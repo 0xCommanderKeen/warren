@@ -51,12 +51,16 @@ from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner
 __all__ = [
     "DEFAULT_CATCHUP_S",
     "DEFAULT_STATE_PATH",
+    "TRIGGER_MANUAL",
+    "TRIGGER_SCHEDULE",
     "FireReport",
     "ScheduledRoutine",
     "Scheduler",
     "SchedulerError",
     "SchedulerState",
+    "default_state_path",
     "latest_fire_at_or_before",
+    "load_scheduled",
     "next_fire_after",
 ]
 
@@ -73,7 +77,10 @@ DEFAULT_CATCHUP_S = 300.0
 MAX_SLEEP_S = 60.0
 MIN_SLEEP_S = 0.05
 
+#: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
+#: asking for it now through the API. The ledger has to be able to tell them apart.
 TRIGGER_SCHEDULE = "schedule"
+TRIGGER_MANUAL = "manual"
 
 #: How a manifest's runner declaration becomes a runner. Injectable for tests.
 type RunnerFactory = Callable[[RunnerSpec], Runner]

@@ -10,6 +10,15 @@ from pathlib import Path
 
 import click
 
+from steward.api import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    ApiConfig,
+    ApiError,
+    create_app,
+    origins_summary,
+    run_server,
+)
 from steward.manifest import (
     Diagnostic,
     Severity,
@@ -305,6 +314,59 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
         click.echo("stopped")
         return
     _report_fires(reports, dry_run=False)
+
+
+# --------------------------------------------------------------------------------------
+# the API
+# --------------------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--host", default=DEFAULT_HOST, show_default=True, help="Interface to bind.")
+@click.option("--port", default=DEFAULT_PORT, show_default=True, help="Port to bind.")
+@click.option(
+    "--residents",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_RESIDENTS_DIR,
+    show_default=True,
+    help="Residents tree the API validates and creates into.",
+)
+@click.option(
+    "--db",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Jobs, approvals, and the request log. Defaults to steward.db beside $STEWARD_STATE.",
+)
+@click.option(
+    "--allow-open",
+    is_flag=True,
+    help="Serve without a token. Local development only: every endpoint is a write path.",
+)
+def serve(
+    host: str,
+    port: int,
+    residents: Path,
+    db: Path | None,
+    allow_open: bool,  # noqa: FBT001 — click passes flags positionally
+) -> None:
+    """Serve the token-gated HTTP API: the write path burrow's viewer calls.
+
+    Tailnet only. The default bind is loopback, and steward must never be exposed to
+    the public internet: one shared token is the whole of its auth.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    config = ApiConfig.from_env(residents_dir=residents, db_path=db, allow_open=allow_open)
+    try:
+        app = create_app(config)
+    except ApiError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if allow_open and not (config.token or "").strip():
+        click.secho("serving without a token — local development only", fg="yellow", err=True)
+    click.echo(
+        f"steward api on http://{host}:{port} (cors: {origins_summary(config.cors_origins)})"
+    )
+    run_server(app, host=host, port=port)
 
 
 if __name__ == "__main__":  # pragma: no cover
