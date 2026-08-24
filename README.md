@@ -43,7 +43,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Eight pieces exist.
+Nine pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -181,7 +181,16 @@ the inbox is gated by the same pause the board is and lands on the ledger under 
 `delegated` — `steward budget show --by-origin` then answers what a fleet spent answering
 one question, however many neighbours it went through.
 
-Still roadmap, in this repo's issues: deployment (#4) and the management UI (#13).
+**The management console** (#13). A browser console for the fleet, served by steward's own
+API at `/ui` — static HTML, CSS, and one JavaScript file, no framework and no build step,
+so it runs on a NAS with the internet unplugged. Residents, a new-resident form, the
+fleet-wide routine ledger, approvals, the job board, and the skills library, all of it read
+from the endpoints above and none of it invented. It is a pure client: the repo stays the
+source of truth, and there is no page here that edits a manifest, because there is no
+endpoint that would let one. Details and the shape of it are in
+[Management UI](#management-ui) below.
+
+Still roadmap, in this repo's issues: deployment (#4).
 Burrow-side rendering counterparts — the journal panel in a villager's house, the notice
 board, the letter carried across the village, the fleet-ops fuel gauges — live in burrow's
 issues.
@@ -219,6 +228,61 @@ $ steward validate residents/life-agent    # or one resident, or one file
 Diagnostics always name the file, the field path, the problem, and an example of a valid
 value, and the same check is importable (`steward.validate_tree`, `steward.load_manifest`)
 so the scheduler, the API, and CI share one load-and-validate path.
+
+## Management UI
+
+The operator console. Burrow renders what the fleet *does*; this manages what the fleet
+*is*. Steward serves it from its own API, so there is nothing else to deploy:
+
+```console
+$ STEWARD_TOKEN=… steward serve
+steward api on http://127.0.0.1:8801 (cors: none (same-origin only))
+management console on http://127.0.0.1:8801/ui/ (from /srv/steward/ui)
+```
+
+<!-- screenshot: ui/ at 1440×900, Residents tab, dark. Replace this comment with
+     ![The residents list](docs/images/ui-residents.png) once one is taken. -->
+
+*(Screenshot placeholder — the residents list, dark, at 1440×900.)*
+
+```
+ui/
+  index.html    the shell: rail, main, the token gate, the pending ledger
+  app.css       one stylesheet — no framework, no CDN, no webfont
+  app.js        one script — one ROUTES map, one fetch, seven views
+```
+
+Six views behind hash routing: **Residents** (list, then soul, charter, voice, effective
+skills, routines, budget, journal, inbox), **New resident**, **Routines** (fleet-wide,
+with run-now), **Approvals**, **Job board**, and **Skills**.
+
+Four things are worth knowing about it.
+
+**One token, once.** The first load asks for `STEWARD_TOKEN`, keeps it in this tab's
+`sessionStorage`, and sends it as a bearer header on every request. A `401` forgets it and
+asks again. The three static files are the one thing on the server *not* behind the token,
+because the browser has to load the script before there is anything to ask a person with —
+they carry no fleet data, and every byte the console displays it fetched with the token.
+
+**No optimistic success.** Every mutating action moves through three states, visible in a
+ledger in the corner: **asked** → **accepted** (with the request id steward returned) →
+**confirmed** or **failed**. Nothing reaches the last state on the strength of a 202: a
+run-now is confirmed by polling `GET /requests/{id}` until steward's own log says `ran`, a
+posted job by finding it on the board, a decision by reading the approval record back, a
+declaration by watching the new manifest come through the validator. Until then it says
+*accepted, not yet confirmed*, and if three minutes pass with no outcome it says that too.
+
+**Empty states say why.** No residents, no routines, an empty journal, an empty library —
+each explains what would have to be true for it to be full, because *nothing here* and
+*steward cannot see it* are different facts. Refusals render the API's own `error` code and
+`message` verbatim, with the whole response one click away.
+
+**It is a client, not an editor.** Skills are read-only, and so are manifests: a skill is
+added by committing a `SKILL.md` and granted by committing a manifest. `POST /residents`
+writes a declaration for review and deploys nothing, and the form says so in the answer it
+gives you. When deployment (#4) lands, `window.STEWARD_UI.deploy` in `index.html` turns on
+the checkbox for it — off until the endpoint is real, because a control that quietly does
+nothing is exactly the lie this console exists not to tell.
 
 ## Development
 
