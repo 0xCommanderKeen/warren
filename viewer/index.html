@@ -266,12 +266,25 @@ class Heap {
   }
 }
 
+/* Two halves of one identity: `PLACE_OF_VERB` in projection.js decides which
+ * place a villager belongs at, `PLACES` above decides where that place stands.
+ * Nothing but the string joins them, so a typo or a one-sided rename would send
+ * every researcher home and say nothing about it. Every projected name is
+ * resolved through here, and the join is checked out loud at startup
+ * (`reportPlaces`) and in tests/test_places.js. */
+function placeOf(v) {
+  return v.place && PLACES[v.place] ? v.place : null;
+}
+function unmappedPlaces() {
+  return [...new Set(Object.values(PLACE_OF_VERB))].filter(id => !PLACES[id]);
+}
+
 // Which shared location a villager belongs at, if any: "door" is your doorstep,
 // anything else is a key in PLACES. null means its own house.
 function whereFor(v) {
   if (v.state === "knocking") return "door";
-  if (v.place && PLACES[v.place] && (v.state === "working" || v.state === "stale"))
-    return v.place;
+  const place = placeOf(v);
+  if (place && (v.state === "working" || v.state === "stale")) return place;
   return null;
 }
 
@@ -327,6 +340,7 @@ class Village extends Phaser.Scene {
     this.buildDecor();
     this.buildSky();
     this.reportMap();
+    this.reportPlaces();
 
     for (const c of CHARS) {
       for (const d of [D_DOWN, D_UP, D_LEFT, D_RIGHT]) {
@@ -772,6 +786,19 @@ class Village extends Phaser.Scene {
              connected: this.connected(), offRoute: this.offRoute, problems: bad };
   }
 
+  /* A place the projection can name but the map cannot draw is the bug this
+     whole change exists to fix, and its symptom — a villager quietly standing
+     at home — looks like nothing at all. Say it loudly instead. */
+  reportPlaces() {
+    const missing = unmappedPlaces();
+    if (!missing.length) return;
+    const msg = "burrow places: the projection sends villagers to " +
+                missing.join(", ") + ", which the map has no building for";
+    console.error(msg);
+    const foot = document.querySelector("footer");
+    if (foot) foot.textContent += " · ⚠ " + msg;
+  }
+
   reportMap() {
     this.offRoute = 0;
     const r = this.checkMap();
@@ -865,7 +892,7 @@ class Village extends Phaser.Scene {
     const chip = this.makeChip(v.id, v.accent, cont.x, cont.y - 11, v.name, v.project);
     const viz = { id: v.id, cont, spr, bang, zzz, chip, plot, char: v.char,
                   state: v.state, lastTs: 0, target: null, walk: null,
-                  home: BurrowPresence.atHome(v) };
+                  home: BurrowPresence.atHome(v.state, placeOf(v)) };
     this.viz.set(v.id, viz);
     return viz;
   }
@@ -969,7 +996,7 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot, BurrowPresence.atHome(v));
+        this.walkTo(viz, spot, BurrowPresence.atHome(v.state, placeOf(v)));
       }
       viz.state = v.state;
 
@@ -1034,7 +1061,7 @@ function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
-  const at = v.place && PLACES[v.place] ? " · at " + PLACES[v.place].label : "";
+  const at = placeOf(v) ? " · at " + PLACES[v.place].label : "";
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
     v.state === "working"  ? (v.doing || "working") + at :

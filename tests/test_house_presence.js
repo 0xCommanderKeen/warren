@@ -39,16 +39,15 @@ test("stale state never claims known presence", () => {
 test("a villager at a shared place leaves its own house dark", () => {
   // Regression: spawning straight into the library (the viewer loads while the
   // research is already running) used to light the villager's own house.
-  assert.equal(presence.atHome({ state: "working", place: "library" }), false);
-  assert.equal(presence.atHome({ state: "stale", place: "library" }), false);
+  assert.equal(presence.atHome("working", "library"), false);
+  assert.equal(presence.atHome("stale", "library"), false);
 
-  const viz = { home: presence.atHome({ state: "working", place: "library" }),
-                state: "working" };
+  const viz = { home: presence.atHome("working", "library"), state: "working" };
   assert.deepEqual(presence.houseLight(viz), { home: false, working: false });
 });
 
 test("a villager working or resting at home lights it", () => {
-  assert.equal(presence.atHome({ state: "working", place: null }), true);
-  assert.equal(presence.atHome({ state: "resting", place: null }), true);
-  assert.equal(presence.atHome({ state: "knocking", place: null }), false);
+  assert.equal(presence.atHome("working", null), true);
+  assert.equal(presence.atHome("resting", null), true);
+  assert.equal(presence.atHome("knocking", null), false);
 });
