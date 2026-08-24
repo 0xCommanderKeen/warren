@@ -92,7 +92,7 @@ buffer.
 |------------|-------------------------------------------------------------------------|
 | `v`        | protocol version, `0` for now                                           |
 | `ts`       | UTC ISO-8601 with milliseconds, `Z` suffix                              |
-| `source`   | what kind of runner emitted this (`claude-code`, later: `cron`, custom) |
+| `source`   | what kind of runner emitted this (`claude-code`, `codex`, `cron`, custom) |
 | `agent_id` | stable identity of the villager: `<source>:<session or agent uuid>`     |
 | `project`  | human label for grouping (v0: basename of `cwd`)                        |
 | `cwd`      | where the agent is working, if it has a working directory               |
@@ -106,7 +106,7 @@ buffer.
 | `task_started`      | the agent picks up work                    | `prompt` (truncated ≤140)  |
 | `tool_called`       | the agent uses a tool                      | `tool`, `detail` (≤120)    |
 | `artifact_produced` | the agent writes/edits a file or output    | `artifact` (path)          |
-| `heartbeat`         | a tool the agent was running finished      | `tool`                     |
+| `heartbeat`         | the agent is known to be working            | bounded tool/phase detail  |
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
@@ -290,3 +290,123 @@ set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optional
 `BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
 `session_ended`: the session's process died, but the agent-as-service is still
 home, resting.
+
+## v0 emitter: Codex hooks
+
+The same `hooks/emit.py` command has runner-specific adapters behind one delivery
+path. Its default remains Claude Code; Codex invokes it with `--runner codex` and
+emits `source: "codex"` with `agent_id: "codex:<session_id>"`. Subagent callbacks
+use `codex:<agent_id>` and retain the parent session identity, `turn_id`, and
+`agent_type` in their payload when supplied. Root and parent identities use the
+same unbounded canonical value so lineage remains exact even for long session IDs.
+
+| Codex hook | burrow event |
+|------------|--------------|
+| `SessionStart` | none — a process starting does not say work began |
+| `UserPromptSubmit` | `task_started` |
+| `PreToolUse` (supported local tool) | `tool_called` |
+| `PermissionRequest` | `heartbeat` with bounded `approval_requested` context |
+| `PostToolUse` (`apply_patch`, exact successful response, with paths in its patch) | one `artifact_produced` per path |
+| `PostToolUse` (other completions; failed, partial, missing, ambiguous, or unparseable patch) | `heartbeat` |
+| `SubagentStart` | `task_started` for the subagent identity |
+| `SubagentStop` | `heartbeat` with bounded lifecycle and lineage metadata |
+| `Stop` | `heartbeat` with bounded lifecycle metadata for the root session |
+| `SessionEnd` | `session_ended` for the root session |
+
+These mappings are deliberately conservative. Matching hooks run concurrently, so
+`PermissionRequest` proves only that Codex is considering an approval request; a
+different hook may allow or deny it before a human ever sees a prompt. Burrow keeps
+the villager working and includes only a bounded phase, tool name, and available
+approval reason. It does not emit `needs_human` without proof that a human is blocked.
+
+Likewise, another concurrent hook can intercept `Stop` or `SubagentStop` and continue
+the flow. Those callbacks prove lifecycle activity, not final idleness, so they emit
+working heartbeats. `SessionEnd` is the unambiguous end of the root thread and remains
+the only Codex callback that removes it. The emitter returns an empty JSON object and
+never approves, denies, rewrites, blocks, or continues anything.
+
+`PostToolUse` means a tool produced a response, not necessarily that it succeeded.
+For `apply_patch`, Burrow emits requested paths only when `tool_response` is the exact
+positive success JSON string, `"Done!"`, used by Codex's apply-patch tool output.
+Any failed, mixed/partial, missing, obsolete object-shaped, or ambiguous response
+emits one heartbeat and claims no paths. Other hosted tools that Codex does not
+expose to hooks produce no invented activity.
+
+Successful patches report resulting files: additions and updates produce artifacts,
+deletions do not, and an update with `*** Move to:` reports only its destination. A
+successful deletion-only patch remains visible as one heartbeat. Tool names in
+PreToolUse and PostToolUse payloads are bounded to 120 characters.
+
+The regression fixture in `tests/fixtures/codex-hooks.jsonl` is a fictionalized,
+redacted reconstruction of captured hook callbacks. It preserves the documented
+wire shape while replacing session, turn, agent, transcript, path, prompt, and tool
+content with safe test values. Its fields are aligned with the official Codex hooks
+documentation linked below; it is not a raw transcript or a claim that those values
+were emitted by a real session.
+
+Omitting `--runner` remains the backward-compatible Claude mode. If `--runner` is
+present, its value must be exactly one supported runner and the option may occur only
+once. Positional and unknown arguments are not accepted. Invalid, missing, duplicate,
+conflicting, or stray arguments exit successfully but emit no event, preventing
+malformed Codex setup from being mislabeled as Claude.
+
+### User-level Codex setup
+
+Follow the [official Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
+Copy the emitter somewhere stable, then put the configuration below in
+`~/.codex/hooks.json`. Replace the URL and token in the command, or omit them for
+local-only fallback logging. Use one user-level representation (`hooks.json` or
+inline hooks in `config.toml`), not both.
+
+```sh
+install -m 700 hooks/emit.py "$HOME/.codex/burrow-emit.py"
+```
+
+```json
+{
+  "description": "Send truthful Codex lifecycle events to Burrow.",
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}]
+  }
+}
+```
+
+Open `/hooks` in Codex, inspect the exact command and script, and trust it. Codex
+hashes hook definitions, so edits require review again.
+
+### Trust and security review
+
+Treat this as telemetry code. It sends prompt excerpts, tool names and selected
+inputs (including shell commands), bounded approval reasons and lifecycle metadata,
+successfully applied paths, working directory, project, and stable session/subagent
+identifiers. It inspects an `apply_patch` response only to require the exact success
+marker; it does **not** transmit tool responses, read transcripts, or send model
+responses, file contents, or credentials
+unless those secrets were themselves included in a prompt/command/path. Keep the
+server private, use `BURROW_TOKEN`, protect both the token-bearing config and
+emitter file, and review diffs before re-trusting an update. The example disables
+the default localhost mirror; enable it knowingly if a local dev server should
+receive the same event stream. The hook is observational only and fails open so a
+Burrow outage cannot block Codex.
+
+### Local smoke check
+
+This exercises the real adapter and local fallback without contacting a server:
+
+```sh
+smoke_home=$(mktemp -d)
+printf '%s\n' '{"session_id":"smoke-1","cwd":"/tmp/burrow-smoke","hook_event_name":"UserPromptSubmit","prompt":"smoke check"}' |
+  HOME="$smoke_home" BURROW_MIRROR= python3 hooks/emit.py --runner codex
+python3 -m json.tool "$smoke_home/.burrow/events.jsonl"
+```
+
+The emitted record should have `source: "codex"`,
+`agent_id: "codex:smoke-1"`, and `type: "task_started"`. Remove the temporary
+directory afterwards.

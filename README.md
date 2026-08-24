@@ -54,6 +54,10 @@ map of everything the fleet does.
   Sessions pick hooks up on start, so already-running sessions won't appear.
   Every event is also mirrored to a local dev server if one is running — see
   [Working on burrow locally](#working-on-burrow-locally).
+- **Codex emitter** — the same script invoked with `--runner codex` from
+  user-level Codex hooks. It uses a distinct `codex:` identity without changing
+  the default Claude adapter. Copyable configuration, trust review, and a smoke
+  check are in [the protocol guide](docs/protocol.md#user-level-codex-setup).
 - **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
   `life-agent` container (via the `claude-config` volume), with
   `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /

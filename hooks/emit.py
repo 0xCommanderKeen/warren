@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""burrow v0 emitter: adapts a Claude Code hook callback (JSON on stdin) to one
-burrow protocol event. See docs/protocol.md.
+"""burrow v0 emitter: adapts runner hook callbacks (JSON on stdin) to burrow
+protocol events. Claude Code is the default; Codex hooks pass ``--runner codex``.
+See docs/protocol.md.
 
 Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; if no
 target takes it, fall back to appending to ~/.burrow/events.jsonl locally. A
@@ -31,6 +32,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -48,9 +50,17 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 
 ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+RUNNER_SOURCES = {"claude": "claude-code", "codex": "codex"}
+
+
+def agent_identity(source, identity):
+    """Canonical runner-qualified identity used by events and lineage."""
+    return source + ":" + str(identity)
 
 
 def tool_detail(tool_input):
+    if not isinstance(tool_input, dict):
+        return ""
     for key in ("file_path", "notebook_path", "path", "pattern", "description",
                 "command", "url", "query", "skill"):
         val = tool_input.get(key)
@@ -59,7 +69,7 @@ def tool_detail(tool_input):
     return ""
 
 
-def to_event(hook):
+def claude_event(hook):
     name = hook.get("hook_event_name", "")
     if name == "UserPromptSubmit":
         prompt = " ".join(str(hook.get("prompt") or "").split())
@@ -85,6 +95,137 @@ def to_event(hook):
     if name == "SessionEnd":
         return "session_ended", {}
     return None, None
+
+
+def to_event(hook):
+    """Backward-compatible Claude adapter surface."""
+    return claude_event(hook)
+
+
+def lineage(hook):
+    payload = {}
+    if hook.get("turn_id"):
+        payload["turn_id"] = str(hook["turn_id"])[:120]
+    if hook.get("agent_type"):
+        payload["agent_type"] = str(hook["agent_type"])[:120]
+    if hook.get("session_id"):
+        payload["parent_agent_id"] = agent_identity(
+            RUNNER_SOURCES["codex"], hook["session_id"])
+    return payload
+
+
+def lifecycle_payload(hook, phase, include_lineage=False):
+    payload = lineage(hook) if include_lineage else {}
+    payload["phase"] = phase
+    if not include_lineage and hook.get("turn_id"):
+        payload["turn_id"] = str(hook["turn_id"])[:120]
+    if isinstance(hook.get("stop_hook_active"), bool):
+        payload["stop_hook_active"] = hook["stop_hook_active"]
+    return payload
+
+
+def patch_artifacts(tool_input):
+    """Resulting paths that a completed Codex apply_patch says it produced."""
+    if not isinstance(tool_input, dict):
+        return []
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return []
+    paths = []
+    blocks = re.finditer(
+        r"^\*\*\* (Add|Update|Delete) File: (.+?)$"
+        r"(.*?)(?=^\*\*\* (?:Add|Update|Delete) File: |^\*\*\* End Patch)",
+        command, flags=re.MULTILINE | re.DOTALL,
+    )
+    for block in blocks:
+        operation, path, body = block.groups()
+        if operation == "Delete":
+            continue
+        if operation == "Update":
+            move = re.search(r"^\*\*\* Move to: (.+)$", body, flags=re.MULTILINE)
+            if move:
+                path = move.group(1)
+        path = path.strip()
+        if path and path not in paths:
+            paths.append(path[:200])
+    return paths
+
+
+def patch_succeeded(tool_response):
+    """True only for the apply_patch response that positively proves success."""
+    return tool_response == "Done!"
+
+
+def codex_events(hook):
+    """Adapt one documented Codex lifecycle callback to zero or more v0 events."""
+    name = hook.get("hook_event_name", "")
+    tool_input = hook.get("tool_input")
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    tool = str(hook.get("tool_name") or "?")
+    bounded_tool = tool[:120]
+    if name == "UserPromptSubmit":
+        prompt = " ".join(str(hook.get("prompt") or "").split())
+        return [("task_started", {"prompt": prompt[:140]})]
+    if name == "PreToolUse":
+        payload = {"tool": bounded_tool}
+        detail = tool_detail(tool_input)
+        if detail:
+            payload["detail"] = detail
+        return [("tool_called", payload)]
+    if name == "PermissionRequest":
+        reason = tool_input.get("description") or tool_detail(tool_input)
+        payload = {"phase": "approval_requested", "tool": bounded_tool}
+        if reason:
+            payload["detail"] = str(reason)[:120]
+        return [("heartbeat", payload)]
+    if name == "PostToolUse":
+        if tool == "apply_patch" and patch_succeeded(hook.get("tool_response")):
+            artifacts = patch_artifacts(tool_input)
+            if artifacts:
+                return [("artifact_produced", {"artifact": path}) for path in artifacts]
+        return [("heartbeat", {"tool": bounded_tool})]
+    if name == "SubagentStart":
+        if not hook.get("agent_id"):
+            return []
+        return [("task_started", lineage(hook))]
+    if name == "SubagentStop":
+        if not hook.get("agent_id"):
+            return []
+        return [("heartbeat", lifecycle_payload(hook, "subagent_stop", True))]
+    if name == "Stop":
+        return [("heartbeat", lifecycle_payload(hook, "stop"))]
+    if name == "SessionEnd":
+        return [("session_ended", {})]
+    return []
+
+
+def adapt_hook(runner, hook):
+    if runner == "codex":
+        return codex_events(hook)
+    etype, payload = claude_event(hook)
+    return [(etype, payload)] if etype else []
+
+
+def runner_name(argv):
+    if not argv:
+        return "claude"
+    if len(argv) != 2 or argv[0] != "--runner":
+        return None
+    runner = argv[1]
+    return runner if runner in RUNNER_SOURCES else None
+
+
+def hook_agent_id(runner, hook, resident_id=None):
+    source = RUNNER_SOURCES[runner]
+    if resident_id:
+        return resident_id if ":" in resident_id else source + ":" + resident_id
+    if runner == "codex" and hook.get("hook_event_name") in (
+            "SubagentStart", "SubagentStop") and hook.get("agent_id"):
+        identity = hook["agent_id"]
+    else:
+        identity = hook.get("session_id") or "unknown"
+    return agent_identity(source, identity)
 
 
 def is_loopback(url):
@@ -147,31 +288,8 @@ def post_event(url, event, token=""):
         return False
 
 
-def main():
-    hook = json.loads(sys.stdin.read())
-    etype, payload = to_event(hook)
-    if not etype:
-        return
-    resident_id = os.environ.get("BURROW_AGENT_ID")
-    if resident_id and etype == "session_ended":
-        etype, payload = "idle", {}
-    if resident_id:
-        agent_id = resident_id if ":" in resident_id else "claude-code:" + resident_id
-    else:
-        agent_id = "claude-code:" + (hook.get("session_id") or "unknown")
-    cwd = hook.get("cwd") or ""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    event = {
-        "v": 0,
-        "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-        "source": "claude-code",
-        "agent_id": agent_id,
-        "project": os.environ.get("BURROW_PROJECT")
-                   or os.path.basename(cwd.rstrip("/")) or "unknown",
-        "cwd": cwd,
-        "type": etype,
-        "payload": payload,
-    }
+def deliver(event):
+    """Shared delivery interface for every runner adapter."""
     delivered = False
     for url, token in targets():
         # No short-circuit: a mirror exists to see the same stream the village
@@ -188,9 +306,40 @@ def main():
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
+def main(runner="claude"):
+    hook = json.loads(sys.stdin.read())
+    specs = adapt_hook(runner, hook)
+    if not specs:
+        return
+    resident_id = os.environ.get("BURROW_AGENT_ID")
+    agent_id = hook_agent_id(runner, hook, resident_id)
+    cwd = hook.get("cwd") or ""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for etype, payload in specs:
+        if resident_id and etype == "session_ended":
+            etype, payload = "idle", {}
+        deliver({
+            "v": 0,
+            "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "source": RUNNER_SOURCES[runner],
+            "agent_id": agent_id,
+            "project": os.environ.get("BURROW_PROJECT")
+                       or os.path.basename(cwd.rstrip("/")) or "unknown",
+            "cwd": cwd,
+            "type": etype,
+            "payload": payload,
+        })
+
+
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        pass
+    runner = runner_name(sys.argv[1:])
+    if runner:
+        try:
+            main(runner)
+        except Exception:
+            pass
+    if runner == "codex":
+        # Stop/SubagentStop require JSON on stdout; an empty object is advisory
+        # and deliberately never approves, denies, blocks, or continues Codex.
+        print("{}")
     sys.exit(0)
