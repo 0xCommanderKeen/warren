@@ -2,15 +2,17 @@
 
 import json
 import threading
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from conftest import RESIDENTS_DIR, ResidentWriter, valid_manifest
+from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import events as ev
+from steward import journal as j
 from steward import manifest as m
+from steward import prompt as p
 from steward import runners as r
 from steward import scheduler as s
 
@@ -57,6 +59,17 @@ DAILY = {
 }
 
 
+CLOSER = {
+    "id": "close-of-day",
+    "schedule": "30 22 * * *",
+    "schedule_tz": "Europe/Ljubljana",
+    "prompt": "Look back over the day.",
+    "timeout_s": 600,
+    "enabled": True,
+    "journal": "close_of_day",
+}
+
+
 @pytest.fixture
 def build(write_resident: ResidentWriter, tmp_path: Path):
     """Build a scheduler over a throwaway resident, with a fallback-only emitter."""
@@ -65,8 +78,12 @@ def build(write_resident: ResidentWriter, tmp_path: Path):
         *routines: dict,
         catchup_s: float = s.DEFAULT_CATCHUP_S,
         runner_factory: s.RunnerFactory = r.build_runner,
+        memory: dict | None = None,
     ) -> s.Scheduler:
-        path = write_resident(manifest_with(*routines))
+        data = manifest_with(*routines)
+        if memory is not None:
+            data["memory"] = memory
+        path = write_resident(data)
         return s.Scheduler(
             s.load_scheduled(path.parent),
             emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
@@ -74,6 +91,24 @@ def build(write_resident: ResidentWriter, tmp_path: Path):
             workdir=tmp_path,
             catchup_s=catchup_s,
             runner_factory=runner_factory,
+        )
+
+    return _build
+
+
+@pytest.fixture
+def journaling(build, tmp_path: Path):
+    """Build a scheduler whose resident keeps a real journal in a throwaway directory."""
+
+    def _build(*routines: dict, output: str = "done", **memory: object) -> s.Scheduler:
+        return build(
+            *routines,
+            memory={"kind": "directory", "path": str(tmp_path / "memory"), **memory},
+            runner_factory=lambda _spec: r.MockRunner(
+                behavior=lambda _req: r.RunResult(
+                    outcome=r.Outcome.OK, output=output, exit_status=0
+                )
+            ),
         )
 
     return _build
@@ -141,7 +176,11 @@ def test_autumn_fall_back_fires_once() -> None:
 def test_hourly_and_daily_schedules_agree_with_the_manifest() -> None:
     scheduled = s.load_scheduled(RESIDENTS_DIR)
     keys = {item.key for item in scheduled}
-    assert keys == {"life-agent/daily-summary", "life-agent/inbox-read"}
+    assert keys == {
+        "life-agent/daily-summary",
+        "life-agent/inbox-read",
+        "life-agent/close-of-day",
+    }
     assert all(item.routine.schedule_tz == "Europe/Ljubljana" for item in scheduled)
 
 
@@ -382,6 +421,185 @@ def test_the_prompt_reaches_the_runner_intact(build) -> None:
     assert seen[0].model == "pretend"
 
 
+# --------------------------------------------------------------------------- the journal
+
+EVENING = datetime(2026, 8, 24, 20, 30, tzinfo=UTC)  # 22:30 in Ljubljana
+
+
+def test_only_the_flagged_routine_is_told_to_close_the_day(journaling) -> None:
+    engine = journaling(DAILY, HOURLY, CLOSER)
+    prompts = {item.routine.id: engine.build_prompt(item, EVENING) for item in engine.scheduled}
+
+    assert p.CLOSING_TITLE in prompts["close-of-day"]
+    assert p.CLOSING_TITLE not in prompts["daily-summary"]
+    assert p.CLOSING_TITLE not in prompts["inbox-read"]
+    assert "2026-08-24.md" in prompts["close-of-day"], "the day is read in the routine's zone"
+
+
+def test_the_closing_session_is_still_told_who_it_is_and_how_it_writes(journaling) -> None:
+    """A close-of-day run is an ordinary session: identity, voice, journal, charter, task."""
+    engine = journaling(CLOSER)
+    text = engine.build_prompt(engine.scheduled[0], EVENING)
+
+    positions = [
+        text.index("WHO YOU ARE"),
+        text.index("YOUR WRITING VOICE (STYLE ONLY)"),
+        text.index("YOUR CHARTER (AUTHORITATIVE, LAST WORD)"),
+        text.index("YOUR TASK RIGHT NOW"),
+        text.index(p.CLOSING_TITLE),
+    ]
+    assert positions == sorted(positions)
+    assert "Flat, factual, short." in text
+    assert text.index("Flat, factual, short.") < text.index("HARD RULES")
+
+
+def test_the_closing_instruction_carries_the_markers_and_the_precedence(journaling) -> None:
+    engine = journaling(CLOSER)
+    text = engine.build_prompt(engine.scheduled[0], EVENING)
+    assert "<journal>" in text
+    assert "</journal>" in text
+    assert text.index("HARD RULES") < text.index(p.CLOSING_TITLE), (
+        "the charter still comes first; closing the day is a task like any other"
+    )
+
+
+def test_the_next_session_opens_with_the_last_entry(journaling) -> None:
+    engine = journaling(HOURLY)
+    manifest = engine.scheduled[0].resident.manifest
+    j.write_entry(manifest, date(2026, 8, 23), "close-of-day", "Two drafts are still waiting.")
+
+    text = engine.build_prompt(engine.scheduled[0], EVENING)
+    assert "YOUR JOURNAL FROM LAST TIME" in text
+    assert "Two drafts are still waiting." in text
+    assert text.index("Two drafts are still waiting.") < text.index("HARD RULES")
+
+
+def test_a_resident_with_no_journal_yet_is_told_about_no_journal(journaling) -> None:
+    engine = journaling(HOURLY)
+    assert "YOUR JOURNAL FROM LAST TIME" not in engine.build_prompt(engine.scheduled[0], EVENING)
+
+
+def test_a_session_that_writes_its_own_entry_keeps_it(journaling, tmp_path: Path) -> None:
+    engine = journaling(CLOSER)
+    manifest = engine.scheduled[0].resident.manifest
+    own = j.write_entry(manifest, date(2026, 8, 24), "close-of-day", "Written in my own hand.")
+
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+    assert report.journal_path == own
+    assert "Written in my own hand." in own.read_text(encoding="utf-8")
+    finished = emitted(tmp_path / "events.jsonl")[1]
+    assert finished["payload"]["artifacts"] == [], (
+        "steward did not write that file, so steward does not claim it"
+    )
+
+
+def test_a_journal_block_in_the_output_is_persisted_and_claimed(journaling, tmp_path: Path):
+    engine = journaling(CLOSER, output="All done.\n<journal>The inbox was quiet.</journal>")
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+
+    assert report.journal_path is not None
+    assert report.journal_path.name == "2026-08-24.md"
+    assert "The inbox was quiet." in report.journal_path.read_text(encoding="utf-8")
+
+    finished = emitted(tmp_path / "events.jsonl")[1]
+    assert finished["payload"]["artifacts"] == [str(report.journal_path)]
+
+
+def test_the_sessions_own_file_beats_the_block_it_also_emitted(journaling) -> None:
+    engine = journaling(CLOSER, output="<journal>steward's copy</journal>")
+    manifest = engine.scheduled[0].resident.manifest
+    own = j.write_entry(manifest, date(2026, 8, 24), "close-of-day", "my own words")
+
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+    assert report.journal_path == own
+    assert "steward's copy" not in own.read_text(encoding="utf-8")
+
+
+def test_a_run_that_says_nothing_leaves_no_entry_behind(journaling) -> None:
+    engine = journaling(CLOSER, output="I ran out of time.")
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+    assert report.journal_path is None
+    assert j.latest_entry(engine.scheduled[0].resident.manifest) is None
+
+
+def test_a_failed_close_of_day_writes_nothing(build, tmp_path: Path) -> None:
+    failed = r.RunResult(outcome=r.Outcome.FAILED, output="<journal>half a thought</journal>")
+    engine = build(
+        CLOSER,
+        memory={"kind": "directory", "path": str(tmp_path / "memory")},
+        runner_factory=lambda _spec: r.MockRunner(behavior=lambda _: failed),
+    )
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+    assert report.journal_path is None
+    assert j.latest_entry(engine.scheduled[0].resident.manifest) is None
+
+
+def test_an_ordinary_routine_never_writes_a_journal(journaling) -> None:
+    engine = journaling(HOURLY, output="<journal>not my job</journal>")
+    report = engine.fire(engine.scheduled[0])
+    assert report.journal_path is None
+    assert j.latest_entry(engine.scheduled[0].resident.manifest) is None
+
+
+def test_a_late_evening_close_writes_the_local_day_not_the_utc_one(journaling) -> None:
+    engine = journaling(
+        {**CLOSER, "schedule": "30 0 * * *"}, output="<journal>after midnight</journal>"
+    )
+    # 22:30 UTC on the 24th is 00:30 on the 25th where the household is.
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 22, 30, tzinfo=UTC))
+    assert report.journal_path is not None
+    assert report.journal_path.name == "2026-08-25.md"
+
+
+def test_closing_the_day_rotates_the_journal(journaling) -> None:
+    engine = journaling(CLOSER, output="<journal>tonight</journal>", journal_keep=2)
+    manifest = engine.scheduled[0].resident.manifest
+    for day in (21, 22, 23):
+        j.write_entry(manifest, date(2026, 8, day), "close-of-day", f"the {day}th")
+
+    engine.fire(engine.scheduled[0], now=EVENING)
+    assert [e.date.day for e in j.read_entries(manifest, 100)] == [24, 23]
+
+
+def test_a_memory_block_with_nowhere_to_journal_is_a_startup_error(build, stub_bin) -> None:
+    stub_bin("claude", "exit 0")
+    engine = build(HOURLY, memory={"kind": "file", "path": "/data/test-agent/memory.md"})
+    problems = engine.check()
+    assert len(problems) == 1
+    assert "memory.kind" in problems[0]
+    with pytest.raises(s.SchedulerError, match="nowhere to keep one entry per day"):
+        engine.require_ready()
+
+
+def test_an_unreachable_journal_is_a_missing_journal_not_a_failed_routine(
+    journaling, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*_args: object, **_kwargs: object) -> str:
+        raise OSError("the volume is gone")
+
+    engine = journaling(CLOSER, output="<journal>tonight</journal>")
+    monkeypatch.setattr(j, "latest_entry", explode)
+    monkeypatch.setattr(j, "persist_close_of_day", explode)
+
+    report = engine.fire(engine.scheduled[0], now=EVENING)
+    assert report.fired
+    assert report.result is not None
+    assert report.result.ok, "a journal steward cannot reach does not fail the routine"
+    assert report.journal_path is None
+    assert "YOUR JOURNAL FROM LAST TIME" not in report.prompt
+
+
+def test_a_journal_declaration_steward_cannot_use_never_fails_a_fire(build, tmp_path: Path):
+    engine = build(
+        HOURLY,
+        memory={"kind": "file", "path": str(tmp_path / "memory.md")},
+        runner_factory=lambda _spec: r.MockRunner(),
+    )
+    report = engine.fire(engine.scheduled[0])
+    assert report.fired
+    assert "YOUR JOURNAL FROM LAST TIME" not in report.prompt
+
+
 def test_a_project_scoped_resident_gets_a_steward_agent_id(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -495,6 +713,92 @@ def test_an_invalid_residents_tree_never_reaches_the_scheduler(
     path = write_resident(data)
     with pytest.raises(s.SchedulerError, match="charter"):
         s.load_scheduled(path.parent)
+
+
+def test_an_over_cap_voice_is_refused_at_schedule_time_by_name(
+    write_resident: ResidentWriter,
+) -> None:
+    bloated = "---\nname: Testy\n---\nbody\n\n## Voice\n" + ("x" * (m.VOICE_MAX_CHARS + 1))
+    path = write_resident(manifest_with(HOURLY), soul=bloated)
+    with pytest.raises(s.SchedulerError) as raised:
+        s.load_scheduled(path.parent)
+    assert "soul.md" in str(raised.value), "the error names the file to edit"
+    assert str(m.VOICE_MAX_CHARS) in str(raised.value)
+
+
+def test_two_routines_may_not_both_close_the_day(write_resident: ResidentWriter) -> None:
+    second = {**CLOSER, "id": "also-closing", "schedule": "0 23 * * *"}
+    path = write_resident(manifest_with(CLOSER, second))
+    with pytest.raises(s.SchedulerError, match="a day that ends more than once is not a day"):
+        s.load_scheduled(path.parent)
+
+
+def test_a_routine_that_fires_hourly_may_not_close_the_day(write_resident: ResidentWriter) -> None:
+    path = write_resident(manifest_with({**HOURLY, "journal": "close_of_day"}))
+    with pytest.raises(s.SchedulerError, match="fires 24 times a day"):
+        s.load_scheduled(path.parent)
+
+
+def test_an_edited_voice_takes_effect_on_the_next_load(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Edit the soul, and the next session gets the new voice. No steward restart beyond that."""
+    path = write_resident(manifest_with(HOURLY))
+
+    def prompt_now() -> str:
+        engine = s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+        )
+        return engine.build_prompt(engine.scheduled[0])
+
+    assert "Flat, factual, short." in prompt_now()
+    soul = path.parent / "soul.md"
+    soul.write_text(
+        soul.read_text(encoding="utf-8").replace("Flat, factual, short.", "Warmer now."),
+        encoding="utf-8",
+    )
+    assert "Warmer now." in prompt_now()
+    assert "Flat, factual, short." not in prompt_now()
+
+
+# ------------------------------------------------------------------ voice emits nothing
+
+
+def test_a_voiced_session_emits_no_event_of_its_own(build, tmp_path: Path) -> None:
+    """Personality is expressed only in work products. It adds nothing to the village."""
+    engine = build(HOURLY)
+    prompt = engine.build_prompt(engine.scheduled[0])
+    assert "Flat, factual, short." in prompt, "the voice really is in this session"
+
+    engine.fire(engine.scheduled[0])
+    events = emitted(tmp_path / "events.jsonl")
+
+    assert [event["type"] for event in events] == ["routine_started", "routine_finished"]
+    assert not any("Flat, factual, short." in json.dumps(event) for event in events), (
+        "a voice reaches the session and never the event log"
+    )
+
+
+def test_a_voiceless_resident_emits_exactly_the_same_events(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    def types_for(soul: str, name: str) -> list[str]:
+        fallback = tmp_path / f"{name}.jsonl"
+        path = write_resident(manifest_with(HOURLY), soul=soul, root=tmp_path / name)
+        engine = s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.EventEmitter(fallback=fallback),
+            state=s.SchedulerState(path=tmp_path / f"{name}-state.json"),
+            workdir=tmp_path,
+        )
+        engine.fire(engine.scheduled[0])
+        return [event["type"] for event in emitted(fallback)]
+
+    voiceless = "---\nname: Testy\n---\nA villager with no voice at all.\n"
+    assert types_for(VALID_SOUL, "voiced") == types_for(voiceless, "plain")
 
 
 # --------------------------------------------------------------------------- the daemon

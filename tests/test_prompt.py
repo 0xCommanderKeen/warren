@@ -1,8 +1,13 @@
 """Prompt assembly: what a session is told, in what order, and who gets the last word."""
 
-from conftest import RESIDENTS_DIR, ResidentWriter, valid_manifest
+import re
+from pathlib import Path
+
+from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import manifest as m
 from steward import prompt as p
+
+SRC = Path(p.__file__).parent
 
 ADVERSARIAL_SOUL = """---
 agent_id: claude-code:test-agent
@@ -140,6 +145,25 @@ def test_a_resident_without_a_voice_gets_no_voice_section(
     assert without == p.assemble_preamble(manifest, None)
 
 
+def test_removing_a_voice_leaves_a_byte_identical_prompt(write_resident: ResidentWriter) -> None:
+    """A voice adds one section and moves nothing. Take it out and the bytes match."""
+    resident = m.load_manifest(write_resident())
+    voiceless = VALID_SOUL.split("## Voice")[0]
+
+    voiced = p.assemble_routine_prompt(resident.manifest, "go", soul_text=resident.soul.body)
+    without = p.assemble_routine_prompt(resident.manifest, "go", soul_text=voiceless)
+
+    assert without == p.assemble_routine_prompt(resident.manifest, "go", soul_text=None)
+
+    rule = "=" * 72
+    section = (
+        f"{rule}\nYOUR WRITING VOICE (STYLE ONLY)\n{rule}\n"
+        f"{p.VOICE_FRAME}\n\nFlat, factual, short.\n\n"
+    )
+    assert section in voiced
+    assert voiced.replace(section, "") == without
+
+
 def test_an_empty_journal_adds_nothing(write_resident: ResidentWriter) -> None:
     manifest = m.load_manifest(write_resident()).manifest
     assert p.assemble_preamble(manifest, None, "   ") == p.assemble_preamble(manifest, None)
@@ -164,3 +188,46 @@ def test_render_charter_is_importable_on_its_own() -> None:
     rendered = p.render_charter(hob().manifest.charter)
     assert rendered.startswith("MISSION")
     assert rendered.index("DUTIES") < rendered.index("HARD RULES") < rendered.index("ESCALATION")
+
+
+# ------------------------------------------------------------------- one assembly point
+
+
+def test_only_the_prompt_module_composes_a_preamble() -> None:
+    """One place decides what a session was told, so the question has one answer."""
+    composes = re.compile(r"\bVOICE_FRAME\b|\bCHARTER_FRAME\b|\bJOURNAL_FRAME\b|\brender_charter\(")
+    offenders = {
+        path.name
+        for path in SRC.glob("*.py")
+        if path.name != "prompt.py" and composes.search(path.read_text(encoding="utf-8"))
+    }
+    assert offenders == set(), (
+        f"{sorted(offenders)} frame charter, voice, or journal text of their own; "
+        f"prompt assembly happens in steward.prompt and nowhere else"
+    )
+
+
+def test_the_close_of_day_section_is_still_assembled_here() -> None:
+    """Even the newest session type goes through the one assembly function."""
+    resident = hob()
+    text = p.assemble_routine_prompt(
+        resident.manifest,
+        "Look back over the day.",
+        soul_text=resident.soul.body,
+        closing="write your journal to /tmp/2026-08-24.md",
+    )
+    assert text.index(p.CLOSING_TITLE) > text.index("YOUR CHARTER")
+    assert "Quiet, unhurried, slightly formal" in text, "Hob still sounds like Hob at bedtime"
+    assert text.index("Quiet, unhurried") < text.index("HARD RULES") < text.index(p.CLOSING_TITLE)
+
+
+def test_an_empty_closing_adds_no_section(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(write_resident())
+    plain = p.assemble_routine_prompt(resident.manifest, "go", soul_text=resident.soul.body)
+    for empty in (None, "", "   "):
+        assert (
+            p.assemble_routine_prompt(
+                resident.manifest, "go", soul_text=resident.soul.body, closing=empty
+            )
+            == plain
+        )
