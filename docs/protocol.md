@@ -71,6 +71,11 @@ The villager's state is decided by its **latest** event:
 - `session_ended` → removed from the village
 - no event for 30 minutes while "working" → shown as **stale** (faded), because a
   villager frozen mid-swing would be a lie
+- no event for 12 hours → dropped from the village entirely, whatever the state
+
+These rules have exactly one implementation: `reduce()` in `viewer/projection.js`,
+loaded by the viewer and exercised by `tests/projection.test.js` (`node --test`,
+see the README).
 
 ## The one rule, restated for implementers
 
