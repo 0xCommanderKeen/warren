@@ -1,0 +1,9 @@
+{"v":0,"ts":"2026-08-24T10:00:00.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"task_started","payload":{"prompt":"visit every work location"}}
+{"v":0,"ts":"2026-08-24T10:00:30.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"tool_called","payload":{"tool":"WebSearch","detail":"village archives"}}
+{"v":0,"ts":"2026-08-24T10:00:45.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"tool_called","payload":{"tool":"Inbox","detail":"check new messages"}}
+{"v":0,"ts":"2026-08-24T10:01:00.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"tool_called","payload":{"tool":"Edit","detail":"map.md"}}
+{"v":0,"ts":"2026-08-24T10:01:15.000Z","source":"fixture","agent_id":"fixture:crafter","project":"forge","cwd":"/tmp/forge","type":"tool_called","payload":{"tool":"Bash","detail":"make signs"}}
+{"v":0,"ts":"2026-08-24T10:01:30.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"tool_called","payload":{"tool":"Agent","detail":"ask a cartographer"}}
+{"v":0,"ts":"2026-08-24T10:02:00.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"tool_called","payload":{"tool":"Read","detail":"map.md"}}
+{"v":0,"ts":"2026-08-24T10:02:30.000Z","source":"fixture","agent_id":"fixture:traveler","project":"atlas","cwd":"/tmp/atlas","type":"idle","payload":{}}
+{"v":0,"ts":"2026-08-24T10:02:45.000Z","source":"fixture","agent_id":"fixture:crafter","project":"forge","cwd":"/tmp/forge","type":"idle","payload":{}}

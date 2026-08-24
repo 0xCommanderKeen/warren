@@ -207,6 +207,50 @@ describe("state mapping (docs/protocol.md, projection rules v0)", () => {
   });
 });
 
+describe("meaningful work locations", () => {
+  const event = tool => ({ type: "tool_called", payload: { tool } });
+
+  it("maps tools through the shared verb table", () => {
+    assert.equal(workPlace(event("WebSearch")), "library");
+    assert.equal(workPlace(event("Inbox")), "post-office");
+    assert.equal(workPlace(event("Write")), "workshop");
+    assert.equal(workPlace(event("Edit")), "workshop");
+    assert.equal(workPlace(event("Bash")), "workshop");
+    assert.equal(workPlace(event("Agent")), "delegation");
+    assert.equal(workPlace(event("Task")), "delegation");
+  });
+
+  it("leaves uncovered tools at the home work spot", () => {
+    assert.equal(workPlace(event("Read")), null);
+    assert.equal(workPlace(event("Telescope")), null);
+    assert.equal(workPlace({ type: "idle", payload: {} }), null);
+  });
+
+  it("projects the latest supported place and keeps it when stale", () => {
+    const fresh = reduce([JSON.stringify({
+      ts: new Date(NOW - MIN).toISOString(), agent_id: "x:builder",
+      type: "tool_called", payload: { tool: "Edit" },
+    })], NOW, [])[0];
+    const stale = reduce([JSON.stringify({
+      ts: new Date(NOW - 31 * MIN).toISOString(), agent_id: "x:delegate",
+      type: "tool_called", payload: { tool: "Agent" },
+    })], NOW, [])[0];
+    assert.equal(fresh.place, "workshop");
+    assert.equal(stale.state, "stale");
+    assert.equal(stale.place, "delegation");
+  });
+
+  it("returns home after an uncovered action", () => {
+    const [v] = reduce([
+      JSON.stringify({ ts: new Date(NOW - 2 * MIN).toISOString(), agent_id: "x:home",
+        type: "tool_called", payload: { tool: "WebFetch" } }),
+      JSON.stringify({ ts: new Date(NOW - MIN).toISOString(), agent_id: "x:home",
+        type: "tool_called", payload: { tool: "Read" } }),
+    ], NOW, []);
+    assert.equal(v.place, null);
+  });
+});
+
 describe("stale and drop windows", () => {
   const v = byId(reduce(log("windows.jsonl"), NOW, []));
 

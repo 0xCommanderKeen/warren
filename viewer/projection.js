@@ -25,18 +25,29 @@ const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
   NotebookEdit: "crafting", Agent: "delegating", Task: "delegating",
+  Email: "emailing", Inbox: "emailing",
   AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
 };
-
-/* Some verbs belong to a shared building rather than the villager's own house
+/* Some verbs belong somewhere other than the villager's own house
  * (docs/protocol.md, "Where the work happens"). The viewer owns where a place
  * *is* on the map; the projection only decides which one a villager belongs at,
- * so this stays pure and testable. Keys must match the PLACES table in the
- * viewer — an unknown name renders as "own house" rather than throwing.
+ * so this stays pure and testable. Every name here but `delegation` must match
+ * the PLACES table in the viewer — an unknown name renders as "own house"
+ * rather than throwing, and tests/test_places.js fails on the mismatch.
+ *
+ * `delegation` is the one entry that is not a building: it means "handing work
+ * to somebody else", and the viewer resolves it to a neighbour's door. See
+ * viewer/destinations.js.
  */
-const PLACE_OF_VERB = { researching: "library" };
+const PLACE_OF_VERB = {
+  researching: "library",
+  crafting: "workshop",
+  tinkering: "workshop",
+  emailing: "post-office",
+  delegating: "delegation",
+};
 
-/* The shared place implied by an event, or null for "its own house". Only
+/* The place implied by an event, or null for "its own house". Only
  * `tool_called` moves anybody: every other event type leaves the verb unknown,
  * and no verb means no trip. */
 function workPlace(ev) {
@@ -199,8 +210,9 @@ function reduce(input, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
+      // A lost signal is not travel: a stale villager keeps its last place.
+      place: state === "working" || state === "stale" ? workPlace(shown) : null,
       doing: state === "working" ? doingLabel(shown) : "",
-      place: workPlace(shown),
       lastLine: describe(shown),
       knock: state === "knocking"
         ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs }

@@ -19,4 +19,8 @@ for t in tests/test_*.js tests/*.test.js; do
   echo "== $t"
   node "$t"
 done
+for t in tests/*.test.js; do
+  echo "== $t"
+  node "$t"
+done
 echo "all green"

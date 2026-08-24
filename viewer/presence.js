@@ -12,11 +12,11 @@
    * that has to hold whether it walked there or the viewer loaded with it
    * already standing there.
    *
-   * `place` is the destination the viewer resolved, not the raw projected name:
-   * a name the map has no building for is not a place, and the villager the
-   * viewer therefore leaves at home must have a lit house like anyone else. */
-  function atHome(state, place) {
-    return !place && (state === "working" || state === "resting");
+   * `dest` is the destination the viewer resolved (viewer/destinations.js), not
+   * the raw projected place name: a name the map has no building for resolves
+   * to home, and that villager's house must light up like anyone else's. */
+  function atHome(state, dest) {
+    return dest.kind === "home" && (state === "working" || state === "resting");
   }
 
   function startJourney(viz, arrivesHome) {

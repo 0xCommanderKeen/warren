@@ -14,6 +14,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const { PLACE_OF_VERB, VERBS } = require("../viewer/projection.js");
+const { DELEGATION, destinationFor } = require("../viewer/destinations.js");
 const html = fs.readFileSync("viewer/index.html", "utf8");
 
 function lift(from, to) {
@@ -26,11 +27,9 @@ function lift(from, to) {
 
 const viewer = vm.runInNewContext(
   [lift("const PLACES = {", "\n};"),
-   lift("function placeOf(v) {", "\n}\n"),
    lift("function unmappedPlaces() {", "\n}\n"),
-   lift("function whereFor(v) {", "\n}\n"),
-   "({ PLACES, placeOf, unmappedPlaces, whereFor })"].join("\n"),
-  { PLACE_OF_VERB },
+   "({ PLACES, unmappedPlaces })"].join("\n"),
+  { PLACE_OF_VERB, DELEGATION },
 );
 
 test("every place the projection can name is on the map", () => {
@@ -41,12 +40,19 @@ test("every place the projection can name is on the map", () => {
     missing.join(", "));
 });
 
-test("every place the projection can name has a label and a footprint", () => {
+test("every building the projection can name has a label and a footprint", () => {
   for (const id of new Set(Object.values(PLACE_OF_VERB))) {
+    if (id === DELEGATION) continue;
     const p = viewer.PLACES[id];
     assert.ok(p.label, `${id} has no label for the villager panel`);
     assert.ok(Number.isFinite(p.tx) && Number.isFinite(p.ty), `${id} has no position`);
   }
+});
+
+test("delegation is deliberately not a building", () => {
+  // It means "handing work to somebody else", and resolves to a neighbour's
+  // door. A PLACES entry for it would be a building nobody ever asked for.
+  assert.equal(viewer.PLACES[DELEGATION], undefined);
 });
 
 test("every place is reached by a verb the tool table actually produces", () => {
@@ -56,8 +62,9 @@ test("every place is reached by a verb the tool table actually produces", () => 
 });
 
 test("a place the map cannot draw sends the villager home, not to an exception", () => {
-  const stranded = { id: "a", state: "working", place: "librari" };
-  assert.equal(viewer.placeOf(stranded), null);
-  assert.equal(viewer.whereFor(stranded), null);
-  assert.equal(viewer.whereFor({ id: "a", state: "working", place: "library" }), "library");
+  const ctx = { places: viewer.PLACES, occupied: [], ownPlot: 0, hash: 1 };
+  assert.deepEqual(destinationFor({ id: "a", state: "working", place: "librari" }, ctx),
+                   { kind: "home" });
+  assert.deepEqual(destinationFor({ id: "a", state: "working", place: "library" }, ctx),
+                   { kind: "building", id: "library" });
 });
