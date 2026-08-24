@@ -625,7 +625,10 @@ panelEl.querySelector(".close").addEventListener("click", closePanel);
 let souls = [];
 let eventCursor = 0;
 let agents = new Map();
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const [evRes, soulRes] = await Promise.all([
       fetch("/events?since=" + eventCursor, { cache: "no-store" }),
@@ -638,7 +641,7 @@ async function poll() {
     const lines = text.split("\n").filter(Boolean);
     // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
     foldEvents(agents, eventCursor === 0 || reset ? lines.slice(-4000) : lines);
-    eventCursor = Number(evRes.headers.get("X-Burrow-Cursor")) || 0;
+    eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     const now = Date.now();
     villagers = reduce(agents, now, souls);
@@ -646,6 +649,8 @@ async function poll() {
     renderChrome(now);
   } catch {
     beatEl.textContent = "server unreachable";
+  } finally {
+    pollInFlight = false;
   }
 }
 

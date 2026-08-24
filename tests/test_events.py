@@ -45,23 +45,23 @@ class EventsEndpointTest(unittest.TestCase):
         self.append(first)
 
         status, headers, body = self.get_events()
-        cursor = int(headers["X-Burrow-Cursor"])
+        cursor = headers["X-Burrow-Cursor"]
         self.assertEqual(status, 200)
         self.assertEqual([first], [json.loads(line) for line in body.splitlines()])
 
         _, headers, body = self.get_events(cursor)
         self.assertEqual(body, b"")
-        self.assertEqual(int(headers["X-Burrow-Cursor"]), cursor)
+        self.assertEqual(headers["X-Burrow-Cursor"], cursor)
 
         self.append(second)
         _, headers, body = self.get_events(cursor)
         self.assertEqual([second], [json.loads(line) for line in body.splitlines()])
-        self.assertGreater(int(headers["X-Burrow-Cursor"]), cursor)
+        self.assertNotEqual(headers["X-Burrow-Cursor"], cursor)
 
     def test_cursor_beyond_rotated_log_resets(self):
         self.append({"type": "idle", "agent_id": "old"})
         _, headers, _ = self.get_events()
-        old_cursor = int(headers["X-Burrow-Cursor"])
+        old_cursor = headers["X-Burrow-Cursor"]
 
         with open(self.events, "wb") as stream:
             stream.write(b'{"type":"idle","agent_id":"new"}\n')
@@ -69,6 +69,21 @@ class EventsEndpointTest(unittest.TestCase):
         _, headers, body = self.get_events(old_cursor)
         self.assertEqual(headers["X-Burrow-Reset"], "1")
         self.assertEqual(json.loads(body), {"type": "idle", "agent_id": "new"})
+
+    def test_replaced_log_that_regrows_past_cursor_resets(self):
+        self.append({"type": "idle", "agent_id": "old"})
+        _, headers, _ = self.get_events()
+        old_cursor = headers["X-Burrow-Cursor"]
+
+        replacement = {"type": "idle", "agent_id": "replacement-with-longer-content"}
+        replacement_path = self.events + ".new"
+        with open(replacement_path, "wb") as stream:
+            stream.write(json.dumps(replacement).encode() + b"\n")
+        os.replace(replacement_path, self.events)
+
+        _, headers, body = self.get_events(old_cursor)
+        self.assertEqual(headers["X-Burrow-Reset"], "1")
+        self.assertEqual([replacement], [json.loads(line) for line in body.splitlines()])
 
     def test_incomplete_line_is_not_returned_or_consumed(self):
         with open(self.events, "wb") as stream:

@@ -65,7 +65,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             raw_since = params.get("since", ["0"])[0]
             try:
-                since = int(raw_since)
+                cursor_parts = raw_since.split(":")
+                if len(cursor_parts) == 3:
+                    cursor_identity = (int(cursor_parts[0]), int(cursor_parts[1]))
+                    since = int(cursor_parts[2])
+                elif len(cursor_parts) == 1:
+                    # Accept the original numeric cursor during rolling upgrades.
+                    cursor_identity = None
+                    since = int(raw_since)
+                else:
+                    raise ValueError
                 if since < 0:
                     raise ValueError
             except ValueError:
@@ -75,8 +84,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data, cursor, reset = b"", 0, False
             try:
                 with open(EVENTS, "rb") as f:
-                    size = os.fstat(f.fileno()).st_size
-                    if since > size:
+                    stat = os.fstat(f.fileno())
+                    identity = (stat.st_dev, stat.st_ino)
+                    if since > stat.st_size or (
+                            cursor_identity is not None and cursor_identity != identity):
                         since, reset = 0, True
                     f.seek(since)
                     chunk = f.read()
@@ -85,6 +96,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if end:
                         data = chunk[:end]
                     cursor = since + end
+                    if cursor:
+                        cursor = f"{identity[0]}:{identity[1]}:{cursor}"
             except FileNotFoundError:
                 reset = since > 0
 
