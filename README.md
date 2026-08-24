@@ -45,6 +45,21 @@ map of everything the fleet does.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
+## Testing the viewer
+
+The village has no fleet of its own to test against, so there is a fixture that
+writes a synthetic event log:
+
+```sh
+python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
+BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
+```
+
+It forces the longest walks on the map — corner plots to your door and back — so
+pathfinding, fence gates and the knock queue all get exercised. The viewer checks
+its own map on boot and logs one line; `__burrow.village.checkMap()` in the console
+re-runs it and returns any spot that stands on solid ground or cannot be reached.
+
 ## Souls
 
 Villagers get persistent identity from **soul files**: `~/.burrow/villagers/*.md`
