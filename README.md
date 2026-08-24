@@ -79,6 +79,25 @@ order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
+## Time of day
+
+The village is tinted by the **real local time of the machine viewing it** —
+dawn, day, dusk and night, interpolated so there is never a jump. It is a
+projection of the clock and nothing else: no weather, no seasons, no simulated
+sky. After dark, a house's windows and doorway light up only while its villager
+is genuinely home, your porch lights only while somebody is actually knocking,
+and the working glow, the knock orange and the stale fade all stay legible.
+
+For development, the clock can be overridden — and whenever it is, the viewer
+says so in the corner, so a pinned tint never passes as the real thing:
+
+| query param      | effect                                        |
+|------------------|-----------------------------------------------|
+| `?phase=night`   | pin a phase: `dawn`, `day`, `dusk`, `night`   |
+| `?time=20:45`    | pin an exact local time                       |
+| `?cycle=60`      | sweep a full 24 h in N seconds (default 60)   |
+
+Without a query param the viewer always shows the real clock.
 ## Testing the viewer
 
 The village has no fleet of its own to test against, so there is a fixture that

@@ -11,6 +11,7 @@ const end = html.indexOf("/* ————— DOM chrome", start);
 const source = html.slice(start, end) + "\nthis.exports = { Village };";
 const context = {
   Phaser: { Scene: class {} }, console, PLACES: {},
+  BurrowPresence: { startJourney() {}, finishJourney() {} },
   hashCode(s) {
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
