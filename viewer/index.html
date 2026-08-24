@@ -654,40 +654,46 @@ class Village extends Phaser.Scene {
     }
     const N = MAPW * MAPH, start = sy * MAPW + sx, goal = gy * MAPW + gx;
     if (start === goal) return [{ x: sx, y: sy }];
-    const g = new Float64Array(N).fill(Infinity);
-    const from = new Int32Array(N).fill(-1);
-    const dir = new Int8Array(N).fill(-1);
-    const done = new Uint8Array(N);
+    // The incoming direction is part of the A* state: reaching the same tile
+    // from different sides can change the cost of every route that follows.
+    const STATES = 5, NO_DIR = 4;
+    const startState = start * STATES + NO_DIR;
+    const g = new Float64Array(N * STATES).fill(Infinity);
+    const from = new Int32Array(N * STATES).fill(-1);
+    const done = new Uint8Array(N * STATES);
     const h = (x, y) => ROAD_COST * (Math.abs(x - gx) + Math.abs(y - gy));
     const DIRS = [[1,0],[-1,0],[0,1],[0,-1]];
     const open = new Heap();
-    g[start] = 0;
-    open.push(start, h(sx, sy));
+    g[startState] = 0;
+    open.push(startState, h(sx, sy));
+    let goalState = -1;
     while (open.size) {
       const cur = open.pop();
-      if (cur === goal) break;
       if (done[cur]) continue;
       done[cur] = 1;
-      const cx = cur % MAPW, cy = (cur / MAPW) | 0;
+      const tile = (cur / STATES) | 0;
+      if (tile === goal) { goalState = cur; break; }
+      const incoming = cur % STATES;
+      const cx = tile % MAPW, cy = (tile / MAPW) | 0;
       for (let d = 0; d < 4; d++) {
         const nx = cx + DIRS[d][0], ny = cy + DIRS[d][1];
         if (!this.walkable(nx, ny)) continue;
-        const ni = ny * MAPW + nx;
+        const ni = (ny * MAPW + nx) * STATES + d;
         if (done[ni]) continue;
         const cost = this.tileCost(nx, ny) +
-                     (dir[cur] >= 0 && dir[cur] !== d ? TURN_COST : 0);
+                     (incoming !== NO_DIR && incoming !== d ? TURN_COST : 0);
         if (g[cur] + cost >= g[ni]) continue;
         g[ni] = g[cur] + cost;
         from[ni] = cur;
-        dir[ni] = d;
         open.push(ni, g[ni] + h(nx, ny));
       }
     }
-    if (from[goal] < 0) return null;
+    if (goalState < 0) return null;
     const path = [];
-    for (let i = goal; i >= 0; i = from[i]) {
-      path.push({ x: i % MAPW, y: (i / MAPW) | 0 });
-      if (i === start) break;
+    for (let i = goalState; i >= 0; i = from[i]) {
+      const tile = (i / STATES) | 0;
+      path.push({ x: tile % MAPW, y: (tile / MAPW) | 0 });
+      if (i === startState) break;
     }
     return path.reverse();
   }
@@ -832,9 +838,13 @@ class Village extends Phaser.Scene {
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
     let path = this.route(c.x, c.y, tx, ty);
-    if (!path) {                    // no way through — better a straight line than a freeze
-      console.warn("burrow: no path to", tx, ty);
-      path = [{ x: tx, y: ty }];
+    if (!path) {
+      // Staying put is truthful. A straight fallback could cross solid terrain
+      // and show the villager somewhere it could never have walked.
+      console.error("burrow invariant: no walkable path to", tx, ty);
+      viz.spr.stop();
+      viz.spr.setTexture(char + "-idle", D_DOWN);
+      return false;
     }
     const legs = [];
     let px = c.x, py = c.y;
@@ -855,8 +865,9 @@ class Village extends Phaser.Scene {
       viz.spr.setTexture(char + "-idle", D_DOWN);
       viz.walk = null;
     };
-    if (!legs.length) { settle(); return; }
+    if (!legs.length) { settle(); return true; }
     viz.walk = this.tweens.chain({ targets: c, tweens: legs, onComplete: settle });
+    return true;
   }
 
   hop(viz) {   // one real event just arrived → one small hop; never loops
