@@ -21,6 +21,11 @@ rather than queueing into silence. Nothing is written for a request that was ref
 blank token means the server refuses to start unless ``--allow-open`` says out loud
 that this is local development. The default bind is ``127.0.0.1``; in deployment
 steward listens on the tailnet interface and is never exposed to the public internet.
+
+The one exception is ``/ui``: the management console's own HTML, CSS, and JavaScript
+are served unauthenticated, because the browser has to load the script *before* there
+is anything to ask a human for a token with. Those three files contain no fleet data —
+every byte the console displays it fetches from the endpoints above, with the token.
 """
 
 import logging
@@ -30,12 +35,14 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from hmac import compare_digest
 from pathlib import Path
 from typing import Any, Literal, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from steward import delegation as dg
@@ -55,7 +62,14 @@ from steward.scheduler import (
     default_state_path,
 )
 from steward.skills import SkillLibrary, effective_skills, library_for
-from steward.store import JOB_STATUSES, STATUS_OPEN, Store, default_db_path, new_id
+from steward.store import (
+    JOB_STATUSES,
+    STATUS_OPEN,
+    RequestRecord,
+    Store,
+    default_db_path,
+    new_id,
+)
 
 __all__ = [
     "DEFAULT_HOST",
@@ -64,6 +78,7 @@ __all__ = [
     "ApiError",
     "ManualRuns",
     "create_app",
+    "default_ui_dir",
     "run_server",
 ]
 
@@ -75,6 +90,18 @@ DEFAULT_PORT = 8801
 TOKEN_ENV = "STEWARD_TOKEN"  # noqa: S105 — an env var name, not a credential
 CORS_ENV = "STEWARD_CORS_ORIGINS"
 RESIDENTS_ENV = "STEWARD_RESIDENTS"
+UI_ENV = "STEWARD_UI"
+
+#: The management console's mount point, and the file that must exist for a directory to
+#: count as one. Serving a directory without it would hand the browser a 404 shaped like
+#: a working console.
+UI_MOUNT = "/ui"
+UI_INDEX = "index.html"
+
+#: How many rows ``GET /requests`` will hand back at most, and how many it hands back
+#: when nobody asks. The console polls this to confirm what a 202 only accepted.
+REQUESTS_DEFAULT_LIMIT = 50
+REQUESTS_MAX_LIMIT = 500
 
 POSTED_BY = "api"
 DECIDED_BY = "api"
@@ -113,6 +140,9 @@ class ApiConfig:
     workdir: Path | None = None
     #: The skills library. ``None`` finds the one beside the residents tree.
     skills_dir: Path | None = None
+    #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
+    #: a directory with no ``index.html`` in it is not served at all.
+    ui_dir: Path | None = None
 
     @classmethod
     def from_env(  # noqa: PLR0913 — one keyword per thing the environment can name
@@ -124,10 +154,12 @@ class ApiConfig:
         allow_open: bool = False,
         workdir: Path | str | None = None,
         skills_dir: Path | str | None = None,
+        ui_dir: Path | str | None = None,
     ) -> ApiConfig:
         """Read the token, the CORS origins, and the residents tree from the environment."""
         source = os.environ if env is None else env
         configured_residents = residents_dir or (source.get(RESIDENTS_ENV) or "").strip()
+        configured_ui = ui_dir or (source.get(UI_ENV) or "").strip()
         return cls(
             residents_dir=Path(configured_residents) if configured_residents else Path("residents"),
             db_path=Path(db_path) if db_path is not None else None,
@@ -136,12 +168,43 @@ class ApiConfig:
             cors_origins=parse_origins(source.get(CORS_ENV)),
             workdir=Path(workdir) if workdir is not None else None,
             skills_dir=Path(skills_dir) if skills_dir is not None else None,
+            ui_dir=Path(configured_ui) if configured_ui else None,
         )
 
 
 def parse_origins(raw: str | None) -> tuple[str, ...]:
     """Split ``STEWARD_CORS_ORIGINS`` into origins. Unset means no origin is allowed."""
     return tuple(part.strip() for part in (raw or "").split(",") if part.strip())
+
+
+def default_ui_dir() -> Path | None:
+    """Find the management console's static files, or ``None`` if this install has none.
+
+    Looked for beside the package first, so a future wheel that ships the console wins,
+    then at the root of the checkout, which is where ``ui/`` lives in this repo. A
+    directory without an ``index.html`` does not count: mounting one would answer ``/ui``
+    with a 404 shaped like a working console.
+    """
+    here = Path(__file__).resolve()
+    for candidate in (here.parent / "ui", here.parents[2] / "ui"):
+        if (candidate / UI_INDEX).is_file():
+            return candidate
+    return None
+
+
+def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str, Any]]:
+    """Index the request log by routine key, keeping the newest entry for each.
+
+    This is how the routine ledger answers "and what became of the last run somebody
+    asked for" without inventing a second ledger: the request log already records the
+    outcome a manual fire came to, and the routine key is in its detail.
+    """
+    latest: dict[str, dict[str, Any]] = {}
+    for record in records:  # oldest first, so the newest request is the last write
+        key = record.detail.get("routine")
+        if isinstance(key, str):
+            latest[key] = record.to_dict()
+    return latest
 
 
 def resolve_token(token: str | None, *, allow_open: bool) -> str | None:
@@ -331,6 +394,11 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     ``effective_skills`` is what a session for this resident is actually given — the
     library's defaults plus this manifest's grants — so the panel can show the set
     without re-deriving it from two places.
+
+    ``voice`` is the soul's own ``## Voice`` section, exactly the text
+    :mod:`steward.prompt` injects. It is already parsed and in memory here, and a console
+    that showed a resident's charter but not the style it writes in would be showing half
+    of who it is. ``None`` means the soul declares no voice, which is a real answer.
     """
     manifest = resident.manifest
     resolved = effective_skills(manifest, library) if library is not None else ()
@@ -341,6 +409,7 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "summary": manifest.summary,
         "path": str(resident.path),
         "soul": manifest.soul.model_dump(mode="json"),
+        "voice": resident.soul.voice,
         "charter": manifest.charter.model_dump(mode="json"),
         "skills": [skill.model_dump(mode="json") for skill in manifest.skills],
         # What the session is actually given: the library's defaults plus those grants.
@@ -352,6 +421,8 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "runner": {"kind": manifest.runner.kind, "model": manifest.runner.model},
         # Whether this resident takes work off the board, and on what terms.
         "board": manifest.board.model_dump(mode="json"),
+        # And whether it may hand work to anybody else, and to whom.
+        "delegation": manifest.delegation.model_dump(mode="json"),
         "routines": [
             {
                 "id": routine.id,
@@ -577,6 +648,61 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
             "library": str(library.path) if library.path is not None else None,
             "skills": [{**skill.as_dict(), "holders": holders[skill.name]} for skill in library],
             "errors": [diagnostic.render() for diagnostic in library.diagnostics],
+        }
+
+    # -- routines --------------------------------------------------------------------
+
+    @app.get("/routines")
+    def list_routines() -> dict[str, Any]:
+        """Every routine of every valid resident: the fleet-wide standing-work ledger.
+
+        Assembled from three things steward already knows and nothing it does not. The
+        schedule and the switch come from the manifest. ``next_fire`` is computed from the
+        cron expression in the routine's own zone, and is ``null`` for a disabled routine
+        because a routine that is off has no next occurrence to promise.
+
+        ``anchor`` is the scheduler's own state file, read fresh on every request because
+        the daemon is a different process — and it is called an anchor rather than a last
+        run because that is what it is: the moment the next occurrence is computed from,
+        which is the last fire *or* the moment steward first saw the routine. Calling it
+        "last run" would let a routine that has never fired look like one that has.
+
+        None of this means anything is firing. Routines fire when
+        ``steward scheduler run`` is up; a ledger is a declaration, not a heartbeat.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        state = SchedulerState.load(default_state_path())
+        now = datetime.now(UTC)
+        latest = latest_run_requests(db.requests())
+        routines = []
+        for resident in result.residents:
+            for routine in resident.manifest.routines:
+                item = ScheduledRoutine(resident=resident, routine=routine)
+                anchor = state.anchor(item.key)
+                routines.append(
+                    {
+                        "key": item.key,
+                        "resident": resident.id,
+                        "resident_name": resident.manifest.soul.name,
+                        "accent": resident.manifest.soul.accent,
+                        "routine": routine.id,
+                        "schedule": routine.schedule,
+                        "schedule_tz": routine.schedule_tz,
+                        "enabled": routine.enabled,
+                        "requires": list(routine.requires),
+                        "timeout_s": routine.timeout_s,
+                        "journal": routine.journal,
+                        "anchor": anchor.isoformat() if anchor is not None else None,
+                        "next_fire": item.next_fire_after(now).isoformat()
+                        if routine.enabled
+                        else None,
+                        "last_request": latest.get(item.key),
+                    }
+                )
+        return {
+            "routines": routines,
+            "state_path": str(default_state_path()),
+            "errors": [diagnostic.render() for diagnostic in result.errors],
         }
 
     # -- run now ---------------------------------------------------------------------
@@ -862,6 +988,47 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
             return None
         guard.resume(pause.resident, decided_by=DECIDED_BY, decide=False)
         return pause.resident
+
+    # -- the request log -------------------------------------------------------------
+
+    @app.get("/requests")
+    def list_requests(limit: int = REQUESTS_DEFAULT_LIMIT) -> dict[str, Any]:
+        """Return accepted requests and what became of them, newest first.
+
+        The endpoint that makes "accepted" survivable as an answer. Every mutating call
+        here returns a ``request_id`` and refuses to claim an effect; this is where the
+        effect eventually shows up — ``queued`` becomes ``ran``, ``skipped: …``, or
+        ``failed`` when the run it stands for finishes. A console polls one of these
+        rather than deciding on its own that a 202 went well.
+        """
+        window = max(1, min(limit, REQUESTS_MAX_LIMIT))
+        rows = db.requests()[-window:]
+        return {"requests": [record.to_dict() for record in reversed(rows)]}
+
+    @app.get("/requests/{request_id}")
+    def get_request(request_id: str) -> dict[str, Any]:
+        """Return one accepted request and its outcome. ``404`` for an id nobody logged."""
+        record = db.request(request_id)
+        if record is None:
+            _refuse(
+                404,
+                "unknown_request",
+                f"no request {request_id!r}; only accepted mutating requests are logged, "
+                f"so a refused one has no id to look up",
+            )
+        return record.to_dict()
+
+    # -- the management console ------------------------------------------------------
+
+    ui_dir = settings.ui_dir if settings.ui_dir is not None else default_ui_dir()
+    app.state.ui_dir = ui_dir if ui_dir is not None and (ui_dir / UI_INDEX).is_file() else None
+    if app.state.ui_dir is not None:
+        # Deliberately outside the token gate: a mount is a plain ASGI app, so the
+        # dependency above does not reach it, and it must not — the browser has to load
+        # the script before there is anything to ask a human for a token with. What is
+        # served here is three static files with no fleet data in them; everything the
+        # console displays it fetches from the endpoints above, with the token.
+        app.mount(UI_MOUNT, StaticFiles(directory=app.state.ui_dir, html=True), name="ui")
 
     return app
 

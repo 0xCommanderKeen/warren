@@ -56,6 +56,12 @@ Reads are gated too. Every endpoint here is a write path except the resident vie
 the skills listing, and gating those as well is simpler than explaining which is which
 — there is one door. The OpenAPI schema and `/docs` are not served at all, for the same reason.
 
+**The one exception is `/ui`.** The management console's three static files are served
+unauthenticated, because the browser has to load the script before there is anything to
+ask a human for a token with. They contain no fleet data: everything the console displays
+it fetches from the endpoints below, with the token, and a `401` on any of them makes it
+forget what it holds and ask again. See [`/ui`](#ui) at the end of this document.
+
 **Tailnet only.** The default bind is `127.0.0.1`; in deployment steward listens on
 its tailnet address and is never exposed to the public internet. One shared token is
 the whole of its auth, and that is only enough behind a private network.
@@ -267,6 +273,12 @@ A resident with no caps reports `"declared": false` and `"summary": "no limit"` 
 than omitting the block — a panel that simply left the gauge out would let *unlimited*
 read as *unknown*.
 
+`voice` is the soul's own `## Voice` section, exactly the text steward injects into a
+session for this resident. `null` means the soul declares no voice, which is a real
+answer: sessions for it get none. `board` and `delegation` are the two blocks that say
+what work a resident takes on beyond its own routines — whether it claims from the board,
+and whether it may hand work to a neighbour and to whom.
+
 ### `GET /residents/{id}/budget`
 
 Spent against limit for each budget, the window those numbers are counted in, and the
@@ -343,6 +355,86 @@ not an omission. A `SKILL.md` that does not parse is named in `errors` and left 
 
 Read-only, like the other views: a skill is added by committing a `SKILL.md` and granted
 by committing a manifest. There is no HTTP path that writes either.
+
+### `GET /routines`
+
+Every routine of every valid resident, fleet-wide: the standing-work ledger. Assembled
+from three things steward already knows and nothing it does not.
+
+```json
+{
+  "routines": [
+    {"key": "life-agent/inbox-read", "resident": "life-agent", "resident_name": "Hob",
+     "accent": "#a68a4f", "routine": "inbox-read", "schedule": "15 * * * *",
+     "schedule_tz": "Europe/Ljubljana", "enabled": true, "requires": ["read-inbox"],
+     "timeout_s": 600, "journal": null,
+     "anchor": "2026-08-24T21:15:00+00:00", "next_fire": "2026-08-25T02:15:00+02:00",
+     "last_request": {"request_id": "…", "outcome": "ran", "detail": {"routine": "…"}}}
+  ],
+  "state_path": "/srv/steward/.steward/state/scheduler.json",
+  "errors": []
+}
+```
+
+`next_fire` is computed from the cron expression in the routine's own zone, and is `null`
+for a disabled routine — a routine that is off has no next occurrence to promise.
+
+`anchor` is the scheduler's state file, re-read on every request because the daemon is a
+different process. It is called an anchor rather than a last run because that is what it
+is: the moment the next occurrence is computed from, which is the last fire *or* the
+moment steward first saw the routine. `null` means it has never fired, and calling that a
+last run would let a routine that has never worked look like one that has.
+
+`last_request` is the newest entry in the request log for this routine — what became of
+the last run **somebody asked for through this API**. A routine that fired on its own
+schedule leaves its record in burrow's event log, not here. `null` is the ordinary case.
+
+None of this means anything is firing. Routines fire while `steward scheduler run` is up;
+a ledger is a declaration, not a heartbeat. Manifests that did not validate are named in
+`errors`, exactly as in `GET /residents`.
+
+### `GET /requests` · `GET /requests/{request_id}`
+
+Accepted requests, and what became of them. This is the endpoint that makes *accepted*
+survivable as an answer: everything above returns a `request_id` and refuses to claim an
+effect, and this is where the effect eventually shows up.
+
+```console
+$ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
+    http://127.0.0.1:8801/requests/2b8f…
+{"request_id": "2b8f…", "received_at": "2026-08-24T23:45:33.975Z", "method": "POST",
+ "path": "/residents/life-agent/routines/inbox-read/run", "outcome": "ran",
+ "detail": {"routine": "life-agent/inbox-read", "run_id": "…"}}
+```
+
+`outcome` is the whole point. A run-now is written as `queued` and becomes `ran`,
+`failed`, `skipped: <reason>`, or `refused: already running` when the fire it stands for
+finishes. A posted job is `posted`, a decision `recorded`, a declaration `declared`, a
+handoff `delegated`. A client polls one of these rather than deciding on its own that a
+202 went well.
+
+`GET /requests` is the log, **newest first**, with `?limit=` (default 50, clamped to
+1–500). `404 unknown_request` for an id nobody logged — and only *accepted* mutating
+requests are logged, so a refused one has no id to look up. That is the same promise as
+everywhere else here: nothing is written for a request that was refused.
+
+### `/ui`
+
+The management console: `index.html`, `app.css`, `app.js`, mounted as static files.
+
+**Not behind the token**, and it has to be — the browser must load the script before there
+is anything to ask a human for a token with. Three static files with no fleet data in
+them; every byte the console displays it fetches from the endpoints above, with the token.
+
+Steward serves whatever `STEWARD_UI` names, else `ui/` in the checkout. A directory with
+no `index.html` in it is not mounted at all, because answering `/ui` with a 404 shaped
+like a working console is worse than not offering one. An install that ships no console
+serves the API and says nothing about a console; `steward serve` prints the URL only when
+there is one to print.
+
+The console is a pure client. It calls only the endpoints in this document, writes nothing
+the API would not accept from anyone else, and has no path that edits a manifest — because
+there is no endpoint that would let it. See the README for what it shows.
 
 ## Storage
 
