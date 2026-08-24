@@ -16,6 +16,13 @@ Two transports; the event shape is the contract, not the pipe:
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
   `BURROW_URL` is unset, or as the fallback above.
 
+The viewer reads `GET /events?since=<byte-offset>`. The response body contains only
+complete JSONL lines after that offset, and `X-Burrow-Cursor` supplies the offset for
+the next request. Omit `since` (or use `0`) for a full bootstrap. If a log is
+truncated or rotated and the cursor is beyond EOF, the server starts again at byte
+zero and includes `X-Burrow-Reset: 1`; consumers must discard their reduced state
+before folding in that response.
+
 ## Event shape
 
 ```json

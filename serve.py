@@ -12,8 +12,8 @@ import http.server
 import json
 import os
 import sys
+import urllib.parse
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8737
 HOST = os.environ.get("BURROW_HOST", "127.0.0.1")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events.jsonl")
@@ -55,17 +55,43 @@ def read_villagers():
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        path = self.path.split("?")[0]
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
         if path == "/villagers":
             self._send(200, json.dumps(read_villagers()).encode("utf-8"),
                        "application/json")
             return
         if path == "/events":
-            data = b""
-            if os.path.exists(EVENTS):
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            raw_since = params.get("since", ["0"])[0]
+            try:
+                since = int(raw_since)
+                if since < 0:
+                    raise ValueError
+            except ValueError:
+                self._send(400, b"invalid since cursor", "text/plain")
+                return
+
+            data, cursor, reset = b"", 0, False
+            try:
                 with open(EVENTS, "rb") as f:
-                    data = f.read()
-            self._send(200, data, "application/x-ndjson")
+                    size = os.fstat(f.fileno()).st_size
+                    if since > size:
+                        since, reset = 0, True
+                    f.seek(since)
+                    chunk = f.read()
+                    # Do not advance over an event that is still being appended.
+                    end = chunk.rfind(b"\n") + 1
+                    if end:
+                        data = chunk[:end]
+                    cursor = since + end
+            except FileNotFoundError:
+                reset = since > 0
+
+            headers = {"X-Burrow-Cursor": str(cursor)}
+            if reset:
+                headers["X-Burrow-Reset"] = "1"
+            self._send(200, data, "application/x-ndjson", headers)
             return
         # everything else is a static file under viewer/
         if path in ("/", "/index.html"):
@@ -105,11 +131,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send(404, b"missing: " + path.encode(), "text/plain")
 
-    def _send(self, code, data, ctype):
+    def _send(self, code, data, ctype, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if data:
             self.wfile.write(data)
@@ -119,5 +147,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"burrow village at http://{HOST}:{PORT}, log at {EVENTS}")
-    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8737
+    print(f"burrow village at http://{HOST}:{port}, log at {EVENTS}")
+    http.server.ThreadingHTTPServer((HOST, port), Handler).serve_forever()
