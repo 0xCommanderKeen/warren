@@ -215,7 +215,8 @@ const DECOR = [[0,176],[16,176],[32,176],[48,176],[96,176],
 const PROPS = [[0,160],[16,160],[32,160],[48,160],[64,160],[80,160],[96,160],
                [64,128],[80,128],[64,224],[80,224]];
 const CROPS = [[144,144],[160,144],[128,160],[144,160]];   // garden vegetables
-// villager house plots: [tileX, tileY], houses are 4×3 tiles, door bottom-center
+// villager house plots: [tileX, tileY]. Houses are 4×3 tiles, but the door in the
+// prefab is not centred: its opening sits at x 17..30 of the 64 px frame.
 const PLOTS = [[3,8],[8,8],[20,8],[25,8],[3,16],[8,16],[20,16],[25,16]];
 const YOUR_HOUSE = { tx: 14, ty: 3 };   // 3×3 tiles, A-frame
 // fenced kitchen gardens: [tileX, tileY, w, h]. The whole rect is solid ground;
@@ -239,9 +240,10 @@ const NOTICE_BOARD_ID = "notice-board";
 const SLOT_SPOTS = [[0, 0], [-24, 14], [24, 14], [-48, 0], [48, 0], [0, 28]];
 const SLOT_WRAP = 30;   // extra row offset once the arc is full
 
+const PLOT_DOOR_X = 24;   // centre of the door opening inside the house frame
 function plotDoor(i) {
   const [px, py] = PLOTS[i];
-  return { x: px * T + 32, y: (py + 3) * T };
+  return { x: px * T + PLOT_DOOR_X, y: (py + 3) * T };
 }
 function placeDoor(name) {
   const p = PLACES[name];
@@ -594,7 +596,7 @@ class Village extends Phaser.Scene {
       for (let y = py; y < py + 3; y++)
         for (let x = px; x < px + 4; x++) this.block(x, y);
       // warm light in the doorway while its agent works — off otherwise
-      const g = this.add.rectangle(px * T + 32, (py + 3) * T - 9, 10, 14, 0xffc86b, .55)
+      const g = this.add.rectangle(px * T + PLOT_DOOR_X, (py + 3) * T - 9, 12, 11, 0xffc86b, .55)
         .setDepth(LIGHT_DEPTH).setVisible(false);
       this.glows.push(g);
     });
