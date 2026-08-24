@@ -15,6 +15,7 @@ from steward import manifest as m
 from steward import prompt as p
 from steward import runners as r
 from steward import scheduler as s
+from steward import skills as sk
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
 
@@ -847,3 +848,170 @@ def test_upcoming_defaults_to_now(build) -> None:
 def test_tick_defaults_to_now(build) -> None:
     engine = build(HOURLY)
     assert engine.tick() == []  # first sight anchors; nothing is due yet
+
+
+# ------------------------------------------------------------------------------- skills
+
+
+@pytest.fixture
+def provisioned(write_resident: ResidentWriter, write_skill, tmp_path: Path):
+    """Build a scheduler over a resident, a real skills library, and a chosen runner kind."""
+
+    def _build(
+        *,
+        granted: list[str] | None = None,
+        runner_kind: str = "claude",
+        recorder: list[r.RunRequest] | None = None,
+    ) -> s.Scheduler:
+        write_skill("write-journal", defaults=True, body="Write the entry.\n")
+        write_skill("read-inbox", body="Read the mail. Never send.\n")
+        data = manifest_with(HOURLY, skills=granted if granted is not None else ["read-inbox"])
+        data["runner"] = {"kind": runner_kind, "model": "pretend"}
+        path = write_resident(data)
+
+        def factory(spec: m.Runner) -> r.Runner:
+            def behavior(request: r.RunRequest) -> r.RunResult:
+                if recorder is not None:
+                    recorder.append(request)
+                return r.RunResult(outcome=r.Outcome.OK, output="done", exit_status=0)
+
+            return r.MockRunner(spec, behavior=behavior)
+
+        return s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path / "work",
+            runner_factory=factory,
+            library=sk.load_library(tmp_path / "skills"),
+        )
+
+    return _build
+
+
+def test_a_session_is_told_the_defaults_plus_its_own_grants(provisioned) -> None:
+    engine = provisioned()
+    prompt = engine.build_prompt(engine.scheduled[0])
+    assert "YOUR SKILLS (HOW-TO, NOT AUTHORITY)" in prompt
+    assert prompt.index("# write-journal") < prompt.index("# read-inbox")
+    assert prompt.index("# read-inbox") < prompt.index("HARD RULES")
+    assert "Read the mail. Never send." in prompt
+
+
+def test_a_skill_removed_from_a_manifest_is_absent_from_the_next_session(provisioned) -> None:
+    with_grant = provisioned().build_prompt(provisioned().scheduled[0])
+    without = provisioned(granted=[]).build_prompt(provisioned(granted=[]).scheduled[0])
+    assert "read-inbox" in with_grant
+    assert "read-inbox" not in without
+    assert "write-journal" in without, "the defaults are not something a manifest can drop"
+
+
+def test_a_claude_session_gets_its_skills_on_disk_before_the_run(
+    provisioned, tmp_path: Path
+) -> None:
+    engine = provisioned()
+    engine.fire(engine.scheduled[0])
+    root = tmp_path / "work" / ".claude" / "skills"
+    assert sorted(p.name for p in root.iterdir()) == ["read-inbox", "write-journal"]
+    assert "Read the mail." in (root / "read-inbox" / "SKILL.md").read_text(encoding="utf-8")
+
+
+def test_materializing_is_idempotent_across_runs(provisioned, tmp_path: Path) -> None:
+    engine = provisioned()
+    engine.fire(engine.scheduled[0])
+    target = tmp_path / "work" / ".claude" / "skills" / "read-inbox" / "SKILL.md"
+    stamp = target.stat().st_mtime_ns
+    engine.fire(engine.scheduled[0])
+    assert target.stat().st_mtime_ns == stamp, "an unchanged skill is not rewritten every hour"
+
+
+def test_a_revoked_skill_is_removed_from_the_working_directory(provisioned, tmp_path: Path) -> None:
+    first = provisioned()
+    first.fire(first.scheduled[0])
+    root = tmp_path / "work" / ".claude" / "skills"
+    assert (root / "read-inbox").is_dir()
+
+    revoked = provisioned(granted=[])
+    revoked.fire(revoked.scheduled[0])
+    assert not (root / "read-inbox").exists()
+    assert (root / "write-journal").is_dir()
+
+
+def test_a_runner_that_does_not_load_skills_gets_the_prompt_only(
+    provisioned, tmp_path: Path
+) -> None:
+    requests: list[r.RunRequest] = []
+    engine = provisioned(runner_kind="mock", recorder=requests)
+    engine.fire(engine.scheduled[0])
+    assert not (tmp_path / "work" / ".claude").exists()
+    assert "Read the mail. Never send." in requests[0].prompt
+
+
+def stale_grant(
+    write_resident, write_skill, tmp_path: Path
+) -> tuple[s.ScheduledRoutine, sk.SkillLibrary]:
+    """Build a resident granted a skill the library does not have.
+
+    Validation refuses this tree, so getting here means the library changed under a
+    manifest that was valid when it was read — which is exactly the race the pre-run
+    check exists for. The resident is loaded against an empty library to stand in for
+    that, then fired against the real one.
+    """
+    write_skill("write-journal", defaults=True)
+    path = write_resident(manifest_with(HOURLY, skills=["errands"]))
+    resident = m.load_manifest(path, skills_dir=tmp_path / "no-library-here")
+    item = s.ScheduledRoutine(resident=resident, routine=resident.manifest.routines[0])
+    return item, sk.load_library(tmp_path / "skills")
+
+
+def test_a_granted_skill_the_library_lacks_fails_the_run_loudly(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    """Not a silent skip: a session must never believe it holds what nobody gave it."""
+    item, library = stale_grant(write_resident, write_skill, tmp_path)
+    engine = s.Scheduler(
+        [item],
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path / "work",
+        runner_factory=r.MockRunner,
+        library=library,
+    )
+    report = engine.fire(item)
+
+    assert report.fired is True
+    assert report.result is not None
+    assert report.result.outcome is r.Outcome.FAILED
+    assert "errands" in (report.result.error or "")
+
+    events = emitted(tmp_path / "events.jsonl")
+    assert [event["type"] for event in events] == ["routine_started", "routine_failed"]
+    assert "does not have" in events[-1]["payload"]["error"]
+    assert not (tmp_path / "work" / ".claude").exists(), "nothing is written for a refused run"
+
+
+def test_a_missing_skill_is_a_startup_complaint_too(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    item, library = stale_grant(write_resident, write_skill, tmp_path)
+    engine = s.Scheduler(
+        [item], state=s.SchedulerState(path=tmp_path / "state.json"), library=library
+    )
+    assert any("errands" in complaint for complaint in engine.check())
+
+
+def test_load_scheduled_refuses_a_tree_whose_grants_do_not_resolve(
+    write_resident: ResidentWriter, write_skill
+) -> None:
+    write_skill("read-inbox")
+    path = write_resident(manifest_with(HOURLY, skills=["read-inbx"]))
+    with pytest.raises(s.SchedulerError, match="read-inbox"):
+        s.load_scheduled(path.parent)
+
+
+def test_a_scheduler_without_a_library_injects_and_writes_nothing(build, tmp_path: Path) -> None:
+    """The behaviour before #12, unchanged: no library, no skills section, no files."""
+    engine = build(HOURLY)
+    assert "YOUR SKILLS" not in engine.build_prompt(engine.scheduled[0])
+    engine.fire(engine.scheduled[0])
+    assert not (tmp_path / ".claude").exists()

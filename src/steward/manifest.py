@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import yaml
 from croniter import croniter
@@ -52,14 +52,19 @@ __all__ = [
     "SoulDocument",
     "SoulIdentity",
     "ValidationResult",
+    "closest_match",
     "extract_voice",
     "load_manifest",
     "manifest_json_schema",
+    "split_frontmatter",
     "validate_manifest",
     "validate_path",
     "validate_paths",
     "validate_tree",
 ]
+
+if TYPE_CHECKING:  # pragma: no cover — the library reads this module, not the reverse
+    from steward.skills import SkillLibrary
 
 MANIFEST_FILENAME = "manifest.yaml"
 DEFAULT_SOUL_FILENAME = "soul.md"
@@ -162,6 +167,16 @@ class ValidationResult:
             residents=self.residents + other.residents,
             diagnostics=self.diagnostics + other.diagnostics,
         )
+
+
+def closest_match(value: str, candidates: Iterable[str]) -> str | None:
+    """Return the candidate a misspelling most likely meant, or ``None``.
+
+    One near-miss finder, shared by every "you named something that does not exist"
+    diagnostic — a typo should be answered with the fix, not with a list to read.
+    """
+    matches = difflib.get_close_matches(value, sorted(candidates), n=1)
+    return matches[0] if matches else None
 
 
 class ManifestError(Exception):
@@ -370,8 +385,10 @@ class Charter(_Model):
 class SkillGrant(_Model):
     """A named, reusable capability granted to a resident.
 
-    The id references the skills library (``skills/<id>/SKILL.md``). Existence is
-    enforced once the library lands; the shape is enforced now.
+    The id names a skill in the library (``skills/<id>/SKILL.md``), and a name the
+    library does not have fails validation with the closest match named. The default
+    skills every resident holds are not listed here: a grant is what this resident has
+    *on top* of them.
     """
 
     id: str = Field(pattern=SLUG_PATTERN, description="Skill name in the library.")
@@ -547,6 +564,19 @@ _FRONTMATTER_RE = re.compile(
 )
 
 
+def split_frontmatter(text: str) -> tuple[str | None, str]:
+    """Split a markdown document into its raw ``---`` frontmatter block and its body.
+
+    One splitter for every document in this repo that carries frontmatter — souls here,
+    skills in :mod:`steward.skills` — so "what counts as frontmatter" has one answer.
+    A document without a block returns ``(None, text)``.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if match is None:
+        return None, text
+    return match.group("frontmatter"), match.group("body")
+
+
 @dataclass(frozen=True, slots=True)
 class SoulDocument:
     """A parsed ``soul.md``: frontmatter, body, and the optional Voice section."""
@@ -577,8 +607,8 @@ def extract_voice(body: str) -> str | None:
 
 def parse_soul(text: str, source: Path) -> tuple[SoulDocument, list[Diagnostic]]:
     """Parse a soul document, returning it alongside any diagnostics."""
-    match = _FRONTMATTER_RE.match(text)
-    if match is None:
+    raw_frontmatter, raw_body = split_frontmatter(text)
+    if raw_frontmatter is None:
         return SoulDocument(path=source, body=text), [
             Diagnostic(
                 file=source,
@@ -590,9 +620,9 @@ def parse_soul(text: str, source: Path) -> tuple[SoulDocument, list[Diagnostic]]
 
     diagnostics: list[Diagnostic] = []
     try:
-        loaded = yaml.safe_load(match.group("frontmatter")) or {}
+        loaded = yaml.safe_load(raw_frontmatter) or {}
     except yaml.YAMLError as exc:
-        return SoulDocument(path=source, body=match.group("body")), [
+        return SoulDocument(path=source, body=raw_body), [
             Diagnostic(
                 file=source,
                 field_path="frontmatter",
@@ -602,7 +632,7 @@ def parse_soul(text: str, source: Path) -> tuple[SoulDocument, list[Diagnostic]]
         ]
 
     if not isinstance(loaded, Mapping):
-        return SoulDocument(path=source, body=match.group("body")), [
+        return SoulDocument(path=source, body=raw_body), [
             Diagnostic(
                 file=source,
                 field_path="frontmatter",
@@ -611,7 +641,7 @@ def parse_soul(text: str, source: Path) -> tuple[SoulDocument, list[Diagnostic]]
             )
         ]
 
-    body = match.group("body")
+    body = raw_body
     voice = extract_voice(body)
     if voice is not None and len(voice) > VOICE_MAX_CHARS:
         diagnostics.append(
@@ -676,8 +706,8 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     ),
     "charter.escalation.when": "when: ['A message needs a reply I was not told to send']",
     "charter.escalation.how": "how: needs_human",
-    "skills": "skills: [daily-summary, read-inbox]",
-    "skills.id": "id: daily-summary  (a name in skills/)",
+    "skills": "skills: [read-inbox, read-calendar]",
+    "skills.id": "id: read-inbox  (a name in skills/)",
     "skills.source": "source: library",
     "memory": (
         "memory: {kind: directory, path: /data/residents/life-agent/memory, journal: journal}"
@@ -708,7 +738,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.schedule": "schedule: '0 7 * * *'",
     "routines.schedule_tz": "schedule_tz: Europe/Ljubljana  (IANA name; defaults to UTC)",
     "routines.prompt": "prompt: Write today's household summary.",
-    "routines.requires": "requires: [daily-summary]  (skills granted above)",
+    "routines.requires": "requires: [read-inbox]  (a default skill, or one granted above)",
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
@@ -799,15 +829,23 @@ def _check_duplicate_ids(manifest: ResidentManifest, source: Path) -> list[Diagn
     return diagnostics
 
 
-def _check_routine_requirements(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
-    granted = {skill.id for skill in manifest.skills}
+def _check_routine_requirements(
+    manifest: ResidentManifest, source: Path, effective: Sequence[str]
+) -> list[Diagnostic]:
+    """Check every ``requires`` against the resident's *effective* skills.
+
+    Effective, not granted: the default skills every resident holds are part of the set
+    a routine may require, so a manifest does not have to re-grant ``write-journal`` to
+    be allowed to close its day with it.
+    """
+    available = set(effective)
     diagnostics: list[Diagnostic] = []
     for index, routine in enumerate(manifest.routines):
         for position, required in enumerate(routine.requires):
-            if required in granted:
+            if required in available:
                 continue
-            close = difflib.get_close_matches(required, sorted(granted), n=1)
-            hint = f"skills: [{close[0]}]" if close else "grant it under skills: first"
+            close = closest_match(required, available)
+            hint = f"skills: [{close}]" if close else "grant it under skills: first"
             diagnostics.append(
                 Diagnostic(
                     file=source,
@@ -991,13 +1029,41 @@ def _load_soul(manifest: ResidentManifest, source: Path) -> tuple[SoulDocument, 
     return parse_soul(soul_path.read_text(encoding="utf-8"), soul_path)
 
 
-def validate_manifest(path: Path | str) -> ValidationResult:
+def _library(residents_dir: Path, skills_dir: Path | str | None) -> SkillLibrary:
+    """Load the skills library a residents tree is validated against.
+
+    Imported here rather than at module scope because the dependency runs the other
+    way: :mod:`steward.skills` is built out of this module's diagnostics and models,
+    and this module only reaches for the library when somebody actually validates.
+    ``skills_dir=None`` means "find the one beside the tree, if there is one", which is
+    what keeps callers from before the library existed working unchanged.
+    """
+    from steward.skills import library_for  # noqa: PLC0415
+
+    return library_for(residents_dir, skills_dir)
+
+
+def validate_manifest(path: Path | str, skills_dir: Path | str | None = None) -> ValidationResult:
     """Validate one manifest file and return structured diagnostics.
 
     This never raises for manifest problems: the caller decides what to do with the
     diagnostics. Use :func:`load_manifest` when you want the model or an exception.
+
+    ``skills_dir`` names the skills library granted names are checked against. It
+    defaults to ``<residents_dir>/../skills`` when that exists, and to no library at
+    all when it does not — a tree with no library validates exactly as it did before
+    the library landed.
     """
     source = Path(path)
+    library = _library(source.parent.parent, skills_dir)
+    result = _validate_manifest(source, library)
+    if not library.diagnostics:
+        return result
+    return ValidationResult(diagnostics=library.diagnostics).merged_with(result)
+
+
+def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
+    """Validate one manifest against an already-loaded library."""
     data, diagnostics = _read_yaml(source)
     if data is None:
         return ValidationResult(diagnostics=tuple(diagnostics))
@@ -1012,11 +1078,16 @@ def validate_manifest(path: Path | str) -> ValidationResult:
     except ValidationError as exc:
         return ValidationResult(diagnostics=tuple(_diagnostics_from_validation_error(exc, source)))
 
+    from steward.skills import effective_names, grant_diagnostics  # noqa: PLC0415
+
     soul, soul_diagnostics = _load_soul(manifest, source)
     diagnostics.extend(soul_diagnostics)
     diagnostics.extend(_check_directory_name(manifest, source))
     diagnostics.extend(_check_duplicate_ids(manifest, source))
-    diagnostics.extend(_check_routine_requirements(manifest, source))
+    diagnostics.extend(grant_diagnostics(manifest, library, source))
+    diagnostics.extend(
+        _check_routine_requirements(manifest, source, effective_names(manifest, library))
+    )
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
@@ -1025,19 +1096,25 @@ def validate_manifest(path: Path | str) -> ValidationResult:
     return ValidationResult(residents=residents, diagnostics=tuple(diagnostics))
 
 
-def load_manifest(path: Path | str) -> Resident:
+def load_manifest(path: Path | str, skills_dir: Path | str | None = None) -> Resident:
     """Load and validate one manifest, or raise :class:`ManifestError`.
 
     The single load-and-validate path shared by the scheduler, the API, and CI.
     """
-    result = validate_manifest(path)
+    result = validate_manifest(path, skills_dir)
     if not result.ok or not result.residents:
         raise ManifestError(result.diagnostics)
     return result.residents[0]
 
 
-def validate_tree(residents_dir: Path | str) -> ValidationResult:
-    """Validate every ``<id>/manifest.yaml`` under a residents directory."""
+def validate_tree(
+    residents_dir: Path | str, skills_dir: Path | str | None = None
+) -> ValidationResult:
+    """Validate every ``<id>/manifest.yaml`` under a residents directory.
+
+    The skills library is loaded once for the whole tree, so a broken ``SKILL.md`` is
+    one complaint rather than one per resident.
+    """
     root = Path(residents_dir)
     if not root.is_dir():
         return ValidationResult(
@@ -1051,7 +1128,8 @@ def validate_tree(residents_dir: Path | str) -> ValidationResult:
             )
         )
 
-    result = ValidationResult()
+    library = _library(root, skills_dir)
+    result = ValidationResult(diagnostics=library.diagnostics)
     found = False
     for directory in sorted(p for p in root.iterdir() if p.is_dir()):
         manifest_path = directory / MANIFEST_FILENAME
@@ -1070,7 +1148,7 @@ def validate_tree(residents_dir: Path | str) -> ValidationResult:
             )
             continue
         found = True
-        result = result.merged_with(validate_manifest(manifest_path))
+        result = result.merged_with(_validate_manifest(manifest_path, library))
 
     if not found and not result.diagnostics:
         result = ValidationResult(
@@ -1087,21 +1165,23 @@ def validate_tree(residents_dir: Path | str) -> ValidationResult:
     return result
 
 
-def validate_path(path: Path | str) -> ValidationResult:
+def validate_path(path: Path | str, skills_dir: Path | str | None = None) -> ValidationResult:
     """Validate a manifest file, a resident directory, or a whole residents tree."""
     target = Path(path)
     if target.is_file():
-        return validate_manifest(target)
+        return validate_manifest(target, skills_dir)
     if (target / MANIFEST_FILENAME).is_file():
-        return validate_manifest(target / MANIFEST_FILENAME)
-    return validate_tree(target)
+        return validate_manifest(target / MANIFEST_FILENAME, skills_dir)
+    return validate_tree(target, skills_dir)
 
 
-def validate_paths(paths: Iterable[Path | str]) -> ValidationResult:
+def validate_paths(
+    paths: Iterable[Path | str], skills_dir: Path | str | None = None
+) -> ValidationResult:
     """Validate several targets, merging their results in order."""
     result = ValidationResult()
     for path in paths:
-        result = result.merged_with(validate_path(path))
+        result = result.merged_with(validate_path(path, skills_dir))
     return result
 
 

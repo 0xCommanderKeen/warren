@@ -55,6 +55,7 @@ __all__ = [
     "RunnerError",
     "build_runner",
     "check_runner",
+    "skills_home",
     "substitute",
 ]
 
@@ -131,6 +132,11 @@ class Runner(ABC):
     """The seam. One method, one truthful result, no exceptions for a failed run."""
 
     kind: ClassVar[str] = "abstract"
+
+    #: Where this brain loads on-disk skills from, relative to the session's working
+    #: directory — or ``None`` when it has no such loader and the prompt is the only
+    #: way it hears about a skill. Steward owns the directory it names.
+    skills_dir: ClassVar[str | None] = None
 
     def __init__(self, spec: RunnerSpec | None = None) -> None:
         """Hold the manifest declaration this runner was built from."""
@@ -259,6 +265,9 @@ class ClaudeRunner(_ProcessRunner):
 
     kind: ClassVar[str] = "claude"
     binary: str = "claude"
+    #: ``claude`` discovers skills under the working directory, so a granted skill is
+    #: both injected into the prompt and written here before the run.
+    skills_dir: ClassVar[str | None] = ".claude/skills"
 
     def argv(self, request: RunRequest) -> list[str]:
         """Build the claude headless argv: prompt, model, JSON output, permissions."""
@@ -395,6 +404,16 @@ def build_runner(spec: RunnerSpec, *, force_mock: bool = False) -> Runner:
         known = ", ".join(sorted(RUNNER_KINDS))
         raise RunnerError(f"unknown runner kind {spec.kind!r}; known kinds: {known}") from None
     return factory(spec)
+
+
+def skills_home(spec: RunnerSpec) -> str | None:
+    """Return where this runner kind loads on-disk skills from, or ``None``.
+
+    Answered from the class rather than an instance, so asking "does this brain read
+    skills off disk" never builds a runner, let alone launches one.
+    """
+    runner = RUNNER_KINDS.get(spec.kind)
+    return getattr(runner, "skills_dir", None) if runner is not None else None
 
 
 def check_runner(spec: RunnerSpec) -> str | None:

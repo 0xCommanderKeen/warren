@@ -639,3 +639,104 @@ def test_scan_for_credentials_walks_lists(tmp_path: Path) -> None:
     data = yaml.safe_load("grants:\n  - name: gmail\n    api_key: abc\n")
     diagnostics = m.scan_for_credentials(data, tmp_path / "manifest.yaml")
     assert [d.field_path for d in diagnostics] == ["grants[0].api_key"]
+
+
+# ------------------------------------------------------------------------- skills library
+
+
+def grants(*names: str, requires: list[str] | None = None) -> dict:
+    data = valid_manifest()
+    data["skills"] = list(names)
+    data["routines"][0]["requires"] = requires if requires is not None else []
+    return data
+
+
+def test_a_grant_that_names_no_library_skill_fails_with_the_closest_match(
+    write_resident: ResidentWriter, write_skill
+) -> None:
+    write_skill("read-inbox")
+    result = m.validate_manifest(write_resident(grants("read-inbx")))
+    assert not result.ok
+    assert "is not in the skills library" in problem_for(result, "skills[0].id")
+    assert result.diagnostics[0].example == "id: read-inbox"
+
+
+def test_a_grant_the_library_does_have_passes(write_resident: ResidentWriter, write_skill) -> None:
+    write_skill("read-inbox")
+    result = m.validate_manifest(write_resident(grants("read-inbox")))
+    assert result.ok, "\n".join(d.render() for d in result.diagnostics)
+
+
+def test_requires_is_checked_against_the_effective_set_not_just_grants(
+    write_resident: ResidentWriter, write_skill
+) -> None:
+    """A default skill is held without being granted, so requiring it is legal."""
+    write_skill("write-journal", defaults=True)
+    write_skill("read-inbox")
+    result = m.validate_manifest(
+        write_resident(grants("read-inbox", requires=["write-journal", "read-inbox"]))
+    )
+    assert result.ok, "\n".join(d.render() for d in result.diagnostics)
+
+
+def test_requiring_a_skill_that_is_neither_default_nor_granted_still_fails(
+    write_resident: ResidentWriter, write_skill
+) -> None:
+    write_skill("write-journal", defaults=True)
+    write_skill("read-inbox")
+    result = m.validate_manifest(write_resident(grants(requires=["read-inbox"])))
+    assert "does not grant" in problem_for(result, "routines[0].requires[0]")
+
+
+def test_a_broken_skill_file_fails_the_tree_once(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    write_skill("write-journal", defaults=True)
+    write_skill("broken", text="---\nname: broken\n---\n\nNo description.\n")
+    write_resident(grants(), directory="test-agent")
+    write_resident({**grants(), "id": "other-agent", "agent_id": "claude-code:other"}, soul=None)
+
+    result = m.validate_tree(tmp_path / "residents")
+    complaints = [d for d in result.diagnostics if d.field_path == "description"]
+    assert len(complaints) == 1, "one broken skill is one complaint, not one per resident"
+    assert not result.ok
+
+
+def test_a_tree_with_no_library_validates_exactly_as_before(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Every caller from before the library keeps working: no skills/, no skill checks."""
+    write_resident(grants("anything-at-all", requires=["anything-at-all"]))
+    assert m.validate_tree(tmp_path / "residents").ok
+
+
+def test_an_explicit_skills_dir_overrides_the_one_beside_the_tree(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    write_skill("read-inbox")
+    write_skill("errands", root=tmp_path / "other-library")
+    manifest_path = write_resident(grants("errands"))
+    assert not m.validate_manifest(manifest_path).ok
+    assert m.validate_manifest(manifest_path, tmp_path / "other-library").ok
+    assert m.validate_path(manifest_path.parent, tmp_path / "other-library").ok
+    assert m.validate_paths([tmp_path / "residents"], tmp_path / "other-library").ok
+
+
+def test_load_manifest_raises_for_a_grant_the_library_does_not_have(
+    write_resident: ResidentWriter, write_skill
+) -> None:
+    write_skill("read-inbox")
+    with pytest.raises(m.ManifestError, match="skills"):
+        m.load_manifest(write_resident(grants("errands")))
+
+
+def test_closest_match_finds_the_near_miss_and_nothing_else() -> None:
+    assert m.closest_match("read-inbx", ["read-inbox", "errands"]) == "read-inbox"
+    assert m.closest_match("zzzzzzzz", ["read-inbox"]) is None
+
+
+def test_split_frontmatter_is_the_one_definition_of_a_frontmatter_block() -> None:
+    frontmatter, body = m.split_frontmatter("---\nname: hob\n---\n\nbody text\n")
+    assert frontmatter == "name: hob"
+    assert body.strip() == "body text"
+    assert m.split_frontmatter("no frontmatter here") == (None, "no frontmatter here")

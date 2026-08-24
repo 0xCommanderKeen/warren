@@ -26,6 +26,13 @@ is not the same fact as "it is 07:00".
 ``routine_finished`` / ``routine_failed`` after — including when steward killed the
 session at its timeout. A hung session must never look like work.
 
+**Every session is provisioned with the skills its manifest grants.** At fire time the
+resident's effective set — the library's defaults plus its own grants
+(:mod:`steward.skills`) — is injected into the prompt, and for a runner that loads
+skills off disk it is also written into the session's working directory. A granted
+skill the library does not have fails the run before it starts; steward will not launch
+a session that believes it has a capability nobody gave it.
+
 **Every session opens with its journal, and one closes the day.** The latest surviving
 entry goes into the preamble (:mod:`steward.journal`), and the single routine a manifest
 flags ``journal: close_of_day`` gets the instruction to write the next one. After an
@@ -54,7 +61,25 @@ from steward import journal
 from steward.manifest import ManifestError, Resident, Routine, validate_path
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_routine_prompt
-from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner, check_runner
+from steward.runners import (
+    Outcome,
+    Runner,
+    RunRequest,
+    RunResult,
+    build_runner,
+    check_runner,
+    skills_home,
+)
+from steward.skills import (
+    Materialization,
+    Skill,
+    SkillError,
+    SkillLibrary,
+    describe_missing,
+    effective_skills,
+    materialize,
+    missing_skills,
+)
 
 __all__ = [
     "DEFAULT_CATCHUP_S",
@@ -289,13 +314,17 @@ def default_state_path(env: dict[str, str] | None = None) -> Path:
 # --------------------------------------------------------------------------------------
 
 
-def load_scheduled(residents_dir: Path | str) -> list[ScheduledRoutine]:
+def load_scheduled(
+    residents_dir: Path | str, skills_dir: Path | str | None = None
+) -> list[ScheduledRoutine]:
     """Collect every enabled routine of every valid resident under a residents tree.
 
     Invalid manifests never reach the scheduler: :func:`validate_path` returns only
-    residents that passed, and the diagnostics are the caller's to report.
+    residents that passed, and the diagnostics are the caller's to report. A granted
+    skill that names nothing in the library is one of those diagnostics, so nothing
+    that could not be provisioned is scheduled in the first place.
     """
-    result = validate_path(residents_dir)
+    result = validate_path(residents_dir, skills_dir)
     if not result.ok:
         raise SchedulerError(
             "cannot schedule from an invalid residents tree:\n"
@@ -323,10 +352,14 @@ class Scheduler:
         dry_run: bool = False,
         max_workers: int = 4,
         runner_factory: RunnerFactory = build_runner,
+        library: SkillLibrary | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
         self.dry_run = dry_run
+        # One library for the fleet: improving a skill improves every resident holding
+        # it. An unconfigured library means no skill is injected and none is written.
+        self.library = library if library is not None else SkillLibrary()
         self.emitter: ev.Emitter = emitter or (
             ev.NullEmitter() if dry_run else ev.EventEmitter.from_env()
         )
@@ -360,9 +393,11 @@ class Scheduler:
             if item.resident.id in seen:
                 continue
             seen.add(item.resident.id)
+            missing = missing_skills(item.resident.manifest, self.library)
             complaints = (
                 check_runner(item.resident.manifest.runner),
                 journal.journal_complaint(item.resident.manifest),
+                describe_missing(item.resident.id, missing, self.library) if missing else None,
             )
             problems.extend(f"{item.resident.path}: {c}" for c in complaints if c)
         return problems
@@ -438,8 +473,43 @@ class Scheduler:
             item.routine.prompt,
             soul_text=item.resident.soul.body,
             journal_entry=self.journal_for(item),
+            skills=self.skills_for(item),
             closing=self.closing_for(item, now or datetime.now(UTC)),
         )
+
+    def skills_for(self, item: ScheduledRoutine) -> tuple[Skill, ...]:
+        """Resolve this resident's effective skill set: defaults plus its own grants.
+
+        Resolved at fire time from the library on disk, so improving a skill improves
+        the next session of every resident that holds it, and a skill removed from a
+        manifest is simply absent from the next run.
+        """
+        return effective_skills(item.resident.manifest, self.library)
+
+    def provision(self, item: ScheduledRoutine, workdir: Path) -> Materialization | None:
+        """Put this resident's skills where the session can reach them. Or refuse.
+
+        Two things happen here, and which ones apply is the runner's business:
+
+        - **Every** runner kind gets the skills in its prompt, assembled above. That is
+          the copy steward can honestly say the session was told.
+        - A runner that loads skills off disk (``claude``) also gets them written into
+          ``<workdir>/<skills_dir>``, write-if-changed, with anything no longer granted
+          removed. Steward owns that directory.
+
+        A granted skill the library does not have is a refusal, not a shrug: the run
+        fails before it starts rather than launching a session that believes it has a
+        capability nobody gave it.
+        """
+        missing = missing_skills(item.resident.manifest, self.library)
+        if missing:
+            raise SkillError(describe_missing(item.resident.id, missing, self.library))
+        subdir = skills_home(item.resident.manifest.runner)
+        if subdir is None or not self.library.configured:
+            return None
+        result = materialize(self.skills_for(item), workdir, subdir)
+        log.debug("%s: skills %s", item.key, result.summary())
+        return result
 
     def journal_for(self, item: ScheduledRoutine) -> str | None:
         """Return the resident's latest surviving journal entry, or ``None``.
@@ -527,6 +597,7 @@ class Scheduler:
 
         started = time.monotonic()
         try:
+            self.provision(item, workdir)
             runner: Runner = self._runner_factory(item.resident.manifest.runner)
             result = runner.run(
                 RunRequest(
@@ -536,6 +607,15 @@ class Scheduler:
                     model=item.resident.manifest.runner.model,
                     env=self._session_env(item, run_id),
                 )
+            )
+        except SkillError as exc:
+            # A session that cannot be given what its manifest grants does not run. The
+            # bracket still closes: routine_started, then routine_failed saying why.
+
+            # steward refused to start is noise in the log.
+            log.error("%s: %s", item.key, exc)  # noqa: TRY400
+            result = RunResult(
+                outcome=Outcome.FAILED, duration_s=time.monotonic() - started, error=str(exc)
             )
         except Exception as exc:  # noqa: BLE001 — a broken runner is a failed routine, not a crash
             duration = time.monotonic() - started

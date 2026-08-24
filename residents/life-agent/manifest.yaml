@@ -41,15 +41,14 @@ charter:
       Raise needs_human with the decision stated in one sentence and the options laid out,
       then stop and rest. A blocked agent that waits is honest; one that guesses is not.
 
+# What Hob holds on top of the default set. daily-summary, write-journal, research and
+# escalate are defaults — every resident has them, so granting them here would say
+# nothing. These four names must exist in skills/, or validation fails.
 skills:
-  - id: daily-summary
-    note: The morning picture of yesterday and today.
   - id: read-inbox
     note: Reads and triages mail; never sends.
   - id: read-calendar
     note: Conflicts, prep, and travel time.
-  - id: write-journal
-    note: End-of-run entry read back at the start of the next session.
   - id: errands
     note: Household chores run as headless sessions.
 

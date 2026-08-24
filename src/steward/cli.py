@@ -34,7 +34,7 @@ from steward.manifest import (
     manifest_json_schema,
     validate_paths,
 )
-from steward.runners import check_runner
+from steward.runners import check_runner, skills_home
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -45,6 +45,7 @@ from steward.scheduler import (
     default_state_path,
     load_scheduled,
 )
+from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
 EXIT_OK = 0
@@ -110,13 +111,22 @@ def main() -> None:
     default="text",
     help="How to report diagnostics.",
 )
-def validate(paths: tuple[Path, ...], output_format: str) -> None:
+@click.option(
+    "--skills",
+    "skills_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The skills library granted names are checked against. Defaults to skills/ "
+    "beside the residents tree.",
+)
+def validate(paths: tuple[Path, ...], output_format: str, skills_dir: Path | None) -> None:
     """Validate resident manifests. Defaults to the residents/ tree.
 
-    Exits non-zero if any manifest fails, so CI can gate on it.
+    Exits non-zero if any manifest fails, so CI can gate on it. A granted skill that
+    names nothing in the library is one of the failures.
     """
     targets = list(paths) or [DEFAULT_RESIDENTS_DIR]
-    result = validate_paths(targets)
+    result = validate_paths(targets, skills_dir)
     if output_format == "json":
         _report_json(result)
     else:
@@ -128,6 +138,91 @@ def validate(paths: tuple[Path, ...], output_format: str) -> None:
 def schema() -> None:
     """Print the resident manifest JSON Schema (burrow reads manifests from this)."""
     click.echo(json.dumps(manifest_json_schema(), indent=2))
+
+
+# --------------------------------------------------------------------------------------
+# skills
+# --------------------------------------------------------------------------------------
+
+
+@main.command("skills")
+@click.option(
+    "--residents",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_RESIDENTS_DIR,
+    show_default=True,
+    help="Residents tree whose effective sets are listed.",
+)
+@click.option(
+    "--skills",
+    "skills_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The skills library. Defaults to the skills/ directory beside the residents tree.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def skills_command(residents: Path, skills_dir: Path | None, output_format: str) -> None:
+    """List the skills library and each resident's effective set.
+
+    The effective set is the library's defaults plus the resident's own grants — what a
+    session for that resident will actually be told, without opening a manifest.
+    """
+    library = library_for(residents, skills_dir)
+    result = validate_paths([residents], skills_dir)
+    sets = {
+        resident.id: effective_skills(resident.manifest, library) for resident in result.residents
+    }
+
+    if output_format == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "library": str(library.path) if library.path else None,
+                    "skills": [skill.as_dict() for skill in library],
+                    "residents": {
+                        resident_id: [skill.name for skill in skills]
+                        for resident_id, skills in sorted(sets.items())
+                    },
+                    "diagnostics": [_diagnostic_as_dict(d) for d in library.diagnostics],
+                },
+                indent=2,
+            )
+        )
+        sys.exit(EXIT_OK if not library.errors else EXIT_INVALID)
+
+    _render_library(library)
+    for resident in result.residents:
+        _render_effective_set(resident, sets[resident.id], library)
+    for diagnostic in library.diagnostics:
+        click.secho(diagnostic.render(), fg="red", err=True)
+    sys.exit(EXIT_OK if not library.errors else EXIT_INVALID)
+
+
+def _render_library(library: SkillLibrary) -> None:
+    if not library.configured:
+        click.secho("no skills library found; residents hold no skills", fg="yellow")
+        return
+    click.secho(f"library {library.path}", fg="cyan", bold=True)
+    if not len(library):
+        click.echo("  (empty)")
+    for skill in library:
+        marker = "default" if skill.default else "granted"
+        click.echo(f"  {skill.name}  [{marker}]  {skill.description}")
+    click.echo("")
+
+
+def _render_effective_set(
+    resident: Resident, skills: Sequence[Skill], library: SkillLibrary
+) -> None:
+    names = ", ".join(skill.name for skill in skills) or "none"
+    click.secho(f"{resident.id}: {names}", fg="green")
+    disk = skills_home(resident.manifest.runner)
+    where = (
+        f"prompt + {disk}/ in the session's working directory"
+        if disk and library.configured
+        else "prompt only"
+    )
+    click.secho(f"  runner {resident.manifest.runner.kind} — {where}", fg="bright_black")
 
 
 # --------------------------------------------------------------------------------------
@@ -165,7 +260,11 @@ def doctor(residents: Path) -> None:
 
     scheduled = _load_or_exit(residents)
     if scheduled:
-        engine = Scheduler(scheduled, state=SchedulerState(path=default_state_path()))
+        engine = Scheduler(
+            scheduled,
+            state=SchedulerState(path=default_state_path()),
+            library=library_for(residents),
+        )
         for item, moment in engine.upcoming(datetime.now(UTC)):
             local = moment.strftime("%Y-%m-%d %H:%M")
             click.echo(
@@ -334,6 +433,7 @@ def _build_scheduler(
         workdir=workdir,
         catchup_s=catchup_seconds,
         dry_run=dry_run,
+        library=library_for(residents),
     )
 
 

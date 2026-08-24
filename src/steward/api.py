@@ -52,6 +52,7 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
 )
+from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import Store, default_db_path, new_id
 
 __all__ = [
@@ -102,9 +103,11 @@ class ApiConfig:
     allow_open: bool = False
     cors_origins: tuple[str, ...] = ()
     workdir: Path | None = None
+    #: The skills library. ``None`` finds the one beside the residents tree.
+    skills_dir: Path | None = None
 
     @classmethod
-    def from_env(
+    def from_env(  # noqa: PLR0913 — one keyword per thing the environment can name
         cls,
         env: Mapping[str, str] | None = None,
         *,
@@ -112,6 +115,7 @@ class ApiConfig:
         db_path: Path | str | None = None,
         allow_open: bool = False,
         workdir: Path | str | None = None,
+        skills_dir: Path | str | None = None,
     ) -> ApiConfig:
         """Read the token, the CORS origins, and the residents tree from the environment."""
         source = os.environ if env is None else env
@@ -123,6 +127,7 @@ class ApiConfig:
             allow_open=allow_open,
             cors_origins=parse_origins(source.get(CORS_ENV)),
             workdir=Path(workdir) if workdir is not None else None,
+            skills_dir=Path(skills_dir) if skills_dir is not None else None,
         )
 
 
@@ -261,14 +266,19 @@ def _fire_outcome(report: FireReport) -> tuple[str, dict[str, Any]]:
 # --------------------------------------------------------------------------------------
 
 
-def resident_view(resident: Resident) -> dict[str, Any]:
+def resident_view(resident: Resident, library: SkillLibrary | None = None) -> dict[str, Any]:
     """Return the JSON view of one validated manifest.
 
     Safe to serve wholesale: a manifest that contained a credential-shaped key or an
     inline secret would have failed validation and never become a ``Resident`` at all,
     so there is nothing here to redact.
+
+    ``effective_skills`` is what a session for this resident is actually given — the
+    library's defaults plus this manifest's grants — so the panel can show the set
+    without re-deriving it from two places.
     """
     manifest = resident.manifest
+    resolved = effective_skills(manifest, library) if library is not None else ()
     return {
         "id": manifest.id,
         "agent_id": manifest.agent_id,
@@ -278,6 +288,8 @@ def resident_view(resident: Resident) -> dict[str, Any]:
         "soul": manifest.soul.model_dump(mode="json"),
         "charter": manifest.charter.model_dump(mode="json"),
         "skills": [skill.model_dump(mode="json") for skill in manifest.skills],
+        # What the session is actually given: the library's defaults plus those grants.
+        "effective_skills": [skill.name for skill in resolved],
         "memory": manifest.memory.model_dump(mode="json"),
         "routes": [route.model_dump(mode="json") for route in manifest.routes],
         "app_grants": [grant.model_dump(mode="json") for grant in manifest.app_grants],
@@ -360,6 +372,9 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     settings = config if config is not None else ApiConfig.from_env()
     token = resolve_token(settings.token, allow_open=settings.allow_open)
     residents_dir = Path(settings.residents_dir)
+    # Read once at startup, like the residents tree's souls: a skill edited on disk
+    # lands on the next restart, and the library is one object the whole app shares.
+    library = library_for(residents_dir, settings.skills_dir)
 
     db = store if store is not None else Store(settings.db_path or default_db_path())
     sink: ev.Emitter = emitter if emitter is not None else ev.EventEmitter.from_env()
@@ -370,6 +385,7 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
             state=SchedulerState(path=default_state_path()),
             workdir=settings.workdir,
             runner_factory=runner_factory,
+            library=library,
         ),
         store=db,
     )
@@ -397,6 +413,7 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     app.state.runs = runs
     app.state.emitter = sink
     app.state.residents_dir = residents_dir
+    app.state.library = library
     app.state.open_mode = token is None
 
     def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
@@ -416,22 +433,22 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     @app.get("/residents")
     def list_residents() -> dict[str, Any]:
         """List the validated residents, and name the manifests that did not validate."""
-        result = validate_path(residents_dir)
+        result = validate_path(residents_dir, settings.skills_dir)
         return {
-            "residents": [resident_view(resident) for resident in result.residents],
+            "residents": [resident_view(resident, library) for resident in result.residents],
             "errors": [diagnostic.render() for diagnostic in result.errors],
         }
 
     @app.get("/residents/{resident_id}")
     def get_resident(resident_id: str) -> dict[str, Any]:
         """Return one validated manifest, runner included, so "which brain" is answerable."""
-        result = validate_path(residents_dir)
-        return resident_view(_find_resident(result, resident_id, residents_dir))
+        result = validate_path(residents_dir, settings.skills_dir)
+        return resident_view(_find_resident(result, resident_id, residents_dir), library)
 
     @app.get("/residents/{resident_id}/journal")
     def get_resident_journal(resident_id: str, limit: int = 14) -> dict[str, Any]:
         """Return the resident's journal, newest first; an empty journal is an empty list."""
-        result = validate_path(residents_dir)
+        result = validate_path(residents_dir, settings.skills_dir)
         resident = _find_resident(result, resident_id, residents_dir)
         complaint = journal_complaint(resident.manifest)
         if complaint is not None:
@@ -458,12 +475,32 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
             **created.to_dict(),
         }
 
+    # -- skills ----------------------------------------------------------------------
+
+    @app.get("/skills")
+    def list_skills() -> dict[str, Any]:
+        """List the skills library, and who holds each skill.
+
+        Read-only, like the rest of the views: a skill is added by committing a
+        ``SKILL.md`` and granted by committing a manifest, never over HTTP.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        holders: dict[str, list[str]] = {skill.name: [] for skill in library}
+        for resident in result.residents:
+            for skill in effective_skills(resident.manifest, library):
+                holders[skill.name].append(resident.id)
+        return {
+            "library": str(library.path) if library.path is not None else None,
+            "skills": [{**skill.as_dict(), "holders": holders[skill.name]} for skill in library],
+            "errors": [diagnostic.render() for diagnostic in library.diagnostics],
+        }
+
     # -- run now ---------------------------------------------------------------------
 
     @app.post("/residents/{resident_id}/routines/{routine_id}/run", status_code=202)
     def run_routine(resident_id: str, routine_id: str, request: Request) -> dict[str, Any]:
         """Ask for one run of one routine, right now, and acknowledge only that."""
-        result = validate_path(residents_dir)
+        result = validate_path(residents_dir, settings.skills_dir)
         resident = _find_resident(result, resident_id, residents_dir)
         routine = next((r for r in resident.manifest.routines if r.id == routine_id), None)
         if routine is None:
