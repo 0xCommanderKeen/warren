@@ -7,7 +7,12 @@ protocol events over HTTP (POST /events, one JSON event per request).
 Env:
     BURROW_HOST    bind address (default 127.0.0.1; 0.0.0.0 in the container)
     BURROW_EVENTS  event log path (default ~/.burrow/events.jsonl)
+    BURROW_TOKEN   shared secret for ingest. When set, POST /events must carry it
+                   as `Authorization: Bearer <token>` or `X-Burrow-Token: <token>`
+                   or it is rejected with 401. When unset, ingest is open (local
+                   dev / today's behavior). GET endpoints are never gated.
 """
+import hmac
 import http.server
 import json
 import os
@@ -20,6 +25,9 @@ EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events
 
 MAX_EVENT_BYTES = 64 * 1024
 VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.expanduser("~/.burrow/villagers")
+# Empty/whitespace-only is treated as unset, so an unpopulated compose var or a
+# `BURROW_TOKEN=` line can't silently lock the fleet out of its own village.
+TOKEN = (os.environ.get("BURROW_TOKEN") or "").strip()
 
 
 CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
@@ -78,9 +86,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ctype = CTYPES.get(os.path.splitext(full)[1], "application/octet-stream")
         self._send_file(full, ctype)
 
+    def _authorized(self):
+        """True when ingest is open (no BURROW_TOKEN) or the request carries the
+        matching secret. Compared in constant time; the two header spellings exist
+        so plain `curl -H` and bearer-aware clients both work."""
+        if not TOKEN:
+            return True
+        presented = self.headers.get("X-Burrow-Token") or ""
+        auth = self.headers.get("Authorization") or ""
+        scheme, _, value = auth.partition(" ")
+        if scheme.lower() == "bearer":
+            presented = value.strip() or presented
+        return hmac.compare_digest(presented, TOKEN)
+
     def do_POST(self):
         if self.path.split("?")[0] != "/events":
             self._send(404, b"not found", "text/plain")
+            return
+        if not self._authorized():
+            # Drain the (capped) body first: we close the connection after
+            # responding, and a client still writing would see a reset instead
+            # of the 401 that tells it to fall back to its local log.
+            try:
+                pending = min(int(self.headers.get("Content-Length") or 0), MAX_EVENT_BYTES)
+                if pending > 0:
+                    self.rfile.read(pending)
+            except (ValueError, OSError):
+                pass
+            self._send(401, b"unauthorized", "text/plain")
             return
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_EVENT_BYTES:

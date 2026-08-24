@@ -5,6 +5,9 @@ burrow protocol event. See docs/protocol.md.
 Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; on any
 failure fall back to appending to ~/.burrow/events.jsonl locally. A failed POST
 trips a 60s circuit breaker so an unreachable server never slows hooks down.
+If BURROW_TOKEN is set it is sent as `Authorization: Bearer <token>`; a server
+that rejects it (401) is just another failed POST — the event still lands in the
+local log, so a wrong or missing token loses no events, only remoteness.
 
 Resident agents (services that outlive any one Claude session, like a Telegram
 bot running claude -p per message) set BURROW_AGENT_ID (stable villager
@@ -66,11 +69,15 @@ def post_event(url, event):
             return False
     except OSError:
         pass
+    headers = {"Content-Type": "application/json"}
+    token = (os.environ.get("BURROW_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = "Bearer " + token
     try:
         req = urllib.request.Request(
             url.rstrip("/") + "/events",
             data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=2):
