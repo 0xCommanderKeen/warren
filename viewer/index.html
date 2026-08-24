@@ -106,6 +106,7 @@
   #preview .note { display: block; font-size: 13px; color: var(--ink-dim); }
 </style>
 <script src="/vendor/phaser.min.js"></script>
+<script src="/presence.js"></script>
 </head>
 <body>
 <div id="game"></div>
@@ -435,6 +436,14 @@ class Village extends Phaser.Scene {
     const sky = skyAt(clockHour());
     this.sky.setFillStyle(sky.color, 1);
     const dark = sky.dark;
+    for (const lamp of this.lamps) { lamp.working = false; lamp.home = false; }
+    for (const viz of this.viz.values()) {
+      if (viz.plot < 0) continue;
+      const light = BurrowPresence.houseLight(viz);
+      const lamp = this.lamps[viz.plot];
+      lamp.home = light.home;
+      lamp.working = light.working;
+    }
     for (const lamp of this.lamps) {
       // a working agent lights its doorway all day and burns brighter after dark;
       // a villager that is merely home gets a soft doorway light once it is dark
@@ -645,7 +654,8 @@ class Village extends Phaser.Scene {
     spr.setData("agent", v.id);
     const chip = this.makeChip(v.id, v.accent, cont.x, cont.y - 11, v.name, v.project);
     const viz = { id: v.id, cont, spr, bang, zzz, chip, plot, char: v.char,
-                  state: "", lastTs: 0, target: null, walk: null };
+                  state: v.state, lastTs: 0, target: null, walk: null,
+                  home: v.state === "working" || v.state === "resting" };
     this.viz.set(v.id, viz);
     return viz;
   }
@@ -663,8 +673,9 @@ class Village extends Phaser.Scene {
     this.plotOf.delete(id);
   }
 
-  walkTo(viz, tx, ty) {
+  walkTo(viz, tx, ty, arrivesHome) {
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+    BurrowPresence.startJourney(viz, arrivesHome);
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
     const legs = [];
     const dx = tx - c.x, dy = ty - c.y;
@@ -680,6 +691,7 @@ class Village extends Phaser.Scene {
       viz.spr.stop();
       viz.spr.setTexture(char + "-idle", D_DOWN);
       viz.walk = null;
+      BurrowPresence.finishJourney(viz, arrivesHome);
     };
     if (!legs.length) { settle(); return; }
     viz.walk = this.tweens.chain({ targets: c, tweens: legs, onComplete: settle });
@@ -693,7 +705,6 @@ class Village extends Phaser.Scene {
     const seen = new Set();
     let knockSlot = 0;
     const dark = this.skyState ? this.skyState.dark : 0;
-    for (const lamp of this.lamps) { lamp.working = false; lamp.home = false; }
     for (const v of list) {
       seen.add(v.id);
       let viz = this.viz.get(v.id);
@@ -728,7 +739,8 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot.x, spot.y);
+        this.walkTo(viz, spot.x, spot.y,
+          v.state === "working" || v.state === "resting");
       }
       viz.state = v.state;
 
@@ -736,13 +748,6 @@ class Village extends Phaser.Scene {
       viz.cont.setAlpha(stale ? .45 + .15 * dark : 1);
       viz.bang.setVisible(v.state === "knocking");
       viz.zzz.setVisible(v.state === "resting");
-      if (viz.plot >= 0) {
-        const lamp = this.lamps[viz.plot];
-        lamp.working = v.state === "working";
-        // lit windows mean someone is genuinely home: not away at your door,
-        // and not stale (no signal — we don't know where they are)
-        lamp.home = v.state === "working" || v.state === "resting";
-      }
     }
     for (const id of [...this.viz.keys()])
       if (!seen.has(id)) this.despawn(id);
