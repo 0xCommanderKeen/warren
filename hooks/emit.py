@@ -14,6 +14,7 @@ process is gone but the agent-as-service is still home, resting.
 
 Must never break the hosting agent: swallow everything, always exit 0."""
 import datetime
+import fcntl
 import json
 import os
 import sys
@@ -24,6 +25,9 @@ LOG_DIR = os.path.expanduser("~/.burrow")
 LOG = os.path.join(LOG_DIR, "events.jsonl")
 BREAKER = os.path.join(LOG_DIR, ".post-failed")
 BREAKER_SECONDS = 60
+
+
+ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 
 def tool_detail(tool_input):
@@ -47,10 +51,13 @@ def to_event(hook):
             payload["detail"] = detail
         return "tool_called", payload
     if name == "PostToolUse":
+        # A tool finished. Write-like tools produced something; every other tool
+        # only proves the agent is still alive and working -> heartbeat.
+        tool = hook.get("tool_name") or "?"
         artifact = (hook.get("tool_input") or {}).get("file_path")
-        if not artifact:
-            return None, None
-        return "artifact_produced", {"artifact": str(artifact)[:200]}
+        if artifact and tool in ARTIFACT_TOOLS:
+            return "artifact_produced", {"artifact": str(artifact)[:200]}
+        return "heartbeat", {"tool": tool}
     if name == "Notification":
         return "needs_human", {"message": str(hook.get("message") or "")[:200]}
     if name == "Stop":
@@ -116,6 +123,10 @@ def main():
         return
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
+        # Coordinate with server-side in-place rotation. Locking the log itself
+        # also works for descriptors opened before rotation because its inode
+        # is deliberately retained.
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
