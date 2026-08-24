@@ -26,8 +26,8 @@ They share **contracts, not code**:
 
 1. **The event protocol** — burrow's `docs/protocol.md`. Steward adds event types
    (`routine_started`, `routine_finished`, `routine_failed`, `task_posted`,
-   `task_claimed`, `task_done`, `task_delegated`, structured `needs_human`
-   payloads) and burrow only ever renders them.
+   `task_claimed`, `task_done`, `task_failed`, `task_delegated`, structured `needs_human`
+   payloads, `needs_human_resolved`) and burrow only ever renders them.
 2. **The resident manifest** — the versioned declaration of a resident's soul,
    charter, skills, memory, routes, and app grants. Steward deploys from it;
    burrow reads it for display. References and grants only — never credentials.
@@ -42,7 +42,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Four pieces exist.
+Seven pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -95,11 +95,39 @@ holds it.
 $ steward skills                     # the library, and each resident's effective set
 ```
 
-Still roadmap, in this repo's issues: the job board's claiming and leases (#6),
-structured approvals raised from a session (#10), delegation (#7), the watchdog and
-budgets (#8), deployment (#4), and the management UI (#13). Burrow-side rendering
-counterparts — the journal panel in a villager's house among them — live in burrow's
-issues.
+**The job board** (#6). One place work can be dropped for the fleet, instead of prompting
+a particular resident. Dispatch is pull-based: a resident that declared `board: {claim:
+true}` in its manifest claims the oldest open task whose required skills it holds — its
+*effective* set, so a task tagged `research` is claimable by a resident that was granted
+nothing — on its own next wake-up, and works it as an ordinary headless session with the
+same skills, journal, and charter a routine session gets. Claiming is a single
+conditional `UPDATE … WHERE status = 'open'`, so two residents waking at once can never
+both hold one task. A claim is a lease, not a deed — thirty minutes by default; when it
+expires the task returns to the board as a `task_failed` with reason `lease_expired`,
+because work that quietly vanished would be the board lying about it.
+
+```console
+$ steward board list                 # the board, and who could take what is open
+$ steward board dispatch             # sweep expired leases, then claim and work
+```
+
+**Structured approvals** (#10). A session that reaches an action its charter gates does
+not do it — it asks, in a `<needs-human>` block in its output or through `steward approval
+raise`, and finishes its turn. Steward turns the ask into a durable request a human
+answers from burrow's panel or a notification, and the decision is delivered at the top
+of the resident's next session. Two safety properties are the point: **deny by default**
+(past `expires_at`, steward resolves the request as `deny` with `decided_by: "expiry"`,
+and the gated action never ran) and **first decision wins** (a replay changes nothing and
+emits nothing). The grammar and both paths are in [docs/approvals.md](docs/approvals.md).
+
+```console
+$ steward approval raise life-agent --action send_email --detail-json '{"to": "…"}'
+$ steward approval show <request_id>  # request, decision, decider, timestamps
+```
+
+Still roadmap, in this repo's issues: delegation (#7), the watchdog and budgets (#8),
+deployment (#4), and the management UI (#13). Burrow-side rendering counterparts — the
+journal panel in a villager's house, the notice board — live in burrow's issues.
 
 ## Residents
 
@@ -113,11 +141,11 @@ skills/
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the five capability dimensions burrow renders — skills,
-memory, routes, app grants — plus the runner steward launches sessions through and the
-routines it fires. Its `skills` are grants by name against the shared library — what this
-resident holds on top of the default set every resident gets. References and grants only:
-a credential-shaped key or an inline secret, in a manifest or in a `SKILL.md`, fails
-validation and is never stored.
+memory, routes, app grants — plus the runner steward launches sessions through, the
+routines it fires, and whether the resident takes work off the job board. Its `skills`
+are grants by name against the shared library — what this resident holds on top of the
+default set every resident gets. References and grants only: a credential-shaped key or
+an inline secret, in a manifest or in a `SKILL.md`, fails validation and is never stored.
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
 `steward schema` emits it as JSON Schema so burrow can read manifests without
@@ -150,4 +178,6 @@ A routine only ever fires while `steward scheduler run` is up. Missed schedules 
 back-filled, an overlapping fire is skipped rather than queued, and a run killed at its
 timeout is emitted as `routine_failed` — the village must never show work that is not
 happening. The same rule governs memory: a day with no journal entry has no journal
-entry, and the next session is told nothing rather than something plausible.
+entry, and the next session is told nothing rather than something plausible. And the same
+rule governs the board and the door: a task nobody finished goes back to `open` loudly,
+and a request nobody answered is a `deny`, never a quiet yes.

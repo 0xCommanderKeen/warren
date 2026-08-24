@@ -372,6 +372,31 @@ def test_a_job_needs_a_title(api: ApiFactory) -> None:
     assert harness.store.jobs() == []
 
 
+def test_the_board_can_be_narrowed_to_one_status(api: ApiFactory) -> None:
+    harness = api()
+    claimed_id = harness.client.post("/jobs", json={"title": "Claimed"}).json()["task_id"]
+    harness.client.post("/jobs", json={"title": "Still open"})
+    harness.store.claim_next_job(
+        claimant="claude-code:test-agent", skills=[], lease_expires_at="2026-08-24T13:00:00.000Z"
+    )
+
+    claimed = harness.client.get("/jobs", params={"status": "claimed"}).json()["jobs"]
+    assert [job["task_id"] for job in claimed] == [claimed_id]
+    assert claimed[0]["claimant"] == "claude-code:test-agent"
+    assert claimed[0]["lease_expires_at"] == "2026-08-24T13:00:00.000Z"
+    assert [
+        job["title"]
+        for job in harness.client.get("/jobs", params={"status": "open"}).json()["jobs"]
+    ] == ["Still open"]
+
+
+def test_an_unknown_board_status_is_refused_rather_than_ignored(api: ApiFactory) -> None:
+    harness = api()
+    response = harness.client.get("/jobs", params={"status": "nearly-done"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "unknown_status"
+
+
 # --------------------------------------------------------------------------------------
 # approvals
 # --------------------------------------------------------------------------------------
@@ -464,6 +489,46 @@ def test_an_unknown_decision_is_refused(api: ApiFactory) -> None:
         == 422
     )
     assert harness.store.pending_approvals()[0].request_id == request_id
+
+
+def test_the_approval_list_defaults_to_pending_and_filters_on_request(api: ApiFactory) -> None:
+    harness = api()
+    decided = _pending(harness)
+    waiting = _pending(harness)
+    harness.client.post(f"/approvals/{decided}", json={"decision": "approve"})
+
+    default = harness.client.get("/approvals").json()
+    assert default["status"] == "pending"
+    assert [r["request_id"] for r in default["approvals"]] == [waiting]
+
+    resolved = harness.client.get("/approvals", params={"status": "resolved"}).json()
+    assert [r["request_id"] for r in resolved["approvals"]] == [decided]
+
+    every = harness.client.get("/approvals", params={"status": "all"}).json()
+    assert {r["request_id"] for r in every["approvals"]} == {decided, waiting}
+
+
+def test_an_unknown_approval_status_is_refused(api: ApiFactory) -> None:
+    harness = api()
+    response = harness.client.get("/approvals", params={"status": "ignored"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "unknown_status"
+
+
+def test_one_request_can_be_audited_by_id(api: ApiFactory) -> None:
+    """What did I approve, and when: request, decision, decider, timestamps, one call."""
+    harness = api()
+    request_id = _pending(harness)
+    harness.client.post(f"/approvals/{request_id}", json={"decision": "deny"})
+
+    audited = harness.client.get(f"/approvals/{request_id}").json()
+    assert audited["action"] == "send_email"
+    assert audited["detail"] == {"to": "plumber@example.com"}
+    assert audited["decision"] == "deny"
+    assert audited["decided_by"] == "api"
+    assert audited["created_at"]
+    assert audited["decided_at"]
+    assert harness.client.get("/approvals/never-existed").status_code == 404
 
 
 # --------------------------------------------------------------------------------------

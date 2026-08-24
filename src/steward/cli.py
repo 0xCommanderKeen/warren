@@ -7,9 +7,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import click
 
+from steward import events as ev
 from steward.api import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -19,6 +21,16 @@ from steward.api import (
     origins_summary,
     run_server,
 )
+from steward.approvals import (
+    ACTION_PATTERN,
+    DEFAULT_EXPIRES_IN_S,
+    ApprovalError,
+    NeedsHuman,
+    parse_duration,
+    parse_options,
+    raise_request,
+)
+from steward.board import BoardReport, Dispatcher, claimable_skills
 from steward.journal import (
     JournalEntry,
     journal_complaint,
@@ -46,6 +58,7 @@ from steward.scheduler import (
     load_scheduled,
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
+from steward.store import APPROVAL_DECISIONS, Store, default_db_path
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
 EXIT_OK = 0
@@ -401,6 +414,12 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
                 help="Fallback working directory when a resident's memory dir is absent.",
             ),
             click.option(
+                "--db",
+                type=click.Path(path_type=Path),
+                default=None,
+                help="Jobs and approvals. Defaults to steward.db beside $STEWARD_STATE.",
+            ),
+            click.option(
                 "--catchup-seconds",
                 type=float,
                 default=DEFAULT_CATCHUP_S,
@@ -418,15 +437,20 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
     return function
 
 
-def _build_scheduler(
+def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     residents: Path,
     state: Path | None,
     workdir: Path | None,
+    db: Path | None,
     catchup_seconds: float,
     *,
     dry_run: bool,
 ) -> Scheduler:
     scheduled = _load_or_exit(residents)
+    # A rehearsal touches no database: it must not claim a task, deliver a decision, or
+    # deny one by expiry. With no hooks the scheduler simply fires routines, as it did
+    # before the board and approvals existed.
+    hooks = None if dry_run else Dispatcher.from_path(residents, _open_store(db), workdir=workdir)
     return Scheduler(
         scheduled,
         state=SchedulerState.load(state if state is not None else default_state_path()),
@@ -434,7 +458,13 @@ def _build_scheduler(
         catchup_s=catchup_seconds,
         dry_run=dry_run,
         library=library_for(residents),
+        hooks=hooks,
     )
+
+
+def _open_store(db: Path | None) -> Store:
+    """Open the jobs-and-approvals database, defaulting beside the scheduler's state."""
+    return Store(db if db is not None else default_db_path())
 
 
 def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
@@ -457,16 +487,17 @@ def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
 
 @scheduler.command("tick")
 @_scheduler_options
-def scheduler_tick(
+def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
     residents: Path,
     state: Path | None,
     workdir: Path | None,
+    db: Path | None,
     catchup_seconds: float,
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
 ) -> None:
-    """Fire everything due right now, then exit. Good under an external cron."""
+    """Fire everything due right now, sweep the board, then exit. Good under cron."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    engine = _build_scheduler(residents, state, workdir, catchup_seconds, dry_run=dry_run)
+    engine = _build_scheduler(residents, state, workdir, db, catchup_seconds, dry_run=dry_run)
     if dry_run:
         reports = [engine.fire(item) for item in engine.scheduled]
     else:
@@ -486,13 +517,14 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
     residents: Path,
     state: Path | None,
     workdir: Path | None,
+    db: Path | None,
     catchup_seconds: float,
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
     max_ticks: int | None,
 ) -> None:
     """Run the scheduler daemon: sleep to the next due routine, fire, repeat."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    engine = _build_scheduler(residents, state, workdir, catchup_seconds, dry_run=dry_run)
+    engine = _build_scheduler(residents, state, workdir, db, catchup_seconds, dry_run=dry_run)
     if dry_run:
         _report_fires([engine.fire(item) for item in engine.scheduled], dry_run=True)
         return
@@ -505,6 +537,246 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
         click.echo("stopped")
         return
     _report_fires(reports, dry_run=False)
+
+
+# --------------------------------------------------------------------------------------
+# the job board
+# --------------------------------------------------------------------------------------
+
+_DB_OPTION = click.option(
+    "--db",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Jobs and approvals. Defaults to steward.db beside $STEWARD_STATE.",
+)
+_RESIDENTS_OPTION = click.option(
+    "--residents",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_RESIDENTS_DIR,
+    show_default=True,
+    help="Residents tree the manifests are read from.",
+)
+
+
+@main.group()
+def board() -> None:
+    """Work the job board: see what is on it, and let residents pick it up."""
+
+
+@board.command("dispatch")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Fallback working directory when a resident's memory dir is absent.",
+)
+@click.option(
+    "--sweep-only",
+    is_flag=True,
+    help="Reopen dead leases and deny stale approvals, but claim nothing and run nothing.",
+)
+def board_dispatch(
+    residents: Path,
+    db: Path | None,
+    workdir: Path | None,
+    sweep_only: bool,  # noqa: FBT001 — click passes flags positionally
+) -> None:
+    """Sweep deadlines, then let board-enabled residents claim and work a task.
+
+    The same call the scheduler makes on every tick, available on its own so a poke from
+    a human or an external cron can pick work up without waiting for the next routine.
+
+    ``--sweep-only`` is not a dry run and does not pretend to be one: it writes, because
+    reopening a dead lease and denying a stale approval are exactly the writes that keep
+    the board honest. It just stops before claiming anything.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with _open_store(db) as store:
+        dispatcher = Dispatcher.from_path(residents, store, workdir=workdir, sweep_only=sweep_only)
+        run = dispatcher.dispatch()
+    for job in run.reopened:
+        click.secho(f"lease expired: {job.task_id} ({job.title}) is back on the board", fg="yellow")
+    for record in run.expired_approvals:
+        click.secho(f"approval expired: {record.action} denied by default", fg="yellow")
+    if not run.reports:
+        click.echo("nothing claimed")
+        return
+    for report in run.reports:
+        _report_board(report)
+
+
+def _report_board(report: BoardReport) -> None:
+    label = f"{report.resident_id} → {report.task.task_id} ({report.task.title})"
+    if report.done:
+        click.secho(f"done {label}", fg="green")
+    else:
+        click.secho(f"failed {label}: {report.reason}", fg="red", err=True)
+    for record in report.raised:
+        click.secho(f"  needs human: {record.message} [{record.request_id}]", fg="yellow")
+
+
+@board.command("list")
+@_DB_OPTION
+@_RESIDENTS_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def board_list(db: Path | None, residents: Path, output_format: str) -> None:
+    """Show the board, oldest first, and who could claim what is still open."""
+    with _open_store(db) as store:
+        jobs = store.jobs()
+    if output_format == "json":
+        click.echo(json.dumps([job.to_dict() for job in jobs], indent=2))
+        return
+    if not jobs:
+        click.echo("the board is empty")
+        return
+    library = library_for(residents)
+    holders = {
+        resident.id: claimable_skills(resident.manifest, library)
+        for resident in validate_paths([residents]).residents
+        if resident.manifest.board.claim
+    }
+    for job in jobs:
+        colour = {"open": "cyan", "claimed": "yellow", "done": "green"}.get(job.status, "red")
+        click.secho(f"{job.status:<8} {job.task_id}  {job.title}", fg=colour)
+        if job.required_skills:
+            click.echo(f"         skills: {', '.join(job.required_skills)}")
+        if job.claimant:
+            click.echo(f"         claimant: {job.claimant} (lease {job.lease_expires_at})")
+        elif job.status == "open":
+            eligible = [name for name, skills in holders.items() if job.claimable_by <= skills]
+            click.echo(f"         claimable by: {', '.join(eligible) or 'nobody on this tree'}")
+
+
+# --------------------------------------------------------------------------------------
+# approvals
+# --------------------------------------------------------------------------------------
+
+
+@main.group()
+def approval() -> None:
+    """Raise and inspect approval requests: the gated half of unattended work."""
+
+
+@approval.command("raise")
+@click.argument("resident_id")
+@click.option("--action", required=True, help="Short slug naming the gated action.")
+@click.option(
+    "--detail-json",
+    default=None,
+    help="JSON object with everything a person needs to decide.",
+)
+@click.option("--note", default=None, help="One plain sentence, instead of --detail-json.")
+@click.option("--expires-in", default=None, help="How long before it denies itself, e.g. 4h.")
+@click.option("--options", default=None, help="Comma-separated: approve, deny, edit.")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+def approval_raise(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    resident_id: str,
+    action: str,
+    detail_json: str | None,
+    note: str | None,
+    expires_in: str | None,
+    options: str | None,
+    residents: Path,
+    db: Path | None,
+) -> None:
+    """Raise an approval request for a resident, from inside its own session.
+
+    Token-free and local on purpose: a headless session with shell access can call this
+    directly rather than needing steward's API token, which is a credential no session
+    should be holding. It writes to the same database the API answers from, so the
+    request appears in `GET /approvals` and knocks in burrow exactly as an output-block
+    request does. Prints the ``request_id``; the session then finishes its turn and
+    stops. Nothing here waits for a decision.
+    """
+    result = validate_paths([residents])
+    resident = next((r for r in result.residents if r.id == resident_id), None)
+    if resident is None:
+        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
+        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
+        sys.exit(EXIT_INVALID)
+    if detail_json and note:
+        click.secho("pass --detail-json or --note, not both", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+
+    try:
+        request = _build_needs_human(action, detail_json, note, expires_in, options)
+    except ApprovalError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+
+    with _open_store(db) as store:
+        record = raise_request(
+            store, ev.EventEmitter.from_env(), manifest=resident.manifest, request=request
+        )
+    click.secho(record.message, fg="yellow")
+    click.echo(record.request_id)
+
+
+def _build_needs_human(
+    action: str,
+    detail_json: str | None,
+    note: str | None,
+    expires_in: str | None,
+    options: str | None,
+) -> NeedsHuman:
+    """Build a request from CLI flags, complaining loudly rather than guessing."""
+    if not ACTION_PATTERN.match(action.strip()):
+        raise ApprovalError(
+            f"action {action!r} is not a slug; use lowercase letters, digits, '_' and '-'"
+        )
+    detail: dict[str, Any] = {}
+    if detail_json:
+        try:
+            loaded = json.loads(detail_json)
+        except ValueError as exc:
+            raise ApprovalError(f"--detail-json does not parse: {exc}") from None
+        if not isinstance(loaded, dict):
+            raise ApprovalError("--detail-json must be a JSON object, so a panel can render it")
+        detail = loaded
+    elif note:
+        detail = {"note": note}
+    return NeedsHuman(
+        raw=f"steward approval raise --action {action}",
+        action=action.strip(),
+        detail=detail,
+        options=parse_options(options) if options else APPROVAL_DECISIONS,
+        expires_in_s=parse_duration(expires_in) if expires_in else DEFAULT_EXPIRES_IN_S,
+    )
+
+
+@approval.command("show")
+@click.argument("request_id")
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def approval_show(request_id: str, db: Path | None, output_format: str) -> None:
+    """Print one request with its decision, decider, and timestamps. The audit query."""
+    with _open_store(db) as store:
+        record = store.approval(request_id)
+    if record is None:
+        click.secho(f"no approval request {request_id!r}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if output_format == "json":
+        click.echo(json.dumps(record.to_dict(), indent=2))
+        return
+    click.secho(record.message, fg="cyan", bold=True)
+    click.echo(f"request:   {record.request_id}")
+    click.echo(f"resident:  {record.resident or record.agent_id}")
+    click.echo(f"action:    {record.action}")
+    click.echo(f"detail:    {json.dumps(dict(record.detail), ensure_ascii=False)}")
+    click.echo(f"options:   {', '.join(record.options)}")
+    click.echo(f"raised:    {record.created_at}")
+    click.echo(f"expires:   {record.expires_at or 'never'}")
+    if record.pending:
+        click.secho("decision:  still waiting", fg="yellow")
+        return
+    click.secho(f"decision:  {record.decision} by {record.decided_by}", fg="green")
+    click.echo(f"decided:   {record.decided_at}")
+    if record.edit:
+        click.echo(f"edited to: {json.dumps(dict(record.edit), ensure_ascii=False)}")
+    click.echo(f"delivered: {record.delivered_at or 'not yet told to the resident'}")
 
 
 # --------------------------------------------------------------------------------------

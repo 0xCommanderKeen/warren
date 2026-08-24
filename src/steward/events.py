@@ -49,7 +49,11 @@ __all__ = [
     "NullEmitter",
     "RunContext",
     "default_fallback_path",
+    "needs_human_event",
     "needs_human_resolved_event",
+    "task_claimed_event",
+    "task_done_event",
+    "task_failed_event",
     "task_posted_event",
     "truncate_error",
     "validate_event",
@@ -62,6 +66,10 @@ ROUTINE_STARTED = "routine_started"
 ROUTINE_FINISHED = "routine_finished"
 ROUTINE_FAILED = "routine_failed"
 TASK_POSTED = "task_posted"
+TASK_CLAIMED = "task_claimed"
+TASK_DONE = "task_done"
+TASK_FAILED = "task_failed"
+NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 
 #: The event types steward adds to the protocol. Additive: a v0 consumer that does not
@@ -71,6 +79,10 @@ EVENT_TYPES = (
     ROUTINE_FINISHED,
     ROUTINE_FAILED,
     TASK_POSTED,
+    TASK_CLAIMED,
+    TASK_DONE,
+    TASK_FAILED,
+    NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
 )
 
@@ -364,6 +376,103 @@ def task_posted_event(  # noqa: PLR0913 — every field is keyword-only and part
             "title": title,
             "required_skills": list(required_skills),
             "posted_by": posted_by,
+        },
+    )
+
+
+def task_claimed_event(*, task_id: str, title: str, claimant: str, project: str) -> Event:
+    """Announce that one resident, and only one, now holds this task.
+
+    Emitted under the claimant's own ``agent_id`` rather than steward's, so burrow walks
+    *that* villager to the notice board. Exactly one of these can exist per claim: the
+    store's conditional ``UPDATE … WHERE status = 'open'`` is what makes that true, and
+    the loser of a race emits nothing at all.
+    """
+    return Event(
+        type=TASK_CLAIMED,
+        agent_id=claimant,
+        project=project,
+        payload={"task_id": task_id, "title": title, "claimant": claimant},
+    )
+
+
+def task_done_event(
+    *,
+    task_id: str,
+    title: str,
+    claimant: str,
+    project: str,
+    artifacts: Sequence[str] = (),
+) -> Event:
+    """Report a claimed task the resident finished, and what it left behind.
+
+    ``artifacts`` is best effort, exactly as it is for a routine: steward reports what
+    the run actually named and never invents a file it did not see.
+    """
+    return Event(
+        type=TASK_DONE,
+        agent_id=claimant,
+        project=project,
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "claimant": claimant,
+            "artifacts": list(artifacts),
+        },
+    )
+
+
+def task_failed_event(
+    *, task_id: str, title: str, claimant: str, project: str, reason: str
+) -> Event:
+    """Report a task its claimant did not finish — including one whose lease ran out.
+
+    A lease expiry is a failure with the reason ``lease_expired``, not a silence: work
+    that quietly returned to the board would let the village show a task nobody is doing
+    as a task somebody is doing.
+    """
+    return Event(
+        type=TASK_FAILED,
+        agent_id=claimant,
+        project=project,
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "claimant": claimant,
+            "reason": truncate_error(reason),
+        },
+    )
+
+
+def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
+    *,
+    message: str,
+    request_id: str,
+    action: str,
+    agent_id: str,
+    project: str,
+    detail: Mapping[str, Any] | None = None,
+    options: Sequence[str] = (),
+    expires_at: str | None = None,
+) -> Event:
+    """Knock at the door with a question that can actually be answered.
+
+    Backwards compatible on purpose: ``message`` is still the one-line knock burrow
+    renders and ntfy forwards, and everything else is additive. A consumer that only
+    knows the old bare ``needs_human`` keeps working unchanged; one that knows the new
+    fields can offer the buttons.
+    """
+    return Event(
+        type=NEEDS_HUMAN,
+        agent_id=agent_id,
+        project=project,
+        payload={
+            "message": message,
+            "request_id": request_id,
+            "action": action,
+            "detail": dict(detail or {}),
+            "options": list(options),
+            "expires_at": expires_at,
         },
     )
 
