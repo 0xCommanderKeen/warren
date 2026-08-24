@@ -123,6 +123,7 @@
 
 <footer>burrow v0.5 · a projection, never a simulation · art: Ninja Adventure (CC0)</footer>
 
+<script src="/routes.js"></script>
 <script>
 "use strict";
 
@@ -540,9 +541,11 @@ class Village extends Phaser.Scene {
 
   spotFor(v, viz, where, slot) {
     if (where && where !== "door") {   // working at a shared building
-      const d = placeDoor(where), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
+      const p = PLACES[where], d = placeDoor(where);
+      const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
       return { x: d.x + dx,
                y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP,
+               approachX: (p.tx - 2) * T + T / 2,
                kind: where };
     }
     if (viz.plot < 0) {   // traveler rests/works on the street
@@ -591,19 +594,23 @@ class Village extends Phaser.Scene {
     this.plotOf.delete(id);
   }
 
-  walkTo(viz, tx, ty) {
+  walkTo(viz, target) {
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
     const legs = [];
-    const dx = tx - c.x, dy = ty - c.y;
-    if (Math.abs(dx) > 1) legs.push({
-      x: tx, duration: Math.abs(dx) / WALK_SPEED * 1000,
-      onStart: () => viz.spr.play(char + "-walk-" + (dx > 0 ? D_RIGHT : D_LEFT)),
-    });
-    if (Math.abs(dy) > 1) legs.push({
-      y: ty, duration: Math.abs(dy) / WALK_SPEED * 1000,
-      onStart: () => viz.spr.play(char + "-walk-" + (dy > 0 ? D_DOWN : D_UP)),
-    });
+    let from = { x: c.x, y: c.y };
+    for (const point of BurrowRoutes.routePoints(from, target)) {
+      const dx = point.x - from.x, dy = point.y - from.y;
+      if (Math.abs(dx) > 1) legs.push({
+        x: point.x, duration: Math.abs(dx) / WALK_SPEED * 1000,
+        onStart: () => viz.spr.play(char + "-walk-" + (dx > 0 ? D_RIGHT : D_LEFT)),
+      });
+      if (Math.abs(dy) > 1) legs.push({
+        y: point.y, duration: Math.abs(dy) / WALK_SPEED * 1000,
+        onStart: () => viz.spr.play(char + "-walk-" + (dy > 0 ? D_DOWN : D_UP)),
+      });
+      from = point;
+    }
     const settle = () => {
       viz.spr.stop();
       viz.spr.setTexture(char + "-idle", D_DOWN);
@@ -657,7 +664,7 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot.x, spot.y);
+        this.walkTo(viz, spot);
       }
       viz.state = v.state;
 
