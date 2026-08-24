@@ -20,6 +20,11 @@ Each real agent — the one summarizing your day, reviewing your code, reading y
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
 4. **Client** — pixel-art renderer. Click a villager to see its current task, its log, and chat with it.
 
+The notice board in the village square opens a fleet-wide review of the 30 most
+recent `artifact_produced` events. It shows each artifact path, its maker and
+project, and how recently it was produced; an empty board says plainly that the
+recent event log contains no artifacts.
+
 ## Running (v0.5)
 
 One village for the whole fleet, served from the NAS over Tailscale:

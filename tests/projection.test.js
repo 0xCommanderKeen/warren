@@ -14,6 +14,7 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
+  MAX_ARTIFACTS, parseEvents, foldEvents, foldArtifacts, nameArtifacts,
   describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
 
@@ -75,6 +76,68 @@ describe("event filtering", () => {
   it("survives an empty log", () => {
     assert.deepEqual(reduce([], NOW, []), []);
     assert.deepEqual(reduce([], NOW, undefined), []);
+  });
+});
+
+describe("notice board artifacts", () => {
+  it("lists artifacts most recent first and ignores malformed entries", () => {
+    const artifacts = foldArtifacts([], [
+      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      "{",
+      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "b", project: "two", type: "artifact_produced", payload: { artifact: "new.md" } }),
+      JSON.stringify({ ts: "2026-08-24T12:00:00Z", agent_id: "c", type: "artifact_produced", payload: {} }),
+    ]);
+    assert.deepEqual(artifacts.map(a => a.artifact), ["new.md", "old.md"]);
+    assert.deepEqual(artifacts.map(a => a.project), ["two", "one"]);
+  });
+
+  it("stays bounded during incremental ingestion", () => {
+    const artifacts = [];
+    for (let i = 0; i < MAX_ARTIFACTS + 25; i++) {
+      foldArtifacts(artifacts, [JSON.stringify({
+        ts: new Date(NOW + i).toISOString(), agent_id: "maker", project: "burrow",
+        type: "artifact_produced", payload: { artifact: `file-${i}` },
+      })]);
+      assert.ok(artifacts.length <= MAX_ARTIFACTS);
+    }
+    assert.equal(artifacts.length, MAX_ARTIFACTS);
+    assert.equal(artifacts[0].artifact, `file-${MAX_ARTIFACTS + 24}`);
+  });
+
+  it("folds the village and the board from one parse of the batch", () => {
+    const lines = [
+      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      "not json",
+      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "a", project: "one", type: "tool_called", payload: { tool: "Read" } }),
+      JSON.stringify({ ts: "2026-08-24T12:00:00Z", type: "artifact_produced", payload: { artifact: "orphan.md" } }),
+    ];
+    // The viewer parses a batch once and hands the same records to both folds.
+    const batch = parseEvents(lines);
+    assert.deepEqual(batch.map(ev => ev.type), ["artifact_produced", "tool_called"]);
+
+    const agents = new Map(), artifacts = [];
+    foldEvents(agents, batch);
+    foldArtifacts(artifacts, batch);
+    assert.deepEqual([...agents.keys()], ["a"]);
+    assert.deepEqual(artifacts.map(a => a.artifact), ["old.md"]);
+
+    // Folding the raw lines has to agree with folding the parsed records, or
+    // the two ingestion paths have drifted apart.
+    const fromLines = new Map(), artifactsFromLines = [];
+    foldEvents(fromLines, lines);
+    foldArtifacts(artifactsFromLines, lines);
+    assert.deepEqual([...fromLines.keys()], [...agents.keys()]);
+    assert.deepEqual(artifactsFromLines, artifacts);
+  });
+
+  it("uses the visible villager name with a stable fallback", () => {
+    const input = [{ artifact: "x", agent_id: "known", project: "p", ts: NOW },
+                   { artifact: "y", agent_id: "gone", project: "p", ts: NOW - 1 }];
+    const named = nameArtifacts(input, [{ id: "known", name: "Maren" }]);
+    assert.equal(named[0].name, "Maren");
+    assert.equal(named[1].name, NAMES[hashCode("gone") % NAMES.length]);
+    const historical = nameArtifacts([input[1]], [], [soul({ project: "p", name: "Vesper" })]);
+    assert.equal(historical[0].name, "Vesper");
   });
 });
 

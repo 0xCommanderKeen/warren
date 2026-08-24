@@ -33,13 +33,17 @@ const context = {
       return new Promise(resolve => { finishCatchup = () => resolve(response("1:2:60")); });
     return Promise.resolve(response("1:2:10"));
   },
-  foldEvents(agents, lines) {
-    for (const line of lines) {
-      const event = JSON.parse(line);
-      const events = agents.get(event.agent_id) || [];
-      events.push(event); agents.set(event.agent_id, events);
+  // project() parses each batch once and folds it into both the village and the
+  // notice board; give it the real parser, or a missing global throws into
+  // poll()'s catch and the cursor assertions below pass for the wrong reason.
+  parseEvents: require("../viewer/projection.js").parseEvents,
+  foldEvents(agents, events) {
+    for (const event of events) {
+      const seen = agents.get(event.agent_id) || [];
+      seen.push(event); agents.set(event.agent_id, seen);
     }
   },
+  foldArtifacts: require("../viewer/projection.js").foldArtifacts,
   reduce: agents => [...agents.values()],
   beatEl: {}, renderChrome() {}, scene: null,
 };

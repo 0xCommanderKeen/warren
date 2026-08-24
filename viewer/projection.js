@@ -20,6 +20,7 @@ const CHARS = ["Villager","Villager2","Villager3","Villager4","Villager5",
 const STALE_MS = 30 * 60 * 1000;
 const DROP_MS  = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
+const MAX_ARTIFACTS = 30;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -84,11 +85,27 @@ function doingLabel(ev) {
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
                              "heartbeat","needs_human","idle","session_ended"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
-function foldEvents(agents, lines) {
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
+/* One parse per batch. The village and the notice board both read what this
+ * returns, so "a well-formed event" has exactly one definition and cannot drift
+ * between the two reducers; each reducer keeps only the checks its own payload
+ * needs. Already-parsed events pass straight through, so a caller can hand
+ * either JSONL lines or records to a fold without a second JSON.parse. */
+function parseEvents(batch) {
+  const events = [];
+  for (const item of batch) {
+    let ev = item;
+    if (typeof ev === "string") {
+      try { ev = JSON.parse(ev); } catch { continue; }
+    }
+    if (!ev || typeof ev !== "object" || !ev.agent_id || !ev.type) continue;
+    events.push(ev);
+  }
+  return events;
+}
+
+function foldEvents(agents, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (!EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
     a.lastAny = ev;
@@ -96,6 +113,38 @@ function foldEvents(agents, lines) {
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
   }
+}
+
+/* Keep the notice board bounded while events arrive. Sorting each small batch
+ * also makes the board truthful when two emitters flush out of order. */
+function foldArtifacts(artifacts, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (ev.type !== "artifact_produced") continue;
+    const artifact = ev.payload && ev.payload.artifact;
+    if (!artifact) continue;
+    artifacts.push({
+      artifact: String(artifact), agent_id: ev.agent_id,
+      project: ev.project || "unknown", ts: Date.parse(ev.ts) || 0,
+    });
+  }
+  artifacts.sort((a, b) => b.ts - a.ts);
+  if (artifacts.length > MAX_ARTIFACTS) artifacts.length = MAX_ARTIFACTS;
+  return artifacts;
+}
+
+function nameArtifacts(artifacts, villagers, souls) {
+  const names = new Map((villagers || []).map(v => [v.id, v.name]));
+  const soulByAgent = new Map(), soulByProject = new Map();
+  for (const soul of souls || []) {
+    if (!soul || !soul.meta || !soul.meta.name) continue;
+    if (soul.meta.agent_id) soulByAgent.set(soul.meta.agent_id, soul.meta.name);
+    if (soul.meta.project) soulByProject.set(soul.meta.project, soul.meta.name);
+  }
+  return artifacts.map(a => ({
+    ...a,
+    name: names.get(a.agent_id) || soulByAgent.get(a.agent_id) ||
+      soulByProject.get(a.project) || NAMES[hashCode(a.agent_id) % NAMES.length],
+  }));
 }
 function reduce(input, now, souls) {
   const soulByAgent = new Map(), soulByProject = new Map();
@@ -164,8 +213,9 @@ function reduce(input, now, souls) {
 // node (tests) picks the module up here; the browser never sees `module`.
 if (typeof module === "object" && module.exports) {
   module.exports = {
-    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES, ACTION_TYPES,
-    PLACE_OF_VERB,
-    hashCode, esc, ago, describe, doingLabel, workPlace, foldEvents, reduce,
+    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
+    VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
+    hashCode, esc, ago, describe, doingLabel, workPlace,
+    parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }
