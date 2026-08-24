@@ -56,3 +56,17 @@ test("a villager working or resting at home lights it", () => {
   assert.equal(presence.atHome("resting", HOME), true);
   assert.equal(presence.atHome("knocking", HOME), false);
 });
+
+test("a failed villager is present at home without a working light", () => {
+  const viz = { home: presence.atHome("failed", HOME), state: "failed" };
+  assert.deepEqual(presence.houseLight(viz), { home: true, working: false });
+});
+
+test("a failed villager returning from a shared place lights home on arrival", () => {
+  const viz = { home: presence.atHome("working", LIBRARY), state: "working" };
+  presence.startJourney(viz, true);
+  viz.state = "failed";
+  assert.deepEqual(presence.houseLight(viz), { home: false, working: false });
+  presence.finishJourney(viz, true);
+  assert.deepEqual(presence.houseLight(viz), { home: true, working: false });
+});

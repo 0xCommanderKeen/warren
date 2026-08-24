@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EMIT = os.path.join(ROOT, "hooks", "emit.py")
@@ -54,6 +55,149 @@ class ToEventTest(unittest.TestCase):
         etype, _ = emit.to_event({"hook_event_name": "PostToolUse", "tool_name": "Bash",
                                   "tool_input": {}})
         self.assertIsNotNone(etype)
+
+    def test_notebook_path_and_failed_tools_are_truthful(self):
+        self.assertEqual(emit.to_event({
+            "hook_event_name": "PostToolUse", "tool_name": "NotebookEdit",
+            "tool_input": {"notebook_path": "/w/analysis.ipynb"},
+        }), ("artifact_produced", {"artifact": "/w/analysis.ipynb"}))
+        self.assertEqual(emit.to_event({
+            "hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+            "error": "exit code 2",
+        }), ("tool_failed", {"tool": "Bash", "error": "exit code 2"}))
+
+    def test_only_real_approval_and_elicitation_notifications_knock(self):
+        for notification_type in ("permission_prompt", "elicitation_dialog"):
+            self.assertEqual(emit.to_event({
+                "hook_event_name": "Notification", "notification_type": notification_type,
+                "message": "Please decide",
+            }), ("needs_human", {"message": "Please decide"}))
+        for notification_type in ("idle_prompt", "auth_success", None):
+            self.assertEqual(emit.to_event({
+                "hook_event_name": "Notification", "notification_type": notification_type,
+                "message": "informational",
+            }), (None, None))
+
+
+class DetailPolicyTest(unittest.TestCase):
+    EVENT = {
+        "v": 0, "ts": "2026-08-24T12:00:00.000Z", "source": "test",
+        "agent_id": "test:one", "project": "burrow", "cwd": "/secret/project",
+        "type": "artifact_produced", "payload": {"artifact": "/secret/project/notes.md"},
+    }
+
+    def delivered_payload(self, runner, hook, policy="safe"):
+        event_type, payload = emit.adapt_hook(runner, hook)[0]
+        event = dict(self.EVENT, type=event_type, payload=payload)
+        posted = []
+        with mock.patch.dict(os.environ, {
+            "BURROW_DETAIL": policy, "BURROW_URL": "http://village",
+            "BURROW_MIRROR": "",
+        }), mock.patch.object(emit, "post_event",
+                             side_effect=lambda url, outgoing, token:
+                             posted.append(outgoing) or True):
+            emit.deliver(event)
+        self.assertEqual(len(posted), 1)
+        return posted[0]["payload"]
+
+    def test_safe_redacts_a_command_containing_a_url_and_query_token(self):
+        payload = self.delivered_payload("codex", {
+            "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {
+                "command": "curl https://api.example.test/items?token=secret",
+            },
+        })
+        self.assertEqual(payload["detail"], "[redacted]")
+
+    def test_safe_redacts_url_query_description_and_approval_reason(self):
+        cases = (
+            ("WebFetch", {"url": "https://private.test/team/report"}, "detail"),
+            ("WebSearch", {"query": "site:private.test/team report"}, "detail"),
+            ("Bash", {"description": "Deploy team/private service"}, "detail"),
+        )
+        for tool, tool_input, field in cases:
+            with self.subTest(tool_input=tool_input):
+                payload = self.delivered_payload("codex", {
+                    "hook_event_name": "PreToolUse", "tool_name": tool,
+                    "tool_input": tool_input,
+                })
+                self.assertEqual(payload[field], "[redacted]")
+
+        approval = self.delivered_payload("codex", {
+            "hook_event_name": "PermissionRequest", "tool_name": "Bash",
+            "tool_input": {"description": "Approve team/private deploy"},
+        })
+        self.assertEqual(approval["message"], "[redacted]")
+
+    def test_safe_basenames_only_explicit_file_and_notebook_paths(self):
+        for field, value, expected in (
+            ("file_path", "/secret/project/report.txt", "report.txt"),
+            ("notebook_path", "/secret/project/analysis.ipynb", "analysis.ipynb"),
+        ):
+            with self.subTest(field=field):
+                hook = {
+                    "hook_event_name": "PreToolUse", "tool_name": "Read",
+                    "tool_input": {field: value},
+                }
+                original = json.loads(json.dumps(hook))
+                payload = self.delivered_payload("codex", hook)
+                self.assertEqual(payload["detail"], expected)
+                self.assertEqual(hook, original)
+
+    def test_full_keeps_and_off_redacts_tool_detail(self):
+        hook = {
+            "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": "curl https://private.test/team"},
+        }
+        original = json.loads(json.dumps(hook))
+        full_detail = self.delivered_payload("codex", hook, "full")["detail"]
+        self.assertEqual(full_detail, hook["tool_input"]["command"])
+        self.assertIs(type(full_detail), str)
+        self.assertEqual(self.delivered_payload("codex", hook, "off")["detail"],
+                         "[redacted]")
+        self.assertEqual(hook, original)
+
+    def test_full_safe_and_off_are_applied_without_mutating_input(self):
+        for policy, cwd, artifact in (
+            ("full", "/secret/project", "/secret/project/notes.md"),
+            ("safe", "", "notes.md"),
+            ("off", "", "[redacted]"),
+        ):
+            with self.subTest(policy), mock.patch.dict(os.environ, {"BURROW_DETAIL": policy}):
+                redacted = emit.redact_event(self.EVENT)
+                self.assertEqual(redacted["cwd"], cwd)
+                self.assertEqual(redacted["payload"]["artifact"], artifact)
+        self.assertEqual(self.EVENT["cwd"], "/secret/project")
+        self.assertEqual(self.EVENT["payload"]["artifact"], "/secret/project/notes.md")
+
+    def test_unknown_policy_fails_private(self):
+        with mock.patch.dict(os.environ, {"BURROW_DETAIL": "typo"}):
+            self.assertEqual(emit.detail_policy(), "safe")
+
+    def test_delivery_redacts_before_each_remote_transport(self):
+        posted = []
+        with mock.patch.dict(os.environ, {
+            "BURROW_DETAIL": "safe", "BURROW_URL": "http://village",
+            "BURROW_MIRROR": "http://mirror",
+        }), mock.patch.object(emit, "post_event",
+                             side_effect=lambda url, event, token: posted.append(event) or True):
+            emit.deliver(self.EVENT)
+        self.assertEqual(len(posted), 2)
+        self.assertTrue(all(event["cwd"] == "" for event in posted))
+        self.assertTrue(all(event["payload"]["artifact"] == "notes.md"
+                            for event in posted))
+
+    def test_local_fallback_is_also_redacted(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.dict(os.environ, {
+                    "BURROW_DETAIL": "off", "BURROW_URL": "", "BURROW_MIRROR": "",
+                }), mock.patch.object(emit, "LOG_DIR", directory), \
+                mock.patch.object(emit, "LOG", os.path.join(directory, "events.jsonl")):
+            emit.deliver(self.EVENT)
+            with open(emit.LOG, encoding="utf-8") as stream:
+                written = json.load(stream)
+        self.assertEqual(written["cwd"], "")
+        self.assertEqual(written["payload"]["artifact"], "[redacted]")
 
 
 class EndToEndTest(unittest.TestCase):

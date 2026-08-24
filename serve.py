@@ -25,8 +25,10 @@ import os
 import sys
 import threading
 import time
-import urllib.request
 import urllib.parse
+import urllib.request
+
+from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES, validate_event
 
 import residents as resident_manifests
 
@@ -43,8 +45,7 @@ MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
 
 # the viewer's reduction rules, mirrored here so a rotated log still projects to
 # exactly the same village (see docs/protocol.md and viewer/index.html)
-EVENT_TYPES = {"task_started", "tool_called", "artifact_produced",
-               "heartbeat", "needs_human", "idle", "session_ended"}
+EVENT_TYPES = set(PROTOCOL_EVENT_TYPES)
 KEEP_PER_AGENT = 80                  # events the viewer keeps per villager
 VIEWER_LINE_LIMIT = 4000             # viewer/index.html bootstrap window
 DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
@@ -63,8 +64,9 @@ except ValueError:
     NOTIFY_TIMEOUT = 5.0
 NOTIFY_MEMORY = 512      # how many knocks we remember, to not knock twice
 DROP_SECONDS = 12 * 60 * 60
-VIEWER_EVENT_TYPES = {"task_started", "tool_called", "artifact_produced",
-                      "needs_human", "idle", "session_ended"}
+VIEWER_EVENT_TYPES = {"task_started", "tool_called", "tool_failed",
+                      "artifact_produced", "needs_human", "idle",
+                      "session_ended"}
 
 
 CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
@@ -474,6 +476,10 @@ def append_event(event):
         maybe_rotate()
 
 
+def _reject_json_constant(value):
+    raise json.JSONDecodeError("non-standard JSON constant", value, 0)
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -533,30 +539,67 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path.split("?")[0] != "/events":
             self._send(404, b"not found", "text/plain")
             return
+        # Validate framing before authorization. Otherwise malformed or
+        # conflicting framing gets a credential-dependent response and can
+        # leave unread bytes to be mistaken for a keep-alive request.
+        length = self._event_content_length(send_error=True)
+        if length is None:
+            return
         if not self._authorized():
             try:
-                pending = min(int(self.headers.get("Content-Length") or 0), MAX_EVENT_BYTES)
-                if pending > 0:
-                    self.rfile.read(pending)
-            except (ValueError, OSError):
-                pass
+                self.rfile.read(length)
+            except OSError:
+                self.close_connection = True
             self._send(401, b"unauthorized", "text/plain")
-            return
-        length = int(self.headers.get("Content-Length") or 0)
-        if length <= 0 or length > MAX_EVENT_BYTES:
-            self._send(413, b"bad length", "text/plain")
             return
         body = self.rfile.read(length)
         try:
-            event = json.loads(body)
-            assert isinstance(event, dict) and event.get("type") and event.get("agent_id")
-        except Exception:
+            event = json.loads(body, parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self._send(400, b"not a protocol event", "text/plain")
+            return
+        error = validate_event(event)
+        if error:
+            self._send(400, error.encode("ascii"), "text/plain")
             return
         append_event(event)
         if claim_knock(event):
             notify_async(event)
         self._send(204, b"", "text/plain")
+
+    def _event_content_length(self, send_error=False):
+        """Parse one unambiguous request length or close the connection.
+
+        An invalid/oversized length cannot be drained safely: treating bytes as
+        a following keep-alive request would desynchronise the HTTP stream.
+        """
+        if self.headers.get_all("Transfer-Encoding", failobj=[]):
+            self.close_connection = True
+            if send_error:
+                self._send(400, b"unsupported transfer encoding", "text/plain",
+                           {"Connection": "close"})
+            return None
+        values = self.headers.get_all("Content-Length", failobj=[])
+        if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
+            self.close_connection = True
+            if send_error:
+                self._send(400, b"invalid content length", "text/plain",
+                           {"Connection": "close"})
+            return None
+        length = int(values[0])
+        if length <= 0:
+            self.close_connection = True
+            if send_error:
+                self._send(400, b"invalid content length", "text/plain",
+                           {"Connection": "close"})
+            return None
+        if length > MAX_EVENT_BYTES:
+            self.close_connection = True
+            if send_error:
+                self._send(413, b"event too large", "text/plain",
+                           {"Connection": "close"})
+            return None
+        return length
 
     def _send_file(self, path, ctype):
         try:

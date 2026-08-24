@@ -76,6 +76,8 @@ function describe(ev) {
     case "task_started":      return "took up a task: “" + (p.prompt || "…") + "”";
     case "tool_called":       return (VERBS[p.tool] || "using " + p.tool) +
                                      (p.detail ? " — " + p.detail : "");
+    case "tool_failed":       return (p.tool || "tool") + " failed" +
+                                     (p.error ? " — " + p.error : "");
     case "artifact_produced": return "crafted " + (p.artifact || "something");
     case "heartbeat":         return "finished " + (p.tool || "a tool");
     case "needs_human":       return "needs you: " + (p.message || "(no message)");
@@ -93,14 +95,57 @@ function doingLabel(ev) {
     default:                  return "";
   }
 }
-const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
-                             "heartbeat","needs_human","idle","session_ended"]);
+const EVENT_TYPES = new Set(["task_started","tool_called","tool_failed",
+                             "artifact_produced","heartbeat","needs_human",
+                             "idle","session_ended"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
-/* One parse per batch. The village and the notice board both read what this
- * returns, so "a well-formed event" has exactly one definition and cannot drift
- * between the two reducers; each reducer keeps only the checks its own payload
- * needs. Already-parsed events pass straight through, so a caller can hand
- * either JSONL lines or records to a fold without a second JSON.parse. */
+const TIMESTAMP_V0 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const REQUIRED_PAYLOAD_TEXT = {
+  task_started: ["prompt"], tool_called: ["tool"], tool_failed: ["tool"],
+  artifact_produced: ["artifact"], needs_human: ["message"],
+};
+const OPTIONAL_PAYLOAD_TEXT = [
+  "prompt", "tool", "artifact", "message", "detail", "error", "phase",
+  "turn_id", "agent_type", "parent_agent_id",
+];
+
+/* The browser adapter for docs/protocol.md's strict v0 contract. Keep this
+ * interface aligned with protocol.validate_event; one fixture matrix exercises
+ * both so ingestion and projection cannot silently drift. */
+function validateEvent(ev) {
+  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return "event must be an object";
+  if (!Number.isInteger(ev.v) || ev.v !== 0) return "unsupported protocol version";
+  if (typeof ev.ts !== "string" || !TIMESTAMP_V0.test(ev.ts) ||
+      ev.ts.slice(0, 4) === "0000" ||
+      !Number.isFinite(Date.parse(ev.ts)) || new Date(ev.ts).toISOString() !== ev.ts) {
+    return "invalid timestamp";
+  }
+  for (const field of ["source", "agent_id", "project"]) {
+    if (typeof ev[field] !== "string" || !ev[field].trim()) return "invalid " + field;
+  }
+  if (Object.hasOwn(ev, "cwd") && typeof ev.cwd !== "string") return "invalid cwd";
+  if (typeof ev.type !== "string" || !EVENT_TYPES.has(ev.type)) return "unsupported event type";
+  if (!ev.payload || typeof ev.payload !== "object" || Array.isArray(ev.payload)) {
+    return "payload must be an object";
+  }
+  for (const field of REQUIRED_PAYLOAD_TEXT[ev.type] || []) {
+    if (typeof ev.payload[field] !== "string" || !ev.payload[field].trim()) {
+      return "invalid payload." + field;
+    }
+  }
+  for (const field of OPTIONAL_PAYLOAD_TEXT) {
+    if (Object.hasOwn(ev.payload, field) && typeof ev.payload[field] !== "string") {
+      return "invalid payload." + field;
+    }
+  }
+  if (Object.hasOwn(ev.payload, "stop_hook_active") &&
+      typeof ev.payload.stop_hook_active !== "boolean") {
+    return "invalid payload.stop_hook_active";
+  }
+  return null;
+}
+
+/* One parse and validation pass per batch for village and notice board. */
 function parseEvents(batch) {
   const events = [];
   for (const item of batch) {
@@ -108,7 +153,7 @@ function parseEvents(batch) {
     if (typeof ev === "string") {
       try { ev = JSON.parse(ev); } catch { continue; }
     }
-    if (!ev || typeof ev !== "object" || !ev.agent_id || !ev.type) continue;
+    if (validateEvent(ev)) continue;
     events.push(ev);
   }
   return events;
@@ -116,7 +161,6 @@ function parseEvents(batch) {
 
 function foldEvents(agents, batch) {
   for (const ev of parseEvents(batch)) {
-    if (!EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) {
       a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
@@ -216,6 +260,7 @@ function reduce(input, now, souls) {
     let state =
       last.type === "needs_human" ? "knocking" :
       last.type === "idle"        ? "resting"  : "working";
+    if (last.type === "tool_failed") state = "failed";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
     const prev = a.events[a.events.length - 1];
     const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
@@ -264,6 +309,6 @@ if (typeof module === "object" && module.exports) {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
-    parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
+    validateEvent, parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

@@ -4,9 +4,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { reduce, MAX_EVENTS } = require("../viewer/projection.js");
 
-const NOW = Date.parse("2026-08-24T12:00:00Z");
+const NOW = Date.parse("2026-08-24T12:00:00.000Z");
 const event = (agent_id, project = "burrow") => ({
-  v: 0, ts: "2026-08-24T11:59:00Z", agent_id, project,
+  v: 0, ts: "2026-08-24T11:59:00.000Z", source: "test", agent_id, project,
   type: "task_started", payload: { prompt: "work" },
 });
 const resident = ({ file, home, agent_id, project, name }) => ({
@@ -64,7 +64,7 @@ test("project fallback stays with the parent while unsouled children are visitor
   const project = resident({ file: "project.resident.json", home: 0,
                              project: "burrow", name: "Maren" });
   const child = event("a-child");
-  child.payload = { parent_agent_id: "z-parent", agent_type: "reviewer" };
+  child.payload = { prompt: "delegated work", parent_agent_id: "z-parent", agent_type: "reviewer" };
   const village = reduce([child, event("z-parent")], NOW, [project]);
   assert.equal(village.find(v => v.id === "z-parent").residency, "resident");
   assert.equal(village.find(v => v.id === "a-child").residency, "visitor");
@@ -74,7 +74,7 @@ test("child lineage survives beyond the bounded display history", () => {
   const project = resident({ file: "project.resident.json", home: 0,
                              project: "burrow", name: "Maren" });
   const child = event("a-child");
-  child.payload = { parent_agent_id: "z-parent", agent_type: "reviewer" };
+  child.payload = { prompt: "delegated work", parent_agent_id: "z-parent", agent_type: "reviewer" };
   const history = [child, event("z-parent")];
   for (let index = 0; index < MAX_EVENTS + 1; index++) {
     history.push({ ...event("a-child"),

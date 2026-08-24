@@ -32,6 +32,9 @@ function byId(villagers) {
 function ids(villagers) {
   return villagers.map(v => v.id);
 }
+function protocolLine(fields) {
+  return JSON.stringify({ v: 0, source: "test", project: "unknown", ...fields });
+}
 /** A soul file as GET /villagers serves it. */
 function soul(meta, body) {
   return { file: (meta.name || "anon") + ".md", meta, body: body || "" };
@@ -58,8 +61,8 @@ describe("event filtering", () => {
 
   it("keeps a heartbeat-only villager alive but ignores unknown types", () => {
     const projected = reduce([
-      '{"ts":"2026-08-24T11:59:00.000Z","agent_id":"x:1","type":"heartbeat","payload":{}}',
-      '{"ts":"2026-08-24T11:59:01.000Z","agent_id":"x:1","type":"agent_thought","payload":{}}',
+      protocolLine({ts:"2026-08-24T11:59:00.000Z",agent_id:"x:1",type:"heartbeat",payload:{}}),
+      protocolLine({ts:"2026-08-24T11:59:01.000Z",agent_id:"x:1",type:"agent_thought",payload:{}}),
     ], NOW, []);
     assert.equal(projected.length, 1);
     assert.equal(projected[0].state, "working");
@@ -82,10 +85,10 @@ describe("event filtering", () => {
 describe("notice board artifacts", () => {
   it("lists artifacts most recent first and ignores malformed entries", () => {
     const artifacts = foldArtifacts([], [
-      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      protocolLine({ ts: "2026-08-24T11:58:00.000Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
       "{",
-      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "b", project: "two", type: "artifact_produced", payload: { artifact: "new.md" } }),
-      JSON.stringify({ ts: "2026-08-24T12:00:00Z", agent_id: "c", type: "artifact_produced", payload: {} }),
+      protocolLine({ ts: "2026-08-24T11:59:00.000Z", agent_id: "b", project: "two", type: "artifact_produced", payload: { artifact: "new.md" } }),
+      protocolLine({ ts: "2026-08-24T12:00:00.000Z", agent_id: "c", type: "artifact_produced", payload: {} }),
     ]);
     assert.deepEqual(artifacts.map(a => a.artifact), ["new.md", "old.md"]);
     assert.deepEqual(artifacts.map(a => a.project), ["two", "one"]);
@@ -94,7 +97,7 @@ describe("notice board artifacts", () => {
   it("stays bounded during incremental ingestion", () => {
     const artifacts = [];
     for (let i = 0; i < MAX_ARTIFACTS + 25; i++) {
-      foldArtifacts(artifacts, [JSON.stringify({
+      foldArtifacts(artifacts, [protocolLine({
         ts: new Date(NOW + i).toISOString(), agent_id: "maker", project: "burrow",
         type: "artifact_produced", payload: { artifact: `file-${i}` },
       })]);
@@ -106,10 +109,10 @@ describe("notice board artifacts", () => {
 
   it("folds the village and the board from one parse of the batch", () => {
     const lines = [
-      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      protocolLine({ ts: "2026-08-24T11:58:00.000Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
       "not json",
-      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "a", project: "one", type: "tool_called", payload: { tool: "Read" } }),
-      JSON.stringify({ ts: "2026-08-24T12:00:00Z", type: "artifact_produced", payload: { artifact: "orphan.md" } }),
+      protocolLine({ ts: "2026-08-24T11:59:00.000Z", agent_id: "a", project: "one", type: "tool_called", payload: { tool: "Read" } }),
+      protocolLine({ ts: "2026-08-24T12:00:00.000Z", type: "artifact_produced", payload: { artifact: "orphan.md" } }),
     ];
     // The viewer parses a batch once and hands the same records to both folds.
     const batch = parseEvents(lines);
@@ -193,7 +196,7 @@ describe("state mapping (docs/protocol.md, projection rules v0)", () => {
   it("caps an agent's kept history at MAX_EVENTS", () => {
     const lines = [];
     for (let i = 0; i < MAX_EVENTS + 20; i++) {
-      lines.push(JSON.stringify({
+      lines.push(protocolLine({
         ts: new Date(NOW - (MAX_EVENTS + 20 - i) * 1000).toISOString(),
         agent_id: "x:long", project: "burrow", type: "tool_called",
         payload: { tool: "Read", detail: "file" + i },
@@ -227,11 +230,11 @@ describe("meaningful work locations", () => {
   });
 
   it("projects the latest supported place and keeps it when stale", () => {
-    const fresh = reduce([JSON.stringify({
+    const fresh = reduce([protocolLine({
       ts: new Date(NOW - MIN).toISOString(), agent_id: "x:builder",
       type: "tool_called", payload: { tool: "Edit" },
     })], NOW, [])[0];
-    const stale = reduce([JSON.stringify({
+    const stale = reduce([protocolLine({
       ts: new Date(NOW - 31 * MIN).toISOString(), agent_id: "x:delegate",
       type: "tool_called", payload: { tool: "Agent" },
     })], NOW, [])[0];
@@ -242,9 +245,9 @@ describe("meaningful work locations", () => {
 
   it("returns home after an uncovered action", () => {
     const [v] = reduce([
-      JSON.stringify({ ts: new Date(NOW - 2 * MIN).toISOString(), agent_id: "x:home",
+      protocolLine({ ts: new Date(NOW - 2 * MIN).toISOString(), agent_id: "x:home",
         type: "tool_called", payload: { tool: "WebFetch" } }),
-      JSON.stringify({ ts: new Date(NOW - MIN).toISOString(), agent_id: "x:home",
+      protocolLine({ ts: new Date(NOW - MIN).toISOString(), agent_id: "x:home",
         type: "tool_called", payload: { tool: "Read" } }),
     ], NOW, []);
     assert.equal(v.place, null);

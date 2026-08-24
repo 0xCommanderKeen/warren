@@ -49,6 +49,7 @@ process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
         })
         self.assertEqual(before["claude-code:child-redacted-a"]["events"][0]["payload"], {
             "agent_type": "Explore", "parent_agent_id": "claude-code:parent-redacted",
+            "prompt": "delegated work",
         })
         after = {v["id"]: v for v in self.project(self.deliver(hooks))}
         self.assertNotIn("claude-code:child-redacted-a", after)
@@ -67,6 +68,7 @@ process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
         self.assertEqual(emit.hook_agent_id("claude", second), "claude-code:child-b")
         self.assertEqual(emit.adapt_hook("claude", first), [("task_started", {
             "parent_agent_id": "claude-code:parent", "agent_type": "Explore",
+            "prompt": "delegated work",
         })])
 
     def test_subagent_stop_ends_only_the_matching_child(self):

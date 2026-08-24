@@ -4,6 +4,7 @@ import os
 import tempfile
 import threading
 import unittest
+import socket
 
 import serve
 
@@ -38,6 +39,104 @@ class EventsEndpointTest(unittest.TestCase):
         with open(self.events, "ab") as stream:
             for event in events:
                 stream.write(json.dumps(event).encode() + b"\n")
+
+    @staticmethod
+    def valid_event(**changes):
+        event = {
+            "v": 0, "ts": "2026-08-24T12:00:00.000Z", "source": "test",
+            "agent_id": "test:one", "project": "burrow", "cwd": "/tmp",
+            "type": "idle", "payload": {},
+        }
+        event.update(changes)
+        return event
+
+    def post_event(self, event):
+        body = json.dumps(event).encode()
+        conn = http.client.HTTPConnection(*self.server.server_address)
+        conn.request("POST", "/events", body, {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        status, data = response.status, response.read()
+        conn.close()
+        return status, data
+
+    def test_ingest_rejects_the_shared_protocol_contract_without_appending(self):
+        fixtures = os.path.join(os.path.dirname(__file__), "fixtures",
+                                "protocol-v0-validation.json")
+        with open(fixtures, encoding="utf-8") as stream:
+            cases = json.load(stream)
+        for case in cases:
+            with self.subTest(case["name"]):
+                before = os.path.getsize(self.events) if os.path.exists(self.events) else 0
+                status, _ = self.post_event(case["event"])
+                self.assertEqual(status, 204 if case["valid"] else 400)
+                after = os.path.getsize(self.events) if os.path.exists(self.events) else 0
+                self.assertEqual(after > before, case["valid"])
+
+    def test_ingest_rejects_non_standard_json_constants_without_appending(self):
+        template = json.dumps(
+            self.valid_event(payload={"unknown": "constant"}),
+            separators=(",", ":"),
+        ).encode()
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            with self.subTest(constant=constant):
+                body = template.replace(b'"constant"', constant)
+                raw = (b"POST /events HTTP/1.1\r\nHost: x\r\n"
+                       b"Content-Type: application/json\r\n"
+                       b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n"
+                       + body +
+                       b"GET /events HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                with socket.create_connection(self.server.server_address,
+                                              timeout=2) as conn:
+                    conn.sendall(raw)
+                    response = b""
+                    while True:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+
+                self.assertEqual(response.count(b"HTTP/1.1"), 2)
+                self.assertIn(b"HTTP/1.1 400", response)
+                self.assertIn(b"not a protocol event", response)
+                self.assertFalse(os.path.exists(self.events))
+
+    def test_malformed_length_returns_stable_error_and_closes_before_pipeline(self):
+        raw = (b"POST /events HTTP/1.1\r\nHost: x\r\nContent-Length: nope\r\n\r\n"
+               b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        with socket.create_connection(self.server.server_address, timeout=2) as conn:
+            conn.sendall(raw)
+            chunks = []
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            response = b"".join(chunks)
+            self.assertIn(b"HTTP/1.1 400", response)
+            self.assertIn(b"invalid content length", response)
+            self.assertEqual(response.count(b"HTTP/1.1"), 1)
+
+        # The server stays healthy and a fresh keep-alive connection is aligned.
+        self.assertEqual(self.post_event(self.valid_event())[0], 204)
+
+    def test_transfer_encoding_is_rejected_and_closes_before_pipeline(self):
+        body = json.dumps(self.valid_event()).encode()
+        raw = (b"POST /events HTTP/1.1\r\nHost: x\r\n"
+               b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+               b"Transfer-Encoding: chunked\r\n\r\n" + body +
+               b"GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        with socket.create_connection(self.server.server_address, timeout=2) as conn:
+            conn.sendall(raw)
+            response = b""
+            while True:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        self.assertIn(b"HTTP/1.1 400", response)
+        self.assertIn(b"unsupported transfer encoding", response)
+        self.assertEqual(response.count(b"HTTP/1.1"), 1)
+        self.assertFalse(os.path.exists(self.events))
 
     def test_incremental_fetch_and_empty_steady_state(self):
         first = {"type": "idle", "agent_id": "one"}

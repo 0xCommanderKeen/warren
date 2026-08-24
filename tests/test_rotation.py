@@ -86,7 +86,7 @@ class CarryForwardTest(unittest.TestCase):
     def test_keeps_live_agents_and_drops_departed_ones(self):
         lines = [json.dumps(e) for e in [
             event("a", "task_started", 5, prompt="work"),
-            event("gone", "task_started", 5),
+            event("gone", "task_started", 5, prompt="work"),
             event("stale", "idle", 60 * 20),          # 20 h ago: past the window
             event("gone", "session_ended", 4),
             event("a", "tool_called", 1, tool="Read"),
@@ -115,7 +115,8 @@ class CarryForwardTest(unittest.TestCase):
 
     def test_compaction_reload_keeps_child_lineage_outside_display_history(self):
         lineage = event("a-child", "task_started", 3,
-                        parent_agent_id="z-parent", agent_type="reviewer")
+                        prompt="delegated work", parent_agent_id="z-parent",
+                        agent_type="reviewer")
         lines = [json.dumps(lineage), json.dumps(event("z-parent", "idle", 2))]
         lines.extend(json.dumps(event("a-child", "tool_called", 1,
                                              tool="Read", n=index))

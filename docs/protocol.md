@@ -21,6 +21,11 @@ Two transports; the event shape is the contract, not the pipe:
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
   `BURROW_URL` is unset, or as the fallback above.
 
+HTTP ingest requires one decimal `Content-Length` from 1 through the configured
+event limit. Missing, duplicate, non-decimal, non-positive, or oversized lengths
+receive a stable 400/413 response and close that connection; bytes with an
+untrusted length are never reinterpreted as a keep-alive request.
+
 ## Ingest auth
 
 The village never lies, so nothing on the tailnet may write to it unasked — a forged
@@ -88,6 +93,29 @@ buffer.
 }
 ```
 
+### Strict v0 validation contract
+
+An event is accepted and projected only when all of these checks pass. HTTP
+ingestion uses `protocol.validate_event`; browser ingestion uses `validateEvent`
+in `viewer/projection.js`. Both adapters run the same fixture matrix in
+`tests/fixtures/protocol-v0-validation.json`.
+
+- The record and `payload` are JSON objects, not nulls, arrays, or scalars.
+- `v` is the integer `0`; `ts` is a real UTC instant written exactly
+  `YYYY-MM-DDTHH:mm:ss.sssZ`. Protocol v0 supports Gregorian years `0001`
+  through `9999`; ISO year `0000` and signed or expanded years are invalid.
+- `source`, `agent_id`, and `project` are non-empty strings. Optional `cwd` is a
+  string when present.
+- `type` is one of the types below. Unknown types are invalid in v0.
+- Required payload strings are non-empty: `task_started.prompt`,
+  `tool_called.tool`, `tool_failed.tool`, `artifact_produced.artifact`, and
+  `needs_human.message`. Known optional detail and lineage fields are strings;
+  `stop_hook_active`, when present, is boolean.
+
+Invalid HTTP records return 400 and are never appended or notified. Projection
+silently ignores the same invalid records. Unknown extension fields remain
+allowed.
+
 | field      | meaning                                                                 |
 |------------|-------------------------------------------------------------------------|
 | `v`        | protocol version, `0` for now                                           |
@@ -111,6 +139,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 |---------------------|--------------------------------------------|----------------------------|
 | `task_started`      | the agent picks up work                    | `prompt` (truncated ≤140)  |
 | `tool_called`       | the agent uses a tool                      | `tool`, `detail` (≤120)    |
+| `tool_failed`       | a tool has explicitly failed               | `tool`, optional `error`   |
 | `artifact_produced` | the agent writes/edits a file or output    | `artifact` (path)          |
 | `heartbeat`         | the agent is known to be working            | bounded tool/phase detail  |
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
@@ -133,6 +162,7 @@ The villager's state is decided by its **latest** event:
   of the villager's event log so a long build doesn't bury the real actions. (If the
   only signal in view is a heartbeat, the villager is simply "working".)
 - `needs_human` → **at your door**
+- `tool_failed` → **failed**, at home; this does not claim the tool is active
 - `idle` → **resting**
 - `session_ended` → removed from the village
 - no event for 30 minutes while "working" → shown as **stale** (faded), because a
@@ -276,9 +306,10 @@ event supports. Filler is forbidden on both sides of the log.
 |-------------------------------------------|---------------------|
 | `UserPromptSubmit`                        | `task_started`      |
 | `PreToolUse` (any tool)                   | `tool_called`       |
-| `PostToolUse` (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, with a `file_path`) | `artifact_produced` |
+| `PostToolUse` (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, with a file or notebook path) | `artifact_produced` |
 | `PostToolUse` (every other tool)          | `heartbeat`         |
-| `Notification`                            | `needs_human`       |
+| `PostToolUseFailure`                      | `tool_failed`       |
+| `Notification` (`permission_prompt` or `elicitation_dialog`) | `needs_human` |
 | `SubagentStart`                           | `task_started` for that child identity, with lineage |
 | `SubagentStop`                            | `session_ended` for only that child identity, with lineage |
 | `Stop`                                    | `idle`              |
@@ -301,6 +332,16 @@ set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optional
 home, resting. Its children remain distinct; a child stop still ends that child,
 and its lineage points to the stable resident parent identity.
 
+`BURROW_DETAIL=full|safe|off` is enforced by the shared delivery interface before
+the first remote POST or local append. `full` (the default) preserves bounded
+detail. `safe` clears `cwd`, reduces artifact and detail sourced from an explicit
+file/notebook/path input field to a basename, and replaces free-form commands,
+URLs, queries, descriptions/reasons, prompts, messages, and errors with
+`[redacted]`. `off` clears `cwd`
+and replaces every required private detail value with `[redacted]`. Unknown policy
+values fail to `safe`. Identity, project, lifecycle, tool, and lineage remain so
+privacy never invents a different lifecycle.
+
 ## v0 emitter: Codex hooks
 
 The same `hooks/emit.py` command has runner-specific adapters behind one delivery
@@ -315,19 +356,20 @@ same unbounded canonical value so lineage remains exact even for long session ID
 | `SessionStart` | none — a process starting does not say work began |
 | `UserPromptSubmit` | `task_started` |
 | `PreToolUse` (supported local tool) | `tool_called` |
-| `PermissionRequest` | `heartbeat` with bounded `approval_requested` context |
+| `PermissionRequest` | `needs_human` with the bounded approval reason |
 | `PostToolUse` (`apply_patch`, exact successful response, with paths in its patch) | one `artifact_produced` per path |
-| `PostToolUse` (other completions; failed, partial, missing, ambiguous, or unparseable patch) | `heartbeat` |
+| Successful file/notebook edit completion with a path | `artifact_produced` |
+| `PostToolUseFailure`, or a completion with explicit failure evidence | `tool_failed` |
+| Other successful or ambiguous completions | `heartbeat` |
 | `SubagentStart` | `task_started` for the subagent identity |
 | `SubagentStop` | `session_ended` for only the matching subagent, with bounded lineage metadata |
 | `Stop` | `heartbeat` with bounded lifecycle metadata for the root session |
 | `SessionEnd` | `session_ended` for the root session |
 
-These mappings are deliberately conservative. Matching hooks run concurrently, so
-`PermissionRequest` proves only that Codex is considering an approval request; a
-different hook may allow or deny it before a human ever sees a prompt. Burrow keeps
-the villager working and includes only a bounded phase, tool name, and available
-approval reason. It does not emit `needs_human` without proof that a human is blocked.
+These mappings are deliberately conservative. `PermissionRequest` is the callback
+that proves an approval is being elicited, so it knocks; informational callbacks do
+not. A failure is emitted only from a failure callback or explicit failure fields,
+non-zero exit code, or an unambiguous failed response.
 
 Likewise, another concurrent hook can intercept root `Stop` and continue the flow,
 so that callback remains a working heartbeat. `SubagentStop` is scoped to the named
@@ -337,9 +379,8 @@ never approves, denies, rewrites, blocks, or continues anything.
 `PostToolUse` means a tool produced a response, not necessarily that it succeeded.
 For `apply_patch`, Burrow emits requested paths only when `tool_response` is the exact
 positive success JSON string, `"Done!"`, used by Codex's apply-patch tool output.
-Any failed, mixed/partial, missing, obsolete object-shaped, or ambiguous response
-emits one heartbeat and claims no paths. Other hosted tools that Codex does not
-expose to hooks produce no invented activity.
+Any mixed/partial failure emits `tool_failed` and claims no paths. Missing or
+ambiguous success evidence emits one heartbeat and claims no paths.
 
 Successful patches report resulting files: additions and updates produce artifacts,
 deletions do not, and an update with `*** Move to:` reports only its destination. A

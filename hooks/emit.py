@@ -50,7 +50,19 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 
 ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+CODEX_ARTIFACT_TOOLS = ARTIFACT_TOOLS + (
+    "write_file", "edit_file", "notebook_edit",
+)
 RUNNER_SOURCES = {"claude": "claude-code", "codex": "codex"}
+
+
+class _ToolDetail(str):
+    """String detail carrying its source field until privacy is applied."""
+
+    def __new__(cls, value, is_path=False):
+        detail = super().__new__(cls, value)
+        detail.is_path = is_path
+        return detail
 
 
 def agent_identity(source, identity):
@@ -65,7 +77,8 @@ def tool_detail(tool_input):
                 "command", "url", "query", "skill"):
         val = tool_input.get(key)
         if val:
-            return str(val)[:120]
+            return _ToolDetail(str(val)[:120], key in (
+                "file_path", "notebook_path", "path"))
     return ""
 
 
@@ -84,14 +97,27 @@ def claude_event(hook):
         # A tool finished. Write-like tools produced something; every other tool
         # only proves the agent is still alive and working -> heartbeat.
         tool = hook.get("tool_name") or "?"
-        artifact = (hook.get("tool_input") or {}).get("file_path")
+        tool_input = hook.get("tool_input") or {}
+        artifact = tool_input.get("file_path") or tool_input.get("notebook_path")
         if artifact and tool in ARTIFACT_TOOLS:
             return "artifact_produced", {"artifact": str(artifact)[:200]}
         return "heartbeat", {"tool": tool}
+    if name == "PostToolUseFailure":
+        tool = str(hook.get("tool_name") or "?")[:120]
+        error = hook.get("error")
+        payload = {"tool": tool}
+        if error:
+            payload["error"] = str(error)[:200]
+        return "tool_failed", payload
     if name == "Notification":
-        return "needs_human", {"message": str(hook.get("message") or "")[:200]}
+        # idle/auth notices are informational. Only callbacks that prove an
+        # actual question is visible to the human may knock.
+        if hook.get("notification_type") not in ("permission_prompt", "elicitation_dialog"):
+            return None, None
+        message = str(hook.get("message") or "Attention requested")[:200]
+        return "needs_human", {"message": message}
     if name == "SubagentStart" and hook.get("agent_id"):
-        return "task_started", lineage(hook, "claude")
+        return "task_started", dict(lineage(hook, "claude"), prompt="delegated work")
     if name == "SubagentStop" and hook.get("agent_id"):
         return "session_ended", lineage(hook, "claude")
     if name == "Stop":
@@ -160,6 +186,46 @@ def patch_succeeded(tool_response):
     return tool_response == "Done!"
 
 
+def tool_failure(hook):
+    """Return bounded explicit failure text, or ``None`` absent proof."""
+    if hook.get("hook_event_name") == "PostToolUseFailure":
+        return str(hook.get("error") or "tool failed")[:200]
+    response = hook.get("tool_response")
+    if isinstance(response, dict):
+        if (response.get("success") is False or response.get("ok") is False
+                or response.get("is_error") is True
+                or response.get("status") in ("failed", "error")):
+            return str(response.get("error") or response.get("message") or "tool failed")[:200]
+        code = response.get("exit_code")
+        if type(code) is int and code != 0:
+            return str(response.get("error") or f"exit code {code}")[:200]
+        if response.get("error"):
+            return str(response["error"])[:200]
+    if hook.get("tool_error"):
+        return str(hook["tool_error"])[:200]
+    if isinstance(response, str) and re.search(r"(?:^|\n)(?:Error|Failed)(?::|\b)", response):
+        return response[:200]
+    return None
+
+
+def direct_artifacts(tool, tool_input):
+    if tool not in CODEX_ARTIFACT_TOOLS or not isinstance(tool_input, dict):
+        return []
+    path = tool_input.get("file_path") or tool_input.get("notebook_path")
+    return [str(path)[:200]] if path else []
+
+
+def codex_tool_succeeded(tool_response):
+    """True only when a Codex response positively reports tool success."""
+    if not isinstance(tool_response, dict):
+        return False
+    return (tool_response.get("success") is True
+            or tool_response.get("ok") is True
+            or tool_response.get("status") in ("success", "succeeded", "completed")
+            or type(tool_response.get("exit_code")) is int
+            and tool_response["exit_code"] == 0)
+
+
 def codex_events(hook):
     """Adapt one documented Codex lifecycle callback to zero or more v0 events."""
     name = hook.get("hook_event_name", "")
@@ -179,20 +245,24 @@ def codex_events(hook):
         return [("tool_called", payload)]
     if name == "PermissionRequest":
         reason = tool_input.get("description") or tool_detail(tool_input)
-        payload = {"phase": "approval_requested", "tool": bounded_tool}
-        if reason:
-            payload["detail"] = str(reason)[:120]
-        return [("heartbeat", payload)]
-    if name == "PostToolUse":
+        message = str(reason or ("Approve " + bounded_tool))[:200]
+        return [("needs_human", {"message": message})]
+    if name in ("PostToolUse", "PostToolUseFailure"):
+        failure = tool_failure(hook)
+        if failure is not None:
+            return [("tool_failed", {"tool": bounded_tool, "error": failure})]
         if tool == "apply_patch" and patch_succeeded(hook.get("tool_response")):
             artifacts = patch_artifacts(tool_input)
             if artifacts:
                 return [("artifact_produced", {"artifact": path}) for path in artifacts]
+        artifacts = direct_artifacts(tool, tool_input)
+        if artifacts and codex_tool_succeeded(hook.get("tool_response")):
+            return [("artifact_produced", {"artifact": path}) for path in artifacts]
         return [("heartbeat", {"tool": bounded_tool})]
     if name == "SubagentStart":
         if not hook.get("agent_id"):
             return []
-        return [("task_started", lineage(hook))]
+        return [("task_started", dict(lineage(hook), prompt="delegated work"))]
     if name == "SubagentStop":
         if not hook.get("agent_id"):
             return []
@@ -297,6 +367,7 @@ def post_event(url, event, token=""):
 
 def deliver(event):
     """Shared delivery interface for every runner adapter."""
+    event = redact_event(event)
     delivered = False
     for url, token in targets():
         # No short-circuit: a mirror exists to see the same stream the village
@@ -311,6 +382,39 @@ def deliver(event):
         # is deliberately retained.
         fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+def detail_policy():
+    value = os.environ.get("BURROW_DETAIL", "full").strip().lower()
+    return value if value in ("full", "safe", "off") else "safe"
+
+
+def _safe_path(value):
+    value = str(value)
+    return os.path.basename(value.rstrip("/\\")) or "[redacted]"
+
+
+def redact_event(event):
+    """Apply producer privacy policy before any transport or local write."""
+    policy = detail_policy()
+    out = dict(event)
+    out["payload"] = dict(event.get("payload") or {})
+    payload = out["payload"]
+    if policy == "full":
+        if isinstance(payload.get("detail"), _ToolDetail):
+            payload["detail"] = str(payload["detail"])
+        return out
+    out["cwd"] = ""
+    if "artifact" in payload:
+        payload["artifact"] = _safe_path(payload["artifact"]) if policy == "safe" else "[redacted]"
+    for key in ("prompt", "message", "detail", "error"):
+        if key in payload:
+            if (policy == "safe" and key == "detail"
+                    and getattr(payload[key], "is_path", False)):
+                payload[key] = _safe_path(payload[key])
+            else:
+                payload[key] = "[redacted]"
+    return out
 
 
 def main(runner="claude"):

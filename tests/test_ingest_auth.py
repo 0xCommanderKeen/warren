@@ -35,16 +35,22 @@ def load(path, name, env):
     """Import a module fresh under a given environment (both modules read their
     config into globals at import time, which is what we want to exercise)."""
     saved = {k: os.environ.get(k) for k in env}
+    saved_path = sys.path[:]
     os.environ.update({k: v for k, v in env.items() if v is not None})
     for k, v in env.items():
         if v is None:
             os.environ.pop(k, None)
     try:
+        # Match Python's normal script-import semantics so modules loaded by
+        # path can resolve siblings without depending on the caller's cwd or
+        # PYTHONPATH. Restore the path afterwards to keep each load isolated.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(path)))
         spec = importlib.util.spec_from_file_location(name, path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         return mod
     finally:
+        sys.path[:] = saved_path
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -125,6 +131,18 @@ def main():
     check("POST wrong x-header", post(serve, ["X-Burrow-Token: nope"])[0], 401)
     check("POST token as prefix", post(serve, ["Authorization: Bearer s3cretXX"])[0], 401)
     check("POST wrong scheme", post(serve, ["Authorization: Basic s3cret"])[0], 401)
+    for label, framing, expected in (
+        ("missing length before auth", b"", 400),
+        ("negative length before auth", b"Content-Length: -1\r\n", 400),
+        ("nondigit length before auth", b"Content-Length: nope\r\n", 400),
+        ("oversized length before auth",
+         b"Content-Length: " + str(serve.MAX_EVENT_BYTES + 1).encode() + b"\r\n", 413),
+        ("transfer encoding before auth",
+         b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", 400),
+    ):
+        raw = (b"POST /events HTTP/1.1\r\nHost: x\r\n" + framing +
+               b"\r\n{}GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
+        check(label, request(serve, raw)[0], expected)
     check("POST right bearer", post(serve, ["Authorization: Bearer s3cret"])[0], 204)
     check("POST right x-header", post(serve, ["X-Burrow-Token: s3cret"])[0], 204)
     check("GET /events ungated", get(serve, "/events")[0], 200)

@@ -1,8 +1,8 @@
 this line is not json at all
-{"v":0,"ts":"2026-08-24T11:58:00.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"heartbeat","payload":{}}
-{"v":0,"ts":"2026-08-24T11:58:05.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"tool_called","payload":{"tool":"Bash","detail":"ls"}}
-{"v":0,"ts":"2026-08-24T11:58:10.000Z","project":"burrow","type":"task_started","payload":{"prompt":"no agent_id, no villager"}}
-{"v":0,"ts":"2026-08-24T11:58:15.000Z","agent_id":"claude-code:ghost","project":"burrow","type":"agent_thought","payload":{"text":"unknown types never make a villager"}}
-{"v":0,"ts":"2026-08-24T11:58:20.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:00.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"heartbeat","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:05.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"tool_called","payload":{"tool":"Bash","detail":"ls"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:10.000Z","project":"burrow","type":"task_started","payload":{"prompt":"no agent_id, no villager"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:15.000Z","agent_id":"claude-code:ghost","project":"burrow","type":"agent_thought","payload":{"text":"unknown types never make a villager"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:20.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"","payload":{}}
 null
-{"v":0,"ts":"2026-08-24T11:58:25.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"idle","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:58:25.000Z","agent_id":"claude-code:a-worker","project":"burrow","type":"idle","payload":{}}

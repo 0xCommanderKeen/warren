@@ -42,6 +42,8 @@
   .chip.working .sub { color: var(--busy); }
   .chip.knocking { border-color: var(--alert); color: #fff; }
   .chip.knocking .sub { color: var(--alert); }
+  .chip.failed { border-color: #c96b54; }
+  .chip.failed .sub { color: #e18a70; }
   .chip.stale { opacity: .55; }
   .chip.you, .chip.place {
     background: rgba(13, 11, 20, .6); border-color: rgba(232,223,200,.12);
@@ -1048,6 +1050,7 @@ class Village extends Phaser.Scene {
       const sub = viz.chip.el.querySelector(".sub");
       const subText =
         v.state === "knocking" ? "needs you!" :
+        v.state === "failed"   ? v.project + " · tool failed" :
         v.state === "stale"    ? v.project + " · no signal" :
         v.state === "working" && v.doing ? v.project + " · " + v.doing :
         v.residency === "visitor" ? v.project + " · visitor" : v.project;
@@ -1108,9 +1111,11 @@ function renderChrome(now) {
   const knockers = villagers.filter(v => v.state === "knocking").length;
   const working  = villagers.filter(v => v.state === "working").length;
   const resting  = villagers.filter(v => v.state === "resting").length;
+  const failed   = villagers.filter(v => v.state === "failed").length;
   const parts = [`${villagers.length} villager${villagers.length === 1 ? "" : "s"}`];
   if (working) parts.push(`${working} working`);
   if (resting) parts.push(`${resting} resting`);
+  if (failed) parts.push(`${failed} failed`);
   censusEl.innerHTML = parts.join('<span class="dot"> · </span>') +
     (knockers ? `<span class="dot"> · </span><span class="attn">${knockers} at your door</span>` : "");
   const newest = Math.max(0, ...villagers.map(v => v.lastTs));
@@ -1167,6 +1172,7 @@ function renderPanel(now) {
   const at = placeLabel(v);
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
+    v.state === "failed"   ? "a tool failed" :
     v.state === "working"  ? (v.doing || "working") + at :
     v.state === "stale"    ? "no signal for a while" + at : "resting";
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";

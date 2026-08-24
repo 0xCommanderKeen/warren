@@ -1,5 +1,5 @@
-{"v":0,"ts":"2026-08-24T12:00:00.000Z","agent_id":"alpha","project":"burrow","cwd":"/work/burrow","type":"task_started","payload":{"prompt":"build it"}}
-{"v":0,"ts":"2026-08-24T12:01:00.000Z","agent_id":"beta","project":"life","cwd":"/work/life","type":"needs_human","payload":{"message":"choose"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T12:00:00.000Z","agent_id":"alpha","project":"burrow","cwd":"/work/burrow","type":"task_started","payload":{"prompt":"build it"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T12:01:00.000Z","agent_id":"beta","project":"life","cwd":"/work/life","type":"needs_human","payload":{"message":"choose"}}
 not json
-{"v":0,"ts":"2026-08-24T12:02:00.000Z","agent_id":"alpha","project":"burrow","cwd":"/work/burrow","type":"tool_called","payload":{"tool":"Edit","detail":"serve.py"}}
-{"v":0,"ts":"2026-08-24T12:03:00.000Z","agent_id":"gone","project":"old","cwd":"/work/old","type":"session_ended","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-24T12:02:00.000Z","agent_id":"alpha","project":"burrow","cwd":"/work/burrow","type":"tool_called","payload":{"tool":"Edit","detail":"serve.py"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T12:03:00.000Z","agent_id":"gone","project":"old","cwd":"/work/old","type":"session_ended","payload":{}}

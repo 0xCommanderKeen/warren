@@ -16,7 +16,8 @@
    * the raw projected place name: a name the map has no building for resolves
    * to home, and that villager's house must light up like anyone else's. */
   function atHome(state, dest) {
-    return dest.kind === "home" && (state === "working" || state === "resting");
+    return dest.kind === "home" &&
+      (state === "working" || state === "resting" || state === "failed");
   }
 
   function startJourney(viz, arrivesHome) {

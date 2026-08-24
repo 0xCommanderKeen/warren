@@ -89,14 +89,12 @@ process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
         self.assertEqual({event["source"] for event in events}, {"codex"})
         self.assertEqual(
             [event["type"] for event in root],
-            ["task_started", "tool_called", "heartbeat", "heartbeat",
+            ["task_started", "tool_called", "needs_human", "heartbeat",
              "tool_called", "artifact_produced", "artifact_produced",
              "heartbeat", "heartbeat"],
         )
         self.assertEqual(root[2]["payload"], {
-            "phase": "approval_requested",
-            "tool": "Bash",
-            "detail": "Run the repository test suite outside the sandbox",
+            "message": "Run the repository test suite outside the sandbox",
         })
         self.assertEqual([event["payload"]["artifact"] for event in root
                           if event["type"] == "artifact_produced"],
@@ -224,16 +222,15 @@ class DefensiveCodexInputTest(unittest.TestCase):
             "stop_hook_active": False,
         })])
 
-    def test_permission_request_is_bounded_working_context_not_human_blockage(self):
+    def test_permission_request_is_a_bounded_genuine_human_approval(self):
         event = emit.codex_events({
             "hook_event_name": "PermissionRequest",
             "tool_name": "Bash" + "x" * 200,
             "tool_input": {"description": "approval reason " + "y" * 200},
         })
-        self.assertEqual(event[0][0], "heartbeat")
-        self.assertEqual(event[0][1]["phase"], "approval_requested")
-        self.assertEqual(event[0][1]["tool"], "Bash" + "x" * 116)
-        self.assertEqual(event[0][1]["detail"], "approval reason " + "y" * 104)
+        self.assertEqual(event, [("needs_human", {
+            "message": "approval reason " + "y" * 184,
+        })])
 
     def test_successful_apply_patch_reports_every_applied_path(self):
         self.assertEqual(emit.codex_events({
@@ -285,7 +282,38 @@ class DefensiveCodexInputTest(unittest.TestCase):
             "tool_response": "Done!",
         }), [("heartbeat", {"tool": "apply_patch"})])
 
-    def test_failed_apply_patch_reports_only_working(self):
+    def test_supported_file_and_notebook_edits_report_artifacts(self):
+        for tool, key, path in (
+            ("Write", "file_path", "notes.md"),
+            ("NotebookEdit", "notebook_path", "analysis.ipynb"),
+            ("edit_file", "file_path", "src/main.py"),
+        ):
+            self.assertEqual(emit.codex_events({
+                "hook_event_name": "PostToolUse", "tool_name": tool,
+                "tool_input": {key: path}, "tool_response": {"success": True},
+            }), [("artifact_produced", {"artifact": path})], tool)
+
+    def test_direct_edits_need_explicit_success_before_claiming_an_artifact(self):
+        for response in (None, {}, {"success": None}, "completed"):
+            hook = {
+                "hook_event_name": "PostToolUse", "tool_name": "write_file",
+                "tool_input": {"file_path": "notes.md"},
+            }
+            if response is not None:
+                hook["tool_response"] = response
+            self.assertEqual(emit.codex_events(hook), [
+                ("heartbeat", {"tool": "write_file"}),
+            ], response)
+
+    def test_failed_direct_edit_reports_failure_without_claiming_an_artifact(self):
+        self.assertEqual(emit.codex_events({
+            "hook_event_name": "PostToolUse", "tool_name": "NotebookEdit",
+            "tool_input": {"notebook_path": "analysis.ipynb"},
+            "tool_response": {"success": False, "error": "cell write failed"},
+        }), [("tool_failed", {"tool": "NotebookEdit",
+                                "error": "cell write failed"})])
+
+    def test_failed_apply_patch_reports_explicit_failure(self):
         self.assertEqual(emit.codex_events({
             "hook_event_name": "PostToolUse",
             "tool_name": "apply_patch",
@@ -295,7 +323,8 @@ class DefensiveCodexInputTest(unittest.TestCase):
                 "*** End Patch"
             )},
             "tool_response": "Failed to find expected lines",
-        }), [("heartbeat", {"tool": "apply_patch"})])
+        }), [("tool_failed", {"tool": "apply_patch",
+                                "error": "Failed to find expected lines"})])
 
     def test_partially_failed_apply_patch_claims_no_paths(self):
         self.assertEqual(emit.codex_events({
@@ -308,7 +337,8 @@ class DefensiveCodexInputTest(unittest.TestCase):
                 "*** End Patch"
             )},
             "tool_response": "Done!\nFailed to update tests/new.py",
-        }), [("heartbeat", {"tool": "apply_patch"})])
+        }), [("tool_failed", {"tool": "apply_patch",
+                                "error": "Done!\nFailed to update tests/new.py"})])
 
     def test_ambiguous_apply_patch_response_claims_no_paths(self):
         for response in (None, {}, "Patch command completed", {"output": "Done!"},
@@ -324,9 +354,10 @@ class DefensiveCodexInputTest(unittest.TestCase):
             }
             if response is not None:
                 hook["tool_response"] = response
-            self.assertEqual(emit.codex_events(hook), [
-                ("heartbeat", {"tool": "apply_patch"}),
-            ], response)
+            expected = (("tool_failed", {"tool": "apply_patch", "error": "write failed"})
+                        if isinstance(response, dict) and response.get("error")
+                        else ("heartbeat", {"tool": "apply_patch"}))
+            self.assertEqual(emit.codex_events(hook), [expected], response)
 
     def test_subagent_without_an_identifier_invents_no_agent(self):
         self.assertEqual(emit.codex_events({

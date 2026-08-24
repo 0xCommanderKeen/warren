@@ -1,0 +1,15 @@
+[
+  {"name":"valid idle","valid":true,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","cwd":"/tmp","type":"idle","payload":{}}},
+  {"name":"valid failed tool","valid":true,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"codex","agent_id":"codex:one","project":"burrow","type":"tool_failed","payload":{"tool":"Bash","error":"exit code 1"}}},
+  {"name":"missing version","valid":false,"event":{"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"boolean version","valid":false,"event":{"v":false,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"unsupported version","valid":false,"event":{"v":1,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"unsupported type","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"thinking","payload":{}}},
+  {"name":"invalid timestamp shape","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"impossible timestamp","valid":false,"event":{"v":0,"ts":"2026-02-30T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"year zero timestamp","valid":false,"error":"invalid timestamp","event":{"v":0,"ts":"0000-01-01T00:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"array payload","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"idle","payload":[]}},
+  {"name":"missing source","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","agent_id":"test:one","project":"burrow","type":"idle","payload":{}}},
+  {"name":"missing tool","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"tool_called","payload":{}}},
+  {"name":"non-string artifact","valid":false,"event":{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"test:one","project":"burrow","type":"artifact_produced","payload":{"artifact":42}}}
+]

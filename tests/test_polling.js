@@ -14,7 +14,7 @@ let eventRequests = 0;
 const eventResponse = cursor => ({
   ok: true,
   headers: { get: name => name === "X-Burrow-Cursor" ? cursor : null },
-  text: async () => '{"type":"idle","agent_id":"one"}\n',
+  text: async () => '{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"test","agent_id":"one","project":"burrow","type":"idle","payload":{}}\n',
 });
 
 const context = {
