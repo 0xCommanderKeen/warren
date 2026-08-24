@@ -56,6 +56,7 @@ before folding in that response.
 | `task_started`      | the agent picks up work                    | `prompt` (truncated ≤140)  |
 | `tool_called`       | the agent uses a tool                      | `tool`, `detail` (≤120)    |
 | `artifact_produced` | the agent writes/edits a file or output    | `artifact` (path)          |
+| `heartbeat`         | a tool the agent was running finished      | `tool`                     |
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
@@ -66,6 +67,11 @@ The villager's state is decided by its **latest** event:
 
 - `task_started`, `tool_called`, `artifact_produced` → **working** (the payload is what
   it is doing right now)
+- `heartbeat` → **working**, but it is *liveness only*: it refreshes the clock and
+  never becomes the action shown. The villager keeps doing whatever the last
+  `task_started` / `tool_called` / `artifact_produced` said, and heartbeats stay out
+  of the villager's event log so a long build doesn't bury the real actions. (If the
+  only signal in view is a heartbeat, the villager is simply "working".)
 - `needs_human` → **at your door**
 - `idle` → **resting**
 - `session_ended` → removed from the village
@@ -76,6 +82,17 @@ The villager's state is decided by its **latest** event:
 These rules have exactly one implementation: `reduce()` in `viewer/projection.js`,
 loaded by the viewer and exercised by `tests/projection.test.js` (`node --test`,
 see the README).
+
+### Why `heartbeat` and not another `tool_called`
+
+`PreToolUse` says a tool *started*; a 40-minute build then emits nothing until it ends,
+so a busy agent and a wedged one look identical and both fade to stale. `PostToolUse`
+gives us a second true fact — *that tool finished* — so the emitter sends it for every
+tool. It is deliberately **not** reused `tool_called` semantics: re-emitting
+`tool_called` on completion would claim a tool was invoked when none was, doubling
+every tool in the log and lying about what the agent is doing right now. A separate
+type keeps the stale rule (last signal wins) working unchanged while letting the
+projection ignore heartbeats when deciding what to *show*.
 
 ## The one rule, restated for implementers
 
@@ -90,10 +107,16 @@ event supports. Filler is forbidden on both sides of the log.
 |-------------------------------------------|---------------------|
 | `UserPromptSubmit`                        | `task_started`      |
 | `PreToolUse` (any tool)                   | `tool_called`       |
-| `PostToolUse` (`Write`/`Edit`/`NotebookEdit`) | `artifact_produced` |
+| `PostToolUse` (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, with a `file_path`) | `artifact_produced` |
+| `PostToolUse` (every other tool)          | `heartbeat`         |
 | `Notification`                            | `needs_human`       |
 | `Stop`                                    | `idle`              |
 | `SessionEnd`                              | `session_ended`     |
+
+Every `PostToolUse` now produces exactly one event, so any tool run — however long —
+keeps the villager alive. Only the write-like tools claim an artifact: a finished
+`Read` has a `file_path` too, and reporting that as `artifact_produced` ("crafted
+README.md") would be a lie; it is a heartbeat.
 
 The emitter must never break the agent: it swallows all errors and always exits 0.
 

@@ -26,6 +26,9 @@ BREAKER = os.path.join(LOG_DIR, ".post-failed")
 BREAKER_SECONDS = 60
 
 
+ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def tool_detail(tool_input):
     for key in ("file_path", "notebook_path", "path", "pattern", "description",
                 "command", "url", "query", "skill"):
@@ -47,10 +50,13 @@ def to_event(hook):
             payload["detail"] = detail
         return "tool_called", payload
     if name == "PostToolUse":
+        # A tool finished. Write-like tools produced something; every other tool
+        # only proves the agent is still alive and working -> heartbeat.
+        tool = hook.get("tool_name") or "?"
         artifact = (hook.get("tool_input") or {}).get("file_path")
-        if not artifact:
-            return None, None
-        return "artifact_produced", {"artifact": str(artifact)[:200]}
+        if artifact and tool in ARTIFACT_TOOLS:
+            return "artifact_produced", {"artifact": str(artifact)[:200]}
+        return "heartbeat", {"tool": tool}
     if name == "Notification":
         return "needs_human", {"message": str(hook.get("message") or "")[:200]}
     if name == "Stop":

@@ -49,6 +49,7 @@ function describe(ev) {
     case "tool_called":       return (VERBS[p.tool] || "using " + p.tool) +
                                      (p.detail ? " — " + p.detail : "");
     case "artifact_produced": return "crafted " + (p.artifact || "something");
+    case "heartbeat":         return "finished " + (p.tool || "a tool");
     case "needs_human":       return "needs you: " + (p.message || "(no message)");
     case "idle":              return "finished, resting";
     case "session_ended":     return "went home";
@@ -65,14 +66,17 @@ function doingLabel(ev) {
   }
 }
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
-                             "needs_human","idle","session_ended"]);
+                             "heartbeat","needs_human","idle","session_ended"]);
+const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 function foldEvents(agents, lines) {
   for (const line of lines) {
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
     if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
-    if (!a) { a = { id: ev.agent_id, events: [] }; agents.set(ev.agent_id, a); }
+    if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
+    a.lastAny = ev;
+    if (ev.type === "heartbeat") continue;
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
   }
@@ -91,7 +95,7 @@ function reduce(input, now, souls) {
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
   for (const a of sorted) {
-    const last = a.events[a.events.length - 1];
+    const last = a.lastAny || a.events[a.events.length - 1];
     const lastTs = Date.parse(last.ts) || 0;
     if (last.type === "session_ended") continue;
     if (now - lastTs > DROP_MS) continue;
@@ -99,6 +103,8 @@ function reduce(input, now, souls) {
       last.type === "needs_human" ? "knocking" :
       last.type === "idle"        ? "resting"  : "working";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
+    const prev = a.events[a.events.length - 1];
+    const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
     const h = hashCode(a.id);
     const project = last.project || "unknown";
     // soul files pin identity: exact agent_id beats project match
@@ -128,8 +134,8 @@ function reduce(input, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
-      doing: state === "working" ? doingLabel(last) : "",
-      lastLine: describe(last),
+      doing: state === "working" ? doingLabel(shown) : "",
+      lastLine: describe(shown),
     });
   }
   return out;
@@ -138,7 +144,7 @@ function reduce(input, now, souls) {
 // node (tests) picks the module up here; the browser never sees `module`.
 if (typeof module === "object" && module.exports) {
   module.exports = {
-    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES,
+    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES, ACTION_TYPES,
     hashCode, esc, ago, describe, doingLabel, foldEvents, reduce,
   };
 }

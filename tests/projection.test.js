@@ -51,15 +51,18 @@ describe("event filtering", () => {
     assert.deepEqual(ids(village), ["claude-code:a-worker"]);
     const v = village[0];
     assert.deepEqual(v.events.map(e => e.type), ["tool_called", "idle"]);
-    // "heartbeat" was newer than the tool_called but must not decide state
+    // The later idle signal decides state; heartbeat stays out of visible history.
     assert.equal(v.state, "resting");
   });
 
-  it("makes no villager out of unknown types alone", () => {
-    assert.deepEqual(reduce([
+  it("keeps a heartbeat-only villager alive but ignores unknown types", () => {
+    const projected = reduce([
       '{"ts":"2026-08-24T11:59:00.000Z","agent_id":"x:1","type":"heartbeat","payload":{}}',
       '{"ts":"2026-08-24T11:59:01.000Z","agent_id":"x:1","type":"agent_thought","payload":{}}',
-    ], NOW, []), []);
+    ], NOW, []);
+    assert.equal(projected.length, 1);
+    assert.equal(projected[0].state, "working");
+    assert.deepEqual(projected[0].events, []);
   });
 
   it("skips unparseable lines, nulls and events with no agent_id", () => {
@@ -328,7 +331,7 @@ describe("presentation helpers shared with the viewer", () => {
     assert.equal(say("needs_human", {}), "needs you: (no message)");
     assert.equal(say("idle", {}), "finished, resting");
     assert.equal(say("session_ended", {}), "went home");
-    assert.equal(say("heartbeat", {}), "heartbeat");
+    assert.equal(say("heartbeat", {}), "finished a tool");
     assert.equal(doingLabel({ type: "idle", payload: {} }), "");
   });
 
