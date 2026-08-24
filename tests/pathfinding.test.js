@@ -10,7 +10,7 @@ const start = html.indexOf("const T = 16");
 const end = html.indexOf("/* ————— DOM chrome", start);
 const source = html.slice(start, end) + "\nthis.exports = { Village };";
 const context = {
-  Phaser: { Scene: class {} }, console,
+  Phaser: { Scene: class {} }, console, PLACES: {},
   hashCode(s) {
     let h = 0;
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;

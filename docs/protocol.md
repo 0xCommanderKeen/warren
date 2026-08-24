@@ -118,6 +118,29 @@ take an advisory lock on the log shared with the bundled emitter. Rotation
 archives a snapshot and rewrites the live file in place, retaining its inode so
 even an already-open append descriptor continues writing to the live log.
 
+## Where the work happens (places)
+
+The same latest event also decides *where* the villager stands. `tool_called` is
+classified into a verb (`WebSearch`/`WebFetch` → researching, `Read` → reading, …)
+and some verbs belong to a shared building rather than the villager's own house:
+
+| verb          | place         |
+|---------------|---------------|
+| researching   | the library   |
+
+Rules that keep this honest:
+
+- Only the latest event decides. Research → the villager walks to the library;
+  any other work → it walks home. Nothing else moves it.
+- Two villagers at the same place take **distinct, stable slots**. A slot is held
+  until its villager leaves, so an arrival or a departure never nudges anyone else
+  — that would be movement no event asked for.
+- A doorway is lit only while somebody is genuinely working there; a villager at
+  the library leaves its own house dark.
+- Losing signal is not travel: a **stale** villager stays where it was, faded.
+
+`fixtures/library-walk.jsonl` is the worked example — see `fixtures/README.md`.
+
 ## The one rule, restated for implementers
 
 Never emit an event for something that did not happen, and never render state that no
