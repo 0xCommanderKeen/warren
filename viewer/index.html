@@ -107,6 +107,9 @@
   .evt .when { color: var(--ink-dim); font-size: 15px; }
   .evt .what { word-break: break-word; }
   .evt.t-needs_human .what { color: var(--alert); }
+  .artifact-empty { color: var(--ink-dim); font-size: 19px; margin-top: 18px; }
+  .artifact-path { color: var(--ink); overflow-wrap: anywhere; }
+  .artifact-by { color: var(--ink-dim); font-size: 15px; }
 
   footer {
     position: absolute; bottom: 8px; left: 24px; z-index: 20; pointer-events: none;
@@ -224,6 +227,7 @@ const SKY_DEPTH=4000, LIGHT_DEPTH=4001;
 const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
+const NOTICE_BOARD_ID = "notice-board";
 
 // standing spots in front of a shared door: first arrival takes the middle, the
 // rest fan out in a staggered arc so their name chips stay readable. Fixed, so
@@ -349,6 +353,7 @@ class Village extends Phaser.Scene {
 
     this.input.on("gameobjectdown", (_p, obj) => {
       if (obj.getData("agent")) openPanel(obj.getData("agent"));
+      if (obj.getData("noticeBoard")) openPanel(NOTICE_BOARD_ID);
     });
     this.events.on("update", () => {
       for (const v of this.viz.values()) {
@@ -570,6 +575,7 @@ class Village extends Phaser.Scene {
     this.chips = [];
     this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
       .el.classList.add("you");
+    this.buildNoticeBoard();
     // shared locations: building, name label, and a doorway lit only while
     // somebody is genuinely there
     this.placeGlow = {};
@@ -582,6 +588,25 @@ class Village extends Phaser.Scene {
       this.makeChip(null, p.accent, d.x, p.ty * T - 2, p.label)
         .el.classList.add("place");
     }
+  }
+
+  buildNoticeBoard() {
+    // A code-drawn prop keeps the board distinct from houses while using the
+    // same crisp map label and pointer interaction as villagers.
+    const x = 18 * T, y = 10 * T;
+    this.block(18, 9); this.block(19, 9);
+    const board = this.add.container(x, y).setDepth(y + T);
+    const sign = this.add.rectangle(T, -T / 2, 30, 20, 0x7a4e2e)
+      .setStrokeStyle(2, 0xd2a15c);
+    const paper = this.add.rectangle(T, -T / 2, 19, 12, 0xe8dfc8);
+    const lines = [0, 4, 8].map(dx => this.add.rectangle(6 + dx, -T / 2, 2, 7, 0x6f6758));
+    const posts = [this.add.rectangle(4, 7, 4, 18, 0x56351f),
+                   this.add.rectangle(28, 7, 4, 18, 0x56351f)];
+    board.add([sign, paper, ...lines, ...posts]);
+    board.setSize(32, 34).setInteractive({ useHandCursor: true });
+    board.setData("noticeBoard", true);
+    this.makeChip(NOTICE_BOARD_ID, "#d2a15c", x + T, y - 22, "notice board")
+      .el.classList.add("place");
   }
 
   makeChip(id, accent, wx, wy, name, sub) {
@@ -1040,6 +1065,20 @@ function renderSky(sky) {
 
 function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
+  if (selectedId === NOTICE_BOARD_ID) {
+    const named = nameArtifacts(artifacts, villagers, souls);
+    panelBody.innerHTML = `
+      <h2><span style="color:#d2a15c">▪</span> What the fleet made</h2>
+      <div class="meta">recent artifacts across the village</div>
+      ${named.length ? named.map(a => `
+        <div class="evt artifact">
+          <div class="artifact-path">${esc(a.artifact)}</div>
+          <div class="artifact-by">${esc(a.name)} · ${esc(a.project)} · ${ago(a.ts, now)}</div>
+        </div>`).join("") :
+        `<div class="artifact-empty">Nothing has been produced in the recent event log.</div>`}`;
+    panelEl.classList.add("open");
+    return;
+  }
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
   const at = v.place ? " · at " + PLACES[v.place].label : "";
@@ -1074,6 +1113,7 @@ panelEl.querySelector(".close").addEventListener("click", closePanel);
 let souls = [];
 let eventCursor = 0;
 let agents = new Map();
+let artifacts = [];
 let pollInFlight = false;
 async function poll() {
   if (pollInFlight) return;
@@ -1086,10 +1126,12 @@ async function poll() {
     if (!evRes.ok) throw new Error("events request failed");
     const text = await evRes.text();
     const reset = evRes.headers.get("X-Burrow-Reset") === "1";
-    if (reset) agents = new Map();
+    if (reset) { agents = new Map(); artifacts = []; }
     const lines = text.split("\n").filter(Boolean);
     // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
-    foldEvents(agents, eventCursor === 0 || reset ? lines.slice(-4000) : lines);
+    const incoming = eventCursor === 0 || reset ? lines.slice(-4000) : lines;
+    foldEvents(agents, incoming);
+    foldArtifacts(artifacts, incoming);
     eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     const now = Date.now();

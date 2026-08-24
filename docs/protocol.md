@@ -97,6 +97,10 @@ before folding in that response.
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
 
+The village notice board is a bounded cross-agent view of this stream. It keeps
+the 30 most recent valid `artifact_produced` events from the viewer's live log
+window, newest first, including artifacts from agents who have since left.
+
 ## Projection rules (v0)
 
 The villager's state is decided by its **latest** event:

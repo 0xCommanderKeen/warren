@@ -20,6 +20,7 @@ const CHARS = ["Villager","Villager2","Villager3","Villager4","Villager5",
 const STALE_MS = 30 * 60 * 1000;
 const DROP_MS  = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
+const MAX_ARTIFACTS = 30;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -80,6 +81,40 @@ function foldEvents(agents, lines) {
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
   }
+}
+
+/* Keep the notice board bounded while events arrive. Sorting each small batch
+ * also makes the board truthful when two emitters flush out of order. */
+function foldArtifacts(artifacts, lines) {
+  for (const line of lines) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (!ev || ev.type !== "artifact_produced" || !ev.agent_id) continue;
+    const artifact = ev.payload && ev.payload.artifact;
+    if (!artifact) continue;
+    artifacts.push({
+      artifact: String(artifact), agent_id: ev.agent_id,
+      project: ev.project || "unknown", ts: Date.parse(ev.ts) || 0,
+    });
+  }
+  artifacts.sort((a, b) => b.ts - a.ts);
+  if (artifacts.length > MAX_ARTIFACTS) artifacts.length = MAX_ARTIFACTS;
+  return artifacts;
+}
+
+function nameArtifacts(artifacts, villagers, souls) {
+  const names = new Map((villagers || []).map(v => [v.id, v.name]));
+  const soulByAgent = new Map(), soulByProject = new Map();
+  for (const soul of souls || []) {
+    if (!soul || !soul.meta || !soul.meta.name) continue;
+    if (soul.meta.agent_id) soulByAgent.set(soul.meta.agent_id, soul.meta.name);
+    if (soul.meta.project) soulByProject.set(soul.meta.project, soul.meta.name);
+  }
+  return artifacts.map(a => ({
+    ...a,
+    name: names.get(a.agent_id) || soulByAgent.get(a.agent_id) ||
+      soulByProject.get(a.project) || NAMES[hashCode(a.agent_id) % NAMES.length],
+  }));
 }
 function reduce(input, now, souls) {
   const soulByAgent = new Map(), soulByProject = new Map();
@@ -147,7 +182,8 @@ function reduce(input, now, souls) {
 // node (tests) picks the module up here; the browser never sees `module`.
 if (typeof module === "object" && module.exports) {
   module.exports = {
-    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES, ACTION_TYPES,
-    hashCode, esc, ago, describe, doingLabel, foldEvents, reduce,
+    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
+    VERBS, EVENT_TYPES, ACTION_TYPES, hashCode, esc, ago, describe, doingLabel,
+    foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }
