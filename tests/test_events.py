@@ -96,6 +96,34 @@ class EventsEndpointTest(unittest.TestCase):
         status, _, _ = self.get_events(-1)
         self.assertEqual(status, 400)
 
+    def test_sse_pushes_new_events_and_resumes_from_last_event_id(self):
+        first = {"type": "idle", "agent_id": "one"}
+        second = {"type": "tool_called", "agent_id": "one"}
+        self.append(first)
+
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream")
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Content-Type"],
+                         "text/event-stream; charset=utf-8")
+        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+        event_id = response.readline().decode().removeprefix("id: ").strip()
+        self.assertEqual(json.loads(response.readline().decode().removeprefix("data: ")),
+                         first)
+        self.assertEqual(response.readline(), b"\n")
+        conn.close()
+
+        self.append(second)
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream", headers={"Last-Event-ID": event_id})
+        response = conn.getresponse()
+        resumed_id = response.readline().decode().removeprefix("id: ").strip()
+        self.assertNotEqual(resumed_id, event_id)
+        self.assertEqual(json.loads(response.readline().decode().removeprefix("data: ")),
+                         second)
+        conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

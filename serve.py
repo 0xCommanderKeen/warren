@@ -430,6 +430,8 @@ def append_event(event):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def _authorized(self):
         if not TOKEN:
             return True
@@ -491,6 +493,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 headers["X-Burrow-Reset"] = "1"
             self._send(200, data, "application/x-ndjson", headers)
             return
+        if path == "/events/stream":
+            self._stream_events(parsed)
+            return
         # everything else is a static file under viewer/
         if path in ("/", "/index.html"):
             path = "/index.html"
@@ -537,6 +542,84 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(200, f.read(), ctype)
         except OSError:
             self._send(404, b"missing: " + path.encode(), "text/plain")
+
+    @staticmethod
+    def _parse_cursor(raw):
+        parts = raw.split(":")
+        if len(parts) == 3:
+            identity, offset = (int(parts[0]), int(parts[1])), int(parts[2])
+        elif len(parts) == 1:
+            identity, offset = None, int(raw)
+        else:
+            raise ValueError
+        if offset < 0:
+            raise ValueError
+        return identity, offset
+
+    def _stream_events(self, parsed):
+        """Tail complete JSONL records as SSE messages.
+
+        Each message id is the same inode-aware byte cursor used by GET /events.
+        That makes Last-Event-ID and the polling fallback interchangeable.
+        """
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        raw_cursor = (self.headers.get("Last-Event-ID")
+                      or params.get("since", ["0"])[0])
+        try:
+            identity, offset = self._parse_cursor(raw_cursor)
+        except (TypeError, ValueError):
+            self._send(400, b"invalid event cursor", "text/plain")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Connection", "keep-alive")
+        # nginx honours this even when proxy_buffering is enabled globally.
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        last_keepalive = time.monotonic()
+        try:
+            while True:
+                messages, identity, offset, reset = self._stream_chunk(identity, offset)
+                if reset:
+                    self.wfile.write(b"event: reset\ndata: {}\n\n")
+                for event_id, line in messages:
+                    self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
+                    self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
+                now = time.monotonic()
+                if messages or reset or now - last_keepalive >= 15:
+                    if not messages and not reset:
+                        self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
+                    last_keepalive = now
+                time.sleep(0.1)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
+
+    @staticmethod
+    def _stream_chunk(cursor_identity, offset):
+        messages, reset = [], False
+        with LOG_LOCK:
+            maybe_rotate()
+            try:
+                with open(EVENTS, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    identity = (stat.st_dev, stat.st_ino)
+                    if offset > stat.st_size or (
+                            cursor_identity is not None and cursor_identity != identity):
+                        offset, reset = 0, True
+                    stream.seek(offset)
+                    chunk = stream.read()
+                    end = chunk.rfind(b"\n") + 1
+                    for line in chunk[:end].splitlines(keepends=True):
+                        offset += len(line)
+                        event_id = f"{identity[0]}:{identity[1]}:{offset}"
+                        messages.append((event_id, line))
+                    return messages, identity, offset, reset
+            except FileNotFoundError:
+                return messages, None, 0, offset > 0
 
     def _send(self, code, data, ctype, headers=None):
         self.send_response(code)
