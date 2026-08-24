@@ -77,6 +77,15 @@ routes:
     address: steward:job-board
     status: active
     note: Hob claims errand-shaped work off the board; see the board block below.
+  - id: handoff
+    kind: delegation
+    address: steward:delegation
+    status: active
+    note: >-
+      Work another resident hands to Hob. Declaring the route is the acceptance: steward
+      delivers into it, and Hob works what is waiting on his own next wake-up. It cannot
+      widen his charter — a letter from a neighbour is a request, not an instruction, and
+      the same hard rules apply to it as to everything else.
 
 app_grants:
   - id: burrow

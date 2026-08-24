@@ -24,6 +24,7 @@ burrow's log.
 | run a routine now | `routine_started`, then `routine_finished` / `routine_failed` |
 | post a job | `task_posted` (and later `task_claimed` / `task_done`) |
 | decide an approval | `needs_human_resolved`, then the resident's next action |
+| delegate to a resident | `task_delegated`, then `task_claimed` / `task_done` |
 | create a resident | nothing — it is a file for review, not a deployment |
 
 The UI must treat the event stream as the only source of truth. No optimistic state:
@@ -113,9 +114,11 @@ Asking for a run now is not a way around a budget the same human set.
 dispatch is pull-based, and a resident claims work on its own next wake-up.
 
 `GET /jobs` lists the board, oldest first, with `?status=open|claimed|done|failed` to
-narrow it. Anything else is a `422` with `unknown_status` rather than a silently ignored
-parameter. Each job carries its `claimant`, `lease_expires_at`, `outcome`, `reason`, and
-`artifacts` as they become true.
+narrow it. Work delegated to one named resident lives in the same table and shows up here
+with its `assignee` set, but it is never on the open board: nobody else can claim it.
+Anything else is a `422` with `unknown_status` rather than a silently ignored parameter.
+Each job carries its `claimant`, `lease_expires_at`, `outcome`, `reason`, and `artifacts`
+as they become true.
 
 The lifecycle, all four transitions visible in burrow's log and reconstructible from
 events alone:
@@ -133,6 +136,54 @@ what it declared it would, and only tasks whose `required_skills` are a subset o
 skills it holds — its *effective* set, the library's defaults plus its own grants
 ([docs/manifest.md](manifest.md#the-skills-library)), so `["research"]` is claimable by
 any board-enabled resident.
+
+### `POST /delegate` · `GET /residents/{id}/inbox` · `GET /tasks/{id}/lineage`
+
+Hand work from one resident to another. The human path into delegation — a session uses
+the `<delegate>` block or `steward delegate`, neither of which holds this token.
+
+```json
+{"from": "burrow-builder", "to": "life-agent", "route": "handoff",
+ "title": "Check the errand list", "detail": "…", "parent_task_id": "…"}
+```
+
+`202` with a `task_id`, the `depth` it landed at, and the `origin` the chain rolls up to.
+The item is delivered into the receiver's inbox and announced as `task_delegated` naming
+both ends; **no resident is prompted**, and the receiver works it on its own next wake-up.
+
+`from` names the resident handing the work over, and its manifest is checked exactly as it
+would be for a block — a person must not be able to make a resident do what its own
+declaration forbids. Omit `from` and the *person* is the sender: the token is the
+permission, and the receiver's declared route is the whole of the agreement.
+
+Steward is the sole arbiter, and a refusal writes nothing and emits nothing:
+
+| status | error | meaning |
+|---|---|---|
+| 404 | `unknown_resident` | no such sender in the residents tree |
+| 404 | `unknown_recipient` | no valid resident by that id (the near miss is named) |
+| 404 | `unknown_parent` | the named `parent_task_id` is a task steward has never seen |
+| 409 | `not_permitted` | the sender's manifest has no `delegation: {send: true}` |
+| 409 | `recipient_not_allowed` | the sender's `to:` list does not name this receiver |
+| 409 | `self_delegation` | a resident cannot hand work to itself |
+| 409 | `unknown_route` | the receiver declares no route by that id |
+| 409 | `route_not_delegable` | the route exists but is not of kind `delegation` |
+| 409 | `route_inactive` | the route is `pending` or `disabled` |
+| 409 | `max_depth_exceeded` | the chain is already as long as steward allows |
+| 409 | `cycle` | the receiver is already somewhere in this task's lineage |
+
+`GET /residents/{id}/inbox` lists what is waiting for a resident — open by default,
+`?status=open|claimed|done|failed|all` to narrow, anything else a `422`. Each item carries
+`delegated_by`, `route`, `depth`, `origin`, and `parent_task_id`, and `routes` names the
+doors that resident declares.
+
+`GET /tasks/{task_id}/lineage` is the audit query: the whole chain, root first, with the
+origin it attributes to. `404` for a task steward has never seen.
+
+The lifecycle after delivery is the board's, unchanged: `task_claimed` on pickup, then
+`task_done`/`task_failed` — all three carrying `parent_task_id`. The declarations both ends
+must make, the block grammar, and the guardrails are in
+[docs/delegation.md](delegation.md).
 
 ### `GET /approvals` · `GET /approvals/{request_id}` · `POST /approvals/{request_id}`
 
@@ -300,7 +351,7 @@ by committing a manifest. There is no HTTP path that writes either.
 
 | table | holds |
 |---|---|
-| `jobs` | the board: task, required skills, status, claimant, lease, artifacts |
+| `jobs` | the board *and* the inboxes: task, status, claimant, lease, artifacts — plus `assignee`, `delegated_by`, `route`, `parent_task_id`, `origin`, `depth` when delegated |
 | `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
 | `run_ledger` | one row per finished session: tokens, money, seconds, and whether the brain reported any of it |

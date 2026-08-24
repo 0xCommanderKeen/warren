@@ -40,13 +40,15 @@ flags ``journal: close_of_day`` gets the instruction to write the next one. Afte
 writes an entry itself only from an explicit ``<journal>`` block in the session's output,
 and never over a file the session wrote for itself.
 
-**Everything else that happens around a wake-up hangs off one hook.** The job board and
-structured approvals reach the scheduler through the structural :class:`WakeHooks`
-protocol and nothing else: decisions in before a prompt is assembled, escalations out
-after a session ends, board dispatch after the due routines have fired. A steward with
-neither fires routines exactly as it did before either existed, and a rehearsal touches
-no database — a dry run that consumed a real decision would silence the session that
-needed it, and a dry run that materialized skills would write into a real workdir.
+**Everything else that happens around a wake-up hangs off one hook.** The job board,
+structured approvals, and delegation reach the scheduler through the structural
+:class:`WakeHooks` protocol and nothing else: decisions in before a prompt is assembled,
+escalations and handoffs out after a session ends, dispatch after the due routines have
+fired. Budgets reach it the same way, through :class:`RunGuard`. A steward with no hooks
+and no guard fires routines exactly as it did before any of them existed — unbounded,
+which is what it was — and a rehearsal touches no database: a dry run that consumed a
+real decision would silence the session that needed it, and a dry run that materialized
+skills would write into a real workdir.
 """
 
 import json
@@ -155,7 +157,13 @@ class WakeHooks(Protocol):
         ...
 
     def harvest(self, manifest: ResidentManifest, output: str) -> object:
-        """Turn any approval a finished session asked for into a real request."""
+        """Turn what a finished session wrote into requests and handoffs.
+
+        Approvals it raised (:mod:`steward.approvals`) and work it handed to another
+        resident (:mod:`steward.delegation`) both leave a session the same way — as a
+        block in its final output — so both are read here rather than through a second
+        question the scheduler would have to learn to ask.
+        """
         ...
 
     def dispatch(self, now: datetime) -> object:

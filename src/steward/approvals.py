@@ -306,7 +306,9 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     *session* never gets to write its own knock — :func:`human_message` derives that from
     the action, so the message can never disagree with what the decision is recorded
     against — but steward raising a request on a resident's behalf knows something the
-    action name cannot carry, such as the number that tripped a budget.
+    action name cannot carry: :mod:`steward.budgets` names the number that tripped a cap,
+    and :mod:`steward.delegation` says "steward refused this handoff" in words the action
+    slug has no room for.
     """
     moment = now or datetime.now(UTC)
     agent_id = manifest.agent_id or f"steward:{manifest.id}"
