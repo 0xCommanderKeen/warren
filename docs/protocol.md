@@ -94,6 +94,30 @@ every tool in the log and lying about what the agent is doing right now. A separ
 type keeps the stale rule (last signal wins) working unchanged while letting the
 projection ignore heartbeats when deciding what to *show*.
 
+## Log rotation
+
+The live log is a window, not an archive. When `events.jsonl` grows past
+`BURROW_MAX_LOG` bytes (default 5 MiB, `0` disables), the server rolls it into
+`<BURROW_ARCHIVE or archive/>/events-20260824T170430Z.jsonl` and starts the live
+file again from the **carry-forward tail** derived from the same latest 4,000
+lines the viewer reads: the last 80 visible events of every villager the
+projection would still draw — plus its latest liveness-only heartbeat when
+present, and skipping any whose latest signal is `session_ended` or older than
+the 12 h drop window — in their original order.
+
+That tail is exactly the input the rules above consume, so the village renders
+identically across a rotation: same states, same panel history. It also means the
+live log has a floor of (live agents × 80 events); a very busy fleet can sit
+above the threshold, and rotation then waits rather than copying the log next to
+itself.
+
+Rotation is checked after every accepted `POST /events` and before every
+`GET /events` (local mode has no POSTs — emitters append to the file themselves).
+All three paths take the same process lock, and file appends and rotation also
+take an advisory lock on the log shared with the bundled emitter. Rotation
+archives a snapshot and rewrites the live file in place, retaining its inode so
+even an already-open append descriptor continues writing to the live log.
+
 ## The one rule, restated for implementers
 
 Never emit an event for something that did not happen, and never render state that no
