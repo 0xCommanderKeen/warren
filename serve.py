@@ -13,11 +13,14 @@ Env:
     BURROW_NOTIFY_TIMEOUT  seconds to wait on the webhook (default 5)
 """
 import collections
+import datetime
+import email.header
 import http.server
 import json
 import os
 import sys
 import threading
+import time
 import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8737
@@ -35,6 +38,9 @@ try:
 except ValueError:
     NOTIFY_TIMEOUT = 5.0
 NOTIFY_MEMORY = 512      # how many knocks we remember, to not knock twice
+DROP_SECONDS = 12 * 60 * 60
+VIEWER_EVENT_TYPES = {"task_started", "tool_called", "artifact_produced",
+                      "needs_human", "idle", "session_ended"}
 
 
 CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
@@ -80,6 +86,7 @@ NAMES = ["Bramble", "Poppy", "Wren", "Sorrel", "Fern", "Alder", "Maple", "Rowan"
          "Thistle", "Clover", "Hazel", "Juniper", "Moss", "Reed", "Tansy", "Willow"]
 
 _notified = collections.OrderedDict()
+_notifying = set()
 _notified_lock = threading.Lock()
 
 
@@ -87,59 +94,151 @@ def js_hash(s):
     """The viewer's hashCode, verbatim, so a nameless villager is called the same
     thing in the notification as it is on screen."""
     h = 0
-    for ch in s:
-        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    encoded = s.encode("utf-16-be", errors="surrogatepass")
+    for index in range(0, len(encoded), 2):
+        code_unit = int.from_bytes(encoded[index:index + 2], "big")
+        h = (h * 31 + code_unit) & 0xFFFFFFFF
     if h >= 0x80000000:
         h -= 0x100000000
     return abs(h)
 
 
-def villager_name(event):
-    """Soul file name (agent_id beats project), else the stable hash-based name."""
-    agent_id = str(event.get("agent_id") or "")
-    project = str(event.get("project") or "")
-    by_project = None
+def villager_names(events):
+    """Resolve names for a fleet exactly as the viewer does.
+
+    Souls and fallback names are unique within the fleet, so resolving an event in
+    isolation can disagree with the name on screen.
+    """
+    latest = {}
+    for event in events:
+        if isinstance(event, dict) and event.get("agent_id"):
+            latest[str(event["agent_id"])] = event
+
+    soul_by_agent = {}
+    soul_by_project = {}
     for soul in read_villagers():
         meta = soul.get("meta") or {}
-        name = meta.get("name")
-        if not name:
+        if meta.get("agent_id"):
+            soul_by_agent[meta["agent_id"]] = soul
+        if meta.get("project"):
+            soul_by_project[meta["project"]] = soul
+
+    names = {}
+    used_souls = set()
+    taken_names = set()
+    for agent_id in sorted(latest):
+        event = latest[agent_id]
+        if event.get("type") == "session_ended":
             continue
-        if meta.get("agent_id") and meta["agent_id"] == agent_id:
-            return name
-        if by_project is None and meta.get("project") and meta["project"] == project:
-            by_project = name
-    return by_project or NAMES[js_hash(agent_id) % len(NAMES)]
+        project = str(event.get("project") or "unknown")
+        soul = soul_by_agent.get(agent_id)
+        soul_key = soul and soul.get("file")
+        if not soul or soul_key in used_souls:
+            project_soul = soul_by_project.get(project)
+            project_key = project_soul and project_soul.get("file")
+            soul = project_soul if project_soul and project_key not in used_souls else None
+            soul_key = soul and soul.get("file")
+        if soul:
+            used_souls.add(soul_key)
+
+        h = js_hash(agent_id)
+        offset = 0
+        while (taken_names and NAMES[(h + offset) % len(NAMES)] in taken_names
+               and offset < len(NAMES)):
+            offset += 1
+        name = NAMES[(h + offset) % len(NAMES)]
+        if soul and (soul.get("meta") or {}).get("name"):
+            name = soul["meta"]["name"]
+        taken_names.add(name)
+        names[agent_id] = name
+    return names
+
+
+def _fleet_events(event):
+    """Read the same bounded event window as the viewer and include this event."""
+    events = []
+    try:
+        with open(EVENTS, encoding="utf-8") as stream:
+            lines = collections.deque(stream, maxlen=4000)
+        for line in lines:
+            try:
+                parsed = json.loads(line)
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(parsed, dict) and parsed.get("agent_id")
+                    and parsed.get("type") in VIEWER_EVENT_TYPES):
+                events.append(parsed)
+    except (OSError, UnicodeDecodeError):
+        pass
+    events.append(event)
+    latest = {str(item["agent_id"]): item for item in events}
+    visible = []
+    for item in latest.values():
+        try:
+            timestamp = str(item.get("ts") or "").replace("Z", "+00:00")
+            event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
+        except (TypeError, ValueError):
+            event_time = 0
+        if item is event or time.time() - event_time <= DROP_SECONDS:
+            visible.append(item)
+    return visible
+
+
+def villager_name(event):
+    agent_id = str(event.get("agent_id") or "")
+    return villager_names(_fleet_events(event)).get(
+        agent_id, NAMES[js_hash(agent_id) % len(NAMES)])
+
+
+def knock_key(event):
+    payload = event.get("payload") or {}
+    return "\x00".join(str(x) for x in (
+        event.get("agent_id"), event.get("ts"),
+        payload.get("message") if isinstance(payload, dict) else ""))
 
 
 def claim_knock(event):
-    """True the first time we see this exact knock. Emitters retry and clients
-    replay, so identity is (agent, timestamp, message), not arrival."""
+    """Claim a knock unless it is in flight or has already been delivered."""
     if not NOTIFY_URL or event.get("type") != "needs_human":
         return False
-    payload = event.get("payload") or {}
-    key = "\x00".join(str(x) for x in (event.get("agent_id"), event.get("ts"),
-                                       payload.get("message") if isinstance(payload, dict) else ""))
+    key = knock_key(event)
     with _notified_lock:
-        if key in _notified:
-            _notified.move_to_end(key)
+        if key in _notified or key in _notifying:
+            if key in _notified:
+                _notified.move_to_end(key)
             return False
-        _notified[key] = True
-        while len(_notified) > NOTIFY_MEMORY:
-            _notified.popitem(last=False)
+        _notifying.add(key)
     return True
 
 
+def finish_knock(event, delivered):
+    """Release an attempt, remembering only successful deliveries."""
+    key = knock_key(event)
+    with _notified_lock:
+        _notifying.discard(key)
+        if delivered:
+            _notified[key] = True
+            _notified.move_to_end(key)
+            while len(_notified) > NOTIFY_MEMORY:
+                _notified.popitem(last=False)
+
+
 def notify(event):
-    """Fire-and-forget POST. Never raises."""
+    """POST one knock and return whether it was delivered. Never raises."""
     try:
         payload = event.get("payload") or {}
-        message = str(payload.get("message") or "").strip() if isinstance(payload, dict) else ""
-        message = message or "(no message)"
+        message = payload.get("message", "") if isinstance(payload, dict) else ""
+        if not isinstance(message, str):
+            message = str(message)
         name = villager_name(event)
         project = str(event.get("project") or "unknown")
+        title = f"{name} is at your door ({project})"
+        if not title.isascii():
+            title = email.header.Header(
+                title, charset="utf-8", maxlinelen=0).encode()
         headers = {
             "Content-Type": "text/plain; charset=utf-8",
-            "Title": f"{name} is at your door ({project})",
+            "Title": title,
             "Tags": "door",
             "Priority": "high",
         }
@@ -149,12 +248,17 @@ def notify(event):
         req = urllib.request.Request(NOTIFY_URL, data=body, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT):
             pass
+        return True
     except Exception:
-        pass
+        return False
+
+
+def deliver_knock(event):
+    finish_knock(event, notify(event))
 
 
 def notify_async(event):
-    threading.Thread(target=notify, args=(event,), daemon=True).start()
+    threading.Thread(target=deliver_knock, args=(event,), daemon=True).start()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
