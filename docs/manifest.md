@@ -81,19 +81,32 @@ charter:
 
 ## `skills` — capabilities
 
-Each entry names a skill in the skills library (`skills/<id>/SKILL.md`, steward #12).
-A bare string is shorthand for `{id: <string>}`.
+Each entry names a skill in the [skills library](#the-skills-library)
+(`skills/<id>/SKILL.md`). A bare string is shorthand for `{id: <string>}`.
 
 ```yaml
 skills:
-  - daily-summary
-  - id: read-inbox
+  - read-inbox
+  - id: read-calendar
     source: library          # library (default) | local
     note: Why this resident holds it.
 ```
 
-Today the id is validated as a slug; once the library lands, unknown names fail
-validation with the closest match named.
+A grant is what this resident holds **on top of the default set** — every resident gets
+the default skills without asking, so re-granting one says nothing and is left out.
+
+A name the library does not have fails validation with the closest match named:
+
+```
+residents/life-agent/manifest.yaml: error: skills[0].id
+    problem: skill 'read-inbx' is not in the skills library at skills; a grant that
+             names nothing is a capability this resident does not have
+    example: id: read-inbox
+```
+
+`source: local` is reserved for a skill body that ships with the resident rather than
+the library; it is not implemented yet, and today every grant must resolve in the
+library whatever its `source` says.
 
 ## `memory` — durable knowledge location
 
@@ -189,14 +202,16 @@ routines:
     schedule: "0 7 * * *"           # five-field cron
     schedule_tz: Europe/Ljubljana   # IANA zone; defaults to UTC
     prompt: Write today's household summary.
-    requires: [daily-summary, read-inbox]   # must be granted under skills
+    requires: [daily-summary, read-inbox]   # must be in the effective skill set
     timeout_s: 900           # the run is killed after this and emitted as routine_failed
     enabled: true
     journal: close_of_day    # optional; on at most one routine — see below
 ```
 
-A routine that requires a skill the manifest does not grant fails validation, not
-execution.
+`requires` is checked against the resident's **effective** set — the library's defaults
+plus this manifest's grants — so a routine may require `write-journal` without the
+manifest re-granting it. A routine that requires anything outside that set fails
+validation, not execution.
 
 ### `journal: close_of_day`
 
@@ -268,16 +283,19 @@ order with fixed delimiters:
    explicit frame saying it changes no rule.
 3. **Your journal from last time** — the resident's own last entry, when there is one.
    Steward never synthesizes one.
-4. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation.
-5. **Your task right now** — the routine's own prompt.
-6. **Close the day: write your journal** — only on the routine flagged
+4. **Your skills (how-to, not authority)** — the resident's effective skill set, under a
+   frame saying a skill cannot widen the charter.
+5. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation.
+6. **Your task right now** — the routine's own prompt.
+7. **Close the day: write your journal** — only on the routine flagged
    `journal: close_of_day`.
 
-Charter last is the point. A soul is trusted repo content and a journal is text a model
-wrote, but both land inside a privileged prompt, so neither gets the last word. The two
-sections after the charter are tasks, and the charter section says in so many words that
-it outranks the task too. Voice is capped at 1200 characters and the journal at 4000
-before injection, as well as at validation.
+Charter last is the point. A soul is trusted repo content, a skill is reviewed repo
+content, and a journal is text a model wrote, but all three land inside a privileged
+prompt, so none of them gets the last word. The two sections after the charter are tasks,
+and the charter section says in so many words that it outranks the task too. Voice is
+capped at 1200 characters, the journal at 4000, and the whole skill set at 24000 before
+injection, as well as at validation.
 
 There is no session type that skips the preamble. A close-of-day run is told who it is,
 how it writes, and what its charter says exactly like every other run — which is the
@@ -349,6 +367,82 @@ correct. The village never lies, and personality is not the exception.
 - **Editing takes effect on the next load.** `steward scheduler tick` under cron reads
   the souls every tick, so an edit lands on the next run; the long-running
   `steward scheduler run` daemon reads them at start, so it lands on its next start.
+
+## The skills library
+
+A skill is a named, reusable capability, written as instructions a session reads:
+
+```
+skills/
+  write-journal/SKILL.md      # default: every resident holds it
+  daily-summary/SKILL.md      # default
+  research/SKILL.md           # default
+  escalate/SKILL.md           # default
+  read-inbox/SKILL.md         # granted in a manifest
+  read-calendar/SKILL.md
+  errands/SKILL.md
+  write-blog-post/SKILL.md
+```
+
+```markdown
+---
+name: write-journal
+description: Close the day by writing one honest entry into your own journal.
+defaults: true          # optional; marks it part of the default set
+---
+
+Direct, second-person instructions. A few dozen lines.
+```
+
+The library is shared, so improving a skill improves every resident that holds it, and
+adding one to a resident is edit-manifest → commit → next session has it.
+
+**The effective set** is `defaults + this manifest's grants`, deduplicated, defaults
+first. That is what a session is given and what `requires` is checked against.
+
+**What fails validation:** a frontmatter `name` that disagrees with the directory (the
+directory is what a manifest grants), a missing `description`, an empty body, a body over
+8000 characters (every session that holds the skill pays for it), an unknown frontmatter
+key, and — exactly as in a manifest — a credential-shaped key or an inline secret.
+**Skills carry no credentials**; they say which grant they need and stop there.
+
+### Provisioning a session
+
+At fire time the scheduler resolves the effective set and provides it to the session.
+What that means depends on the runner:
+
+| runner kind | prompt injection | on-disk skills |
+|---|---|---|
+| `claude` | yes | yes — `<workdir>/.claude/skills/<name>/SKILL.md` |
+| `codex` | yes | no — nothing is written |
+| `command` | yes | no |
+| `mock` | yes | no |
+
+The prompt copy is what steward can honestly say the session was *told*; the on-disk copy
+is what a brain with its own skill loader can pick up as it works. **Steward owns the
+materialized directory**: files are written only when their content changed, and anything
+in there that is not in the effective set is removed — so a skill taken out of a manifest
+is genuinely absent from the next session rather than surviving on disk.
+
+A granted skill the library does not have is a **loud pre-run failure**: the run is
+bracketed `routine_started` → `routine_failed` with the missing name in the error, and
+nothing is written. Steward will not launch a session that believes it has a capability
+nobody gave it. (Ordinarily validation catches this long before a fire; the pre-run check
+is for the library changing under a manifest that was valid when it was read.)
+
+```console
+$ steward skills                      # the library, and each resident's effective set
+library /srv/steward/skills
+  daily-summary  [default]  Turn a day's scattered facts into one short honest picture…
+  read-inbox     [granted]  Read and triage mail on a schedule…
+
+life-agent: daily-summary, escalate, research, write-journal, read-inbox, read-calendar, errands
+  runner claude — prompt + .claude/skills/ in the session's working directory
+```
+
+`steward validate` checks grants against `skills/` beside the residents tree; `--skills`
+names a different library. A tree with no library beside it is validated exactly as it
+was before the library existed — no library, no skill checks, no injection.
 
 ## The journal
 
@@ -443,6 +537,7 @@ steward validate residents/life-agent/manifest.yaml --format json
 steward schema                   # JSON Schema for the manifest, for burrow and editors
 steward doctor                   # can what the manifests declare actually run, here, now?
 steward journal life-agent       # what a resident has actually written, newest first
+steward skills                   # the library, and what each resident effectively holds
 ```
 
 Exit code is non-zero on any error, so CI can gate on it.
@@ -477,7 +572,7 @@ residents/life-agent/manifest.yaml: error: charter.mission
   `AKIA…`, `AIza…`, a JWT, a PEM private key, or a URL with an inline password.
 - An opaque blob in a field that is supposed to hold a reference (`memory.path`,
   `routes[].address`, `app_grants[].status_ref`).
-- Inline secrets in the soul body.
+- Inline secrets in the soul body, and in any `SKILL.md` in the library.
 
 The credential scan runs **before** schema binding, so a secret is never loaded into a
 model or echoed back in a diagnostic.

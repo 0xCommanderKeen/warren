@@ -51,9 +51,9 @@ One shared token, exactly like burrow's ingest auth.
   is local development.
 - Anything else is `401`, and nothing is queued, stored, or emitted.
 
-Reads are gated too. Every endpoint here is a write path except the two resident
-views, and gating those as well is simpler than explaining which is which — there is
-one door. The OpenAPI schema and `/docs` are not served at all, for the same reason.
+Reads are gated too. Every endpoint here is a write path except the resident views and
+the skills listing, and gating those as well is simpler than explaining which is which
+— there is one door. The OpenAPI schema and `/docs` are not served at all, for the same reason.
 
 **Tailnet only.** The default bind is `127.0.0.1`; in deployment steward listens on
 its tailnet address and is never exposed to the public internet. One shared token is
@@ -159,6 +159,38 @@ Read-only JSON views of validated manifests, including `runner.kind` and
 not validate are named in `errors` rather than quietly omitted. There is nothing to
 redact: a manifest holding a credential-shaped key or an inline secret would have
 failed validation and never become a resident at all.
+
+`skills` is what the manifest grants; `effective_skills` is what a session actually
+gets — the library's defaults plus those grants, in injection order:
+
+```json
+{"skills": [{"id": "read-inbox", "source": "library", "note": "…"}],
+ "effective_skills": ["daily-summary", "escalate", "research", "write-journal", "read-inbox"]}
+```
+
+### `GET /skills`
+
+The skills library, and who holds each skill.
+
+```json
+{
+  "library": "/srv/steward/skills",
+  "skills": [
+    {"name": "research", "description": "Answer a question from real sources…",
+     "default": true, "path": "skills/research/SKILL.md", "body_chars": 2391,
+     "holders": ["life-agent", "burrow-builder"]}
+  ],
+  "errors": []
+}
+```
+
+`default: true` means every resident holds it without a grant, so `holders` is every
+valid resident. A skill nobody holds reports `"holders": []` — that is a real answer,
+not an omission. A `SKILL.md` that does not parse is named in `errors` and left out of
+`skills`, the same way a broken manifest is handled above.
+
+Read-only, like the other views: a skill is added by committing a `SKILL.md` and granted
+by committing a manifest. There is no HTTP path that writes either.
 
 ## Storage
 

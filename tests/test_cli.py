@@ -432,3 +432,91 @@ def test_serve_says_out_loud_when_it_has_no_token(
     assert result.exit_code == 0, result.output
     assert "without a token" in result.output
     assert "cors: none" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# skills
+# --------------------------------------------------------------------------------------
+
+
+def test_skills_lists_the_shipped_library_and_every_resident(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    result = runner.invoke(main, ["skills"])
+    assert result.exit_code == 0, result.output
+    assert "write-journal  [default]" in result.output
+    assert "read-inbox  [granted]" in result.output
+    assert "life-agent: daily-summary, escalate, research, write-journal, read-inbox" in (
+        result.output
+    )
+    assert "burrow-builder: daily-summary, escalate, research, write-journal" in result.output
+    assert ".claude/skills/ in the session's working directory" in result.output
+
+
+def test_skills_reports_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(REPO_ROOT)
+    result = runner.invoke(main, ["skills", "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["library"].endswith("skills")
+    assert {"errands", "escalate"} <= {skill["name"] for skill in payload["skills"]}
+    assert "errands" in payload["residents"]["life-agent"]
+    assert payload["diagnostics"] == []
+
+
+def test_skills_says_so_when_there_is_no_library(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    write_resident()
+    result = runner.invoke(main, ["skills", "--residents", str(tmp_path / "residents")])
+    assert result.exit_code == 0
+    assert "no skills library found" in result.output
+    assert "test-agent: none" in result.output
+
+
+def test_skills_exits_non_zero_on_a_broken_library(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    write_skill("broken", text="---\nname: broken\n---\n\nNo description.\n")
+    write_resident()
+    result = runner.invoke(main, ["skills", "--residents", str(tmp_path / "residents")])
+    assert result.exit_code == 1
+    assert "description" in result.output
+
+
+def test_skills_takes_an_explicit_library(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    write_skill("errands", root=tmp_path / "other-library", defaults=True)
+    data = valid_manifest()
+    data["skills"] = []
+    data["routines"] = []
+    write_resident(data)
+    result = runner.invoke(
+        main,
+        [
+            "skills",
+            "--residents",
+            str(tmp_path / "residents"),
+            "--skills",
+            str(tmp_path / "other-library"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "test-agent: errands" in result.output
+
+
+def test_validate_takes_an_explicit_library(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    write_skill("read-inbox", root=tmp_path / "other-library")
+    data = valid_manifest()
+    data["skills"] = ["errands"]
+    data["routines"] = []
+    manifest_path = write_resident(data)
+    result = runner.invoke(
+        main, ["validate", str(manifest_path), "--skills", str(tmp_path / "other-library")]
+    )
+    assert result.exit_code == 1
+    assert "not in the skills library" in result.output

@@ -42,7 +42,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Three pieces exist.
+Four pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -81,11 +81,25 @@ $ STEWARD_TOKEN=… steward serve      # 127.0.0.1:8801 by default; never public
 $ steward serve --allow-open         # local dev, with the missing token said out loud
 ```
 
-Still roadmap, in this repo's issues: the skills library (#12), the job board's claiming
-and leases (#6), structured approvals raised from a session (#10), delegation (#7), the
-watchdog and budgets (#8), deployment (#4), and the management UI (#13). Burrow-side
-rendering counterparts — the journal panel in a villager's house among them — live in
-burrow's issues.
+**The skills library** (#12). `skills/<name>/SKILL.md` — a named, reusable capability
+written as instructions. A documented default set (`write-journal`, `daily-summary`,
+`research`, `escalate`) is held by every resident; everything else is granted by name in
+a manifest, and a name the library does not have fails validation with the closest match
+named. At fire time the scheduler resolves the effective set, injects it into the prompt
+under a frame saying a skill is how-to and never authority, and — for runners that load
+skills off disk — writes it into the session's working directory, removing what is no
+longer granted. The library is shared, so improving a skill improves every resident that
+holds it.
+
+```console
+$ steward skills                     # the library, and each resident's effective set
+```
+
+Still roadmap, in this repo's issues: the job board's claiming and leases (#6),
+structured approvals raised from a session (#10), delegation (#7), the watchdog and
+budgets (#8), deployment (#4), and the management UI (#13). Burrow-side rendering
+counterparts — the journal panel in a villager's house among them — live in burrow's
+issues.
 
 ## Residents
 
@@ -93,13 +107,17 @@ burrow's issues.
 residents/
   life-agent/       manifest.yaml + soul.md   Hob, the household spirit
   burrow-builder/   manifest.yaml + soul.md   Maren, who builds the village
+skills/
+  <name>/SKILL.md                             the shared library both draw on
 ```
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the five capability dimensions burrow renders — skills,
 memory, routes, app grants — plus the runner steward launches sessions through and the
-routines it fires. References and grants only: a credential-shaped key or an inline
-secret fails validation and is never stored.
+routines it fires. Its `skills` are grants by name against the shared library — what this
+resident holds on top of the default set every resident gets. References and grants only:
+a credential-shaped key or an inline secret, in a manifest or in a `SKILL.md`, fails
+validation and is never stored.
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
 `steward schema` emits it as JSON Schema so burrow can read manifests without

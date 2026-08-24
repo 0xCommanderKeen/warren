@@ -1,8 +1,9 @@
 """The residents actually shipped in this repo must always validate."""
 
-from conftest import RESIDENTS_DIR
+from conftest import REPO_ROOT, RESIDENTS_DIR
 from steward import journal
 from steward import manifest as m
+from steward.skills import default_skills, effective_names, load_library, missing_skills
 
 
 def test_the_residents_tree_validates() -> None:
@@ -72,8 +73,24 @@ def test_shipped_souls_have_voices_within_the_cap() -> None:
         assert len(resident.soul.voice) <= m.VOICE_MAX_CHARS
 
 
-def test_shipped_manifests_grant_only_declared_skills() -> None:
+def test_shipped_manifests_require_only_skills_they_effectively_hold() -> None:
+    """Effective, not granted: the default set counts, and a name outside it does not."""
+    library = load_library(REPO_ROOT / "skills")
     for resident in m.validate_tree(RESIDENTS_DIR).residents:
-        granted = {skill.id for skill in resident.manifest.skills}
+        held = set(effective_names(resident.manifest, library))
         for routine in resident.manifest.routines:
-            assert set(routine.requires) <= granted
+            assert set(routine.requires) <= held, routine.id
+
+
+def test_no_shipped_manifest_grants_a_skill_the_library_does_not_have() -> None:
+    library = load_library(REPO_ROOT / "skills")
+    for resident in m.validate_tree(RESIDENTS_DIR).residents:
+        assert missing_skills(resident.manifest, library) == (), resident.id
+
+
+def test_no_shipped_manifest_re_grants_a_default_skill() -> None:
+    """A grant is what a resident has on top of the defaults; repeating one says nothing."""
+    defaults = {skill.name for skill in default_skills(load_library(REPO_ROOT / "skills"))}
+    for resident in m.validate_tree(RESIDENTS_DIR).residents:
+        repeated = {grant.id for grant in resident.manifest.skills} & defaults
+        assert repeated == set(), f"{resident.id} re-grants {sorted(repeated)}"

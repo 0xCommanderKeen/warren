@@ -99,6 +99,43 @@ def write_resident(tmp_path: Path) -> ResidentWriter:
     return _write
 
 
+SKILL_BODY = "Read what is there. Write down what you did. Say what you could not do.\n"
+
+type SkillWriter = Callable[..., Path]
+
+
+@pytest.fixture
+def write_skill(tmp_path: Path) -> SkillWriter:
+    """Write ``skills/<name>/SKILL.md`` beside the temp residents tree.
+
+    The library lands where :func:`steward.skills.default_skills_dir` looks for it, so
+    a test that writes a skill gets the same resolution the real repo has.
+    """
+
+    def _write(  # noqa: PLR0913 — one keyword per thing a test wants to vary
+        name: str,
+        *,
+        description: str = "One line saying what this skill is for.",
+        body: str = SKILL_BODY,
+        defaults: bool = False,
+        text: str | None = None,
+        root: Path | None = None,
+    ) -> Path:
+        base = root if root is not None else tmp_path / "skills"
+        directory = base / name
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "SKILL.md"
+        if text is None:
+            frontmatter = [f"name: {name}", f"description: {description}"]
+            if defaults:
+                frontmatter.append("defaults: true")
+            text = "---\n" + "\n".join(frontmatter) + "\n---\n\n" + body
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    return _write
+
+
 type StubWriter = Callable[..., Path]
 
 

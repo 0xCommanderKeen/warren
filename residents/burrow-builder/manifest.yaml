@@ -34,15 +34,12 @@ charter:
     When an issue's acceptance criteria are ambiguous, ask rather than pick — a wrong guess
     about the protocol costs both repos.
 
-skills:
-  - id: pixel-art-viewer
-    note: Phaser 3 viewer on the Ninja Adventure tileset.
-  - id: event-protocol
-    note: Event shape, ingest, cursors, projection rules.
-  - id: hooks-emitter
-    note: Claude Code hook emitter and its transports.
-  - id: write-journal
-    note: End-of-run entry read back at the start of the next session.
+# Maren holds the default set and nothing else. The viewer, the protocol and the hook
+# emitter were listed here as free text before the library existed; they are what she
+# works on, not reusable instructions any resident could be handed, and her charter
+# above is where they belong. A grant now has to name a skill in skills/ — an empty
+# list is the honest declaration until one of them is written as a real skill.
+skills: []
 
 memory:
   kind: directory
