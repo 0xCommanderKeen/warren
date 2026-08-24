@@ -13,8 +13,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
-  reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS,
-  describe: describeEvent, doingLabel, ago, esc, hashCode,
+  reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
+  describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
 
 /** All fixture timestamps are written relative to this instant. */
@@ -345,5 +345,54 @@ describe("presentation helpers shared with the viewer", () => {
   it("escapes agent-supplied text before it reaches the DOM", () => {
     assert.equal(esc('<img src=x onerror="alert(1)">'),
                  "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+});
+
+describe("where the work happens (docs/protocol.md, places)", () => {
+  const village = reduce(log("places.jsonl"), NOW, []);
+  const v = byId(village);
+
+  it("sends a researching villager to the library", () => {
+    // The bug this test exists for: the verb classified as researching, the
+    // panel said so, and the villager never left its own doorstep.
+    assert.equal(v.get("claude-code:a-searcher").doing, "researching");
+    assert.equal(v.get("claude-code:a-searcher").place, "library");
+    assert.equal(v.get("claude-code:b-fetcher").place, "library");   // WebFetch too
+  });
+
+  it("leaves every other verb at its own house", () => {
+    assert.equal(v.get("claude-code:c-reader").place, null);         // Read
+    assert.equal(v.get("cron:g-unknown").place, null);               // unknown tool
+  });
+
+  it("walks home when the research ends", () => {
+    const done = v.get("claude-code:d-finished");
+    assert.equal(done.state, "resting");
+    assert.equal(done.place, null);
+  });
+
+  it("keeps a heartbeating researcher at the library", () => {
+    // A heartbeat is liveness only: it must not read as "no verb, go home".
+    const beating = v.get("claude-code:e-beating");
+    assert.equal(beating.state, "working");
+    assert.equal(beating.place, "library");
+  });
+
+  it("leaves a stale researcher where it was — losing signal is not travel", () => {
+    const quiet = v.get("claude-code:f-quiet");
+    assert.equal(quiet.state, "stale");
+    assert.equal(quiet.place, "library");
+  });
+
+  it("only tool_called can move anybody", () => {
+    assert.equal(workPlace(null), null);
+    assert.equal(workPlace({ type: "tool_called" }), null);          // no payload
+    assert.equal(workPlace({ type: "idle", payload: { tool: "WebSearch" } }), null);
+    assert.equal(workPlace({ type: "tool_called", payload: { tool: "WebSearch" } }), "library");
+  });
+
+  it("maps places by verb, not by tool name", () => {
+    // Adding a research-shaped tool must not need a second table edit.
+    assert.equal(PLACE_OF_VERB.researching, "library");
   });
 });
