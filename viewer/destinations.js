@@ -45,16 +45,23 @@
     return others[Math.abs(hash || 0) % others.length];
   }
 
-  /* `ctx` supplies what only the viewer knows: the villager's own plot, the
-     plots occupied right now, the delegation target it is already standing at,
-     and its identity hash. */
+  /* `ctx` supplies what only the viewer knows: the buildings it can actually
+     draw, the villager's own plot, the plots occupied right now, the delegation
+     target it is already standing at, and its identity hash. */
   function destinationFor(v, ctx) {
+    ctx = ctx || {};
     if (v.state === "knocking") return DOOR;
     const away = v.state === "working" || v.state === "stale";
     if (!away || !v.place) return HOME;
-    if (v.place !== DELEGATION) return { kind: "building", id: v.place };
-    const plot = delegatePlot(ctx || {});
-    return plot === null ? HOME : { kind: "plot", plot };
+    if (v.place === DELEGATION) {
+      const plot = delegatePlot(ctx);
+      return plot === null ? HOME : { kind: "plot", plot };
+    }
+    // A place the map has no building for is not a place: send the villager
+    // home rather than throw. The viewer reports the broken join loudly at
+    // startup, and tests/test_places.js fails on it — silence is the bug.
+    if (ctx.places && !ctx.places[v.place]) return HOME;
+    return { kind: "building", id: v.place };
   }
 
   // Stable identity for the slot table: two villagers at the same destination

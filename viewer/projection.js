@@ -20,6 +20,7 @@ const CHARS = ["Villager","Villager2","Villager3","Villager4","Villager5",
 const STALE_MS = 30 * 60 * 1000;
 const DROP_MS  = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
+const MAX_ARTIFACTS = 30;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -27,17 +28,31 @@ const VERBS = {
   Email: "emailing", Inbox: "emailing",
   AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
 };
-const LOCATION_OF_VERB = {
+/* Some verbs belong somewhere other than the villager's own house
+ * (docs/protocol.md, "Where the work happens"). The viewer owns where a place
+ * *is* on the map; the projection only decides which one a villager belongs at,
+ * so this stays pure and testable. Every name here but `delegation` must match
+ * the PLACES table in the viewer — an unknown name renders as "own house"
+ * rather than throwing, and tests/test_places.js fails on the mismatch.
+ *
+ * `delegation` is the one entry that is not a building: it means "handing work
+ * to somebody else", and the viewer resolves it to a neighbour's door. See
+ * viewer/destinations.js.
+ */
+const PLACE_OF_VERB = {
   researching: "library",
   crafting: "workshop",
   tinkering: "workshop",
-  "emailing": "post-office",
+  emailing: "post-office",
   delegating: "delegation",
 };
 
-function workLocation(ev) {
+/* The place implied by an event, or null for "its own house". Only
+ * `tool_called` moves anybody: every other event type leaves the verb unknown,
+ * and no verb means no trip. */
+function workPlace(ev) {
   if (!ev || ev.type !== "tool_called") return null;
-  return LOCATION_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
+  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
 }
 
 function hashCode(s) {
@@ -81,11 +96,27 @@ function doingLabel(ev) {
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
                              "heartbeat","needs_human","idle","session_ended"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
-function foldEvents(agents, lines) {
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
+/* One parse per batch. The village and the notice board both read what this
+ * returns, so "a well-formed event" has exactly one definition and cannot drift
+ * between the two reducers; each reducer keeps only the checks its own payload
+ * needs. Already-parsed events pass straight through, so a caller can hand
+ * either JSONL lines or records to a fold without a second JSON.parse. */
+function parseEvents(batch) {
+  const events = [];
+  for (const item of batch) {
+    let ev = item;
+    if (typeof ev === "string") {
+      try { ev = JSON.parse(ev); } catch { continue; }
+    }
+    if (!ev || typeof ev !== "object" || !ev.agent_id || !ev.type) continue;
+    events.push(ev);
+  }
+  return events;
+}
+
+function foldEvents(agents, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (!EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
     a.lastAny = ev;
@@ -93,6 +124,38 @@ function foldEvents(agents, lines) {
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
   }
+}
+
+/* Keep the notice board bounded while events arrive. Sorting each small batch
+ * also makes the board truthful when two emitters flush out of order. */
+function foldArtifacts(artifacts, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (ev.type !== "artifact_produced") continue;
+    const artifact = ev.payload && ev.payload.artifact;
+    if (!artifact) continue;
+    artifacts.push({
+      artifact: String(artifact), agent_id: ev.agent_id,
+      project: ev.project || "unknown", ts: Date.parse(ev.ts) || 0,
+    });
+  }
+  artifacts.sort((a, b) => b.ts - a.ts);
+  if (artifacts.length > MAX_ARTIFACTS) artifacts.length = MAX_ARTIFACTS;
+  return artifacts;
+}
+
+function nameArtifacts(artifacts, villagers, souls) {
+  const names = new Map((villagers || []).map(v => [v.id, v.name]));
+  const soulByAgent = new Map(), soulByProject = new Map();
+  for (const soul of souls || []) {
+    if (!soul || !soul.meta || !soul.meta.name) continue;
+    if (soul.meta.agent_id) soulByAgent.set(soul.meta.agent_id, soul.meta.name);
+    if (soul.meta.project) soulByProject.set(soul.meta.project, soul.meta.name);
+  }
+  return artifacts.map(a => ({
+    ...a,
+    name: names.get(a.agent_id) || soulByAgent.get(a.agent_id) ||
+      soulByProject.get(a.project) || NAMES[hashCode(a.agent_id) % NAMES.length],
+  }));
 }
 function reduce(input, now, souls) {
   const soulByAgent = new Map(), soulByProject = new Map();
@@ -147,8 +210,8 @@ function reduce(input, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
-      // A lost signal is not travel: stale villagers keep the last supported place.
-      place: state === "working" || state === "stale" ? workLocation(shown) : null,
+      // A lost signal is not travel: a stale villager keeps its last place.
+      place: state === "working" || state === "stale" ? workPlace(shown) : null,
       doing: state === "working" ? doingLabel(shown) : "",
       lastLine: describe(shown),
       knock: state === "knocking"
@@ -162,8 +225,9 @@ function reduce(input, now, souls) {
 // node (tests) picks the module up here; the browser never sees `module`.
 if (typeof module === "object" && module.exports) {
   module.exports = {
-    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, LOCATION_OF_VERB,
-    EVENT_TYPES, ACTION_TYPES, hashCode, esc, ago, describe, doingLabel,
-    workLocation, foldEvents, reduce,
+    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
+    VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
+    hashCode, esc, ago, describe, doingLabel, workPlace,
+    parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

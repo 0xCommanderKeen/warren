@@ -1,0 +1,9 @@
+{"v":0,"ts":"2026-08-24T11:59:40.000Z","source":"claude-code","agent_id":"claude-code:a-searcher","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"WebSearch","detail":"phaser tilemaps"}}
+{"v":0,"ts":"2026-08-24T11:59:41.000Z","source":"claude-code","agent_id":"claude-code:b-fetcher","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"WebFetch","detail":"https://example.com"}}
+{"v":0,"ts":"2026-08-24T11:59:42.000Z","source":"claude-code","agent_id":"claude-code:c-reader","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"Read","detail":"README.md"}}
+{"v":0,"ts":"2026-08-24T11:59:30.000Z","source":"claude-code","agent_id":"claude-code:d-finished","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"WebSearch","detail":"done with this"}}
+{"v":0,"ts":"2026-08-24T11:59:50.000Z","source":"claude-code","agent_id":"claude-code:d-finished","project":"burrow","cwd":"/srv/burrow","type":"idle","payload":{}}
+{"v":0,"ts":"2026-08-24T11:59:30.000Z","source":"claude-code","agent_id":"claude-code:e-beating","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"WebSearch","detail":"still reading"}}
+{"v":0,"ts":"2026-08-24T11:59:55.000Z","source":"claude-code","agent_id":"claude-code:e-beating","project":"burrow","cwd":"/srv/burrow","type":"heartbeat","payload":{"tool":"WebSearch"}}
+{"v":0,"ts":"2026-08-24T11:20:00.000Z","source":"claude-code","agent_id":"claude-code:f-quiet","project":"burrow","cwd":"/srv/burrow","type":"tool_called","payload":{"tool":"WebSearch","detail":"lost signal mid-search"}}
+{"v":0,"ts":"2026-08-24T11:59:45.000Z","source":"cron","agent_id":"cron:g-unknown","project":"burrow","type":"tool_called","payload":{"tool":"Telescope"}}

@@ -107,6 +107,9 @@
   .evt .when { color: var(--ink-dim); font-size: 15px; }
   .evt .what { word-break: break-word; }
   .evt.t-needs_human .what { color: var(--alert); }
+  .artifact-empty { color: var(--ink-dim); font-size: 19px; margin-top: 18px; }
+  .artifact-path { color: var(--ink); overflow-wrap: anywhere; }
+  .artifact-by { color: var(--ink-dim); font-size: 15px; }
 
   footer {
     position: absolute; bottom: 8px; left: 24px; z-index: 20; pointer-events: none;
@@ -155,7 +158,7 @@
 /* projection logic (event filtering, state mapping, souls, identities) lives in
    /projection.js — same file the test suite in tests/ runs under node. It gives
    this script: NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, VERBS, hashCode, esc,
-   ago, describe, doingLabel, foldEvents, reduce. */
+   ago, describe, doingLabel, parseEvents, foldEvents, reduce. */
 
 /* ————— the village scene ————— */
 
@@ -182,19 +185,19 @@ function hhmm(h){const m=Math.floor((h-Math.floor(h))*60);return String(Math.flo
 const PLACES = {
   library: {
     label: "the library",
-    tx: 11, ty: 21, w: 3, h: 3,
+    tx: 11, ty: 19, w: 3, h: 3,
     frame: { x: 352, y: 0, w: 48, h: 48 },
     accent: "#7fb0c8",
   },
   workshop: {
     label: "the workshop",
-    tx: 15, ty: 21, w: 3, h: 3,
+    tx: 15, ty: 19, w: 3, h: 3,
     frame: { x: 256, y: 0, w: 48, h: 48 },
     accent: "#d99a5e",
   },
   "post-office": {
     label: "the post office",
-    tx: 19, ty: 21, w: 3, h: 3,
+    tx: 19, ty: 19, w: 3, h: 3,
     frame: { x: 304, y: 0, w: 48, h: 48 },
     accent: "#d97979",
   },
@@ -228,6 +231,7 @@ const SKY_DEPTH=4000, LIGHT_DEPTH=4001;
 const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
+const NOTICE_BOARD_ID = "notice-board";
 
 // standing spots in front of a shared door: first arrival takes the middle, the
 // rest fan out in a staggered arc so their name chips stay readable. Fixed, so
@@ -242,6 +246,17 @@ function plotDoor(i) {
 function placeDoor(name) {
   const p = PLACES[name];
   return { x: p.tx * T + p.w * T / 2, y: (p.ty + p.h) * T };
+}
+
+/* Where the nth visitor to a shared place stands. One definition, because the
+   sprite, the map self-check and the decor pass all have to agree: when they
+   drifted, a prop was scattered onto a slot and the villager standing there was
+   inside a barrel. */
+function placeSlot(name, slot) {
+  const d = placeDoor(name);
+  const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
+  return { x: d.x + dx,
+           y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP };
 }
 const yourDoor = { x: YOUR_HOUSE.tx * T + 24, y: (YOUR_HOUSE.ty + 3) * T };
 const grid = fill => Array.from({ length: MAPH }, () => Array(MAPW).fill(fill));
@@ -281,9 +296,22 @@ class Heap {
 
 /* Where each villager belongs, as { kind, ... } rather than a string — see
    viewer/destinations.js. The viewer supplies what the projection cannot know:
-   which plots are occupied right now, and which door a delegating villager is
-   already standing at. */
-const { destinationFor, destinationKey } = BurrowDestinations;
+   the PLACES it can actually draw, which plots are occupied right now, and
+   which door a delegating villager is already standing at. */
+const { destinationFor, destinationKey, DELEGATION } = BurrowDestinations;
+
+/* Two halves of one identity: `PLACE_OF_VERB` in projection.js decides which
+ * place a villager belongs at, `PLACES` above decides where that place stands.
+ * Nothing but the string joins them, so a typo or a one-sided rename would send
+ * every researcher home and say nothing about it. `destinationFor` degrades
+ * that way on purpose — better a villager at home than an exception — so the
+ * join is checked out loud at startup (`reportPlaces`) and in
+ * tests/test_places.js. `delegation` is exempt: it is the one projected place
+ * that is deliberately not a building. */
+function unmappedPlaces() {
+  return [...new Set(Object.values(PLACE_OF_VERB))]
+    .filter(id => id !== DELEGATION && !PLACES[id]);
+}
 
 class Village extends Phaser.Scene {
   constructor() {
@@ -337,6 +365,7 @@ class Village extends Phaser.Scene {
     this.buildDecor();
     this.buildSky();
     this.reportMap();
+    this.reportPlaces();
 
     for (const c of CHARS) {
       for (const d of [D_DOWN, D_UP, D_LEFT, D_RIGHT]) {
@@ -351,6 +380,7 @@ class Village extends Phaser.Scene {
 
     this.input.on("gameobjectdown", (_p, obj) => {
       if (obj.getData("agent")) openPanel(obj.getData("agent"));
+      if (obj.getData("noticeBoard")) openPanel(NOTICE_BOARD_ID);
     });
     this.events.on("update", () => {
       for (const v of this.viz.values()) {
@@ -446,6 +476,12 @@ class Village extends Phaser.Scene {
     for (const p of Object.values(PLACES))
       for (let y = p.ty - 1; y <= p.ty + p.h; y++)
         for (let x = p.tx - 1; x <= p.tx + p.w; x++) clear.add(x + "," + y);
+    // the slots in front of a shared place reach further out than its footprint
+    for (const name of Object.keys(PLACES))
+      for (let s = 0; s < SLOT_SPOTS.length; s++) {
+        const t = this.tileAt(placeSlot(name, s).x, placeSlot(name, s).y);
+        reserve(t.x, t.y);
+      }
     for (const [px, py] of PLOTS) { reserve(px + 1, py + 3); reserve(px + 2, py + 3); }
     for (let y = 6; y <= 8; y++) for (let x = 12; x <= 19; x++) reserve(x, y);
     // the lane behind the lower houses is the only way to their doors: keep it clear
@@ -572,6 +608,7 @@ class Village extends Phaser.Scene {
     this.chips = [];
     this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
       .el.classList.add("you");
+    this.buildNoticeBoard();
     // shared locations: building, name label, and a doorway lit only while
     // somebody is genuinely there
     this.placeGlow = {};
@@ -584,6 +621,25 @@ class Village extends Phaser.Scene {
       this.makeChip(null, p.accent, d.x, p.ty * T - 2, p.label)
         .el.classList.add("place");
     }
+  }
+
+  buildNoticeBoard() {
+    // A code-drawn prop keeps the board distinct from houses while using the
+    // same crisp map label and pointer interaction as villagers.
+    const x = 18 * T, y = 10 * T;
+    this.block(18, 9); this.block(19, 9);
+    const board = this.add.container(x, y).setDepth(y + T);
+    const sign = this.add.rectangle(T, -T / 2, 30, 20, 0x7a4e2e)
+      .setStrokeStyle(2, 0xd2a15c);
+    const paper = this.add.rectangle(T, -T / 2, 19, 12, 0xe8dfc8);
+    const lines = [0, 4, 8].map(dx => this.add.rectangle(6 + dx, -T / 2, 2, 7, 0x6f6758));
+    const posts = [this.add.rectangle(4, 7, 4, 18, 0x56351f),
+                   this.add.rectangle(28, 7, 4, 18, 0x56351f)];
+    board.add([sign, paper, ...lines, ...posts]);
+    board.setSize(32, 34).setInteractive({ useHandCursor: true });
+    board.setData("noticeBoard", true);
+    this.makeChip(NOTICE_BOARD_ID, "#d2a15c", x + T, y - 22, "notice board")
+      .el.classList.add("place");
   }
 
   makeChip(id, accent, wx, wy, name, sub) {
@@ -750,13 +806,9 @@ class Village extends Phaser.Scene {
     for (let s = 0; s < 8; s++)
       out.push({ name: "knock " + s, x: yourDoor.x + (s % 4) * 26 - 39,
                  y: yourDoor.y + 10 + Math.floor(s / 4) * 16 });
-    for (const name of Object.keys(PLACES)) {
-      const d = placeDoor(name);
-      for (let s = 0; s < SLOT_SPOTS.length; s++) {
-        const [dx, dy] = SLOT_SPOTS[s];
-        out.push({ name: name + " " + s, x: d.x + dx, y: d.y + 6 + dy });
-      }
-    }
+    for (const name of Object.keys(PLACES))
+      for (let s = 0; s < SLOT_SPOTS.length; s++)
+        out.push({ name: name + " " + s, ...placeSlot(name, s) });
     for (let i = 0; i < 14; i++)
       out.push({ name: "street " + i, x: 48 + i * 28, y: 13 * T + 8 });
     return out;
@@ -787,6 +839,19 @@ class Village extends Phaser.Scene {
         if (!this.blocked[y][x]) { open++; if (this.dirt[y][x]) road++; }
     return { tiles: MAPW * MAPH, walkable: open, road, spots: spots.length,
              connected: this.connected(), offRoute: this.offRoute, problems: bad };
+  }
+
+  /* A place the projection can name but the map cannot draw is the bug this
+     whole change exists to fix, and its symptom — a villager quietly standing
+     at home — looks like nothing at all. Say it loudly instead. */
+  reportPlaces() {
+    const missing = unmappedPlaces();
+    if (!missing.length) return;
+    const msg = "burrow places: the projection sends villagers to " +
+                missing.join(", ") + ", which the map has no building for";
+    console.error(msg);
+    const foot = document.querySelector("footer");
+    if (foot) foot.textContent += " · ⚠ " + msg;
   }
 
   reportMap() {
@@ -845,10 +910,8 @@ class Village extends Phaser.Scene {
       return { x: d.x + dx, y: d.y + 6 + dy, kind: "delegation" };
     }
     if (dest.kind === "building") {
-      const p = PLACES[dest.id], d = placeDoor(dest.id);
-      const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
-      return { x: d.x + dx,
-               y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP,
+      const p = PLACES[dest.id];
+      return { ...placeSlot(dest.id, slot),
                approachX: (p.tx - 2) * T + T / 2,
                kind: dest.id };
     }
@@ -867,7 +930,7 @@ class Village extends Phaser.Scene {
     }
   }
 
-  spawn(v) {
+  spawn(v, dest) {
     const plot = this.assignPlot(v.id);
     const door = plot >= 0 ? plotDoor(plot) : { x: 48 + (hashCode(v.id) % 14) * 28, y: 13 * T + 8 };
     const cont = this.add.container(door.x, door.y + 2);
@@ -886,7 +949,7 @@ class Village extends Phaser.Scene {
     const chip = this.makeChip(v.id, v.accent, cont.x, cont.y - 11, v.name, v.project);
     const viz = { id: v.id, cont, spr, bang, zzz, chip, plot, char: v.char,
                   state: v.state, lastTs: 0, target: null, walk: null,
-                  home: v.state === "working" || v.state === "resting" };
+                  home: BurrowPresence.atHome(v.state, dest) };
     this.viz.set(v.id, viz);
     return viz;
   }
@@ -959,8 +1022,12 @@ class Village extends Phaser.Scene {
     for (const v of list) {
       seen.add(v.id);
       let viz = this.viz.get(v.id);
+      const dest = destinationFor(v, {
+        held: viz && viz.delegateTo, ownPlot: this.plotOf.get(v.id),
+        occupied, hash: hashCode(v.id), places: PLACES,
+      });
       const isNew = !viz;
-      if (isNew) viz = this.spawn(v);
+      if (isNew) viz = this.spawn(v, dest);
 
       viz.chip.el.className = "chip " + v.state;
       viz.chip.el.querySelector(".nm").textContent = v.name;
@@ -981,8 +1048,6 @@ class Village extends Phaser.Scene {
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
 
-      const dest = destinationFor(v, { held: viz.delegateTo, ownPlot: viz.plot,
-                                       occupied, hash: hashCode(v.id) });
       // held so a neighbour arriving or leaving cannot drag it to another door
       viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
       viz.dest = dest;
@@ -999,8 +1064,7 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot,
-                    dest.kind === "home" && (v.state === "working" || v.state === "resting"));
+        this.walkTo(viz, spot, BurrowPresence.atHome(v.state, dest));
       }
       viz.state = v.state;
 
@@ -1018,7 +1082,7 @@ class Village extends Phaser.Scene {
   }
 }
 
-/* ————— DOM chrome: census, panel, poll loop ————— */
+/* ————— DOM chrome: census, panel, live event transport ————— */
 
 const censusEl  = document.getElementById("census");
 const beatEl    = document.getElementById("lastbeat");
@@ -1075,6 +1139,20 @@ function placeLabel(v) {
 
 function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
+  if (selectedId === NOTICE_BOARD_ID) {
+    const named = nameArtifacts(artifacts, villagers, souls);
+    panelBody.innerHTML = `
+      <h2><span style="color:#d2a15c">▪</span> What the fleet made</h2>
+      <div class="meta">recent artifacts across the village</div>
+      ${named.length ? named.map(a => `
+        <div class="evt artifact">
+          <div class="artifact-path">${esc(a.artifact)}</div>
+          <div class="artifact-by">${esc(a.name)} · ${esc(a.project)} · ${ago(a.ts, now)}</div>
+        </div>`).join("") :
+        `<div class="artifact-empty">Nothing has been produced in the recent event log.</div>`}`;
+    panelEl.classList.add("open");
+    return;
+  }
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
   const at = placeLabel(v);
@@ -1109,11 +1187,31 @@ panelEl.querySelector(".close").addEventListener("click", closePanel);
 let souls = [];
 let eventCursor = 0;
 let agents = new Map();
-let pollInFlight = false;
-async function poll() {
-  if (pollInFlight) return;
-  pollInFlight = true;
-  try {
+let artifacts = [];
+let pollPromise = null;
+let eventStream = null;
+let streamReady = false;
+let reconnectTimer = null;
+
+function project(lines, reset = false) {
+  if (reset) { agents = new Map(); artifacts = []; }
+  // Parsed once, folded twice: the village and the notice board are two views of
+  // the same records, not two readers of the same text. Both transports land
+  // here, so a streamed event reaches the board exactly like a polled one.
+  const batch = parseEvents(lines);
+  foldEvents(agents, batch);
+  foldArtifacts(artifacts, batch);
+  const now = Date.now();
+  villagers = reduce(agents, now, souls);
+  if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
+  renderChrome(now);
+}
+
+function poll() {
+  if (pollPromise) return pollPromise;
+  if (eventStream || streamReady) return Promise.resolve();
+  pollPromise = (async () => {
+    try {
     const [evRes, soulRes] = await Promise.all([
       fetch("/events?since=" + eventCursor, { cache: "no-store" }),
       fetch("/villagers", { cache: "no-store" }).catch(() => null),
@@ -1121,21 +1219,45 @@ async function poll() {
     if (!evRes.ok) throw new Error("events request failed");
     const text = await evRes.text();
     const reset = evRes.headers.get("X-Burrow-Reset") === "1";
-    if (reset) agents = new Map();
     const lines = text.split("\n").filter(Boolean);
     // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
-    foldEvents(agents, eventCursor === 0 || reset ? lines.slice(-4000) : lines);
+    project(eventCursor === 0 || reset ? lines.slice(-4000) : lines, reset);
     eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
-    const now = Date.now();
-    villagers = reduce(agents, now, souls);
-    if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
-    renderChrome(now);
-  } catch {
-    beatEl.textContent = "server unreachable";
-  } finally {
-    pollInFlight = false;
-  }
+    // Souls affect names and appearance even when there are no new events.
+    project([]);
+    } catch {
+      beatEl.textContent = "server unreachable";
+    }
+  })().finally(() => { pollPromise = null; });
+  return pollPromise;
+}
+
+function connectStream() {
+  if (eventStream || typeof EventSource === "undefined") return;
+  const stream = new EventSource("/events/stream?since=" + encodeURIComponent(eventCursor));
+  eventStream = stream;
+  stream.onopen = () => { streamReady = true; };
+  stream.onmessage = message => {
+    streamReady = true;
+    if (message.lastEventId) eventCursor = message.lastEventId;
+    project([message.data]);
+  };
+  stream.addEventListener("reset", () => {
+    eventCursor = 0;
+    project([], true);
+  });
+  stream.onerror = async () => {
+    stream.close();
+    if (eventStream === stream) eventStream = null;
+    streamReady = false;
+    beatEl.textContent = "live stream interrupted — polling";
+    // Finish the cursor catch-up before opening another stream, otherwise a slow
+    // poll and a fast reconnect could deliver the same tail concurrently.
+    await poll();
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectStream, 2000);
+  };
 }
 
 /* ————— boot ————— */
@@ -1155,7 +1277,12 @@ async function poll() {
   game.events.on("ready", () => {
     scene = game.scene.getScene("village");
     window.__burrow.village = scene;   // map self-check hook, see checkMap()
-    scene.events.once("create", () => { poll(); setInterval(poll, 2000); });
+    scene.events.once("create", async () => {
+      await poll();
+      connectStream();
+      // Idle while SSE is healthy; this is the fallback when it is not.
+      setInterval(poll, 2000);
+    });
   });
 })();
 </script>

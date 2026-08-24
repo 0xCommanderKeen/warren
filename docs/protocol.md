@@ -52,12 +52,21 @@ back to local logs and the village looks emptier than the fleet is.
 
 Rotating the secret runs the same loop in reverse: unset on the server, re-issue to
 emitters, set again.
-The viewer reads `GET /events?since=<byte-offset>`. The response body contains only
-complete JSONL lines after that offset, and `X-Burrow-Cursor` supplies the offset for
-the next request. Omit `since` (or use `0`) for a full bootstrap. If a log is
-truncated or rotated and the cursor is beyond EOF, the server starts again at byte
-zero and includes `X-Burrow-Reset: 1`; consumers must discard their reduced state
-before folding in that response.
+The viewer bootstraps and falls back through `GET /events?since=<cursor>`. The
+response body contains only complete JSONL lines after that position, and
+`X-Burrow-Cursor` supplies the cursor for the next request. Omit `since` (or use `0`)
+for a full bootstrap. If a log is truncated or rotated, the server starts again at
+byte zero and includes `X-Burrow-Reset: 1`; consumers must discard their reduced
+state before folding in that response.
+
+Live updates use `GET /events/stream?since=<cursor>` with `text/event-stream`. Each
+JSON event is one SSE `data` message and its `id` is the cursor immediately after
+that event. Reconnect with that value in `Last-Event-ID` (preferred automatically by
+`EventSource`) or `since`; both transports use the same cursor, so switching between
+SSE and polling neither duplicates nor skips an event. A rotation emits an SSE
+`reset` event before replaying the new live log. The stream sends keepalive comments
+and `X-Accel-Buffering: no` so the NAS reverse proxy does not hold events in a
+buffer.
 
 ## Event shape
 
@@ -96,6 +105,10 @@ before folding in that response.
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
+
+The village notice board is a bounded cross-agent view of this stream. It keeps
+the 30 most recent valid `artifact_produced` events from the viewer's live log
+window, newest first, including artifacts from agents who have since left.
 
 ## Projection rules (v0)
 
@@ -168,7 +181,7 @@ and some verbs belong to a shared building rather than the villager's own house:
 | delegating                   | another villager's door       |
 | every other / unknown verb   | the villager's home work spot |
 
-The mapping is `LOCATION_OF_VERB` in `viewer/projection.js`. It consumes the
+The mapping is `PLACE_OF_VERB` in `viewer/projection.js`. It consumes the
 classification from the existing `VERBS` table, so tool names have one source of
 truth. The post office is ready for email/inbox adapters: they classify their tool
 as `emailing` in `VERBS` and inherit the shared location without viewer changes.

@@ -9,14 +9,14 @@ const assert = require("node:assert/strict");
 
 const { DELEGATION, destinationFor, destinationKey, delegatePlot } =
   require("../viewer/destinations.js");
-const { LOCATION_OF_VERB, reduce, hashCode } = require("../viewer/projection.js");
+const { PLACE_OF_VERB, reduce, hashCode } = require("../viewer/projection.js");
 const fs = require("node:fs");
 
 const working = place => ({ id: "x:one", state: "working", place });
 
 test("the projection and the map agree on what delegation is called", () => {
   // The only string joining the two modules; a rename here fails loudly.
-  assert.equal(LOCATION_OF_VERB.delegating, DELEGATION);
+  assert.equal(PLACE_OF_VERB.delegating, DELEGATION);
 });
 
 test("each kind of destination is a distinct value", () => {

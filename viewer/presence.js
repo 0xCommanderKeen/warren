@@ -7,6 +7,18 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowPresence = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
+  /* Whether a villager belongs at its own house right now. A villager working
+   * at a shared place (the library) does not, so its house stays dark — and
+   * that has to hold whether it walked there or the viewer loaded with it
+   * already standing there.
+   *
+   * `dest` is the destination the viewer resolved (viewer/destinations.js), not
+   * the raw projected place name: a name the map has no building for resolves
+   * to home, and that villager's house must light up like anyone else's. */
+  function atHome(state, dest) {
+    return dest.kind === "home" && (state === "working" || state === "resting");
+  }
+
   function startJourney(viz, arrivesHome) {
     // Leaving is physical as soon as the walk starts. On a return trip, retain
     // the away state until the final tween completes.
@@ -23,5 +35,5 @@
     return { home, working: home && viz.state === "working" };
   }
 
-  return { startJourney, finishJourney, houseLight };
+  return { atHome, startJourney, finishJourney, houseLight };
 });

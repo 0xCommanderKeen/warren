@@ -13,8 +13,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
-  reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS,
-  describe: describeEvent, doingLabel, ago, esc, hashCode, workLocation,
+  reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
+  MAX_ARTIFACTS, parseEvents, foldEvents, foldArtifacts, nameArtifacts,
+  describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
 
 /** All fixture timestamps are written relative to this instant. */
@@ -75,6 +76,68 @@ describe("event filtering", () => {
   it("survives an empty log", () => {
     assert.deepEqual(reduce([], NOW, []), []);
     assert.deepEqual(reduce([], NOW, undefined), []);
+  });
+});
+
+describe("notice board artifacts", () => {
+  it("lists artifacts most recent first and ignores malformed entries", () => {
+    const artifacts = foldArtifacts([], [
+      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      "{",
+      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "b", project: "two", type: "artifact_produced", payload: { artifact: "new.md" } }),
+      JSON.stringify({ ts: "2026-08-24T12:00:00Z", agent_id: "c", type: "artifact_produced", payload: {} }),
+    ]);
+    assert.deepEqual(artifacts.map(a => a.artifact), ["new.md", "old.md"]);
+    assert.deepEqual(artifacts.map(a => a.project), ["two", "one"]);
+  });
+
+  it("stays bounded during incremental ingestion", () => {
+    const artifacts = [];
+    for (let i = 0; i < MAX_ARTIFACTS + 25; i++) {
+      foldArtifacts(artifacts, [JSON.stringify({
+        ts: new Date(NOW + i).toISOString(), agent_id: "maker", project: "burrow",
+        type: "artifact_produced", payload: { artifact: `file-${i}` },
+      })]);
+      assert.ok(artifacts.length <= MAX_ARTIFACTS);
+    }
+    assert.equal(artifacts.length, MAX_ARTIFACTS);
+    assert.equal(artifacts[0].artifact, `file-${MAX_ARTIFACTS + 24}`);
+  });
+
+  it("folds the village and the board from one parse of the batch", () => {
+    const lines = [
+      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      "not json",
+      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "a", project: "one", type: "tool_called", payload: { tool: "Read" } }),
+      JSON.stringify({ ts: "2026-08-24T12:00:00Z", type: "artifact_produced", payload: { artifact: "orphan.md" } }),
+    ];
+    // The viewer parses a batch once and hands the same records to both folds.
+    const batch = parseEvents(lines);
+    assert.deepEqual(batch.map(ev => ev.type), ["artifact_produced", "tool_called"]);
+
+    const agents = new Map(), artifacts = [];
+    foldEvents(agents, batch);
+    foldArtifacts(artifacts, batch);
+    assert.deepEqual([...agents.keys()], ["a"]);
+    assert.deepEqual(artifacts.map(a => a.artifact), ["old.md"]);
+
+    // Folding the raw lines has to agree with folding the parsed records, or
+    // the two ingestion paths have drifted apart.
+    const fromLines = new Map(), artifactsFromLines = [];
+    foldEvents(fromLines, lines);
+    foldArtifacts(artifactsFromLines, lines);
+    assert.deepEqual([...fromLines.keys()], [...agents.keys()]);
+    assert.deepEqual(artifactsFromLines, artifacts);
+  });
+
+  it("uses the visible villager name with a stable fallback", () => {
+    const input = [{ artifact: "x", agent_id: "known", project: "p", ts: NOW },
+                   { artifact: "y", agent_id: "gone", project: "p", ts: NOW - 1 }];
+    const named = nameArtifacts(input, [{ id: "known", name: "Maren" }]);
+    assert.equal(named[0].name, "Maren");
+    assert.equal(named[1].name, NAMES[hashCode("gone") % NAMES.length]);
+    const historical = nameArtifacts([input[1]], [], [soul({ project: "p", name: "Vesper" })]);
+    assert.equal(historical[0].name, "Vesper");
   });
 });
 
@@ -148,19 +211,19 @@ describe("meaningful work locations", () => {
   const event = tool => ({ type: "tool_called", payload: { tool } });
 
   it("maps tools through the shared verb table", () => {
-    assert.equal(workLocation(event("WebSearch")), "library");
-    assert.equal(workLocation(event("Inbox")), "post-office");
-    assert.equal(workLocation(event("Write")), "workshop");
-    assert.equal(workLocation(event("Edit")), "workshop");
-    assert.equal(workLocation(event("Bash")), "workshop");
-    assert.equal(workLocation(event("Agent")), "delegation");
-    assert.equal(workLocation(event("Task")), "delegation");
+    assert.equal(workPlace(event("WebSearch")), "library");
+    assert.equal(workPlace(event("Inbox")), "post-office");
+    assert.equal(workPlace(event("Write")), "workshop");
+    assert.equal(workPlace(event("Edit")), "workshop");
+    assert.equal(workPlace(event("Bash")), "workshop");
+    assert.equal(workPlace(event("Agent")), "delegation");
+    assert.equal(workPlace(event("Task")), "delegation");
   });
 
   it("leaves uncovered tools at the home work spot", () => {
-    assert.equal(workLocation(event("Read")), null);
-    assert.equal(workLocation(event("Telescope")), null);
-    assert.equal(workLocation({ type: "idle", payload: {} }), null);
+    assert.equal(workPlace(event("Read")), null);
+    assert.equal(workPlace(event("Telescope")), null);
+    assert.equal(workPlace({ type: "idle", payload: {} }), null);
   });
 
   it("projects the latest supported place and keeps it when stale", () => {
@@ -389,5 +452,54 @@ describe("presentation helpers shared with the viewer", () => {
   it("escapes agent-supplied text before it reaches the DOM", () => {
     assert.equal(esc('<img src=x onerror="alert(1)">'),
                  "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+  });
+});
+
+describe("where the work happens (docs/protocol.md, places)", () => {
+  const village = reduce(log("places.jsonl"), NOW, []);
+  const v = byId(village);
+
+  it("sends a researching villager to the library", () => {
+    // The bug this test exists for: the verb classified as researching, the
+    // panel said so, and the villager never left its own doorstep.
+    assert.equal(v.get("claude-code:a-searcher").doing, "researching");
+    assert.equal(v.get("claude-code:a-searcher").place, "library");
+    assert.equal(v.get("claude-code:b-fetcher").place, "library");   // WebFetch too
+  });
+
+  it("leaves every other verb at its own house", () => {
+    assert.equal(v.get("claude-code:c-reader").place, null);         // Read
+    assert.equal(v.get("cron:g-unknown").place, null);               // unknown tool
+  });
+
+  it("walks home when the research ends", () => {
+    const done = v.get("claude-code:d-finished");
+    assert.equal(done.state, "resting");
+    assert.equal(done.place, null);
+  });
+
+  it("keeps a heartbeating researcher at the library", () => {
+    // A heartbeat is liveness only: it must not read as "no verb, go home".
+    const beating = v.get("claude-code:e-beating");
+    assert.equal(beating.state, "working");
+    assert.equal(beating.place, "library");
+  });
+
+  it("leaves a stale researcher where it was — losing signal is not travel", () => {
+    const quiet = v.get("claude-code:f-quiet");
+    assert.equal(quiet.state, "stale");
+    assert.equal(quiet.place, "library");
+  });
+
+  it("only tool_called can move anybody", () => {
+    assert.equal(workPlace(null), null);
+    assert.equal(workPlace({ type: "tool_called" }), null);          // no payload
+    assert.equal(workPlace({ type: "idle", payload: { tool: "WebSearch" } }), null);
+    assert.equal(workPlace({ type: "tool_called", payload: { tool: "WebSearch" } }), "library");
+  });
+
+  it("maps places by verb, not by tool name", () => {
+    // Adding a research-shaped tool must not need a second table edit.
+    assert.equal(PLACE_OF_VERB.researching, "library");
   });
 });

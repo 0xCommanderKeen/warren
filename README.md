@@ -20,6 +20,11 @@ Each real agent — the one summarizing your day, reviewing your code, reading y
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
 4. **Client** — pixel-art renderer. Click a villager to see its current task, its log, and chat with it.
 
+The notice board in the village square opens a fleet-wide review of the 30 most
+recent `artifact_produced` events. It shows each artifact path, its maker and
+project, and how recently it was produced; an empty board says plainly that the
+recent event log contains no artifacts.
+
 ## Running (v0.5)
 
 One village for the whole fleet, served from the NAS over Tailscale:
@@ -37,6 +42,11 @@ map of everything the fleet does.
   'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Souls
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying.
+  The viewer's live feed is SSE at `/events/stream`; the response disables nginx
+  buffering itself. If another reverse proxy is placed in front, keep streaming
+  responses unbuffered and give them an idle timeout longer than the 15-second
+  keepalive interval. Polling automatically carries the same cursor while a stream
+  is unavailable and retries SSE every two seconds.
 - **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
   `SessionEnd`) with `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
