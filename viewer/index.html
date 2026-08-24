@@ -181,22 +181,25 @@ function hhmm(h){const m=Math.floor((h-Math.floor(h))*60);return String(Math.flo
 const PLACES = {
   library: {
     label: "the library",
-    tx: 15, ty: 16, w: 3, h: 3,
-    frame: { x: 256, y: 0, w: 48, h: 48 },
+    tx: 11, ty: 21, w: 3, h: 3,
+    frame: { x: 352, y: 0, w: 48, h: 48 },
     accent: "#7fb0c8",
-    verbs: ["researching"],
+  },
+  workshop: {
+    label: "the workshop",
+    tx: 15, ty: 21, w: 3, h: 3,
+    frame: { x: 256, y: 0, w: 48, h: 48 },
+    accent: "#d99a5e",
+  },
+  "post-office": {
+    label: "the post office",
+    tx: 19, ty: 21, w: 3, h: 3,
+    frame: { x: 304, y: 0, w: 48, h: 48 },
+    accent: "#d97979",
   },
 };
-const PLACE_OF_VERB = {};
-for (const [name, p] of Object.entries(PLACES))
-  for (const verb of p.verbs) PLACE_OF_VERB[verb] = name;
 
-function workPlace(ev) {
-  if (!ev || ev.type !== "tool_called") return null;
-  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
-}
-
-const T = 16, MAPW = 32, MAPH = 22, ZOOM = 3;
+const T = 16, MAPW = 32, MAPH = 27, ZOOM = 3;
 const FLOOR_COLS = 22;
 const GRASS = 11 * FLOOR_COLS + 3, GRASS2 = 11 * FLOOR_COLS + 2;
 // dirt autotile block: cols 0-2 × rows 7-9 of the floor tileset (edges + center)
@@ -279,6 +282,8 @@ class Heap {
 // anything else is a key in PLACES. null means its own house.
 function whereFor(v) {
   if (v.state === "knocking") return "door";
+  if (v.place === "delegation" && (v.state === "working" || v.state === "stale"))
+    return "delegate:" + ((hashCode(v.id) % (PLOTS.length - 1)) + 1);
   if (v.place && (v.state === "working" || v.state === "stale")) return v.place;
   return null;
 }
@@ -748,6 +753,13 @@ class Village extends Phaser.Scene {
     for (let s = 0; s < 8; s++)
       out.push({ name: "knock " + s, x: yourDoor.x + (s % 4) * 26 - 39,
                  y: yourDoor.y + 10 + Math.floor(s / 4) * 16 });
+    for (const name of Object.keys(PLACES)) {
+      const d = placeDoor(name);
+      for (let s = 0; s < SLOT_SPOTS.length; s++) {
+        const [dx, dy] = SLOT_SPOTS[s];
+        out.push({ name: name + " " + s, x: d.x + dx, y: d.y + 6 + dy });
+      }
+    }
     for (let i = 0; i < 14; i++)
       out.push({ name: "street " + i, x: 48 + i * 28, y: 13 * T + 8 });
     return out;
@@ -831,6 +843,12 @@ class Village extends Phaser.Scene {
   }
 
   spotFor(v, viz, where, slot) {
+    if (where && where.startsWith("delegate:")) {
+      let plot = Number(where.slice("delegate:".length)) % PLOTS.length;
+      if (plot === viz.plot) plot = (plot + 1) % PLOTS.length;
+      const d = plotDoor(plot), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
+      return { x: d.x + dx, y: d.y + 6 + dy, kind: "delegation" };
+    }
     if (where && where !== "door") {   // working at a shared building
       const p = PLACES[where], d = placeDoor(where);
       const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
@@ -967,7 +985,8 @@ class Village extends Phaser.Scene {
       const where = whereFor(v);
       this.leaveSlots(v.id, where);
       const slot = where ? this.slotAt(where, v.id) : 0;
-      if (where && where !== "door" && v.state === "working") busyPlaces.add(where);
+      if (where && where !== "door" && !where.startsWith("delegate:") && v.state === "working")
+        busyPlaces.add(where);
       if (v.state === "knocking") knockers++;
       const spot = this.spotFor(v, viz, where, slot);
       const moved = !viz.target || viz.target.x !== spot.x || viz.target.y !== spot.y;
@@ -1042,7 +1061,8 @@ function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
-  const at = v.place ? " · at " + PLACES[v.place].label : "";
+  const at = v.place ? " · at " + (v.place === "delegation"
+    ? "another villager's plot" : PLACES[v.place].label) : "";
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
     v.state === "working"  ? (v.doing || "working") + at :

@@ -160,14 +160,23 @@ The same latest event also decides *where* the villager stands. `tool_called` is
 classified into a verb (`WebSearch`/`WebFetch` → researching, `Read` → reading, …)
 and some verbs belong to a shared building rather than the villager's own house:
 
-| verb          | place         |
-|---------------|---------------|
-| researching   | the library   |
+| verb                         | place                         |
+|------------------------------|-------------------------------|
+| researching                  | the library                   |
+| crafting, tinkering          | the workshop                  |
+| emailing                     | the post office               |
+| delegating                   | another villager's plot area  |
+| every other / unknown verb   | the villager's home work spot |
+
+The mapping is `LOCATION_OF_VERB` in `viewer/projection.js`. It consumes the
+classification from the existing `VERBS` table, so tool names have one source of
+truth. The post office is ready for email/inbox adapters: they classify their tool
+as `emailing` in `VERBS` and inherit the shared location without viewer changes.
 
 Rules that keep this honest:
 
-- Only the latest event decides. Research → the villager walks to the library;
-  any other work → it walks home. Nothing else moves it.
+- Only the latest event decides. A covered verb walks to its mapped location; any
+  other work walks home. Nothing else moves it.
 - Two villagers at the same place take **distinct, stable slots**. A slot is held
   until its villager leaves, so an arrival or a departure never nudges anyone else
   — that would be movement no event asked for.
@@ -175,7 +184,8 @@ Rules that keep this honest:
   the library leaves its own house dark.
 - Losing signal is not travel: a **stale** villager stays where it was, faded.
 
-`fixtures/library-walk.jsonl` is the worked example — see `fixtures/README.md`.
+`fixtures/meaningful-locations.jsonl` exercises every location end to end — see
+`fixtures/README.md`.
 
 ## Knocks reach you off-screen
 

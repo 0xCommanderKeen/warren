@@ -24,8 +24,21 @@ const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
   NotebookEdit: "crafting", Agent: "delegating", Task: "delegating",
+  Email: "emailing", Inbox: "emailing",
   AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
 };
+const LOCATION_OF_VERB = {
+  researching: "library",
+  crafting: "workshop",
+  tinkering: "workshop",
+  "emailing": "post-office",
+  delegating: "delegation",
+};
+
+function workLocation(ev) {
+  if (!ev || ev.type !== "tool_called") return null;
+  return LOCATION_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
+}
 
 function hashCode(s) {
   let h = 0;
@@ -134,6 +147,8 @@ function reduce(input, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
+      // A lost signal is not travel: stale villagers keep the last supported place.
+      place: state === "working" || state === "stale" ? workLocation(shown) : null,
       doing: state === "working" ? doingLabel(shown) : "",
       lastLine: describe(shown),
       knock: state === "knocking"
@@ -147,7 +162,8 @@ function reduce(input, now, souls) {
 // node (tests) picks the module up here; the browser never sees `module`.
 if (typeof module === "object" && module.exports) {
   module.exports = {
-    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES, ACTION_TYPES,
-    hashCode, esc, ago, describe, doingLabel, foldEvents, reduce,
+    NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, LOCATION_OF_VERB,
+    EVENT_TYPES, ACTION_TYPES, hashCode, esc, ago, describe, doingLabel,
+    workLocation, foldEvents, reduce,
   };
 }

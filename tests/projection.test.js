@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS,
-  describe: describeEvent, doingLabel, ago, esc, hashCode,
+  describe: describeEvent, doingLabel, ago, esc, hashCode, workLocation,
 } = require("../viewer/projection.js");
 
 /** All fixture timestamps are written relative to this instant. */
@@ -141,6 +141,50 @@ describe("state mapping (docs/protocol.md, projection rules v0)", () => {
     // the cap drops the oldest, never the newest
     assert.equal(long.events.at(-1).payload.detail, "file" + (MAX_EVENTS + 19));
     assert.equal(long.events[0].payload.detail, "file20");
+  });
+});
+
+describe("meaningful work locations", () => {
+  const event = tool => ({ type: "tool_called", payload: { tool } });
+
+  it("maps tools through the shared verb table", () => {
+    assert.equal(workLocation(event("WebSearch")), "library");
+    assert.equal(workLocation(event("Inbox")), "post-office");
+    assert.equal(workLocation(event("Write")), "workshop");
+    assert.equal(workLocation(event("Edit")), "workshop");
+    assert.equal(workLocation(event("Bash")), "workshop");
+    assert.equal(workLocation(event("Agent")), "delegation");
+    assert.equal(workLocation(event("Task")), "delegation");
+  });
+
+  it("leaves uncovered tools at the home work spot", () => {
+    assert.equal(workLocation(event("Read")), null);
+    assert.equal(workLocation(event("Telescope")), null);
+    assert.equal(workLocation({ type: "idle", payload: {} }), null);
+  });
+
+  it("projects the latest supported place and keeps it when stale", () => {
+    const fresh = reduce([JSON.stringify({
+      ts: new Date(NOW - MIN).toISOString(), agent_id: "x:builder",
+      type: "tool_called", payload: { tool: "Edit" },
+    })], NOW, [])[0];
+    const stale = reduce([JSON.stringify({
+      ts: new Date(NOW - 31 * MIN).toISOString(), agent_id: "x:delegate",
+      type: "tool_called", payload: { tool: "Agent" },
+    })], NOW, [])[0];
+    assert.equal(fresh.place, "workshop");
+    assert.equal(stale.state, "stale");
+    assert.equal(stale.place, "delegation");
+  });
+
+  it("returns home after an uncovered action", () => {
+    const [v] = reduce([
+      JSON.stringify({ ts: new Date(NOW - 2 * MIN).toISOString(), agent_id: "x:home",
+        type: "tool_called", payload: { tool: "WebFetch" } }),
+      JSON.stringify({ ts: new Date(NOW - MIN).toISOString(), agent_id: "x:home",
+        type: "tool_called", payload: { tool: "Read" } }),
+    ], NOW, []);
+    assert.equal(v.place, null);
   });
 });
 

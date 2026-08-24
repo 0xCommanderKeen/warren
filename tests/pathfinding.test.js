@@ -23,8 +23,8 @@ const { Village } = context.exports;
 
 function village(blocked = []) {
   const v = new Village();
-  v.blocked = Array.from({ length: 22 }, () => Array(32).fill(false));
-  v.dirt = Array.from({ length: 22 }, () => Array(32).fill(false));
+  v.blocked = Array.from({ length: 27 }, () => Array(32).fill(false));
+  v.dirt = Array.from({ length: 27 }, () => Array(32).fill(false));
   for (const [x, y] of blocked) v.blocked[y][x] = true;
   return v;
 }
@@ -66,7 +66,7 @@ if (process.env.BURROW_CASE !== "no-path") {
 
 // A failed route must not fabricate a straight tween through a wall.
 if (process.env.BURROW_CASE !== "cost") {
-  const v = village(Array.from({ length: 22 }, (_, y) => [1, y]));
+  const v = village(Array.from({ length: 27 }, (_, y) => [1, y]));
   let chained = false;
   v.route = () => null;
   v.tweens = { chain() { chained = true; } };

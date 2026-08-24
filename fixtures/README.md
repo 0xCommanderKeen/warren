@@ -28,3 +28,11 @@ Two agents, one shared location. What to watch for:
 5. scholar-1 calls `Edit` → **crafting**, not research: it walks home. scholar-2
    keeps the slot it was already standing in.
 6. Both finish (`idle`) and rest at their own doors; the library goes dark.
+
+## `meaningful-locations.jsonl`
+
+One worker visits every meaningful work location in sequence: research goes to the
+library, inbox work goes to the post office, editing and shell work go to the workshop, delegation heads toward another
+villager's plot, and an uncovered `Read` returns home. A second crafter overlaps at
+the workshop to demonstrate stable shared-building slots. The final idle events send
+both villagers home.
