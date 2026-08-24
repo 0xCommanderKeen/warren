@@ -184,17 +184,8 @@ const PLACES = {
     tx: 15, ty: 16, w: 3, h: 3,
     frame: { x: 256, y: 0, w: 48, h: 48 },
     accent: "#7fb0c8",
-    verbs: ["researching"],
   },
 };
-const PLACE_OF_VERB = {};
-for (const [name, p] of Object.entries(PLACES))
-  for (const verb of p.verbs) PLACE_OF_VERB[verb] = name;
-
-function workPlace(ev) {
-  if (!ev || ev.type !== "tool_called") return null;
-  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
-}
 
 const T = 16, MAPW = 32, MAPH = 22, ZOOM = 3;
 const FLOOR_COLS = 22;
@@ -279,7 +270,8 @@ class Heap {
 // anything else is a key in PLACES. null means its own house.
 function whereFor(v) {
   if (v.state === "knocking") return "door";
-  if (v.place && (v.state === "working" || v.state === "stale")) return v.place;
+  if (v.place && PLACES[v.place] && (v.state === "working" || v.state === "stale"))
+    return v.place;
   return null;
 }
 
@@ -873,7 +865,7 @@ class Village extends Phaser.Scene {
     const chip = this.makeChip(v.id, v.accent, cont.x, cont.y - 11, v.name, v.project);
     const viz = { id: v.id, cont, spr, bang, zzz, chip, plot, char: v.char,
                   state: v.state, lastTs: 0, target: null, walk: null,
-                  home: v.state === "working" || v.state === "resting" };
+                  home: BurrowPresence.atHome(v) };
     this.viz.set(v.id, viz);
     return viz;
   }
@@ -977,7 +969,7 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot, !v.place && (v.state === "working" || v.state === "resting"));
+        this.walkTo(viz, spot, BurrowPresence.atHome(v));
       }
       viz.state = v.state;
 
@@ -1042,7 +1034,7 @@ function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
-  const at = v.place ? " · at " + PLACES[v.place].label : "";
+  const at = v.place && PLACES[v.place] ? " · at " + PLACES[v.place].label : "";
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
     v.state === "working"  ? (v.doing || "working") + at :

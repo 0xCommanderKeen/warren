@@ -12,7 +12,10 @@ for t in tests/test_*.py; do
   echo "== $t"
   "$PYTHON" "$t"
 done
-for t in tests/test_*.js; do
+# Both naming conventions run: test_*.js and *.test.js. The library trip shipped
+# broken because tests/projection.test.js and tests/routes.test.js matched
+# neither glob and so never ran.
+for t in tests/test_*.js tests/*.test.js; do
   echo "== $t"
   node "$t"
 done

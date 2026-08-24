@@ -27,6 +27,22 @@ const VERBS = {
   AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
 };
 
+/* Some verbs belong to a shared building rather than the villager's own house
+ * (docs/protocol.md, "Where the work happens"). The viewer owns where a place
+ * *is* on the map; the projection only decides which one a villager belongs at,
+ * so this stays pure and testable. Keys must match the PLACES table in the
+ * viewer — an unknown name renders as "own house" rather than throwing.
+ */
+const PLACE_OF_VERB = { researching: "library" };
+
+/* The shared place implied by an event, or null for "its own house". Only
+ * `tool_called` moves anybody: every other event type leaves the verb unknown,
+ * and no verb means no trip. */
+function workPlace(ev) {
+  if (!ev || ev.type !== "tool_called") return null;
+  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
+}
+
 function hashCode(s) {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
@@ -135,6 +151,7 @@ function reduce(input, now, souls) {
       project,
       cwd: last.cwd || "",
       doing: state === "working" ? doingLabel(shown) : "",
+      place: workPlace(shown),
       lastLine: describe(shown),
       knock: state === "knocking"
         ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs }
@@ -148,6 +165,7 @@ function reduce(input, now, souls) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES, ACTION_TYPES,
-    hashCode, esc, ago, describe, doingLabel, foldEvents, reduce,
+    PLACE_OF_VERB,
+    hashCode, esc, ago, describe, doingLabel, workPlace, foldEvents, reduce,
   };
 }
