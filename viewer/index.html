@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>burrow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<style>
+  /* ————— night palette ————— */
+  :root {
+    --sky-top: #070a1c;
+    --sky-mid: #10142e;
+    --sky-low: #251f3d;
+    --horizon: #3a2c47;
+    --ground:  #16211a;
+    --ground-hi: #1d2b21;
+    --path:    #2b2420;
+    --timber:  #241b16;
+    --timber-hi: #3a2b21;
+    --roof:    #4a3327;
+    --window-lit: #ffc86b;
+    --window-dim: #2a2333;
+    --ink:     #e8dfc8;
+    --ink-dim: #8b8474;
+    --alert:   #ff8f5e;
+    --panel:   #100d18;
+    --moon:    #f4ecd3;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "VT323", "Courier New", monospace;
+    background: var(--sky-top);
+    color: var(--ink);
+    overflow: hidden;
+    image-rendering: pixelated;
+  }
+
+  /* ————— sky ————— */
+  #world {
+    position: absolute; inset: 0;
+    background: linear-gradient(var(--sky-top) 0%, var(--sky-mid) 45%,
+                                var(--sky-low) 72%, var(--horizon) 100%);
+  }
+  /* static stars — scenery, not liveliness. nothing here animates. */
+  .stars, .stars::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      radial-gradient(1.5px 1.5px at 8% 12%,  #cfd6ff 50%, transparent 51%),
+      radial-gradient(2px 2px     at 21% 33%, #9aa4d8 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 34% 9%,  #cfd6ff 50%, transparent 51%),
+      radial-gradient(2px 2px     at 47% 25%, #7f89c2 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 58% 14%, #cfd6ff 50%, transparent 51%),
+      radial-gradient(2px 2px     at 69% 31%, #9aa4d8 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 81% 8%,  #cfd6ff 50%, transparent 51%),
+      radial-gradient(2px 2px     at 92% 22%, #7f89c2 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 15% 48%, #545e94 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 63% 44%, #545e94 50%, transparent 51%),
+      radial-gradient(1.5px 1.5px at 88% 41%, #545e94 50%, transparent 51%);
+  }
+  .stars::after { transform: translate(3vw, 5vh) scale(1.3); opacity: .5; }
+  .moon {
+    position: absolute; top: 9vh; right: 12vw; width: 64px; height: 64px;
+    background: var(--moon); border-radius: 50%;
+    box-shadow: inset -14px 8px 0 0 #b9ae8d, 0 0 42px 6px rgba(244,236,211,.16);
+  }
+
+  /* ————— ground ————— */
+  .ground {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 26vh;
+    background:
+      repeating-linear-gradient(90deg, transparent 0 26px,
+        rgba(255,255,255,.02) 26px 28px),
+      linear-gradient(var(--ground-hi), var(--ground));
+    border-top: 4px solid #33452f;
+  }
+  .path {
+    position: absolute; left: 0; right: 0; bottom: 7vh; height: 26px;
+    background: var(--path);
+    border-top: 3px solid #3d332b; border-bottom: 3px solid #191411;
+  }
+
+  /* ————— header ————— */
+  header {
+    position: absolute; top: 22px; left: 28px; z-index: 20; line-height: 1.15;
+  }
+  header h1 {
+    font-size: 44px; font-weight: 400; letter-spacing: 2px; color: var(--ink);
+    text-shadow: 0 3px 0 #000;
+  }
+  header .tagline { font-size: 18px; color: var(--ink-dim); }
+  #census { font-size: 20px; margin-top: 10px; color: var(--ink); }
+  #census .dot { color: var(--ink-dim); }
+  #census .attn { color: var(--alert); }
+  #lastbeat { font-size: 16px; color: var(--ink-dim); }
+
+  /* ————— village row ————— */
+  #village {
+    position: absolute; left: 0; right: 0; bottom: calc(7vh + 26px);
+    display: flex; align-items: flex-end; justify-content: center;
+    gap: 5vw; padding: 0 4vw; z-index: 5;
+  }
+  .homestead { position: relative; display: flex; flex-direction: column; align-items: center; cursor: pointer; }
+  .homestead:hover .house { filter: brightness(1.18); }
+
+  /* pixel house */
+  .house { position: relative; width: 92px; }
+  .roof {
+    width: 108px; height: 40px; margin-left: -8px;
+    background: var(--roof);
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  }
+  .wall {
+    width: 92px; height: 58px; background: var(--timber);
+    border: 3px solid #120d0a; border-top: none; position: relative;
+    background-image: linear-gradient(var(--timber-hi) 2px, transparent 2px);
+    background-size: 100% 14px;
+  }
+  .window {
+    position: absolute; top: 12px; left: 12px; width: 20px; height: 20px;
+    background: var(--window-dim); border: 3px solid #120d0a;
+  }
+  .window::after {  /* cross muntin */
+    content: ""; position: absolute; inset: 0;
+    background:
+      linear-gradient(#120d0a, #120d0a) 50% 0 / 3px 100% no-repeat,
+      linear-gradient(#120d0a, #120d0a) 0 50% / 100% 3px no-repeat;
+  }
+  .working .window { background: var(--window-lit); box-shadow: 0 0 18px 3px rgba(255,200,107,.35); }
+  .door {
+    position: absolute; top: 16px; right: 12px; width: 22px; height: 42px;
+    background: #1a1310; border: 3px solid #120d0a; border-bottom: none;
+    border-radius: 10px 10px 0 0;
+  }
+  .sign {
+    margin-top: 10px; text-align: center; max-width: 150px;
+  }
+  .sign .name { font-size: 21px; }
+  .sign .project { font-size: 16px; color: var(--ink-dim); }
+  .sign .doing {
+    font-size: 16px; color: var(--window-lit); min-height: 19px;
+    max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .resting .sign .doing { color: var(--ink-dim); }
+  .stale { opacity: .4; }
+  .stale .sign .doing { color: var(--ink-dim); }
+
+  /* ————— villager sprite ————— */
+  .villager { position: absolute; bottom: 0; left: -30px; width: 20px; z-index: 6; }
+  .v-head { width: 12px; height: 9px; margin: 0 auto; background: #d8a878; }
+  .v-hood { width: 16px; height: 6px; margin: 0 auto; }
+  .v-body { width: 16px; height: 12px; margin: 0 auto; }
+  .v-feet { width: 12px; height: 4px; margin: 0 auto; background: #120d0a; }
+  .working .villager { animation: bob .9s steps(2) infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  .resting .villager .v-head { height: 7px; }   /* head drooped */
+  .resting .villager { left: auto; right: -26px; }
+  .zzz { position: absolute; top: -16px; left: 14px; font-size: 15px; color: var(--ink-dim); }
+
+  /* ————— your house ————— */
+  #yourstead { position: relative; display: flex; flex-direction: column; align-items: center; }
+  #yourstead .house { width: 118px; }
+  #yourstead .roof { width: 138px; height: 50px; margin-left: -10px; background: #543c2c; }
+  #yourstead .wall { width: 118px; height: 72px; }
+  #yourstead .door { width: 28px; height: 52px; top: 20px; right: 16px; }
+  .lantern {
+    position: absolute; top: 8px; left: 46px; width: 10px; height: 12px;
+    background: var(--window-lit); border: 3px solid #120d0a;
+    box-shadow: 0 0 14px 3px rgba(255,200,107,.45);
+  }
+  #porch {
+    position: absolute; bottom: 0; right: 130px;
+    display: flex; gap: 16px; align-items: flex-end;
+  }
+  .knocker { position: relative; width: 20px; cursor: pointer; animation: bob .5s steps(2) infinite; }
+  .knocker .bang {
+    position: absolute; top: -24px; left: 5px; font-size: 24px; color: var(--alert);
+    animation: bang .5s steps(2) infinite;
+  }
+  @keyframes bang { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-3px); } }
+  .door-glow .door { background: #3d2416; box-shadow: 0 0 20px 4px rgba(255,143,94,.35); }
+
+  /* ————— empty state ————— */
+  #empty {
+    position: absolute; left: 0; right: 0; top: 40vh; text-align: center;
+    font-size: 26px; color: var(--ink-dim); z-index: 4; text-shadow: 0 2px 0 #000;
+  }
+  #empty .sub { font-size: 18px; margin-top: 6px; }
+
+  /* ————— log panel ————— */
+  #panel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 380px; z-index: 30;
+    background: var(--panel); border-left: 4px solid #2a2438;
+    padding: 26px 22px; overflow-y: auto;
+    transform: translateX(100%); transition: transform .18s steps(4);
+  }
+  #panel.open { transform: translateX(0); }
+  #panel .close {
+    position: absolute; top: 14px; right: 16px; font-size: 26px; color: var(--ink-dim);
+    cursor: pointer; background: none; border: none; font-family: inherit;
+  }
+  #panel .close:hover { color: var(--ink); }
+  #panel h2 { font-size: 30px; font-weight: 400; }
+  #panel .meta { font-size: 17px; color: var(--ink-dim); margin-bottom: 4px; word-break: break-all; }
+  #panel .state-line { font-size: 20px; margin: 10px 0 16px; }
+  #panel .state-line.attn { color: var(--alert); }
+  #panel .state-line.busy { color: var(--window-lit); }
+  .evt { border-top: 2px solid #221d30; padding: 8px 0; font-size: 17px; }
+  .evt .when { color: var(--ink-dim); font-size: 15px; }
+  .evt .what { word-break: break-word; }
+  .evt .t-needs_human .what { color: var(--alert); }
+
+  footer {
+    position: absolute; bottom: 10px; left: 28px; z-index: 20;
+    font-size: 15px; color: #57506a;
+  }
+</style>
+</head>
+<body>
+<div id="world">
+  <div class="stars"></div>
+  <div class="moon"></div>
+  <div class="ground"></div>
+  <div class="path"></div>
+
+  <header>
+    <h1>burrow</h1>
+    <div class="tagline">the village never lies</div>
+    <div id="census"></div>
+    <div id="lastbeat"></div>
+  </header>
+
+  <div id="empty">
+    the village is asleep — nothing is running
+    <div class="sub">events will appear from ~/.burrow/events.jsonl</div>
+  </div>
+
+  <div id="village"></div>
+
+  <footer>burrow v0 · projection of ~/.burrow/events.jsonl · polling every 2s</footer>
+</div>
+
+<aside id="panel">
+  <button class="close" title="close">✕</button>
+  <div id="panel-body"></div>
+</aside>
+
+<script>
+"use strict";
+
+const NAMES = ["Bramble","Poppy","Wren","Sorrel","Fern","Alder","Maple","Rowan",
+               "Thistle","Clover","Hazel","Juniper","Moss","Reed","Tansy","Willow"];
+const CLOAKS = ["#7d5ba6","#4f7d5b","#a65b5b","#5b7da6","#a68a4f","#5ba69b",
+                "#a65b8a","#6b7da0","#8aa65b","#a6764f"];
+const STALE_MS = 30 * 60 * 1000;      // working with no signal → stale
+const DROP_MS  = 12 * 60 * 60 * 1000; // silent this long → leave the village
+const VERBS = {
+  Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
+  WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
+  NotebookEdit: "crafting", Agent: "delegating", Task: "delegating",
+  AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
+};
+
+function hashCode(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+}
+function ago(ts, now) {
+  const s = Math.max(0, Math.round((now - ts) / 1000));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  return (s / 3600).toFixed(1) + "h ago";
+}
+function describe(ev) {
+  const p = ev.payload || {};
+  switch (ev.type) {
+    case "task_started":      return "took up a task: “" + (p.prompt || "…") + "”";
+    case "tool_called":       return (VERBS[p.tool] || "using " + p.tool) +
+                                     (p.detail ? " — " + p.detail : "");
+    case "artifact_produced": return "crafted " + (p.artifact || "something");
+    case "needs_human":       return "needs you: " + (p.message || "(no message)");
+    case "idle":              return "finished, resting";
+    case "session_ended":     return "went home";
+    default:                  return ev.type;
+  }
+}
+function doingLabel(ev) {
+  const p = ev.payload || {};
+  switch (ev.type) {
+    case "task_started":      return "starting a task";
+    case "tool_called":       return VERBS[p.tool] || ("using " + p.tool);
+    case "artifact_produced": return "crafting";
+    default:                  return "";
+  }
+}
+
+// ————— state reduction (docs/protocol.md, projection rules v0) —————
+function reduce(lines, now) {
+  const agents = new Map();
+  for (const line of lines) {
+    let ev;
+    try { ev = JSON.parse(line); } catch { continue; }
+    if (!ev || !ev.agent_id || !ev.type) continue;
+    let a = agents.get(ev.agent_id);
+    if (!a) { a = { id: ev.agent_id, events: [] }; agents.set(ev.agent_id, a); }
+    a.events.push(ev);
+    if (a.events.length > 80) a.events.shift();
+  }
+  const out = [];
+  for (const a of agents.values()) {
+    const last = a.events[a.events.length - 1];
+    const lastTs = Date.parse(last.ts) || 0;
+    if (last.type === "session_ended") continue;
+    if (now - lastTs > DROP_MS) continue;
+    let state =
+      last.type === "needs_human" ? "knocking" :
+      last.type === "idle"        ? "resting"  : "working";
+    if (state === "working" && now - lastTs > STALE_MS) state = "stale";
+    const h = hashCode(a.id);
+    out.push({
+      id: a.id, state, lastTs, events: a.events,
+      name: NAMES[h % NAMES.length],
+      cloak: CLOAKS[h % CLOAKS.length],
+      project: last.project || "unknown",
+      cwd: last.cwd || "",
+      doing: state === "working" ? doingLabel(last) : "",
+      lastLine: describe(last),
+    });
+  }
+  out.sort((x, y) => x.id < y.id ? -1 : 1);
+  return out;
+}
+
+// ————— render —————
+const villageEl = document.getElementById("village");
+const emptyEl   = document.getElementById("empty");
+const censusEl  = document.getElementById("census");
+const beatEl    = document.getElementById("lastbeat");
+const panelEl   = document.getElementById("panel");
+const panelBody = document.getElementById("panel-body");
+
+let villagers = [];
+let selectedId = null;
+let lastSig = "";
+
+function villagerSprite(v) {
+  return `<div class="villager">
+    ${v.state === "resting" ? '<span class="zzz">z</span>' : ""}
+    <div class="v-hood" style="background:${v.cloak}"></div>
+    <div class="v-head"></div>
+    <div class="v-body" style="background:${v.cloak}"></div>
+    <div class="v-feet"></div>
+  </div>`;
+}
+
+function render(now) {
+  const sig = JSON.stringify(villagers.map(v => [v.id, v.state, v.doing]));
+  const knockers = villagers.filter(v => v.state === "knocking");
+
+  if (sig !== lastSig) {
+    lastSig = sig;
+    let html = "";
+    for (const v of villagers) {
+      const atHome = v.state !== "knocking";
+      html += `<div class="homestead ${v.state}" data-id="${esc(v.id)}"
+                    title="${esc(v.name)} · ${esc(v.project)}">
+        <div class="house">
+          <div class="roof"></div>
+          <div class="wall"><div class="window"></div><div class="door"></div></div>
+          ${atHome ? villagerSprite(v) : ""}
+        </div>
+        <div class="sign">
+          <div class="name">${esc(v.name)}</div>
+          <div class="project">${esc(v.project)}</div>
+          <div class="doing">${v.state === "knocking" ? "at your door" :
+                              v.state === "stale" ? "no signal" : esc(v.doing)}</div>
+        </div>
+      </div>`;
+    }
+    html += `<div id="yourstead" class="${knockers.length ? "door-glow" : ""}">
+      <div class="house">
+        <div class="roof"></div>
+        <div class="wall"><div class="lantern"></div>
+          <div class="window" style="background:var(--window-lit)"></div>
+          <div class="door"></div>
+        </div>
+        <div id="porch">
+          ${knockers.map(v => `<div class="knocker" data-id="${esc(v.id)}"
+              title="${esc(v.name)} needs you"><span class="bang">!</span>
+              ${villagerSprite(v)}</div>`).join("")}
+        </div>
+      </div>
+      <div class="sign"><div class="name">you</div><div class="project">home</div>
+        <div class="doing">${knockers.length ? knockers.length + " knocking" : ""}</div></div>
+    </div>`;
+    villageEl.innerHTML = html;
+  }
+
+  emptyEl.style.display = villagers.length ? "none" : "block";
+  const working = villagers.filter(v => v.state === "working").length;
+  const resting = villagers.filter(v => v.state === "resting").length;
+  const parts = [`${villagers.length} villager${villagers.length === 1 ? "" : "s"}`];
+  if (working) parts.push(`${working} working`);
+  if (resting) parts.push(`${resting} resting`);
+  censusEl.innerHTML = parts.join('<span class="dot"> · </span>') +
+    (knockers.length ? `<span class="dot"> · </span><span class="attn">${knockers.length} at your door</span>` : "");
+  const newest = Math.max(0, ...villagers.map(v => v.lastTs));
+  beatEl.textContent = newest ? "last signal " + ago(newest, now) : "";
+
+  if (selectedId) renderPanel(now);
+}
+
+function renderPanel(now) {
+  const v = villagers.find(x => x.id === selectedId);
+  if (!v) { closePanel(); return; }
+  const stateText =
+    v.state === "knocking" ? "at your door — needs you" :
+    v.state === "working"  ? (v.doing || "working") :
+    v.state === "stale"    ? "no signal for a while" : "resting";
+  const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
+  panelBody.innerHTML = `
+    <h2><span style="color:${v.cloak}">▪</span> ${esc(v.name)}</h2>
+    <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
+    <div class="meta">${esc(v.id)}</div>
+    <div class="state-line ${cls}">${esc(stateText)}</div>
+    ${v.events.slice().reverse().map(ev => `
+      <div class="evt t-${esc(ev.type)}">
+        <div class="when">${ago(Date.parse(ev.ts) || 0, now)} · ${esc(ev.type)}</div>
+        <div class="what">${esc(describe(ev))}</div>
+      </div>`).join("")}`;
+  panelEl.classList.add("open");
+}
+function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
+
+villageEl.addEventListener("click", e => {
+  const t = e.target.closest("[data-id]");
+  if (!t) return;
+  selectedId = t.dataset.id;
+  renderPanel(Date.now());
+});
+panelEl.querySelector(".close").addEventListener("click", closePanel);
+
+// ————— poll loop —————
+async function poll() {
+  try {
+    const res = await fetch("/events", { cache: "no-store" });
+    const text = await res.text();
+    const now = Date.now();
+    villagers = reduce(text.split("\n").filter(Boolean).slice(-4000), now);
+    render(now);
+  } catch {
+    beatEl.textContent = "server unreachable";
+  }
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
