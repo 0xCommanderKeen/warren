@@ -53,7 +53,7 @@ from steward.scheduler import (
     default_state_path,
 )
 from steward.skills import SkillLibrary, effective_skills, library_for
-from steward.store import Store, default_db_path, new_id
+from steward.store import JOB_STATUSES, Store, default_db_path, new_id
 
 __all__ = [
     "DEFAULT_HOST",
@@ -76,6 +76,12 @@ RESIDENTS_ENV = "STEWARD_RESIDENTS"
 
 POSTED_BY = "api"
 DECIDED_BY = "api"
+
+#: What ``GET /approvals?status=`` accepts. ``pending`` is the default, so a panel that
+#: never passed the parameter sees exactly what it always saw.
+APPROVAL_STATUS_PENDING = "pending"
+APPROVAL_STATUS_ALL = "all"
+APPROVAL_STATUSES = (APPROVAL_STATUS_PENDING, "resolved", APPROVAL_STATUS_ALL)
 
 NO_TOKEN_MESSAGE = (
     f"{TOKEN_ENV} is unset or blank, and every endpoint of this API is a write path "
@@ -295,6 +301,8 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "app_grants": [grant.model_dump(mode="json") for grant in manifest.app_grants],
         # Which brain, answerable without opening a file.
         "runner": {"kind": manifest.runner.kind, "model": manifest.runner.model},
+        # Whether this resident takes work off the board, and on what terms.
+        "board": manifest.board.model_dump(mode="json"),
         "routines": [
             {
                 "id": routine.id,
@@ -545,9 +553,16 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     # -- job board -------------------------------------------------------------------
 
     @app.get("/jobs")
-    def list_jobs() -> dict[str, Any]:
-        """List the board. Everything is ``open`` until claiming lands (steward #6)."""
-        return {"jobs": [job.to_dict() for job in db.jobs()]}
+    def list_jobs(status: str | None = None) -> dict[str, Any]:
+        """List the board, optionally narrowed with ``?status=open|claimed|done|failed``."""
+        if status is not None and status not in JOB_STATUSES:
+            _refuse(
+                422,
+                "unknown_status",
+                f"status {status!r} is not a board status; use one of: "
+                f"{', '.join(JOB_STATUSES)}, or leave it off for the whole board",
+            )
+        return {"jobs": [job.to_dict() for job in db.jobs(status)]}
 
     @app.post("/jobs", status_code=202)
     def post_job(body: JobPost, request: Request) -> dict[str, Any]:
@@ -580,9 +595,31 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     # -- approvals -------------------------------------------------------------------
 
     @app.get("/approvals")
-    def list_approvals() -> dict[str, Any]:
-        """List the gated actions still waiting on a human."""
-        return {"approvals": [record.to_dict() for record in db.pending_approvals()]}
+    def list_approvals(status: str | None = None) -> dict[str, Any]:
+        """List gated actions. Pending by default; ``?status=resolved|all`` for the rest.
+
+        The default stays ``pending`` so a panel that has always called this keeps seeing
+        exactly what it saw before. ``all`` is the audit view: request and decision in one
+        row, which is how "what did I approve, and when" gets answered.
+        """
+        wanted = status or APPROVAL_STATUS_PENDING
+        if wanted not in APPROVAL_STATUSES:
+            _refuse(
+                422,
+                "unknown_status",
+                f"status {status!r} is not an approval status; use one of: "
+                f"{', '.join(APPROVAL_STATUSES)}",
+            )
+        records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
+        return {"status": wanted, "approvals": [record.to_dict() for record in records]}
+
+    @app.get("/approvals/{request_id}")
+    def get_approval(request_id: str) -> dict[str, Any]:
+        """Return one request with its decision, decider, and timestamps. The audit query."""
+        record = db.approval(request_id)
+        if record is None:
+            _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
+        return record.to_dict()
 
     @app.post("/approvals/{request_id}")
     def decide_approval(

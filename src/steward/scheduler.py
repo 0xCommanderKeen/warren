@@ -39,6 +39,14 @@ flags ``journal: close_of_day`` gets the instruction to write the next one. Afte
 ``ok`` close-of-day run, steward keeps whatever entry exists and rotates the rest. It
 writes an entry itself only from an explicit ``<journal>`` block in the session's output,
 and never over a file the session wrote for itself.
+
+**Everything else that happens around a wake-up hangs off one hook.** The job board and
+structured approvals reach the scheduler through the structural :class:`WakeHooks`
+protocol and nothing else: decisions in before a prompt is assembled, escalations out
+after a session ends, board dispatch after the due routines have fired. A steward with
+neither fires routines exactly as it did before either existed, and a rehearsal touches
+no database — a dry run that consumed a real decision would silence the session that
+needed it, and a dry run that materialized skills would write into a real workdir.
 """
 
 import json
@@ -52,13 +60,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
 
 from steward import events as ev
 from steward import journal
-from steward.manifest import ManifestError, Resident, Routine, validate_path
+from steward.manifest import ManifestError, Resident, ResidentManifest, Routine, validate_path
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_routine_prompt
 from steward.runners import (
@@ -91,6 +100,7 @@ __all__ = [
     "Scheduler",
     "SchedulerError",
     "SchedulerState",
+    "WakeHooks",
     "default_state_path",
     "latest_fire_at_or_before",
     "load_scheduled",
@@ -122,6 +132,34 @@ STATE_VERSION = 0
 
 class SchedulerError(Exception):
     """Raised when the scheduler refuses to start — loudly, in daylight."""
+
+
+class WakeHooks(Protocol):
+    """What else happens around a wake-up, besides the routine that was due.
+
+    A structural protocol rather than an import, because the thing that satisfies it —
+    :class:`steward.board.Dispatcher` — sits *above* the scheduler and needs the
+    scheduler's own types. Three questions, asked at three moments:
+
+    - before a session is assembled, "does this resident have decisions waiting?";
+    - after a session ends, "did it ask for anything?";
+    - after the due routines have fired, "is there board work to pick up?".
+
+    The scheduler runs perfectly well with no hooks at all: a steward without a job board
+    and without approvals fires routines exactly as it did before either existed.
+    """
+
+    def decisions_for(self, resident_id: str) -> str | None:
+        """Return decisions to tell this resident about, and mark them told."""
+        ...
+
+    def harvest(self, manifest: ResidentManifest, output: str) -> object:
+        """Turn any approval a finished session asked for into a real request."""
+        ...
+
+    def dispatch(self, now: datetime) -> object:
+        """Sweep deadlines and let board-enabled residents claim work."""
+        ...
 
 
 # --------------------------------------------------------------------------------------
@@ -189,28 +227,16 @@ class ScheduledRoutine:
     @property
     def agent_id(self) -> str:
         """The burrow identity events are emitted under."""
-        manifest = self.resident.manifest
-        return manifest.agent_id or f"steward:{manifest.id}"
+        return self.resident.agent_id
 
     @property
     def project(self) -> str:
         """The burrow project label: the manifest's project, else the resident id."""
-        return self.resident.manifest.project or self.resident.manifest.id
+        return self.resident.project
 
     def workdir(self, fallback: Path) -> Path:
-        """Where the session runs.
-
-        The resident's declared memory directory when it exists — the one place its
-        charter says it may write — and otherwise the scheduler's working directory.
-        Containers land in a later issue; until then this is the most honest location
-        the manifest actually gives us.
-        """
-        memory = self.resident.manifest.memory
-        if memory.kind == "directory":
-            candidate = Path(memory.path).expanduser()
-            if candidate.is_dir():
-                return candidate
-        return fallback
+        """Where the session runs — the resident's own declared location, or the fallback."""
+        return self.resident.workdir(fallback)
 
     def next_fire_after(self, after: datetime) -> datetime:
         """Return the routine's next occurrence after a moment."""
@@ -353,6 +379,7 @@ class Scheduler:
         max_workers: int = 4,
         runner_factory: RunnerFactory = build_runner,
         library: SkillLibrary | None = None,
+        hooks: WakeHooks | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
@@ -360,6 +387,7 @@ class Scheduler:
         # One library for the fleet: improving a skill improves every resident holding
         # it. An unconfigured library means no skill is injected and none is written.
         self.library = library if library is not None else SkillLibrary()
+        self.hooks = hooks
         self.emitter: ev.Emitter = emitter or (
             ev.NullEmitter() if dry_run else ev.EventEmitter.from_env()
         )
@@ -474,6 +502,7 @@ class Scheduler:
             soul_text=item.resident.soul.body,
             journal_entry=self.journal_for(item),
             skills=self.skills_for(item),
+            decisions=self.decisions_for(item),
             closing=self.closing_for(item, now or datetime.now(UTC)),
         )
 
@@ -510,6 +539,22 @@ class Scheduler:
         result = materialize(self.skills_for(item), workdir, subdir)
         log.debug("%s: skills %s", item.key, result.summary())
         return result
+
+    def decisions_for(self, item: ScheduledRoutine) -> str | None:
+        """Return the answers this resident has not been told about yet, or ``None``.
+
+        This is the resident-inbox half of steward #10: a session that parked on an
+        approval finishes its turn, and the decision reaches it here, at the top of its
+        next wake-up. With no hooks wired there is nothing to deliver and the preamble is
+        byte-identical to one assembled before approvals existed.
+
+        A dry run gets nothing, and the reason matters: delivery is a *write*. A rehearsal
+        that consumed a real decision would mean the resident's next real session never
+        heard the answer — a rehearsal is not work, and it must not be able to eat one.
+        """
+        if self.hooks is None or self.dry_run:
+            return None
+        return self.hooks.decisions_for(item.resident.id)
 
     def journal_for(self, item: ScheduledRoutine) -> str | None:
         """Return the resident's latest surviving journal entry, or ``None``.
@@ -623,6 +668,8 @@ class Scheduler:
                 outcome=Outcome.FAILED, duration_s=duration, error=f"{type(exc).__name__}: {exc}"
             )
 
+        self._harvest(item, result.output)
+
         journal_path: Path | None = None
         if result.ok:
             closed = self.close_the_day(item, moment, result.output)
@@ -679,6 +726,20 @@ class Scheduler:
         )
         return closed if closed is not None else journal.CloseOfDay()
 
+    def _harvest(self, item: ScheduledRoutine, output: str) -> None:
+        """Turn anything the session asked for into a real approval request.
+
+        A run that timed out is harvested too: a session killed halfway through may still
+        have written its escalation, and throwing that away would leave a resident having
+        asked a question nobody was told about.
+        """
+        if self.hooks is None or not output:
+            return
+        try:
+            self.hooks.harvest(item.resident.manifest, output)
+        except Exception as exc:  # noqa: BLE001 — a failed escalation is not a failed routine
+            log.warning("%s: could not record an approval from this session: %s", item.key, exc)
+
     def _session_env(self, item: ScheduledRoutine, run_id: str) -> dict[str, str]:
         """Build the env a session inherits, so its own emitter reports as this resident."""
         return {
@@ -691,14 +752,29 @@ class Scheduler:
     # -- the two entry points --------------------------------------------------------
 
     def tick(self, now: datetime | None = None) -> list[FireReport]:
-        """Fire everything due right now, then return. Useful under external cron."""
+        """Fire everything due right now, then sweep the board. Useful under external cron."""
         moment = now or datetime.now(UTC)
         reports: list[FireReport] = []
         for item in self.due(moment):
             self.state.set_anchor(item.key, moment)
             reports.append(self.fire(item, now=moment))
         self._save_state()
+        self._dispatch(moment)
         return reports
+
+    def _dispatch(self, moment: datetime) -> None:
+        """Run the board and the deadline sweeps for this wake-up. Never raises.
+
+        After the due routines, not before: standing work a resident declared for itself
+        comes ahead of work somebody dropped on a board. A board that cannot be reached
+        is a warning, not a failed tick — the routines that already fired really did fire.
+        """
+        if self.hooks is None or self.dry_run:
+            return
+        try:
+            self.hooks.dispatch(moment)
+        except Exception as exc:  # noqa: BLE001 — the board must not take the scheduler down
+            log.warning("board dispatch failed: %s", exc)
 
     def run(
         self,
@@ -726,6 +802,7 @@ class Scheduler:
                     self.state.set_anchor(item.key, moment)
                 self._save_state()
                 futures = [pool.submit(self.fire, item, now=moment) for item in due]
+                self._dispatch(moment)
                 if not due:
                     sleep(self._sleep_for(moment))
                 reports.extend(future.result() for future in futures)

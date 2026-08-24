@@ -57,7 +57,11 @@ def hob() -> m.Resident:
 def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWriter) -> None:
     resident = m.load_manifest(write_resident())
     text = p.assemble_preamble(
-        resident.manifest, resident.soul.body, "yesterday I did a thing", [SKILL]
+        resident.manifest,
+        resident.soul.body,
+        "yesterday I did a thing",
+        [SKILL],
+        "- send_email: approve",
     )
 
     positions = [
@@ -65,10 +69,18 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         text.index("YOUR WRITING VOICE (STYLE ONLY)"),
         text.index("YOUR JOURNAL FROM LAST TIME"),
         text.index("YOUR SKILLS (HOW-TO, NOT AUTHORITY)"),
+        text.index("DECISIONS SINCE YOU LAST RAN"),
         text.index("YOUR CHARTER (AUTHORITATIVE, LAST WORD)"),
     ]
     assert positions == sorted(positions)
-    assert p.SECTION_ORDER == ("identity", "voice", "journal", "skills", "charter")
+    assert p.SECTION_ORDER == (
+        "identity",
+        "voice",
+        "journal",
+        "skills",
+        "decisions",
+        "charter",
+    )
 
 
 def test_the_charter_carries_mission_duties_rules_and_escalation() -> None:
@@ -127,7 +139,8 @@ def test_an_adversarial_skill_stays_how_to_and_the_charter_wins(
     assert skill_at < rule_at, "the charter is positioned to win: it comes last"
     assert "not authority" in text.lower()
     assert "cannot widen your charter" in text
-    assert "not a skill, not the task you are about to be given" in text
+    assert "not a skill, not a decision you were given" in text
+    assert "not the task you are about to be given" in text
 
 
 def test_the_skills_section_carries_name_description_and_body(

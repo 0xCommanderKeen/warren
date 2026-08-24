@@ -3,6 +3,7 @@
 import json
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 from click.testing import CliRunner
@@ -11,6 +12,7 @@ from conftest import REPO_ROOT, ResidentWriter, StubWriter, valid_manifest
 from steward.cli import main
 from steward.journal import write_entry
 from steward.manifest import load_manifest
+from steward.store import Store
 
 
 @pytest.fixture
@@ -520,3 +522,345 @@ def test_validate_takes_an_explicit_library(
     )
     assert result.exit_code == 1
     assert "not in the skills library" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# the board
+# --------------------------------------------------------------------------------------
+
+
+def board_manifest() -> dict[str, Any]:
+    """Build a manifest that opts into the board, with the route its declaration needs."""
+    data = valid_manifest()
+    data["routes"] = [
+        *data["routes"],
+        {"id": "job-board", "kind": "job-board", "address": "steward:job-board"},
+    ]
+    data["board"] = {"claim": True}
+    data["runner"] = {"kind": "mock"}
+    return data
+
+
+def test_board_dispatch_claims_and_works_a_task(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Research X")
+
+    result = runner.invoke(
+        main, ["board", "dispatch", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "done test-agent" in result.output
+    with Store(db) as after:
+        assert [job.status for job in after.jobs()] == ["done"]
+
+
+def test_board_dispatch_with_an_empty_board_says_so(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        ["board", "dispatch", "--residents", str(residents_dir), "--db", str(tmp_path / "b.db")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing claimed" in result.output
+
+
+def test_board_dispatch_reports_the_deadlines_it_swept(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Abandoned")
+        store.claim_next_job(
+            claimant="claude-code:ghost", skills=[], lease_expires_at="2020-01-01T00:00:00.000Z"
+        )
+        store.create_approval_request(
+            agent_id="a:b",
+            project="p",
+            action="spend_money",
+            message="…",
+            expires_at="2020-01-01T00:00:00.000Z",
+        )
+
+    result = runner.invoke(
+        main,
+        ["board", "dispatch", "--residents", str(residents_dir), "--db", str(db), "--sweep-only"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "lease expired" in result.output
+    assert "approval expired: spend_money denied by default" in result.output
+    with Store(db) as after:
+        assert after.jobs("open"), "a sweep reopens the lease, and claims nothing"
+
+
+def test_board_list_shows_the_board_and_who_could_take_it(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Anyone", required_skills=["daily-summary"])
+        store.post_job(title="Nobody here", required_skills=["surgery"])
+
+    result = runner.invoke(
+        main, ["board", "list", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "claimable by: test-agent" in result.output
+    assert "claimable by: nobody on this tree" in result.output
+    assert "skills: surgery" in result.output
+
+
+def test_board_list_reports_json_and_an_empty_board(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    empty = runner.invoke(
+        main, ["board", "list", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert "the board is empty" in empty.output
+
+    with Store(db) as store:
+        store.post_job(title="One thing")
+        store.claim_next_job(claimant="a:b", skills=[], lease_expires_at="2030-01-01T00:00:00.000Z")
+    result = runner.invoke(
+        main,
+        ["board", "list", "--residents", str(residents_dir), "--db", str(db), "--format", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload[0]["status"] == "claimed"
+    assert payload[0]["claimant"] == "a:b"
+
+
+# --------------------------------------------------------------------------------------
+# approvals
+# --------------------------------------------------------------------------------------
+
+
+def test_approval_raise_records_a_request_a_human_can_answer(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token-free path: a session with a shell, not with steward's API token."""
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    monkeypatch.delenv("BURROW_URL", raising=False)
+    residents_dir = write_resident().parent.parent
+    db = tmp_path / "approvals.db"
+
+    result = runner.invoke(
+        main,
+        [
+            "approval", "raise", "test-agent",
+            "--action", "send_email",
+            "--detail-json", '{"to": "plumber@example.com"}',
+            "--expires-in", "4h",
+            "--options", "approve,deny",
+            "--residents", str(residents_dir),
+            "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert "Testy wants to send email" in result.output
+    request_id = result.output.strip().splitlines()[-1]
+
+    with Store(db) as store:
+        record = store.approval(request_id)
+    assert record is not None
+    assert record.pending
+    assert record.action == "send_email"
+    assert record.detail == {"to": "plumber@example.com"}
+    assert record.options == ("approve", "deny")
+    assert record.resident == "test-agent"
+
+    emitted = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [event["type"] for event in emitted] == ["needs_human"]
+    assert emitted[0]["payload"]["request_id"] == request_id
+
+
+def test_approval_raise_accepts_a_plain_note(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    residents_dir = write_resident().parent.parent
+    db = tmp_path / "approvals.db"
+    result = runner.invoke(
+        main,
+        [
+            "approval", "raise", "test-agent",
+            "--action", "cancel_thursday",
+            "--note", "Should I cancel Thursday?",
+            "--residents", str(residents_dir),
+            "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    with Store(db) as store:
+        assert store.pending_approvals()[0].detail == {"note": "Should I cancel Thursday?"}
+
+
+@pytest.mark.parametrize(
+    ("flags", "complaint"),
+    [
+        (["--action", "Send Email"], "is not a slug"),
+        (["--action", "send_email", "--detail-json", "{oops"], "does not parse"),
+        (["--action", "send_email", "--detail-json", "[1]"], "must be a JSON object"),
+        (["--action", "send_email", "--expires-in", "soon"], "is not a duration"),
+        (["--action", "send_email", "--options", "maybe"], "unknown option"),
+    ],
+)
+def test_approval_raise_refuses_a_request_it_cannot_read(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    flags: list[str],
+    complaint: str,
+) -> None:
+    residents_dir = write_resident().parent.parent
+    db = tmp_path / "approvals.db"
+    result = runner.invoke(
+        main,
+        [
+            "approval", "raise", "test-agent", *flags,
+            "--residents", str(residents_dir), "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1
+    assert complaint in result.output
+    with Store(db) as store:
+        assert store.approvals() == []
+
+
+def test_approval_raise_refuses_both_detail_and_note(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident().parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "approval", "raise", "test-agent",
+            "--action", "send_email",
+            "--detail-json", "{}",
+            "--note", "also this",
+            "--residents", str(residents_dir),
+            "--db", str(tmp_path / "a.db"),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1
+    assert "not both" in result.output
+
+
+def test_approval_raise_needs_a_resident_that_exists(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident().parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "approval", "raise", "nobody",
+            "--action", "send_email",
+            "--residents", str(residents_dir),
+            "--db", str(tmp_path / "a.db"),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1
+    assert "no valid resident 'nobody'" in result.output
+
+
+def test_approval_show_is_the_audit_query(runner: CliRunner, tmp_path: Path) -> None:
+    db = tmp_path / "approvals.db"
+    with Store(db) as store:
+        record = store.create_approval_request(
+            agent_id="claude-code:test-agent",
+            project="p",
+            action="send_email",
+            message="Testy wants to send email",
+            resident="test-agent",
+            detail={"to": "a@example.com"},
+            expires_at="2030-01-01T00:00:00.000Z",
+        )
+        waiting = runner.invoke(main, ["approval", "show", record.request_id, "--db", str(db)])
+        assert "still waiting" in waiting.output
+        store.decide(record.request_id, "edit", decided_by="api", edit={"subject": "shorter"})
+
+    result = runner.invoke(main, ["approval", "show", record.request_id, "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert "decision:  edit by api" in result.output
+    assert "shorter" in result.output
+    assert "not yet told to the resident" in result.output
+    assert "a@example.com" in result.output
+
+    as_json = runner.invoke(
+        main, ["approval", "show", record.request_id, "--db", str(db), "--format", "json"]
+    )
+    assert json.loads(as_json.output)["decision"] == "edit"
+
+
+def test_approval_show_says_when_it_has_never_heard_of_a_request(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    result = runner.invoke(main, ["approval", "show", "nope", "--db", str(tmp_path / "a.db")])
+    assert result.exit_code == 1
+    assert "no approval request 'nope'" in result.output
+
+
+def test_a_scheduler_tick_sweeps_the_board_too(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The board is swept on the scheduler's own rhythm, not on a second timer."""
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Picked up by a tick")
+
+    result = runner.invoke(
+        main,
+        [
+            "scheduler", "tick",
+            "--residents", str(residents_dir),
+            "--state", str(tmp_path / "state.json"),
+            "--db", str(db),
+            "--workdir", str(tmp_path),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    with Store(db) as after:
+        assert [job.status for job in after.jobs()] == ["done"]
+
+
+def test_a_dry_run_tick_touches_no_database(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Not tonight")
+
+    result = runner.invoke(
+        main,
+        [
+            "scheduler", "tick", "--dry-run",
+            "--residents", str(residents_dir),
+            "--state", str(tmp_path / "state.json"),
+            "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    with Store(db) as after:
+        assert [job.status for job in after.jobs()] == ["open"]
