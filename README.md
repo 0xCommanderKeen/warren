@@ -86,6 +86,23 @@ with status labels. The convention, for humans and agents alike:
 
 Remove the status label when the issue closes.
 
+### Tests
+
+The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
+event log into villagers — lives in `viewer/projection.js`. The viewer loads it as
+a plain `<script>`; the tests `require()` the same file. No build step, no
+framework, no install:
+
+```sh
+node --test                      # from the repo root: everything under tests/
+node tests/projection.test.js    # or just this one file
+```
+
+Cases are driven by fixture event logs in `tests/fixtures/*.jsonl`, all written
+against a fixed `now` (`2026-08-24T12:00:00Z`) so the 30-minute stale and 12-hour
+drop windows land exactly on their edges. Change a projection rule and a fixture
+should have to change with it.
+
 ## Not this project
 
 Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate project ([arcadia](https://github.com/0xCommanderKeen/arcadia)).
