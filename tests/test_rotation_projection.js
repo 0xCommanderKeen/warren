@@ -9,18 +9,7 @@ const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const vm = require("node:vm");
-
-const html = fs.readFileSync("viewer/index.html", "utf8");
-const start = html.indexOf("const NAMES");
-const end = html.indexOf("/* ————— the village scene", start);
-assert.notEqual(start, -1);
-assert.notEqual(end, -1);
-
-const context = {};
-vm.createContext(context);
-vm.runInContext(html.slice(start, end) + "\nthis.projection = { reduce };", context);
-const { reduce } = context.projection;
+const { reduce } = require("../viewer/projection.js");
 
 const NOW = Date.parse("2026-08-24T12:00:00.000Z");
 const at = (minutesAgo) => new Date(NOW - minutesAgo * 60000).toISOString();

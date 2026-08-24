@@ -1,0 +1,10 @@
+{"v":0,"ts":"2026-08-24T11:00:00.000Z","source":"claude-code","agent_id":"claude-code:aaa","project":"burrow","cwd":"/w/burrow","type":"task_started","payload":{"prompt":"build the whole thing"}}
+{"v":0,"ts":"2026-08-24T11:05:00.000Z","source":"claude-code","agent_id":"claude-code:aaa","project":"burrow","cwd":"/w/burrow","type":"tool_called","payload":{"tool":"Bash","detail":"make build"}}
+{"v":0,"ts":"2026-08-24T11:40:00.000Z","source":"claude-code","agent_id":"claude-code:aaa","project":"burrow","cwd":"/w/burrow","type":"heartbeat","payload":{"tool":"Bash"}}
+{"v":0,"ts":"2026-08-24T12:20:00.000Z","source":"claude-code","agent_id":"claude-code:aaa","project":"burrow","cwd":"/w/burrow","type":"heartbeat","payload":{"tool":"Bash"}}
+{"v":0,"ts":"2026-08-24T12:58:00.000Z","source":"claude-code","agent_id":"claude-code:aaa","project":"burrow","cwd":"/w/burrow","type":"heartbeat","payload":{"tool":"Bash"}}
+{"v":0,"ts":"2026-08-24T11:00:00.000Z","source":"claude-code","agent_id":"claude-code:bbb","project":"burrow","cwd":"/w/burrow","type":"task_started","payload":{"prompt":"the wedged one"}}
+{"v":0,"ts":"2026-08-24T11:05:00.000Z","source":"claude-code","agent_id":"claude-code:bbb","project":"burrow","cwd":"/w/burrow","type":"tool_called","payload":{"tool":"Bash","detail":"make build"}}
+{"v":0,"ts":"2026-08-24T12:59:00.000Z","source":"claude-code","agent_id":"claude-code:ccc","project":"burrow","cwd":"/w/burrow","type":"heartbeat","payload":{"tool":"Grep"}}
+{"v":0,"ts":"2026-08-24T12:00:00.000Z","source":"claude-code","agent_id":"claude-code:ddd","project":"burrow","cwd":"/w/burrow","type":"needs_human","payload":{"message":"which branch?"}}
+{"v":0,"ts":"2026-08-24T12:59:00.000Z","source":"claude-code","agent_id":"claude-code:ddd","project":"burrow","cwd":"/w/burrow","type":"heartbeat","payload":{"tool":"AskUserQuestion"}}

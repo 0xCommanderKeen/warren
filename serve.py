@@ -7,7 +7,7 @@ protocol events over HTTP (POST /events, one JSON event per request).
 Env:
     BURROW_HOST         bind address (default 127.0.0.1; 0.0.0.0 in the container)
     BURROW_EVENTS       event log path (default ~/.burrow/events.jsonl)
-    BURROW_VILLAGERS    soul file directory (default ~/.burrow/villagers)
+    BURROW_VILLAGERS    soul directory (default: villagers/ next to this file)
     BURROW_ARCHIVE      rotated log directory (default <events dir>/archive)
     BURROW_MAX_LOG      rotate once the live log passes this many bytes
                         (default 5 MiB; 0 disables rotation)
@@ -20,6 +20,7 @@ import os
 import sys
 import threading
 import time
+import urllib.parse
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8737
 HOST = os.environ.get("BURROW_HOST", "127.0.0.1")
@@ -27,7 +28,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events.jsonl")
 
 MAX_EVENT_BYTES = 64 * 1024
-VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.expanduser("~/.burrow/villagers")
+VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.join(ROOT, "villagers")
 ARCHIVE_DIR = os.environ.get("BURROW_ARCHIVE") or ""
 MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
 
@@ -50,7 +51,7 @@ CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
 
 
 def read_villagers():
-    """Soul files: ~/.burrow/villagers/*.md with a simple `key: value` frontmatter
+    """Soul files: villagers/*.md with a simple `key: value` frontmatter
     between --- fences; the body is free-form markdown shown in the viewer panel."""
     out = []
     if not os.path.isdir(VILLAGERS_DIR):
@@ -227,13 +228,56 @@ def append_event(event):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        path = self.path.split("?")[0]
+        parsed = urllib.parse.urlsplit(self.path)
+        path = parsed.path
         if path == "/villagers":
             self._send(200, json.dumps(read_villagers()).encode("utf-8"),
                        "application/json")
             return
         if path == "/events":
-            self._send(200, read_log(), "application/x-ndjson")
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            raw_since = params.get("since", ["0"])[0]
+            try:
+                cursor_parts = raw_since.split(":")
+                if len(cursor_parts) == 3:
+                    cursor_identity = (int(cursor_parts[0]), int(cursor_parts[1]))
+                    since = int(cursor_parts[2])
+                elif len(cursor_parts) == 1:
+                    cursor_identity = None
+                    since = int(raw_since)
+                else:
+                    raise ValueError
+                if since < 0:
+                    raise ValueError
+            except ValueError:
+                self._send(400, b"invalid since cursor", "text/plain")
+                return
+
+            data, cursor, reset = b"", 0, False
+            with LOG_LOCK:
+                maybe_rotate()
+                try:
+                    with open(EVENTS, "rb") as f:
+                        stat = os.fstat(f.fileno())
+                        identity = (stat.st_dev, stat.st_ino)
+                        if since > stat.st_size or (
+                                cursor_identity is not None and cursor_identity != identity):
+                            since, reset = 0, True
+                        f.seek(since)
+                        chunk = f.read()
+                        end = chunk.rfind(b"\n") + 1
+                        if end:
+                            data = chunk[:end]
+                        cursor = since + end
+                        if cursor:
+                            cursor = f"{identity[0]}:{identity[1]}:{cursor}"
+                except FileNotFoundError:
+                    reset = since > 0
+
+            headers = {"X-Burrow-Cursor": str(cursor)}
+            if reset:
+                headers["X-Burrow-Reset"] = "1"
+            self._send(200, data, "application/x-ndjson", headers)
             return
         # everything else is a static file under viewer/
         if path in ("/", "/index.html"):
@@ -271,11 +315,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send(404, b"missing: " + path.encode(), "text/plain")
 
-    def _send(self, code, data, ctype):
+    def _send(self, code, data, ctype, headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if data:
             self.wfile.write(data)
