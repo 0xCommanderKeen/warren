@@ -28,20 +28,54 @@ map of everything the fleet does.
 
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
   `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
-  `BURROW_EVENTS=/data/events.jsonl`. Deploy code updates with a tar-over-ssh pipe
-  (UGOS scp is broken): `tar -cf - serve.py viewer | ssh Miha@dxp2800 'tar -xf - -C
-  ~/docker/burrow/app'`, then `docker compose restart burrow`.
+  `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
+  updates with a tar-over-ssh pipe (UGOS scp is broken): `tar -cf - serve.py viewer |
+  ssh Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart
+  burrow`.
+  `BURROW_EVENTS=/data/events.jsonl`. Deploy code *and souls* with a tar-over-ssh
+  pipe (UGOS scp is broken): `tar -cf - serve.py viewer villagers | ssh Miha@dxp2800
+  'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Souls
+  ship with the code, so `/villagers` on the NAS matches the repo after every
+  deploy — no manual file copying.
 - **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
-  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737`. Off the tailnet it falls
-  back to `~/.burrow/events.jsonl` locally. Sessions pick hooks up on start, so
-  already-running sessions won't appear.
+  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
+  secret>`. Off the tailnet it falls back to `~/.burrow/events.jsonl` locally.
+  Sessions pick hooks up on start, so already-running sessions won't appear.
 - **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
   `life-agent` container (via the `claude-config` volume), with
-  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` so it appears as one resident
-  villager that rests between turns instead of leaving.
+  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
+  `BURROW_TOKEN` pair, so it appears as one resident villager that rests between
+  turns instead of leaving.
 - **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
+  viewer over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
+
+### Ingest auth
+
+Anything on the tailnet could otherwise POST fake events, and the village never lies.
+When the server has `BURROW_TOKEN` set, `POST /events` must carry it as
+`Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. GET endpoints —
+the viewer, `/events`, `/villagers` — are not gated. With the var unset, ingest is open,
+which is what local dev uses.
+
+Emitters send the token from their own `BURROW_TOKEN`. A rejected POST is just a failed
+POST: the event falls back to the local JSONL file, so a missing token costs visibility,
+never events. **Roll it out server-first:** deploy the token-aware server with the var
+unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
+order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   viewer over the local log.
+- **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
+  `needs_human` event is also pushed there once, with the villager's name, project
+  and message (`https://ntfy.sh/<your-topic>` works out of the box;
+  `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
+  dead notification service can never block or lose an event.
+- **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
+  `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
+  `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the
+  village still needs, so nothing on screen changes. Archives are plain JSONL and
+  keep the full history; set `BURROW_ARCHIVE` to put them elsewhere (on the NAS,
+  they land next to the log in the mounted volume). `BURROW_MAX_LOG=0` turns
+  rotation off.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
@@ -64,13 +98,30 @@ says so in the corner, so a pinned tint never passes as the real thing:
 | `?cycle=60`      | sweep a full 24 h in N seconds (default 60)   |
 
 Without a query param the viewer always shows the real clock.
+## Testing the viewer
+
+The village has no fleet of its own to test against, so there is a fixture that
+writes a synthetic event log:
+
+```sh
+python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
+BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
+```
+
+It forces the longest walks on the map — corner plots to your door and back — so
+pathfinding, fence gates and the knock queue all get exercised. The viewer checks
+its own map on boot and logs one line; `__burrow.village.checkMap()` in the console
+re-runs it and returns any spot that stands on solid ground or cannot be reached.
 
 ## Souls
 
-Villagers get persistent identity from **soul files**: `~/.burrow/villagers/*.md`
-(override the directory with `BURROW_VILLAGERS`; on the NAS, mount it next to the
-event log). Frontmatter pins who the file is for and how they look; the body is
-free-form markdown shown when you click the villager (description, skills, anything).
+Villagers get persistent identity from **soul files**, versioned in this repo under
+[`villagers/`](villagers) — one `*.md` per villager, and the source of truth. Editing
+a villager is: edit the file → commit → deploy. Point `BURROW_VILLAGERS` at another
+directory to override (handy for a local scratch village).
+
+Frontmatter pins who the file is for and how they look; the body is free-form
+markdown shown when you click the villager (description, skills, anything).
 
 ```md
 ---
@@ -105,6 +156,25 @@ with status labels. The convention, for humans and agents alike:
 - `status:parked` — decision record, deliberately not scheduled.
 
 Remove the status label when the issue closes.
+
+Tests are plain stdlib scripts under `tests/`, run directly:
+`python3 tests/test_ingest_auth.py`.
+### Tests
+
+The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
+event log into villagers — lives in `viewer/projection.js`. The viewer loads it as
+a plain `<script>`; the tests `require()` the same file. No build step, no
+framework, no install:
+
+```sh
+node --test                      # from the repo root: everything under tests/
+node tests/projection.test.js    # or just this one file
+```
+
+Cases are driven by fixture event logs in `tests/fixtures/*.jsonl`, all written
+against a fixed `now` (`2026-08-24T12:00:00Z`) so the 30-minute stale and 12-hour
+drop windows land exactly on their edges. Change a projection rule and a fixture
+should have to change with it.
 
 ## Not this project
 

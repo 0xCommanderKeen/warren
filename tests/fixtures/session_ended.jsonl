@@ -1,0 +1,7 @@
+{"v":0,"ts":"2026-08-24T11:50:00.000Z","agent_id":"s:gone","project":"burrow","type":"task_started","payload":{"prompt":"a short session"}}
+{"v":0,"ts":"2026-08-24T11:51:00.000Z","agent_id":"s:gone","project":"burrow","type":"idle","payload":{}}
+{"v":0,"ts":"2026-08-24T11:52:00.000Z","agent_id":"s:gone","project":"burrow","type":"session_ended","payload":{}}
+{"v":0,"ts":"2026-08-24T11:50:00.000Z","agent_id":"s:returned","project":"life","type":"idle","payload":{}}
+{"v":0,"ts":"2026-08-24T11:51:00.000Z","agent_id":"s:returned","project":"life","type":"session_ended","payload":{}}
+{"v":0,"ts":"2026-08-24T11:59:00.000Z","agent_id":"s:returned","project":"life","type":"task_started","payload":{"prompt":"resident agent, new session"}}
+{"v":0,"ts":"2026-08-24T11:58:00.000Z","agent_id":"s:staying","project":"mail","type":"idle","payload":{}}
