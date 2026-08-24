@@ -177,6 +177,31 @@ Rules that keep this honest:
 
 `fixtures/library-walk.jsonl` is the worked example — see `fixtures/README.md`.
 
+## Knocks reach you off-screen
+
+A villager at your door is useless if the village isn't on a screen you are looking
+at, so the server can forward it. When it ingests a `needs_human` event and
+`BURROW_NOTIFY_URL` is set, it asynchronously attempts a POST at that URL:
+
+- body: `<villager name> · <project>` then the `message`, verbatim
+- headers: `Title: <name> is at your door (<project>)`, `Tags: door`,
+  `Priority: high` — ntfy reads these, so `https://ntfy.sh/<topic>` works as-is;
+  any endpoint that accepts a POST works too (Telegram via a small relay)
+- `BURROW_NOTIFY_TOKEN` (optional) adds `Authorization: Bearer …` for private topics
+- `BURROW_NOTIFY_TIMEOUT` (optional, default 5 s) bounds the request
+
+Two properties matter more than the format:
+
+- **A delivered knock is claimed once.** Identity is `(agent_id, ts, message)`, not
+  arrival, so an emitter retry or replay does not duplicate a successful delivery.
+  A failed delivery remains eligible for a later replay.
+- **Notifying never blocks ingest.** The POST runs on a daemon thread and swallows
+  every error; a down notification service must not slow an agent down or lose an
+  event. Unset `BURROW_NOTIFY_URL` and nothing is sent at all.
+
+This is a transport for something that already happened. It never invents a knock —
+one `needs_human` event, one notification.
+
 ## The one rule, restated for implementers
 
 Never emit an event for something that did not happen, and never render state that no

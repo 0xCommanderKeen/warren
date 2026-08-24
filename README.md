@@ -64,6 +64,11 @@ never events. **Roll it out server-first:** deploy the token-aware server with t
 unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   viewer over the local log.
+- **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
+  `needs_human` event is also pushed there once, with the villager's name, project
+  and message (`https://ntfy.sh/<your-topic>` works out of the box;
+  `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
+  dead notification service can never block or lose an event.
 - **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
   `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
   `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the

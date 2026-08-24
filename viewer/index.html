@@ -82,6 +82,21 @@
   #panel .state-line { font-size: 20px; margin: 10px 0 16px; }
   #panel .state-line.attn { color: var(--alert); }
   #panel .state-line.busy { color: var(--busy); }
+  /* a knock is the one thing you must not have to squint at */
+  #panel .knock {
+    border: 2px solid var(--alert); border-left-width: 6px;
+    background: rgba(255, 143, 94, .09);
+    padding: 10px 12px 12px; margin: 0 0 16px;
+  }
+  #panel .knock .knock-h {
+    font-size: 16px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--alert); margin-bottom: 6px;
+  }
+  #panel .knock .knock-msg {
+    font-size: 22px; line-height: 1.2; color: #fff;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  #panel .knock .knock-when { font-size: 15px; color: var(--ink-dim); margin-top: 8px; }
   .evt { border-top: 2px solid #221d30; padding: 8px 0; font-size: 17px; }
   #panel .meta.role { color: var(--busy); }
   #panel .soul {
@@ -958,6 +973,12 @@ function renderPanel(now) {
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
     <div class="meta">${esc(v.id)}</div>
     <div class="state-line ${cls}">${esc(stateText)}</div>
+    ${v.knock ? `
+      <div class="knock">
+        <div class="knock-h">needs you</div>
+        <div class="knock-msg">${esc(v.knock.message)}</div>
+        <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
+      </div>` : ""}
     ${v.soul && v.soul.body ? `<div class="soul">${esc(v.soul.body)}</div>` : ""}
     ${v.events.slice().reverse().map(ev => `
       <div class="evt t-${esc(ev.type)}">

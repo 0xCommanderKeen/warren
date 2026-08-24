@@ -136,6 +136,9 @@ function reduce(input, now, souls) {
       cwd: last.cwd || "",
       doing: state === "working" ? doingLabel(shown) : "",
       lastLine: describe(shown),
+      knock: state === "knocking"
+        ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs }
+        : null,
     });
   }
   return out;
