@@ -56,6 +56,32 @@ def village(lines, now_ms=None):
 
 
 class CarryForwardTest(unittest.TestCase):
+    def test_matches_viewers_global_4000_line_window(self):
+        sparse = json.dumps(event("sparse", "idle", 1))
+        lines = [sparse] + [json.dumps(event("gone", "session_ended", 1, n=i))
+                            for i in range(4000)]
+        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertNotIn(sparse, tail)
+
+    def test_latest_heartbeat_keeps_agent_live_without_consuming_history(self):
+        actions = [json.dumps(event("a", "tool_called", 60 * 13,
+                                    tool="Read", n=i))
+                   for i in range(serve.KEEP_PER_AGENT + 10)]
+        heartbeat = json.dumps(event("a", "heartbeat", 1, tool="Read"))
+        tail = serve.carry_forward(actions + [heartbeat], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(len(tail), serve.KEEP_PER_AGENT + 1)
+        self.assertEqual(tail[-1], heartbeat)
+        self.assertEqual(json.loads(tail[0])["payload"]["n"], 10)
+
+    def test_heartbeat_after_session_end_revives_agent(self):
+        ended = json.dumps(event("a", "session_ended", 2))
+        heartbeat = json.dumps(event("a", "heartbeat", 1, tool="Read"))
+        tail = serve.carry_forward([ended, heartbeat], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(tail, [ended, heartbeat])
+
     def test_keeps_live_agents_and_drops_departed_ones(self):
         lines = [json.dumps(e) for e in [
             event("a", "task_started", 5, prompt="work"),
@@ -165,6 +191,20 @@ class RotationTest(unittest.TestCase):
             archived = f.read().splitlines()
         self.assertEqual(archived,
                          [json.dumps(e, ensure_ascii=False) for e in original])
+
+    def test_already_open_append_descriptor_stays_on_live_log(self):
+        self.write(self.noisy_history())
+        fd = open(self.events, "a", encoding="utf-8")
+        try:
+            with serve.LOG_LOCK:
+                serve.maybe_rotate()
+            late = event("late", "task_started", 0, prompt="after rotation")
+            fd.write(json.dumps(late) + "\n")
+            fd.flush()
+        finally:
+            fd.close()
+        self.assertIn("late", {json.loads(line)["agent_id"]
+                               for line in self.live_lines()})
 
     def test_archive_names_carry_a_timestamp(self):
         self.write(self.noisy_history())

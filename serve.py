@@ -13,10 +13,10 @@ Env:
                         (default 5 MiB; 0 disables rotation)
 """
 import datetime
+import fcntl
 import http.server
 import json
 import os
-import shutil
 import sys
 import threading
 import time
@@ -34,8 +34,9 @@ MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
 # the viewer's reduction rules, mirrored here so a rotated log still projects to
 # exactly the same village (see docs/protocol.md and viewer/index.html)
 EVENT_TYPES = {"task_started", "tool_called", "artifact_produced",
-               "needs_human", "idle", "session_ended"}
+               "heartbeat", "needs_human", "idle", "session_ended"}
 KEEP_PER_AGENT = 80                  # events the viewer keeps per villager
+VIEWER_LINE_LIMIT = 4000             # viewer/index.html bootstrap window
 DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 
 # every read, append and rotation of the log goes through this, so an event can
@@ -95,6 +96,9 @@ def carry_forward(lines, now_ms):
     last KEEP_PER_AGENT events of every villager the viewer would still draw —
     skipping the ones that went home or fell out of the 12 h window — kept in
     their original order, because the projection reads the latest event."""
+    # The browser deliberately ignores anything older than this global window.
+    # Applying it here too prevents rotation from resurrecting a sparse agent.
+    lines = lines[-VIEWER_LINE_LIMIT:]
     per_agent = {}
     for i, line in enumerate(lines):
         try:
@@ -105,16 +109,22 @@ def carry_forward(lines, now_ms):
             continue
         if event.get("type") not in EVENT_TYPES:
             continue
-        kept = per_agent.setdefault(event["agent_id"], [])
-        kept.append((i, event))
-        if len(kept) > KEEP_PER_AGENT:
-            kept.pop(0)
+        agent = per_agent.setdefault(event["agent_id"], {"events": [], "last": None})
+        agent["last"] = (i, event)
+        # Heartbeat is liveness-only in the projection. It must survive when it
+        # is latest, but must not consume one of the 80 visible-history slots.
+        if event["type"] != "heartbeat":
+            agent["events"].append((i, event))
+            if len(agent["events"]) > KEEP_PER_AGENT:
+                agent["events"].pop(0)
     keep = []
-    for kept in per_agent.values():
-        last = kept[-1][1]
+    for agent in per_agent.values():
+        last_i, last = agent["last"]
         if last["type"] == "session_ended" or now_ms - event_ms(last) > DROP_MS:
             continue
-        keep.extend(i for i, _ in kept)
+        keep.extend(i for i, _ in agent["events"])
+        if last["type"] == "heartbeat":
+            keep.append(last_i)
     return [lines[i] for i in sorted(keep)]
 
 
@@ -144,30 +154,31 @@ def rotate(size):
     village still needs. Call with LOG_LOCK held. Returns the archive path, or
     None when there was nothing worth reclaiming."""
     global _rotate_floor
-    with open(EVENTS, encoding="utf-8", errors="replace") as f:
-        lines = f.read().splitlines()
-    tail = carry_forward(lines, int(time.time() * 1000))
-    data = "".join(line + "\n" for line in tail).encode("utf-8")
-    if len(data) > size * 9 // 10:
-        # every event still matters (a very busy fleet): rotating would only
-        # copy the log next to itself, so wait until it has grown some more
-        _rotate_floor = size + max(MAX_LOG_BYTES // 10, 1)
-        return None
-    os.makedirs(archive_dir(), exist_ok=True)
-    pending = EVENTS + ".rotating"
-    with open(pending, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    archive = archive_path()
-    try:
-        # hardlink first: the live path never blinks out of existence, so an
-        # emitter appending straight to the file cannot land in a gap
-        os.link(EVENTS, archive)
-    except OSError:
-        # archive is on another volume, or the filesystem has no hardlinks
-        shutil.move(EVENTS, archive)
-    os.replace(pending, EVENTS)
+    # Keep the inode: local emitters may already have EVENTS open for append.
+    # An inode swap strands such descriptors in the archive. Advisory locking
+    # coordinates the bundled emitter, while retaining the inode also makes a
+    # descriptor that writes after rotation append to the new live contents.
+    with open(EVENTS, "r+b") as live:
+        fcntl.flock(live, fcntl.LOCK_EX)
+        original = live.read()
+        lines = original.decode("utf-8", errors="replace").splitlines()
+        tail = carry_forward(lines, int(time.time() * 1000))
+        data = "".join(line + "\n" for line in tail).encode("utf-8")
+        size = len(original)
+        if len(data) > size * 9 // 10:
+            _rotate_floor = size + max(MAX_LOG_BYTES // 10, 1)
+            return None
+        os.makedirs(archive_dir(), exist_ok=True)
+        archive = archive_path()
+        with open(archive, "xb") as archived:
+            archived.write(original)
+            archived.flush()
+            os.fsync(archived.fileno())
+        live.seek(0)
+        live.write(data)
+        live.truncate()
+        live.flush()
+        os.fsync(live.fileno())
     _rotate_floor = 0
     return archive
 
@@ -208,7 +219,9 @@ def append_event(event):
     with LOG_LOCK:
         os.makedirs(os.path.dirname(os.path.abspath(EVENTS)), exist_ok=True)
         with open(EVENTS, "a", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
             f.write(line)
+            f.flush()
         maybe_rotate()
 
 

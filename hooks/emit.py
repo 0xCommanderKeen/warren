@@ -14,6 +14,7 @@ process is gone but the agent-as-service is still home, resting.
 
 Must never break the hosting agent: swallow everything, always exit 0."""
 import datetime
+import fcntl
 import json
 import os
 import sys
@@ -116,6 +117,10 @@ def main():
         return
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
+        # Coordinate with server-side in-place rotation. Locking the log itself
+        # also works for descriptors opened before rotation because its inode
+        # is deliberately retained.
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
