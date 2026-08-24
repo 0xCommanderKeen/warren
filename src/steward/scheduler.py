@@ -25,6 +25,13 @@ is not the same fact as "it is 07:00".
 **Every run is bracketed.** ``routine_started`` before, then exactly one of
 ``routine_finished`` / ``routine_failed`` after — including when steward killed the
 session at its timeout. A hung session must never look like work.
+
+**Every session opens with its journal, and one closes the day.** The latest surviving
+entry goes into the preamble (:mod:`steward.journal`), and the single routine a manifest
+flags ``journal: close_of_day`` gets the instruction to write the next one. After an
+``ok`` close-of-day run, steward keeps whatever entry exists and rotates the rest. It
+writes an entry itself only from an explicit ``<journal>`` block in the session's output,
+and never over a file the session wrote for itself.
 """
 
 import json
@@ -35,7 +42,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -43,7 +50,8 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 from steward import events as ev
-from steward.manifest import Resident, Routine, validate_path
+from steward import journal
+from steward.manifest import ManifestError, Resident, Routine, validate_path
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_routine_prompt
 from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner, check_runner
@@ -187,6 +195,9 @@ class FireReport:
     skipped_reason: str | None = None
     result: RunResult | None = None
     prompt: str = ""
+    #: Where the day's journal entry ended up, when this was the closing routine and an
+    #: entry exists. ``None`` means no entry — which is a real answer, not a failure.
+    journal_path: Path | None = None
 
     @property
     def routine_id(self) -> str:
@@ -331,6 +342,10 @@ class Scheduler:
         Called before the daemon takes its first breath, so "the ``claude`` binary is
         not on PATH" is a startup error at a reasonable hour rather than a routine
         that silently never happened.
+
+        The resident's journal location is checked here too, and for the same reason:
+        every session opens with its journal, so a memory block steward cannot journal
+        into is a complaint in daylight rather than a midnight write into nowhere.
         """
         problems: list[str] = []
         seen: set[str] = set()
@@ -338,9 +353,11 @@ class Scheduler:
             if item.resident.id in seen:
                 continue
             seen.add(item.resident.id)
-            complaint = check_runner(item.resident.manifest.runner)
-            if complaint:
-                problems.append(f"{item.resident.path}: {complaint}")
+            complaints = (
+                check_runner(item.resident.manifest.runner),
+                journal.journal_complaint(item.resident.manifest),
+            )
+            problems.extend(f"{item.resident.path}: {c}" for c in complaints if c)
         return problems
 
     def require_ready(self) -> None:
@@ -407,28 +424,66 @@ class Scheduler:
         with self._lock:
             self._running.discard(key)
 
-    def build_prompt(self, item: ScheduledRoutine) -> str:
+    def build_prompt(self, item: ScheduledRoutine, now: datetime | None = None) -> str:
         """Assemble the full prompt for one routine, through the one prompt module."""
         return assemble_routine_prompt(
             item.resident.manifest,
             item.routine.prompt,
             soul_text=item.resident.soul.body,
             journal_entry=self.journal_for(item),
+            closing=self.closing_for(item, now or datetime.now(UTC)),
         )
 
     def journal_for(self, item: ScheduledRoutine) -> str | None:
-        """Return the resident's latest journal entry.
+        """Return the resident's latest surviving journal entry, or ``None``.
 
-        Always ``None`` today: journals land in steward #5, and until a session has
-        actually written one there is nothing to inject. Steward never synthesizes an
-        entry on a resident's behalf.
+        Read through :mod:`steward.journal`, so the location comes from this resident's
+        own manifest and from nowhere else. A resident that has never journaled, or
+        whose last session died before it wrote, gets the previous surviving entry or
+        nothing — steward never synthesizes one.
+
+        A journal that cannot be read *right now* degrades to no journal and a log line
+        rather than a failed routine. The declaration itself is checked in
+        :meth:`check`, which is where a broken one is supposed to be loud.
         """
-        _ = item
+        return self._journal_call(item, lambda: journal.latest_entry(item.resident.manifest))
+
+    def closing_for(self, item: ScheduledRoutine, now: datetime) -> str | None:
+        """Return the close-of-day instruction, on the flagged routine and nowhere else.
+
+        The contract is the explicit ``journal: close_of_day`` flag in the manifest, not
+        an inference about which routine happens to fire last today. The day the entry
+        belongs to is read in this routine's own ``schedule_tz``.
+        """
+        if item.routine.journal != journal.CLOSE_OF_DAY:
+            return None
+        day = journal.local_day(item.routine, now)
+        return self._journal_call(
+            item,
+            lambda: journal.close_of_day_instruction(
+                item.resident.manifest, day, item.routine.id, source=item.resident.path
+            ),
+        )
+
+    def _journal_call[T](self, item: ScheduledRoutine, read: Callable[[], T]) -> T | None:
+        try:
+            return read()
+        except ManifestError as exc:
+            log.warning("%s: no journal — %s", item.key, exc)
+        except OSError as exc:
+            log.warning("%s: could not reach the journal: %s", item.key, exc)
         return None
 
-    def fire(self, item: ScheduledRoutine, *, trigger: str = TRIGGER_SCHEDULE) -> FireReport:
+    def fire(
+        self,
+        item: ScheduledRoutine,
+        *,
+        trigger: str = TRIGGER_SCHEDULE,
+        now: datetime | None = None,
+    ) -> FireReport:
         """Run one routine end to end, bracketed by events. Never raises."""
         run_id = str(uuid.uuid4())
+        moment = now or datetime.now(UTC)
         if not self._claim(item.key):
             log.warning(
                 "%s: previous run is still going — skipping this fire rather than queueing a lie",
@@ -438,12 +493,14 @@ class Scheduler:
                 scheduled=item, run_id=run_id, fired=False, skipped_reason="already running"
             )
         try:
-            return self._fire_claimed(item, run_id, trigger)
+            return self._fire_claimed(item, run_id, trigger, moment)
         finally:
             self._release(item.key)
 
-    def _fire_claimed(self, item: ScheduledRoutine, run_id: str, trigger: str) -> FireReport:
-        prompt = self.build_prompt(item)
+    def _fire_claimed(
+        self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
+    ) -> FireReport:
+        prompt = self.build_prompt(item, moment)
         workdir = item.workdir(self.workdir)
         cwd = str(workdir)
 
@@ -479,7 +536,14 @@ class Scheduler:
                 outcome=Outcome.FAILED, duration_s=duration, error=f"{type(exc).__name__}: {exc}"
             )
 
+        journal_path: Path | None = None
         if result.ok:
+            closed = self.close_the_day(item, moment, result.output)
+            journal_path = closed.path
+            if closed.persisted and journal_path is not None:
+                # Steward wrote this file, so steward can name it. Everything else in
+                # artifacts is the session's own claim, reported by its own emitter.
+                result = replace(result, artifacts=(*result.artifacts, str(journal_path)))
             self.emitter.emit(
                 context.finished(
                     outcome=str(result.outcome),
@@ -494,7 +558,39 @@ class Scheduler:
                     duration_s=result.duration_s,
                 )
             )
-        return FireReport(scheduled=item, run_id=run_id, fired=True, result=result, prompt=prompt)
+        return FireReport(
+            scheduled=item,
+            run_id=run_id,
+            fired=True,
+            result=result,
+            prompt=prompt,
+            journal_path=journal_path,
+        )
+
+    def close_the_day(
+        self, item: ScheduledRoutine, moment: datetime, output: str
+    ) -> journal.CloseOfDay:
+        """Keep whatever entry the closing routine produced, then rotate. Never raises.
+
+        The session's own file wins; a ``<journal>`` block in its output is the fallback
+        for a run that had nowhere to write. Only an ``ok`` run closes a day — a session
+        killed at its timeout did not finish its day, and dating a half-written note
+        would make tomorrow believe a day happened that did not.
+        """
+        if item.routine.journal != journal.CLOSE_OF_DAY:
+            return journal.CloseOfDay()
+        day = journal.local_day(item.routine, moment)
+        closed = self._journal_call(
+            item,
+            lambda: journal.persist_close_of_day(
+                item.resident.manifest,
+                day,
+                item.routine.id,
+                output,
+                source=item.resident.path,
+            ),
+        )
+        return closed if closed is not None else journal.CloseOfDay()
 
     def _session_env(self, item: ScheduledRoutine, run_id: str) -> dict[str, str]:
         """Build the env a session inherits, so its own emitter reports as this resident."""
@@ -513,7 +609,7 @@ class Scheduler:
         reports: list[FireReport] = []
         for item in self.due(moment):
             self.state.set_anchor(item.key, moment)
-            reports.append(self.fire(item))
+            reports.append(self.fire(item, now=moment))
         self._save_state()
         return reports
 
@@ -542,7 +638,7 @@ class Scheduler:
                 for item in due:
                     self.state.set_anchor(item.key, moment)
                 self._save_state()
-                futures = [pool.submit(self.fire, item) for item in due]
+                futures = [pool.submit(self.fire, item, now=moment) for item in due]
                 if not due:
                     sleep(self._sleep_for(moment))
                 reports.extend(future.result() for future in futures)

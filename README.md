@@ -42,7 +42,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Two pieces exist.
+Three pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -53,16 +53,25 @@ template / a mock), with the charter, voice, and journal assembled in one place,
 run bracketed by real burrow events. Nothing fires unless `steward scheduler run` is up:
 an enabled routine is a declaration, not an animation.
 
+**The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
+markdown entry into the location its own manifest declares, and the next session opens
+with that entry. The resident writes it; steward only asks for it, reads it back, and
+keeps the directory bounded — it never summarizes a day on a resident's behalf and never
+invents an entry. Souls carry a `## Voice` section, capped and framed as style only, so
+what Hob writes reads like Hob. Personality is expressed only through real work products:
+a voice adds no event, no movement, no ambient liveliness to the village.
+
 ```console
-$ steward doctor                     # which brain, is it installed, what fires next
+$ steward doctor                     # which brain, where the journal lives, what fires next
 $ steward scheduler run              # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
+$ steward journal life-agent         # what Hob has actually written, newest first
 ```
 
-Still roadmap, in this repo's issues: the journal (#5), soul voice end to end (#9), the
-job board, deployment, and the HTTP API. Burrow-side rendering counterparts live in
-burrow's issues.
+Still roadmap, in this repo's issues: the job board, deployment, and the HTTP API.
+Burrow-side rendering counterparts — the journal panel in a villager's house among them —
+live in burrow's issues.
 
 ## Residents
 
@@ -108,4 +117,5 @@ make check     # what CI runs: lint, test, validate
 A routine only ever fires while `steward scheduler run` is up. Missed schedules are not
 back-filled, an overlapping fire is skipped rather than queued, and a run killed at its
 timeout is emitted as `routine_failed` — the village must never show work that is not
-happening.
+happening. The same rule governs memory: a day with no journal entry has no journal
+entry, and the next session is told nothing rather than something plausible.

@@ -20,6 +20,7 @@ import re
 import zoneinfo
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -29,6 +30,9 @@ from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 __all__ = [
+    "CLOSE_OF_DAY",
+    "DEFAULT_JOURNAL_DIR",
+    "DEFAULT_KEEP_ENTRIES",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
     "VOICE_MAX_CHARS",
@@ -62,6 +66,21 @@ DEFAULT_SOUL_FILENAME = "soul.md"
 SCHEMA_VERSION = 0
 VOICE_MAX_CHARS = 1200
 VOICE_HEADING = "## Voice"
+
+#: The journal subdirectory, under ``memory.path``, a manifest gets when it names none.
+DEFAULT_JOURNAL_DIR = "journal"
+
+#: Keep the newest N entries. Counted, not aged: there is at most one entry per local
+#: day, so 30 is "the last 30 days this resident actually wrote", and one that was quiet
+#: for a month still has its last entry to wake up to. An age cut-off would delete it.
+DEFAULT_KEEP_ENTRIES = 30
+MAX_JOURNAL_KEEP = 3650
+
+#: The one legal value of a routine's ``journal:`` flag: the run that ends the day.
+CLOSE_OF_DAY = "close_of_day"
+
+#: Stop counting a closing routine's daily fires here; anything over one is already wrong.
+MAX_CLOSER_FIRES = 24
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
@@ -375,9 +394,16 @@ class Memory(_Model):
 
     kind: Literal["directory", "file", "repo"] = "directory"
     path: str = Field(min_length=1, description="Reference to the memory location.")
-    journal: str | None = Field(
-        default=None,
-        description="Journal file relative to path, read at session start.",
+    journal: str = Field(
+        default=DEFAULT_JOURNAL_DIR,
+        min_length=1,
+        description="Journal directory relative to path; one entry per local day.",
+    )
+    journal_keep: int = Field(
+        default=DEFAULT_KEEP_ENTRIES,
+        ge=1,
+        le=MAX_JOURNAL_KEEP,
+        description="How many entries survive rotation, newest first.",
     )
 
 
@@ -451,6 +477,10 @@ class Routine(_Model):
     )
     timeout_s: int = Field(gt=0, le=MAX_TIMEOUT_S, description="Kill the run after this long.")
     enabled: bool = True
+    journal: Literal["close_of_day"] | None = Field(
+        default=None,
+        description="Flag the one routine that ends the resident's day and journals.",
+    )
 
     @field_validator("schedule")
     @classmethod
@@ -649,10 +679,13 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "skills": "skills: [daily-summary, read-inbox]",
     "skills.id": "id: daily-summary  (a name in skills/)",
     "skills.source": "source: library",
-    "memory": "memory: {kind: directory, path: /data/residents/life-agent/memory}",
+    "memory": (
+        "memory: {kind: directory, path: /data/residents/life-agent/memory, journal: journal}"
+    ),
     "memory.kind": "kind: directory",
     "memory.path": "path: /data/residents/life-agent/memory",
-    "memory.journal": "journal: journal.md",
+    "memory.journal": "journal: journal  (a directory under path; one file per local day)",
+    "memory.journal_keep": "journal_keep: 30  (entries kept, newest first)",
     "routes": "routes: [{id: cron, kind: cron, address: steward-scheduler, status: active}]",
     "routes.id": "id: inbox",
     "routes.kind": "kind: email",
@@ -678,6 +711,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.requires": "requires: [daily-summary]  (skills granted above)",
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
+    "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
 }
 
 _UNION_TAGS = frozenset({"str", "int", "bool", "list[str]", "Escalation", "function-after[_"})
@@ -785,6 +819,65 @@ def _check_routine_requirements(manifest: ResidentManifest, source: Path) -> lis
                     example=hint,
                 )
             )
+    return diagnostics
+
+
+def _fires_per_day(routine: Routine) -> int:
+    """Count a routine's occurrences in one ordinary local day, capped so it terminates."""
+    zone = zoneinfo.ZoneInfo(routine.schedule_tz)
+    start = datetime(2026, 6, 15, 0, 0, tzinfo=zone)  # mid-year: no DST seam either side
+    end = start + timedelta(days=1)
+    cursor = croniter(routine.schedule, start - timedelta(seconds=1))
+    fires = 0
+    while fires <= MAX_CLOSER_FIRES:
+        if cursor.get_next(datetime) >= end:
+            break
+        fires += 1
+    return fires
+
+
+def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """One entry per day means one closing routine, firing once.
+
+    Both halves are checked here rather than left to discover themselves at midnight: a
+    second closer would write a second entry over the first, and a closer on an hourly
+    schedule would rewrite the day twenty-four times and call the last one the day.
+    """
+    closers = [
+        (index, routine)
+        for index, routine in enumerate(manifest.routines)
+        if routine.journal == CLOSE_OF_DAY
+    ]
+    diagnostics = [
+        Diagnostic(
+            file=source,
+            field_path=f"routines[{index}].journal",
+            problem=(
+                f"routine {routine.id!r} also closes the day; "
+                f"{', '.join(repr(r.id) for _, r in closers)} all claim it, and a day "
+                f"that ends more than once is not a day"
+            ),
+            example=f"journal: {CLOSE_OF_DAY} on exactly one routine",
+        )
+        for index, routine in closers[1:]
+    ]
+    for index, routine in closers:
+        fires = _fires_per_day(routine)
+        if fires == 1:
+            continue
+        many = f"{MAX_CLOSER_FIRES}+" if fires > MAX_CLOSER_FIRES else str(fires)
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path=f"routines[{index}].schedule",
+                problem=(
+                    f"routine {routine.id!r} closes the day but fires {many} times a day "
+                    f"in {routine.schedule_tz}; the journal is one entry per day, so the "
+                    f"closing routine has to run once"
+                ),
+                example="schedule: '30 22 * * *'  (once, late)",
+            )
+        )
     return diagnostics
 
 
@@ -924,6 +1017,7 @@ def validate_manifest(path: Path | str) -> ValidationResult:
     diagnostics.extend(_check_directory_name(manifest, source))
     diagnostics.extend(_check_duplicate_ids(manifest, source))
     diagnostics.extend(_check_routine_requirements(manifest, source))
+    diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
     resident = Resident(path=source, manifest=manifest, soul=soul)

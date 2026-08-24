@@ -51,7 +51,7 @@ def valid_manifest() -> dict[str, Any]:
         "memory": {
             "kind": "directory",
             "path": "/data/residents/test-agent/memory",
-            "journal": "journal.md",
+            "journal": "journal",
         },
         "routes": [
             {"id": "schedule", "kind": "cron", "address": "steward:scheduler"},

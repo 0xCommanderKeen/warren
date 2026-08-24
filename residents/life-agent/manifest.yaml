@@ -22,7 +22,7 @@ charter:
     - Read the inbox on a schedule and surface only what genuinely needs a person.
     - Track the calendar for conflicts, missing prep, and appointments that need travel time.
     - Draft replies, checklists, and errand plans so a person only has to approve or edit.
-    - Write a journal entry at the end of every run so the next session knows where it left off.
+    - Close each day with a journal entry, so tomorrow's session knows where this one stopped.
   rules:
     - Never send email without explicit approval; drafting is always allowed, sending never is.
     - Never accept, decline, move, or delete a calendar event on the human's behalf.
@@ -56,7 +56,11 @@ skills:
 memory:
   kind: directory
   path: /data/residents/life-agent/memory
-  journal: journal.md
+  # One markdown entry per Ljubljana day, under memory/journal/YYYY-MM-DD.md. The
+  # newest 30 survive rotation; older ones go, because a memory nobody bounds is not
+  # a memory, it is a log.
+  journal: journal
+  journal_keep: 30
 
 routes:
   - id: schedule
@@ -108,13 +112,11 @@ routines:
     schedule_tz: Europe/Ljubljana
     prompt: >-
       Write today's household summary: what was left open yesterday, what is on the
-      calendar today, and anything in the inbox that needs a person. End with the
-      journal entry for this run.
+      calendar today, and anything in the inbox that needs a person.
     requires:
       - daily-summary
       - read-inbox
       - read-calendar
-      - write-journal
     timeout_s: 900
     enabled: true
   - id: inbox-read
@@ -127,3 +129,17 @@ routines:
       - read-inbox
     timeout_s: 600
     enabled: true
+  # The last run of Hob's day, and the only one that journals. The flag is what makes
+  # it the closer — not cron arithmetic about which routine happens to fire last, which
+  # nobody reading this file could work out.
+  - id: close-of-day
+    schedule: "30 22 * * *"
+    schedule_tz: Europe/Ljubljana
+    prompt: >-
+      Look back over the day: what actually got done, what is still open, and what
+      changed that tomorrow's session should know. Start no new work this late.
+    requires:
+      - write-journal
+    timeout_s: 600
+    enabled: true
+    journal: close_of_day
