@@ -1,0 +1,85 @@
+[project]
+name = "steward"
+version = "0.1.0"
+description = "Control plane for the agent fleet that burrow watches: souls, resident manifests, routines."
+readme = "README.md"
+authors = [
+    { name = "0xCommanderKeen", email = "91289621+0xCommanderKeen@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "click>=8.4.2",
+    "pydantic>=2.13.4",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+steward = "steward.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.4,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.4",
+    "ty>=0.0.74",
+    "types-pyyaml>=6.0.12.20260815",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D203",    # incompatible with D211 (no blank line before class docstring)
+    "D213",    # incompatible with D212 (summary on the first line)
+    "COM812",  # trailing-comma rules that fight the formatter
+    "ISC001",
+    "EM101",   # readable exception messages beat a constant-per-raise
+    "EM102",
+    "TRY003",
+    "PLR0911", # validators legitimately return many diagnostics-shaped branches
+    "CPY001",  # no copyright headers in this repo
+    "TC003",   # annotations are lazy on 3.14 (PEP 649); TYPE_CHECKING blocks buy nothing
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",    # asserts are the point
+    "S105", "S106",  # fake credentials are the subject under test
+    "D100", "D103", "D104",
+    "PLR2004", # literal comparisons in assertions are clearer inline
+    "ANN201", "ANN001",
+    "SLF001",  # private helpers are fair game for their own unit tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["steward", "conftest"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--cov=steward",
+    "--cov-report=term-missing",
+    "--cov-fail-under=85",
+    "-q",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/steward"]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.terminal]
+error-on-warning = true

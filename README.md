@@ -42,5 +42,51 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Nothing is built yet. The roadmap lives in this repo's issues; burrow-side
-rendering counterparts live in burrow's issues.
+The first piece exists: **resident manifests and charters** (#1). Souls and manifests are
+versioned here and validated in CI; everything else — the scheduler, the runner
+abstraction, the job board, the API — is still roadmap, and lives in this repo's issues.
+Burrow-side rendering counterparts live in burrow's issues.
+
+## Residents
+
+```
+residents/
+  life-agent/       manifest.yaml + soul.md   Hob, the household spirit
+  burrow-builder/   manifest.yaml + soul.md   Maren, who builds the village
+```
+
+Each manifest declares the resident's soul identity, charter (mission, duties, hard
+rules, escalation policy), and the five capability dimensions burrow renders — skills,
+memory, routes, app grants — plus the runner and routines steward will execute once
+those land. References and grants only: a credential-shaped key or an inline secret
+fails validation and is never stored.
+
+The schema is documented in [docs/manifest.md](docs/manifest.md), and
+`steward schema` emits it as JSON Schema so burrow can read manifests without
+translation.
+
+```console
+$ steward validate                         # the whole residents/ tree
+ok: 2 valid resident(s), 0 error(s), 0 warning(s) in residents
+
+$ steward validate residents/life-agent    # or one resident, or one file
+```
+
+Diagnostics always name the file, the field path, the problem, and an example of a valid
+value, and the same check is importable (`steward.validate_tree`, `steward.load_manifest`)
+so the scheduler, the API, and CI share one load-and-validate path.
+
+## Development
+
+Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
+
+```console
+make dev       # uv sync --all-groups
+make lint      # ruff format --check, ruff check, ty
+make format    # ruff format + ruff check --fix
+make test      # pytest with coverage
+make check     # what CI runs: lint, test, validate
+```
+
+Routines declared in a manifest stay `enabled: false` until the scheduler exists (#2) —
+the village must never show work that is not happening.
