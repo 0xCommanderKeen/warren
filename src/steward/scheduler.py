@@ -96,6 +96,7 @@ __all__ = [
     "TRIGGER_MANUAL",
     "TRIGGER_SCHEDULE",
     "FireReport",
+    "RunGuard",
     "ScheduledRoutine",
     "Scheduler",
     "SchedulerError",
@@ -159,6 +160,42 @@ class WakeHooks(Protocol):
 
     def dispatch(self, now: datetime) -> object:
         """Sweep deadlines and let board-enabled residents claim work."""
+        ...
+
+
+class RunGuard(Protocol):
+    """Whether a resident may run at all, how long it gets, and what the run cost.
+
+    The budget seam (steward #8), and a structural protocol for the same reason
+    :class:`WakeHooks` is one: :class:`steward.budgets.BudgetGuard` needs the scheduler's
+    types, so the dependency runs the other way and the scheduler never imports it. A
+    steward with no guard fires routines exactly as it did before budgets existed —
+    unbounded, which is what it was.
+
+    Three moments, and the order matters. :meth:`allow` is asked *before* the prompt is
+    assembled, because assembling one delivers a resident's pending decisions and a
+    refused fire must not eat an answer the next real session needs to hear.
+    """
+
+    def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+        """Return why this resident may not run at ``now``, or ``None`` when it may."""
+        ...
+
+    def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+        """Return the timeout this run actually gets, capped by the manifest's budget."""
+        ...
+
+    def record(  # noqa: PLR0913 — the run, named by its kind, its id, and what it cost
+        self,
+        manifest: ResidentManifest,
+        *,
+        result: RunResult,
+        kind: str,
+        run_id: str,
+        ref: str,
+        now: datetime | None = None,
+    ) -> object:
+        """Append what one finished session cost to the durable ledger."""
         ...
 
 
@@ -380,10 +417,13 @@ class Scheduler:
         runner_factory: RunnerFactory = build_runner,
         library: SkillLibrary | None = None,
         hooks: WakeHooks | None = None,
+        guard: RunGuard | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
         self.dry_run = dry_run
+        # No guard means no budget: unbounded, exactly as it was before steward #8.
+        self.guard = guard
         # One library for the fleet: improving a skill improves every resident holding
         # it. An unconfigured library means no skill is injected and none is written.
         self.library = library if library is not None else SkillLibrary()
@@ -622,6 +662,10 @@ class Scheduler:
     def _fire_claimed(
         self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
     ) -> FireReport:
+        refusal = self._budget_refusal(item, moment)
+        if refusal is not None:
+            return FireReport(scheduled=item, run_id=run_id, fired=False, skipped_reason=refusal)
+
         prompt = self.build_prompt(item, moment)
         workdir = item.workdir(self.workdir)
         cwd = str(workdir)
@@ -648,7 +692,7 @@ class Scheduler:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=item.routine.timeout_s,
+                    timeout_s=self._timeout_for(item),
                     model=item.resident.manifest.runner.model,
                     env=self._session_env(item, run_id),
                 )
@@ -668,6 +712,7 @@ class Scheduler:
                 outcome=Outcome.FAILED, duration_s=duration, error=f"{type(exc).__name__}: {exc}"
             )
 
+        self._ledger(item, run_id, result, moment)
         self._harvest(item, result.output)
 
         journal_path: Path | None = None
@@ -725,6 +770,50 @@ class Scheduler:
             ),
         )
         return closed if closed is not None else journal.CloseOfDay()
+
+    def _budget_refusal(self, item: ScheduledRoutine, moment: datetime) -> str | None:
+        """Ask the budget whether this resident may run at all, before anything is spent.
+
+        Asked before the prompt is assembled, because assembling one *delivers* the
+        resident's pending approval decisions, and a fire refused after that would have
+        eaten an answer the next real session needed to hear. A guard that raises is a
+        guard steward refuses to trust into silence: an unreadable budget stops the run
+        rather than waving it through.
+        """
+        if self.guard is None:
+            return None
+        try:
+            refusal = self.guard.allow(item.resident.manifest, moment)
+        except Exception as exc:  # noqa: BLE001 — an unreadable budget is a refusal, not a crash
+            log.warning("%s: could not read the budget, so nothing fires: %s", item.key, exc)
+            return f"budget unreadable: {type(exc).__name__}: {exc}"
+        if refusal is not None:
+            log.warning("%s: %s", item.key, refusal)
+        return refusal
+
+    def _timeout_for(self, item: ScheduledRoutine) -> int:
+        """Return this run's effective timeout: the declared one, capped by the budget."""
+        if self.guard is None:
+            return item.routine.timeout_s
+        return self.guard.timeout_for(item.resident.manifest, item.routine.timeout_s)
+
+    def _ledger(
+        self, item: ScheduledRoutine, run_id: str, result: RunResult, moment: datetime
+    ) -> None:
+        """Record what this run cost. Never raises: a lost row is not a failed routine."""
+        if self.guard is None:
+            return
+        try:
+            self.guard.record(
+                item.resident.manifest,
+                result=result,
+                kind="routine",
+                run_id=run_id,
+                ref=item.routine.id,
+                now=moment,
+            )
+        except Exception as exc:  # noqa: BLE001 — the ledger must not take a routine down
+            log.warning("%s: could not record what this run cost: %s", item.key, exc)
 
     def _harvest(self, item: ScheduledRoutine, output: str) -> None:
         """Turn anything the session asked for into a real approval request.

@@ -94,7 +94,12 @@ work.
 | 404 | `unknown_routine` | the manifest declares no routine by that name |
 | 409 | `routine_disabled` | declared but `enabled: false`; enable it in the manifest |
 | 409 | `already_running` | the scheduler's overlap rule: skipped, never queued |
+| 409 | `budget_exceeded` | `paused: budget exceeded`; see [`GET /residents/{id}/budget`](#get-residentsidbudget) |
 | 409 | `resident_invalid` | the resident exists but its manifest does not validate |
+
+The run's consumption — tokens, money, seconds — lands on the durable ledger like any
+other session's, and its timeout is capped by the manifest's `budgets.max_run_seconds`.
+Asking for a run now is not a way around a budget the same human set.
 
 ### `POST /jobs` · `GET /jobs`
 
@@ -196,6 +201,74 @@ gets — the library's defaults plus those grants, in injection order:
  "effective_skills": ["daily-summary", "escalate", "research", "write-journal", "read-inbox"]}
 ```
 
+`GET /residents` additionally carries a small `budget` block on every resident, so a
+fleet view can draw fuel gauges without a round trip each:
+
+```json
+{"budget": {"declared": true, "paused": false, "summary": "daily_cost_usd: 1.25 of 5",
+            "spent_usd": 1.25, "tokens": 20400, "runs": 6,
+            "budgets": [{"budget": "daily_cost_usd", "spent": 1.25, "limit": 5.0,
+                         "remaining": 3.75, "exhausted": false}],
+            "window": {"tz": "Europe/Ljubljana", "day": "2026-08-24", "start": "…", "end": "…"}}}
+```
+
+A resident with no caps reports `"declared": false` and `"summary": "no limit"` rather
+than omitting the block — a panel that simply left the gauge out would let *unlimited*
+read as *unknown*.
+
+### `GET /residents/{id}/budget`
+
+Spent against limit for each budget, the window those numbers are counted in, and the
+pause state. This is the read burrow's fleet-ops view (burrow #40) draws from; steward
+invents no village state to serve it.
+
+```json
+{
+  "resident": "life-agent",
+  "agent_id": "claude-code:life-agent",
+  "window": {"tz": "Europe/Ljubljana", "day": "2026-08-24",
+             "start": "2026-08-23T22:00:00.000Z", "end": "2026-08-24T22:00:00.000Z"},
+  "spent": {"runs": 6, "input_tokens": 18000, "output_tokens": 2400, "tokens": 20400,
+            "cost_usd": 5.2, "duration_s": 812.4, "unreported_runs": 0},
+  "budgets": [
+    {"budget": "daily_cost_usd", "spent": 5.2, "limit": 5.0, "remaining": 0.0, "exhausted": true},
+    {"budget": "daily_tokens", "spent": 20400, "limit": null, "remaining": null, "exhausted": false}
+  ],
+  "max_run_seconds": 900,
+  "paused": true,
+  "pause": {"resident": "life-agent", "budget": "daily_cost_usd", "spent": 5.2, "cap": 5.0,
+            "reason": "daily_cost_usd: 5.20 of 5", "request_id": "…",
+            "window_end": "2026-08-24T22:00:00.000Z", "paused_at": "…"},
+  "allowance": null,
+  "summary": "paused: budget exceeded"
+}
+```
+
+Everything here is a sum over rows steward wrote when runs finished, inside a window
+computed from the calendar **at the moment of the request**. A steward that restarted an
+hour ago answers exactly what one that has been up all day answers — a daily cap that
+resets because the daemon bounced is not a cap. `"limit": null` means no cap is declared,
+and `unreported_runs` counts the runs whose brain reported no usage at all (a `codex` or
+`command` session has none to give); steward writes those as zero and says how many they
+were rather than inventing a number.
+
+An exhausted budget **pauses** the resident. While it is paused:
+
+- scheduled fires and board claims are skipped with a logged reason;
+- `POST /residents/{id}/routines/{routine}/run` returns
+  `409 {"error": "budget_exceeded", "message": "paused: budget exceeded (…)"}` and writes
+  nothing — it is refused before it is accepted, like every other refusal here;
+- exactly **one** `needs_human` was emitted, naming the budget and the number that tripped
+  it, and no more are emitted however many fires are refused.
+
+Unpausing goes through the ordinary approvals machinery: `POST /approvals/{request_id}`
+with `{"decision": "approve"}` resumes the resident and reports `"resumed": "<id>"`
+alongside the usual `needs_human_resolved`. `deny` is a real answer too — it leaves the
+resident paused. `steward budget unpause <id>` does the same thing from a terminal,
+resolving the same request and emitting the same event. Either way the resident gets an
+**allowance until the end of the window that tripped**: carrying on means today, not
+forever, and tomorrow's cap applies to tomorrow.
+
 ### `GET /skills`
 
 The skills library, and who holds each skill.
@@ -230,6 +303,12 @@ by committing a manifest. There is no HTTP path that writes either.
 | `jobs` | the board: task, required skills, status, claimant, lease, artifacts |
 | `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
+| `run_ledger` | one row per finished session: tokens, money, seconds, and whether the brain reported any of it |
+| `budget_pauses` | the residents steward has stopped, and the number that stopped them |
+| `budget_allowances` | a human's "carry on", and the moment it runs out |
+| `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
+| `watchdog_passes` | when the watchdog last swept, which is how `doctor` can say nothing is watching |
+| `unbracketed_runs` | the runs steward buried on their session's behalf, so nobody is mourned twice |
 
 SQLite rather than a JSON file because the two interesting writes are both
 conditional — claiming an open task and deciding a pending approval — and "the first

@@ -26,8 +26,9 @@ They share **contracts, not code**:
 
 1. **The event protocol** — burrow's `docs/protocol.md`. Steward adds event types
    (`routine_started`, `routine_finished`, `routine_failed`, `task_posted`,
-   `task_claimed`, `task_done`, `task_failed`, `task_delegated`, structured `needs_human`
-   payloads, `needs_human_resolved`) and burrow only ever renders them.
+   `task_claimed`, `task_done`, `task_failed`, `task_delegated`, `resident_restarted`,
+   structured `needs_human` payloads, `needs_human_resolved`) and burrow only ever renders
+   them.
 2. **The resident manifest** — the versioned declaration of a resident's soul,
    charter, skills, memory, routes, and app grants. Steward deploys from it;
    burrow reads it for display. References and grants only — never credentials.
@@ -42,7 +43,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Seven pieces exist.
+Eight pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -125,9 +126,38 @@ $ steward approval raise life-agent --action send_email --detail-json '{"to": "�
 $ steward approval show <request_id>  # request, decision, decider, timestamps
 ```
 
-Still roadmap, in this repo's issues: delegation (#7), the watchdog and budgets (#8),
-deployment (#4), and the management UI (#13). Burrow-side rendering counterparts — the
-journal panel in a villager's house, the notice board — live in burrow's issues.
+**The watchdog and budgets** (#8). An agent nobody is watching can fail in two directions,
+and steward now answers both. A manifest declares `budgets: {daily_cost_usd, daily_tokens,
+max_run_seconds}`; every finished session — routine, board task, delegated item, run-now —
+appends what it actually cost to a ledger on disk, and "today" is `[local midnight, next
+local midnight)` in the resident's own zone, computed from the calendar at the moment
+somebody asks. A daily cap that reset because the daemon bounced would not be a cap. When
+one trips, the resident is **paused** — no fires, no claims, run-now answers `409 paused:
+budget exceeded` — and steward knocks **once**, naming the budget and the number, through
+the same approvals machinery everything else uses. Approving that knock resumes the
+resident for the rest of that day; tomorrow's cap applies to tomorrow.
+
+The watchdog is the other direction. `LocalProbe` sees what steward can truthfully see
+about itself — a scheduler anchor that stopped advancing, a lease held past its expiry, a
+run that started and never came back — and `DockerSupervisor` restarts the container a
+manifest names in `deploy.container`, wired and tested against a stub docker, for real use
+when deployment (#4) lands. Every intervention emits `resident_restarted` with its reason
+and attempt number, because a silent restart is a lie by omission; attempts are bounded
+(1m, 5m, 25m, three of them) and then steward stops and asks a person instead. And a
+`routine_started` that no closing event ever answered becomes `routine_failed` with
+`error: "run never reported back"`, emitted exactly once — the village must never show
+eternal work.
+
+```console
+$ steward budget show                # today's spend against every declared cap
+$ steward budget unpause life-agent  # or approve the knock from burrow's panel
+$ steward watchdog run                # probe, sweep, bury stale runs, check budgets
+$ steward watchdog tick               # one pass, then exit (external cron)
+```
+
+Still roadmap, in this repo's issues: delegation (#7), deployment (#4), and the management
+UI (#13). Burrow-side rendering counterparts — the journal panel in a villager's house,
+the notice board, the fleet-ops fuel gauges — live in burrow's issues.
 
 ## Residents
 
@@ -180,4 +210,6 @@ timeout is emitted as `routine_failed` — the village must never show work that
 happening. The same rule governs memory: a day with no journal entry has no journal
 entry, and the next session is told nothing rather than something plausible. And the same
 rule governs the board and the door: a task nobody finished goes back to `open` loudly,
-and a request nobody answered is a `deny`, never a quiet yes.
+and a request nobody answered is a `deny`, never a quiet yes. A restart is announced, a
+run that never reported back is buried out loud, and a resident that has spent its day
+stops and says which number stopped it.

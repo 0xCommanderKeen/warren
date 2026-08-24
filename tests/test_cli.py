@@ -9,6 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from conftest import REPO_ROOT, ResidentWriter, StubWriter, valid_manifest
+from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.journal import write_entry
 from steward.manifest import load_manifest
@@ -864,3 +865,292 @@ def test_a_dry_run_tick_touches_no_database(
     assert result.exit_code == 0, result.output
     with Store(db) as after:
         assert [job.status for job in after.jobs()] == ["open"]
+
+
+# ------------------------------------------------------- budgets and the watchdog (#8)
+
+
+def budgeted_manifest(**budgets: object) -> dict[str, Any]:
+    """Build a manifest with a mock runner and the budgets a test wants to try."""
+    data = valid_manifest()
+    data["runner"] = {"kind": "mock", "model": "pretend"}
+    if budgets:
+        data["budgets"] = dict(budgets)
+    return data
+
+
+def ledger_a_run(db: Path, cost: float, *, resident: str = "test-agent") -> None:
+    """Put one finished run on the ledger, as a scheduler would."""
+    with Store(db) as store:
+        store.record_run(
+            resident=resident,
+            agent_id="claude-code:test-agent",
+            kind="routine",
+            run_id="already-ran",
+            ref="daily-summary",
+            cost_usd=cost,
+            input_tokens=50,
+            output_tokens=50,
+        )
+
+
+def test_budget_show_prints_the_gauges_and_the_window(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest(daily_cost_usd=5.0)).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 1.5)
+
+    result = runner.invoke(
+        main, ["budget", "show", "--residents", str(residents_dir), "--db", str(db)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "daily_cost_usd: 1.50 of 5" in result.output
+    assert "daily_tokens: 100 spent, no limit" in result.output
+    assert "1 run(s)" in result.output
+
+
+def test_budget_show_says_no_limit_out_loud(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        ["budget", "show", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+    assert result.exit_code == 0
+    assert "test-agent: no limit" in result.output
+
+
+def test_budget_show_reports_json(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest(daily_tokens=1000)).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 0.0)
+    result = runner.invoke(
+        main,
+        [
+            "budget", "show", "test-agent",
+            "--residents", str(residents_dir), "--db", str(db), "--format", "json",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload[0]["resident"] == "test-agent"
+    assert payload[0]["spent"]["tokens"] == 100
+    assert payload[0]["window"]["day"]
+
+
+def test_budget_show_refuses_an_unknown_resident(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "budget",
+            "show",
+            "nobody",
+            "--residents",
+            str(residents_dir),
+            "--db",
+            str(tmp_path / "s"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "no valid resident 'nobody'" in result.output
+
+
+def test_budget_show_names_the_gap_when_a_brain_reported_nothing(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest(daily_cost_usd=5.0)).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.record_run(
+            resident="test-agent",
+            agent_id="claude-code:test-agent",
+            kind="routine",
+            run_id="quiet",
+            usage_known=False,
+        )
+    result = runner.invoke(
+        main, ["budget", "show", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert "did not report what they cost" in result.output
+
+
+def test_budget_unpause_lifts_a_pause_and_says_what_it_was(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    residents_dir = write_resident(budgeted_manifest(daily_cost_usd=1.0)).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 4.0)
+    # Trip the budget through the same path a scheduled fire would.
+    with Store(db) as store:
+        resident = load_manifest(residents_dir / "test-agent" / "manifest.yaml")
+        BudgetGuard(store).allow(resident.manifest)
+
+    result = runner.invoke(main, ["budget", "unpause", "test-agent", "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent resumed" in result.output
+    assert "daily_cost_usd" in result.output
+    with Store(db) as store:
+        assert store.budget_pause("test-agent") is None
+        assert store.approvals()[0].decision == "approve"
+
+
+def test_budget_unpause_on_a_running_resident_says_so(runner: CliRunner, tmp_path: Path) -> None:
+    result = runner.invoke(
+        main, ["budget", "unpause", "test-agent", "--db", str(tmp_path / "steward.db")]
+    )
+    assert result.exit_code == 0
+    assert "is not paused by a budget" in result.output
+
+
+def test_watchdog_tick_reports_a_quiet_pass(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A watchdog with nothing to do says so, and names what it could not see."""
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+    assert result.exit_code == 0, result.output
+    # Nothing can actually see this resident's process today — no container is declared,
+    # and steward's own state only ever proves stuckness — so it says so rather than
+    # printing a green tick it has not earned.
+    assert "test-agent: unsupervised" in result.output
+    assert "nothing to intervene in" in result.output
+
+
+def test_watchdog_tick_closes_a_run_that_never_reported_back(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    log = tmp_path / "events.jsonl"
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(log))
+    log.write_text(
+        json.dumps(
+            {
+                "v": 0,
+                "ts": "2020-01-01T00:00:00.000Z",
+                "source": "steward",
+                "agent_id": "claude-code:test-agent",
+                "project": "test-agent",
+                "type": "routine_started",
+                "payload": {"routine": "daily-summary", "run_id": "gone"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        main,
+        ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "closed run gone" in result.output
+    emitted = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
+    assert [e["type"] for e in emitted if e["payload"].get("run_id") == "gone"] == [
+        "routine_started",
+        "routine_failed",
+    ]
+
+
+def test_watchdog_tick_reports_json(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "watchdog", "tick", "--residents", str(residents_dir),
+            "--db", str(tmp_path / "s.db"), "--format", "json",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["interventions"] == 0
+    assert payload["health"][0]["resident"] == "test-agent"
+
+
+def test_watchdog_run_makes_the_passes_it_was_asked_for(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    db = tmp_path / "s.db"
+    result = runner.invoke(
+        main,
+        [
+            "watchdog", "run", "--residents", str(residents_dir),
+            "--db", str(db), "--interval", "0", "--max-passes", "2",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    with Store(db) as store:
+        last = store.last_watchdog_pass()
+    assert last is not None
+    assert last["passes"] == 2
+
+
+def test_doctor_reports_the_budget_and_the_watchdog(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest(daily_cost_usd=5.0)
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 2.0)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: budget daily_cost_usd: 2 of 5" in result.output
+    assert "watchdog: has never made a pass" in result.output
+
+
+def test_doctor_says_a_paused_resident_will_not_fire_tonight(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest(daily_cost_usd=1.0)
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 9.0)
+    with Store(db) as store:
+        BudgetGuard(store).allow(
+            load_manifest(residents_dir / "test-agent" / "manifest.yaml").manifest
+        )
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 1
+    assert "budget — paused: budget exceeded" in result.output
+
+
+def test_doctor_names_the_last_watchdog_pass(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest()
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.record_watchdog_pass(interventions=2, now="2026-08-24T12:00:00.000Z")
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "watchdog: last pass 2026-08-24T12:00:00.000Z" in result.output
+    assert "2 intervention(s)" in result.output

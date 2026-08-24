@@ -41,7 +41,9 @@ __all__ = [
     "VOICE_MAX_CHARS",
     "AppGrant",
     "Board",
+    "Budgets",
     "Charter",
+    "Deploy",
     "Diagnostic",
     "Escalation",
     "ManifestError",
@@ -114,6 +116,9 @@ DEFAULT_BOARD_TIMEOUT_S = 900
 
 #: A wake-up is a wake-up, not a shift. More than this and the resident is a queue worker.
 MAX_CLAIMS_PER_WAKE = 10
+
+#: A container name is a docker identifier: letters, digits, and ``_.-`` after the first.
+CONTAINER_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
 
 
 # --------------------------------------------------------------------------------------
@@ -255,6 +260,15 @@ def _looks_like_opaque_blob(value: str) -> bool:
 
 REFERENCE_FIELDS = frozenset({"memory.path", "routes.address", "app_grants.status_ref"})
 
+#: The exact field paths whose *names* look credential-shaped and are not. There is one,
+#: and it earns its place: ``budgets.daily_tokens`` is how many tokens a resident may
+#: spend in a day — an integer, and the whole point of the field is that a person reads it
+#: next to ``daily_cost_usd``. The alternative was to name it something the scanner does
+#: not recognise, which would have meant letting a regex choose the vocabulary of the
+#: manifest. An exemption is a path, never a prefix and never a pattern, so nothing new
+#: slips through by being spelled cleverly.
+CREDENTIAL_NAME_EXEMPT = frozenset({"budgets.daily_tokens"})
+
 CREDENTIAL_EXAMPLE = (
     "drop the field entirely — credentials live outside this repo; "
     "declare access instead: app_grants: [{id: gmail, name: Gmail, status: granted}]"
@@ -287,8 +301,9 @@ def scan_for_credentials(data: object, source: Path) -> list[Diagnostic]:
     for path, value in _walk(data):
         if not path:
             continue
-        leaf = _strip_indices(path).rsplit(".", 1)[-1]
-        if CREDENTIAL_KEY_PATTERN.search(leaf):
+        normalized = _strip_indices(path)
+        leaf = normalized.rsplit(".", 1)[-1]
+        if normalized not in CREDENTIAL_NAME_EXEMPT and CREDENTIAL_KEY_PATTERN.search(leaf):
             diagnostics.append(
                 Diagnostic(
                     file=source,
@@ -315,7 +330,7 @@ def scan_for_credentials(data: object, source: Path) -> list[Diagnostic]:
                 )
                 break
         else:
-            if _strip_indices(path) in REFERENCE_FIELDS and _looks_like_opaque_blob(value):
+            if normalized in REFERENCE_FIELDS and _looks_like_opaque_blob(value):
                 diagnostics.append(
                     Diagnostic(
                         file=source,
@@ -541,6 +556,65 @@ class Board(_Model):
         return self
 
 
+class Budgets(_Model):
+    """What one resident may spend in a day, and how long one run of it may take.
+
+    Every field is optional, and an absent field means *unlimited* — but unlimited is
+    said out loud rather than assumed: ``GET /residents/{id}/budget`` reports a limit of
+    ``null`` and ``steward budget show`` prints ``no limit``, so "Hob has no cap" is an
+    answer somebody read rather than a silence somebody hoped about.
+
+    The two daily caps are counted in the resident's own primary time zone (see
+    :mod:`steward.budgets`), because "a day" is a wall-clock fact where the household is.
+    ``max_run_seconds`` is not daily at all: it caps a *single* run, and steward enforces
+    it as ``min(routine timeout, max_run_seconds)`` so a manifest cannot declare a routine
+    that outlives the budget the same manifest declares.
+    """
+
+    daily_cost_usd: float | None = Field(
+        default=None,
+        gt=0,
+        description="Money this resident may spend per local day. Absent means unlimited.",
+    )
+    daily_tokens: int | None = Field(
+        default=None,
+        gt=0,
+        description="Input plus output tokens per local day. Absent means unlimited.",
+    )
+    max_run_seconds: int | None = Field(
+        default=None,
+        gt=0,
+        le=MAX_TIMEOUT_S,
+        description="Hard cap on one run, applied as min(timeout_s, this).",
+    )
+
+    @property
+    def declared(self) -> bool:
+        """True when this manifest actually declares a budget of any kind."""
+        return any(
+            value is not None
+            for value in (self.daily_cost_usd, self.daily_tokens, self.max_run_seconds)
+        )
+
+
+class Deploy(_Model):
+    """Where this resident runs, for the things that have to reach the process itself.
+
+    One field today, and it is deliberately small: ``container`` names the docker
+    container the watchdog restarts (:mod:`steward.watchdog`). steward does not own
+    containers yet — deployment is steward #4 — so this is a declaration a supervisor can
+    act on, not a promise that steward created anything. A resident with no ``deploy``
+    block is one no container supervisor can speak for, and the watchdog says exactly
+    that instead of guessing a name.
+    """
+
+    container: str | None = Field(
+        default=None,
+        pattern=CONTAINER_PATTERN,
+        description="Docker container name the watchdog restarts, e.g. steward-life-agent.",
+    )
+
+
 class Routine(_Model):
     """Standing work a resident performs without being prompted."""
 
@@ -611,6 +685,14 @@ class ResidentManifest(_Model):
     board: Board = Field(
         default_factory=Board,
         description="Job board participation. Absent means this resident never claims.",
+    )
+    budgets: Budgets = Field(
+        default_factory=Budgets,
+        description="Daily spend caps and the per-run time cap. Absent means unlimited.",
+    )
+    deploy: Deploy = Field(
+        default_factory=Deploy,
+        description="Where this resident runs, for the watchdog. Absent means unsupervised.",
     )
 
     @model_validator(mode="after")
@@ -839,6 +921,12 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "board.max_claims_per_wake": "max_claims_per_wake: 1",
     "board.lease_s": "lease_s: 1800  (must outlive timeout_s)",
     "board.timeout_s": "timeout_s: 900",
+    "budgets": "budgets: {daily_cost_usd: 5.0, daily_tokens: 2000000, max_run_seconds: 900}",
+    "budgets.daily_cost_usd": "daily_cost_usd: 5.0  (omit the field for no cap)",
+    "budgets.daily_tokens": "daily_tokens: 2000000  (input + output, per local day)",
+    "budgets.max_run_seconds": "max_run_seconds: 900  (one run, not a day)",
+    "deploy": "deploy: {container: steward-life-agent}",
+    "deploy.container": "container: steward-life-agent  (the docker name, or omit the block)",
 }
 
 _UNION_TAGS = frozenset({"str", "int", "bool", "list[str]", "Escalation", "function-after[_"})
@@ -1063,6 +1151,51 @@ def _check_board_route(manifest: ResidentManifest, source: Path) -> list[Diagnos
     ]
 
 
+def _check_budget_runtime(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Warn when a declared timeout is longer than the budget that will cut it short.
+
+    A warning rather than an error, because the manifest is not *wrong*: steward enforces
+    ``min(timeout_s, max_run_seconds)`` and the run really does get killed at the budget.
+    But a routine declaring a fifteen-minute timeout under a five-minute budget will never
+    once get fifteen minutes, and reading the two numbers side by side is the only moment
+    anybody is going to notice that. Silence here would make the manifest a document that
+    disagrees with itself.
+    """
+    cap = manifest.budgets.max_run_seconds
+    if cap is None:
+        return []
+    example = f"timeout_s: {cap}  (at most budgets.max_run_seconds)"
+    diagnostics = [
+        Diagnostic(
+            file=source,
+            field_path=f"routines[{index}].timeout_s",
+            problem=(
+                f"routine {routine.id!r} declares timeout_s {routine.timeout_s} but "
+                f"budgets.max_run_seconds is {cap}; steward runs it for {cap}s and the "
+                f"declared timeout is never reached"
+            ),
+            example=example,
+            severity=Severity.WARNING,
+        )
+        for index, routine in enumerate(manifest.routines)
+        if routine.timeout_s > cap
+    ]
+    if manifest.board.claim and manifest.board.timeout_s > cap:
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path="board.timeout_s",
+                problem=(
+                    f"board sessions declare timeout_s {manifest.board.timeout_s} but "
+                    f"budgets.max_run_seconds is {cap}; a claimed task is killed at {cap}s"
+                ),
+                example=example,
+                severity=Severity.WARNING,
+            )
+        )
+    return diagnostics
+
+
 def _check_soul_agreement(
     manifest: ResidentManifest, soul: SoulDocument, source: Path
 ) -> list[Diagnostic]:
@@ -1234,6 +1367,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     )
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
+    diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
     resident = Resident(path=source, manifest=manifest, soul=soul)

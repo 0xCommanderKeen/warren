@@ -34,6 +34,8 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
+| `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
+| `deploy` | no | Where this resident runs, for the watchdog. Absent means unsupervised. |
 
 `agent_id` matches before `project`, mirroring burrow's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
@@ -322,6 +324,115 @@ them from there), same charter with the last word — with one extra section nam
 task.
 See [docs/api.md](api.md) for posting to the board and the lifecycle events.
 
+## `budgets` — what a day may cost
+
+```yaml
+budgets:
+  daily_cost_usd: 5.0        # money per local day
+  daily_tokens: 2000000      # input + output per local day
+  max_run_seconds: 900       # one run, not a day
+```
+
+Every field is optional and **absent means unlimited** — but unlimited is said out loud,
+never assumed: `GET /residents/{id}/budget` reports `"limit": null` and `steward budget
+show` prints `no limit`, so "Hob has no cap" is something you read rather than something
+you hoped.
+
+**Where a day happens.** The two daily caps are counted in the resident's own *primary*
+time zone, picked in this order:
+
+1. the `schedule_tz` of the routine flagged [`journal: close_of_day`](#journal-close_of_day)
+   — that routine already decides which calendar day this resident's journal entry is
+   dated in, and one resident should have one day;
+2. otherwise the most common `schedule_tz` among its **enabled** routines;
+3. otherwise `UTC`, which is what `schedule_tz` itself defaults to.
+
+The window is `[local midnight, next local midnight)`, resolved to two UTC instants **at
+the moment somebody asks**. Nothing is zeroed or rolled over by a process starting up: a
+daily cap that resets because the daemon bounced is not a cap. Across a DST seam the
+window is genuinely 23 or 25 hours long, because the budget is a promise about a day.
+
+**What is counted.** Every finished session appends one row to the run ledger — a
+scheduled routine, a claimed board task, a delegated item, and a run a human asked for
+through the API. Failed runs and runs steward killed at their timeout count too: a session
+that burned four minutes and produced nothing still burned four minutes. Usage a brain did
+not report is written as **zero and flagged**, never guessed — a `codex` or `command` run
+has no cost to give, so the gauge says "0.00 spent, 3 of today's 4 runs did not report
+what they cost" rather than a comfortable "0.00 spent".
+
+**What happens when a cap trips.** The resident is *paused*: steward refuses its scheduled
+fires, refuses its board claims, answers run-now with `409 paused: budget exceeded`, and
+raises **one** structured `needs_human` naming the budget and the number — not one per
+refused fire. Lifting it is a human act, through either path:
+
+```console
+$ steward budget show                  # today's spend against every declared cap
+$ steward budget unpause life-agent    # or approve the needs_human from burrow's panel
+```
+
+Lifting a pause grants an **allowance until the end of the window that tripped**: "carry
+on" means today, not forever. Without it, unpausing would be theatre — the day's spend is
+still over the cap, so the next fire would re-trip and knock again, and answering a
+question would be answering it into a loop. Tomorrow the allowance is simply gone, and
+tomorrow's cap applies to tomorrow. The next day does *not* silently un-pause a resident
+nobody answered for: the window resetting is a fact about arithmetic, but a resident that
+blew through the cap you set is a fact about the resident.
+
+**`max_run_seconds` is not daily.** It caps a *single* run, enforced as
+`min(timeout_s, max_run_seconds)` for both routine and board sessions, so a manifest can
+never declare a routine that outlives the budget the same manifest declares. A run killed
+by it takes the scheduler's existing timeout path — `routine_failed` / `task_failed` — and
+its seconds are ledgered like any other. Declaring a `timeout_s` longer than the cap is a
+validation **warning**, not an error: the manifest is not wrong, steward really does kill
+the run at the budget, but a routine that will never once get its declared fifteen minutes
+is worth noticing while you are reading the two numbers side by side.
+
+## `deploy` — where this resident runs
+
+```yaml
+deploy:
+  container: steward-life-agent
+```
+
+One optional field, and it is deliberately small. `container` names the docker container
+[the watchdog](#the-watchdog) restarts. Steward does not own containers yet — deployment
+is steward #4 — so this is a declaration a supervisor can act on, not a promise that
+steward created anything. A resident with no `deploy` block is reported by the watchdog as
+**unsupervised**, which is a real answer; it is never reported as healthy.
+
+## The watchdog
+
+`steward watchdog run` (or `tick` for one pass, under external cron) keeps unattended
+residents honest in the direction budgets do not cover. Deliberately separate from
+`steward scheduler run`: the thing that notices a dead scheduler must not be part of the
+scheduler.
+
+One pass does four things:
+
+- **Probes every resident** through the supervisor seam. `LocalProbe` sees what steward
+  can truthfully see about itself — a scheduler anchor that stopped advancing while
+  occurrences went by, a lease still held past its expiry, a run that never reported back.
+  It finds *stuckness*, and finding none is reported as "nothing stuck", never as "up",
+  because those are different sentences. `DockerSupervisor` asks `docker inspect` about
+  `deploy.container` and restarts it with `docker restart`.
+- **Restarts, and says so.** Every intervention emits `resident_restarted` with the reason
+  and the attempt number, under the resident's own `agent_id`. A silent restart would let
+  the village show an unbroken villager where a process actually died. Attempts are
+  bounded — 1 minute, 5 minutes, 25 minutes, three attempts — and then steward stops
+  restarting and raises one `needs_human` with the failure summary. The budget lives in
+  the store, so three attempts means three, not three per watchdog process.
+- **Closes runs that vanished.** A `routine_started` with no closing event past
+  `timeout + grace` becomes `routine_failed` with `error: "run never reported back"`,
+  emitted exactly once, so the village never shows eternal work.
+- **Checks every budget**, so a cap trips even on a day nothing was scheduled and burrow's
+  fleet-ops fuel gauges are right without waiting for a wake-up that may never come.
+
+```console
+$ steward watchdog tick                # one pass, then exit
+$ steward watchdog run --interval 60   # the daemon
+$ steward doctor                       # …and when the watchdog last made a pass
+```
+
 ## The session prompt
 
 Every session steward launches is composed in one place, `steward.prompt`, in a fixed
@@ -595,6 +706,8 @@ steward schema                   # JSON Schema for the manifest, for burrow and 
 steward doctor                   # can what the manifests declare actually run, here, now?
 steward journal life-agent       # what a resident has actually written, newest first
 steward skills                   # the library, and what each resident effectively holds
+steward budget show              # today's spend against every declared cap
+steward watchdog tick            # one pass: probe, sweep, bury stale runs, check budgets
 ```
 
 Exit code is non-zero on any error, so CI can gate on it.
@@ -624,7 +737,10 @@ residents/life-agent/manifest.yaml: error: charter.mission
 
 - Any key whose name looks like a credential — `token`, `secret`, `password`,
   `passphrase`, `api_key`, `access_key`, `private_key`, `client_secret`, `credential(s)`,
-  `bearer`, `authorization`, `cookie`, `*_token` — anywhere in the tree.
+  `bearer`, `authorization`, `cookie`, `*_token` — anywhere in the tree. There is exactly
+  one exemption, `budgets.daily_tokens`, and it is an exact path rather than a prefix or a
+  pattern: that field holds an integer, and the alternative was to let a regex choose the
+  vocabulary of the manifest.
 - Any value matching a known secret shape: `sk-…`, `ghp_…`/`github_pat_…`, `xox[bapr]-…`,
   `AKIA…`, `AIza…`, a JWT, a PEM private key, or a URL with an inline password.
 - An opaque blob in a field that is supposed to hold a reference (`memory.path`,

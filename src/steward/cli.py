@@ -31,6 +31,7 @@ from steward.approvals import (
     raise_request,
 )
 from steward.board import BoardReport, Dispatcher, claimable_skills
+from steward.budgets import BudgetGuard, BudgetStatus
 from steward.journal import (
     JournalEntry,
     journal_complaint,
@@ -59,10 +60,28 @@ from steward.scheduler import (
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 from steward.store import APPROVAL_DECISIONS, Store, default_db_path
+from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
 EXIT_OK = 0
 EXIT_INVALID = 1
+
+#: The two options half the commands here share. Declared once, at the top, because a
+#: subcommand that spelled ``--db`` slightly differently from its neighbour would be a
+#: subcommand quietly reading a different database.
+_DB_OPTION = click.option(
+    "--db",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Jobs, approvals, and the run ledger. Defaults to steward.db beside $STEWARD_STATE.",
+)
+_RESIDENTS_OPTION = click.option(
+    "--residents",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_RESIDENTS_DIR,
+    show_default=True,
+    help="Residents tree the manifests are read from.",
+)
 
 
 def _diagnostic_as_dict(diagnostic: Diagnostic) -> dict[str, str]:
@@ -245,12 +264,15 @@ def _render_effective_set(
 
 @main.command()
 @click.argument("residents", type=click.Path(path_type=Path), default=DEFAULT_RESIDENTS_DIR)
-def doctor(residents: Path) -> None:
+@_DB_OPTION
+def doctor(residents: Path, db: Path | None) -> None:
     """Check that what the manifests declare can actually run, here, now.
 
-    Names the brain each resident runs on, whether its binary exists, and when each
-    enabled routine fires next. A missing binary is an error at a reasonable hour
-    rather than a routine that silently never happens at 7am.
+    Names the brain each resident runs on, whether its binary exists, what it has spent
+    today, and when each enabled routine fires next — then says when the watchdog last
+    made a pass. A missing binary is an error at a reasonable hour rather than a routine
+    that silently never happens at 7am, and a resident paused by its budget is a resident
+    that will not fire tonight however green everything else looks.
     """
     result = validate_paths([residents])
     if not result.ok:
@@ -258,18 +280,22 @@ def doctor(residents: Path) -> None:
         sys.exit(EXIT_INVALID)
 
     problems = 0
-    for resident in result.residents:
-        runner = resident.manifest.runner
-        complaint = check_runner(runner)
-        label = f"{resident.id}: runner {runner.kind}"
-        if runner.model:
-            label += f" ({runner.model})"
-        if complaint:
-            problems += 1
-            click.secho(f"{label} — {complaint}", fg="red", err=True)
-        else:
-            click.secho(f"{label} — ready", fg="green")
-        problems += _report_journal(resident)
+    with _open_store(db) as store:
+        guard = BudgetGuard(store)
+        for resident in result.residents:
+            runner = resident.manifest.runner
+            complaint = check_runner(runner)
+            label = f"{resident.id}: runner {runner.kind}"
+            if runner.model:
+                label += f" ({runner.model})"
+            if complaint:
+                problems += 1
+                click.secho(f"{label} — {complaint}", fg="red", err=True)
+            else:
+                click.secho(f"{label} — ready", fg="green")
+            problems += _report_journal(resident)
+            problems += _report_budget(guard.status(resident.manifest))
+        problems += _report_watchdog(store.last_watchdog_pass())
 
     scheduled = _load_or_exit(residents)
     if scheduled:
@@ -303,6 +329,33 @@ def _report_journal(resident: Resident) -> int:
     )
     ends_with = f"closed by {closer}" if closer else "no routine closes the day"
     click.secho(f"{resident.id}: journal {directory} — {ends_with}", fg="green")
+    return 0
+
+
+def _report_budget(status: BudgetStatus) -> int:
+    """Print what this resident has spent today. A pause is a problem worth exiting on."""
+    if status.paused:
+        click.secho(f"{status.resident}: budget — {status.summary()}", fg="red", err=True)
+        return 1
+    colour = "green" if status.declared else "bright_black"
+    click.secho(f"{status.resident}: budget {status.summary()}", fg=colour)
+    return 0
+
+
+def _report_watchdog(last: dict[str, Any] | None) -> int:
+    """Say when the watchdog last swept, or that nothing is watching. Never a guess."""
+    if last is None:
+        click.secho(
+            "watchdog: has never made a pass — nothing is noticing a stuck run or a dead "
+            "container; run `steward watchdog run`",
+            fg="yellow",
+        )
+        return 0
+    click.secho(
+        f"watchdog: last pass {last['last_pass_at']} "
+        f"({last['passes']} pass(es), {last['interventions']} intervention(s))",
+        fg="green",
+    )
     return 0
 
 
@@ -447,10 +500,15 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     dry_run: bool,
 ) -> Scheduler:
     scheduled = _load_or_exit(residents)
-    # A rehearsal touches no database: it must not claim a task, deliver a decision, or
-    # deny one by expiry. With no hooks the scheduler simply fires routines, as it did
-    # before the board and approvals existed.
-    hooks = None if dry_run else Dispatcher.from_path(residents, _open_store(db), workdir=workdir)
+    # A rehearsal touches no database: it must not claim a task, deliver a decision, deny
+    # one by expiry, or spend a budget. With no hooks and no guard the scheduler simply
+    # fires routines, as it did before the board, approvals, and budgets existed.
+    if dry_run:
+        hooks, guard = None, None
+    else:
+        store = _open_store(db)
+        guard = BudgetGuard(store, ev.EventEmitter.from_env())
+        hooks = Dispatcher.from_path(residents, store, workdir=workdir, guard=guard)
     return Scheduler(
         scheduled,
         state=SchedulerState.load(state if state is not None else default_state_path()),
@@ -459,6 +517,7 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
         dry_run=dry_run,
         library=library_for(residents),
         hooks=hooks,
+        guard=guard,
     )
 
 
@@ -543,20 +602,6 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
 # the job board
 # --------------------------------------------------------------------------------------
 
-_DB_OPTION = click.option(
-    "--db",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Jobs and approvals. Defaults to steward.db beside $STEWARD_STATE.",
-)
-_RESIDENTS_OPTION = click.option(
-    "--residents",
-    type=click.Path(path_type=Path),
-    default=DEFAULT_RESIDENTS_DIR,
-    show_default=True,
-    help="Residents tree the manifests are read from.",
-)
-
 
 @main.group()
 def board() -> None:
@@ -594,7 +639,13 @@ def board_dispatch(
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
-        dispatcher = Dispatcher.from_path(residents, store, workdir=workdir, sweep_only=sweep_only)
+        dispatcher = Dispatcher.from_path(
+            residents,
+            store,
+            workdir=workdir,
+            guard=BudgetGuard(store, ev.EventEmitter.from_env()),
+            sweep_only=sweep_only,
+        )
         run = dispatcher.dispatch()
     for job in run.reopened:
         click.secho(f"lease expired: {job.task_id} ({job.title}) is back on the board", fg="yellow")
@@ -777,6 +828,181 @@ def approval_show(request_id: str, db: Path | None, output_format: str) -> None:
     if record.edit:
         click.echo(f"edited to: {json.dumps(dict(record.edit), ensure_ascii=False)}")
     click.echo(f"delivered: {record.delivered_at or 'not yet told to the resident'}")
+
+
+# --------------------------------------------------------------------------------------
+# budgets
+# --------------------------------------------------------------------------------------
+
+
+@main.group()
+def budget() -> None:
+    """See what residents have spent today, and lift a pause a budget caused."""
+
+
+def _render_budget(status: BudgetStatus) -> None:
+    """Print one resident's gauges, its window, and whether it is stopped."""
+    colour = "red" if status.paused else "green"
+    click.secho(f"{status.resident}: {status.summary()}", fg=colour, bold=True)
+    click.secho(
+        f"  window {status.window.day} ({status.window.tz}) — {status.spend.runs} run(s)",
+        fg="bright_black",
+    )
+    for gauge in status.gauges:
+        click.echo(f"  {gauge.describe()}")
+    if status.max_run_seconds is not None:
+        click.echo(f"  max_run_seconds: {status.max_run_seconds}")
+    if status.spend.unreported:
+        click.secho(
+            f"  {status.spend.unreported} of today's runs did not report what they cost; "
+            f"steward counts them as zero rather than guessing",
+            fg="yellow",
+        )
+    if status.pause is not None:
+        click.secho(f"  paused at {status.pause.paused_at}: {status.pause.reason}", fg="red")
+        if status.pause.request_id:
+            click.secho(f"  approve {status.pause.request_id} to resume", fg="yellow")
+
+
+@budget.command("show")
+@click.argument("resident_id", required=False)
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def budget_show(
+    resident_id: str | None, residents: Path, db: Path | None, output_format: str
+) -> None:
+    """Show today's spend against each declared budget. All residents, or just one.
+
+    "Today" is the resident's own primary time zone — the zone of the routine that closes
+    its day, else the zone most of its routines run in — and the window is computed from
+    the calendar right now, not from a counter some daemon has been holding since it
+    started. A steward that restarted a minute ago prints the same numbers.
+    """
+    result = validate_paths([residents])
+    wanted = [r for r in result.residents if resident_id is None or r.id == resident_id]
+    if resident_id is not None and not wanted:
+        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
+        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
+        sys.exit(EXIT_INVALID)
+
+    with _open_store(db) as store:
+        guard = BudgetGuard(store)
+        statuses = [guard.status(resident.manifest) for resident in wanted]
+
+    if output_format == "json":
+        click.echo(json.dumps([status.to_dict() for status in statuses], indent=2))
+        return
+    if not statuses:
+        click.echo(f"no valid residents in {residents}")
+        return
+    for status in statuses:
+        _render_budget(status)
+
+
+@budget.command("unpause")
+@click.argument("resident_id")
+@_DB_OPTION
+def budget_unpause(resident_id: str, db: Path | None) -> None:
+    """Lift a budget pause and let this resident run again.
+
+    The same act as approving the ``needs_human`` the pause raised, from a terminal
+    instead of a panel: the request is resolved as ``approve``, ``needs_human_resolved``
+    is emitted, and the village sees one answer to one question either way.
+    """
+    with _open_store(db) as store:
+        pause = BudgetGuard(store, ev.EventEmitter.from_env()).resume(resident_id, decided_by="cli")
+    if pause is None:
+        click.secho(f"{resident_id} is not paused by a budget", fg="yellow")
+        return
+    click.secho(f"{resident_id} resumed — it was paused by {pause.reason}", fg="green")
+    click.secho(
+        "the day's spend is still on the ledger; the next run adds to it", fg="bright_black"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# the watchdog
+# --------------------------------------------------------------------------------------
+
+
+@main.group()
+def watchdog() -> None:
+    """Keep unattended residents alive, and never let a stuck run look like work."""
+
+
+def _report_interventions(report: WatchdogPass) -> None:
+    """Print everything the pass actually changed, loudest first."""
+    for health in report.gave_up:
+        click.secho(f"gave up on {health.resident_id}: {health.detail}", fg="red", err=True)
+    for resident_id in report.paused:
+        click.secho(f"paused {resident_id}: budget exceeded", fg="red", err=True)
+    for health in report.restarted:
+        click.secho(f"restarted {health.resident_id}: {health.detail}", fg="yellow")
+    for run in report.buried:
+        click.secho(
+            f"closed run {run.run_id} of {run.routine}: it never reported back", fg="yellow"
+        )
+    for job in report.reopened:
+        click.secho(f"lease expired: {job.task_id} ({job.title}) is back on the board", fg="yellow")
+    for record in report.expired_approvals:
+        click.secho(f"approval expired: {record.action} denied by default", fg="yellow")
+
+
+def _report_pass(report: WatchdogPass) -> None:
+    """Print what one pass observed and did, interventions before observations."""
+    _report_interventions(report)
+    for health in report.health:
+        if not health.known:
+            click.secho(f"{health.resident_id}: unsupervised — {health.detail}", fg="bright_black")
+        elif health.alive:
+            click.secho(f"{health.resident_id}: ok", fg="green")
+    if not report:
+        click.echo("nothing to intervene in")
+
+
+@watchdog.command("tick")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
+    """Make one pass: probe, sweep deadlines, bury stale runs, check budgets. Then exit."""
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with _open_store(db) as store:
+        report = Watchdog.from_path(residents, store).tick()
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _report_pass(report)
+
+
+@watchdog.command("run")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option(
+    "--interval",
+    type=float,
+    default=DEFAULT_INTERVAL_S,
+    show_default=True,
+    help="Seconds between passes.",
+)
+@click.option("--max-passes", type=int, default=None, help="Stop after this many passes.")
+def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: int | None) -> None:
+    """Run the watchdog daemon: one pass, sleep, repeat.
+
+    Sits alongside ``steward scheduler run`` rather than inside it, on purpose: the thing
+    that notices a dead scheduler must not be a part of the scheduler.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with _open_store(db) as store:
+        dog = Watchdog.from_path(residents, store)
+        try:
+            passes = dog.run(interval_s=interval, max_passes=max_passes)
+        except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon
+            click.echo("stopped")
+            return
+    for report in passes:
+        _report_pass(report)
 
 
 # --------------------------------------------------------------------------------------
