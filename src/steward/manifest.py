@@ -17,6 +17,7 @@ than being stored.
 
 import difflib
 import re
+import zoneinfo
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 import yaml
+from croniter import croniter
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 __all__ = [
@@ -46,6 +48,7 @@ __all__ = [
     "SoulDocument",
     "SoulIdentity",
     "ValidationResult",
+    "extract_voice",
     "load_manifest",
     "manifest_json_schema",
     "validate_manifest",
@@ -69,6 +72,8 @@ _CRON_LIST = rf"{_CRON_FIELD}(?:,{_CRON_FIELD})*"
 CRON_PATTERN = re.compile(rf"^{_CRON_LIST}(?:\s+{_CRON_LIST}){{4}}$")
 
 MAX_TIMEOUT_S = 24 * 60 * 60
+
+DEFAULT_SCHEDULE_TZ = "UTC"
 
 
 # --------------------------------------------------------------------------------------
@@ -434,7 +439,11 @@ class Routine(_Model):
     """Standing work a resident performs without being prompted."""
 
     id: str = Field(pattern=SLUG_PATTERN)
-    schedule: str = Field(description="Five-field cron expression, resident-local time.")
+    schedule: str = Field(description="Five-field cron expression, read in schedule_tz.")
+    schedule_tz: str = Field(
+        default=DEFAULT_SCHEDULE_TZ,
+        description="IANA zone the schedule is read in, e.g. Europe/Ljubljana.",
+    )
     prompt: str = Field(min_length=1, description="Prompt template for the session.")
     requires: list[str] = Field(
         default_factory=list,
@@ -446,9 +455,25 @@ class Routine(_Model):
     @field_validator("schedule")
     @classmethod
     def _check_cron(cls, value: str) -> str:
-        if not CRON_PATTERN.match(value.strip()):
+        stripped = value.strip()
+        if not CRON_PATTERN.match(stripped):
             raise ValueError("schedule must be a five-field cron expression")
-        return value.strip()
+        if not croniter.is_valid(stripped):
+            raise ValueError("schedule is a five-field cron expression with out-of-range values")
+        return stripped
+
+    @field_validator("schedule_tz")
+    @classmethod
+    def _check_timezone(cls, value: str) -> str:
+        stripped = value.strip()
+        try:
+            zoneinfo.ZoneInfo(stripped)
+        except zoneinfo.ZoneInfoNotFoundError, ValueError, ModuleNotFoundError:
+            raise ValueError(
+                f"schedule_tz {stripped!r} is not an IANA time zone; "
+                f"'resident-local time' has to be written down to mean anything"
+            ) from None
+        return stripped
 
 
 class ResidentManifest(_Model):
@@ -502,8 +527,12 @@ class SoulDocument:
     voice: str | None = None
 
 
-def _extract_voice(body: str) -> str | None:
-    """Return the text of the ``## Voice`` section, if the soul has one."""
+def extract_voice(body: str) -> str | None:
+    """Return the text of the ``## Voice`` section, if the soul has one.
+
+    The one definition of what a voice is: the validator caps it here, and
+    :mod:`steward.prompt` injects exactly what this returns.
+    """
     lines = body.splitlines()
     for index, line in enumerate(lines):
         if line.strip().lower() == VOICE_HEADING.lower():
@@ -553,7 +582,7 @@ def parse_soul(text: str, source: Path) -> tuple[SoulDocument, list[Diagnostic]]
         ]
 
     body = match.group("body")
-    voice = _extract_voice(body)
+    voice = extract_voice(body)
     if voice is not None and len(voice) > VOICE_MAX_CHARS:
         diagnostics.append(
             Diagnostic(
@@ -644,6 +673,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     ),
     "routines.id": "id: daily-summary",
     "routines.schedule": "schedule: '0 7 * * *'",
+    "routines.schedule_tz": "schedule_tz: Europe/Ljubljana  (IANA name; defaults to UTC)",
     "routines.prompt": "prompt: Write today's household summary.",
     "routines.requires": "requires: [daily-summary]  (skills granted above)",
     "routines.timeout_s": "timeout_s: 900",

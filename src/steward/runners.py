@@ -1,0 +1,434 @@
+"""Runners: the one seam through which steward launches a headless session.
+
+A resident's manifest declares *which brain* it runs on (``runner.kind`` and
+``runner.model``); this module is the only place in steward that turns that
+declaration into a process. The scheduler, and later the job board, delegation, and
+approvals, all go through :func:`build_runner` — **no other module may spawn an LLM
+CLI**, which ``tests/test_runners.py`` asserts by reading the source tree.
+
+Four kinds:
+
+``claude``
+    ``claude -p <prompt> --model <model> --output-format json``. The JSON result
+    carries usage and cost, so a claude run feeds the budget ledger for free.
+``codex``
+    ``codex exec <prompt>``. Plain text out; usage is not available, and steward
+    reports it as unknown rather than guessing.
+``command``
+    An argv template from the manifest, with ``{prompt}`` and ``{workdir}``
+    substituted in a single pass. Never a shell, ever: manifest content is data.
+``mock``
+    Deterministic, no network, no subprocess. Used by tests and ``--dry-run``.
+
+Every runner returns the same :class:`RunResult` with a truthful ``outcome``:
+``ok`` only when the process exited zero, ``timeout`` only when steward killed it,
+``failed`` for everything else.
+"""
+
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import time
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
+from pathlib import Path
+from typing import Any, ClassVar
+
+from steward.manifest import Runner as RunnerSpec
+
+__all__ = [
+    "ClaudeRunner",
+    "CodexRunner",
+    "CommandRunner",
+    "MockRunner",
+    "Outcome",
+    "RunRequest",
+    "RunResult",
+    "Runner",
+    "RunnerError",
+    "build_runner",
+    "check_runner",
+    "substitute",
+]
+
+OUTPUT_MAX_CHARS = 20_000
+KILL_GRACE_S = 5.0
+
+_PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
+
+
+class Outcome(StrEnum):
+    """What actually happened to a run. Nothing here is a guess."""
+
+    OK = "ok"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+
+
+class RunnerError(Exception):
+    """Raised when a runner cannot be built from a manifest declaration."""
+
+
+@dataclass(frozen=True, slots=True)
+class RunRequest:
+    """One headless session steward wants run."""
+
+    prompt: str
+    workdir: Path
+    timeout_s: int
+    model: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
+
+    def key(self) -> str:
+        """Return a stable digest of the request, so mock results are reproducible."""
+        material = "\x00".join(
+            [self.prompt, str(self.workdir), str(self.timeout_s), self.model or ""]
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    """The uniform result of a session, whichever brain ran it.
+
+    ``artifacts`` is best effort and often empty: most CLIs do not report what they
+    wrote, and steward would rather claim nothing than claim a file it did not see.
+    The session's own burrow emitter is what reports artifacts truthfully.
+    """
+
+    outcome: Outcome
+    output: str = ""
+    exit_status: int | None = None
+    duration_s: float = 0.0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: float | None = None
+    artifacts: tuple[str, ...] = ()
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True only when the process exited zero."""
+        return self.outcome is Outcome.OK
+
+    def summary(self) -> str:
+        """Describe this result in one line, for logs and ``routine_failed`` payloads."""
+        if self.error:
+            return self.error
+        if self.outcome is Outcome.TIMEOUT:
+            return f"killed after {self.duration_s:.0f}s"
+        return f"exit status {self.exit_status}"
+
+
+class Runner(ABC):
+    """The seam. One method, one truthful result, no exceptions for a failed run."""
+
+    kind: ClassVar[str] = "abstract"
+
+    def __init__(self, spec: RunnerSpec | None = None) -> None:
+        """Hold the manifest declaration this runner was built from."""
+        self.spec = spec if spec is not None else RunnerSpec(kind="mock")
+
+    @abstractmethod
+    def run(self, request: RunRequest) -> RunResult:
+        """Run one session to completion and describe what happened."""
+
+    def check(self) -> str | None:
+        """Return why this runner cannot run, or ``None`` when it is ready.
+
+        Called at validate/schedule time so a missing binary is a loud diagnostic in
+        daylight rather than a silent failure at 7am.
+        """
+        return None
+
+    def describe(self) -> str:
+        """One line naming the brain in use — 'which model is Hob on' is answerable."""
+        model = self.spec.model or "default model"
+        return f"{self.kind} ({model})"
+
+
+# --------------------------------------------------------------------------------------
+# subprocess plumbing — the only place in steward that starts a process
+# --------------------------------------------------------------------------------------
+
+
+def substitute(template: Sequence[str], *, prompt: str, workdir: str) -> list[str]:
+    """Fill ``{prompt}``/``{workdir}`` in an argv template, in one pass.
+
+    One pass matters: a prompt containing the literal text ``{workdir}`` is inserted
+    as data and never re-scanned, so no manifest and no model output can smuggle a
+    second substitution in. Nothing here goes near a shell, so a prompt full of
+    ``;``, ``$(…)`` or backticks is one ordinary argv element.
+    """
+    values = {"prompt": prompt, "workdir": workdir}
+    return [_PLACEHOLDER.sub(lambda match: values[match.group(1)], part) for part in template]
+
+
+def _terminate(process: subprocess.Popen[bytes]) -> None:
+    """Kill a timed-out session, and its children, as firmly as the platform allows."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except OSError, AttributeError:
+        process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=KILL_GRACE_S)
+
+
+class _ProcessRunner(Runner):
+    """Shared body for every runner that launches a real process."""
+
+    #: The executable this runner needs on PATH. An instance attribute, because a
+    #: ``command`` runner only learns its binary from the manifest template.
+    binary: str = ""
+
+    @abstractmethod
+    def argv(self, request: RunRequest) -> list[str]:
+        """Return the exact argv for this request. Never a shell string."""
+
+    def parse(self, result: RunResult, stdout: str) -> RunResult:  # noqa: ARG002
+        """Enrich a finished result from the CLI's own output. Default: unchanged."""
+        return result
+
+    def check(self) -> str | None:
+        """Report a missing binary by name, with the runner kind that wants it."""
+        if not self.binary:
+            return None
+        if shutil.which(self.binary) is None:
+            return (
+                f"runner kind {self.kind!r} needs the {self.binary!r} executable, "
+                f"which is not on PATH"
+            )
+        return None
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Launch the session, bound by its timeout, and report what happened."""
+        argv = self.argv(request)
+        env = {**os.environ, **request.env}
+        started = time.monotonic()
+        try:
+            process = subprocess.Popen(  # noqa: S603 — argv list, shell=False, no template
+                argv,
+                cwd=str(request.workdir),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return RunResult(
+                outcome=Outcome.FAILED,
+                duration_s=time.monotonic() - started,
+                error=f"cannot launch {argv[0]!r}: {exc.strerror or exc}",
+            )
+
+        try:
+            raw_out, raw_err = process.communicate(timeout=request.timeout_s)
+        except subprocess.TimeoutExpired:
+            _terminate(process)
+            duration = time.monotonic() - started
+            return RunResult(
+                outcome=Outcome.TIMEOUT,
+                exit_status=process.returncode,
+                duration_s=duration,
+                error=f"exceeded its {request.timeout_s}s timeout and was killed",
+            )
+
+        duration = time.monotonic() - started
+        stdout = raw_out.decode("utf-8", "replace")
+        stderr = raw_err.decode("utf-8", "replace")
+        outcome = Outcome.OK if process.returncode == 0 else Outcome.FAILED
+        result = RunResult(
+            outcome=outcome,
+            output=stdout[:OUTPUT_MAX_CHARS],
+            exit_status=process.returncode,
+            duration_s=duration,
+            error=None if outcome is Outcome.OK else (stderr.strip() or stdout.strip())[:1000],
+        )
+        return self.parse(result, stdout)
+
+
+class ClaudeRunner(_ProcessRunner):
+    """``claude -p`` in headless mode, asked for JSON so usage and cost come back."""
+
+    kind: ClassVar[str] = "claude"
+    binary: str = "claude"
+
+    def argv(self, request: RunRequest) -> list[str]:
+        """Build the claude headless argv: prompt, model, JSON output, permissions."""
+        argv = [self.binary, "-p", request.prompt, "--output-format", "json"]
+        model = request.model or self.spec.model
+        if model:
+            argv += ["--model", model]
+        if self.spec.permission_mode:
+            argv += ["--permission-mode", self.spec.permission_mode]
+        return argv
+
+    def parse(self, result: RunResult, stdout: str) -> RunResult:
+        """Pull text, usage, and cost out of ``--output-format json`` when present."""
+        payload = _load_json_object(stdout)
+        if payload is None:
+            return result
+        usage = payload.get("usage")
+        usage = usage if isinstance(usage, Mapping) else {}
+        text = payload.get("result")
+        is_error = bool(payload.get("is_error"))
+        return replace(
+            result,
+            output=text[:OUTPUT_MAX_CHARS] if isinstance(text, str) else result.output,
+            outcome=Outcome.FAILED if is_error else result.outcome,
+            input_tokens=_as_int(usage.get("input_tokens")),
+            output_tokens=_as_int(usage.get("output_tokens")),
+            cost_usd=_as_float(payload.get("total_cost_usd")),
+            error=(str(text)[:1000] if is_error and isinstance(text, str) else result.error),
+        )
+
+
+class CodexRunner(_ProcessRunner):
+    """``codex exec`` — the same seam, a different brain."""
+
+    kind: ClassVar[str] = "codex"
+    binary: str = "codex"
+
+    def argv(self, request: RunRequest) -> list[str]:
+        """Build the codex headless argv."""
+        argv = [self.binary, "exec"]
+        model = request.model or self.spec.model
+        if model:
+            argv += ["--model", model]
+        argv.append(request.prompt)
+        return argv
+
+
+class CommandRunner(_ProcessRunner):
+    """An arbitrary argv template from the manifest, for anything else."""
+
+    kind: ClassVar[str] = "command"
+
+    def __init__(self, spec: RunnerSpec | None = None) -> None:
+        """Refuse to exist without the template the manifest promised."""
+        super().__init__(spec)
+        if not self.spec.command:
+            raise RunnerError("runner kind 'command' requires a command template")
+        self.template: tuple[str, ...] = tuple(self.spec.command)
+        self.binary = self.template[0]
+
+    def argv(self, request: RunRequest) -> list[str]:
+        """Substitute the two allowed placeholders; everything else stays literal."""
+        return substitute(self.template, prompt=request.prompt, workdir=str(request.workdir))
+
+    def check(self) -> str | None:
+        """Report a template whose executable is not on PATH."""
+        if shutil.which(self.binary) is None:
+            return f"runner command template starts with {self.binary!r}, which is not on PATH"
+        return None
+
+    def describe(self) -> str:
+        """Name the command, since 'command' alone says nothing useful."""
+        return f"command ({' '.join(self.template)})"
+
+
+class MockRunner(Runner):
+    """Deterministic, offline, and injectable. Tests and ``--dry-run`` use this.
+
+    The same request always produces the same result, because the output is derived
+    from a digest of the request. Pass ``behavior`` to make a run fail, time out, or
+    block — a scheduler test needs all three.
+    """
+
+    kind: ClassVar[str] = "mock"
+
+    def __init__(
+        self,
+        spec: RunnerSpec | None = None,
+        *,
+        behavior: Callable[[RunRequest], RunResult] | None = None,
+    ) -> None:
+        """Optionally take a behavior that decides each result."""
+        super().__init__(spec)
+        self.behavior = behavior
+        self.requests: list[RunRequest] = []
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Return the injected result, or a deterministic successful one."""
+        self.requests.append(request)
+        if self.behavior is not None:
+            return self.behavior(request)
+        digest = request.key()[:12]
+        return RunResult(
+            outcome=Outcome.OK,
+            output=f"[mock {self.spec.model or 'model'}] {digest}",
+            exit_status=0,
+            duration_s=0.0,
+        )
+
+
+# --------------------------------------------------------------------------------------
+# factory
+# --------------------------------------------------------------------------------------
+
+RUNNER_KINDS: Mapping[str, type[Runner]] = {
+    ClaudeRunner.kind: ClaudeRunner,
+    CodexRunner.kind: CodexRunner,
+    CommandRunner.kind: CommandRunner,
+    MockRunner.kind: MockRunner,
+}
+
+
+def build_runner(spec: RunnerSpec, *, force_mock: bool = False) -> Runner:
+    """Build the runner a manifest declares.
+
+    ``force_mock`` is how ``--dry-run`` keeps its promise: a rehearsal must not be
+    able to reach a real brain, whatever the manifest says.
+    """
+    if force_mock:
+        return MockRunner(spec)
+    try:
+        factory = RUNNER_KINDS[spec.kind]
+    except KeyError:
+        known = ", ".join(sorted(RUNNER_KINDS))
+        raise RunnerError(f"unknown runner kind {spec.kind!r}; known kinds: {known}") from None
+    return factory(spec)
+
+
+def check_runner(spec: RunnerSpec) -> str | None:
+    """Return why a declared runner cannot run, or ``None``. Never launches anything."""
+    try:
+        return build_runner(spec).check()
+    except RunnerError as exc:
+        return str(exc)
+
+
+# --------------------------------------------------------------------------------------
+# small parsing helpers
+# --------------------------------------------------------------------------------------
+
+
+def _load_json_object(text: str) -> Mapping[str, Any] | None:
+    """Parse the CLI's stdout as a JSON object, tolerating trailing noise."""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        loaded = json.loads(stripped)
+    except ValueError:
+        return None
+    if isinstance(loaded, list) and loaded and isinstance(loaded[-1], Mapping):
+        return loaded[-1]
+    return loaded if isinstance(loaded, Mapping) else None
+
+
+def _as_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    return float(value) if isinstance(value, (int, float)) else None

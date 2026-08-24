@@ -1,6 +1,8 @@
-"""Shared fixtures: a factory that writes throwaway resident directories."""
+"""Shared fixtures: throwaway resident directories, and stub CLIs on PATH."""
 
 import copy
+import os
+import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -95,3 +97,32 @@ def write_resident(tmp_path: Path) -> ResidentWriter:
         return manifest_path
 
     return _write
+
+
+type StubWriter = Callable[..., Path]
+
+
+@pytest.fixture
+def stub_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StubWriter:
+    """Write a fake executable into a temp dir that is first on PATH.
+
+    Runner tests assert against a real process, not a mocked one: that is the only
+    way to know steward passes the model, the prompt, and the cwd the way it claims.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    def _write(name: str, body: str) -> Path:
+        script = bindir / name
+        script.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        return script
+
+    return _write
+
+
+@pytest.fixture
+def empty_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Blank out PATH so a missing binary is missing for sure."""
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing-here"))

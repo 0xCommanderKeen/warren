@@ -63,7 +63,7 @@ routes:
     kind: cron
     address: steward:scheduler
     status: active
-    note: Routines below fire through steward once the scheduler lands.
+    note: The routines below fire through steward's scheduler, and only while it runs.
   - id: inbox
     kind: email
     address: mailbox:household
@@ -98,11 +98,14 @@ runner:
   kind: claude
   model: claude-opus-5
 
-# Declared, not yet running: the scheduler lands in steward #2. Until then these are
-# disabled, because the village must never show work that is not happening.
+# Enabled, and therefore real: these fire only while `steward scheduler run` is up, and
+# every fire emits routine_started plus exactly one of routine_finished/routine_failed.
+# Nothing here animates a villager on its own — if the scheduler is not running, Hob
+# genuinely does nothing, and the village correctly shows nothing.
 routines:
   - id: daily-summary
     schedule: "0 7 * * *"
+    schedule_tz: Europe/Ljubljana
     prompt: >-
       Write today's household summary: what was left open yesterday, what is on the
       calendar today, and anything in the inbox that needs a person. End with the
@@ -113,13 +116,14 @@ routines:
       - read-calendar
       - write-journal
     timeout_s: 900
-    enabled: false
+    enabled: true
   - id: inbox-read
     schedule: "15 * * * *"
+    schedule_tz: Europe/Ljubljana
     prompt: >-
       Read new mail since the last run. Triage it, draft replies where a reply is
       obviously needed, and raise needs_human for anything that must actually be sent.
     requires:
       - read-inbox
     timeout_s: 600
-    enabled: false
+    enabled: true

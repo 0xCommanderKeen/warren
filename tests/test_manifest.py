@@ -391,6 +391,52 @@ def test_good_cron_schedules_pass(write_resident: ResidentWriter, schedule: str)
     assert m.validate_manifest(write_resident(data)).ok
 
 
+@pytest.mark.parametrize("schedule", ["99 7 * * *", "0 25 * * *", "0 7 32 * *"])
+def test_cron_values_out_of_range_fail(write_resident: ResidentWriter, schedule: str) -> None:
+    data = valid_manifest()
+    data["routines"][0]["schedule"] = schedule
+    result = m.validate_manifest(write_resident(data))
+    assert "out-of-range" in problem_for(result, "routines[0].schedule")
+
+
+def test_schedule_tz_defaults_to_utc(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(write_resident())
+    assert resident.manifest.routines[0].schedule_tz == "UTC"
+
+
+@pytest.mark.parametrize("zone", ["Europe/Ljubljana", "UTC", "America/New_York"])
+def test_good_schedule_zones_pass(write_resident: ResidentWriter, zone: str) -> None:
+    data = valid_manifest()
+    data["routines"][0]["schedule_tz"] = zone
+    result = m.validate_manifest(write_resident(data))
+    assert result.ok, [d.render() for d in result.diagnostics]
+    assert result.residents[0].manifest.routines[0].schedule_tz == zone
+
+
+@pytest.mark.parametrize("zone", ["Europe/Atlantis", "CEST", "+02:00", ""])
+def test_a_schedule_zone_that_is_not_iana_fails(write_resident: ResidentWriter, zone: str) -> None:
+    data = valid_manifest()
+    data["routines"][0]["schedule_tz"] = zone
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "IANA time zone" in problem_for(result, "routines[0].schedule_tz")
+
+
+def test_the_schedule_zone_example_is_actionable(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["routines"][0]["schedule_tz"] = "Mars/Olympus"
+    result = m.validate_manifest(write_resident(data))
+    example = next(d.example for d in result.diagnostics if d.field_path.endswith("schedule_tz"))
+    assert "Europe/Ljubljana" in example
+
+
+def test_schedule_tz_is_in_the_json_schema() -> None:
+    schema = m.manifest_json_schema()
+    routine = schema["$defs"]["Routine"]["properties"]
+    assert routine["schedule_tz"]["default"] == "UTC"
+    assert "IANA" in routine["schedule_tz"]["description"]
+
+
 @pytest.mark.parametrize("timeout", [0, -1, 90000])
 def test_bad_routine_timeouts_fail(write_resident: ResidentWriter, timeout: int) -> None:
     data = valid_manifest()

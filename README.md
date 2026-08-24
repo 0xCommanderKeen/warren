@@ -42,10 +42,27 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-The first piece exists: **resident manifests and charters** (#1). Souls and manifests are
-versioned here and validated in CI; everything else — the scheduler, the runner
-abstraction, the job board, the API — is still roadmap, and lives in this repo's issues.
-Burrow-side rendering counterparts live in burrow's issues.
+Two pieces exist.
+
+**Resident manifests and charters** (#1). Souls and manifests are versioned here and
+validated in CI.
+
+**The scheduler and the runner seam** (#2, #11, #21). Routines fire on a cron schedule in
+a declared time zone, through one runner abstraction (`claude` / `codex` / a command
+template / a mock), with the charter, voice, and journal assembled in one place, and every
+run bracketed by real burrow events. Nothing fires unless `steward scheduler run` is up:
+an enabled routine is a declaration, not an animation.
+
+```console
+$ steward doctor                     # which brain, is it installed, what fires next
+$ steward scheduler run              # the daemon: sleep to the next due routine, fire
+$ steward scheduler tick             # fire anything due now, then exit (external cron)
+$ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
+```
+
+Still roadmap, in this repo's issues: the journal (#5), soul voice end to end (#9), the
+job board, deployment, and the HTTP API. Burrow-side rendering counterparts live in
+burrow's issues.
 
 ## Residents
 
@@ -57,9 +74,9 @@ residents/
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the five capability dimensions burrow renders — skills,
-memory, routes, app grants — plus the runner and routines steward will execute once
-those land. References and grants only: a credential-shaped key or an inline secret
-fails validation and is never stored.
+memory, routes, app grants — plus the runner steward launches sessions through and the
+routines it fires. References and grants only: a credential-shaped key or an inline
+secret fails validation and is never stored.
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
 `steward schema` emits it as JSON Schema so burrow can read manifests without
@@ -88,5 +105,7 @@ make test      # pytest with coverage
 make check     # what CI runs: lint, test, validate
 ```
 
-Routines declared in a manifest stay `enabled: false` until the scheduler exists (#2) —
-the village must never show work that is not happening.
+A routine only ever fires while `steward scheduler run` is up. Missed schedules are not
+back-filled, an overlapping fire is skipped rather than queued, and a run killed at its
+timeout is emitted as `routine_failed` — the village must never show work that is not
+happening.

@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "click>=8.4.2",
+    "croniter>=6.2.4",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
 ]
@@ -46,7 +47,9 @@ ignore = [
     "TRY003",
     "PLR0911", # validators legitimately return many diagnostics-shaped branches
     "CPY001",  # no copyright headers in this repo
-    "TC003",   # annotations are lazy on 3.14 (PEP 649); TYPE_CHECKING blocks buy nothing
+    "TC001",   # annotations are lazy on 3.14 (PEP 649); TYPE_CHECKING blocks buy nothing
+    "TC002",
+    "TC003",
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -32,7 +32,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `routes` | yes | Route dimension (may be an empty list). |
 | `app_grants` | yes | App access dimension (may be an empty list). |
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
-| `routines` | no | Standing scheduled work. Defaults to `[]`. |
+| `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 
 `agent_id` matches before `project`, mirroring burrow's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
@@ -131,9 +131,10 @@ app_grants:
     status_ref: https://myaccount.google.com/permissions   # where the grant is administered
 ```
 
-## `runner` — which brain (steward #11)
+## `runner` — which brain
 
-Declared now, executed once the runner abstraction lands.
+Every headless session steward launches goes through one seam, `steward.runners`. The
+manifest declares which brain it opens onto.
 
 ```yaml
 runner:
@@ -143,26 +144,112 @@ runner:
   permission_mode: null
 ```
 
+| kind | what it runs |
+|---|---|
+| `claude` | `claude -p <prompt> --model <model> --output-format json`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free. |
+| `codex` | `codex exec [--model <model>] <prompt>`. Plain text out; usage is unavailable, and steward reports it as unknown rather than guessing. |
+| `command` | The argv template below, for anything else. |
+| `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
+
 `command` is an argv list, not a shell string, and accepts only the `{prompt}` and
-`{workdir}` placeholders — manifest content can never become shell.
+`{workdir}` placeholders — manifest content can never become shell. Substitution is a
+single pass, so a prompt containing the literal text `{workdir}` is inserted as data
+and never re-scanned.
 
-## `routines` — standing work (steward #2)
+A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
-Declared now, fired by the scheduler once it lands. Keep `enabled: false` until then:
-the village must never show work that is not happening.
+```console
+$ steward doctor
+life-agent: runner claude (claude-opus-5) — ready
+  life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
+  life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
+```
+
+`steward scheduler run` performs the same check before its first breath and refuses to
+start if a declared runner cannot run.
+
+## `routines` — standing work
+
+Fired by the scheduler, and only while it is running. A routine that is `enabled: true`
+in a manifest with no scheduler up does nothing at all, and the village correctly shows
+nothing — enabling a routine is a declaration, not an animation.
 
 ```yaml
 routines:
   - id: daily-summary
-    schedule: "0 7 * * *"    # five-field cron
+    schedule: "0 7 * * *"           # five-field cron
+    schedule_tz: Europe/Ljubljana   # IANA zone; defaults to UTC
     prompt: Write today's household summary.
     requires: [daily-summary, read-inbox]   # must be granted under skills
     timeout_s: 900           # the run is killed after this and emitted as routine_failed
-    enabled: false
+    enabled: true
 ```
 
 A routine that requires a skill the manifest does not grant fails validation, not
 execution.
+
+### `schedule_tz`
+
+`schedule` is a wall clock, and a wall clock without a zone is undefined for a container
+on a NAS. `schedule_tz` is an IANA zone name (`Europe/Ljubljana`, `America/New_York`,
+`UTC`), validated against `zoneinfo` at load; anything that is not a zone — an
+abbreviation like `CEST`, an offset like `+02:00`, a place that does not exist — fails
+validation with the file and field named. It defaults to `UTC`, which is a real answer
+rather than "whatever the host thinks".
+
+Daylight saving is resolved on the wall clock, because that is what the manifest wrote
+down:
+
+- **Spring forward.** A time that does not exist that morning lands on the next minute
+  that does — a `30 2 * * *` routine runs at 03:00, and the day is not skipped.
+- **Autumn fall back.** The repeated hour is the *same* wall-clock slot twice, so the
+  routine fires on the first pass only. A second run is one the schedule never asked for.
+
+### What the scheduler promises
+
+- **No back-fill.** A fire more than the catch-up window late (default 5 minutes,
+  `--catchup-seconds`) is not run at all. A daemon that was down all morning does not
+  run the 7am summary at noon and call it the morning summary.
+- **One run per routine at a time.** An overlapping fire is skipped and logged, never
+  queued.
+- **Restart changes nothing.** Last-fire state lives in `.steward/state/scheduler.json`
+  (`--state`, `$STEWARD_STATE`), so a restart neither re-fires nor duplicates. A routine
+  seen for the first time is anchored at that moment and fires at its *next* occurrence.
+- **Every run is bracketed** by real events: `routine_started`, then exactly one of
+  `routine_finished` / `routine_failed`. A run killed at its `timeout_s` is a
+  `routine_failed` with `outcome: timeout` — a hung session must never look like work.
+
+```console
+$ steward scheduler run                    # the daemon: sleep to the next due routine, fire
+$ steward scheduler tick                   # fire anything due now, then exit (external cron)
+$ steward scheduler tick --dry-run         # print what would fire, and the whole prompt
+```
+
+`--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
+manifest says. A rehearsal is not work.
+
+Events go to `BURROW_URL`/events with `Authorization: Bearer $BURROW_TOKEN` when set. A
+failed POST trips a short per-target circuit breaker and the event is appended to
+`$STEWARD_EVENTS_FALLBACK` (default `~/.burrow/events.jsonl`) instead — the same file
+burrow's own emitter falls back to. A village that cannot be reached loses no events,
+only their remoteness, and never slows a routine down.
+
+## The session prompt
+
+Every session steward launches is composed in one place, `steward.prompt`, in a fixed
+order with fixed delimiters:
+
+1. **Who you are** — from the manifest's `soul` block.
+2. **Your writing voice (style only)** — the soul's `## Voice` section, under an
+   explicit frame saying it changes no rule.
+3. **Your journal from last time** — the resident's own last entry, when there is one.
+   Steward never synthesizes one. (Written by steward #5.)
+4. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation.
+
+Charter last is the point. A soul is trusted repo content and a journal is text a model
+wrote, but both land inside a privileged prompt, so neither gets the last word. Voice is
+capped at 1200 characters and the journal at 4000 before injection, as well as at
+validation.
 
 ## The soul body
 
@@ -196,6 +283,7 @@ steward validate                 # the residents/ tree
 steward validate residents/life-agent
 steward validate residents/life-agent/manifest.yaml --format json
 steward schema                   # JSON Schema for the manifest, for burrow and editors
+steward doctor                   # can what the manifests declare actually run, here, now?
 ```
 
 Exit code is non-zero on any error, so CI can gate on it.
