@@ -5,13 +5,15 @@ them. The public surface is the manifest load-and-validate path, the runner seam
 session launch goes through, the prompt assembly point, the skills library every
 resident draws on, the resident journal (the one read path into a resident's durable
 memory), the scheduler that fires routines and emits what really happened, and the job
-board and approvals that hang off it — how a resident picks work up without being told
-to, and what it does when its charter says stop.
+board, approvals, and delegation that hang off it — how a resident picks work up without
+being told to, what it does when its charter says stop, and how it hands work to a
+neighbour when the work is not its own.
 """
 
 from steward.api import ApiConfig, ApiError, create_app
 from steward.approvals import NeedsHuman, extract_requests, harvest
 from steward.board import BoardReport, Dispatcher, DispatchRun, claimable_skills
+from steward.delegation import DelegationError, Delegator, Handoff, extract_handoffs
 from steward.events import Event, EventEmitter, NullEmitter
 from steward.journal import (
     JournalEntry,
@@ -35,7 +37,12 @@ from steward.manifest import (
     validate_tree,
 )
 from steward.nursery import NewResident, declare_resident
-from steward.prompt import assemble_preamble, assemble_routine_prompt, assemble_task_prompt
+from steward.prompt import (
+    assemble_delegated_prompt,
+    assemble_preamble,
+    assemble_routine_prompt,
+    assemble_task_prompt,
+)
 from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner
 from steward.scheduler import (
     ScheduledRoutine,
@@ -58,11 +65,14 @@ __all__ = [
     "ApiConfig",
     "ApiError",
     "BoardReport",
+    "DelegationError",
+    "Delegator",
     "Diagnostic",
     "DispatchRun",
     "Dispatcher",
     "Event",
     "EventEmitter",
+    "Handoff",
     "JournalEntry",
     "ManifestError",
     "NeedsHuman",
@@ -83,6 +93,7 @@ __all__ = [
     "Store",
     "ValidationResult",
     "WakeHooks",
+    "assemble_delegated_prompt",
     "assemble_preamble",
     "assemble_routine_prompt",
     "assemble_task_prompt",
@@ -92,6 +103,7 @@ __all__ = [
     "declare_resident",
     "default_skills",
     "effective_skills",
+    "extract_handoffs",
     "extract_requests",
     "harvest",
     "journal_complaint",

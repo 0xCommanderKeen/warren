@@ -61,6 +61,12 @@ becomes a request with the action `unreadable_escalation`, carrying the raw bloc
 complaint in its detail, and it knocks like any other. A session that tried to ask and
 failed must never be mistaken for a session that had nothing to ask.
 
+The same door is used by delegation ([docs/delegation.md](delegation.md)), which is this
+mechanism's sibling: a `<delegate>` block steward could not read becomes an
+`unreadable_delegation` request, and one it read and *refused* becomes a
+`rejected_delegation` request carrying the reason. The session that wrote the block has
+already finished, so a person is the only one left to tell.
+
 ### 2. `steward approval raise`
 
 For a session with shell access that wants the request registered before its turn ends.

@@ -35,6 +35,7 @@ __all__ = [
     "DEFAULT_BOARD_TIMEOUT_S",
     "DEFAULT_JOURNAL_DIR",
     "DEFAULT_KEEP_ENTRIES",
+    "DELEGATION_ROUTE_KIND",
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
@@ -42,6 +43,7 @@ __all__ = [
     "AppGrant",
     "Board",
     "Charter",
+    "Delegation",
     "Diagnostic",
     "Escalation",
     "ManifestError",
@@ -105,6 +107,13 @@ DEFAULT_SCHEDULE_TZ = "UTC"
 
 #: The route kind that names the job board as a channel work reaches a resident through.
 JOB_BOARD_ROUTE_KIND = "job-board"
+
+#: The route kind that makes a channel deliverable: steward may hand another resident's
+#: delegated work into a route of this kind, and into no other. Naming it as a *kind*
+#: rather than a flag keeps one vocabulary — ``routes`` is already this manifest's answer
+#: to "how does work reach this resident", and a letter from a neighbour is work reaching
+#: it. The route's ``id`` is what a delegating session names in its block.
+DELEGATION_ROUTE_KIND = "delegation"
 
 #: How long a claim is good for before the task returns to the board (30 minutes).
 DEFAULT_BOARD_LEASE_S = 30 * 60
@@ -441,13 +450,28 @@ class Memory(_Model):
 
 
 class Route(_Model):
-    """A declared inbound channel through which work can reach a resident."""
+    """A declared inbound channel through which work can reach a resident.
+
+    A route of kind ``delegation`` is the receiving half of steward #7: it declares that
+    this resident accepts work handed to it by another resident, and steward will deliver
+    into it. Every other kind is a channel steward only describes.
+    """
 
     id: str = Field(pattern=SLUG_PATTERN)
-    kind: Literal["email", "chat", "http", "webhook", "cron", "cli", "job-board"]
+    kind: Literal["email", "chat", "http", "webhook", "cron", "cli", "job-board", "delegation"]
     address: str = Field(min_length=1, description="Reference to the channel, not a secret.")
     status: Literal["active", "pending", "disabled"] = "active"
     note: str | None = None
+
+    @property
+    def accepts_delegation(self) -> bool:
+        """True when steward may deliver another resident's work into this route.
+
+        Both halves are required and neither is inferred: the kind says this channel is
+        *for* delegated work, and ``active`` says it is open today. A route somebody is
+        still wiring up takes no letters.
+        """
+        return self.kind == DELEGATION_ROUTE_KIND and self.status == "active"
 
 
 class AppGrant(_Model):
@@ -541,6 +565,43 @@ class Board(_Model):
         return self
 
 
+class Delegation(_Model):
+    """Whether this resident may hand work to another resident, and to whom.
+
+    The sending half of steward #7, and it is one boolean that defaults to *off*, for the
+    same reason ``board.claim`` does: silence in a declaration is not consent. A resident
+    that has never been told it may delegate never delegates, however sensible the handoff
+    would have been, because the point of a manifest is that you can read what a resident
+    will do before it does it.
+
+    ``to`` is an optional allowlist of resident ids. Empty means "any resident whose own
+    manifest declares a route that accepts the work" — the receiver's declaration is
+    always the second half of the answer, and neither half can be waived by the other.
+    """
+
+    send: bool = Field(
+        default=False,
+        description="Whether this resident may delegate work to another resident.",
+    )
+    to: list[str] = Field(
+        default_factory=list,
+        description="Resident ids this one may delegate to. Empty means any receiver.",
+    )
+    note: str | None = Field(default=None, description="Why this resident hands work over.")
+
+    @field_validator("to")
+    @classmethod
+    def _recipients_are_resident_ids(cls, value: list[str]) -> list[str]:
+        bad = [entry for entry in value if not re.match(SLUG_PATTERN, entry.strip())]
+        if bad:
+            raise ValueError(f"recipient(s) {bad} are not resident ids (lowercase, dashes)")
+        return [entry.strip() for entry in value]
+
+    def may_send_to(self, resident_id: str) -> bool:
+        """Report whether this manifest permits delegating to a named resident."""
+        return self.send and (not self.to or resident_id in self.to)
+
+
 class Routine(_Model):
     """Standing work a resident performs without being prompted."""
 
@@ -611,6 +672,10 @@ class ResidentManifest(_Model):
     board: Board = Field(
         default_factory=Board,
         description="Job board participation. Absent means this resident never claims.",
+    )
+    delegation: Delegation = Field(
+        default_factory=Delegation,
+        description="Handing work to other residents. Absent means this one never does.",
     )
 
     @model_validator(mode="after")
@@ -754,6 +819,15 @@ class Resident:
         """The burrow project label: the manifest's project, else the resident id."""
         return self.manifest.project or self.manifest.id
 
+    def route(self, route_id: str) -> Route | None:
+        """Return the declared route with this id, or ``None`` if it declares none."""
+        return next((route for route in self.manifest.routes if route.id == route_id), None)
+
+    @property
+    def delegation_routes(self) -> tuple[str, ...]:
+        """The ids of the routes work may be delegated into, in declared order."""
+        return tuple(route.id for route in self.manifest.routes if route.accepts_delegation)
+
     def workdir(self, fallback: Path) -> Path:
         """Where a session for this resident runs.
 
@@ -810,7 +884,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "memory.journal_keep": "journal_keep: 30  (entries kept, newest first)",
     "routes": "routes: [{id: cron, kind: cron, address: steward-scheduler, status: active}]",
     "routes.id": "id: inbox",
-    "routes.kind": "kind: email",
+    "routes.kind": "kind: email  (delegation makes the route deliverable)",
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
     "app_grants": "app_grants: [{id: gmail, name: Gmail, status: granted}]",
@@ -834,6 +908,10 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
+    "delegation": "delegation: {send: true, to: [life-agent]}",
+    "delegation.send": "send: true  (omit the block entirely to never delegate)",
+    "delegation.to": "to: [life-agent]  (resident ids; omit it to allow any receiver)",
+    "delegation.note": "note: Maren hands household errands to Hob.",
     "board": "board: {claim: true, max_claims_per_wake: 1, lease_s: 1800, timeout_s: 900}",
     "board.claim": "claim: true  (omit the block entirely to never claim)",
     "board.max_claims_per_wake": "max_claims_per_wake: 1",
@@ -1063,6 +1141,48 @@ def _check_board_route(manifest: ResidentManifest, source: Path) -> list[Diagnos
     ]
 
 
+def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Check that the delegation block says something, and does not say it about itself.
+
+    Two ways to write a block that reads like a grant and is not one, both caught here
+    rather than at the moment a session tries to hand work over and is refused:
+
+    - **An allowlist with the switch off.** ``to:`` names recipients while ``send`` is
+      false. Nothing is permitted, and a reader would swear otherwise.
+    - **Naming yourself.** A resident cannot delegate to itself: that is not a handoff,
+      it is the same session pretending to be two, and steward rejects it at enqueue. A
+      manifest that declares it is declaring something that can never happen.
+    """
+    delegation = manifest.delegation
+    diagnostics: list[Diagnostic] = []
+    if delegation.to and not delegation.send:
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path="delegation.send",
+                problem=(
+                    f"delegation.to names {sorted(delegation.to)} but delegation.send is "
+                    f"false, so this resident may not delegate to anybody; an allowlist "
+                    f"that grants nothing reads like a grant"
+                ),
+                example="delegation: {send: true, to: [life-agent]}",
+            )
+        )
+    if manifest.id in delegation.to:
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path="delegation.to",
+                problem=(
+                    f"{manifest.id!r} lists itself as a recipient; a resident handing work "
+                    f"to itself is one session pretending to be two, and steward rejects it"
+                ),
+                example="to: [life-agent]  (somebody else)",
+            )
+        )
+    return diagnostics
+
+
 def _check_soul_agreement(
     manifest: ResidentManifest, soul: SoulDocument, source: Path
 ) -> list[Diagnostic]:
@@ -1234,6 +1354,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     )
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
+    diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
     resident = Resident(path=source, manifest=manifest, soul=soul)

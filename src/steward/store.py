@@ -11,7 +11,11 @@ kind of lie this project refuses to tell.
 
 Nothing here emits, renders, or decides. It records facts and hands them back:
 
-- ``jobs`` — posted work, with the status the board reports.
+- ``jobs`` — posted work, with the status the board reports. A row with an ``assignee``
+  is work one resident handed to another (:mod:`steward.delegation`): the same table,
+  because a delegated item is a task addressed to somebody rather than to the fleet, and
+  everything the board already does to a task — leasing it, sweeping it, closing it —
+  applies to it unchanged.
 - ``approvals`` — a gated action waiting on a human, and the decision it received.
 - ``requests`` — every accepted mutating API request and how it turned out, so a
   queued action that later failed is traceable rather than silently gone.
@@ -33,6 +37,7 @@ __all__ = [
     "APPROVAL_DECISIONS",
     "DECIDED_BY_EXPIRY",
     "JOB_STATUSES",
+    "STATUS_OPEN",
     "ApprovalRecord",
     "JobRecord",
     "RequestRecord",
@@ -110,6 +115,15 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "outcome": "TEXT",
         "reason": "TEXT",
         "artifacts": "TEXT NOT NULL DEFAULT '[]'",
+        # Delegation (steward #7). A delegated item is a job addressed to one resident:
+        # same table, same lease, same three closing events. ``assignee`` is what makes
+        # it a letter rather than a notice — a row with one is never on the open board.
+        "assignee": "TEXT",
+        "delegated_by": "TEXT",
+        "route": "TEXT",
+        "parent_task_id": "TEXT",
+        "origin": "TEXT",
+        "depth": "INTEGER NOT NULL DEFAULT 0",
     },
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
@@ -167,11 +181,26 @@ class JobRecord:
     outcome: str | None = None
     reason: str | None = None
     artifacts: tuple[str, ...] = ()
+    #: The resident this work was handed to. ``None`` is an open notice anybody
+    #: qualified may claim; a name is a letter addressed to one villager.
+    assignee: str | None = None
+    delegated_by: str | None = None
+    route: str | None = None
+    parent_task_id: str | None = None
+    #: The accountable origin the whole chain rolls up to, so spend and work attribute
+    #: to one root rather than to the last hop. See :mod:`steward.delegation`.
+    origin: str | None = None
+    depth: int = 0
 
     @property
     def claimable_by(self) -> frozenset[str]:
         """The skills a resident must hold before this task is claimable by it."""
         return frozenset(self.required_skills)
+
+    @property
+    def delegated(self) -> bool:
+        """True when this work was handed to one named resident rather than posted."""
+        return self.assignee is not None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> JobRecord:
@@ -191,6 +220,12 @@ class JobRecord:
             outcome=row["outcome"],
             reason=row["reason"],
             artifacts=tuple(_loads(row["artifacts"], [])),
+            assignee=row["assignee"],
+            delegated_by=row["delegated_by"],
+            route=row["route"],
+            parent_task_id=row["parent_task_id"],
+            origin=row["origin"],
+            depth=row["depth"] or 0,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -210,6 +245,12 @@ class JobRecord:
             "outcome": self.outcome,
             "reason": self.reason,
             "artifacts": list(self.artifacts),
+            "assignee": self.assignee,
+            "delegated_by": self.delegated_by,
+            "route": self.route,
+            "parent_task_id": self.parent_task_id,
+            "origin": self.origin,
+            "depth": self.depth,
         }
 
 
@@ -416,6 +457,69 @@ class Store:
             )
         return record
 
+    def delegate_job(  # noqa: PLR0913 — one keyword per column of the record
+        self,
+        *,
+        title: str,
+        assignee: str,
+        delegated_by: str,
+        route: str,
+        detail: str = "",
+        parent_task_id: str | None = None,
+        origin: str | None = None,
+        depth: int = 1,
+        task_id: str | None = None,
+    ) -> JobRecord:
+        """Record work handed to one named resident, and return it, open and unclaimed.
+
+        The same table the board uses, because a delegated item *is* a task — it is worked
+        as a session, leased, and closed with the same three events. The only difference
+        is the addressee: an item with an ``assignee`` is never offered to the open board
+        (:meth:`claim_next_job` skips it), and only that resident may pick it up.
+
+        Nothing is validated here. Whether the sender may delegate, whether the receiver's
+        route accepts the work, how deep the chain is and whether it loops are all
+        steward's questions, answered in :mod:`steward.delegation` before this is called —
+        the store records facts and refuses none.
+        """
+        record = JobRecord(
+            task_id=task_id or new_id(),
+            title=title,
+            detail=detail,
+            required_skills=(),
+            status=STATUS_OPEN,
+            posted_by=delegated_by,
+            created_at=utc_now_iso(),
+            assignee=assignee,
+            delegated_by=delegated_by,
+            route=route,
+            parent_task_id=parent_task_id,
+            origin=origin,
+            depth=depth,
+        )
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO jobs (task_id, title, detail, required_skills, status, "
+                "posted_by, claimant, created_at, assignee, delegated_by, route, "
+                "parent_task_id, origin, depth) "
+                "VALUES (?, ?, ?, '[]', ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    record.task_id,
+                    record.title,
+                    record.detail,
+                    record.status,
+                    record.posted_by,
+                    record.created_at,
+                    record.assignee,
+                    record.delegated_by,
+                    record.route,
+                    record.parent_task_id,
+                    record.origin,
+                    record.depth,
+                ),
+            )
+        return record
+
     def jobs(self, status: str | None = None) -> list[JobRecord]:
         """Return the board, oldest first, optionally narrowed to one status."""
         query = "SELECT * FROM jobs"
@@ -426,6 +530,41 @@ class Store:
         with self._lock:
             rows = self._conn.execute(f"{query} ORDER BY created_at, rowid", params).fetchall()
         return [JobRecord.from_row(row) for row in rows]
+
+    def inbox(self, assignee: str, status: str | None = STATUS_OPEN) -> list[JobRecord]:
+        """Return one resident's delegated items, oldest first.
+
+        The default is the pending inbox — what is waiting to be picked up. ``status=None``
+        is everything ever addressed to this resident, which is the audit view.
+        """
+        query = "SELECT * FROM jobs WHERE assignee = ?"
+        params: tuple[str, ...] = (assignee,)
+        if status is not None:
+            query += " AND status = ?"
+            params = (assignee, status)
+        with self._lock:
+            rows = self._conn.execute(f"{query} ORDER BY created_at, rowid", params).fetchall()
+        return [JobRecord.from_row(row) for row in rows]
+
+    def lineage(self, task_id: str) -> list[JobRecord]:
+        """Return the chain this task belongs to, root first, ending at the task itself.
+
+        Walks ``parent_task_id`` upwards, which is the only direction the chain is written
+        in, and stops on an id it has already seen — a database somebody hand-edited into
+        a loop is a corrupt database, not an infinite loop in a CLI. A task nobody
+        delegated is a chain of one, which is a real answer.
+        """
+        chain: list[JobRecord] = []
+        seen: set[str] = set()
+        cursor: str | None = task_id
+        while cursor is not None and cursor not in seen:
+            seen.add(cursor)
+            record = self.job(cursor)
+            if record is None:
+                break
+            chain.append(record)
+            cursor = record.parent_task_id
+        return list(reversed(chain))
 
     def job(self, task_id: str) -> JobRecord | None:
         """Return one task, or ``None`` when the board has never heard of it."""
@@ -457,12 +596,17 @@ class Store:
         Skill matching happens in Python because ``required_skills`` is a JSON list, but
         it happens *before* the conditional update and is re-checked against the row the
         update touched, so a task can never be claimed by a resident that lacks a skill.
+
+        Work addressed to somebody — a delegated item, with an ``assignee`` — is not on
+        the open board and is never returned here, however well the skills match. Reading
+        another villager's letter off the notice board is not claiming.
         """
         held = frozenset(skills)
         moment = now or utc_now_iso()
         with self._lock, self._conn:
             candidates = self._conn.execute(
-                "SELECT * FROM jobs WHERE status = ? ORDER BY created_at, rowid",
+                "SELECT * FROM jobs WHERE status = ? AND assignee IS NULL "
+                "ORDER BY created_at, rowid",
                 (STATUS_OPEN,),
             ).fetchall()
             for row in candidates:
@@ -483,6 +627,58 @@ class Store:
                 )
                 if cursor.rowcount == 0:
                     continue  # Lost the race for this row; try the next open task.
+                claimed = self._conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ?", (record.task_id,)
+                ).fetchone()
+                return JobRecord.from_row(claimed)
+        return None
+
+    def claim_next_delegated(
+        self,
+        *,
+        assignee: str,
+        claimant: str,
+        lease_expires_at: str,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Atomically pick up the oldest item waiting in one resident's inbox.
+
+        The board's conditional write, narrowed by the addressee::
+
+            UPDATE jobs SET status='claimed' … WHERE task_id=? AND status='open'
+                AND assignee=?
+
+        No skill matching: the sender named this resident and this resident's own manifest
+        declares a route that accepts the work, which is the whole of the agreement. A
+        second skills veto here would let steward silently drop a letter both ends said yes
+        to, and a dropped letter is the one thing an inbox may not do.
+
+        ``claimant`` is the burrow agent id the pickup is recorded and emitted under;
+        ``assignee`` is the resident id the item was addressed to.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            candidates = self._conn.execute(
+                "SELECT * FROM jobs WHERE status = ? AND assignee = ? ORDER BY created_at, rowid",
+                (STATUS_OPEN, assignee),
+            ).fetchall()
+            for row in candidates:
+                record = JobRecord.from_row(row)
+                cursor = self._conn.execute(
+                    "UPDATE jobs SET status = ?, claimant = ?, claimed_at = ?, "
+                    "lease_expires_at = ? WHERE task_id = ? AND status = ? AND assignee = ?",
+                    (
+                        STATUS_CLAIMED,
+                        claimant,
+                        moment,
+                        lease_expires_at,
+                        record.task_id,
+                        STATUS_OPEN,
+                        assignee,
+                    ),
+                )
+                if cursor.rowcount == 0:
+                    continue  # Two wake-ups of the same resident raced; one of them won.
                 claimed = self._conn.execute(
                     "SELECT * FROM jobs WHERE task_id = ?", (record.task_id,)
                 ).fetchone()

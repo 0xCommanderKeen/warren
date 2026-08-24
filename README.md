@@ -42,7 +42,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Seven pieces exist.
+Eight pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -125,9 +125,31 @@ $ steward approval raise life-agent --action send_email --detail-json '{"to": "�
 $ steward approval show <request_id>  # request, decision, decider, timestamps
 ```
 
-Still roadmap, in this repo's issues: delegation (#7), the watchdog and budgets (#8),
-deployment (#4), and the management UI (#13). Burrow-side rendering counterparts — the
-journal panel in a villager's house, the notice board — live in burrow's issues.
+**Delegation** (#7). A resident can hand work to a neighbour, and steward is the only
+arbiter: both manifests have to agree — `delegation: {send: true}` on the sender, an active
+route of kind `delegation` on the receiver — and steward enforces what no manifest can see,
+a depth cap (default three hops) and a flat refusal of any chain that would revisit a
+resident. A session asks with a `<delegate>` block in its output or `steward delegate`;
+steward validates, delivers into the receiver's inbox, and emits `task_delegated` naming
+both ends, so burrow can finally show a villager walking to a *specific* neighbour's door.
+Delivery is pull-based like everything else: the receiver drains its inbox on its own next
+wake-up, ahead of the open board, and works the item as an ordinary session that reads the
+letter as a request from a colleague rather than an instruction. Every item records its
+parent, its depth, and the origin the chain rolls up to, so what a fleet spent answering
+one question attributes to that question. Refusals are structured, write nothing, emit
+nothing — and a refused block still knocks at a human's door. The grammar, the guardrails,
+and the lineage model are in [docs/delegation.md](docs/delegation.md).
+
+```console
+$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward inbox life-agent            # what is waiting, from whom, at what depth
+$ steward task lineage <task_id>      # the whole chain, root first
+```
+
+Still roadmap, in this repo's issues: the watchdog and budgets (#8), deployment (#4), and
+the management UI (#13). Burrow-side rendering counterparts — the journal panel in a
+villager's house, the notice board, the letter carried across the village — live in
+burrow's issues.
 
 ## Residents
 
@@ -142,7 +164,8 @@ skills/
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
 rules, escalation policy), and the five capability dimensions burrow renders — skills,
 memory, routes, app grants — plus the runner steward launches sessions through, the
-routines it fires, and whether the resident takes work off the job board. Its `skills`
+routines it fires, whether the resident takes work off the job board, and whether it may
+hand work to another resident. Its `skills`
 are grants by name against the shared library — what this resident holds on top of the
 default set every resident gets. References and grants only: a credential-shaped key or
 an inline secret, in a manifest or in a `SKILL.md`, fails validation and is never stored.

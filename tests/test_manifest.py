@@ -740,3 +740,82 @@ def test_split_frontmatter_is_the_one_definition_of_a_frontmatter_block() -> Non
     assert frontmatter == "name: hob"
     assert body.strip() == "body text"
     assert m.split_frontmatter("no frontmatter here") == (None, "no frontmatter here")
+
+
+# ----------------------------------------------------------------------------- delegation
+
+
+def delegating(delegation: dict[str, object] | None = None, **overrides: object) -> dict:
+    """Build a manifest carrying a delegation block."""
+    data = valid_manifest()
+    if delegation is not None:
+        data["delegation"] = delegation
+    data.update(overrides)
+    return data
+
+
+def test_a_manifest_with_no_delegation_block_delegates_to_nobody(
+    write_resident: ResidentWriter,
+) -> None:
+    """Silence is not consent, and the default has to say so without being written."""
+    resident = m.load_manifest(write_resident())
+    assert resident.manifest.delegation.send is False
+    assert resident.manifest.delegation.to == []
+    assert resident.manifest.delegation.may_send_to("anybody") is False
+
+
+def test_a_permitted_sender_may_send_to_anybody_unless_it_names_a_list(
+    write_resident: ResidentWriter,
+) -> None:
+    open_sender = m.load_manifest(write_resident(delegating({"send": True})))
+    assert open_sender.manifest.delegation.may_send_to("life-agent") is True
+
+    narrow = m.load_manifest(write_resident(delegating({"send": True, "to": ["life-agent"]})))
+    assert narrow.manifest.delegation.may_send_to("life-agent") is True
+    assert narrow.manifest.delegation.may_send_to("burrow-builder") is False
+
+
+def test_an_allowlist_with_the_switch_off_is_refused(write_resident: ResidentWriter) -> None:
+    """It reads like a grant and grants nothing, which is the worst kind of declaration."""
+    result = m.validate_manifest(write_resident(delegating({"send": False, "to": ["life-agent"]})))
+    assert not result.ok
+    assert "may not delegate to anybody" in problem_for(result, "delegation.send")
+
+
+def test_naming_yourself_as_a_recipient_is_refused(write_resident: ResidentWriter) -> None:
+    result = m.validate_manifest(write_resident(delegating({"send": True, "to": ["test-agent"]})))
+    assert not result.ok
+    assert "lists itself" in problem_for(result, "delegation.to")
+
+
+def test_a_recipient_that_is_not_a_resident_id_is_refused(
+    write_resident: ResidentWriter,
+) -> None:
+    result = m.validate_manifest(write_resident(delegating({"send": True, "to": ["Not An Id"]})))
+    assert not result.ok
+    assert "not resident ids" in problem_for(result, "delegation.to")
+
+
+def test_a_delegation_route_is_the_receiving_declaration(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["routes"] = [
+        *data["routes"],
+        {"id": "inbox", "kind": "delegation", "address": "steward:delegation"},
+        {"id": "later", "kind": "delegation", "address": "steward:delegation", "status": "pending"},
+    ]
+    resident = m.load_manifest(write_resident(data))
+
+    assert resident.delegation_routes == ("inbox",), "a route not open yet takes no letters"
+    assert resident.route("nothing-like-that") is None
+    inbox = resident.route("inbox")
+    schedule = resident.route("schedule")
+    assert inbox is not None
+    assert inbox.accepts_delegation is True
+    assert schedule is not None
+    assert schedule.accepts_delegation is False
+
+
+def test_the_schema_carries_the_delegation_block() -> None:
+    schema = m.manifest_json_schema()
+    assert "delegation" in schema["properties"]
+    assert m.DELEGATION_ROUTE_KIND in schema["$defs"]["Route"]["properties"]["kind"]["enum"]

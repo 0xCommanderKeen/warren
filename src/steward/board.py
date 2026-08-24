@@ -31,6 +31,15 @@ every resident holds. The claimant is then provisioned exactly as a routine sess
 same library, same prompt injection, same on-disk materialization for the runners that
 read skills off disk, same refusal when a grant names nothing.
 
+**A delegated item is a task addressed to one resident.** Steward #7 writes handoffs into
+the same table with an ``assignee`` (:mod:`steward.delegation`), and this module works them
+with the machinery already here: the same conditional claim, the same lease, the same
+provisioned session, the same three closing events — only narrowed to the one resident the
+letter names, and drained before the open board, because work addressed to you personally
+comes ahead of work addressed to nobody. A resident drains its inbox whether or not it
+claims board work — accepting delegated work is declared in ``routes``, not in ``board`` —
+and stops draining it the moment that route stops being active.
+
 **The village hears every transition.** ``task_posted`` (the API), then ``task_claimed``,
 then exactly one of ``task_done`` / ``task_failed`` — the last three under the
 *claimant's* agent id, so burrow walks the right villager. Everything the board shows is
@@ -44,10 +53,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from steward import approvals
+from steward import delegation as dg
 from steward import events as ev
 from steward import journal as journal_module
-from steward.manifest import ManifestError, Resident, ResidentManifest, validate_path
-from steward.prompt import assemble_task_prompt
+from steward.manifest import (
+    DEFAULT_BOARD_LEASE_S,
+    DEFAULT_BOARD_TIMEOUT_S,
+    ManifestError,
+    Resident,
+    ResidentManifest,
+    validate_path,
+)
+from steward.prompt import assemble_delegated_prompt, assemble_task_prompt
 from steward.runners import Outcome, RunRequest, RunResult, build_runner, skills_home
 from steward.scheduler import RunnerFactory
 from steward.skills import (
@@ -70,7 +87,9 @@ __all__ = [
     "Dispatcher",
     "board_residents",
     "claimable_skills",
+    "delegation_residents",
     "load_board_residents",
+    "load_residents",
 ]
 
 log = logging.getLogger("steward.board")
@@ -100,6 +119,18 @@ def board_residents(residents: Sequence[Resident]) -> list[Resident]:
     return [resident for resident in residents if resident.manifest.board.claim]
 
 
+def delegation_residents(residents: Sequence[Resident]) -> list[Resident]:
+    """Return the residents with a door open to delegated work, in declared order.
+
+    An *active* route of kind ``delegation`` — the same declaration steward checks before
+    delivering anything (:mod:`steward.delegation`). A resident that has closed its door
+    since a letter arrived stops taking new ones and the letter waits on the mat, visible
+    in ``steward inbox``; steward does not push work through a channel a manifest now says
+    is shut.
+    """
+    return [resident for resident in residents if resident.delegation_routes]
+
+
 def load_board_residents(
     residents_dir: Path | str, skills_dir: Path | str | None = None
 ) -> list[Resident]:
@@ -109,8 +140,21 @@ def load_board_residents(
     scheduler: a resident steward cannot read is a resident steward will not run — and a
     resident granted a skill the library does not have is one steward cannot read.
     """
-    result = validate_path(residents_dir, skills_dir)
-    return board_residents(result.residents)
+    return board_residents(load_residents(residents_dir, skills_dir))
+
+
+def load_residents(
+    residents_dir: Path | str, skills_dir: Path | str | None = None
+) -> list[Resident]:
+    """Collect every valid resident under a residents tree.
+
+    Wider than :func:`load_board_residents` on purpose. Claiming from the board is one
+    reason a dispatch touches a resident; a letter addressed to it is another, and a
+    resident that accepts delegated work has said so in its ``routes`` without ever
+    opting into the board. Both filters are applied where they belong — at dispatch —
+    rather than by loading a narrower fleet than exists.
+    """
+    return list(validate_path(residents_dir, skills_dir).residents)
 
 
 # --------------------------------------------------------------------------------------
@@ -130,11 +174,18 @@ class BoardReport:
     reason: str | None = None
     artifacts: tuple[str, ...] = ()
     raised: tuple[ApprovalRecord, ...] = ()
+    #: The handoffs this session wrote, delivered or refused (:mod:`steward.delegation`).
+    handed_over: tuple[dg.Delivery, ...] = ()
 
     @property
     def done(self) -> bool:
         """True only when the session finished the task on its own terms."""
         return self.status == STATUS_DONE
+
+    @property
+    def delegated(self) -> bool:
+        """True when this work was handed to this resident rather than claimed by it."""
+        return self.task.delegated
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +229,17 @@ class Dispatcher:
     #: ``--dry-run`` is a rehearsal that changes nothing at all, and one word should not
     #: mean two things.
     sweep_only: bool = False
+    #: How deep a chain of delegated work may run before steward refuses (steward #7).
+    max_delegation_depth: int = field(default_factory=dg.max_depth)
+    #: How many delegated items one wake-up drains. A wake-up is a wake-up, not a shift:
+    #: a resident that finds five letters answers one and finds four next time.
+    max_delegations_per_wake: int = 1
+    #: The terms delegated work runs on. Deliberately *not* read from the receiver's
+    #: ``board`` block: accepting a letter is not opting into the board, and a resident
+    #: that never claims has never been asked what a claim of its should cost. These are
+    #: the same honest defaults the board ships with.
+    delegation_lease_s: int = DEFAULT_BOARD_LEASE_S
+    delegation_timeout_s: int = DEFAULT_BOARD_TIMEOUT_S
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -191,8 +253,14 @@ class Dispatcher:
         library: SkillLibrary | None = None,
         skills_dir: Path | str | None = None,
         sweep_only: bool = False,
+        max_delegation_depth: int | None = None,
     ) -> Dispatcher:
-        """Build a dispatcher over the board-enabled residents of a residents tree.
+        """Build a dispatcher over the valid residents of a residents tree.
+
+        The whole tree, not only the board-enabled part: claiming is one reason a resident
+        is woken here and a delegated letter is another, and the second is declared in
+        ``routes``, not in ``board``. Which residents claim is still decided by
+        :func:`board_residents`, at dispatch.
 
         The library is resolved the same way every other entry point resolves it — an
         explicit one wins, otherwise the library beside the tree — so the board matches
@@ -200,13 +268,30 @@ class Dispatcher:
         """
         resolved = library if library is not None else library_for(residents_dir, skills_dir)
         return cls(
-            residents=load_board_residents(residents_dir, skills_dir),
+            residents=load_residents(residents_dir, skills_dir),
             store=store,
             emitter=emitter or ev.EventEmitter.from_env(),
             workdir=workdir if workdir is not None else Path.cwd(),
             runner_factory=runner_factory,
             library=resolved,
             sweep_only=sweep_only,
+            max_delegation_depth=(
+                max_delegation_depth if max_delegation_depth is not None else dg.max_depth()
+            ),
+        )
+
+    @property
+    def delegator(self) -> dg.Delegator:
+        """The arbiter this dispatch validates handoffs through.
+
+        Built from the same residents, store, and emitter, so a handoff harvested out of a
+        session is judged against exactly the fleet this dispatcher can see.
+        """
+        return dg.Delegator(
+            residents=self.residents,
+            store=self.store,
+            emitter=self.emitter,
+            max_depth=self.max_delegation_depth,
         )
 
     # -- housekeeping ----------------------------------------------------------------
@@ -235,6 +320,7 @@ class Dispatcher:
                     claimant=claimant,
                     project=self._project_of(claimant),
                     reason=LEASE_EXPIRED,
+                    parent_task_id=job.parent_task_id,
                 )
             )
         return expired
@@ -256,12 +342,45 @@ class Dispatcher:
         return text
 
     def harvest(self, manifest: ResidentManifest, output: str) -> list[ApprovalRecord]:
-        """Turn any ``<needs-human>`` block a finished session wrote into a request.
+        """Turn what a finished session wrote into requests and handoffs.
 
-        Part of :class:`steward.scheduler.WakeHooks`: a routine session asks for approval
-        exactly the way a board session does, and both land in the same store.
+        Part of :class:`steward.scheduler.WakeHooks`, unchanged in shape: a routine session
+        asks for approval exactly the way a board session does, and both land in the same
+        store. Delegation rides the same hook rather than adding a second one — a
+        ``<delegate>`` block is another thing a session writes on its way out, and the
+        scheduler should not have to learn a new question to keep working.
+
+        A routine session has no task above it, so anything it hands over is attributed to
+        the resident's own initiative rather than to a parent task.
         """
-        return approvals.harvest(self.store, self.emitter, manifest=manifest, output=output)
+        raised = approvals.harvest(self.store, self.emitter, manifest=manifest, output=output)
+        self.hand_over(manifest, output)
+        return raised
+
+    def hand_over(
+        self,
+        manifest: ResidentManifest,
+        output: str,
+        *,
+        parent_task_id: str | None = None,
+        now: datetime | None = None,
+    ) -> tuple[dg.Delivery, ...]:
+        """Deliver every ``<delegate>`` block this session wrote, or knock about the refusal.
+
+        Never raises: a handoff steward cannot deliver is a knock at a human's door, and
+        neither a refusal nor a broken database may turn a finished session into a failed
+        one. The session's own work is done either way.
+        """
+        sender = next((r for r in self.residents if r.id == manifest.id), None)
+        if sender is None or not output:
+            return ()
+        try:
+            return tuple(
+                self.delegator.harvest(sender, output, parent_task_id=parent_task_id, now=now)
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed handoff is not a failed task
+            log.warning("%s: could not record a delegation from this session: %s", sender.id, exc)
+            return ()
 
     # -- claiming ---------------------------------------------------------------------
 
@@ -283,20 +402,74 @@ class Dispatcher:
         if job is None:
             return None
         log.info("%s claimed task %s (%s)", resident.id, job.task_id, job.title)
+        self._announce_claim(resident, job)
+        return job
+
+    def take_delivery(self, resident: Resident, now: datetime) -> JobRecord | None:
+        """Pick up the oldest letter waiting in this resident's inbox, or return ``None``.
+
+        The claim half of delegation, and deliberately the *same* claim: one conditional
+        write, a lease rather than a deed, and ``task_claimed`` under the receiver's own
+        agent id. A delegated item is a task addressed to one resident, so everything the
+        board already knows how to do to a task applies to it unchanged — including the
+        lease sweep that puts it back if the receiver dies mid-session.
+        """
+        job = self.store.claim_next_delegated(
+            assignee=resident.id,
+            claimant=resident.agent_id,
+            lease_expires_at=ev.utc_now_iso(now + timedelta(seconds=self.delegation_lease_s)),
+            now=ev.utc_now_iso(now),
+        )
+        if job is None:
+            return None
+        log.info(
+            "%s picked up delegated task %s (%s) from %s",
+            resident.id,
+            job.task_id,
+            job.title,
+            job.delegated_by,
+        )
+        self._announce_claim(resident, job)
+        return job
+
+    def _announce_claim(self, resident: Resident, job: JobRecord) -> None:
+        """Tell the village who holds this work now, delegated or claimed."""
         self.emitter.emit(
             ev.task_claimed_event(
                 task_id=job.task_id,
                 title=job.title,
                 claimant=resident.agent_id,
                 project=resident.project,
+                parent_task_id=job.parent_task_id,
             )
         )
-        return job
 
     # -- working ----------------------------------------------------------------------
 
     def build_prompt(self, resident: Resident, job: JobRecord) -> str:
-        """Assemble a board session's prompt, through the one prompt module."""
+        """Assemble a session's prompt for this task, through the one prompt module.
+
+        Both kinds of task go through the same preamble and differ only in their last
+        section: a notice off the board says so, and a letter names who sent it and which
+        route it arrived through.
+        """
+        journal_entry = self._journal_for(resident)
+        skills = self.skills_for(resident)
+        decisions = self.decisions_for(resident.id)
+        if job.delegated:
+            return assemble_delegated_prompt(
+                resident.manifest,
+                task_id=job.task_id,
+                title=job.title,
+                detail=job.detail,
+                sender=self._sender_label(job.delegated_by),
+                route=job.route or "delegation",
+                parent_task_id=job.parent_task_id,
+                soul_text=resident.soul.body,
+                journal_entry=journal_entry,
+                skills=skills,
+                decisions=decisions,
+            )
         return assemble_task_prompt(
             resident.manifest,
             task_id=job.task_id,
@@ -304,10 +477,19 @@ class Dispatcher:
             detail=job.detail,
             required_skills=job.required_skills,
             soul_text=resident.soul.body,
-            journal_entry=self._journal_for(resident),
-            skills=self.skills_for(resident),
-            decisions=self.decisions_for(resident.id),
+            journal_entry=journal_entry,
+            skills=skills,
+            decisions=decisions,
         )
+
+    def _sender_label(self, sender_id: str | None) -> str:
+        """Name the sender the way the receiving session will read it."""
+        if not sender_id:
+            return "another resident"
+        for resident in self.residents:
+            if resident.id == sender_id:
+                return f"{resident.manifest.soul.name} ({resident.id})"
+        return sender_id
 
     def skills_for(self, resident: Resident) -> tuple[Skill, ...]:
         """Resolve this resident's effective skill set, exactly as the scheduler does.
@@ -349,7 +531,9 @@ class Dispatcher:
         moment = now or datetime.now(UTC)
         prompt = self.build_prompt(resident, job)
         workdir = resident.workdir(self.workdir)
-        board = resident.manifest.board
+        timeout_s = (
+            self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
+        )
 
         try:
             self.provision(resident, workdir)
@@ -358,7 +542,7 @@ class Dispatcher:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=board.timeout_s,
+                    timeout_s=timeout_s,
                     model=resident.manifest.runner.model,
                     env=self._session_env(resident, job),
                 )
@@ -378,15 +562,22 @@ class Dispatcher:
             output=result.output,
             now=moment,
         )
-        return self._record(resident, job, result, moment, raised)
+        # This task is the parent of anything the session handed on, which is what makes
+        # the chain — and the budget it rolls up to — traceable past the first hop.
+        handed = self.hand_over(
+            resident.manifest, result.output, parent_task_id=job.task_id, now=moment
+        )
+        return self._record(resident, job, result, moment, raised, handed=handed)
 
-    def _record(
+    def _record(  # noqa: PLR0913 — one parameter per fact the report is built from
         self,
         resident: Resident,
         job: JobRecord,
         result: RunResult,
         moment: datetime,
         raised: Sequence[ApprovalRecord],
+        *,
+        handed: Sequence[dg.Delivery] = (),
     ) -> BoardReport:
         status = STATUS_DONE if result.ok else STATUS_FAILED
         reason = None if result.ok else f"{result.outcome}: {result.summary()}"
@@ -415,6 +606,7 @@ class Dispatcher:
                 result=result,
                 reason="lease lost while the session was running",
                 raised=tuple(raised),
+                handed_over=tuple(handed),
             )
 
         if result.ok:
@@ -425,6 +617,7 @@ class Dispatcher:
                     claimant=resident.agent_id,
                     project=resident.project,
                     artifacts=result.artifacts,
+                    parent_task_id=job.parent_task_id,
                 )
             )
         else:
@@ -435,6 +628,7 @@ class Dispatcher:
                     claimant=resident.agent_id,
                     project=resident.project,
                     reason=reason or str(result.outcome),
+                    parent_task_id=job.parent_task_id,
                 )
             )
         return BoardReport(
@@ -446,25 +640,36 @@ class Dispatcher:
             reason=reason,
             artifacts=result.artifacts,
             raised=tuple(raised),
+            handed_over=tuple(handed),
         )
 
     def _session_env(self, resident: Resident, job: JobRecord) -> dict[str, str]:
         """Build the env a board session inherits, so its own emitter reports truthfully."""
-        return {
+        env = {
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "STEWARD_TASK_ID": job.task_id,
         }
+        if job.parent_task_id:
+            # So a session that emits for itself can name the chain it is part of.
+            env["STEWARD_PARENT_TASK_ID"] = job.parent_task_id
+        return env
 
     # -- the entry point ---------------------------------------------------------------
 
     def dispatch(self, now: datetime | None = None) -> DispatchRun:
         """Sweep, then let every board-enabled resident claim and work. Never raises.
 
-        Order matters. Expired leases are reopened *first*, so a task somebody dropped is
-        available to whoever is waking up right now rather than a tick later. Expired
-        approvals are denied in the same breath, because both are deadlines that only
-        exist if something visits them.
+        Order matters, twice. Expired leases are reopened *first*, so a task somebody
+        dropped is available to whoever is waking up right now rather than a tick later;
+        expired approvals are denied in the same breath, because both are deadlines that
+        only exist if something visits them.
+
+        Then the inboxes, and only then the board. Work addressed to you personally comes
+        ahead of work addressed to nobody: a neighbour who handed you something is waiting
+        on it, while a notice on the board is waiting on the fleet. A resident drains its
+        inbox whether or not it claims from the board at all — accepting a letter is
+        declared in ``routes``, not in ``board`` — and only while that route is open.
         """
         moment = now or datetime.now(UTC)
         reopened = self.expire_leases(moment)
@@ -473,6 +678,12 @@ class Dispatcher:
         reports: list[BoardReport] = []
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
+        for resident in delegation_residents(self.residents):
+            for _ in range(self.max_delegations_per_wake):
+                job = self.take_delivery(resident, moment)
+                if job is None:
+                    break
+                reports.append(self.work(resident, job, moment))
         for resident in board_residents(self.residents):
             for _ in range(resident.manifest.board.max_claims_per_wake):
                 job = self.claim(resident, moment)

@@ -285,6 +285,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     request: NeedsHuman,
     now: datetime | None = None,
     request_id: str | None = None,
+    message: str | None = None,
 ) -> ApprovalRecord:
     """Persist one request and knock. Returns the record the human will answer.
 
@@ -292,6 +293,11 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     :data:`UNREADABLE_ACTION`, with the raw block and the complaint in its detail. That
     is the whole reason this function takes a :class:`NeedsHuman` rather than an action
     string: an escalation steward failed to read still has to reach a person.
+
+    ``message`` overrides the derived one-line knock, and only steward itself passes it —
+    :mod:`steward.delegation` uses it to say "steward refused this handoff" in words the
+    action slug cannot. A *session* never authors the message: that is what keeps the
+    knock from disagreeing with the action a decision is recorded against.
     """
     moment = now or datetime.now(UTC)
     agent_id = manifest.agent_id or f"steward:{manifest.id}"
@@ -309,7 +315,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
         agent_id=agent_id,
         project=project,
         action=request.action,
-        message=human_message(manifest, request.action),
+        message=message or human_message(manifest, request.action),
         resident=manifest.id,
         detail=detail,
         options=request.options,
