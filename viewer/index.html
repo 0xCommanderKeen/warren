@@ -97,6 +97,7 @@
   }
 </style>
 <script src="/vendor/phaser.min.js"></script>
+<script src="/projection.js"></script>
 </head>
 <body>
 <div id="game"></div>
@@ -124,137 +125,10 @@
 <script>
 "use strict";
 
-/* ————— shared projection logic (docs/protocol.md, v0 rules) ————— */
-
-const NAMES = ["Bramble","Poppy","Wren","Sorrel","Fern","Alder","Maple","Rowan",
-               "Thistle","Clover","Hazel","Juniper","Moss","Reed","Tansy","Willow"];
-const ACCENTS = ["#7d5ba6","#4f7d5b","#a65b5b","#5b7da6","#a68a4f","#5ba69b",
-                 "#a65b8a","#6b7da0","#8aa65b","#a6764f"];
-const CHARS = ["Villager","Villager2","Villager3","Villager4","Villager5",
-               "Woman","Boy","OldMan","Princess","Hunter","Noble","Monk"];
-const STALE_MS = 30 * 60 * 1000;
-const DROP_MS  = 12 * 60 * 60 * 1000;
-const VERBS = {
-  Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
-  WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
-  NotebookEdit: "crafting", Agent: "delegating", Task: "delegating",
-  AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
-};
-
-function hashCode(s) {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, c =>
-    ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
-}
-function ago(ts, now) {
-  const s = Math.max(0, Math.round((now - ts) / 1000));
-  if (s < 60) return s + "s ago";
-  if (s < 3600) return Math.round(s / 60) + "m ago";
-  return (s / 3600).toFixed(1) + "h ago";
-}
-function describe(ev) {
-  const p = ev.payload || {};
-  switch (ev.type) {
-    case "task_started":      return "took up a task: “" + (p.prompt || "…") + "”";
-    case "tool_called":       return (VERBS[p.tool] || "using " + p.tool) +
-                                     (p.detail ? " — " + p.detail : "");
-    case "artifact_produced": return "crafted " + (p.artifact || "something");
-    case "heartbeat":         return "finished " + (p.tool || "a tool");
-    case "needs_human":       return "needs you: " + (p.message || "(no message)");
-    case "idle":              return "finished, resting";
-    case "session_ended":     return "went home";
-    default:                  return ev.type;
-  }
-}
-function doingLabel(ev) {
-  const p = ev.payload || {};
-  switch (ev.type) {
-    case "task_started":      return "starting a task";
-    case "tool_called":       return VERBS[p.tool] || ("using " + p.tool);
-    case "artifact_produced": return "crafting";
-    default:                  return "";
-  }
-}
-const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
-                             "heartbeat","needs_human","idle","session_ended"]);
-// events that describe a visible action; a heartbeat is liveness only, so it
-// refreshes the clock but never becomes what a villager is shown doing
-const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
-function reduce(lines, now, souls) {
-  const soulByAgent = new Map(), soulByProject = new Map();
-  for (const s of souls || []) {
-    if (!s || !s.meta) continue;
-    if (s.meta.agent_id) soulByAgent.set(s.meta.agent_id, s);
-    if (s.meta.project) soulByProject.set(s.meta.project, s);
-  }
-  const usedSouls = new Set();
-  const agents = new Map();
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
-    let a = agents.get(ev.agent_id);
-    if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
-    a.lastAny = ev;                        // any signal, heartbeats included
-    if (ev.type === "heartbeat") continue;  // liveness only: kept out of the log
-    a.events.push(ev);
-    if (a.events.length > 80) a.events.shift();
-  }
-  const out = [];
-  const takenNames = new Set(), takenChars = new Set();
-  const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
-  for (const a of sorted) {
-    // state follows the newest signal of any kind; what the villager is *shown*
-    // doing follows the newest signal that was an actual action
-    const last = a.lastAny;
-    const lastTs = Date.parse(last.ts) || 0;
-    if (last.type === "session_ended") continue;
-    if (now - lastTs > DROP_MS) continue;
-    let state =
-      last.type === "needs_human" ? "knocking" :
-      last.type === "idle"        ? "resting"  : "working";
-    if (state === "working" && now - lastTs > STALE_MS) state = "stale";
-    const prev = a.events[a.events.length - 1];
-    const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
-    const h = hashCode(a.id);
-    const project = last.project || "unknown";
-    // soul files pin identity: exact agent_id beats project match
-    let soul = soulByAgent.get(a.id);
-    if (!soul || usedSouls.has(soul)) {
-      const p = soulByProject.get(project);
-      soul = p && !usedSouls.has(p) ? p : soul && !usedSouls.has(soul) ? soul : null;
-    }
-    if (soul) usedSouls.add(soul);
-    // probe past hash collisions so every villager in view looks distinct
-    let n = 0;
-    while (takenNames.has(NAMES[(h + n) % NAMES.length]) && n < NAMES.length) n++;
-    let c = 0;
-    while (takenChars.has(CHARS[(h + c) % CHARS.length]) && c < CHARS.length) c++;
-    let name = NAMES[(h + n) % NAMES.length];
-    let char = CHARS[(h + c) % CHARS.length];
-    let accent = ACCENTS[(h + n) % ACCENTS.length];
-    if (soul) {
-      if (soul.meta.name) name = soul.meta.name;
-      if (CHARS.includes(soul.meta.char)) char = soul.meta.char;
-      if (soul.meta.accent) accent = soul.meta.accent;
-    }
-    takenNames.add(name);
-    takenChars.add(char);
-    out.push({
-      id: a.id, state, lastTs, events: a.events,
-      name, char, accent, soul,
-      project,
-      cwd: last.cwd || "",
-      doing: state === "working" ? doingLabel(shown) : "",
-      lastLine: describe(shown),
-    });
-  }
-  return out;
-}
+/* projection logic (event filtering, state mapping, souls, identities) lives in
+   /projection.js — same file the test suite in tests/ runs under node. It gives
+   this script: NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, VERBS, hashCode, esc,
+   ago, describe, doingLabel, foldEvents, reduce. */
 
 /* ————— the village scene ————— */
 
@@ -263,11 +137,26 @@ const FLOOR_COLS = 22;
 const GRASS = 11 * FLOOR_COLS + 3, GRASS2 = 11 * FLOOR_COLS + 2;
 // dirt autotile block: cols 0-2 × rows 7-9 of the floor tileset (edges + center)
 const DIRT_AT = (col, row) => row * FLOOR_COLS + col;
-const DECOR = [[32,160],[48,160],[0,160],[16,160],[0,176],[16,176],[96,176],[112,176]];
+// flat ground clutter from TilesetNature — villagers walk over it
+const DECOR = [[0,176],[16,176],[32,176],[48,176],[96,176],
+               [112,176],[128,176],[144,176],[176,192]];
+// solid props — each one blocks its tile, so paths route around it
+const PROPS = [[0,160],[16,160],[32,160],[48,160],[64,160],[80,160],[96,160],
+               [64,128],[80,128],[64,224],[80,224]];
+const CROPS = [[144,144],[160,144],[128,160],[144,160]];   // garden vegetables
 // villager house plots: [tileX, tileY], houses are 4×3 tiles, door bottom-center
 const PLOTS = [[3,8],[8,8],[20,8],[25,8],[3,16],[8,16],[20,16],[25,16]];
 const YOUR_HOUSE = { tx: 14, ty: 3 };   // 3×3 tiles, A-frame
+// fenced kitchen gardens: [tileX, tileY, w, h]. The whole rect is solid ground;
+// the inside is soil with crops, the border carries the picket fence.
+const GARDENS = [[2,5,4,3],[8,5,4,3],[20,5,4,3],[26,5,4,3],[13,16,4,3]];
+// picket runs along the street edge of each house row: [x0, x1, row].
+// Door stubs punch gates through them, so every doorstep stays reachable.
+const FENCE_RUNS = [[3,13,11],[18,28,11],[2,5,15],[9,12,15],[19,22,15],[26,29,15]];
 const WALK_SPEED = 55;                  // px/s, native scale
+// path costs: a road tile is cheaper than grass, so walks visibly prefer the
+// street; turning costs a hair so paths come out straight instead of stair-stepped
+const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 
@@ -276,6 +165,40 @@ function plotDoor(i) {
   return { x: px * T + 32, y: (py + 3) * T };
 }
 const yourDoor = { x: YOUR_HOUSE.tx * T + 24, y: (YOUR_HOUSE.ty + 3) * T };
+const grid = fill => Array.from({ length: MAPH }, () => Array(MAPW).fill(fill));
+
+/* Binary min-heap for A*: small, hand-rolled, no dependencies. */
+class Heap {
+  constructor() { this.node = []; this.f = []; }
+  get size() { return this.node.length; }
+  push(n, f) {
+    let i = this.node.length;
+    this.node.push(n); this.f.push(f);
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (this.f[p] <= this.f[i]) break;
+      this.swap(p, i); i = p;
+    }
+  }
+  pop() {
+    const top = this.node[0], last = this.node.length - 1;
+    this.swap(0, last); this.node.pop(); this.f.pop();
+    let i = 0;
+    for (;;) {
+      const l = i * 2 + 1, r = l + 1;
+      let s = i;
+      if (l < this.node.length && this.f[l] < this.f[s]) s = l;
+      if (r < this.node.length && this.f[r] < this.f[s]) s = r;
+      if (s === i) break;
+      this.swap(s, i); i = s;
+    }
+    return top;
+  }
+  swap(a, b) {
+    [this.node[a], this.node[b]] = [this.node[b], this.node[a]];
+    [this.f[a], this.f[b]] = [this.f[b], this.f[a]];
+  }
+}
 
 class Village extends Phaser.Scene {
   constructor() { super("village"); this.viz = new Map(); this.plotOf = new Map(); }
@@ -300,15 +223,27 @@ class Village extends Phaser.Scene {
     const houses = this.textures.get("houses");
     for (let i = 0; i < 4; i++) houses.add("h" + i, 0, i * 64, 0, 64, 48);
     houses.add("yours", 0, 416, 0, 48, 48);
+    // picket fence cut out of the enclosure prefab: the horizontal run repeats
+    // every 16 px and the vertical rail every 16 px, plus a post cap at each end
+    houses.add("fenceH", 0, 161, 162, 16, 14);
+    houses.add("fenceL", 0, 150, 162, 11, 14);
+    houses.add("fenceR", 0, 207, 162, 12, 14);
+    houses.add("fenceV", 0, 150, 178,  4, 16);
     const nature = this.textures.get("nature");
     nature.add("tree0", 0, 0, 0, 32, 32);
     nature.add("tree1", 0, 32, 0, 32, 32);
     DECOR.forEach(([x, y], i) => nature.add("d" + i, 0, x, y, 16, 16));
+    PROPS.forEach(([x, y], i) => nature.add("p" + i, 0, x, y, 16, 16));
+    CROPS.forEach(([x, y], i) => nature.add("c" + i, 0, x, y, 16, 16));
 
+    // walkability is derived from the terrain: every builder marks what it covers
+    this.blocked = grid(false);
     this.buildGround();
     this.buildBuildings();
     this.buildTrees();
+    this.buildFences();
     this.buildDecor();
+    this.reportMap();
 
     for (const c of CHARS) {
       for (const d of [D_DOWN, D_UP, D_LEFT, D_RIGHT]) {
@@ -329,13 +264,22 @@ class Village extends Phaser.Scene {
         v.cont.setDepth(v.cont.y);
         v.chip.wx = v.cont.x;
         v.chip.wy = v.cont.y - 11;
+        // self-check: a villager standing on solid ground would be a lie
+        const t = this.tileAt(v.cont.x, v.cont.y);
+        if (!this.walkable(t.x, t.y)) this.offRoute++;
       }
       this.layoutChips();
     });
   }
 
+  /* ————— terrain ————— */
+
+  block(x, y) {
+    if (x >= 0 && y >= 0 && x < MAPW && y < MAPH) this.blocked[y][x] = true;
+  }
+
   buildGround() {
-    const dirt = Array.from({ length: MAPH }, () => Array(MAPW).fill(false));
+    const dirt = grid(false), soil = grid(false);
     const mark = (x0, x1, y0, y1) => {
       for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) dirt[y][x] = true;
     };
@@ -343,17 +287,26 @@ class Village extends Phaser.Scene {
     mark(14, 17, 6, 11);                       // lane from your door to the street
     mark(12, 19, 6, 8);                        // plaza at your door
     for (const [px, py] of PLOTS) mark(px + 1, px + 2, py + 3, py + 3); // door stubs
+    for (const [gx, gy, gw, gh] of GARDENS) {
+      for (let y = gy; y < gy + gh; y++)
+        for (let x = gx; x < gx + gw; x++) this.block(x, y);
+      for (let y = gy + 1; y < gy + gh; y++)
+        for (let x = gx + 1; x < gx + gw - 1; x++) soil[y][x] = true;
+    }
     this.dirt = dirt;
+    this.soil = soil;
+    const earth = (x, y) => dirt[y][x] || soil[y][x];
     const rows = [];
     for (let y = 0; y < MAPH; y++) {
       const row = [];
       for (let x = 0; x < MAPW; x++) {
-        if (!dirt[y][x]) {
+        if (soil[y][x]) { row.push(DIRT_AT(1, 8)); continue; }  // tilled bed, fenced in
+        if (!earth(x, y)) {
           row.push(hashCode(x + "," + y) % 11 === 0 ? GRASS2 : GRASS);
           continue;
         }
-        const gN = y > 0 && !dirt[y - 1][x], gS = y < MAPH - 1 && !dirt[y + 1][x];
-        const gW = x > 0 && !dirt[y][x - 1], gE = x < MAPW - 1 && !dirt[y][x + 1];
+        const gN = y > 0 && !earth(x, y - 1), gS = y < MAPH - 1 && !earth(x, y + 1);
+        const gW = x > 0 && !earth(x - 1, y), gE = x < MAPW - 1 && !earth(x + 1, y);
         const col = gW && !gE ? 0 : gE && !gW ? 2 : 1;
         const r   = gN && !gS ? 7 : gS && !gN ? 9 : 8;
         row.push(DIRT_AT(col, r));
@@ -365,20 +318,114 @@ class Village extends Phaser.Scene {
   }
 
   buildDecor() {
-    const blocked = (x, y) => {
-      if (this.dirt[y][x]) return true;
-      for (const [px, py] of PLOTS.concat([[YOUR_HOUSE.tx, YOUR_HOUSE.ty]]))
-        if (x >= px - 1 && x <= px + 4 && y >= py - 1 && y <= py + 3) return true;
-      return false;
+    // doorsteps, the knock queue and the tiles around them stay clear of props
+    const clear = new Set();
+    const reserve = (x, y) => {
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) clear.add((x + dx) + "," + (y + dy));
     };
-    for (let y = 3; y < MAPH - 2; y++) {
-      for (let x = 3; x < MAPW - 3; x++) {
+    for (const [px, py] of PLOTS) { reserve(px + 1, py + 3); reserve(px + 2, py + 3); }
+    for (let y = 6; y <= 8; y++) for (let x = 12; x <= 19; x++) reserve(x, y);
+    // the lane behind the lower houses is the only way to their doors: keep it clear
+    for (let y = 15; y <= 19; y++) for (let x = 0; x < MAPW; x++) clear.add(x + "," + y);
+    for (let y = 1; y < MAPH - 1; y++) {
+      for (let x = 1; x < MAPW - 1; x++) {
+        if (this.blocked[y][x] || this.dirt[y][x]) continue;
         const h = hashCode(y + ":" + x);
-        if (h % 8 !== 0 || blocked(x, y)) continue;
-        this.add.image(x * T + 8, y * T + 16, "nature", "d" + ((h >> 4) % DECOR.length))
-          .setOrigin(.5, 1).setDepth(0);
+        if (h % 5 === 0) {
+          this.add.image(x * T + 8, y * T + 16, "nature", "d" + ((h >> 4) % DECOR.length))
+            .setOrigin(.5, 1).setDepth(0);
+        } else if (h % 11 === 0 && !clear.has(x + "," + y) && this.tryBlock(x, y)) {
+          this.add.image(x * T + 8, y * T + 16, "nature", "p" + ((h >> 4) % PROPS.length))
+            .setOrigin(.5, 1).setDepth(y * T + 16);
+        }
       }
     }
+  }
+
+  // Block a tile only if it costs the village exactly that one tile — a bush is
+  // never allowed to wall a villager off from its door.
+  tryBlock(x, y) {
+    const before = this.reachable();
+    this.blocked[y][x] = true;
+    if (this.reachable() === before - 1) return true;
+    this.blocked[y][x] = false;
+    return false;
+  }
+
+  // how many tiles you can walk to from the main street
+  reachable() {
+    if (this.blocked[13][15]) return 0;
+    const seen = new Uint8Array(MAPW * MAPH);
+    const seed = 13 * MAPW + 15;   // middle of the main street
+    const stack = [seed];
+    seen[seed] = 1;
+    let n = 0;
+    while (stack.length) {
+      const i = stack.pop(), cx = i % MAPW, cy = (i / MAPW) | 0;
+      n++;
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= MAPW || ny >= MAPH) continue;
+        const ni = ny * MAPW + nx;
+        if (seen[ni] || this.blocked[ny][nx]) continue;
+        seen[ni] = 1; stack.push(ni);
+      }
+    }
+    return n;
+  }
+
+  // no walkable tile is walled off from the street
+  connected() {
+    let open = 0;
+    for (let y = 0; y < MAPH; y++)
+      for (let x = 0; x < MAPW; x++) if (!this.blocked[y][x]) open++;
+    return this.reachable() === open;
+  }
+
+  buildFences() {
+    const gates = new Set();
+    for (const [px, py] of PLOTS) {
+      gates.add((px + 1) + "," + (py + 3));
+      gates.add((px + 2) + "," + (py + 3));
+    }
+    for (const [x0, x1, row] of FENCE_RUNS) {
+      let run = [];
+      const flush = () => {
+        if (run.length) this.fenceRun(run[0], run[run.length - 1], row);
+        run = [];
+      };
+      for (let x = x0; x <= x1; x++) {
+        if (gates.has(x + "," + row)) { flush(); continue; }
+        this.block(x, row);
+        run.push(x);
+      }
+      flush();
+    }
+    for (const [gx, gy, gw, gh] of GARDENS) {
+      this.fenceRun(gx, gx + gw - 1, gy);
+      this.fenceRun(gx, gx + gw - 1, gy + gh - 1);
+      for (let r = gy; r < gy + gh; r++) {
+        this.add.image(gx * T + 5, r * T, "houses", "fenceV")
+          .setOrigin(0, 0).setDepth((r + 1) * T + 2);
+        this.add.image((gx + gw - 1) * T + 7, r * T, "houses", "fenceV")
+          .setOrigin(0, 0).setDepth((r + 1) * T + 2);
+      }
+      // one row of vegetables, so the soil and the front fence both stay visible
+      for (let x = gx + 1; x < gx + gw - 1; x++) {
+        const h = hashCode("crop" + x + ":" + gy);
+        this.add.image(x * T + 8, (gy + 2) * T, "nature", "c" + (h % CROPS.length))
+          .setOrigin(.5, 1).setDepth((gy + 1) * T + 8);
+      }
+    }
+  }
+
+  fenceRun(x0, x1, row) {
+    const y = (row + 1) * T;
+    for (let x = x0; x <= x1; x++)
+      this.add.image(x * T, y, "houses", "fenceH").setOrigin(0, 1).setDepth(y);
+    this.add.image(x0 * T, y, "houses", "fenceL").setOrigin(1, 1).setDepth(y + 1);
+    this.add.image((x1 + 1) * T, y, "houses", "fenceR").setOrigin(0, 1).setDepth(y + 1);
   }
 
   buildBuildings() {
@@ -386,6 +433,8 @@ class Village extends Phaser.Scene {
     PLOTS.forEach(([px, py], i) => {
       this.add.image(px * T, py * T, "houses", "h" + (i % 4))
         .setOrigin(0, 0).setDepth((py + 3) * T);
+      for (let y = py; y < py + 3; y++)
+        for (let x = px; x < px + 4; x++) this.block(x, y);
       // warm light in the doorway while its agent works — off otherwise
       const g = this.add.rectangle(px * T + 32, (py + 3) * T - 9, 10, 14, 0xffc86b, .55)
         .setDepth((py + 3) * T + 1).setVisible(false);
@@ -393,6 +442,8 @@ class Village extends Phaser.Scene {
     });
     this.add.image(YOUR_HOUSE.tx * T, YOUR_HOUSE.ty * T, "houses", "yours")
       .setOrigin(0, 0).setDepth((YOUR_HOUSE.ty + 3) * T);
+    for (let y = YOUR_HOUSE.ty; y < YOUR_HOUSE.ty + 3; y++)
+      for (let x = YOUR_HOUSE.tx; x < YOUR_HOUSE.tx + 3; x++) this.block(x, y);
     this.chips = [];
     this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
       .el.classList.add("you");
@@ -422,8 +473,14 @@ class Village extends Phaser.Scene {
   }
 
   buildTrees() {
-    const tree = (x, y, i) =>
+    // a tree is 32×32 with its base at (x, y): the ground it stands on is solid,
+    // which is what makes the border trees a wall villagers have to route around
+    const tree = (x, y, i) => {
       this.add.image(x, y, "nature", "tree" + (i % 2)).setOrigin(.5, 1).setDepth(y);
+      for (let ty = Math.floor((y - 32) / T); ty <= Math.ceil(y / T) - 1; ty++)
+        for (let tx = Math.floor((x - 16) / T); tx <= Math.ceil((x + 16) / T) - 1; tx++)
+          this.block(tx, ty);
+    };
     for (let i = 0; i < MAPW / 2; i++) {
       tree(i * 32 + 16, 34, i);
       tree(i * 32 + 16, MAPH * T, i + 1);
@@ -432,7 +489,169 @@ class Village extends Phaser.Scene {
       tree(16, i * 32 + 2, i);
       tree(MAPW * T - 16, i * 32 + 2, i + 1);
     }
-    tree(12 * T, 6 * T, 0); tree(20 * T, 6 * T, 1);   // accents by the plaza
+    tree(13 * T, 4 * T, 0); tree(19 * T, 4 * T, 1);   // accents flanking your house
+  }
+
+  /* ————— pathfinding ————— */
+
+  walkable(x, y) {
+    return x >= 0 && y >= 0 && x < MAPW && y < MAPH && !this.blocked[y][x];
+  }
+  tileAt(x, y) {
+    return { x: Phaser.Math.Clamp(Math.floor(x / T), 0, MAPW - 1),
+             y: Phaser.Math.Clamp(Math.floor(y / T), 0, MAPH - 1) };
+  }
+  tileCost(x, y) { return this.dirt[y][x] ? ROAD_COST : GRASS_COST; }
+
+  // nearest walkable tile, breadth-first — used when a spot lands on solid ground
+  nearestWalkable(x, y) {
+    const seen = new Uint8Array(MAPW * MAPH);
+    const q = [[x, y]];
+    seen[y * MAPW + x] = 1;
+    for (let i = 0; i < q.length; i++) {
+      const [cx, cy] = q[i];
+      if (this.walkable(cx, cy)) return { x: cx, y: cy };
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= MAPW || ny >= MAPH) continue;
+        if (seen[ny * MAPW + nx]) continue;
+        seen[ny * MAPW + nx] = 1;
+        q.push([nx, ny]);
+      }
+    }
+    return null;
+  }
+
+  // A* over the walkability map, 4-way (the sprites only face 4 ways).
+  // Roads cost less than grass, so a walk takes the street when the detour is
+  // reasonable; turning costs a little, so paths come out straight.
+  findPath(sx, sy, gx, gy) {
+    if (!this.walkable(sx, sy)) {
+      const n = this.nearestWalkable(sx, sy);
+      if (!n) return null;
+      sx = n.x; sy = n.y;
+    }
+    if (!this.walkable(gx, gy)) {
+      const n = this.nearestWalkable(gx, gy);
+      if (!n) return null;
+      gx = n.x; gy = n.y;
+    }
+    const N = MAPW * MAPH, start = sy * MAPW + sx, goal = gy * MAPW + gx;
+    if (start === goal) return [{ x: sx, y: sy }];
+    // The incoming direction is part of the A* state: reaching the same tile
+    // from different sides can change the cost of every route that follows.
+    const STATES = 5, NO_DIR = 4;
+    const startState = start * STATES + NO_DIR;
+    const g = new Float64Array(N * STATES).fill(Infinity);
+    const from = new Int32Array(N * STATES).fill(-1);
+    const done = new Uint8Array(N * STATES);
+    const h = (x, y) => ROAD_COST * (Math.abs(x - gx) + Math.abs(y - gy));
+    const DIRS = [[1,0],[-1,0],[0,1],[0,-1]];
+    const open = new Heap();
+    g[startState] = 0;
+    open.push(startState, h(sx, sy));
+    let goalState = -1;
+    while (open.size) {
+      const cur = open.pop();
+      if (done[cur]) continue;
+      done[cur] = 1;
+      const tile = (cur / STATES) | 0;
+      if (tile === goal) { goalState = cur; break; }
+      const incoming = cur % STATES;
+      const cx = tile % MAPW, cy = (tile / MAPW) | 0;
+      for (let d = 0; d < 4; d++) {
+        const nx = cx + DIRS[d][0], ny = cy + DIRS[d][1];
+        if (!this.walkable(nx, ny)) continue;
+        const ni = (ny * MAPW + nx) * STATES + d;
+        if (done[ni]) continue;
+        const cost = this.tileCost(nx, ny) +
+                     (incoming !== NO_DIR && incoming !== d ? TURN_COST : 0);
+        if (g[cur] + cost >= g[ni]) continue;
+        g[ni] = g[cur] + cost;
+        from[ni] = cur;
+        open.push(ni, g[ni] + h(nx, ny));
+      }
+    }
+    if (goalState < 0) return null;
+    const path = [];
+    for (let i = goalState; i >= 0; i = from[i]) {
+      const tile = (i / STATES) | 0;
+      path.push({ x: tile % MAPW, y: (tile / MAPW) | 0 });
+      if (i === startState) break;
+    }
+    return path.reverse();
+  }
+
+  // pixel waypoints for a walk: tile centres along the path, collinear runs
+  // collapsed into one leg, ending exactly on the spot the villager is headed for
+  route(fromX, fromY, toX, toY) {
+    const s = this.tileAt(fromX, fromY), e = this.tileAt(toX, toY);
+    const tiles = this.findPath(s.x, s.y, e.x, e.y);
+    if (!tiles) return null;
+    const pts = tiles.slice(1).map(t => ({ x: t.x * T + T / 2, y: t.y * T + T / 2 }));
+    pts.push({ x: toX, y: toY });
+    const out = [];
+    let prev = { x: fromX, y: fromY };
+    for (let i = 0; i < pts.length; i++) {
+      const cur = pts[i], next = pts[i + 1];
+      if (next && ((prev.x === cur.x && cur.x === next.x) ||
+                   (prev.y === cur.y && cur.y === next.y))) continue;
+      out.push(cur);
+      prev = cur;
+    }
+    return out;
+  }
+
+  // every doorstep, work spot and knock slot the projection can ask for
+  spots() {
+    const out = [];
+    PLOTS.forEach((_p, i) => {
+      const d = plotDoor(i);
+      out.push({ name: "plot " + i + " rest", x: d.x, y: d.y + 2 });
+      out.push({ name: "plot " + i + " work", x: d.x, y: d.y + 14 });
+    });
+    for (let s = 0; s < 8; s++)
+      out.push({ name: "knock " + s, x: yourDoor.x + (s % 4) * 26 - 39,
+                 y: yourDoor.y + 10 + Math.floor(s / 4) * 16 });
+    for (let i = 0; i < 14; i++)
+      out.push({ name: "street " + i, x: 48 + i * 28, y: 13 * T + 8 });
+    return out;
+  }
+
+  // Every spot must stand on open ground and every walk between two spots must
+  // stay on it. Cheap enough to run on load; `village.checkMap()` re-runs it.
+  checkMap() {
+    const spots = this.spots(), bad = [];
+    for (const s of spots) {
+      const t = this.tileAt(s.x, s.y);
+      if (!this.walkable(t.x, t.y)) bad.push(s.name + ": stands on solid ground");
+    }
+    for (const a of spots) {
+      for (const b of spots) {
+        if (a === b) continue;
+        const ta = this.tileAt(a.x, a.y), tb = this.tileAt(b.x, b.y);
+        const path = this.findPath(ta.x, ta.y, tb.x, tb.y);
+        if (!path) { bad.push(a.name + " → " + b.name + ": no path"); continue; }
+        for (const t of path)
+          if (!this.walkable(t.x, t.y))
+            bad.push(a.name + " → " + b.name + ": crosses " + t.x + "," + t.y);
+      }
+    }
+    let open = 0, road = 0;
+    for (let y = 0; y < MAPH; y++)
+      for (let x = 0; x < MAPW; x++)
+        if (!this.blocked[y][x]) { open++; if (this.dirt[y][x]) road++; }
+    return { tiles: MAPW * MAPH, walkable: open, road, spots: spots.length,
+             connected: this.connected(), offRoute: this.offRoute, problems: bad };
+  }
+
+  reportMap() {
+    this.offRoute = 0;
+    const r = this.checkMap();
+    const line = `burrow map: ${r.walkable}/${r.tiles} tiles walkable ` +
+                 `(${r.road} road), ${r.spots} spots all reachable`;
+    if (r.problems.length) console.error("burrow map problems:", r.problems);
+    else console.log(line);
   }
 
   text(x, y, str, color, size) {
@@ -502,23 +721,37 @@ class Village extends Phaser.Scene {
   walkTo(viz, tx, ty) {
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
+    let path = this.route(c.x, c.y, tx, ty);
+    if (!path) {
+      // Staying put is truthful. A straight fallback could cross solid terrain
+      // and show the villager somewhere it could never have walked.
+      console.error("burrow invariant: no walkable path to", tx, ty);
+      viz.spr.stop();
+      viz.spr.setTexture(char + "-idle", D_DOWN);
+      return false;
+    }
     const legs = [];
-    const dx = tx - c.x, dy = ty - c.y;
-    if (Math.abs(dx) > 1) legs.push({
-      x: tx, duration: Math.abs(dx) / WALK_SPEED * 1000,
-      onStart: () => viz.spr.play(char + "-walk-" + (dx > 0 ? D_RIGHT : D_LEFT)),
-    });
-    if (Math.abs(dy) > 1) legs.push({
-      y: ty, duration: Math.abs(dy) / WALK_SPEED * 1000,
-      onStart: () => viz.spr.play(char + "-walk-" + (dy > 0 ? D_DOWN : D_UP)),
-    });
+    let px = c.x, py = c.y;
+    for (const p of path) {
+      const dx = p.x - px, dy = p.y - py;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1) continue;
+      const d = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? D_RIGHT : D_LEFT)
+                                             : (dy > 0 ? D_DOWN : D_UP);
+      legs.push({
+        x: p.x, y: p.y, duration: dist / WALK_SPEED * 1000,
+        onStart: () => viz.spr.play(char + "-walk-" + d, true),
+      });
+      px = p.x; py = p.y;
+    }
     const settle = () => {
       viz.spr.stop();
       viz.spr.setTexture(char + "-idle", D_DOWN);
       viz.walk = null;
     };
-    if (!legs.length) { settle(); return; }
+    if (!legs.length) { settle(); return true; }
     viz.walk = this.tweens.chain({ targets: c, tweens: legs, onComplete: settle });
+    return true;
   }
 
   hop(viz) {   // one real event just arrived → one small hop; never loops
@@ -632,20 +865,34 @@ function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
 panelEl.querySelector(".close").addEventListener("click", closePanel);
 
 let souls = [];
+let eventCursor = 0;
+let agents = new Map();
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const [evRes, soulRes] = await Promise.all([
-      fetch("/events", { cache: "no-store" }),
+      fetch("/events?since=" + eventCursor, { cache: "no-store" }),
       fetch("/villagers", { cache: "no-store" }).catch(() => null),
     ]);
+    if (!evRes.ok) throw new Error("events request failed");
     const text = await evRes.text();
+    const reset = evRes.headers.get("X-Burrow-Reset") === "1";
+    if (reset) agents = new Map();
+    const lines = text.split("\n").filter(Boolean);
+    // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
+    foldEvents(agents, eventCursor === 0 || reset ? lines.slice(-4000) : lines);
+    eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     const now = Date.now();
-    villagers = reduce(text.split("\n").filter(Boolean).slice(-4000), now, souls);
+    villagers = reduce(agents, now, souls);
     if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
     renderChrome(now);
   } catch {
     beatEl.textContent = "server unreachable";
+  } finally {
+    pollInFlight = false;
   }
 }
 
@@ -665,6 +912,7 @@ async function poll() {
   window.__burrow = game;
   game.events.on("ready", () => {
     scene = game.scene.getScene("village");
+    window.__burrow.village = scene;   // map self-check hook, see checkMap()
     scene.events.once("create", () => { poll(); setInterval(poll, 2000); });
   });
 })();

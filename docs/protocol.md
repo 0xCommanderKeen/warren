@@ -16,6 +16,13 @@ Two transports; the event shape is the contract, not the pipe:
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
   `BURROW_URL` is unset, or as the fallback above.
 
+The viewer reads `GET /events?since=<byte-offset>`. The response body contains only
+complete JSONL lines after that offset, and `X-Burrow-Cursor` supplies the offset for
+the next request. Omit `since` (or use `0`) for a full bootstrap. If a log is
+truncated or rotated and the cursor is beyond EOF, the server starts again at byte
+zero and includes `X-Burrow-Reset: 1`; consumers must discard their reduced state
+before folding in that response.
+
 ## Event shape
 
 ```json
@@ -70,6 +77,11 @@ The villager's state is decided by its **latest** event:
 - `session_ended` → removed from the village
 - no event for 30 minutes while "working" → shown as **stale** (faded), because a
   villager frozen mid-swing would be a lie
+- no event for 12 hours → dropped from the village entirely, whatever the state
+
+These rules have exactly one implementation: `reduce()` in `viewer/projection.js`,
+loaded by the viewer and exercised by `tests/projection.test.js` (`node --test`,
+see the README).
 
 ### Why `heartbeat` and not another `tool_called`
 

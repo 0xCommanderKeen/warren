@@ -1,29 +1,15 @@
 /* Fixture test for the heartbeat rule (docs/protocol.md, issue #4).
  *
- * The projection lives inline in viewer/index.html; lift the shared block out of
- * the file and run it in a vm so the reducer can be tested without a browser.
+ * The projection is shared by the browser and Node, so test the real module.
  *
  *   node tests/test_heartbeat.js        (run from the repo root)
  */
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const html = fs.readFileSync(path.join(root, "viewer/index.html"), "utf8");
-const start = html.indexOf("const NAMES");
-const end = html.indexOf("/* ————— the village scene", start);
-assert.notEqual(start, -1, "projection block not found in viewer/index.html");
-assert.notEqual(end, -1, "end of projection block not found in viewer/index.html");
-
-const context = {};
-vm.createContext(context);
-vm.runInContext(
-  html.slice(start, end) + "\nthis.projection = { reduce, describe, doingLabel, STALE_MS };",
-  context,
-);
-const { reduce, STALE_MS } = context.projection;
+const { reduce, STALE_MS } = require(path.join(root, "viewer/projection.js"));
 
 const lines = fs.readFileSync(path.join(root, "tests/fixtures/heartbeat.jsonl"), "utf8")
   .trimEnd().split("\n");

@@ -28,9 +28,11 @@ map of everything the fleet does.
 
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
   `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
-  `BURROW_EVENTS=/data/events.jsonl`. Deploy code updates with a tar-over-ssh pipe
-  (UGOS scp is broken): `tar -cf - serve.py viewer | ssh Miha@dxp2800 'tar -xf - -C
-  ~/docker/burrow/app'`, then `docker compose restart burrow`.
+  `BURROW_EVENTS=/data/events.jsonl`. Deploy code *and souls* with a tar-over-ssh
+  pipe (UGOS scp is broken): `tar -cf - serve.py viewer villagers | ssh Miha@dxp2800
+  'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Souls
+  ship with the code, so `/villagers` on the NAS matches the repo after every
+  deploy — no manual file copying.
 - **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
   `SessionEnd`) with `BURROW_URL=http://dxp2800:8737`. Off the tailnet it falls
@@ -45,12 +47,30 @@ map of everything the fleet does.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
+## Testing the viewer
+
+The village has no fleet of its own to test against, so there is a fixture that
+writes a synthetic event log:
+
+```sh
+python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
+BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
+```
+
+It forces the longest walks on the map — corner plots to your door and back — so
+pathfinding, fence gates and the knock queue all get exercised. The viewer checks
+its own map on boot and logs one line; `__burrow.village.checkMap()` in the console
+re-runs it and returns any spot that stands on solid ground or cannot be reached.
+
 ## Souls
 
-Villagers get persistent identity from **soul files**: `~/.burrow/villagers/*.md`
-(override the directory with `BURROW_VILLAGERS`; on the NAS, mount it next to the
-event log). Frontmatter pins who the file is for and how they look; the body is
-free-form markdown shown when you click the villager (description, skills, anything).
+Villagers get persistent identity from **soul files**, versioned in this repo under
+[`villagers/`](villagers) — one `*.md` per villager, and the source of truth. Editing
+a villager is: edit the file → commit → deploy. Point `BURROW_VILLAGERS` at another
+directory to override (handy for a local scratch village).
+
+Frontmatter pins who the file is for and how they look; the body is free-form
+markdown shown when you click the villager (description, skills, anything).
 
 ```md
 ---
@@ -85,6 +105,23 @@ with status labels. The convention, for humans and agents alike:
 - `status:parked` — decision record, deliberately not scheduled.
 
 Remove the status label when the issue closes.
+
+### Tests
+
+The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
+event log into villagers — lives in `viewer/projection.js`. The viewer loads it as
+a plain `<script>`; the tests `require()` the same file. No build step, no
+framework, no install:
+
+```sh
+node --test                      # from the repo root: everything under tests/
+node tests/projection.test.js    # or just this one file
+```
+
+Cases are driven by fixture event logs in `tests/fixtures/*.jsonl`, all written
+against a fixed `now` (`2026-08-24T12:00:00Z`) so the 30-minute stale and 12-hour
+drop windows land exactly on their edges. Change a projection rule and a fixture
+should have to change with it.
 
 ## Not this project
 
