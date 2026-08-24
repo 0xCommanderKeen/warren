@@ -249,17 +249,14 @@ class Village extends Phaser.Scene {
     const houses = this.textures.get("houses");
     for (let i = 0; i < 4; i++) houses.add("h" + i, 0, i * 64, 0, 64, 48);
     houses.add("yours", 0, 416, 0, 48, 48);
-<<<<<<< HEAD
     for (const [name, p] of Object.entries(PLACES))
       houses.add("place-" + name, 0, p.frame.x, p.frame.y, p.frame.w, p.frame.h);
-=======
     // picket fence cut out of the enclosure prefab: the horizontal run repeats
     // every 16 px and the vertical rail every 16 px, plus a post cap at each end
     houses.add("fenceH", 0, 161, 162, 16, 14);
     houses.add("fenceL", 0, 150, 162, 11, 14);
     houses.add("fenceR", 0, 207, 162, 12, 14);
     houses.add("fenceV", 0, 150, 178,  4, 16);
->>>>>>> origin/main
     const nature = this.textures.get("nature");
     nature.add("tree0", 0, 0, 0, 32, 32);
     nature.add("tree1", 0, 32, 0, 32, 32);
@@ -318,18 +315,16 @@ class Village extends Phaser.Scene {
     mark(14, 17, 6, 11);                       // lane from your door to the street
     mark(12, 19, 6, 8);                        // plaza at your door
     for (const [px, py] of PLOTS) mark(px + 1, px + 2, py + 3, py + 3); // door stubs
-<<<<<<< HEAD
     for (const p of Object.values(PLACES)) {          // lane off the street, then
       const doorRow = p.ty + p.h, lane = p.tx - 2;    // an apron at the door
       mark(lane, lane, 15, doorRow);
       mark(lane, p.tx + p.w + 1, doorRow, doorRow + 1);
-=======
+    }
     for (const [gx, gy, gw, gh] of GARDENS) {
       for (let y = gy; y < gy + gh; y++)
         for (let x = gx; x < gx + gw; x++) this.block(x, y);
       for (let y = gy + 1; y < gy + gh; y++)
         for (let x = gx + 1; x < gx + gw - 1; x++) soil[y][x] = true;
->>>>>>> origin/main
     }
     this.dirt = dirt;
     this.soil = soil;
@@ -356,16 +351,6 @@ class Village extends Phaser.Scene {
   }
 
   buildDecor() {
-<<<<<<< HEAD
-    const blocked = (x, y) => {
-      if (this.dirt[y][x]) return true;
-      for (const [px, py] of PLOTS.concat([[YOUR_HOUSE.tx, YOUR_HOUSE.ty]]))
-        if (x >= px - 1 && x <= px + 4 && y >= py - 1 && y <= py + 3) return true;
-      for (const p of Object.values(PLACES))
-        if (x >= p.tx - 1 && x <= p.tx + p.w && y >= p.ty - 1 && y <= p.ty + p.h)
-          return true;
-      return false;
-=======
     // doorsteps, the knock queue and the tiles around them stay clear of props
     const clear = new Set();
     const reserve = (x, y) => {
@@ -373,6 +358,9 @@ class Village extends Phaser.Scene {
         for (let dx = -1; dx <= 1; dx++) clear.add((x + dx) + "," + (y + dy));
 >>>>>>> origin/main
     };
+    for (const p of Object.values(PLACES))
+      for (let y = p.ty - 1; y <= p.ty + p.h; y++)
+        for (let x = p.tx - 1; x <= p.tx + p.w; x++) clear.add(x + "," + y);
     for (const [px, py] of PLOTS) { reserve(px + 1, py + 3); reserve(px + 2, py + 3); }
     for (let y = 6; y <= 8; y++) for (let x = 12; x <= 19; x++) reserve(x, y);
     // the lane behind the lower houses is the only way to their doors: keep it clear
@@ -822,20 +810,6 @@ class Village extends Phaser.Scene {
       return false;
     }
     const legs = [];
-<<<<<<< HEAD
-    let from = { x: c.x, y: c.y };
-    for (const point of BurrowRoutes.routePoints(from, target)) {
-      const dx = point.x - from.x, dy = point.y - from.y;
-      if (Math.abs(dx) > 1) legs.push({
-        x: point.x, duration: Math.abs(dx) / WALK_SPEED * 1000,
-        onStart: () => viz.spr.play(char + "-walk-" + (dx > 0 ? D_RIGHT : D_LEFT)),
-      });
-      if (Math.abs(dy) > 1) legs.push({
-        y: point.y, duration: Math.abs(dy) / WALK_SPEED * 1000,
-        onStart: () => viz.spr.play(char + "-walk-" + (dy > 0 ? D_DOWN : D_UP)),
-      });
-      from = point;
-=======
     let px = c.x, py = c.y;
     for (const p of path) {
       const dx = p.x - px, dy = p.y - py;
@@ -848,7 +822,6 @@ class Village extends Phaser.Scene {
         onStart: () => viz.spr.play(char + "-walk-" + d, true),
       });
       px = p.x; py = p.y;
->>>>>>> origin/main
     }
     const settle = () => {
       viz.spr.stop();
