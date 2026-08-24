@@ -43,7 +43,9 @@
   .chip.knocking { border-color: var(--alert); color: #fff; }
   .chip.knocking .sub { color: var(--alert); }
   .chip.stale { opacity: .55; }
-  .chip.you { background: rgba(13, 11, 20, .6); border-color: rgba(232,223,200,.12); }
+  .chip.you, .chip.place {
+    background: rgba(13, 11, 20, .6); border-color: rgba(232,223,200,.12);
+  }
 
   header {
     position: absolute; top: 18px; left: 24px; z-index: 20; line-height: 1.1;
@@ -140,6 +142,31 @@ const VERBS = {
   NotebookEdit: "crafting", Agent: "delegating", Task: "delegating",
   AskUserQuestion: "asking you", Skill: "consulting a manual", Workflow: "orchestrating",
 };
+
+/* Shared locations. A place is a public building a villager travels to because
+   of what it is actually doing right now — research happens at the library, so
+   a villager whose latest event is a research tool call stands there and walks
+   home the moment its work changes. Adding a place is one entry here: sprite
+   frame + tile position + the verbs that send villagers to it. The label, the
+   footpath, the door slots and the lit doorway all follow from the table. */
+const PLACES = {
+  library: {
+    label: "the library",
+    tx: 15, ty: 16, w: 3, h: 3,               // tiles; door is bottom-centre
+    frame: { x: 256, y: 0, w: 48, h: 48 },    // rect in the house tileset
+    accent: "#7fb0c8",
+    verbs: ["researching"],                   // VERBS values, not tool names
+  },
+};
+const PLACE_OF_VERB = {};
+for (const [name, p] of Object.entries(PLACES))
+  for (const verb of p.verbs) PLACE_OF_VERB[verb] = name;
+
+// Where the *work itself* happens. null = the villager's own house.
+function workPlace(ev) {
+  if (!ev || ev.type !== "tool_called") return null;
+  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
+}
 
 function hashCode(s) {
   let h = 0;
@@ -239,6 +266,8 @@ function reduce(lines, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
+      // a lost signal doesn't teleport anyone: stale villagers keep their place
+      place: state === "working" || state === "stale" ? workPlace(last) : null,
       doing: state === "working" ? doingLabel(last) : "",
       lastLine: describe(last),
     });
@@ -261,14 +290,37 @@ const WALK_SPEED = 55;                  // px/s, native scale
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 
+// standing spots in front of a shared door: first arrival takes the middle, the
+// rest fan out in a staggered arc so their name chips stay readable. Fixed, so
+// nobody is nudged aside when a neighbour arrives or leaves.
+const SLOT_SPOTS = [[0, 0], [-24, 14], [24, 14], [-48, 0], [48, 0], [0, 28]];
+const SLOT_WRAP = 30;   // extra row offset once the arc is full
+
 function plotDoor(i) {
   const [px, py] = PLOTS[i];
   return { x: px * T + 32, y: (py + 3) * T };
 }
+function placeDoor(name) {
+  const p = PLACES[name];
+  return { x: p.tx * T + p.w * T / 2, y: (p.ty + p.h) * T };
+}
 const yourDoor = { x: YOUR_HOUSE.tx * T + 24, y: (YOUR_HOUSE.ty + 3) * T };
 
+// Which shared location a villager belongs at, if any: "door" is your doorstep,
+// anything else is a key in PLACES. null means its own house.
+function whereFor(v) {
+  if (v.state === "knocking") return "door";
+  if (v.place && (v.state === "working" || v.state === "stale")) return v.place;
+  return null;
+}
+
 class Village extends Phaser.Scene {
-  constructor() { super("village"); this.viz = new Map(); this.plotOf = new Map(); }
+  constructor() {
+    super("village");
+    this.viz = new Map();
+    this.plotOf = new Map();
+    this.slots = new Map();   // shared location → [agent id per slot, null = free]
+  }
 
   preload() {
     this.load.image("floor",  "/assets/tilesets/TilesetFloor.png");
@@ -290,6 +342,8 @@ class Village extends Phaser.Scene {
     const houses = this.textures.get("houses");
     for (let i = 0; i < 4; i++) houses.add("h" + i, 0, i * 64, 0, 64, 48);
     houses.add("yours", 0, 416, 0, 48, 48);
+    for (const [name, p] of Object.entries(PLACES))
+      houses.add("place-" + name, 0, p.frame.x, p.frame.y, p.frame.w, p.frame.h);
     const nature = this.textures.get("nature");
     nature.add("tree0", 0, 0, 0, 32, 32);
     nature.add("tree1", 0, 32, 0, 32, 32);
@@ -333,6 +387,11 @@ class Village extends Phaser.Scene {
     mark(14, 17, 6, 11);                       // lane from your door to the street
     mark(12, 19, 6, 8);                        // plaza at your door
     for (const [px, py] of PLOTS) mark(px + 1, px + 2, py + 3, py + 3); // door stubs
+    for (const p of Object.values(PLACES)) {          // lane off the street, then
+      const doorRow = p.ty + p.h, lane = p.tx - 2;    // an apron at the door
+      mark(lane, lane, 15, doorRow);
+      mark(lane, p.tx + p.w + 1, doorRow, doorRow + 1);
+    }
     this.dirt = dirt;
     const rows = [];
     for (let y = 0; y < MAPH; y++) {
@@ -359,6 +418,9 @@ class Village extends Phaser.Scene {
       if (this.dirt[y][x]) return true;
       for (const [px, py] of PLOTS.concat([[YOUR_HOUSE.tx, YOUR_HOUSE.ty]]))
         if (x >= px - 1 && x <= px + 4 && y >= py - 1 && y <= py + 3) return true;
+      for (const p of Object.values(PLACES))
+        if (x >= p.tx - 1 && x <= p.tx + p.w && y >= p.ty - 1 && y <= p.ty + p.h)
+          return true;
       return false;
     };
     for (let y = 3; y < MAPH - 2; y++) {
@@ -386,6 +448,18 @@ class Village extends Phaser.Scene {
     this.chips = [];
     this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
       .el.classList.add("you");
+    // shared locations: building, name label, and a doorway lit only while
+    // somebody is genuinely there
+    this.placeGlow = {};
+    for (const [name, p] of Object.entries(PLACES)) {
+      const d = placeDoor(name);
+      this.add.image(p.tx * T, p.ty * T, "houses", "place-" + name)
+        .setOrigin(0, 0).setDepth(d.y);
+      this.placeGlow[name] = this.add.rectangle(d.x, d.y - 9, 12, 14, 0xffc86b, .5)
+        .setDepth(d.y + 1).setVisible(false);
+      this.makeChip(null, p.accent, d.x, p.ty * T - 2, p.label)
+        .el.classList.add("place");
+    }
   }
 
   makeChip(id, accent, wx, wy, name, sub) {
@@ -443,7 +517,34 @@ class Village extends Phaser.Scene {
     return -1;
   }
 
-  spotFor(v, viz, knockSlot) {
+  /* A shared location hands out stable slots: a villager keeps the spot it took
+     for as long as it stays, so nobody shuffles sideways because a neighbour
+     arrived or left — that would be movement no event asked for. */
+  slotAt(where, id) {
+    let taken = this.slots.get(where);
+    if (!taken) { taken = []; this.slots.set(where, taken); }
+    const mine = taken.indexOf(id);
+    if (mine >= 0) return mine;
+    const free = taken.indexOf(null);
+    if (free >= 0) { taken[free] = id; return free; }
+    return taken.push(id) - 1;
+  }
+
+  leaveSlots(id, except) {
+    for (const [where, taken] of this.slots) {
+      if (where === except) continue;
+      const at = taken.indexOf(id);
+      if (at >= 0) taken[at] = null;
+    }
+  }
+
+  spotFor(v, viz, where, slot) {
+    if (where && where !== "door") {   // working at a shared building
+      const d = placeDoor(where), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
+      return { x: d.x + dx,
+               y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP,
+               kind: where };
+    }
     if (viz.plot < 0) {   // traveler rests/works on the street
       const rx = 48 + (hashCode(viz.id) % 14) * 28;
       if (v.state === "knocking") { /* fall through to door */ }
@@ -451,8 +552,8 @@ class Village extends Phaser.Scene {
     }
     const door = viz.plot >= 0 ? plotDoor(viz.plot) : null;
     switch (v.state) {
-      case "knocking": return { x: yourDoor.x + (knockSlot % 4) * 26 - 39,
-                                y: yourDoor.y + 10 + Math.floor(knockSlot / 4) * 16,
+      case "knocking": return { x: yourDoor.x + (slot % 4) * 26 - 39,
+                                y: yourDoor.y + 10 + Math.floor(slot / 4) * 16,
                                 kind: "knocking" };
       case "working":  return { x: door.x, y: door.y + 14, kind: "working" };
       default:         return { x: door.x, y: door.y + 2,  kind: "resting" };
@@ -485,6 +586,7 @@ class Village extends Phaser.Scene {
     viz.chip.el.remove();
     this.chips = this.chips.filter(c => c !== viz.chip);
     viz.cont.destroy();
+    this.leaveSlots(id, null);
     this.viz.delete(id);
     this.plotOf.delete(id);
   }
@@ -517,7 +619,7 @@ class Village extends Phaser.Scene {
 
   updateVillage(list) {
     const seen = new Set();
-    let knockSlot = 0;
+    const busyPlaces = new Set();
     for (const v of list) {
       seen.add(v.id);
       let viz = this.viz.get(v.id);
@@ -543,8 +645,11 @@ class Village extends Phaser.Scene {
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
 
-      const slot = v.state === "knocking" ? knockSlot++ : 0;
-      const spot = this.spotFor(v, viz, slot);
+      const where = whereFor(v);
+      this.leaveSlots(v.id, where);
+      const slot = where ? this.slotAt(where, v.id) : 0;
+      if (where && where !== "door" && v.state === "working") busyPlaces.add(where);
+      const spot = this.spotFor(v, viz, where, slot);
       const moved = !viz.target || viz.target.x !== spot.x || viz.target.y !== spot.y;
       if (isNew) {
         viz.cont.setPosition(spot.x, spot.y);
@@ -560,9 +665,12 @@ class Village extends Phaser.Scene {
       viz.cont.setAlpha(stale ? .45 : 1);
       viz.bang.setVisible(v.state === "knocking");
       viz.zzz.setVisible(v.state === "resting");
+      // the light is on at home only while the work is actually happening there
       if (viz.plot >= 0)
-        this.glows[viz.plot].setVisible(v.state === "working");
+        this.glows[viz.plot].setVisible(v.state === "working" && !v.place);
     }
+    for (const name of Object.keys(PLACES))
+      this.placeGlow[name].setVisible(busyPlaces.has(name));
     for (const id of [...this.viz.keys()])
       if (!seen.has(id)) this.despawn(id);
   }
@@ -599,10 +707,11 @@ function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
+  const at = v.place ? " · at " + PLACES[v.place].label : "";
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
-    v.state === "working"  ? (v.doing || "working") :
-    v.state === "stale"    ? "no signal for a while" : "resting";
+    v.state === "working"  ? (v.doing || "working") + at :
+    v.state === "stale"    ? "no signal for a while" + at : "resting";
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
   panelBody.innerHTML = `
     <h2><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
