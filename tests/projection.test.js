@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS,
-  MAX_ARTIFACTS, foldArtifacts, nameArtifacts,
+  MAX_ARTIFACTS, parseEvents, foldEvents, foldArtifacts, nameArtifacts,
   describe: describeEvent, doingLabel, ago, esc, hashCode,
 } = require("../viewer/projection.js");
 
@@ -102,6 +102,32 @@ describe("notice board artifacts", () => {
     }
     assert.equal(artifacts.length, MAX_ARTIFACTS);
     assert.equal(artifacts[0].artifact, `file-${MAX_ARTIFACTS + 24}`);
+  });
+
+  it("folds the village and the board from one parse of the batch", () => {
+    const lines = [
+      JSON.stringify({ ts: "2026-08-24T11:58:00Z", agent_id: "a", project: "one", type: "artifact_produced", payload: { artifact: "old.md" } }),
+      "not json",
+      JSON.stringify({ ts: "2026-08-24T11:59:00Z", agent_id: "a", project: "one", type: "tool_called", payload: { tool: "Read" } }),
+      JSON.stringify({ ts: "2026-08-24T12:00:00Z", type: "artifact_produced", payload: { artifact: "orphan.md" } }),
+    ];
+    // The viewer parses a batch once and hands the same records to both folds.
+    const batch = parseEvents(lines);
+    assert.deepEqual(batch.map(ev => ev.type), ["artifact_produced", "tool_called"]);
+
+    const agents = new Map(), artifacts = [];
+    foldEvents(agents, batch);
+    foldArtifacts(artifacts, batch);
+    assert.deepEqual([...agents.keys()], ["a"]);
+    assert.deepEqual(artifacts.map(a => a.artifact), ["old.md"]);
+
+    // Folding the raw lines has to agree with folding the parsed records, or
+    // the two ingestion paths have drifted apart.
+    const fromLines = new Map(), artifactsFromLines = [];
+    foldEvents(fromLines, lines);
+    foldArtifacts(artifactsFromLines, lines);
+    assert.deepEqual([...fromLines.keys()], [...agents.keys()]);
+    assert.deepEqual(artifactsFromLines, artifacts);
   });
 
   it("uses the visible villager name with a stable fallback", () => {

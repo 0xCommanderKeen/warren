@@ -69,11 +69,27 @@ function doingLabel(ev) {
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
                              "heartbeat","needs_human","idle","session_ended"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
-function foldEvents(agents, lines) {
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
+/* One parse per batch. The village and the notice board both read what this
+ * returns, so "a well-formed event" has exactly one definition and cannot drift
+ * between the two reducers; each reducer keeps only the checks its own payload
+ * needs. Already-parsed events pass straight through, so a caller can hand
+ * either JSONL lines or records to a fold without a second JSON.parse. */
+function parseEvents(batch) {
+  const events = [];
+  for (const item of batch) {
+    let ev = item;
+    if (typeof ev === "string") {
+      try { ev = JSON.parse(ev); } catch { continue; }
+    }
+    if (!ev || typeof ev !== "object" || !ev.agent_id || !ev.type) continue;
+    events.push(ev);
+  }
+  return events;
+}
+
+function foldEvents(agents, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (!EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
     a.lastAny = ev;
@@ -85,11 +101,9 @@ function foldEvents(agents, lines) {
 
 /* Keep the notice board bounded while events arrive. Sorting each small batch
  * also makes the board truthful when two emitters flush out of order. */
-function foldArtifacts(artifacts, lines) {
-  for (const line of lines) {
-    let ev;
-    try { ev = JSON.parse(line); } catch { continue; }
-    if (!ev || ev.type !== "artifact_produced" || !ev.agent_id) continue;
+function foldArtifacts(artifacts, batch) {
+  for (const ev of parseEvents(batch)) {
+    if (ev.type !== "artifact_produced") continue;
     const artifact = ev.payload && ev.payload.artifact;
     if (!artifact) continue;
     artifacts.push({
@@ -184,6 +198,6 @@ if (typeof module === "object" && module.exports) {
   module.exports = {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, hashCode, esc, ago, describe, doingLabel,
-    foldEvents, foldArtifacts, nameArtifacts, reduce,
+    parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

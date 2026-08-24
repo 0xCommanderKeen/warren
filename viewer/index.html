@@ -157,7 +157,7 @@
 /* projection logic (event filtering, state mapping, souls, identities) lives in
    /projection.js — same file the test suite in tests/ runs under node. It gives
    this script: NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, VERBS, hashCode, esc,
-   ago, describe, doingLabel, foldEvents, reduce. */
+   ago, describe, doingLabel, parseEvents, foldEvents, reduce. */
 
 /* ————— the village scene ————— */
 
@@ -1130,8 +1130,11 @@ async function poll() {
     const lines = text.split("\n").filter(Boolean);
     // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
     const incoming = eventCursor === 0 || reset ? lines.slice(-4000) : lines;
-    foldEvents(agents, incoming);
-    foldArtifacts(artifacts, incoming);
+    // Parsed once, folded twice: the village and the notice board are two views
+    // of the same records, not two readers of the same text.
+    const batch = parseEvents(incoming);
+    foldEvents(agents, batch);
+    foldArtifacts(artifacts, batch);
     eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     const now = Date.now();

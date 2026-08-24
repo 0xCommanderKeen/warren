@@ -26,11 +26,16 @@ const context = {
     eventRequests += 1;
     return eventRequests === 1 ? firstResponse : Promise.resolve(eventResponse("20"));
   },
+  // The poll loop parses each batch once and folds it into both projections;
+  // stub all three, or a missing global throws into poll()'s catch and the
+  // assertions below pass for the wrong reason.
+  parseEvents: lines => lines,
   foldEvents(agents, lines) {
     const events = agents.get("one") || [];
     events.push(...lines);
     agents.set("one", events);
   },
+  foldArtifacts() {},
   reduce: agents => [...agents.values()],
   beatEl: {},
   renderChrome() {},
