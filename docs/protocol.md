@@ -4,12 +4,17 @@ Everything in burrow consumes this. Agents (or adapters wrapping them) append on
 object per line to the event log. The projection layer never reads agent internals —
 only this log.
 
-## Transport (v0)
+## Transport (v0.5)
 
-Append-only JSONL file: `~/.burrow/events.jsonl`. One event per line. Writers append
-a single line atomically (a single `write()` of < 4 KB is atomic enough on macOS/Linux
-for line-oriented logs). Later versions may move to a socket or HTTP ingest; the event
-shape is the contract, not the file.
+Two transports; the event shape is the contract, not the pipe:
+
+- **HTTP ingest** (preferred): `POST <BURROW_URL>/events` with one JSON event as the
+  body → 204. The server appends it to its own log. Emitters set `BURROW_URL`; a
+  failed POST trips a 60 s circuit breaker and falls back to the local file, so an
+  unreachable server never slows an agent down.
+- **Local JSONL file**: append one event per line to `~/.burrow/events.jsonl`
+  (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
+  `BURROW_URL` is unset, or as the fallback above.
 
 ## Event shape
 
@@ -79,3 +84,10 @@ event supports. Filler is forbidden on both sides of the log.
 | `SessionEnd`                              | `session_ended`     |
 
 The emitter must never break the agent: it swallows all errors and always exits 0.
+
+Env vars: `BURROW_URL` (POST target, see Transport). **Resident agents** — services
+that outlive any one Claude session, like a bot running `claude -p` per message —
+set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
+`BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
+`session_ended`: the session's process died, but the agent-as-service is still
+home, resting.

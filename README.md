@@ -20,17 +20,30 @@ Each real agent — the one summarizing your day, reviewing your code, reading y
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
 4. **Client** — pixel-art renderer. Click a villager to see its current task, its log, and chat with it.
 
-## Running v0
+## Running (v0.5)
 
-v0 projects every Claude Code session on this machine as a villager.
+One village for the whole fleet, served from the NAS over Tailscale:
+<http://dxp2800:8737>. Never exposed to the public internet — the event log is a
+map of everything the fleet does.
 
-1. **Emitter** — `hooks/emit.py` is wired into `~/.claude/settings.json` hooks
-   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
-   `SessionEnd`). Each hook appends one protocol event to `~/.burrow/events.jsonl`.
-   Sessions pick hooks up on start, so already-running sessions won't appear.
-2. **Server + viewer** — `python3 serve.py` then open <http://localhost:8737>.
+- **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
+  `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
+  `BURROW_EVENTS=/data/events.jsonl`. Deploy code updates with a tar-over-ssh pipe
+  (UGOS scp is broken): `tar -cf - serve.py viewer | ssh Miha@dxp2800 'tar -xf - -C
+  ~/docker/burrow/app'`, then `docker compose restart burrow`.
+- **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
+  (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
+  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737`. Off the tailnet it falls
+  back to `~/.burrow/events.jsonl` locally. Sessions pick hooks up on start, so
+  already-running sessions won't appear.
+- **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
+  `life-agent` container (via the `claude-config` volume), with
+  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` so it appears as one resident
+  villager that rests between turns instead of leaving.
+- **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
+  viewer over the local log.
 
-Event schema and projection rules: [docs/protocol.md](docs/protocol.md).
+Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
 ## Not this project
 
