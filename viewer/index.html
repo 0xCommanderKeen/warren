@@ -58,7 +58,15 @@
   #census { font-size: 20px; margin-top: 8px; }
   #census .dot { color: var(--ink-dim); }
   #census .attn { color: var(--alert); }
+  #census .census-action {
+    pointer-events: auto; cursor: pointer; font: inherit; color: inherit;
+    background: none; border: 0; text-shadow: inherit;
+  }
+  #census .census-action:hover, #census .census-action:focus-visible { text-decoration: underline; }
   #lastbeat { font-size: 16px; color: var(--ink-dim); }
+  #transport { font-size: 16px; color: #9bb7a0; }
+  #transport[data-state="reconnecting"], #transport[data-state="polling"] { color: var(--busy); }
+  #transport[data-state="disconnected"] { color: var(--alert); }
 
   #empty {
     position: absolute; left: 0; right: 0; top: 42vh; text-align: center;
@@ -137,6 +145,7 @@
   <div class="tagline">the village never lies</div>
   <div id="census"></div>
   <div id="lastbeat"></div>
+  <div id="transport" data-state="disconnected" role="status" aria-live="polite" aria-atomic="true">telemetry disconnected</div>
 </header>
 
 <div id="empty" style="display:none">
@@ -154,6 +163,7 @@
 
 <script src="/routes.js"></script>
 <script src="/destinations.js"></script>
+<script src="/browser-runtime.js"></script>
 <script>
 "use strict";
 
@@ -1098,6 +1108,7 @@ class Village extends Phaser.Scene {
 
 const censusEl  = document.getElementById("census");
 const beatEl    = document.getElementById("lastbeat");
+const transportEl = document.getElementById("transport");
 const emptyEl   = document.getElementById("empty");
 const panelEl   = document.getElementById("panel");
 const panelBody = document.getElementById("panel-body");
@@ -1112,10 +1123,12 @@ function renderChrome(now) {
   const working  = villagers.filter(v => v.state === "working").length;
   const resting  = villagers.filter(v => v.state === "resting").length;
   const failed   = villagers.filter(v => v.state === "failed").length;
+  const stale    = villagers.filter(v => v.state === "stale").length;
   const parts = [`${villagers.length} villager${villagers.length === 1 ? "" : "s"}`];
   if (working) parts.push(`${working} working`);
   if (resting) parts.push(`${resting} resting`);
   if (failed) parts.push(`${failed} failed`);
+  if (stale) parts.push(`<button type="button" class="attn census-action" data-action="inspect-stale">${stale} stale — inspect no-signal agents</button>`);
   censusEl.innerHTML = parts.join('<span class="dot"> · </span>') +
     (knockers ? `<span class="dot"> · </span><span class="attn">${knockers} at your door</span>` : "");
   const newest = Math.max(0, ...villagers.map(v => v.lastTs));
@@ -1199,124 +1212,32 @@ function renderPanel(now) {
 }
 function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
 panelEl.querySelector(".close").addEventListener("click", closePanel);
+censusEl.addEventListener("click", event => {
+  if (!event.target.closest('[data-action="inspect-stale"]')) return;
+  const staleVillager = villagers.find(v => v.state === "stale");
+  if (staleVillager) openPanel(staleVillager.id);
+});
 
 let souls = [];
-let residentSouls = [];
-let legacySouls = [];
-let eventCursor = 0;
-let agents = new Map();
 let artifacts = [];
-let pollPromise = null;
-let eventStream = null;
-let streamReady = false;
-let reconnectTimer = null;
-let residentPromise = null;
-let reportedResidentDiagnostics = new Set();
-
-function combineSouls() {
-  souls = residentSouls.concat(legacySouls);
-}
-
-function refreshResidents() {
-  if (residentPromise) return residentPromise;
-  residentPromise = (async () => {
-    try {
-      const response = await fetch("/residents", { cache: "no-store" });
-      if (!response.ok) return;
-      const report = await response.json();
-      if (!report || !Array.isArray(report.residents)) return;
-      residentSouls = report.residents;
-      combineSouls();
-      const nextDiagnostics = new Set();
-      for (const diagnostic of report.diagnostics || []) {
-        const message = `resident manifest ${diagnostic.file}${diagnostic.path}: ${diagnostic.message}`;
-        nextDiagnostics.add(message);
-        if (!reportedResidentDiagnostics.has(message)) console.warn(message);
-      }
-      reportedResidentDiagnostics = nextDiagnostics;
-      project([]); // manifest changes promote visitors without changing history
-    } catch {}
-  })().finally(() => { residentPromise = null; });
-  return residentPromise;
-}
-
-function project(lines, reset = false) {
-  if (reset) { agents = new Map(); artifacts = []; }
-  // Parsed once, folded twice: the village and the notice board are two views of
-  // the same records, not two readers of the same text. Both transports land
-  // here, so a streamed event reaches the board exactly like a polled one.
-  const batch = parseEvents(lines);
-  foldEvents(agents, batch);
-  foldArtifacts(artifacts, batch);
-  const now = Date.now();
-  villagers = reduce(agents, now, souls);
-  if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
-  renderChrome(now);
-}
-
-function poll() {
-  if (pollPromise) return pollPromise;
-  if (eventStream || streamReady) return Promise.resolve();
-  pollPromise = (async () => {
-    try {
-    const [evRes, soulRes] = await Promise.all([
-      fetch("/events?since=" + eventCursor, { cache: "no-store" }),
-      fetch("/villagers", { cache: "no-store" }).catch(() => null),
-    ]);
-    if (!evRes.ok) throw new Error("events request failed");
-    const text = await evRes.text();
-    const reset = evRes.headers.get("X-Burrow-Reset") === "1";
-    const lines = text.split("\n").filter(Boolean);
-    // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
-    project(eventCursor === 0 || reset ? lines.slice(-4000) : lines, reset);
-    eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
-    if (soulRes && soulRes.ok) {
-      try {
-        const loaded = await soulRes.json();
-        if (Array.isArray(loaded)) {
-          residentSouls = loaded.filter(soul => soul && soul.valid === true &&
-            soul.manifest_version === 1);
-          legacySouls = loaded.filter(soul => soul && (soul.valid !== true ||
-            soul.manifest_version !== 1));
-          combineSouls();
-        }
-      } catch {}
-    }
-    // Souls affect names and appearance even when there are no new events.
-    project([]);
-    } catch {
-      beatEl.textContent = "server unreachable";
-    }
-  })().finally(() => { pollPromise = null; });
-  return pollPromise;
-}
-
-function connectStream() {
-  if (eventStream || typeof EventSource === "undefined") return;
-  const stream = new EventSource("/events/stream?since=" + encodeURIComponent(eventCursor));
-  eventStream = stream;
-  stream.onopen = () => { streamReady = true; };
-  stream.onmessage = message => {
-    streamReady = true;
-    if (message.lastEventId) eventCursor = message.lastEventId;
-    project([message.data]);
-  };
-  stream.addEventListener("reset", () => {
-    eventCursor = 0;
-    project([], true);
-  });
-  stream.onerror = async () => {
-    stream.close();
-    if (eventStream === stream) eventStream = null;
-    streamReady = false;
-    beatEl.textContent = "live stream interrupted — polling";
-    // Finish the cursor catch-up before opening another stream, otherwise a slow
-    // poll and a fast reconnect could deliver the same tail concurrently.
-    await poll();
-    clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(connectStream, 2000);
-  };
-}
+const runtime = BurrowBrowser.createBrowserRuntime({
+  now: () => Date.now(), fetch: (...args) => fetch(...args),
+  EventSource: typeof EventSource === "undefined" ? null : EventSource,
+  setTimeout: (...args) => setTimeout(...args),
+  clearTimeout: timer => clearTimeout(timer),
+  warn: message => console.warn(message),
+  onProjection(view) {
+    villagers = view.villagers;
+    artifacts = view.artifacts;
+    souls = view.souls;
+    if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
+    renderChrome(view.now);
+  },
+  onTransport(state) {
+    transportEl.dataset.state = state;
+    transportEl.textContent = "telemetry " + state;
+  },
+});
 
 /* ————— boot ————— */
 
@@ -1336,13 +1257,16 @@ function connectStream() {
     scene = game.scene.getScene("village");
     window.__burrow.village = scene;   // map self-check hook, see checkMap()
     scene.events.once("create", async () => {
-      await poll();
-      connectStream();
+      await runtime.poll();
+      runtime.connectStream();
       // Idle while SSE is healthy; this is the fallback when it is not.
-      setInterval(poll, 2000);
+      setInterval(runtime.poll, 2000);
       // Manifests are a separate projection input: refresh even while SSE keeps
       // event polling idle, so adding one promotes a visitor on the next fold.
-      setInterval(refreshResidents, 2000);
+      setInterval(runtime.refreshResidents, 2000);
+      // Wall-clock projection is independent of both transports: a quiet live
+      // stream still ages activity, relative times, and the 12-hour census.
+      setInterval(runtime.tick, 1000);
     });
   });
 })();

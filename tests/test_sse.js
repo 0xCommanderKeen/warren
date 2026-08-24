@@ -1,10 +1,7 @@
-const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const vm = require("node:vm");
+"use strict";
 
-const html = fs.readFileSync("viewer/index.html", "utf8");
-const start = html.indexOf("let souls = [];");
-const end = html.indexOf("/* ————— boot", start);
+const assert = require("node:assert/strict");
+const { createBrowserRuntime } = require("../viewer/browser-runtime.js");
 
 const streams = [];
 class FakeEventSource {
@@ -21,11 +18,13 @@ const response = cursor => ({
   headers: { get: name => name === "X-Burrow-Cursor" ? cursor : null },
   text: async () => "",
 });
-const context = {
-  Map, Date, Promise, EventSource: FakeEventSource,
-  encodeURIComponent,
-  setTimeout(fn) { retry = fn; return 1; },
-  clearTimeout() {},
+const event = (agent, type = "tool_called") => JSON.stringify({
+  v: 0, ts: "2026-08-25T10:00:00.000Z", source: "test", agent_id: agent,
+  project: "burrow", cwd: "/project", type, payload: { tool: "Read" },
+});
+const runtime = createBrowserRuntime({
+  now: () => Date.now(), EventSource: FakeEventSource,
+  setTimeout(fn) { retry = fn; return 1; }, clearTimeout() {},
   fetch(url) {
     if (url === "/villagers") return Promise.resolve({ ok: false });
     eventRequests += 1;
@@ -33,32 +32,14 @@ const context = {
       return new Promise(resolve => { finishCatchup = () => resolve(response("1:2:60")); });
     return Promise.resolve(response("1:2:10"));
   },
-  // project() parses each batch once and folds it into both the village and the
-  // notice board; give it the real parser, or a missing global throws into
-  // poll()'s catch and the cursor assertions below pass for the wrong reason.
-  parseEvents: require("../viewer/projection.js").parseEvents,
-  foldEvents(agents, events) {
-    for (const event of events) {
-      const seen = agents.get(event.agent_id) || [];
-      seen.push(event); agents.set(event.agent_id, seen);
-    }
-  },
-  foldArtifacts: require("../viewer/projection.js").foldArtifacts,
-  reduce: agents => [...agents.values()],
-  beatEl: {}, renderChrome() {}, scene: null,
-};
-vm.createContext(context);
-vm.runInContext(html.slice(start, end) + `
-  this.transport = { poll, connectStream, cursor: () => eventCursor,
-    agents: () => agents };
-`, context);
+});
 
 (async () => {
-  await context.transport.poll();
-  context.transport.connectStream();
+  await runtime.poll();
+  runtime.connectStream();
   assert.equal(streams[0].url, "/events/stream?since=1%3A2%3A10");
 
-  context.transport.poll();
+  runtime.poll();
   streams[0].onerror();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(streams[0].closed, true);
@@ -71,7 +52,72 @@ vm.runInContext(html.slice(start, end) + `
   retry();
   assert.equal(streams[1].url, "/events/stream?since=1%3A2%3A60");
   streams[1].listeners.reset();
-  assert.equal(context.transport.cursor(), 0);
-  assert.equal(context.transport.agents().size, 0);
+  assert.equal(runtime.snapshot().cursor, 0);
+  assert.equal(runtime.snapshot().villagers.length, 0);
+
+  let clock = 0;
+  let timerId = 0;
+  const timers = new Map();
+  const advance = milliseconds => {
+    clock += milliseconds;
+    for (const [id, timer] of [...timers]) {
+      if (timer.at > clock) continue;
+      timers.delete(id);
+      timer.fn();
+    }
+  };
+  let requests = 0;
+  let finishLatePoll;
+  const raceStreams = [];
+  class RaceEventSource extends FakeEventSource {
+    constructor(url) { super(url); raceStreams.push(this); }
+  }
+  const eventResponse = (cursor, body = "", reset = false) => ({
+    ok: true,
+    headers: { get: name => name === "X-Burrow-Cursor" ? cursor :
+      name === "X-Burrow-Reset" && reset ? "1" : null },
+    text: async () => body,
+  });
+  const raceRuntime = createBrowserRuntime({
+    now: () => Date.parse("2026-08-25T10:01:00.000Z"),
+    EventSource: RaceEventSource,
+    setTimeout(fn, delay) {
+      const id = ++timerId;
+      timers.set(id, { at: clock + delay, fn });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    fetch(url) {
+      if (url === "/villagers") return Promise.resolve({ ok: false });
+      requests += 1;
+      if (requests === 1) return Promise.resolve(eventResponse("10", event("old", "idle") + "\n"));
+      if (requests === 2) return Promise.resolve(eventResponse("20"));
+      return new Promise(resolve => {
+        finishLatePoll = () => resolve(eventResponse("20", event("old", "idle") + "\n", true));
+      });
+    },
+  });
+
+  await raceRuntime.poll();
+  raceRuntime.connectStream();
+  raceStreams[0].onerror();
+  await new Promise(resolve => setImmediate(resolve));
+
+  const latePoll = raceRuntime.poll();
+  advance(2000);
+  assert.equal(raceStreams.length, 1,
+    "the reconnect timer must not open SSE over a fallback poll");
+
+  finishLatePoll();
+  await latePoll;
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(raceStreams[1].url, "/events/stream?since=20");
+
+  raceStreams[1].onmessage({ lastEventId: "30", data: event("new") });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(raceRuntime.snapshot().cursor, "30",
+    "a completed fallback poll cannot regress a newer stream cursor to 20");
+  assert.deepEqual(raceRuntime.snapshot().villagers.map(v => v.id).sort(),
+    ["new", "old"], "a late reset cannot erase newer stream state");
   console.log("SSE resumes by cursor and falls back to polling");
 })().catch(error => { console.error(error); process.exitCode = 1; });
