@@ -201,6 +201,12 @@ const PLACES = {
     frame: { x: 304, y: 0, w: 48, h: 48 },
     accent: "#d97979",
   },
+  "visitor-lodge": {
+    label: "the visitor lodge",
+    tx: 23, ty: 19, w: 3, h: 3,
+    frame: { x: 208, y: 0, w: 48, h: 48 },
+    accent: "#c4a56a",
+  },
 };
 
 const T = 16, MAPW = 32, MAPH = 27, ZOOM = 3;
@@ -876,13 +882,12 @@ class Village extends Phaser.Scene {
 
   /* ————— villagers ————— */
 
-  assignPlot(id) {
-    if (this.plotOf.has(id)) return this.plotOf.get(id);
-    const used = new Set(this.plotOf.values());
-    for (let i = 0; i < PLOTS.length; i++)
-      if (!used.has(i)) { this.plotOf.set(id, i); return i; }
-    this.plotOf.set(id, -1);   // village is full: traveler without a house
-    return -1;
+  assignPlot(v) {
+    const id = typeof v === "string" ? v : v.id;
+    const plot = typeof v === "string" ? (this.plotOf.get(id) ?? -1) :
+      (v.residency === "resident" && Number.isInteger(v.home) ? v.home : -1);
+    this.plotOf.set(id, plot);
+    return plot;
   }
 
   /* A shared location hands out stable slots: a villager keeps the spot it took
@@ -933,7 +938,7 @@ class Village extends Phaser.Scene {
   }
 
   spawn(v, dest) {
-    const plot = this.assignPlot(v.id);
+    const plot = this.assignPlot(v);
     const door = plot >= 0 ? plotDoor(plot) : { x: 48 + (hashCode(v.id) % 14) * 28, y: 13 * T + 8 };
     const cont = this.add.container(door.x, door.y + 2);
     const shadow = this.add.image(0, 7, "shadow").setAlpha(.35);
@@ -1020,10 +1025,11 @@ class Village extends Phaser.Scene {
     /* Which plots have somebody behind the door right now. Plots are assigned
        up front so a delegating villager cannot be sent to the house of a
        villager this same pass is about to spawn into a different one. */
-    const occupied = list.map(v => this.assignPlot(v.id)).filter(plot => plot >= 0);
+    const occupied = list.map(v => this.assignPlot(v)).filter(plot => plot >= 0);
     for (const v of list) {
       seen.add(v.id);
       let viz = this.viz.get(v.id);
+      if (viz) viz.plot = this.assignPlot(v);
       const dest = destinationFor(v, {
         held: viz && viz.delegateTo, ownPlot: this.plotOf.get(v.id),
         occupied, hash: hashCode(v.id), places: PLACES,
@@ -1043,7 +1049,8 @@ class Village extends Phaser.Scene {
       const subText =
         v.state === "knocking" ? "needs you!" :
         v.state === "stale"    ? v.project + " · no signal" :
-        v.state === "working" && v.doing ? v.project + " · " + v.doing : v.project;
+        v.state === "working" && v.doing ? v.project + " · " + v.doing :
+        v.residency === "visitor" ? v.project + " · visitor" : v.project;
       sub.textContent = subText;
       sub.style.display = "";
 
@@ -1165,6 +1172,7 @@ function renderPanel(now) {
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
   panelBody.innerHTML = `
     <h2><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
+    <div class="meta role">${v.residency === "resident" ? `resident · home ${v.home + 1}` : "visitor · based at the lodge"}</div>
     ${v.soul && v.soul.meta.role ? `<div class="meta role">${esc(v.soul.meta.role)}</div>` : ""}
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
     <div class="meta">${esc(v.id)}</div>
@@ -1187,6 +1195,8 @@ function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
 panelEl.querySelector(".close").addEventListener("click", closePanel);
 
 let souls = [];
+let residentSouls = [];
+let legacySouls = [];
 let eventCursor = 0;
 let agents = new Map();
 let artifacts = [];
@@ -1194,6 +1204,35 @@ let pollPromise = null;
 let eventStream = null;
 let streamReady = false;
 let reconnectTimer = null;
+let residentPromise = null;
+let reportedResidentDiagnostics = new Set();
+
+function combineSouls() {
+  souls = residentSouls.concat(legacySouls);
+}
+
+function refreshResidents() {
+  if (residentPromise) return residentPromise;
+  residentPromise = (async () => {
+    try {
+      const response = await fetch("/residents", { cache: "no-store" });
+      if (!response.ok) return;
+      const report = await response.json();
+      if (!report || !Array.isArray(report.residents)) return;
+      residentSouls = report.residents;
+      combineSouls();
+      const nextDiagnostics = new Set();
+      for (const diagnostic of report.diagnostics || []) {
+        const message = `resident manifest ${diagnostic.file}${diagnostic.path}: ${diagnostic.message}`;
+        nextDiagnostics.add(message);
+        if (!reportedResidentDiagnostics.has(message)) console.warn(message);
+      }
+      reportedResidentDiagnostics = nextDiagnostics;
+      project([]); // manifest changes promote visitors without changing history
+    } catch {}
+  })().finally(() => { residentPromise = null; });
+  return residentPromise;
+}
 
 function project(lines, reset = false) {
   if (reset) { agents = new Map(); artifacts = []; }
@@ -1225,7 +1264,18 @@ function poll() {
     // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
     project(eventCursor === 0 || reset ? lines.slice(-4000) : lines, reset);
     eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
-    if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
+    if (soulRes && soulRes.ok) {
+      try {
+        const loaded = await soulRes.json();
+        if (Array.isArray(loaded)) {
+          residentSouls = loaded.filter(soul => soul && soul.valid === true &&
+            soul.manifest_version === 1);
+          legacySouls = loaded.filter(soul => soul && (soul.valid !== true ||
+            soul.manifest_version !== 1));
+          combineSouls();
+        }
+      } catch {}
+    }
     // Souls affect names and appearance even when there are no new events.
     project([]);
     } catch {
@@ -1284,6 +1334,9 @@ function connectStream() {
       connectStream();
       // Idle while SSE is healthy; this is the fallback when it is not.
       setInterval(poll, 2000);
+      // Manifests are a separate projection input: refresh even while SSE keeps
+      // event polling idle, so adding one promotes a visitor on the next fold.
+      setInterval(refreshResidents, 2000);
     });
   });
 })();

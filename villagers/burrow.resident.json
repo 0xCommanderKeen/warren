@@ -1,0 +1,20 @@
+{
+  "manifest_version": 1,
+  "match": { "project": "burrow" },
+  "home": 0,
+  "soul": {
+    "name": "Maren",
+    "char": "Hunter",
+    "accent": "#4f7d5b",
+    "role": "village builder",
+    "description": "Works on burrow itself — the village you are looking at."
+  },
+  "skills": [
+    { "id": "pixel-art-viewer", "status_ref": "repository:viewer" },
+    { "id": "event-projection", "status_ref": "repository:viewer/projection.js" },
+    { "id": "runner-hooks", "status_ref": "repository:hooks/emit.py" }
+  ],
+  "memory": { "ref": "repository:CONTEXT.md", "status_ref": "version-controlled" },
+  "routes": [],
+  "app_grants": []
+}

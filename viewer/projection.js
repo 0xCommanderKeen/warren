@@ -118,8 +118,13 @@ function foldEvents(agents, batch) {
   for (const ev of parseEvents(batch)) {
     if (!EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
-    if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
+    if (!a) {
+      a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
+      agents.set(ev.agent_id, a);
+    }
     a.lastAny = ev;
+    const payload = ev.payload || {};
+    if (payload.parent_agent_id) a.parentAgentId = String(payload.parent_agent_id);
     if (ev.type === "heartbeat") continue;
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
@@ -159,17 +164,50 @@ function nameArtifacts(artifacts, villagers, souls) {
 }
 function reduce(input, now, souls) {
   const soulByAgent = new Map(), soulByProject = new Map();
+  const isResident = soul => Boolean(soul && soul.valid === true &&
+    soul.manifest_version === 1 && Number.isInteger(soul.home));
+  const indexSoul = (index, key, soul) => {
+    if (!index.has(key) || isResident(soul) || !isResident(index.get(key))) {
+      index.set(key, soul);
+    }
+  };
   for (const s of souls || []) {
     if (!s || !s.meta) continue;
-    if (s.meta.agent_id) soulByAgent.set(s.meta.agent_id, s);
-    if (s.meta.project) soulByProject.set(s.meta.project, s);
+    const match = s.match || s.meta;
+    if (match.agent_id) indexSoul(soulByAgent, match.agent_id, s);
+    if (match.project) indexSoul(soulByProject, match.project, s);
   }
-  const usedSouls = new Set();
   const agents = input instanceof Map ? input : new Map();
   if (!(input instanceof Map)) foldEvents(agents, input);
   const out = [];
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
+  const visible = sorted.filter(a => {
+    const last = a.lastAny || a.events[a.events.length - 1];
+    return last && last.type !== "session_ended" && now - (Date.parse(last.ts) || 0) <= DROP_MS;
+  });
+  // Reserve exact identities in a separate pass. A project fallback must never
+  // consume the declaration belonging to an exact agent that sorts later.
+  const assignedSouls = new Map(), usedSouls = new Set();
+  for (const a of visible) {
+    const exact = soulByAgent.get(a.id);
+    if (exact && !usedSouls.has(exact)) {
+      assignedSouls.set(a.id, exact);
+      usedSouls.add(exact);
+    }
+  }
+  for (const a of visible) {
+    if (assignedSouls.has(a.id)) continue;
+    // Project declarations describe the root working session. A child without
+    // its own exact declaration remains a Visitor even though it shares cwd.
+    if (a.parentAgentId) continue;
+    const last = a.lastAny || a.events[a.events.length - 1];
+    const fallback = soulByProject.get(last.project || "unknown");
+    if (fallback && !usedSouls.has(fallback)) {
+      assignedSouls.set(a.id, fallback);
+      usedSouls.add(fallback);
+    }
+  }
   for (const a of sorted) {
     const last = a.lastAny || a.events[a.events.length - 1];
     const lastTs = Date.parse(last.ts) || 0;
@@ -183,13 +221,7 @@ function reduce(input, now, souls) {
     const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
     const h = hashCode(a.id);
     const project = last.project || "unknown";
-    // soul files pin identity: exact agent_id beats project match
-    let soul = soulByAgent.get(a.id);
-    if (!soul || usedSouls.has(soul)) {
-      const p = soulByProject.get(project);
-      soul = p && !usedSouls.has(p) ? p : soul && !usedSouls.has(soul) ? soul : null;
-    }
-    if (soul) usedSouls.add(soul);
+    const soul = assignedSouls.get(a.id) || null;
     // probe past hash collisions so every villager in view looks distinct
     let n = 0;
     while (takenNames.has(NAMES[(h + n) % NAMES.length]) && n < NAMES.length) n++;
@@ -205,9 +237,13 @@ function reduce(input, now, souls) {
     }
     takenNames.add(name);
     takenChars.add(char);
+    const resident = isResident(soul);
     out.push({
       id: a.id, state, lastTs, events: a.events,
       name, char, accent, soul,
+      residency: resident ? "resident" : "visitor",
+      home: resident ? soul.home : null,
+      base: resident ? "home" : "visitor-lodge",
       project,
       cwd: last.cwd || "",
       // A lost signal is not travel: a stale villager keeps its last place.

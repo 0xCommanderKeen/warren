@@ -32,6 +32,17 @@ test("a stale villager stays where its last event put it", () => {
                    { kind: "building", id: "workshop" });
 });
 
+test("visitors share the lodge whenever resident work would happen at home", () => {
+  const ctx = { places: { "visitor-lodge": {} }, occupied: [], ownPlot: -1, hash: 1 };
+  assert.deepEqual(destinationFor({ state: "resting", base: "visitor-lodge" }, ctx),
+                   { kind: "building", id: "visitor-lodge" });
+  assert.deepEqual(destinationFor({ state: "working", base: "visitor-lodge", place: null }, ctx),
+                   { kind: "building", id: "visitor-lodge" });
+  assert.deepEqual(destinationFor({ state: "working", base: "visitor-lodge", place: "library" },
+                                  { ...ctx, places: { ...ctx.places, library: {} } }),
+                   { kind: "building", id: "library" });
+});
+
 test("destination keys separate every destination into its own slot bucket", () => {
   const keys = [
     destinationKey({ kind: "home" }), destinationKey({ kind: "door" }),
@@ -62,6 +73,12 @@ test("delegation with nobody else in the village stays home", () => {
                    { kind: "home" });
   assert.deepEqual(destinationFor(working(DELEGATION), { ownPlot: -1, occupied: [], hash: 9 }),
                    { kind: "home" });
+});
+
+test("visitor delegation with no resident returns to the shared lodge", () => {
+  assert.deepEqual(destinationFor({ ...working(DELEGATION), base: "visitor-lodge" },
+                                  { ownPlot: -1, occupied: [], hash: 9 }),
+                   { kind: "building", id: "visitor-lodge" });
 });
 
 test("a delegating villager holds its door while that neighbour is home", () => {
@@ -109,7 +126,9 @@ test("the fixture delegates to the only other villager in the village", () => {
   const dest = walk(village, "fixture:traveler");
   assert.deepEqual(dest, { kind: "plot", plot: plotsFor(village).get("fixture:crafter") });
 
-  // Take the crafter out and there is nobody to hand work to: it stays home.
+  // Take the crafter out and there is nobody to hand work to: this unsouled
+  // fixture villager returns to the shared lodge, never an empty resident home.
   const alone = reduce(upTo.filter(l => !l.includes("fixture:crafter")), now, []);
-  assert.deepEqual(walk(alone, "fixture:traveler"), { kind: "home" });
+  assert.deepEqual(walk(alone, "fixture:traveler"),
+                   { kind: "building", id: "visitor-lodge" });
 });

@@ -90,6 +90,10 @@ def claude_event(hook):
         return "heartbeat", {"tool": tool}
     if name == "Notification":
         return "needs_human", {"message": str(hook.get("message") or "")[:200]}
+    if name == "SubagentStart" and hook.get("agent_id"):
+        return "task_started", lineage(hook, "claude")
+    if name == "SubagentStop" and hook.get("agent_id"):
+        return "session_ended", lineage(hook, "claude")
     if name == "Stop":
         return "idle", {}
     if name == "SessionEnd":
@@ -102,7 +106,7 @@ def to_event(hook):
     return claude_event(hook)
 
 
-def lineage(hook):
+def lineage(hook, runner="codex"):
     payload = {}
     if hook.get("turn_id"):
         payload["turn_id"] = str(hook["turn_id"])[:120]
@@ -110,7 +114,7 @@ def lineage(hook):
         payload["agent_type"] = str(hook["agent_type"])[:120]
     if hook.get("session_id"):
         payload["parent_agent_id"] = agent_identity(
-            RUNNER_SOURCES["codex"], hook["session_id"])
+            RUNNER_SOURCES[runner], hook["session_id"])
     return payload
 
 
@@ -192,7 +196,10 @@ def codex_events(hook):
     if name == "SubagentStop":
         if not hook.get("agent_id"):
             return []
-        return [("heartbeat", lifecycle_payload(hook, "subagent_stop", True))]
+        payload = lineage(hook)
+        if isinstance(hook.get("stop_hook_active"), bool):
+            payload["stop_hook_active"] = hook["stop_hook_active"]
+        return [("session_ended", payload)]
     if name == "Stop":
         return [("heartbeat", lifecycle_payload(hook, "stop"))]
     if name == "SessionEnd":
@@ -218,11 +225,11 @@ def runner_name(argv):
 
 def hook_agent_id(runner, hook, resident_id=None):
     source = RUNNER_SOURCES[runner]
-    if resident_id:
-        return resident_id if ":" in resident_id else source + ":" + resident_id
-    if runner == "codex" and hook.get("hook_event_name") in (
+    if hook.get("hook_event_name") in (
             "SubagentStart", "SubagentStop") and hook.get("agent_id"):
         identity = hook["agent_id"]
+    elif resident_id:
+        return resident_id if ":" in resident_id else source + ":" + resident_id
     else:
         identity = hook.get("session_id") or "unknown"
     return agent_identity(source, identity)
@@ -313,11 +320,20 @@ def main(runner="claude"):
         return
     resident_id = os.environ.get("BURROW_AGENT_ID")
     agent_id = hook_agent_id(runner, hook, resident_id)
+    resident_parent = None
+    if resident_id:
+        source = RUNNER_SOURCES[runner]
+        resident_parent = resident_id if ":" in resident_id else source + ":" + resident_id
     cwd = hook.get("cwd") or ""
     now = datetime.datetime.now(datetime.timezone.utc)
     for etype, payload in specs:
+        if resident_parent and payload.get("parent_agent_id"):
+            payload = dict(payload, parent_agent_id=resident_parent)
         if resident_id and etype == "session_ended":
-            etype, payload = "idle", {}
+            # A child lifecycle still ends that child. Only the stable resident
+            # parent rests between backing sessions.
+            if agent_id == resident_parent:
+                etype, payload = "idle", {}
         deliver({
             "v": 0,
             "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),

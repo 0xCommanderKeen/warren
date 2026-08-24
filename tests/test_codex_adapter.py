@@ -106,7 +106,7 @@ process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
         })
         self.assertEqual(root[7]["payload"], {"tool": "apply_patch"})
         self.assertEqual([event["type"] for event in child],
-                         ["task_started", "heartbeat"])
+                         ["task_started", "session_ended"])
         self.assertEqual(child[0]["payload"]["parent_agent_id"],
                          "codex:thr_redacted_root")
         self.assertEqual(child[0]["payload"]["turn_id"], "turn_redacted")
@@ -115,11 +115,11 @@ process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
         village = {villager["id"]: villager for villager in self.project(events)}
         self.assertEqual(village["codex:thr_redacted_root"]["state"], "working")
         self.assertEqual(village["codex:thr_redacted_root"]["project"], "burrow")
-        self.assertEqual(village["codex:agent_redacted_review"]["state"], "working")
+        self.assertNotIn("codex:agent_redacted_review", village)
 
     def test_session_end_removes_only_the_root_codex_session(self):
         village = {villager["id"]: villager
-                   for villager in self.project(self.deliver(self.hooks))}
+                   for villager in self.project(self.deliver(self.hooks[:8] + [self.hooks[-1]]))}
         self.assertNotIn("codex:thr_redacted_root", village)
         self.assertIn("codex:agent_redacted_review", village)
 
@@ -209,7 +209,7 @@ class DefensiveCodexInputTest(unittest.TestCase):
             "stop_hook_active": True,
         })])
 
-    def test_subagent_stop_is_a_bounded_lineage_heartbeat(self):
+    def test_subagent_stop_ends_only_that_child_with_bounded_lineage(self):
         self.assertEqual(emit.codex_events({
             "hook_event_name": "SubagentStop",
             "session_id": "root-" + "r" * 200,
@@ -217,8 +217,7 @@ class DefensiveCodexInputTest(unittest.TestCase):
             "agent_type": "reviewer-" + "a" * 200,
             "turn_id": "turn",
             "stop_hook_active": False,
-        }), [("heartbeat", {
-            "phase": "subagent_stop",
+        }), [("session_ended", {
             "turn_id": "turn",
             "agent_type": "reviewer-" + "a" * 111,
             "parent_agent_id": "codex:root-" + "r" * 200,

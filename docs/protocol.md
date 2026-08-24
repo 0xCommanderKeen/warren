@@ -99,6 +99,12 @@ buffer.
 | `type`     | one of the types below                                                  |
 | `payload`  | type-specific detail, always an object, may be empty                    |
 
+Child lifecycle events may add `parent_agent_id` and `agent_type` to `payload`.
+These fields are optional v0 lineage: consumers that know them can relate child and
+parent villagers, while existing v0 consumers continue to ignore unknown payload
+fields. Parent and child always retain distinct `agent_id` values and lifecycles;
+`SubagentStop` emits `session_ended` for only the named child.
+
 ## Event types
 
 | type                | emitted when…                              | payload                    |
@@ -156,7 +162,8 @@ The live log is a window, not an archive. When `events.jsonl` grows past
 file again from the **carry-forward tail** derived from the same latest 4,000
 lines the viewer reads: the last 80 visible events of every villager the
 projection would still draw — plus its latest liveness-only heartbeat when
-present, and skipping any whose latest signal is `session_ended` or older than
+present, plus one canonical lineage-bearing record for each active child, and
+skipping any whose latest signal is `session_ended` or older than
 the 12 h drop window — in their original order.
 
 That tail is exactly the input the rules above consume, so the village renders
@@ -272,6 +279,8 @@ event supports. Filler is forbidden on both sides of the log.
 | `PostToolUse` (`Write`/`Edit`/`MultiEdit`/`NotebookEdit`, with a `file_path`) | `artifact_produced` |
 | `PostToolUse` (every other tool)          | `heartbeat`         |
 | `Notification`                            | `needs_human`       |
+| `SubagentStart`                           | `task_started` for that child identity, with lineage |
+| `SubagentStop`                            | `session_ended` for only that child identity, with lineage |
 | `Stop`                                    | `idle`              |
 | `SessionEnd`                              | `session_ended`     |
 
@@ -289,7 +298,8 @@ that outlive any one Claude session, like a bot running `claude -p` per message 
 set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
 `BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
 `session_ended`: the session's process died, but the agent-as-service is still
-home, resting.
+home, resting. Its children remain distinct; a child stop still ends that child,
+and its lineage points to the stable resident parent identity.
 
 ## v0 emitter: Codex hooks
 
@@ -309,7 +319,7 @@ same unbounded canonical value so lineage remains exact even for long session ID
 | `PostToolUse` (`apply_patch`, exact successful response, with paths in its patch) | one `artifact_produced` per path |
 | `PostToolUse` (other completions; failed, partial, missing, ambiguous, or unparseable patch) | `heartbeat` |
 | `SubagentStart` | `task_started` for the subagent identity |
-| `SubagentStop` | `heartbeat` with bounded lifecycle and lineage metadata |
+| `SubagentStop` | `session_ended` for only the matching subagent, with bounded lineage metadata |
 | `Stop` | `heartbeat` with bounded lifecycle metadata for the root session |
 | `SessionEnd` | `session_ended` for the root session |
 
@@ -319,10 +329,9 @@ different hook may allow or deny it before a human ever sees a prompt. Burrow ke
 the villager working and includes only a bounded phase, tool name, and available
 approval reason. It does not emit `needs_human` without proof that a human is blocked.
 
-Likewise, another concurrent hook can intercept `Stop` or `SubagentStop` and continue
-the flow. Those callbacks prove lifecycle activity, not final idleness, so they emit
-working heartbeats. `SessionEnd` is the unambiguous end of the root thread and remains
-the only Codex callback that removes it. The emitter returns an empty JSON object and
+Likewise, another concurrent hook can intercept root `Stop` and continue the flow,
+so that callback remains a working heartbeat. `SubagentStop` is scoped to the named
+child and removes only that child; root `SessionEnd` removes only the root. The emitter returns an empty JSON object and
 never approves, denies, rewrites, blocks, or continues anything.
 
 `PostToolUse` means a tool produced a response, not necessarily that it succeeded.

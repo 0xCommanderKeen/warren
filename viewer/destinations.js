@@ -23,6 +23,12 @@
   const DELEGATION = "delegation";
   const HOME = { kind: "home" }, DOOR = { kind: "door" };
 
+  function baseDestination(v) {
+    return v && v.base === "visitor-lodge"
+      ? { kind: "building", id: "visitor-lodge" }
+      : HOME;
+  }
+
   /* Which door a delegating villager walks to.
    *
    * The protocol carries no delegate identity — `tool_called` says an `Agent`
@@ -52,15 +58,17 @@
     ctx = ctx || {};
     if (v.state === "knocking") return DOOR;
     const away = v.state === "working" || v.state === "stale";
-    if (!away || !v.place) return HOME;
+    if (!away || !v.place) {
+      return baseDestination(v);
+    }
     if (v.place === DELEGATION) {
       const plot = delegatePlot(ctx);
-      return plot === null ? HOME : { kind: "plot", plot };
+      return plot === null ? baseDestination(v) : { kind: "plot", plot };
     }
     // A place the map has no building for is not a place: send the villager
     // home rather than throw. The viewer reports the broken join loudly at
     // startup, and tests/test_places.js fails on it — silence is the bug.
-    if (ctx.places && !ctx.places[v.place]) return HOME;
+    if (ctx.places && !ctx.places[v.place]) return baseDestination(v);
     return { kind: "building", id: v.place };
   }
 

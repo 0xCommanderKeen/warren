@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "match": { "agent_id": "claude-code:life-agent" },
+  "home": 1,
+  "soul": {
+    "name": "Hob",
+    "char": "Monk",
+    "accent": "#a68a4f",
+    "role": "life bot",
+    "description": "The household spirit. Lives here full-time and rests between turns."
+  },
+  "skills": [
+    { "id": "daily-summaries", "status_ref": "life-agent:skill-status/daily-summaries" },
+    { "id": "inbox-calendar", "status_ref": "life-agent:skill-status/inbox-calendar" },
+    { "id": "errands", "status_ref": "life-agent:skill-status/errands" }
+  ],
+  "memory": { "ref": "life-agent:/data/memory", "status_ref": "mounted" },
+  "routes": [
+    { "id": "telegram", "status_ref": "life-agent:route-status/telegram" }
+  ],
+  "app_grants": [
+    { "id": "gmail", "status_ref": "life-agent:grant-status/gmail" },
+    { "id": "google-calendar", "status_ref": "life-agent:grant-status/google-calendar" }
+  ]
+}

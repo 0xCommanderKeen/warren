@@ -7,6 +7,7 @@ import datetime
 import http.client
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -111,6 +112,42 @@ class CarryForwardTest(unittest.TestCase):
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(len(tail), serve.KEEP_PER_AGENT)
         self.assertEqual(tail, lines[-serve.KEEP_PER_AGENT:])
+
+    def test_compaction_reload_keeps_child_lineage_outside_display_history(self):
+        lineage = event("a-child", "task_started", 3,
+                        parent_agent_id="z-parent", agent_type="reviewer")
+        lines = [json.dumps(lineage), json.dumps(event("z-parent", "idle", 2))]
+        lines.extend(json.dumps(event("a-child", "tool_called", 1,
+                                             tool="Read", n=index))
+                     for index in range(serve.KEEP_PER_AGENT + 1))
+
+        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        script = """
+const fs = require('node:fs');
+const { reduce } = require('./viewer/projection.js');
+const lines = JSON.parse(fs.readFileSync(0, 'utf8'));
+const resident = {
+  file: 'project.resident.json', valid: true, manifest_version: 1, home: 0,
+  match: { project: 'burrow' },
+  meta: { project: 'burrow', name: 'Maren', char: 'Monk', accent: '#a68a4f' },
+  body: 'Resident', capabilities: {
+    soul: {}, skills: [], memory: {}, routes: [], app_grants: []
+  }
+};
+const village = reduce(lines, Date.now(), [resident]);
+process.stdout.write(JSON.stringify(Object.fromEntries(
+  village.map(v => [v.id, v.residency]))));
+"""
+        projected = subprocess.run(
+            ["node", "-e", script], input=json.dumps(tail), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+
+        self.assertIn(json.dumps(lineage), tail)
+        self.assertEqual(json.loads(projected.stdout), {
+            "a-child": "visitor", "z-parent": "resident",
+        })
 
     def test_ignores_junk_lines(self):
         lines = ["not json", json.dumps({"type": "tool_called"}),

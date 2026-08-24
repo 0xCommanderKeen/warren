@@ -39,7 +39,7 @@ map of everything the fleet does.
   burrow`.
   `BURROW_EVENTS=/data/events.jsonl`. Deploy code *and souls* with a tar-over-ssh
   pipe (UGOS scp is broken): `tar -cf - serve.py viewer villagers | ssh Miha@dxp2800
-  'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Souls
+  'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying.
   The viewer's live feed is SSE at `/events/stream`; the response disables nginx
@@ -49,7 +49,8 @@ map of everything the fleet does.
   is unavailable and retries SSE every two seconds.
 - **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
-  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
+  `SubagentStart`, `SubagentStop`, `SessionEnd`) with
+  `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
   secret>`. Off the tailnet it falls back to `~/.burrow/events.jsonl` locally.
   Sessions pick hooks up on start, so already-running sessions won't appear.
   Every event is also mirrored to a local dev server if one is running — see
@@ -160,33 +161,23 @@ pathfinding, fence gates and the knock queue all get exercised. The viewer check
 its own map on boot and logs one line; `__burrow.village.checkMap()` in the console
 re-runs it and returns any spot that stands on solid ground or cannot be reached.
 
-## Souls
+## Residents and visitors
 
-Villagers get persistent identity from **soul files**, versioned in this repo under
-[`villagers/`](villagers) — one `*.md` per villager, and the source of truth. Editing
-a villager is: edit the file → commit → deploy. Point `BURROW_VILLAGERS` at another
-directory to override (handy for a local scratch village).
+Residents get persistent identity and a reserved home from versioned **resident
+manifests** under [`villagers/`](villagers). Every other projected identity is a
+Visitor based at the shared lodge. Editing a resident is: edit the JSON file → run
+the tests → commit → deploy. Point `BURROW_VILLAGERS` at another directory to
+override it (handy for a local scratch village).
 
-Frontmatter pins who the file is for and how they look; the body is free-form
-markdown shown when you click the villager (description, skills, anything).
+The [resident-manifest v1 guide](docs/resident-manifest.md) documents the validated
+schema for identity, soul, skills, durable memory, routes, app grants, and the stable
+home number. `GET /residents` reports valid declarations and actionable diagnostics;
+both resident endpoints publish only the guide's allow-listed display and capability
+metadata, never raw manifest objects or app credentials. Exact agent identity wins
+before a project fallback. Invalid or incomplete declarations remain Visitors and
+advertise no access.
 
-```md
----
-project: burrow          # match ephemeral sessions by project…
-# agent_id: life-agent   # …or a resident agent by its stable id (wins over project)
-name: Maren
-char: Hunter             # sprite: Villager…Villager5, Woman, Boy, OldMan,
-                         # Princess, Hunter, Noble, Monk
-accent: "#4f7d5b"
-role: village builder
----
-Works on burrow itself — the village you are looking at.
-
-## Skills
-- pixel-art viewer
-```
-
-Agents without a soul file get a stable hash-based name and sprite. The viewer's
+Visitors get a stable hash-based name and sprite for their event identity. The viewer's
 pixel art is the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
 (see `viewer/assets/README.md`).
 

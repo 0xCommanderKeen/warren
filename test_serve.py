@@ -50,6 +50,23 @@ class NotificationTests(unittest.TestCase):
                 stream.write(f"{key}: {value}\n")
             stream.write("---\n")
 
+    def write_resident(self, filename, match, name="Resident", home=0):
+        manifest = {
+            "manifest_version": 1,
+            "match": match,
+            "home": home,
+            "soul": {
+                "name": name, "char": "Monk", "accent": "#a68a4f",
+                "role": "resident", "description": "A validated resident.",
+            },
+            "skills": [{"id": "summary", "status_ref": "bundled"}],
+            "memory": {"ref": "file:///memory.md", "status_ref": "mounted"},
+            "routes": [{"id": "local", "status_ref": "configured"}],
+            "app_grants": [{"id": "mail", "status_ref": "configured"}],
+        }
+        with open(os.path.join(self.villagers, filename), "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream)
+
     def test_failed_delivery_can_be_claimed_again_but_success_is_deduplicated(self):
         event = self.event()
         self.assertTrue(serve.claim_knock(event))
@@ -88,8 +105,41 @@ class NotificationTests(unittest.TestCase):
         self.write_events(ephemeral, resident)
 
         names = serve.villager_names([ephemeral, resident])
-        self.assertEqual("Maren", names["ephemeral"])
-        self.assertNotEqual("Maren", names["resident"])
+        self.assertNotEqual("Maren", names["ephemeral"])
+        self.assertEqual("Maren", names["resident"])
+
+    def test_resident_manifest_name_wins_over_legacy_soul_for_same_agent(self):
+        self.write_resident("resident.resident.json", {"agent_id": "shared"})
+        self.write_soul("legacy.md", agent_id="shared", name="Legacy")
+
+        names = serve.villager_names([self.event(agent_id="shared")])
+
+        self.assertEqual("Resident", names["shared"])
+
+    def test_resident_manifest_name_wins_over_legacy_soul_for_same_project(self):
+        self.write_resident("resident.resident.json", {"project": "burrow"})
+        self.write_soul("legacy.md", project="burrow", name="Legacy")
+
+        names = serve.villager_names([self.event(agent_id="visitor")])
+
+        self.assertEqual("Resident", names["visitor"])
+
+    def test_child_lineage_survives_later_events_for_notification_names(self):
+        self.write_soul("burrow.md", project="burrow", name="Maren")
+        parent = self.event(agent_id="z-parent")
+        child_start = self.event(agent_id="a-child", ts="2026-08-24T11:59:58Z")
+        child_start["type"] = "task_started"
+        child_start["payload"] = {"parent_agent_id": "z-parent", "agent_type": "reviewer"}
+        child_tool = self.event(agent_id="a-child", ts="2026-08-24T11:59:59Z")
+        child_tool["type"] = "tool_called"
+        child_tool["payload"] = {"tool": "Read"}
+        child_knock = self.event(agent_id="a-child")
+        self.write_events(child_start, child_tool, parent)
+
+        names = serve.villager_names([child_start, child_tool, parent, child_knock])
+        self.assertEqual("Maren", names["z-parent"])
+        self.assertNotEqual("Maren", names["a-child"])
+        self.assertEqual(names["a-child"], serve.villager_name(child_knock))
 
     def test_unicode_title_is_ascii_safe_for_http(self):
         event = self.event(project="项目")

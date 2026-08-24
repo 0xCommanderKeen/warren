@@ -7,7 +7,7 @@ protocol events over HTTP (POST /events, one JSON event per request).
 Env:
     BURROW_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container)
     BURROW_EVENTS        event log path (default ~/.burrow/events.jsonl)
-    BURROW_VILLAGERS     soul directory (default: villagers/ next to this file)
+    BURROW_VILLAGERS     resident-manifest directory (default: villagers/ next to this file)
     BURROW_ARCHIVE       rotated log directory (default <events dir>/archive)
     BURROW_MAX_LOG       rotate once the live log passes this many bytes
     BURROW_NOTIFY_URL    POST target for needs_human knocks (unset = no notifications)
@@ -27,6 +27,8 @@ import threading
 import time
 import urllib.request
 import urllib.parse
+
+import residents as resident_manifests
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8737
 HOST = os.environ.get("BURROW_HOST", "127.0.0.1")
@@ -70,9 +72,8 @@ CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
 
 
 def read_villagers():
-    """Soul files: villagers/*.md with a simple `key: value` frontmatter
-    between --- fences; the body is free-form markdown shown in the viewer panel."""
-    out = []
+    """Validated residents plus legacy soul files for v0 client compatibility."""
+    out = read_residents()["residents"]
     if not os.path.isdir(VILLAGERS_DIR):
         return out
     for fn in sorted(os.listdir(VILLAGERS_DIR)):
@@ -94,6 +95,11 @@ def read_villagers():
                 body = parts[2].strip()
         out.append({"file": fn, "meta": meta, "body": body})
     return out
+
+
+def read_residents():
+    """Load valid resident declarations and actionable validation diagnostics."""
+    return resident_manifests.load_resident_manifests(VILLAGERS_DIR)
 
 
 # ————— knocks: push a needs_human event to a webhook —————
@@ -132,36 +138,65 @@ def villager_names(events):
     isolation can disagree with the name on screen.
     """
     latest = {}
+    parent_by_agent = {}
     for event in events:
         if isinstance(event, dict) and event.get("agent_id"):
-            latest[str(event["agent_id"])] = event
+            agent_id = str(event["agent_id"])
+            latest[agent_id] = event
+            payload = event.get("payload") or {}
+            if isinstance(payload, dict) and payload.get("parent_agent_id"):
+                parent_by_agent[agent_id] = str(payload["parent_agent_id"])
 
     soul_by_agent = {}
     soul_by_project = {}
+
+    def is_resident(soul):
+        return (soul.get("valid") is True
+                and soul.get("manifest_version") == 1
+                and type(soul.get("home")) is int)
+
+    def index_soul(index, key, soul):
+        current = index.get(key)
+        if current is None or is_resident(soul) or not is_resident(current):
+            index[key] = soul
+
     for soul in read_villagers():
         meta = soul.get("meta") or {}
         if meta.get("agent_id"):
-            soul_by_agent[meta["agent_id"]] = soul
+            index_soul(soul_by_agent, meta["agent_id"], soul)
         if meta.get("project"):
-            soul_by_project[meta["project"]] = soul
+            index_soul(soul_by_project, meta["project"], soul)
 
     names = {}
     used_souls = set()
     taken_names = set()
+    assigned = {}
+    # Exact identities are reserved first, independently of lexical event order.
+    for agent_id in sorted(latest):
+        if latest[agent_id].get("type") == "session_ended":
+            continue
+        soul = soul_by_agent.get(agent_id)
+        soul_key = soul and soul.get("file")
+        if soul and soul_key not in used_souls:
+            assigned[agent_id] = soul
+            used_souls.add(soul_key)
+    for agent_id in sorted(latest):
+        if agent_id in assigned or latest[agent_id].get("type") == "session_ended":
+            continue
+        if agent_id in parent_by_agent:
+            continue
+        project = str(latest[agent_id].get("project") or "unknown")
+        soul = soul_by_project.get(project)
+        soul_key = soul and soul.get("file")
+        if soul and soul_key not in used_souls:
+            assigned[agent_id] = soul
+            used_souls.add(soul_key)
     for agent_id in sorted(latest):
         event = latest[agent_id]
         if event.get("type") == "session_ended":
             continue
         project = str(event.get("project") or "unknown")
-        soul = soul_by_agent.get(agent_id)
-        soul_key = soul and soul.get("file")
-        if not soul or soul_key in used_souls:
-            project_soul = soul_by_project.get(project)
-            project_key = project_soul and project_soul.get("file")
-            soul = project_soul if project_soul and project_key not in used_souls else None
-            soul_key = soul and soul.get("file")
-        if soul:
-            used_souls.add(soul_key)
+        soul = assigned.get(agent_id)
 
         h = js_hash(agent_id)
         offset = 0
@@ -194,16 +229,16 @@ def _fleet_events(event):
         pass
     events.append(event)
     latest = {str(item["agent_id"]): item for item in events}
-    visible = []
-    for item in latest.values():
+    visible_agents = set()
+    for agent_id, item in latest.items():
         try:
             timestamp = str(item.get("ts") or "").replace("Z", "+00:00")
             event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
         except (TypeError, ValueError):
             event_time = 0
         if item is event or time.time() - event_time <= DROP_SECONDS:
-            visible.append(item)
-    return visible
+            visible_agents.add(agent_id)
+    return [item for item in events if str(item["agent_id"]) in visible_agents]
 
 
 def villager_name(event):
@@ -314,8 +349,12 @@ def carry_forward(lines, now_ms):
             continue
         if event.get("type") not in EVENT_TYPES:
             continue
-        agent = per_agent.setdefault(event["agent_id"], {"events": [], "last": None})
+        agent = per_agent.setdefault(
+            event["agent_id"], {"events": [], "last": None, "lineage": None})
         agent["last"] = (i, event)
+        payload = event.get("payload")
+        if isinstance(payload, dict) and payload.get("parent_agent_id"):
+            agent["lineage"] = (i, event)
         # Heartbeat is liveness-only in the projection. It must survive when it
         # is latest, but must not consume one of the 80 visible-history slots.
         if event["type"] != "heartbeat":
@@ -328,9 +367,13 @@ def carry_forward(lines, now_ms):
         if last["type"] == "session_ended" or now_ms - event_ms(last) > DROP_MS:
             continue
         keep.extend(i for i, _ in agent["events"])
+        if agent["lineage"]:
+            lineage_i, _ = agent["lineage"]
+            if lineage_i not in keep:
+                keep.append(lineage_i)
         if last["type"] == "heartbeat":
             keep.append(last_i)
-    return [lines[i] for i in sorted(keep)]
+    return [lines[i] for i in sorted(set(keep))]
 
 
 def archive_dir():
@@ -448,6 +491,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/villagers":
             self._send(200, json.dumps(read_villagers()).encode("utf-8"),
+                       "application/json")
+            return
+        if path == "/residents":
+            self._send(200, json.dumps(read_residents()).encode("utf-8"),
                        "application/json")
             return
         if path == "/events":

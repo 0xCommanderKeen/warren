@@ -74,3 +74,13 @@ docs/protocol.md, "What delegation may claim"). Replay it with the crafter's two
 lines removed and the traveler stays home instead.
 
 The final idle events send both villagers home.
+
+## Lineage and residency fixtures
+
+`tests/fixtures/codex-hooks.jsonl` and `tests/fixtures/claude-subagents.jsonl` are
+redacted hook-shape fixtures. Their end-to-end adapter tests prove parent/child
+lineage, independent villager identities, and matching-child stop behavior for both
+runners. `tests/residents.test.js` folds fixed events with and without canonical
+manifest records to prove Resident promotion, exact-identity priority, stable homes,
+and the shared Visitor lodge without modifying event history. Checked-in manifests
+are validated end to end by `tests/test_residents.py`.
