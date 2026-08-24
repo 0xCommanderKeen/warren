@@ -32,7 +32,15 @@ Two agents, one shared location. What to watch for:
 ## `meaningful-locations.jsonl`
 
 One worker visits every meaningful work location in sequence: research goes to the
-library, inbox work goes to the post office, editing and shell work go to the workshop, delegation heads toward another
-villager's plot, and an uncovered `Read` returns home. A second crafter overlaps at
-the workshop to demonstrate stable shared-building slots. The final idle events send
-both villagers home.
+library, inbox work goes to the post office, editing and shell work go to the
+workshop, and an uncovered `Read` returns home. A second crafter overlaps at the
+workshop to demonstrate stable shared-building slots.
+
+The delegation step is the one to watch: the traveler walks to the crafter's
+door, because the crafter is the only other villager in the village. Nothing in
+the log says the work went to *that* villager — the protocol has no delegate
+identity — so all the map claims is a door with somebody behind it (see
+docs/protocol.md, "What delegation may claim"). Replay it with the crafter's two
+lines removed and the traveler stays home instead.
+
+The final idle events send both villagers home.

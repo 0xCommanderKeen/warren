@@ -148,6 +148,7 @@
 <div id="preview" hidden></div>
 
 <script src="/routes.js"></script>
+<script src="/destinations.js"></script>
 <script>
 "use strict";
 
@@ -278,15 +279,11 @@ class Heap {
   }
 }
 
-// Which shared location a villager belongs at, if any: "door" is your doorstep,
-// anything else is a key in PLACES. null means its own house.
-function whereFor(v) {
-  if (v.state === "knocking") return "door";
-  if (v.place === "delegation" && (v.state === "working" || v.state === "stale"))
-    return "delegate:" + ((hashCode(v.id) % (PLOTS.length - 1)) + 1);
-  if (v.place && (v.state === "working" || v.state === "stale")) return v.place;
-  return null;
-}
+/* Where each villager belongs, as { kind, ... } rather than a string — see
+   viewer/destinations.js. The viewer supplies what the projection cannot know:
+   which plots are occupied right now, and which door a delegating villager is
+   already standing at. */
+const { destinationFor, destinationKey } = BurrowDestinations;
 
 class Village extends Phaser.Scene {
   constructor() {
@@ -842,20 +839,18 @@ class Village extends Phaser.Scene {
     }
   }
 
-  spotFor(v, viz, where, slot) {
-    if (where && where.startsWith("delegate:")) {
-      let plot = Number(where.slice("delegate:".length)) % PLOTS.length;
-      if (plot === viz.plot) plot = (plot + 1) % PLOTS.length;
-      const d = plotDoor(plot), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
+  spotFor(v, viz, dest, slot) {
+    if (dest.kind === "plot") {   // handing work over at a neighbour's door
+      const d = plotDoor(dest.plot), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
       return { x: d.x + dx, y: d.y + 6 + dy, kind: "delegation" };
     }
-    if (where && where !== "door") {   // working at a shared building
-      const p = PLACES[where], d = placeDoor(where);
+    if (dest.kind === "building") {
+      const p = PLACES[dest.id], d = placeDoor(dest.id);
       const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
       return { x: d.x + dx,
                y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP,
                approachX: (p.tx - 2) * T + T / 2,
-               kind: where };
+               kind: dest.id };
     }
     if (viz.plot < 0) {   // traveler rests/works on the street
       const rx = 48 + (hashCode(viz.id) % 14) * 28;
@@ -957,6 +952,10 @@ class Village extends Phaser.Scene {
     const seen = new Set();
     const busyPlaces = new Set();
     let knockers = 0;
+    /* Which plots have somebody behind the door right now. Plots are assigned
+       up front so a delegating villager cannot be sent to the house of a
+       villager this same pass is about to spawn into a different one. */
+    const occupied = list.map(v => this.assignPlot(v.id)).filter(plot => plot >= 0);
     for (const v of list) {
       seen.add(v.id);
       let viz = this.viz.get(v.id);
@@ -982,13 +981,17 @@ class Village extends Phaser.Scene {
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
 
-      const where = whereFor(v);
-      this.leaveSlots(v.id, where);
-      const slot = where ? this.slotAt(where, v.id) : 0;
-      if (where && where !== "door" && !where.startsWith("delegate:") && v.state === "working")
-        busyPlaces.add(where);
+      const dest = destinationFor(v, { held: viz.delegateTo, ownPlot: viz.plot,
+                                       occupied, hash: hashCode(v.id) });
+      // held so a neighbour arriving or leaving cannot drag it to another door
+      viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
+      viz.dest = dest;
+      const key = dest.kind === "home" ? null : destinationKey(dest);
+      this.leaveSlots(v.id, key);
+      const slot = key ? this.slotAt(key, v.id) : 0;
+      if (dest.kind === "building" && v.state === "working") busyPlaces.add(dest.id);
       if (v.state === "knocking") knockers++;
-      const spot = this.spotFor(v, viz, where, slot);
+      const spot = this.spotFor(v, viz, dest, slot);
       const moved = !viz.target || viz.target.x !== spot.x || viz.target.y !== spot.y;
       if (isNew) {
         viz.cont.setPosition(spot.x, spot.y);
@@ -996,7 +999,8 @@ class Village extends Phaser.Scene {
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
       } else if (moved || v.state !== viz.state) {
         viz.target = spot;
-        this.walkTo(viz, spot, !v.place && (v.state === "working" || v.state === "resting"));
+        this.walkTo(viz, spot,
+                    dest.kind === "home" && (v.state === "working" || v.state === "resting"));
       }
       viz.state = v.state;
 
@@ -1057,12 +1061,23 @@ function renderSky(sky) {
     `<span class="note">dev override — not the real clock</span>`;
 }
 
+/* What the panel may claim about where a villager is: whatever the map did
+   with it, and no more. A delegating villager is at a neighbour's door — the
+   protocol never says whose, so neither does this. */
+function placeLabel(v) {
+  const viz = scene && scene.viz.get(v.id);
+  const dest = viz && viz.dest;
+  if (!dest) return "";
+  if (dest.kind === "building") return " · at " + PLACES[dest.id].label;
+  if (dest.kind === "plot") return " · at a neighbour's door";
+  return "";
+}
+
 function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
   const v = villagers.find(x => x.id === selectedId);
   if (!v) { closePanel(); return; }
-  const at = v.place ? " · at " + (v.place === "delegation"
-    ? "another villager's plot" : PLACES[v.place].label) : "";
+  const at = placeLabel(v);
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
     v.state === "working"  ? (v.doing || "working") + at :

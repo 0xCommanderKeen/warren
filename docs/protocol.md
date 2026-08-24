@@ -165,7 +165,7 @@ and some verbs belong to a shared building rather than the villager's own house:
 | researching                  | the library                   |
 | crafting, tinkering          | the workshop                  |
 | emailing                     | the post office               |
-| delegating                   | another villager's plot area  |
+| delegating                   | another villager's door       |
 | every other / unknown verb   | the villager's home work spot |
 
 The mapping is `LOCATION_OF_VERB` in `viewer/projection.js`. It consumes the
@@ -173,11 +173,37 @@ classification from the existing `VERBS` table, so tool names have one source of
 truth. The post office is ready for email/inbox adapters: they classify their tool
 as `emailing` in `VERBS` and inherit the shared location without viewer changes.
 
+A place is a destination, not a name: the viewer resolves each one to a
+`{ kind }` value — `home`, `door`, `{ building, id }` or `{ plot }` — in
+`viewer/destinations.js`, and coordinates, slots, doorway glow and the panel
+label all read that one value.
+
+### What delegation may claim
+
+`tool_called` says an `Agent` ran. It does **not** say who the work went to —
+the protocol carries no delegate identity, and a subagent has no `agent_id` of
+its own until it emits events under one. So the map claims only what the event
+supports: the work was handed to *somebody*.
+
+- The destination is drawn from the plots **actually occupied** by villagers in
+  the village right now. A villager is never sent to an empty house — that would
+  be a delegate the log never mentioned.
+- The choice is deterministic in the delegating villager's `agent_id`, and it is
+  **held** for as long as that neighbour is still in the village: an arrival or
+  a departure elsewhere never nudges it to a different door.
+- If nobody else is in the village, the villager stays at its own house. There
+  is no one to walk to.
+- The panel says "at a neighbour's door" and never names them, because the
+  events do not.
+
+When an emitter starts carrying the delegate's identity, `place` can become that
+villager and this fallback goes away.
+
 Rules that keep this honest:
 
 - Only the latest event decides. A covered verb walks to its mapped location; any
   other work walks home. Nothing else moves it.
-- Two villagers at the same place take **distinct, stable slots**. A slot is held
+- Two villagers at the same destination take **distinct, stable slots**. A slot is held
   until its villager leaves, so an arrival or a departure never nudges anyone else
   — that would be movement no event asked for.
 - A doorway is lit only while somebody is genuinely working there; a villager at
