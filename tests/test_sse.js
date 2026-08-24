@@ -15,6 +15,7 @@ class FakeEventSource {
 
 let eventRequests = 0;
 let retry;
+let finishCatchup;
 const response = cursor => ({
   ok: true,
   headers: { get: name => name === "X-Burrow-Cursor" ? cursor : null },
@@ -28,7 +29,9 @@ const context = {
   fetch(url) {
     if (url === "/villagers") return Promise.resolve({ ok: false });
     eventRequests += 1;
-    return Promise.resolve(response(eventRequests === 1 ? "1:2:10" : "1:2:60"));
+    if (eventRequests === 2)
+      return new Promise(resolve => { finishCatchup = () => resolve(response("1:2:60")); });
+    return Promise.resolve(response("1:2:10"));
   },
   foldEvents(agents, lines) {
     for (const line of lines) {
@@ -51,16 +54,15 @@ vm.runInContext(html.slice(start, end) + `
   context.transport.connectStream();
   assert.equal(streams[0].url, "/events/stream?since=1%3A2%3A10");
 
-  streams[0].onmessage({
-    data: '{"type":"idle","agent_id":"one"}', lastEventId: "1:2:42",
-  });
-  assert.equal(context.transport.cursor(), "1:2:42");
-  assert.equal(context.transport.agents().get("one").length, 1);
-
+  context.transport.poll();
   streams[0].onerror();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(streams[0].closed, true);
   assert.equal(eventRequests, 2, "polling resumes when SSE fails");
+  assert.equal(retry, undefined, "reconnect waits for the in-flight poll");
+
+  finishCatchup();
+  await new Promise(resolve => setImmediate(resolve));
 
   retry();
   assert.equal(streams[1].url, "/events/stream?since=1%3A2%3A60");

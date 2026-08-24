@@ -1074,7 +1074,7 @@ panelEl.querySelector(".close").addEventListener("click", closePanel);
 let souls = [];
 let eventCursor = 0;
 let agents = new Map();
-let pollInFlight = false;
+let pollPromise = null;
 let eventStream = null;
 let streamReady = false;
 let reconnectTimer = null;
@@ -1088,10 +1088,11 @@ function project(lines, reset = false) {
   renderChrome(now);
 }
 
-async function poll() {
-  if (pollInFlight || streamReady) return;
-  pollInFlight = true;
-  try {
+function poll() {
+  if (pollPromise) return pollPromise;
+  if (eventStream || streamReady) return Promise.resolve();
+  pollPromise = (async () => {
+    try {
     const [evRes, soulRes] = await Promise.all([
       fetch("/events?since=" + eventCursor, { cache: "no-store" }),
       fetch("/villagers", { cache: "no-store" }).catch(() => null),
@@ -1106,11 +1107,11 @@ async function poll() {
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     // Souls affect names and appearance even when there are no new events.
     project([]);
-  } catch {
-    beatEl.textContent = "server unreachable";
-  } finally {
-    pollInFlight = false;
-  }
+    } catch {
+      beatEl.textContent = "server unreachable";
+    }
+  })().finally(() => { pollPromise = null; });
+  return pollPromise;
 }
 
 function connectStream() {

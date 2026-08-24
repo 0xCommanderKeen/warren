@@ -51,6 +51,7 @@ DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 # never land in the gap between reading the log and swapping it out
 LOG_LOCK = threading.Lock()
 _rotate_floor = 0                    # don't re-check until the log grows past this
+_log_generation = 0                 # changes when rotation rewrites the live inode
 
 NOTIFY_URL = (os.environ.get("BURROW_NOTIFY_URL") or "").strip()
 NOTIFY_TOKEN = (os.environ.get("BURROW_NOTIFY_TOKEN") or "").strip()
@@ -357,7 +358,7 @@ def rotate(size):
     """Roll the live log into a dated archive and restart it from the tail the
     village still needs. Call with LOG_LOCK held. Returns the archive path, or
     None when there was nothing worth reclaiming."""
-    global _rotate_floor
+    global _rotate_floor, _log_generation
     # Keep the inode: local emitters may already have EVENTS open for append.
     # An inode swap strands such descriptors in the archive. Advisory locking
     # coordinates the bundled emitter, while retaining the inode also makes a
@@ -383,6 +384,7 @@ def rotate(size):
         live.truncate()
         live.flush()
         os.fsync(live.fileno())
+        _log_generation += 1
     _rotate_floor = 0
     return archive
 
@@ -452,43 +454,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             raw_since = params.get("since", ["0"])[0]
             try:
-                cursor_parts = raw_since.split(":")
-                if len(cursor_parts) == 3:
-                    cursor_identity = (int(cursor_parts[0]), int(cursor_parts[1]))
-                    since = int(cursor_parts[2])
-                elif len(cursor_parts) == 1:
-                    cursor_identity = None
-                    since = int(raw_since)
-                else:
-                    raise ValueError
-                if since < 0:
-                    raise ValueError
-            except ValueError:
+                cursor_identity, since = self._parse_cursor(raw_since)
+            except (TypeError, ValueError):
                 self._send(400, b"invalid since cursor", "text/plain")
                 return
 
-            data, cursor, reset = b"", 0, False
-            with LOG_LOCK:
-                maybe_rotate()
-                try:
-                    with open(EVENTS, "rb") as f:
-                        stat = os.fstat(f.fileno())
-                        identity = (stat.st_dev, stat.st_ino)
-                        if since > stat.st_size or (
-                                cursor_identity is not None and cursor_identity != identity):
-                            since, reset = 0, True
-                        f.seek(since)
-                        chunk = f.read()
-                        end = chunk.rfind(b"\n") + 1
-                        if end:
-                            data = chunk[:end]
-                        cursor = since + end
-                        if cursor:
-                            cursor = f"{identity[0]}:{identity[1]}:{cursor}"
-                except FileNotFoundError:
-                    reset = since > 0
+            records, identity, cursor, reset = self._read_event_records(
+                cursor_identity, since)
+            data = b"".join(line for _, line in records)
 
-            headers = {"X-Burrow-Cursor": str(cursor)}
+            headers = {"X-Burrow-Cursor": self._format_cursor(identity, cursor)}
             if reset:
                 headers["X-Burrow-Reset"] = "1"
             self._send(200, data, "application/x-ndjson", headers)
@@ -546,7 +521,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
     @staticmethod
     def _parse_cursor(raw):
         parts = raw.split(":")
-        if len(parts) == 3:
+        if len(parts) == 4:
+            identity = (int(parts[0]), int(parts[1]), int(parts[2]))
+            offset = int(parts[3])
+        elif len(parts) == 3:  # cursor issued before rotation generations existed
             identity, offset = (int(parts[0]), int(parts[1])), int(parts[2])
         elif len(parts) == 1:
             identity, offset = None, int(raw)
@@ -555,6 +533,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if offset < 0:
             raise ValueError
         return identity, offset
+
+    @staticmethod
+    def _format_cursor(identity, offset):
+        if not identity or not offset:
+            return "0"
+        return ":".join(str(part) for part in (*identity, offset))
+
+    @staticmethod
+    def _read_event_records(cursor_identity, offset):
+        """Read complete records once for both polling and SSE transports."""
+        records, reset = [], False
+        with LOG_LOCK:
+            maybe_rotate()
+            try:
+                with open(EVENTS, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    identity = (stat.st_dev, stat.st_ino, _log_generation)
+                    if offset > stat.st_size or (
+                            cursor_identity is not None and cursor_identity != identity):
+                        offset, reset = 0, True
+                    stream.seek(offset)
+                    chunk = stream.read()
+                    end = chunk.rfind(b"\n") + 1
+                    for line in chunk[:end].splitlines(keepends=True):
+                        offset += len(line)
+                        records.append((offset, line))
+                    return records, identity, offset, reset
+            except FileNotFoundError:
+                return records, None, 0, offset > 0
 
     def _stream_events(self, parsed):
         """Tail complete JSONL records as SSE messages.
@@ -582,44 +589,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_keepalive = time.monotonic()
         try:
             while True:
-                messages, identity, offset, reset = self._stream_chunk(identity, offset)
+                records, identity, offset, reset = self._read_event_records(identity, offset)
                 if reset:
                     self.wfile.write(b"event: reset\ndata: {}\n\n")
-                for event_id, line in messages:
+                for record_offset, line in records:
+                    event_id = self._format_cursor(identity, record_offset)
                     self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
                     self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
                 now = time.monotonic()
-                if messages or reset or now - last_keepalive >= 15:
-                    if not messages and not reset:
+                if records or reset or now - last_keepalive >= 15:
+                    if not records and not reset:
                         self.wfile.write(b": keepalive\n\n")
                     self.wfile.flush()
                     last_keepalive = now
                 time.sleep(0.1)
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
-
-    @staticmethod
-    def _stream_chunk(cursor_identity, offset):
-        messages, reset = [], False
-        with LOG_LOCK:
-            maybe_rotate()
-            try:
-                with open(EVENTS, "rb") as stream:
-                    stat = os.fstat(stream.fileno())
-                    identity = (stat.st_dev, stat.st_ino)
-                    if offset > stat.st_size or (
-                            cursor_identity is not None and cursor_identity != identity):
-                        offset, reset = 0, True
-                    stream.seek(offset)
-                    chunk = stream.read()
-                    end = chunk.rfind(b"\n") + 1
-                    for line in chunk[:end].splitlines(keepends=True):
-                        offset += len(line)
-                        event_id = f"{identity[0]}:{identity[1]}:{offset}"
-                        messages.append((event_id, line))
-                    return messages, identity, offset, reset
-            except FileNotFoundError:
-                return messages, None, 0, offset > 0
 
     def _send(self, code, data, ctype, headers=None):
         self.send_response(code)

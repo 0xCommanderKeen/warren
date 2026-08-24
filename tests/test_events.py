@@ -85,6 +85,24 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertEqual(headers["X-Burrow-Reset"], "1")
         self.assertEqual([replacement], [json.loads(line) for line in body.splitlines()])
 
+    def test_in_place_rotation_resets_a_cursor_still_within_the_new_log(self):
+        ts = "2099-01-01T00:00:00.000Z"
+        self.append({"type": "idle", "agent_id": "one", "ts": ts})
+        _, headers, _ = self.get_events()
+        old_cursor = headers["X-Burrow-Cursor"]
+
+        for index in range(100):
+            self.append({"type": "tool_called", "agent_id": "one", "ts": ts,
+                         "payload": {"tool": "Read", "detail": str(index)}})
+        with serve.LOG_LOCK:
+            archive = serve.rotate(os.path.getsize(self.events))
+        self.assertIsNotNone(archive)
+        self.assertGreater(os.path.getsize(self.events), int(old_cursor.rsplit(":", 1)[-1]))
+
+        _, headers, body = self.get_events(old_cursor)
+        self.assertEqual(headers.get("X-Burrow-Reset"), "1")
+        self.assertTrue(body.startswith(b'{"type"'))
+
     def test_incomplete_line_is_not_returned_or_consumed(self):
         with open(self.events, "wb") as stream:
             stream.write(b'{"type":"idle"')
