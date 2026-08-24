@@ -200,9 +200,18 @@ with status labels. The convention, for humans and agents alike:
 
 Remove the status label when the issue closes.
 
-Tests are plain stdlib scripts under `tests/`, run directly:
-`python3 tests/test_ingest_auth.py`.
+Tests are plain scripts throughout the repository. For example, the root-level
+server test can be run directly with `python3 test_serve.py`.
+
 ### Tests
+
+The authoritative test command discovers every tracked `test_*.py`, `test_*.js`,
+and `*.test.js` file anywhere in the repository and runs each exactly once:
+
+```sh
+sh tests/run.sh
+sh tests/run.sh --list  # show the tests that would run
+```
 
 The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
 event log into villagers — lives in `viewer/projection.js`. The viewer loads it as
