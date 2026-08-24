@@ -135,6 +135,24 @@
 
 /* ————— the village scene ————— */
 
+const PLACES = {
+  library: {
+    label: "the library",
+    tx: 15, ty: 16, w: 3, h: 3,
+    frame: { x: 256, y: 0, w: 48, h: 48 },
+    accent: "#7fb0c8",
+    verbs: ["researching"],
+  },
+};
+const PLACE_OF_VERB = {};
+for (const [name, p] of Object.entries(PLACES))
+  for (const verb of p.verbs) PLACE_OF_VERB[verb] = name;
+
+function workPlace(ev) {
+  if (!ev || ev.type !== "tool_called") return null;
+  return PLACE_OF_VERB[VERBS[(ev.payload || {}).tool]] || null;
+}
+
 const T = 16, MAPW = 32, MAPH = 22, ZOOM = 3;
 const FLOOR_COLS = 22;
 const GRASS = 11 * FLOOR_COLS + 3, GRASS2 = 11 * FLOOR_COLS + 2;
@@ -356,7 +374,6 @@ class Village extends Phaser.Scene {
     const reserve = (x, y) => {
       for (let dy = -1; dy <= 1; dy++)
         for (let dx = -1; dx <= 1; dx++) clear.add((x + dx) + "," + (y + dy));
->>>>>>> origin/main
     };
     for (const p of Object.values(PLACES))
       for (let y = p.ty - 1; y <= p.ty + p.h; y++)
@@ -797,9 +814,11 @@ class Village extends Phaser.Scene {
     this.plotOf.delete(id);
   }
 
-  walkTo(viz, target) {
+  walkTo(viz, target, targetY) {
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
+    const tx = typeof target === "object" ? target.x : target;
+    const ty = typeof target === "object" ? target.y : targetY;
     let path = this.route(c.x, c.y, tx, ty);
     if (!path) {
       // Staying put is truthful. A straight fallback could cross solid terrain
