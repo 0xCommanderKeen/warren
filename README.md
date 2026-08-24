@@ -72,6 +72,20 @@ Agents without a soul file get a stable hash-based name and sprite. The viewer's
 pixel art is the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
 (see `viewer/assets/README.md`).
 
+## Working on burrow
+
+Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/burrow/issues)
+with status labels. The convention, for humans and agents alike:
+
+- `status:ready` — free to pick up. **When you start, swap it to `status:in-progress`**
+  and drop a comment saying who/what is working on it; that's the claim.
+- `status:blocked` — a "Blocked by" issue must close first; swap to `status:ready`
+  when it does.
+- `needs:decision` — don't start; a human call is required first (see issue body).
+- `status:parked` — decision record, deliberately not scheduled.
+
+Remove the status label when the issue closes.
+
 ## Not this project
 
 Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate project ([arcadia](https://github.com/0xCommanderKeen/arcadia)).
