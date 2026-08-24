@@ -14,6 +14,7 @@ Env:
 """
 import datetime
 import fcntl
+import hmac
 import http.server
 import json
 import os
@@ -29,6 +30,7 @@ EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events
 
 MAX_EVENT_BYTES = 64 * 1024
 VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.join(ROOT, "villagers")
+TOKEN = (os.environ.get("BURROW_TOKEN") or "").strip()
 ARCHIVE_DIR = os.environ.get("BURROW_ARCHIVE") or ""
 MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
 
@@ -227,6 +229,15 @@ def append_event(event):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _authorized(self):
+        if not TOKEN:
+            return True
+        presented = self.headers.get("X-Burrow-Token") or ""
+        scheme, _, value = (self.headers.get("Authorization") or "").partition(" ")
+        if scheme.lower() == "bearer":
+            presented = value.strip() or presented
+        return hmac.compare_digest(presented, TOKEN)
+
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
@@ -293,6 +304,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path.split("?")[0] != "/events":
             self._send(404, b"not found", "text/plain")
+            return
+        if not self._authorized():
+            try:
+                pending = min(int(self.headers.get("Content-Length") or 0), MAX_EVENT_BYTES)
+                if pending > 0:
+                    self.rfile.read(pending)
+            except (ValueError, OSError):
+                pass
+            self._send(401, b"unauthorized", "text/plain")
             return
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_EVENT_BYTES:

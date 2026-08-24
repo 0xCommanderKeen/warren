@@ -16,6 +16,42 @@ Two transports; the event shape is the contract, not the pipe:
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
   `BURROW_URL` is unset, or as the fallback above.
 
+## Ingest auth
+
+The village never lies, so nothing on the tailnet may write to it unasked — a forged
+event is a lie with extra steps. Ingest is protected by one shared secret:
+
+- The server reads `BURROW_TOKEN`. **When set**, `POST /events` must present it as
+  `Authorization: Bearer <token>` (preferred) or `X-Burrow-Token: <token>`; anything
+  else gets `401 unauthorized` and is not logged. Comparison is constant-time, and an
+  empty/whitespace-only value counts as unset.
+- **When unset**, ingest is open — exactly today's behavior, which is what local-only
+  mode (`python3 serve.py` with no `BURROW_URL`) relies on.
+- **GET is never gated.** `/`, `/events`, `/villagers`, and the static viewer stay open;
+  the token guards writes, not reads. The event log is still a map of everything the
+  fleet does, so the server stays off the public internet either way.
+
+Emitters send `BURROW_TOKEN` from their own env. A 401 is treated as just another
+failed POST: circuit breaker trips, the event is appended to the local JSONL file. **A
+wrong token loses no events** — only their remoteness — which is what makes the rollout
+below safe.
+
+### Rollout order
+
+The token must never be required before it is sent, or in-flight agents silently fall
+back to local logs and the village looks emptier than the fleet is.
+
+1. **Server first, token unset.** Deploy the `BURROW_TOKEN`-aware `serve.py` with the
+   var *not* set. Behavior is unchanged; every existing emitter keeps working.
+2. **Emitters next.** Roll `BURROW_TOKEN=<secret>` out to every emitter (Mac hooks,
+   `life-agent` container, any other resident). A server with no token set ignores the
+   header, so emitters can be updated one at a time with no coordination.
+3. **Server last, token set.** Once every emitter sends the secret, set `BURROW_TOKEN`
+   on the server and restart. Ingest is now closed; anything still unconfigured degrades
+   to its local log rather than disappearing.
+
+Rotating the secret runs the same loop in reverse: unset on the server, re-issue to
+emitters, set again.
 The viewer reads `GET /events?since=<byte-offset>`. The response body contains only
 complete JSONL lines after that offset, and `X-Burrow-Cursor` supplies the offset for
 the next request. Omit `since` (or use `0`) for a full bootstrap. If a log is
@@ -167,7 +203,8 @@ README.md") would be a lie; it is a heartbeat.
 
 The emitter must never break the agent: it swallows all errors and always exits 0.
 
-Env vars: `BURROW_URL` (POST target, see Transport). **Resident agents** — services
+Env vars: `BURROW_URL` (POST target, see Transport) and `BURROW_TOKEN` (ingest secret,
+see Ingest auth — sent as a bearer header, omitted when unset). **Resident agents** — services
 that outlive any one Claude session, like a bot running `claude -p` per message —
 set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
 `BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of

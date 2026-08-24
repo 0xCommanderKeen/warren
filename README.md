@@ -28,6 +28,10 @@ map of everything the fleet does.
 
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
   `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
+  `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
+  updates with a tar-over-ssh pipe (UGOS scp is broken): `tar -cf - serve.py viewer |
+  ssh Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart
+  burrow`.
   `BURROW_EVENTS=/data/events.jsonl`. Deploy code *and souls* with a tar-over-ssh
   pipe (UGOS scp is broken): `tar -cf - serve.py viewer villagers | ssh Miha@dxp2800
   'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Souls
@@ -35,14 +39,30 @@ map of everything the fleet does.
   deploy — no manual file copying.
 - **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
-  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737`. Off the tailnet it falls
-  back to `~/.burrow/events.jsonl` locally. Sessions pick hooks up on start, so
-  already-running sessions won't appear.
+  `SessionEnd`) with `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
+  secret>`. Off the tailnet it falls back to `~/.burrow/events.jsonl` locally.
+  Sessions pick hooks up on start, so already-running sessions won't appear.
 - **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
   `life-agent` container (via the `claude-config` volume), with
-  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` so it appears as one resident
-  villager that rests between turns instead of leaving.
+  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
+  `BURROW_TOKEN` pair, so it appears as one resident villager that rests between
+  turns instead of leaving.
 - **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
+  viewer over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
+
+### Ingest auth
+
+Anything on the tailnet could otherwise POST fake events, and the village never lies.
+When the server has `BURROW_TOKEN` set, `POST /events` must carry it as
+`Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. GET endpoints —
+the viewer, `/events`, `/villagers` — are not gated. With the var unset, ingest is open,
+which is what local dev uses.
+
+Emitters send the token from their own `BURROW_TOKEN`. A rejected POST is just a failed
+POST: the event falls back to the local JSONL file, so a missing token costs visibility,
+never events. **Roll it out server-first:** deploy the token-aware server with the var
+unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
+order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   viewer over the local log.
 - **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
   `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
@@ -113,6 +133,8 @@ with status labels. The convention, for humans and agents alike:
 
 Remove the status label when the issue closes.
 
+Tests are plain stdlib scripts under `tests/`, run directly:
+`python3 tests/test_ingest_auth.py`.
 ### Tests
 
 The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
