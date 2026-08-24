@@ -1,0 +1,16 @@
+{"v":0,"ts":"2026-08-24T11:50:00.000Z","agent_id":"crowd:00","project":"p0","cwd":"/w/p0","type":"tool_called","payload":{"tool":"Read","detail":"file0.md"}}
+{"v":0,"ts":"2026-08-24T11:51:01.000Z","agent_id":"crowd:01","project":"p1","cwd":"/w/p1","type":"tool_called","payload":{"tool":"Read","detail":"file1.md"}}
+{"v":0,"ts":"2026-08-24T11:52:02.000Z","agent_id":"crowd:02","project":"p2","cwd":"/w/p2","type":"tool_called","payload":{"tool":"Read","detail":"file2.md"}}
+{"v":0,"ts":"2026-08-24T11:53:03.000Z","agent_id":"crowd:03","project":"p3","cwd":"/w/p3","type":"tool_called","payload":{"tool":"Read","detail":"file3.md"}}
+{"v":0,"ts":"2026-08-24T11:54:04.000Z","agent_id":"crowd:04","project":"p4","cwd":"/w/p4","type":"tool_called","payload":{"tool":"Read","detail":"file4.md"}}
+{"v":0,"ts":"2026-08-24T11:55:05.000Z","agent_id":"crowd:05","project":"p5","cwd":"/w/p5","type":"tool_called","payload":{"tool":"Read","detail":"file5.md"}}
+{"v":0,"ts":"2026-08-24T11:56:06.000Z","agent_id":"crowd:06","project":"p6","cwd":"/w/p6","type":"tool_called","payload":{"tool":"Read","detail":"file6.md"}}
+{"v":0,"ts":"2026-08-24T11:57:07.000Z","agent_id":"crowd:07","project":"p7","cwd":"/w/p7","type":"tool_called","payload":{"tool":"Read","detail":"file7.md"}}
+{"v":0,"ts":"2026-08-24T11:58:08.000Z","agent_id":"crowd:08","project":"p8","cwd":"/w/p8","type":"tool_called","payload":{"tool":"Read","detail":"file8.md"}}
+{"v":0,"ts":"2026-08-24T11:59:09.000Z","agent_id":"crowd:09","project":"p9","cwd":"/w/p9","type":"tool_called","payload":{"tool":"Read","detail":"file9.md"}}
+{"v":0,"ts":"2026-08-24T11:50:00.000Z","agent_id":"crowd:10","project":"p10","cwd":"/w/p10","type":"tool_called","payload":{"tool":"Read","detail":"file10.md"}}
+{"v":0,"ts":"2026-08-24T11:51:01.000Z","agent_id":"crowd:11","project":"p11","cwd":"/w/p11","type":"tool_called","payload":{"tool":"Read","detail":"file11.md"}}
+{"v":0,"ts":"2026-08-24T11:52:02.000Z","agent_id":"crowd:12","project":"p12","cwd":"/w/p12","type":"tool_called","payload":{"tool":"Read","detail":"file12.md"}}
+{"v":0,"ts":"2026-08-24T11:53:03.000Z","agent_id":"crowd:13","project":"p13","cwd":"/w/p13","type":"tool_called","payload":{"tool":"Read","detail":"file13.md"}}
+{"v":0,"ts":"2026-08-24T11:54:04.000Z","agent_id":"crowd:14","project":"p14","cwd":"/w/p14","type":"tool_called","payload":{"tool":"Read","detail":"file14.md"}}
+{"v":0,"ts":"2026-08-24T11:55:05.000Z","agent_id":"crowd:15","project":"p15","cwd":"/w/p15","type":"tool_called","payload":{"tool":"Read","detail":"file15.md"}}

@@ -5,6 +5,9 @@ burrow protocol event. See docs/protocol.md.
 Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; on any
 failure fall back to appending to ~/.burrow/events.jsonl locally. A failed POST
 trips a 60s circuit breaker so an unreachable server never slows hooks down.
+If BURROW_TOKEN is set it is sent as `Authorization: Bearer <token>`; a server
+that rejects it (401) is just another failed POST — the event still lands in the
+local log, so a wrong or missing token loses no events, only remoteness.
 
 Resident agents (services that outlive any one Claude session, like a Telegram
 bot running claude -p per message) set BURROW_AGENT_ID (stable villager
@@ -14,6 +17,7 @@ process is gone but the agent-as-service is still home, resting.
 
 Must never break the hosting agent: swallow everything, always exit 0."""
 import datetime
+import fcntl
 import json
 import os
 import sys
@@ -24,6 +28,9 @@ LOG_DIR = os.path.expanduser("~/.burrow")
 LOG = os.path.join(LOG_DIR, "events.jsonl")
 BREAKER = os.path.join(LOG_DIR, ".post-failed")
 BREAKER_SECONDS = 60
+
+
+ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 
 
 def tool_detail(tool_input):
@@ -47,10 +54,13 @@ def to_event(hook):
             payload["detail"] = detail
         return "tool_called", payload
     if name == "PostToolUse":
+        # A tool finished. Write-like tools produced something; every other tool
+        # only proves the agent is still alive and working -> heartbeat.
+        tool = hook.get("tool_name") or "?"
         artifact = (hook.get("tool_input") or {}).get("file_path")
-        if not artifact:
-            return None, None
-        return "artifact_produced", {"artifact": str(artifact)[:200]}
+        if artifact and tool in ARTIFACT_TOOLS:
+            return "artifact_produced", {"artifact": str(artifact)[:200]}
+        return "heartbeat", {"tool": tool}
     if name == "Notification":
         return "needs_human", {"message": str(hook.get("message") or "")[:200]}
     if name == "Stop":
@@ -66,11 +76,15 @@ def post_event(url, event):
             return False
     except OSError:
         pass
+    headers = {"Content-Type": "application/json"}
+    token = (os.environ.get("BURROW_TOKEN") or "").strip()
+    if token:
+        headers["Authorization"] = "Bearer " + token
     try:
         req = urllib.request.Request(
             url.rstrip("/") + "/events",
             data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=2):
@@ -116,6 +130,10 @@ def main():
         return
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:
+        # Coordinate with server-side in-place rotation. Locking the log itself
+        # also works for descriptors opened before rotation because its inode
+        # is deliberately retained.
+        fcntl.flock(f, fcntl.LOCK_EX)
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
