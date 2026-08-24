@@ -69,7 +69,14 @@ from croniter import croniter
 
 from steward import events as ev
 from steward import journal
-from steward.manifest import ManifestError, Resident, ResidentManifest, Routine, validate_path
+from steward.manifest import (
+    ManifestError,
+    Resident,
+    ResidentManifest,
+    Routine,
+    active_residents,
+    validate_path,
+)
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_routine_prompt
 from steward.runners import (
@@ -394,6 +401,11 @@ def load_scheduled(
     residents that passed, and the diagnostics are the caller's to report. A granted
     skill that names nothing in the library is one of those diagnostics, so nothing
     that could not be provisioned is scheduled in the first place.
+
+    Retired residents are left out too, and for a plainer reason: a manifest that says
+    ``retired: true`` has said this resident does no more work. Its routines are still
+    declared, still valid, and still readable in git — they simply never fire, which is
+    what retirement means. Un-retire it and commit, and they fire again.
     """
     result = validate_path(residents_dir, skills_dir)
     if not result.ok:
@@ -403,7 +415,7 @@ def load_scheduled(
         )
     return [
         ScheduledRoutine(resident=resident, routine=routine)
-        for resident in result.residents
+        for resident in active_residents(result.residents)
         for routine in resident.manifest.routines
         if routine.enabled
     ]

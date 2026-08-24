@@ -299,3 +299,22 @@ def test_only_the_runner_module_may_launch_a_session() -> None:
         f"{sorted(offenders)} launch processes directly; every session must go through "
         f"steward.runners so 'which brain is Hob on' has one answer"
     )
+
+
+# ---------------------------------------------------------- feeding a command stdin
+
+
+def test_a_command_can_be_fed_a_payload_on_stdin(stub_bin: StubWriter, tmp_path: Path) -> None:
+    """The nursery pipes a tar into `tar -xf -` this way, because the NAS has no working scp."""
+    dump = tmp_path / "stdin.bin"
+    stub_bin("swallow", f'cat > "{dump}"')
+
+    outcome = r.run_argv(["swallow"], stdin=b"a tar archive, or near enough\x00")
+
+    assert outcome.ok
+    assert dump.read_bytes() == b"a tar archive, or near enough\x00"
+
+
+def test_a_command_with_no_stdin_sees_an_empty_one(stub_bin: StubWriter) -> None:
+    stub_bin("echoback", "cat")
+    assert r.run_argv(["echoback"]).stdout == ""

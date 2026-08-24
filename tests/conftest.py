@@ -3,7 +3,9 @@
 import copy
 import os
 import stat
+import subprocess
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -179,3 +181,60 @@ def stub_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StubWriter:
 def empty_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Blank out PATH so a missing binary is missing for sure."""
     monkeypatch.setenv("PATH", str(tmp_path / "nothing-here"))
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchRepo:
+    """A throwaway git checkout shaped like this one: residents/ and skills/ inside it."""
+
+    root: Path
+
+    @property
+    def residents(self) -> Path:
+        """The residents tree inside the scratch checkout."""
+        return self.root / "residents"
+
+    @property
+    def skills(self) -> Path:
+        """The skills library beside it."""
+        return self.root / "skills"
+
+    def git(self, *args: str) -> subprocess.CompletedProcess[str]:
+        """Run one git command in the scratch checkout, and insist that it worked."""
+        return subprocess.run(  # noqa: S603 — argv list, shell=False, a temp directory
+            ["git", "-C", str(self.root), *args],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def log(self) -> list[str]:
+        """Return the commit subjects, newest first."""
+        out = self.git("log", "--format=%s").stdout.strip()
+        return out.splitlines() if out else []
+
+    def head(self) -> str:
+        """Return the current commit."""
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+
+@pytest.fixture
+def scratch_repo(tmp_path: Path) -> ScratchRepo:
+    """Build a real git repo in a temp directory, with one commit already in it.
+
+    Real git, because the nursery's commits are made by running ``git`` and a fake would
+    only prove that the fake agrees with itself. Temp directory, emphatically: a test that
+    could commit into *this* checkout would be a test suite writing history nobody asked
+    for, and the fixture exists so no test is ever tempted to point at the repo root.
+    """
+    repo = ScratchRepo(root=tmp_path / "checkout")
+    repo.residents.mkdir(parents=True)
+    repo.skills.mkdir(parents=True)
+    (repo.root / "README.md").write_text("scratch\n", encoding="utf-8")
+    repo.git("init", "-b", "main")
+    repo.git("config", "user.email", "test@example.invalid")
+    repo.git("config", "user.name", "Test")
+    repo.git("config", "commit.gpgsign", "false")
+    repo.git("add", "-A")
+    repo.git("commit", "-m", "chore: scratch repo")
+    return repo

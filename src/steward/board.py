@@ -62,6 +62,7 @@ from steward.manifest import (
     ManifestError,
     Resident,
     ResidentManifest,
+    active_residents,
     validate_path,
 )
 from steward.prompt import assemble_delegated_prompt, assemble_task_prompt
@@ -123,8 +124,14 @@ def claimable_skills(manifest: ResidentManifest, library: SkillLibrary) -> froze
 
 
 def board_residents(residents: Sequence[Resident]) -> list[Resident]:
-    """Return the residents whose manifests opt into board work, in declared order."""
-    return [resident for resident in residents if resident.manifest.board.claim]
+    """Return the residents whose manifests opt into board work, in declared order.
+
+    A retired resident is not one of them, whatever its ``board`` block still says. The
+    filter is applied here as well as at load time because a caller may hand the
+    dispatcher an explicit list, and "does this resident take work" must have the same
+    answer however the list was built.
+    """
+    return [resident for resident in active_residents(residents) if resident.manifest.board.claim]
 
 
 def delegation_residents(residents: Sequence[Resident]) -> list[Resident]:
@@ -134,9 +141,9 @@ def delegation_residents(residents: Sequence[Resident]) -> list[Resident]:
     delivering anything (:mod:`steward.delegation`). A resident that has closed its door
     since a letter arrived stops taking new ones and the letter waits on the mat, visible
     in ``steward inbox``; steward does not push work through a channel a manifest now says
-    is shut.
+    is shut — and a resident that has been retired has closed every door it had.
     """
-    return [resident for resident in residents if resident.delegation_routes]
+    return [resident for resident in active_residents(residents) if resident.delegation_routes]
 
 
 def load_board_residents(
@@ -161,6 +168,12 @@ def load_residents(
     resident that accepts delegated work has said so in its ``routes`` without ever
     opting into the board. Both filters are applied where they belong — at dispatch —
     rather than by loading a narrower fleet than exists.
+
+    Retirement is filtered at dispatch too, and for the same reason plus one more: a lease
+    held by a resident that has since been retired still has to be swept, and naming its
+    project in the ``task_failed`` needs the manifest this load would otherwise have
+    dropped. What a retired resident cannot do is take *new* work, and that is decided by
+    :func:`board_residents` and :func:`delegation_residents`.
     """
     return list(validate_path(residents_dir, skills_dir).residents)
 

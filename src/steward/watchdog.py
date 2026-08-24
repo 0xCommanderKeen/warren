@@ -57,7 +57,7 @@ from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.board import Dispatcher, DispatchRun
 from steward.budgets import BudgetGuard
-from steward.manifest import Resident, validate_path
+from steward.manifest import Resident, active_residents, validate_path
 from steward.runners import CommandRun, run_argv
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
 from steward.store import ApprovalRecord, JobRecord, Store
@@ -562,10 +562,15 @@ class Watchdog:
         read is a resident steward cannot honestly speak for, and restarting a container
         named in a manifest that does not validate would be acting on a declaration
         nobody has checked.
+
+        Retired residents are left out for a sharper one. ``steward retire`` marks the
+        manifest and *then* stops the container, so a watchdog that still probed retired
+        residents would find one down and put it straight back up — steward undoing
+        steward, on a schedule, forever.
         """
         sink = emitter if emitter is not None else ev.EventEmitter.from_env()
         return cls(
-            residents=list(validate_path(residents_dir, skills_dir).residents),
+            residents=active_residents(validate_path(residents_dir, skills_dir).residents),
             store=store,
             emitter=sink,
             supervisors=supervisors,

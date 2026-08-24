@@ -36,7 +36,8 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `board` | no | Job board participation. Absent means this resident never claims. |
 | `delegation` | no | Handing work to other residents. Absent means this one never does. |
 | `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
-| `deploy` | no | Where this resident runs, for the watchdog. Absent means unsupervised. |
+| `deploy` | no | Where this resident runs: the nursery deploys there, the watchdog probes it. |
+| `retired` | no | Lifecycle state. `true` stops the resident; the files stay in git. |
 
 `agent_id` matches before `project`, mirroring burrow's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
@@ -438,14 +439,81 @@ is worth noticing while you are reading the two numbers side by side.
 
 ```yaml
 deploy:
-  container: steward-life-agent
+  host: dxp2800                       # the NAS, over Tailscale
+  user: Miha                          # the ssh user steward reaches it as
+  path: ~/docker/steward-life-agent   # the compose directory on that host
+  container: steward-life-agent       # the docker container name
+  image: python:3.12-slim             # what the container runs
+  command: [sleep, infinity]          # argv inside it
 ```
 
-One optional field, and it is deliberately small. `container` names the docker container
-[the watchdog](#the-watchdog) restarts. Steward does not own containers yet — deployment
-is steward #4 — so this is a declaration a supervisor can act on, not a promise that
-steward created anything. A resident with no `deploy` block is reported by the watchdog as
-**unsupervised**, which is a real answer; it is never reported as healthy.
+Every field is optional, and every one has a default for the layout this fleet already
+uses — burrow's own server is `~/docker/burrow` on `dxp2800`, and a new resident lands
+beside it:
+
+| field | default |
+|---|---|
+| `host` | `dxp2800` |
+| `user` | `Miha` |
+| `path` | `~/docker/<container>` |
+| `container` | `steward-<id>` |
+| `image` | `python:3.12-slim` |
+| `command` | `["sleep", "infinity"]` |
+
+So an ordinary resident declares no `deploy` block at all and still deploys. The block is
+for the resident that does *not* live where everything else lives: a second machine, a
+different compose root, a container somebody named by hand before steward existed.
+
+`container` is also what [the watchdog](#the-watchdog) probes and restarts. An **absent**
+`deploy` block still means unsupervised: the default name is what the nursery *would*
+create, and a resident nobody has provisioned has no container under it.
+
+The default `command` is honest about what a resident's container is: a place for sessions
+to happen, not a process that does work on its own. Steward drives the brain from outside,
+so the container's job is to be there.
+
+**Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
+up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A
+value carrying a space, a quote, a `;` or a `$(…)` would be a manifest that runs arbitrary
+commands on the NAS. Steward never builds a shell string, but the remote end is a shell
+whether steward likes it or not, and the patterns are where that fact is answered:
+
+```
+residents/note-keeper/manifest.yaml: error: deploy.host
+    problem: String should match pattern '^[A-Za-z0-9][A-Za-z0-9.-]*$'
+    example: host: dxp2800  (a hostname, no spaces: it reaches a remote shell)
+```
+
+## `retired` — the lifecycle state
+
+```yaml
+retired: true
+```
+
+Defaults to `false`. `steward retire <id>` sets it, commits it, and then stops the
+container — in that order, so the watchdog is not still trying to restart something
+steward is deliberately taking down.
+
+Retirement is **not deletion**. The manifest and the soul stay in this repo and in its
+history, `steward validate` still reads them, `GET /residents` still lists the resident
+with `"retired": true`, and `steward doctor` prints *retired — fires nothing*. A village
+that forgot a resident had ever existed could not answer what used to happen here.
+
+What a retired resident stops doing, and where each refusal lives:
+
+| it no longer | enforced in |
+|---|---|
+| fires routines | `load_scheduled` |
+| claims board tasks | `board_residents` |
+| receives delegated work | `delegation_residents`, and `Delegator` with the reason |
+| answers `POST …/run` | the API, as `409 resident_retired` |
+| is probed or restarted | `Watchdog.from_path` |
+
+It drops out of the village the honest way: it stops emitting, and burrow's existing
+projection rules do the rest. Steward forges no `session_ended` on its behalf.
+
+Bringing one back is a person's decision written down: set `retired: false`, commit, and
+run `steward new-resident` again to put the container up.
 
 ## The watchdog
 

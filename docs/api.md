@@ -25,7 +25,8 @@ burrow's log.
 | post a job | `task_posted` (and later `task_claimed` / `task_done`) |
 | decide an approval | `needs_human_resolved`, then the resident's next action |
 | delegate to a resident | `task_delegated`, then `task_claimed` / `task_done` |
-| create a resident | nothing — it is a file for review, not a deployment |
+| create a resident (`deploy: false`) | nothing — it is a file for review, not a deployment |
+| create a resident (`deploy: true`) | the resident's own first event, and nothing sooner |
 
 The UI must treat the event stream as the only source of truth. No optimistic state:
 a village that shows work the fleet has not confirmed is a village that lies.
@@ -97,6 +98,7 @@ work.
 | 409 | `already_running` | the scheduler's overlap rule: skipped, never queued |
 | 409 | `budget_exceeded` | `paused: budget exceeded`; see [`GET /residents/{id}/budget`](#get-residentsidbudget) |
 | 409 | `resident_invalid` | the resident exists but its manifest does not validate |
+| 409 | `resident_retired` | the manifest declares `retired: true`; it takes no work at all |
 
 The run's consumption — tokens, money, seconds — lands on the durable ledger like any
 other session's, and its timeout is capped by the manifest's `budgets.max_run_seconds`.
@@ -221,20 +223,77 @@ one. A request nobody answers before its `expires_at` resolves itself as `deny` 
   "id": "note-keeper", "name": "Quill", "char": "Scribe",
   "accent": "#4f7ea6", "role": "note bot",
   "charter": {"mission": "…", "duties": ["…"], "rules": ["…"], "escalation": "…"},
-  "skills": ["research"], "runner": {"kind": "claude", "model": "claude-opus-5"}
+  "skills": ["research"], "runner": {"kind": "claude", "model": "claude-opus-5"},
+  "deploy": false
 }
 ```
 
-Writes `residents/<id>/manifest.yaml` and `residents/<id>/soul.md` and reads them back
-through the ordinary validator, so what it produces is something `steward validate`
-accepts — checked, not claimed. A skeleton that fails validation is removed rather
-than left to break the tree for everyone.
+Runs the same `steward.nursery.raise_resident` pipeline `steward new-resident` runs —
+the endpoint and the command are one implementation, verified by a test that injects the
+pipeline rather than by a convention somebody has to keep.
 
-`201` with the paths it wrote. **It deploys nothing**: no container, no scheduler
-registration, no event on the new resident's behalf. A villager appears in burrow when
-it genuinely exists and emits. `409` if the resident already exists — converging an
-existing declaration is the nursery's job, not an accidental overwrite of a soul
-someone wrote.
+**`deploy` defaults to `false`**, so the endpoint's old behaviour is still its default:
+`residents/<id>/manifest.yaml` and `residents/<id>/soul.md` are written and read back
+through the ordinary validator — checked, not claimed — and nothing else happens. No
+container, no scheduler registration, no event on the new resident's behalf. A skeleton
+that fails validation is removed rather than left to break the tree for everyone.
+
+**`deploy: true`** additionally provisions the container and checks the schedule. Asking
+for that is asking steward to reach a machine over ssh and start something on it, which
+is not a thing a request should be able to do by leaving a field out.
+
+**This endpoint never commits.** Not with `deploy: false`, not with `deploy: true`. The
+server is not guaranteed to own the checkout it is reading — it may be a tailnet process
+on a machine where nobody is watching git — and a commit appearing there is a commit that
+surprises somebody. The response says so in `message`, and `declare.commit` is `null`, so
+a panel can tell the human what is still theirs to do. `steward new-resident` on a
+terminal is the path that commits.
+
+`201` with the paths it wrote and the full report:
+
+```json
+{"request_id": "…", "status": "accepted", "message": "…",
+ "id": "note-keeper", "manifest_path": "residents/note-keeper/manifest.yaml",
+ "soul_path": "residents/note-keeper/soul.md",
+ "changed": true,
+ "declare": {"written": true, "commit": null, "note": "declared and validated"},
+ "provision": {"target": {"host": "dxp2800", "user": "Miha",
+                          "path": "~/docker/steward-note-keeper",
+                          "container": "steward-note-keeper", "image": "python:3.12-slim"},
+               "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
+               "compose": "services:\n  note-keeper:\n…",
+               "compose_changed": true, "env_keys": ["BURROW_TOKEN", "BURROW_URL"],
+               "commands": ["ssh Miha@dxp2800 docker compose … up -d"], "sent": true},
+ "register": {"ok": true, "problems": [],
+              "next_fires": [{"routine": "tidy-notes", "at": "2026-06-15T20:00:00+02:00"}]}}
+```
+
+`env_keys` is **names only, forever**. The values are read from steward's own environment
+at provision time, written into a `.env` on the host at mode `0600`, and never returned,
+logged, or committed — see [the nursery's secret rule](#secrets-and-the-nursery).
+
+Posting the **same body twice** is `201` and converged: `declare.written` is `false`,
+`provision.sent` is `false`, `changed` is `false`, and nothing was written or uploaded.
+Posting a **different** declaration under a name that already exists is `409
+resident_not_declared`, naming the fields that disagree — the skeleton is a starting
+point somebody then edits, and a request must not be able to overwrite a soul from a form.
+
+`409 resident_retired` when the id belongs to a retired resident: un-retiring is a
+person's decision, written into the manifest and committed, not something an HTTP call
+does on the way past.
+
+### Secrets and the nursery
+
+`BURROW_URL` and `BURROW_TOKEN` are read from **steward's own environment** when a
+resident is provisioned and templated into a `.env` beside the compose file on the host.
+They are never in the compose file (which carries `${BURROW_TOKEN-}`, a reference), never
+in a manifest, never in a soul, and never in git — the repo's own credential scanners are
+run over everything the nursery writes into the checkout, as a test.
+
+`POST /residents` with `deploy: true` and no `BURROW_URL` in steward's environment is
+refused: a container with nowhere to emit is a resident that would never appear in the
+village, and finding that out three days later from an empty house is worse than finding
+it out now.
 
 ### `GET /residents` · `GET /residents/{id}`
 
@@ -243,6 +302,11 @@ Read-only JSON views of validated manifests, including `runner.kind` and
 not validate are named in `errors` rather than quietly omitted. There is nothing to
 redact: a manifest holding a credential-shaped key or an inline secret would have
 failed validation and never become a resident at all.
+
+A **retired** resident is listed, with `"retired": true`. Hiding it would leave a fleet
+view unable to answer what used to run here, and retirement is a lifecycle state rather
+than a deletion — see [`retired`](manifest.md#retired--the-lifecycle-state) for the full
+list of what it stops.
 
 `skills` is what the manifest grants; `effective_skills` is what a session actually
 gets — the library's defaults plus those grants, in injection order:

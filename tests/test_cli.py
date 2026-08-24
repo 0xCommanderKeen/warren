@@ -8,9 +8,10 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from conftest import REPO_ROOT, ResidentWriter, StubWriter, valid_manifest
+from conftest import REPO_ROOT, ResidentWriter, ScratchRepo, StubWriter, valid_manifest
 from steward.budgets import BudgetGuard
 from steward.cli import main
+from steward.deploy import LocalTransport
 from steward.journal import write_entry
 from steward.manifest import load_manifest
 from steward.store import Store
@@ -1511,3 +1512,361 @@ def test_board_dispatch_reports_a_letter_it_worked(
     assert result.exit_code == 0, result.output
     assert "done receiver-agent" in result.output
     assert "delegated by test-agent" in result.output
+
+
+# ======================================================================================
+# the nursery: `steward new-resident` and `steward retire`
+# ======================================================================================
+
+CHARTER_YAML = """mission: Keep the village's notes in order.
+duties:
+  - Tidy the notes each evening.
+rules:
+  - Never delete a note without asking.
+escalation: Raise needs_human before anything irreversible.
+"""
+
+
+@pytest.fixture
+def charter_file(tmp_path: Path) -> Path:
+    path = tmp_path / "charter.yaml"
+    path.write_text(CHARTER_YAML, encoding="utf-8")
+    return path
+
+
+@pytest.fixture
+def nas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalTransport:
+    """Point the CLI's default transport at a directory instead of the real NAS.
+
+    ``transport_for`` is the documented seam: the pipeline builds the ssh transport its
+    manifest addresses unless somebody hands it one. A CLI test hands it one here rather
+    than growing a flag nobody would ever use in production.
+    """
+    host = LocalTransport(root=tmp_path / "nas")
+    monkeypatch.setattr("steward.nursery.transport_for", lambda _target: host)
+    monkeypatch.setenv("BURROW_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("BURROW_TOKEN", "cli-village-token")
+    return host
+
+
+def new_resident_argv(repo: ScratchRepo, charter: Path, *extra: str) -> list[str]:
+    """Build the full command line, so each test varies only what it is about."""
+    return [
+        "new-resident",
+        "--id",
+        "note-keeper",
+        "--name",
+        "Quill",
+        "--char",
+        "Scribe",
+        "--accent",
+        "#4f7ea6",
+        "--role",
+        "note bot",
+        "--charter",
+        str(charter),
+        "--residents",
+        str(repo.residents),
+        "--repo",
+        str(repo.root),
+        *extra,
+    ]
+
+
+def test_new_resident_raises_a_resident_end_to_end(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+
+    assert result.exit_code == 0, result.output
+    assert "note-keeper is raised" in result.output
+    assert (scratch_repo.residents / "note-keeper" / "soul.md").is_file()
+    assert scratch_repo.log()[0] == "feat(residents): declare note-keeper"
+    assert (nas.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+
+
+@pytest.mark.usefixtures("nas")
+def test_new_resident_is_a_no_op_the_second_time(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+    commits = scratch_repo.log()
+
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+
+    assert result.exit_code == 0, result.output
+    assert "converged" in result.output
+    assert scratch_repo.log() == commits
+
+
+def test_new_resident_dry_run_prints_the_plan_and_changes_nothing(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file, "--dry-run"))
+
+    assert result.exit_code == 0, result.output
+    assert "plan for note-keeper" in result.output
+    assert "docker compose" in result.output
+    assert "nothing was written, sent, or committed" in result.output
+    assert not (scratch_repo.residents / "note-keeper").exists()
+    assert not nas.touched
+
+
+@pytest.mark.usefixtures("nas")
+def test_new_resident_reports_json_when_asked(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file, "--format", "json"))
+
+    payload = json.loads(result.output)
+    assert payload["resident"] == "note-keeper"
+    assert payload["provision"]["target"]["container"] == "steward-note-keeper"
+    assert "cli-village-token" not in result.output
+
+
+def test_new_resident_can_skip_the_container_entirely(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file, "--no-deploy"))
+
+    assert result.exit_code == 0, result.output
+    assert not nas.touched
+    assert scratch_repo.log()[0] == "feat(residents): declare note-keeper"
+
+
+@pytest.mark.usefixtures("nas")
+def test_new_resident_can_skip_the_commit(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file, "--no-commit"))
+
+    assert result.exit_code == 0, result.output
+    assert scratch_repo.log() == ["chore: scratch repo"]
+    assert (scratch_repo.residents / "note-keeper" / "manifest.yaml").is_file()
+
+
+def test_new_resident_refuses_a_dirty_worktree(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    (scratch_repo.root / "scratch.txt").write_text("mid-thought\n", encoding="utf-8")
+
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+
+    assert result.exit_code == 1
+    assert "uncommitted changes" in result.output
+    assert not nas.touched
+
+
+@pytest.mark.usefixtures("nas")
+def test_new_resident_needs_a_charter(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    result = runner.invoke(
+        main,
+        [
+            "new-resident",
+            "--id",
+            "note-keeper",
+            "--name",
+            "Quill",
+            "--char",
+            "Scribe",
+            "--accent",
+            "#4f7ea6",
+            "--role",
+            "note bot",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "--charter is required" in result.output
+
+
+@pytest.mark.usefixtures("nas")
+def test_a_charter_that_is_not_a_charter_says_what_one_looks_like(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    tmp_path: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    charter = tmp_path / "charter.yaml"
+    charter.write_text("- just a list\n", encoding="utf-8")
+
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter))
+
+    assert result.exit_code == 1
+    assert "mission" in result.output
+
+
+@pytest.mark.usefixtures("nas")
+def test_a_charter_that_is_not_yaml_at_all_is_named(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    tmp_path: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    charter = tmp_path / "charter.yaml"
+    charter.write_text("mission: [unclosed\n", encoding="utf-8")
+
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter))
+
+    assert result.exit_code == 1
+    assert "cannot read the charter" in result.output
+
+
+@pytest.mark.usefixtures("nas")
+def test_a_spec_that_cannot_bind_to_the_schema_names_the_field(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    result = runner.invoke(
+        main, new_resident_argv(scratch_repo, charter_file, "--accent", "not-a-colour")
+    )
+
+    assert result.exit_code == 1
+    assert "accent" in result.output
+
+
+def test_retire_stops_the_container_and_commits_the_decision(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+
+    result = runner.invoke(
+        main,
+        [
+            "retire",
+            "note-keeper",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "note-keeper is retired" in result.output
+    assert "no event was emitted on its behalf" in result.output
+    assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
+    assert nas.calls[-1][-2:] == ("down", "--remove-orphans")
+
+
+def test_retire_dry_run_changes_nothing(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+    before = scratch_repo.head()
+    nas.calls.clear()
+
+    result = runner.invoke(
+        main,
+        [
+            "retire",
+            "note-keeper",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "nothing was stopped, marked, or committed" in result.output
+    assert scratch_repo.head() == before
+    assert nas.calls == []
+
+
+@pytest.mark.usefixtures("nas")
+def test_retire_reports_json_when_asked(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+
+    result = runner.invoke(
+        main,
+        [
+            "retire",
+            "note-keeper",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+            "--format",
+            "json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert payload["marked"] is True
+    assert payload["stopped"] is True
+
+
+@pytest.mark.usefixtures("nas")
+def test_retiring_a_resident_nobody_declared_exits_non_zero(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    nas: LocalTransport,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    result = runner.invoke(
+        main,
+        [
+            "retire",
+            "ghost",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "no resident 'ghost'" in result.output
+
+
+@pytest.mark.usefixtures("nas")
+def test_doctor_says_a_retired_resident_fires_nothing(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    tmp_path: Path,
+) -> None:
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+    runner.invoke(
+        main,
+        [
+            "retire",
+            "note-keeper",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+        ],
+    )
+
+    result = runner.invoke(
+        main, ["doctor", str(scratch_repo.residents), "--db", str(tmp_path / "doctor.db")]
+    )
+
+    assert "retired — fires nothing" in result.output
+    assert "no enabled routines" in result.output

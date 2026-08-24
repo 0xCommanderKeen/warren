@@ -60,10 +60,12 @@ __all__ = [
     "SoulDocument",
     "SoulIdentity",
     "ValidationResult",
+    "active_residents",
     "closest_match",
     "extract_voice",
     "load_manifest",
     "manifest_json_schema",
+    "retired_complaint",
     "split_frontmatter",
     "validate_manifest",
     "validate_path",
@@ -128,6 +130,17 @@ MAX_CLAIMS_PER_WAKE = 10
 
 #: A container name is a docker identifier: letters, digits, and ``_.-`` after the first.
 CONTAINER_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+
+#: The four ``deploy`` patterns are narrow on purpose, and the reason is not tidiness.
+#: Everything in that block is interpolated into an ``ssh`` command line, and ``ssh``
+#: hands its arguments to a shell on the far side — so a host, user, or path carrying a
+#: space, a quote, a ``;`` or a ``$(…)`` would be a manifest that runs arbitrary commands
+#: on the NAS. steward never builds a shell string, but the remote end is a shell whether
+#: steward likes it or not, and these patterns are where that fact is answered.
+HOST_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.-]*$"
+SSH_USER_PATTERN = r"^[A-Za-z_][A-Za-z0-9._-]*$"
+REMOTE_PATH_PATTERN = r"^[A-Za-z0-9~/][A-Za-z0-9_./-]*$"
+IMAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$"
 
 
 # --------------------------------------------------------------------------------------
@@ -622,20 +635,50 @@ class Budgets(_Model):
 
 
 class Deploy(_Model):
-    """Where this resident runs, for the things that have to reach the process itself.
+    """Where this resident runs: the address the nursery ships it to and the watchdog probes.
 
-    One field today, and it is deliberately small: ``container`` names the docker
-    container the watchdog restarts (:mod:`steward.watchdog`). steward does not own
-    containers yet — deployment is steward #4 — so this is a declaration a supervisor can
-    act on, not a promise that steward created anything. A resident with no ``deploy``
-    block is one no container supervisor can speak for, and the watchdog says exactly
-    that instead of guessing a name.
+    Every field is optional and every one has a documented default for the dxp2800 layout
+    (see :mod:`steward.deploy`), so an ordinary resident declares nothing here and still
+    deploys. What the block is for is the resident that does *not* live where everything
+    else lives — a second NAS, a different compose root, a container someone named by hand
+    before steward existed.
+
+    An absent ``deploy`` block is still what the watchdog calls **unsupervised**: the
+    default container name is what the nursery *would* create, and a resident nobody has
+    provisioned has no container under that name to speak for.
+
+    The patterns on ``host``, ``user``, ``path`` and ``image`` are a safety boundary, not
+    a style guide — see :data:`HOST_PATTERN`.
     """
 
     container: str | None = Field(
         default=None,
         pattern=CONTAINER_PATTERN,
-        description="Docker container name the watchdog restarts, e.g. steward-life-agent.",
+        description="Docker container name, e.g. steward-life-agent. Default: steward-<id>.",
+    )
+    host: str | None = Field(
+        default=None,
+        pattern=HOST_PATTERN,
+        description="Host the container runs on. Default: dxp2800.",
+    )
+    user: str | None = Field(
+        default=None,
+        pattern=SSH_USER_PATTERN,
+        description="SSH user steward reaches that host as. Default: Miha.",
+    )
+    path: str | None = Field(
+        default=None,
+        pattern=REMOTE_PATH_PATTERN,
+        description="Compose directory on the host. Default: ~/docker/<container>.",
+    )
+    image: str | None = Field(
+        default=None,
+        pattern=IMAGE_PATTERN,
+        description="Container image. Default: python:3.12-slim.",
+    )
+    command: list[str] = Field(
+        default_factory=list,
+        description="argv the container runs. Default: ['sleep', 'infinity'].",
     )
 
 
@@ -733,6 +776,10 @@ class ResidentManifest(_Model):
     )
     project: str | None = Field(default=None, description="Project label for scoped residents.")
     summary: str | None = Field(default=None, description="One line burrow can display.")
+    retired: bool = Field(
+        default=False,
+        description="This resident has been retired. It keeps validating and stops working.",
+    )
 
     soul: SoulIdentity
     charter: Charter
@@ -901,6 +948,11 @@ class Resident:
         """The burrow project label: the manifest's project, else the resident id."""
         return self.manifest.project or self.manifest.id
 
+    @property
+    def retired(self) -> bool:
+        """True when this resident's own manifest says it has been retired."""
+        return self.manifest.retired
+
     def route(self, route_id: str) -> Route | None:
         """Return the declared route with this id, or ``None`` if it declares none."""
         return next((route for route in self.manifest.routes if route.id == route_id), None)
@@ -924,6 +976,31 @@ class Resident:
             if candidate.is_dir():
                 return candidate
         return fallback
+
+
+#: What every refusal says about a retired resident, so the reason reads the same whether
+#: it came back from the scheduler, the board, a delegation, or the API.
+RETIRED_REASON = (
+    "resident {id!r} is retired: its manifest declares retired: true, so it takes no "
+    "routines, no board tasks, no letters, and no run-now. Set retired: false and commit "
+    "to bring it back, and run `steward new-resident` to put its container back up."
+)
+
+
+def retired_complaint(resident: Resident) -> str | None:
+    """Return why this resident may not be given work, or ``None`` when it may."""
+    return RETIRED_REASON.format(id=resident.id) if resident.retired else None
+
+
+def active_residents(residents: Iterable[Resident]) -> list[Resident]:
+    """Return the residents that have not been retired, in the order they came in.
+
+    The one filter. Retirement is a lifecycle state rather than a deletion — the manifest
+    and the soul stay in git, the resident keeps validating, and ``steward validate``
+    still reads it — so *every* path that hands out work has to consult it, and doing that
+    in one function is what keeps "retired" from meaning four slightly different things.
+    """
+    return [resident for resident in residents if not resident.retired]
 
 
 # --------------------------------------------------------------------------------------
@@ -1003,8 +1080,14 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "budgets.daily_cost_usd": "daily_cost_usd: 5.0  (omit the field for no cap)",
     "budgets.daily_tokens": "daily_tokens: 2000000  (input + output, per local day)",
     "budgets.max_run_seconds": "max_run_seconds: 900  (one run, not a day)",
-    "deploy": "deploy: {container: steward-life-agent}",
+    "deploy": "deploy: {host: dxp2800, user: Miha, container: steward-life-agent}",
     "deploy.container": "container: steward-life-agent  (the docker name, or omit the block)",
+    "deploy.host": "host: dxp2800  (a hostname, no spaces: it reaches a remote shell)",
+    "deploy.user": "user: Miha  (the ssh user on that host)",
+    "deploy.path": "path: ~/docker/steward-life-agent  (the compose directory on the host)",
+    "deploy.image": "image: python:3.12-slim",
+    "deploy.command": "command: [sleep, infinity]",
+    "retired": "retired: false  (true retires the resident; the files stay in git)",
 }
 
 _UNION_TAGS = frozenset({"str", "int", "bool", "list[str]", "Escalation", "function-after[_"})
