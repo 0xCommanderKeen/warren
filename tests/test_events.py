@@ -85,6 +85,24 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertEqual(headers["X-Burrow-Reset"], "1")
         self.assertEqual([replacement], [json.loads(line) for line in body.splitlines()])
 
+    def test_in_place_rotation_resets_a_cursor_still_within_the_new_log(self):
+        ts = "2099-01-01T00:00:00.000Z"
+        self.append({"type": "idle", "agent_id": "one", "ts": ts})
+        _, headers, _ = self.get_events()
+        old_cursor = headers["X-Burrow-Cursor"]
+
+        for index in range(100):
+            self.append({"type": "tool_called", "agent_id": "one", "ts": ts,
+                         "payload": {"tool": "Read", "detail": str(index)}})
+        with serve.LOG_LOCK:
+            archive = serve.rotate(os.path.getsize(self.events))
+        self.assertIsNotNone(archive)
+        self.assertGreater(os.path.getsize(self.events), int(old_cursor.rsplit(":", 1)[-1]))
+
+        _, headers, body = self.get_events(old_cursor)
+        self.assertEqual(headers.get("X-Burrow-Reset"), "1")
+        self.assertTrue(body.startswith(b'{"type"'))
+
     def test_incomplete_line_is_not_returned_or_consumed(self):
         with open(self.events, "wb") as stream:
             stream.write(b'{"type":"idle"')
@@ -95,6 +113,34 @@ class EventsEndpointTest(unittest.TestCase):
     def test_invalid_cursor_is_rejected(self):
         status, _, _ = self.get_events(-1)
         self.assertEqual(status, 400)
+
+    def test_sse_pushes_new_events_and_resumes_from_last_event_id(self):
+        first = {"type": "idle", "agent_id": "one"}
+        second = {"type": "tool_called", "agent_id": "one"}
+        self.append(first)
+
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream")
+        response = conn.getresponse()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Content-Type"],
+                         "text/event-stream; charset=utf-8")
+        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+        event_id = response.readline().decode().removeprefix("id: ").strip()
+        self.assertEqual(json.loads(response.readline().decode().removeprefix("data: ")),
+                         first)
+        self.assertEqual(response.readline(), b"\n")
+        conn.close()
+
+        self.append(second)
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream", headers={"Last-Event-ID": event_id})
+        response = conn.getresponse()
+        resumed_id = response.readline().decode().removeprefix("id: ").strip()
+        self.assertNotEqual(resumed_id, event_id)
+        self.assertEqual(json.loads(response.readline().decode().removeprefix("data: ")),
+                         second)
+        conn.close()
 
 
 if __name__ == "__main__":
