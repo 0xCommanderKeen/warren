@@ -31,12 +31,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 __all__ = [
     "CLOSE_OF_DAY",
+    "DEFAULT_BOARD_LEASE_S",
+    "DEFAULT_BOARD_TIMEOUT_S",
     "DEFAULT_JOURNAL_DIR",
     "DEFAULT_KEEP_ENTRIES",
+    "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
     "VOICE_MAX_CHARS",
     "AppGrant",
+    "Board",
     "Charter",
     "Diagnostic",
     "Escalation",
@@ -93,6 +97,18 @@ CRON_PATTERN = re.compile(rf"^{_CRON_LIST}(?:\s+{_CRON_LIST}){{4}}$")
 MAX_TIMEOUT_S = 24 * 60 * 60
 
 DEFAULT_SCHEDULE_TZ = "UTC"
+
+#: The route kind that names the job board as a channel work reaches a resident through.
+JOB_BOARD_ROUTE_KIND = "job-board"
+
+#: How long a claim is good for before the task returns to the board (30 minutes).
+DEFAULT_BOARD_LEASE_S = 30 * 60
+
+#: How long a board session may run before steward kills it (15 minutes).
+DEFAULT_BOARD_TIMEOUT_S = 900
+
+#: A wake-up is a wake-up, not a shift. More than this and the resident is a queue worker.
+MAX_CLAIMS_PER_WAKE = 10
 
 
 # --------------------------------------------------------------------------------------
@@ -461,6 +477,53 @@ class Runner(_Model):
         return self
 
 
+class Board(_Model):
+    """Whether this resident takes work off the job board, and on what terms.
+
+    Opting in is one boolean, and it defaults to *off*. A resident that has never heard
+    of the board never claims from it, however well its skills happen to match, because
+    silence in a manifest is not consent — the whole point of a declaration is that you
+    can read what a resident will do before it does it.
+
+    The rest is the terms of the claim, all with honest defaults: one task per wake-up,
+    a thirty-minute lease, and a fifteen-minute session. ``lease_s`` should comfortably
+    exceed ``timeout_s``; a lease that dies while the session is still running hands the
+    same task to somebody else, which is the one thing claiming exists to prevent.
+    """
+
+    claim: bool = Field(
+        default=False,
+        description="Whether this resident may claim open tasks from the board.",
+    )
+    max_claims_per_wake: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_CLAIMS_PER_WAKE,
+        description="How many tasks one wake-up may claim and work.",
+    )
+    lease_s: int = Field(
+        default=DEFAULT_BOARD_LEASE_S,
+        gt=0,
+        le=MAX_TIMEOUT_S,
+        description="How long a claim holds before the task returns to the board.",
+    )
+    timeout_s: int = Field(
+        default=DEFAULT_BOARD_TIMEOUT_S,
+        gt=0,
+        le=MAX_TIMEOUT_S,
+        description="Kill a board session after this long.",
+    )
+
+    @model_validator(mode="after")
+    def _lease_outlives_the_session(self) -> Self:
+        if self.claim and self.lease_s <= self.timeout_s:
+            raise ValueError(
+                f"lease_s ({self.lease_s}) must outlive timeout_s ({self.timeout_s}); "
+                f"a lease that expires mid-session hands the same task to somebody else"
+            )
+        return self
+
+
 class Routine(_Model):
     """Standing work a resident performs without being prompted."""
 
@@ -528,6 +591,10 @@ class ResidentManifest(_Model):
 
     runner: Runner = Field(default_factory=Runner)
     routines: list[Routine] = Field(default_factory=list)
+    board: Board = Field(
+        default_factory=Board,
+        description="Job board participation. Absent means this resident never claims.",
+    )
 
     @model_validator(mode="after")
     def _check_identity(self) -> Self:
@@ -647,6 +714,31 @@ class Resident:
         """The resident id."""
         return self.manifest.id
 
+    @property
+    def agent_id(self) -> str:
+        """The burrow identity this resident's events are emitted under."""
+        return self.manifest.agent_id or f"steward:{self.manifest.id}"
+
+    @property
+    def project(self) -> str:
+        """The burrow project label: the manifest's project, else the resident id."""
+        return self.manifest.project or self.manifest.id
+
+    def workdir(self, fallback: Path) -> Path:
+        """Where a session for this resident runs.
+
+        The declared memory directory when it exists — the one place its charter says it
+        may write — and otherwise the caller's working directory. Both session types
+        (scheduled routines and claimed board tasks) resolve it here, so a resident does
+        not land somewhere different depending on why it woke up.
+        """
+        memory = self.manifest.memory
+        if memory.kind == "directory":
+            candidate = Path(memory.path).expanduser()
+            if candidate.is_dir():
+                return candidate
+        return fallback
+
 
 # --------------------------------------------------------------------------------------
 # diagnostics from pydantic
@@ -712,6 +804,11 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
+    "board": "board: {claim: true, max_claims_per_wake: 1, lease_s: 1800, timeout_s: 900}",
+    "board.claim": "claim: true  (omit the block entirely to never claim)",
+    "board.max_claims_per_wake": "max_claims_per_wake: 1",
+    "board.lease_s": "lease_s: 1800  (must outlive timeout_s)",
+    "board.timeout_s": "timeout_s: 900",
 }
 
 _UNION_TAGS = frozenset({"str", "int", "bool", "list[str]", "Escalation", "function-after[_"})
@@ -881,6 +978,53 @@ def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagno
     return diagnostics
 
 
+def _check_board_route(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Require a declared job-board route from any resident that claims board work.
+
+    ``routes`` is already this manifest's answer to "how does work reach this resident",
+    and the board is a way work reaches it. Letting ``board.claim: true`` stand on its
+    own would let a resident pull real work through a channel its own declaration never
+    mentions — and burrow, which renders routes, would show a villager with no way in.
+    The route must be ``active`` too: a channel somebody is still wiring up is not one
+    tasks should be arriving through tonight.
+    """
+    if not manifest.board.claim:
+        return []
+    routes = [route for route in manifest.routes if route.kind == JOB_BOARD_ROUTE_KIND]
+    example = (
+        f"routes: [{{id: job-board, kind: {JOB_BOARD_ROUTE_KIND}, "
+        f"address: steward:job-board, status: active}}]"
+    )
+    if not routes:
+        return [
+            Diagnostic(
+                file=source,
+                field_path="board.claim",
+                problem=(
+                    f"board.claim is true but no route of kind {JOB_BOARD_ROUTE_KIND!r} is "
+                    f"declared; a resident cannot pull work through a channel its own "
+                    f"manifest does not mention"
+                ),
+                example=example,
+            )
+        ]
+    if any(route.status == "active" for route in routes):
+        return []
+    statuses = ", ".join(sorted({route.status for route in routes}))
+    return [
+        Diagnostic(
+            file=source,
+            field_path="board.claim",
+            problem=(
+                f"board.claim is true but every {JOB_BOARD_ROUTE_KIND!r} route is {statuses}; "
+                f"claiming real work through a channel that is not open yet is a lie the "
+                f"village would render"
+            ),
+            example=example,
+        )
+    ]
+
+
 def _check_soul_agreement(
     manifest: ResidentManifest, soul: SoulDocument, source: Path
 ) -> list[Diagnostic]:
@@ -1018,6 +1162,7 @@ def validate_manifest(path: Path | str) -> ValidationResult:
     diagnostics.extend(_check_duplicate_ids(manifest, source))
     diagnostics.extend(_check_routine_requirements(manifest, source))
     diagnostics.extend(_check_close_of_day(manifest, source))
+    diagnostics.extend(_check_board_route(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
     resident = Resident(path=source, manifest=manifest, soul=soul)

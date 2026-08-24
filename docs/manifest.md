@@ -33,6 +33,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `app_grants` | yes | App access dimension (may be an empty list). |
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
+| `board` | no | Job board participation. Absent means this resident never claims. |
 
 `agent_id` matches before `project`, mirroring burrow's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
@@ -258,6 +259,49 @@ failed POST trips a short per-target circuit breaker and the event is appended t
 burrow's own emitter falls back to. A village that cannot be reached loses no events,
 only their remoteness, and never slows a routine down.
 
+## `board` — job board participation
+
+```yaml
+board:
+  claim: true                # default false: a resident with no board block never claims
+  max_claims_per_wake: 1     # 1..10
+  lease_s: 1800              # how long a claim holds before the task returns to the board
+  timeout_s: 900             # kill a board session after this long
+```
+
+Opting in is one boolean, and it defaults to **off**. A resident whose skills match a
+task perfectly still never claims it unless its manifest says it takes board work:
+silence in a declaration is not consent, and the point of a manifest is that you can read
+what a resident will do before it does it.
+
+Two things are checked at validation time rather than discovered at midnight:
+
+- **`claim: true` requires a `job-board` route with `status: active`.** `routes` is
+  already this manifest's answer to "how does work reach this resident", and the board is
+  a way work reaches it. A resident pulling real work through a channel its own
+  declaration never mentions would render in burrow as a villager with no way in.
+- **`lease_s` must outlive `timeout_s`.** A lease that expires while the session is still
+  running hands the same task to somebody else, which is the one thing claiming exists to
+  prevent.
+
+Dispatch is pull-based. On every scheduler tick — and on `steward board dispatch` —
+steward first reopens tasks whose leases ran out (emitting `task_failed` with
+`reason: "lease_expired"`), then lets each board-enabled resident atomically claim the
+oldest open task whose `required_skills` are a subset of the skills it holds. An untagged
+task is claimable by any board-enabled resident, because an empty set is a subset of
+everything. The claim is one conditional `UPDATE … WHERE status = 'open'`: two residents
+waking in the same millisecond can never both hold one task.
+
+```console
+$ steward board list                       # the board, and who could take what is open
+$ steward board dispatch                   # sweep deadlines, then claim and work
+$ steward board dispatch --sweep-only      # reopen dead leases only; claim nothing
+```
+
+The claimed task is worked as an ordinary headless session — same identity, same voice,
+same journal, same charter with the last word — with one extra section naming the task.
+See [docs/api.md](api.md) for posting to the board and the lifecycle events.
+
 ## The session prompt
 
 Every session steward launches is composed in one place, `steward.prompt`, in a fixed
@@ -268,20 +312,24 @@ order with fixed delimiters:
    explicit frame saying it changes no rule.
 3. **Your journal from last time** — the resident's own last entry, when there is one.
    Steward never synthesizes one.
-4. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation.
-5. **Your task right now** — the routine's own prompt.
-6. **Close the day: write your journal** — only on the routine flagged
+4. **Decisions since you last ran** — answers to approval requests this resident raised
+   in an earlier session, delivered exactly once. A record, not an order.
+5. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation,
+   and the exact mechanism for escalating (see [docs/approvals.md](approvals.md)).
+6. **Your task right now** — the routine's own prompt, or a task claimed off the board.
+7. **Close the day: write your journal** — only on the routine flagged
    `journal: close_of_day`.
 
-Charter last is the point. A soul is trusted repo content and a journal is text a model
-wrote, but both land inside a privileged prompt, so neither gets the last word. The two
-sections after the charter are tasks, and the charter section says in so many words that
-it outranks the task too. Voice is capped at 1200 characters and the journal at 4000
-before injection, as well as at validation.
+Charter last is the point. A soul is trusted repo content, a journal is text a model
+wrote, and a decision is a narrow authorisation for one named action; all three land
+inside a privileged prompt, so none gets the last word. The two sections after the
+charter are tasks, and the charter section says in so many words that it outranks the
+task too. Voice is capped at 1200 characters, the journal and the decisions at 4000
+each, before injection as well as at validation.
 
-There is no session type that skips the preamble. A close-of-day run is told who it is,
-how it writes, and what its charter says exactly like every other run — which is the
-point of asking for a journal in the resident's own voice at all.
+There is no session type that skips the preamble. A close-of-day run and a board session
+are told who they are, how they write, and what their charter says exactly like every
+other run — which is the point of asking for a journal in the resident's own voice at all.
 
 ## The soul body
 

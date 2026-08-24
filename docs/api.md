@@ -102,17 +102,41 @@ work.
 {"title": "Research X", "detail": "…", "required_skills": ["research"]}
 ```
 
-`202` with a `task_id`. The task is persisted (SQLite, so the claim in steward #6 can
-be a single atomic `UPDATE … WHERE status = 'open'`) and announced as `task_posted`
-with `{task_id, title, required_skills, posted_by: "api"}`. No resident is prompted:
+`202` with a `task_id`. The task is persisted (SQLite, so a claim is a single atomic
+`UPDATE … WHERE status = 'open'`) and announced as `task_posted` with
+`{task_id, title, required_skills, posted_by: "api"}`. **No resident is prompted:**
 dispatch is pull-based, and a resident claims work on its own next wake-up.
 
-`GET /jobs` lists the board. Everything is `open` today — claiming, leases, and the
-rest of the lifecycle land with the job board itself.
+`GET /jobs` lists the board, oldest first, with `?status=open|claimed|done|failed` to
+narrow it. Anything else is a `422` with `unknown_status` rather than a silently ignored
+parameter. Each job carries its `claimant`, `lease_expires_at`, `outcome`, `reason`, and
+`artifacts` as they become true.
 
-### `GET /approvals` · `POST /approvals/{request_id}`
+The lifecycle, all four transitions visible in burrow's log and reconstructible from
+events alone:
 
-`GET` lists the gated actions still waiting on a human. `POST` answers one:
+| event | when | agent id |
+|---|---|---|
+| `task_posted` | this endpoint accepted it | `steward:api` |
+| `task_claimed` | one resident atomically claimed it | the claimant |
+| `task_done` | the claimant finished; carries `artifacts` | the claimant |
+| `task_failed` | the claimant gave up, or its lease expired | the claimant |
+
+Claiming is documented with the manifest's `board` block in
+[docs/manifest.md](manifest.md#board--job-board-participation). A resident claims only
+what it declared it would, and only tasks whose `required_skills` are a subset of the
+skills it holds.
+
+### `GET /approvals` · `GET /approvals/{request_id}` · `POST /approvals/{request_id}`
+
+`GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
+`all`; anything else is a `422` with `unknown_status`. The default is unchanged from
+before the parameter existed, so a panel that never passed it sees exactly what it saw.
+
+`GET /approvals/{request_id}` is the audit query: request, full detail, decision,
+decider, and every timestamp, in one call. `404` for an id steward has never seen.
+
+`POST /approvals/{request_id}` answers one:
 
 ```json
 {"decision": "approve" | "deny" | "edit", "edit": {"subject": "shorter"}}
@@ -126,9 +150,11 @@ Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
 changes nothing, and emits nothing. An unknown `request_id` is `404`.
 
-Requests are *created* by the session that reaches a gated action, through
-`Store.create_approval_request(...)` — steward #10 wires that up. The API only ever
-answers a request; it never invents one.
+Requests are *created* by the session that reaches a gated action — through a
+`<needs-human>` block in its output or `steward approval raise`, both documented in
+[docs/approvals.md](approvals.md). The API only ever answers a request; it never invents
+one. A request nobody answers before its `expires_at` resolves itself as `deny` with
+`decided_by: "expiry"`, and the resolution event lands like any other.
 
 ### `POST /residents`
 
@@ -167,11 +193,15 @@ failed validation and never become a resident at all.
 
 | table | holds |
 |---|---|
-| `jobs` | the board: task, required skills, status, claimant |
-| `approvals` | the request, its full detail, and the decision it received |
+| `jobs` | the board: task, required skills, status, claimant, lease, artifacts |
+| `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
 
 SQLite rather than a JSON file because the two interesting writes are both
 conditional — claiming an open task and deciding a pending approval — and "the first
 writer wins, everyone else reads back what was recorded" is exactly what a
 read-modify-write over a JSON file cannot promise.
+
+Schema changes are `ALTER TABLE`, applied at open time. A steward that has been running
+since the API landed already has a `steward.db` full of real jobs, and a migration that
+drops it is a migration that loses work.

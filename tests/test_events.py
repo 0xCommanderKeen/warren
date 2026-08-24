@@ -79,6 +79,10 @@ def test_the_added_types_are_the_additive_set() -> None:
         "routine_finished",
         "routine_failed",
         "task_posted",
+        "task_claimed",
+        "task_done",
+        "task_failed",
+        "needs_human",
         "needs_human_resolved",
     )
 

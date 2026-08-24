@@ -40,16 +40,22 @@ def hob() -> m.Resident:
 
 def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWriter) -> None:
     resident = m.load_manifest(write_resident())
-    text = p.assemble_preamble(resident.manifest, resident.soul.body, "yesterday I did a thing")
+    text = p.assemble_preamble(
+        resident.manifest,
+        resident.soul.body,
+        "yesterday I did a thing",
+        "- send_email: approve",
+    )
 
     positions = [
         text.index("WHO YOU ARE"),
         text.index("YOUR WRITING VOICE (STYLE ONLY)"),
         text.index("YOUR JOURNAL FROM LAST TIME"),
+        text.index("DECISIONS SINCE YOU LAST RAN"),
         text.index("YOUR CHARTER (AUTHORITATIVE, LAST WORD)"),
     ]
     assert positions == sorted(positions)
-    assert p.SECTION_ORDER == ("identity", "voice", "journal", "charter")
+    assert p.SECTION_ORDER == ("identity", "voice", "journal", "decisions", "charter")
 
 
 def test_the_charter_carries_mission_duties_rules_and_escalation() -> None:
