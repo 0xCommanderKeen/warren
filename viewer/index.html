@@ -163,6 +163,7 @@ function describe(ev) {
     case "tool_called":       return (VERBS[p.tool] || "using " + p.tool) +
                                      (p.detail ? " — " + p.detail : "");
     case "artifact_produced": return "crafted " + (p.artifact || "something");
+    case "heartbeat":         return "finished " + (p.tool || "a tool");
     case "needs_human":       return "needs you: " + (p.message || "(no message)");
     case "idle":              return "finished, resting";
     case "session_ended":     return "went home";
@@ -179,7 +180,10 @@ function doingLabel(ev) {
   }
 }
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
-                             "needs_human","idle","session_ended"]);
+                             "heartbeat","needs_human","idle","session_ended"]);
+// events that describe a visible action; a heartbeat is liveness only, so it
+// refreshes the clock but never becomes what a villager is shown doing
+const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 function reduce(lines, now, souls) {
   const soulByAgent = new Map(), soulByProject = new Map();
   for (const s of souls || []) {
@@ -194,7 +198,9 @@ function reduce(lines, now, souls) {
     try { ev = JSON.parse(line); } catch { continue; }
     if (!ev || !ev.agent_id || !EVENT_TYPES.has(ev.type)) continue;
     let a = agents.get(ev.agent_id);
-    if (!a) { a = { id: ev.agent_id, events: [] }; agents.set(ev.agent_id, a); }
+    if (!a) { a = { id: ev.agent_id, events: [], lastAny: null }; agents.set(ev.agent_id, a); }
+    a.lastAny = ev;                        // any signal, heartbeats included
+    if (ev.type === "heartbeat") continue;  // liveness only: kept out of the log
     a.events.push(ev);
     if (a.events.length > 80) a.events.shift();
   }
@@ -202,7 +208,9 @@ function reduce(lines, now, souls) {
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
   for (const a of sorted) {
-    const last = a.events[a.events.length - 1];
+    // state follows the newest signal of any kind; what the villager is *shown*
+    // doing follows the newest signal that was an actual action
+    const last = a.lastAny;
     const lastTs = Date.parse(last.ts) || 0;
     if (last.type === "session_ended") continue;
     if (now - lastTs > DROP_MS) continue;
@@ -210,6 +218,8 @@ function reduce(lines, now, souls) {
       last.type === "needs_human" ? "knocking" :
       last.type === "idle"        ? "resting"  : "working";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
+    const prev = a.events[a.events.length - 1];
+    const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
     const h = hashCode(a.id);
     const project = last.project || "unknown";
     // soul files pin identity: exact agent_id beats project match
@@ -239,8 +249,8 @@ function reduce(lines, now, souls) {
       name, char, accent, soul,
       project,
       cwd: last.cwd || "",
-      doing: state === "working" ? doingLabel(last) : "",
-      lastLine: describe(last),
+      doing: state === "working" ? doingLabel(shown) : "",
+      lastLine: describe(shown),
     });
   }
   return out;
