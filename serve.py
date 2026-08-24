@@ -33,12 +33,12 @@ def read_villagers():
     if not os.path.isdir(VILLAGERS_DIR):
         return out
     for fn in sorted(os.listdir(VILLAGERS_DIR)):
-        if not fn.endswith(".md"):
+        if not fn.endswith(".md") or fn.startswith("."):
             continue
         try:
             with open(os.path.join(VILLAGERS_DIR, fn), encoding="utf-8") as f:
                 text = f.read()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         meta, body = {}, text.strip()
         if text.startswith("---"):
