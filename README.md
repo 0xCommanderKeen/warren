@@ -42,6 +42,13 @@ map of everything the fleet does.
   villager that rests between turns instead of leaving.
 - **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
   viewer over the local log.
+- **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
+  `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
+  `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the
+  village still needs, so nothing on screen changes. Archives are plain JSONL and
+  keep the full history; set `BURROW_ARCHIVE` to put them elsewhere (on the NAS,
+  they land next to the log in the mounted volume). `BURROW_MAX_LOG=0` turns
+  rotation off.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 

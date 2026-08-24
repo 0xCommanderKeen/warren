@@ -65,6 +65,28 @@ The villager's state is decided by its **latest** event:
 - no event for 30 minutes while "working" → shown as **stale** (faded), because a
   villager frozen mid-swing would be a lie
 
+## Log rotation
+
+The live log is a window, not an archive. When `events.jsonl` grows past
+`BURROW_MAX_LOG` bytes (default 5 MiB, `0` disables), the server rolls it into
+`<BURROW_ARCHIVE or archive/>/events-20260824T170430Z.jsonl` and starts the live
+file again from the **carry-forward tail**: the last 80 events of every villager
+the projection would still draw — skipping any whose latest event is
+`session_ended` or older than the 12 h drop window — in their original order.
+
+That tail is exactly the input the rules above consume, so the village renders
+identically across a rotation: same states, same panel history. It also means the
+live log has a floor of (live agents × 80 events); a very busy fleet can sit
+above the threshold, and rotation then waits rather than copying the log next to
+itself.
+
+Rotation is checked after every accepted `POST /events` and before every
+`GET /events` (local mode has no POSTs — emitters append to the file themselves).
+All three paths take the same lock, and the write happens before the check, so an
+accepted event is always either in the live tail or in an archive. The swap
+hardlinks the archive into place before replacing the live file, so the log path
+never stops existing under an appending emitter.
+
 ## The one rule, restated for implementers
 
 Never emit an event for something that did not happen, and never render state that no
