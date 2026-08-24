@@ -22,8 +22,13 @@ def test_hob_is_the_life_agent() -> None:
     assert isinstance(escalation, m.Escalation)
     assert escalation.how == "needs_human"
     assert {grant.id for grant in hob.manifest.app_grants} >= {"gmail", "burrow"}
-    assert all(not routine.enabled for routine in hob.manifest.routines), (
-        "routines must stay disabled until the scheduler exists — the village never lies"
+    assert {routine.id for routine in hob.manifest.routines} == {"daily-summary", "inbox-read"}
+    assert all(routine.enabled for routine in hob.manifest.routines), (
+        "Hob's routines are enabled now that the scheduler exists; they still only fire "
+        "while `steward scheduler run` is up, so the village shows nothing when it is not"
+    )
+    assert all(routine.schedule_tz == "Europe/Ljubljana" for routine in hob.manifest.routines), (
+        "'resident-local time' has to be written down: the NAS is not the household"
     )
 
 
