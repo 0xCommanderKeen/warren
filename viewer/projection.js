@@ -66,15 +66,7 @@ function doingLabel(ev) {
 }
 const EVENT_TYPES = new Set(["task_started","tool_called","artifact_produced",
                              "needs_human","idle","session_ended"]);
-function reduce(lines, now, souls) {
-  const soulByAgent = new Map(), soulByProject = new Map();
-  for (const s of souls || []) {
-    if (!s || !s.meta) continue;
-    if (s.meta.agent_id) soulByAgent.set(s.meta.agent_id, s);
-    if (s.meta.project) soulByProject.set(s.meta.project, s);
-  }
-  const usedSouls = new Set();
-  const agents = new Map();
+function foldEvents(agents, lines) {
   for (const line of lines) {
     let ev;
     try { ev = JSON.parse(line); } catch { continue; }
@@ -84,6 +76,17 @@ function reduce(lines, now, souls) {
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
   }
+}
+function reduce(input, now, souls) {
+  const soulByAgent = new Map(), soulByProject = new Map();
+  for (const s of souls || []) {
+    if (!s || !s.meta) continue;
+    if (s.meta.agent_id) soulByAgent.set(s.meta.agent_id, s);
+    if (s.meta.project) soulByProject.set(s.meta.project, s);
+  }
+  const usedSouls = new Set();
+  const agents = input instanceof Map ? input : new Map();
+  if (!(input instanceof Map)) foldEvents(agents, input);
   const out = [];
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
@@ -136,6 +139,6 @@ function reduce(lines, now, souls) {
 if (typeof module === "object" && module.exports) {
   module.exports = {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, VERBS, EVENT_TYPES,
-    hashCode, esc, ago, describe, doingLabel, reduce,
+    hashCode, esc, ago, describe, doingLabel, foldEvents, reduce,
   };
 }

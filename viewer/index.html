@@ -128,7 +128,7 @@
 /* projection logic (event filtering, state mapping, souls, identities) lives in
    /projection.js — same file the test suite in tests/ runs under node. It gives
    this script: NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, VERBS, hashCode, esc,
-   ago, describe, doingLabel, reduce. */
+   ago, describe, doingLabel, foldEvents, reduce. */
 
 /* ————— the village scene ————— */
 
@@ -506,20 +506,34 @@ function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
 panelEl.querySelector(".close").addEventListener("click", closePanel);
 
 let souls = [];
+let eventCursor = 0;
+let agents = new Map();
+let pollInFlight = false;
 async function poll() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
     const [evRes, soulRes] = await Promise.all([
-      fetch("/events", { cache: "no-store" }),
+      fetch("/events?since=" + eventCursor, { cache: "no-store" }),
       fetch("/villagers", { cache: "no-store" }).catch(() => null),
     ]);
+    if (!evRes.ok) throw new Error("events request failed");
     const text = await evRes.text();
+    const reset = evRes.headers.get("X-Burrow-Reset") === "1";
+    if (reset) agents = new Map();
+    const lines = text.split("\n").filter(Boolean);
+    // Preserve the old first-load behavior: bootstrap from at most 4,000 events.
+    foldEvents(agents, eventCursor === 0 || reset ? lines.slice(-4000) : lines);
+    eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
     if (soulRes && soulRes.ok) { try { souls = await soulRes.json(); } catch {} }
     const now = Date.now();
-    villagers = reduce(text.split("\n").filter(Boolean).slice(-4000), now, souls);
+    villagers = reduce(agents, now, souls);
     if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
     renderChrome(now);
   } catch {
     beatEl.textContent = "server unreachable";
+  } finally {
+    pollInFlight = false;
   }
 }
 
