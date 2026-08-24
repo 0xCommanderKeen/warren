@@ -42,7 +42,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Two pieces exist.
+Three pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -60,9 +60,21 @@ $ steward scheduler tick             # fire anything due now, then exit (externa
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
 ```
 
+**The HTTP API** (#3). The token-gated write path burrow's viewer calls directly, so
+burrow's server never gets write access to agents: run a routine now, post a job to the
+board, answer an approval, declare a new resident. The contract is acknowledgement, not
+effect — an accepted request returns a request id and the word *accepted*, and the work
+is confirmed only when the matching protocol event lands in burrow's log. Tailnet only,
+one shared token, documented in [docs/api.md](docs/api.md).
+
+```console
+$ STEWARD_TOKEN=… steward serve      # 127.0.0.1:8801 by default; never public
+$ steward serve --allow-open         # local dev, with the missing token said out loud
+```
+
 Still roadmap, in this repo's issues: the journal (#5), soul voice end to end (#9), the
-job board, deployment, and the HTTP API. Burrow-side rendering counterparts live in
-burrow's issues.
+job board's claiming and leases (#6), structured approvals raised from a session (#10),
+and deployment (#4). Burrow-side rendering counterparts live in burrow's issues.
 
 ## Residents
 

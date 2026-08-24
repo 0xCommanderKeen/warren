@@ -256,3 +256,65 @@ def test_scheduler_refuses_an_invalid_tree(
     result = runner.invoke(main, ["scheduler", "tick", *scheduler_args(path, tmp_path)])
     assert result.exit_code == 1
     assert "memory" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# serve
+# --------------------------------------------------------------------------------------
+
+
+def test_serve_refuses_to_start_without_a_token(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STEWARD_TOKEN", raising=False)
+    result = runner.invoke(
+        main, ["serve", "--residents", str(tmp_path), "--db", str(tmp_path / "s.db")]
+    )
+    assert result.exit_code == 1
+    assert "STEWARD_TOKEN" in result.output
+    assert "--allow-open" in result.output
+    assert not (tmp_path / "s.db").exists()
+
+
+def test_serve_binds_loopback_by_default(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEWARD_TOKEN", "a-shared-secret")
+    monkeypatch.setenv("STEWARD_CORS_ORIGINS", "http://village.local")
+    served: dict[str, object] = {}
+    monkeypatch.setattr(
+        "steward.cli.run_server",
+        lambda app, *, host, port: served.update(app=app, host=host, port=port),
+    )
+    result = runner.invoke(
+        main, ["serve", "--residents", str(tmp_path), "--db", str(tmp_path / "s.db")]
+    )
+    assert result.exit_code == 0, result.output
+    assert served["host"] == "127.0.0.1"
+    assert served["port"] == 8801
+    assert "http://127.0.0.1:8801" in result.output
+    assert "http://village.local" in result.output
+
+
+def test_serve_says_out_loud_when_it_has_no_token(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STEWARD_TOKEN", raising=False)
+    monkeypatch.delenv("STEWARD_CORS_ORIGINS", raising=False)
+    monkeypatch.setattr("steward.cli.run_server", lambda *_a, **_k: None)
+    result = runner.invoke(
+        main,
+        [
+            "serve",
+            "--allow-open",
+            "--port",
+            "9000",
+            "--residents",
+            str(tmp_path),
+            "--db",
+            str(tmp_path / "s.db"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "without a token" in result.output
+    assert "cors: none" in result.output

@@ -73,8 +73,44 @@ def test_finished_and_failed_carry_what_the_issue_asks_for() -> None:
     assert failed.payload["error"] == "boom"
 
 
-def test_all_three_types_are_the_additive_set() -> None:
-    assert ev.EVENT_TYPES == ("routine_started", "routine_finished", "routine_failed")
+def test_the_added_types_are_the_additive_set() -> None:
+    assert ev.EVENT_TYPES == (
+        "routine_started",
+        "routine_finished",
+        "routine_failed",
+        "task_posted",
+        "needs_human_resolved",
+    )
+
+
+def test_task_posted_carries_the_board_payload() -> None:
+    event = ev.task_posted_event(task_id="t1", title="Research X", required_skills=["research"])
+    assert ev.validate_event(event.to_dict()) == ()
+    assert event.agent_id == ev.API_AGENT_ID
+    assert event.payload == {
+        "task_id": "t1",
+        "title": "Research X",
+        "required_skills": ["research"],
+        "posted_by": "api",
+    }
+
+
+def test_needs_human_resolved_is_emitted_as_the_villager_who_knocked() -> None:
+    event = ev.needs_human_resolved_event(
+        request_id="r1",
+        decision="approve",
+        action="send_email",
+        agent_id="claude-code:life-agent",
+        project="household",
+    )
+    assert ev.validate_event(event.to_dict()) == ()
+    assert event.agent_id == "claude-code:life-agent"
+    assert event.payload == {
+        "request_id": "r1",
+        "decision": "approve",
+        "decided_by": "api",
+        "action": "send_email",
+    }
 
 
 def test_an_error_is_truncated_to_one_line() -> None:

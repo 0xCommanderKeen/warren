@@ -34,6 +34,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 __all__ = [
+    "API_AGENT_ID",
+    "API_PROJECT",
     "BREAKER_SECONDS",
     "ERROR_MAX_CHARS",
     "EVENT_SOURCE",
@@ -47,6 +49,8 @@ __all__ = [
     "NullEmitter",
     "RunContext",
     "default_fallback_path",
+    "needs_human_resolved_event",
+    "task_posted_event",
     "truncate_error",
     "validate_event",
 ]
@@ -57,10 +61,23 @@ EVENT_SOURCE = "steward"
 ROUTINE_STARTED = "routine_started"
 ROUTINE_FINISHED = "routine_finished"
 ROUTINE_FAILED = "routine_failed"
+TASK_POSTED = "task_posted"
+NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 
 #: The event types steward adds to the protocol. Additive: a v0 consumer that does not
 #: know them ignores them, which is why burrow needs no change to stay correct.
-EVENT_TYPES = (ROUTINE_STARTED, ROUTINE_FINISHED, ROUTINE_FAILED)
+EVENT_TYPES = (
+    ROUTINE_STARTED,
+    ROUTINE_FINISHED,
+    ROUTINE_FAILED,
+    TASK_POSTED,
+    NEEDS_HUMAN_RESOLVED,
+)
+
+#: Steward's own identity, for the work steward itself does rather than a resident.
+#: A job posted through the API is posted by the API, and the log should say so.
+API_AGENT_ID = "steward:api"
+API_PROJECT = "steward"
 
 POST_TIMEOUT_S = 2.0
 BREAKER_SECONDS = 60.0
@@ -321,3 +338,58 @@ class RunContext:
             ROUTINE_FAILED,
             {"error": truncate_error(error), "duration_s": round(duration_s, 3)},
         )
+
+
+def task_posted_event(  # noqa: PLR0913 — every field is keyword-only and part of the payload
+    *,
+    task_id: str,
+    title: str,
+    required_skills: Sequence[str] = (),
+    posted_by: str = "api",
+    agent_id: str = API_AGENT_ID,
+    project: str = API_PROJECT,
+) -> Event:
+    """Announce that a task landed on the job board (steward #6's first transition).
+
+    The board's own storage is steward's; the *board* burrow renders is rebuilt from
+    these events alone, so a task that was never announced does not exist as far as
+    the village is concerned.
+    """
+    return Event(
+        type=TASK_POSTED,
+        agent_id=agent_id,
+        project=project,
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "required_skills": list(required_skills),
+            "posted_by": posted_by,
+        },
+    )
+
+
+def needs_human_resolved_event(  # noqa: PLR0913 — the payload the protocol documents
+    *,
+    request_id: str,
+    decision: str,
+    action: str,
+    agent_id: str,
+    project: str,
+    decided_by: str = "api",
+) -> Event:
+    """Close the loop on a knock at the door: the human answered, and this is the answer.
+
+    Emitted under the *resident's* identity, not steward's, because the villager burrow
+    has to walk away from your door is the one who knocked.
+    """
+    return Event(
+        type=NEEDS_HUMAN_RESOLVED,
+        agent_id=agent_id,
+        project=project,
+        payload={
+            "request_id": request_id,
+            "decision": decision,
+            "decided_by": decided_by,
+            "action": action,
+        },
+    )

@@ -6,6 +6,7 @@ session launch goes through, the prompt assembly point, and the scheduler that f
 routines and emits what really happened.
 """
 
+from steward.api import ApiConfig, ApiError, create_app
 from steward.events import Event, EventEmitter, NullEmitter
 from steward.manifest import (
     Diagnostic,
@@ -21,15 +22,20 @@ from steward.manifest import (
     validate_paths,
     validate_tree,
 )
+from steward.nursery import NewResident, declare_resident
 from steward.prompt import assemble_preamble, assemble_routine_prompt
 from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner
 from steward.scheduler import ScheduledRoutine, Scheduler, SchedulerState, load_scheduled
+from steward.store import Store
 
 __all__ = [
+    "ApiConfig",
+    "ApiError",
     "Diagnostic",
     "Event",
     "EventEmitter",
     "ManifestError",
+    "NewResident",
     "NullEmitter",
     "Outcome",
     "Resident",
@@ -41,10 +47,13 @@ __all__ = [
     "Scheduler",
     "SchedulerState",
     "Severity",
+    "Store",
     "ValidationResult",
     "assemble_preamble",
     "assemble_routine_prompt",
     "build_runner",
+    "create_app",
+    "declare_resident",
     "load_manifest",
     "load_scheduled",
     "manifest_json_schema",

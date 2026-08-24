@@ -10,8 +10,10 @@ requires-python = ">=3.14"
 dependencies = [
     "click>=8.4.2",
     "croniter>=6.2.4",
+    "fastapi>=0.141.1",
     "pydantic>=2.13.4",
     "pyyaml>=6.0.3",
+    "uvicorn>=0.52.4",
 ]
 
 [project.scripts]
@@ -23,6 +25,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.4",
