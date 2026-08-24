@@ -5,13 +5,20 @@ protocol events over HTTP (POST /events, one JSON event per request).
     python3 serve.py [port]     # default 8737
 
 Env:
-    BURROW_HOST    bind address (default 127.0.0.1; 0.0.0.0 in the container)
-    BURROW_EVENTS  event log path (default ~/.burrow/events.jsonl)
+    BURROW_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container)
+    BURROW_EVENTS        event log path (default ~/.burrow/events.jsonl)
+    BURROW_VILLAGERS     soul file directory (default ~/.burrow/villagers)
+    BURROW_NOTIFY_URL    POST target for needs_human knocks (unset = no notifications)
+    BURROW_NOTIFY_TOKEN  optional bearer token for that target (e.g. a private ntfy topic)
+    BURROW_NOTIFY_TIMEOUT  seconds to wait on the webhook (default 5)
 """
+import collections
 import http.server
 import json
 import os
 import sys
+import threading
+import urllib.request
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8737
 HOST = os.environ.get("BURROW_HOST", "127.0.0.1")
@@ -20,6 +27,14 @@ EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events
 
 MAX_EVENT_BYTES = 64 * 1024
 VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.expanduser("~/.burrow/villagers")
+
+NOTIFY_URL = (os.environ.get("BURROW_NOTIFY_URL") or "").strip()
+NOTIFY_TOKEN = (os.environ.get("BURROW_NOTIFY_TOKEN") or "").strip()
+try:
+    NOTIFY_TIMEOUT = float(os.environ.get("BURROW_NOTIFY_TIMEOUT") or 5)
+except ValueError:
+    NOTIFY_TIMEOUT = 5.0
+NOTIFY_MEMORY = 512      # how many knocks we remember, to not knock twice
 
 
 CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
@@ -51,6 +66,95 @@ def read_villagers():
                 body = parts[2].strip()
         out.append({"file": fn, "meta": meta, "body": body})
     return out
+
+
+# ————— knocks: push a needs_human event to a webhook —————
+#
+# The village can't knock on a door you're not looking at, so a `needs_human`
+# ingest also fires one POST at BURROW_NOTIFY_URL. Body is plain text and the
+# title rides in headers, which is exactly what ntfy wants; anything that
+# accepts a POST works. It happens on a daemon thread and swallows every
+# error: a knock we fail to forward must never slow down or fail the ingest.
+
+NAMES = ["Bramble", "Poppy", "Wren", "Sorrel", "Fern", "Alder", "Maple", "Rowan",
+         "Thistle", "Clover", "Hazel", "Juniper", "Moss", "Reed", "Tansy", "Willow"]
+
+_notified = collections.OrderedDict()
+_notified_lock = threading.Lock()
+
+
+def js_hash(s):
+    """The viewer's hashCode, verbatim, so a nameless villager is called the same
+    thing in the notification as it is on screen."""
+    h = 0
+    for ch in s:
+        h = (h * 31 + ord(ch)) & 0xFFFFFFFF
+    if h >= 0x80000000:
+        h -= 0x100000000
+    return abs(h)
+
+
+def villager_name(event):
+    """Soul file name (agent_id beats project), else the stable hash-based name."""
+    agent_id = str(event.get("agent_id") or "")
+    project = str(event.get("project") or "")
+    by_project = None
+    for soul in read_villagers():
+        meta = soul.get("meta") or {}
+        name = meta.get("name")
+        if not name:
+            continue
+        if meta.get("agent_id") and meta["agent_id"] == agent_id:
+            return name
+        if by_project is None and meta.get("project") and meta["project"] == project:
+            by_project = name
+    return by_project or NAMES[js_hash(agent_id) % len(NAMES)]
+
+
+def claim_knock(event):
+    """True the first time we see this exact knock. Emitters retry and clients
+    replay, so identity is (agent, timestamp, message), not arrival."""
+    if not NOTIFY_URL or event.get("type") != "needs_human":
+        return False
+    payload = event.get("payload") or {}
+    key = "\x00".join(str(x) for x in (event.get("agent_id"), event.get("ts"),
+                                       payload.get("message") if isinstance(payload, dict) else ""))
+    with _notified_lock:
+        if key in _notified:
+            _notified.move_to_end(key)
+            return False
+        _notified[key] = True
+        while len(_notified) > NOTIFY_MEMORY:
+            _notified.popitem(last=False)
+    return True
+
+
+def notify(event):
+    """Fire-and-forget POST. Never raises."""
+    try:
+        payload = event.get("payload") or {}
+        message = str(payload.get("message") or "").strip() if isinstance(payload, dict) else ""
+        message = message or "(no message)"
+        name = villager_name(event)
+        project = str(event.get("project") or "unknown")
+        headers = {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Title": f"{name} is at your door ({project})",
+            "Tags": "door",
+            "Priority": "high",
+        }
+        if NOTIFY_TOKEN:
+            headers["Authorization"] = "Bearer " + NOTIFY_TOKEN
+        body = f"{name} · {project}\n{message}".encode("utf-8")
+        req = urllib.request.Request(NOTIFY_URL, data=body, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT):
+            pass
+    except Exception:
+        pass
+
+
+def notify_async(event):
+    threading.Thread(target=notify, args=(event,), daemon=True).start()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -96,6 +200,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         os.makedirs(os.path.dirname(EVENTS), exist_ok=True)
         with open(EVENTS, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        if claim_knock(event):
+            notify_async(event)
         self._send(204, b"", "text/plain")
 
     def _send_file(self, path, ctype):
@@ -120,4 +226,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"burrow village at http://{HOST}:{PORT}, log at {EVENTS}")
+    if NOTIFY_URL:
+        print(f"knocks will be pushed to {NOTIFY_URL}")
     http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

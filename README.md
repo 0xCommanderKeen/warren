@@ -42,6 +42,11 @@ map of everything the fleet does.
   villager that rests between turns instead of leaving.
 - **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
   viewer over the local log.
+- **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
+  `needs_human` event is also pushed there once, with the villager's name, project
+  and message (`https://ntfy.sh/<your-topic>` works out of the box;
+  `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
+  dead notification service can never block or lose an event.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
