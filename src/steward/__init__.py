@@ -2,12 +2,20 @@
 
 Souls and resident manifests are versioned here; burrow only ever reads and renders
 them. The public surface is the manifest load-and-validate path, the runner seam every
-session launch goes through, the prompt assembly point, and the scheduler that fires
-routines and emits what really happened.
+session launch goes through, the prompt assembly point, the resident journal (the one
+read path into a resident's durable memory), and the scheduler that fires routines and
+emits what really happened.
 """
 
 from steward.api import ApiConfig, ApiError, create_app
 from steward.events import Event, EventEmitter, NullEmitter
+from steward.journal import (
+    JournalEntry,
+    journal_complaint,
+    latest_entry,
+    read_entries,
+    resolve_journal_dir,
+)
 from steward.manifest import (
     Diagnostic,
     ManifestError,
@@ -34,6 +42,7 @@ __all__ = [
     "Diagnostic",
     "Event",
     "EventEmitter",
+    "JournalEntry",
     "ManifestError",
     "NewResident",
     "NullEmitter",
@@ -54,9 +63,13 @@ __all__ = [
     "build_runner",
     "create_app",
     "declare_resident",
+    "journal_complaint",
+    "latest_entry",
     "load_manifest",
     "load_scheduled",
     "manifest_json_schema",
+    "read_entries",
+    "resolve_journal_dir",
     "validate_manifest",
     "validate_path",
     "validate_paths",

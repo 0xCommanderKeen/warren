@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from steward import events as ev
+from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, validate_path
 from steward.nursery import CreatedResident, NewResident, NurseryError, declare_resident
 from steward.runners import build_runner
@@ -426,6 +427,17 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         """Return one validated manifest, runner included, so "which brain" is answerable."""
         result = validate_path(residents_dir)
         return resident_view(_find_resident(result, resident_id, residents_dir))
+
+    @app.get("/residents/{resident_id}/journal")
+    def get_resident_journal(resident_id: str, limit: int = 14) -> dict[str, Any]:
+        """Return the resident's journal, newest first; an empty journal is an empty list."""
+        result = validate_path(residents_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        complaint = journal_complaint(resident.manifest)
+        if complaint is not None:
+            _refuse(409, "journal_unreadable", complaint)
+        entries = read_entries(resident.manifest, max(0, min(limit, 100)))
+        return {"resident": resident.id, "entries": [entry.as_dict() for entry in entries]}
 
     @app.post("/residents", status_code=201)
     def create_resident(spec: NewResident, request: Request) -> dict[str, Any]:

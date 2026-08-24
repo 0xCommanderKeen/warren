@@ -19,8 +19,16 @@ from steward.api import (
     origins_summary,
     run_server,
 )
+from steward.journal import (
+    JournalEntry,
+    journal_complaint,
+    read_entries,
+    resolve_journal_dir,
+)
 from steward.manifest import (
     Diagnostic,
+    ManifestError,
+    Resident,
     Severity,
     ValidationResult,
     manifest_json_schema,
@@ -153,6 +161,7 @@ def doctor(residents: Path) -> None:
             click.secho(f"{label} — {complaint}", fg="red", err=True)
         else:
             click.secho(f"{label} — ready", fg="green")
+        problems += _report_journal(resident)
 
     scheduled = _load_or_exit(residents)
     if scheduled:
@@ -169,12 +178,94 @@ def doctor(residents: Path) -> None:
     sys.exit(EXIT_OK if problems == 0 else EXIT_INVALID)
 
 
+def _report_journal(resident: Resident) -> int:
+    """Print where this resident's journal lives, or why it has none. Returns problems."""
+    complaint = journal_complaint(resident.manifest)
+    if complaint:
+        click.secho(f"{resident.id}: journal — {complaint}", fg="red", err=True)
+        return 1
+    directory = resolve_journal_dir(resident.manifest, source=resident.path)
+    closer = next(
+        (r.id for r in resident.manifest.routines if r.enabled and r.journal == "close_of_day"),
+        None,
+    )
+    ends_with = f"closed by {closer}" if closer else "no routine closes the day"
+    click.secho(f"{resident.id}: journal {directory} — {ends_with}", fg="green")
+    return 0
+
+
 def _load_or_exit(residents: Path) -> list[ScheduledRoutine]:
     try:
         return load_scheduled(residents)
     except SchedulerError as exc:
         click.secho(str(exc), fg="red", err=True)
         sys.exit(EXIT_INVALID)
+
+
+# --------------------------------------------------------------------------------------
+# journal
+# --------------------------------------------------------------------------------------
+
+DEFAULT_JOURNAL_LIMIT = 5
+
+
+def _render_entry(entry: JournalEntry) -> None:
+    heading = entry.date.isoformat()
+    if entry.routine:
+        heading += f"  ({entry.routine})"
+    click.secho(heading, fg="cyan", bold=True)
+    click.secho(str(entry.path), fg="bright_black")
+    click.echo("")
+    click.echo(entry.text)
+    click.echo("")
+
+
+@main.command("journal")
+@click.argument("resident_id")
+@click.option(
+    "--residents",
+    type=click.Path(path_type=Path),
+    default=DEFAULT_RESIDENTS_DIR,
+    show_default=True,
+    help="Residents tree the manifest is read from.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=DEFAULT_JOURNAL_LIMIT,
+    show_default=True,
+    help="How many entries to print, newest first.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def journal_command(resident_id: str, residents: Path, limit: int, output_format: str) -> None:
+    """Print a resident's journal entries, newest first.
+
+    Read-only, and read from the location the resident's own manifest declares. This
+    prints what the resident wrote; when it has written nothing it says so, because an
+    empty journal is a real answer.
+    """
+    result = validate_paths([residents])
+    resident = next((r for r in result.residents if r.id == resident_id), None)
+    if resident is None:
+        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
+        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
+        sys.exit(EXIT_INVALID)
+
+    try:
+        entries = read_entries(resident.manifest, limit, source=resident.path)
+        directory = resolve_journal_dir(resident.manifest, source=resident.path)
+    except ManifestError as exc:
+        click.secho(f"{resident.path}: {exc}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+
+    if output_format == "json":
+        click.echo(json.dumps([entry.as_dict() for entry in entries], indent=2))
+        return
+    if not entries:
+        click.echo(f"{resident_id} has not written a journal entry yet ({directory})")
+        return
+    for entry in entries:
+        _render_entry(entry)
 
 
 # --------------------------------------------------------------------------------------

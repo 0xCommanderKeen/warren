@@ -47,7 +47,8 @@ skills:
 memory:
   kind: directory
   path: ~/.steward/memory/burrow-builder
-  journal: journal.md
+  journal: journal
+  journal_keep: 30
 
 routes:
   - id: interactive

@@ -16,6 +16,12 @@ Charter last is the whole point. A soul is trusted repo content, but it is still
 landing inside a privileged prompt, and a journal is text a model wrote. Neither may
 outrank a hard rule, so neither gets the last word.
 
+A routine prompt adds one more section after the charter — the task — and the routine
+that closes the resident's day adds a second, the close-of-day journal instruction.
+Both are tasks, and the charter section says in so many words that it outranks the task
+too. There is no session type that skips the preamble: a close-of-day run is told who it
+is and how it writes exactly like every other run.
+
 Both untrusted-ish sections are bounded before injection as well as at validation
 time: the voice at :data:`steward.manifest.VOICE_MAX_CHARS`, the journal at
 :data:`JOURNAL_MAX_CHARS`. A note to tomorrow is not a transcript.
@@ -32,6 +38,7 @@ from steward.manifest import (
 )
 
 __all__ = [
+    "CLOSING_TITLE",
     "JOURNAL_MAX_CHARS",
     "SECTION_ORDER",
     "VOICE_FRAME",
@@ -45,6 +52,9 @@ JOURNAL_MAX_CHARS = 4000
 
 #: The documented order. Read it as precedence: later sections win.
 SECTION_ORDER = ("identity", "voice", "journal", "charter")
+
+#: The heading of the close-of-day section, when the routine is the one that ends the day.
+CLOSING_TITLE = "CLOSE THE DAY: WRITE YOUR JOURNAL"
 
 _RULE = "=" * 72
 
@@ -156,13 +166,23 @@ def assemble_routine_prompt(
     *,
     soul_text: str | None = None,
     journal_entry: str | None = None,
+    closing: str | None = None,
 ) -> str:
     """Preamble, then the routine's own prompt as the task for this run.
 
     The task comes after the charter because it is what the resident does *now*, but
     the charter section states its own precedence, so a task can no more override a
     hard rule than a voice can.
+
+    ``closing`` is the close-of-day instruction (:func:`steward.journal.close_of_day_instruction`),
+    present only on the one routine a manifest flags ``journal: close_of_day``. It comes
+    after the task because it is the last thing the session does, and it is still just a
+    task: the charter above it keeps its precedence, so "write your journal" can no more
+    license a forbidden action than anything else here can. A close-of-day session is an
+    ordinary session in every other respect — same identity, same voice, same charter.
     """
     preamble = assemble_preamble(manifest, soul_text, journal_entry)
     task = _section("YOUR TASK RIGHT NOW", routine_prompt)
+    if closing and closing.strip():
+        return f"{preamble}\n{task}\n{_section(CLOSING_TITLE, closing)}"
     return f"{preamble}\n{task}"
