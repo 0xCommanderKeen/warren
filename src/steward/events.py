@@ -54,6 +54,7 @@ __all__ = [
     "resident_restarted_event",
     "routine_failed_event",
     "task_claimed_event",
+    "task_delegated_event",
     "task_done_event",
     "task_failed_event",
     "task_posted_event",
@@ -71,6 +72,7 @@ TASK_POSTED = "task_posted"
 TASK_CLAIMED = "task_claimed"
 TASK_DONE = "task_done"
 TASK_FAILED = "task_failed"
+TASK_DELEGATED = "task_delegated"
 NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 RESIDENT_RESTARTED = "resident_restarted"
@@ -85,6 +87,7 @@ EVENT_TYPES = (
     TASK_CLAIMED,
     TASK_DONE,
     TASK_FAILED,
+    TASK_DELEGATED,
     NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
     RESIDENT_RESTARTED,
@@ -420,29 +423,52 @@ def task_posted_event(  # noqa: PLR0913 — every field is keyword-only and part
     )
 
 
-def task_claimed_event(*, task_id: str, title: str, claimant: str, project: str) -> Event:
+def _lineage(parent_task_id: str | None) -> dict[str, Any]:
+    """Add ``parent_task_id`` to a payload, and only when there is one.
+
+    A task nobody delegated has no parent, and saying ``"parent_task_id": null`` on every
+    board task would be steward answering a question that was not asked. The key appears
+    exactly when the fact does, so the payload of an ordinary claim is byte-identical to
+    what it was before delegation existed.
+    """
+    return {"parent_task_id": parent_task_id} if parent_task_id else {}
+
+
+def task_claimed_event(
+    *, task_id: str, title: str, claimant: str, project: str, parent_task_id: str | None = None
+) -> Event:
     """Announce that one resident, and only one, now holds this task.
 
     Emitted under the claimant's own ``agent_id`` rather than steward's, so burrow walks
     *that* villager to the notice board. Exactly one of these can exist per claim: the
     store's conditional ``UPDATE … WHERE status = 'open'`` is what makes that true, and
     the loser of a race emits nothing at all.
+
+    A delegated item is picked up through this same event, carrying the ``parent_task_id``
+    it was handed under, so the chain from the first task to the last is readable from the
+    log alone.
     """
     return Event(
         type=TASK_CLAIMED,
         agent_id=claimant,
         project=project,
-        payload={"task_id": task_id, "title": title, "claimant": claimant},
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "claimant": claimant,
+            **_lineage(parent_task_id),
+        },
     )
 
 
-def task_done_event(
+def task_done_event(  # noqa: PLR0913 — every field is keyword-only and part of the payload
     *,
     task_id: str,
     title: str,
     claimant: str,
     project: str,
     artifacts: Sequence[str] = (),
+    parent_task_id: str | None = None,
 ) -> Event:
     """Report a claimed task the resident finished, and what it left behind.
 
@@ -458,18 +484,26 @@ def task_done_event(
             "title": title,
             "claimant": claimant,
             "artifacts": list(artifacts),
+            **_lineage(parent_task_id),
         },
     )
 
 
-def task_failed_event(
-    *, task_id: str, title: str, claimant: str, project: str, reason: str
+def task_failed_event(  # noqa: PLR0913 — every field is keyword-only and part of the payload
+    *,
+    task_id: str,
+    title: str,
+    claimant: str,
+    project: str,
+    reason: str,
+    parent_task_id: str | None = None,
 ) -> Event:
     """Report a task its claimant did not finish — including one whose lease ran out.
 
     A lease expiry is a failure with the reason ``lease_expired``, not a silence: work
     that quietly returned to the board would let the village show a task nobody is doing
-    as a task somebody is doing.
+    as a task somebody is doing. A delegated item that nobody finished fails the same way,
+    still naming its parent, so the chain shows where the work stopped.
     """
     return Event(
         type=TASK_FAILED,
@@ -480,6 +514,44 @@ def task_failed_event(
             "title": title,
             "claimant": claimant,
             "reason": truncate_error(reason),
+            **_lineage(parent_task_id),
+        },
+    )
+
+
+def task_delegated_event(  # noqa: PLR0913 — the payload the issue documents
+    *,
+    task_id: str,
+    title: str,
+    sender: str,
+    recipient: str,
+    route: str,
+    project: str,
+    depth: int,
+    parent_task_id: str | None = None,
+) -> Event:
+    """Announce that one resident handed work to another, and name both ends.
+
+    Emitted under the **delegating** resident's agent id, because the villager burrow has
+    to walk across the village is the one carrying the letter. ``to`` names the doorway it
+    is walking to, and ``route`` names which door — a resident may declare more than one.
+
+    Nothing else in the chain needs a new event type: the receiver picks the item up with
+    ``task_claimed`` and closes it with ``task_done``/``task_failed``, both carrying the
+    same ``parent_task_id``, so the whole handoff is reconstructible from the log.
+    """
+    return Event(
+        type=TASK_DELEGATED,
+        agent_id=sender,
+        project=project,
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "from": sender,
+            "to": recipient,
+            "route": route,
+            "parent_task_id": parent_task_id,
+            "depth": depth,
         },
     )
 

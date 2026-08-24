@@ -943,6 +943,83 @@ def test_budget_show_reports_json(
     assert payload[0]["window"]["day"]
 
 
+def test_budget_show_by_origin_rolls_a_chain_up_to_the_question_that_started_it(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The other half of the ledger: not who spent it, but what it was spent answering."""
+    residents_dir = write_resident(budgeted_manifest(daily_cost_usd=50.0)).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        letter = store.delegate_job(
+            title="Check the errand list",
+            assignee="test-agent",
+            delegated_by="somebody",
+            route="inbox",
+            origin="task:root",
+        )
+        store.record_run(
+            resident="test-agent",
+            agent_id="claude-code:test-agent",
+            kind="delegated",
+            run_id=letter.task_id,
+            ref=letter.task_id,
+            cost_usd=3.25,
+            input_tokens=40,
+            output_tokens=60,
+        )
+
+    result = runner.invoke(
+        main,
+        [
+            "budget", "show", "test-agent", "--by-origin",
+            "--residents", str(residents_dir), "--db", str(db),
+        ],
+    )  # fmt: skip
+
+    assert result.exit_code == 0, result.output
+    assert "by origin" in result.output
+    assert "task:root: $3.2500, 100 token(s), 1 run(s)" in result.output
+
+
+def test_budget_show_by_origin_says_so_when_the_ledger_is_empty(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """An empty rollup is an answer, not a blank space where a number should be."""
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "budget", "show", "--by-origin",
+            "--residents", str(residents_dir), "--db", str(tmp_path / "steward.db"),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert "nothing on the ledger in this window" in result.output
+
+
+def test_budget_show_by_origin_wraps_the_json_only_when_it_is_asked_for(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The bare list is the shape something is already parsing; the flag is what wraps it."""
+    residents_dir = write_resident(budgeted_manifest(daily_cost_usd=5.0)).parent.parent
+    db = tmp_path / "steward.db"
+    ledger_a_run(db, 1.0)
+    result = runner.invoke(
+        main,
+        [
+            "budget", "show", "--by-origin",
+            "--residents", str(residents_dir), "--db", str(db), "--format", "json",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["residents"][0]["resident"] == "test-agent"
+    # A routine came off no task, so it is named unattributed rather than dropped.
+    assert payload["by_origin"] == [
+        {"origin": "unattributed", "runs": 1, "cost_usd": 1.0, "tokens": 100, "duration_s": 0.0}
+    ]
+
+
 def test_budget_show_refuses_an_unknown_resident(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -1154,3 +1231,283 @@ def test_doctor_names_the_last_watchdog_pass(
     assert result.exit_code == 0, result.output
     assert "watchdog: last pass 2026-08-24T12:00:00.000Z" in result.output
     assert "2 intervention(s)" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# delegation
+# --------------------------------------------------------------------------------------
+
+RECEIVER_SOUL = """---
+agent_id: claude-code:receiver-agent
+name: Recy
+char: Monk
+accent: "#a68a4f"
+role: test bot
+---
+A villager that exists only inside a test.
+"""
+
+
+def delegation_fleet(write_resident: ResidentWriter) -> Path:
+    """Write a permitted sender and a declared receiver, and return the tree."""
+    sender = valid_manifest()
+    sender["delegation"] = {"send": True}
+    residents_dir = write_resident(sender).parent.parent
+
+    receiver = valid_manifest()
+    receiver["id"] = "receiver-agent"
+    receiver["agent_id"] = "claude-code:receiver-agent"
+    receiver["soul"]["name"] = "Recy"
+    receiver["routes"] = [
+        *receiver["routes"],
+        {"id": "inbox", "kind": "delegation", "address": "steward:delegation"},
+    ]
+    write_resident(receiver, soul=RECEIVER_SOUL, root=residents_dir)
+    return residents_dir
+
+
+def test_delegate_hands_work_over_and_prints_the_task_id(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The token-free path: a session with a shell, not with steward's API token."""
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    monkeypatch.delenv("BURROW_URL", raising=False)
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+
+    result = runner.invoke(
+        main,
+        [
+            "delegate", "test-agent",
+            "--to", "receiver-agent",
+            "--route", "inbox",
+            "--title", "Read the background",
+            "--detail", "everything they need",
+            "--residents", str(residents_dir),
+            "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert "test-agent → receiver-agent via inbox" in result.output
+    task_id = result.output.strip().splitlines()[-1]
+
+    with Store(db) as store:
+        (waiting,) = store.inbox("receiver-agent")
+    assert waiting.task_id == task_id
+    assert waiting.detail == "everything they need"
+
+    emitted = [
+        json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [event["type"] for event in emitted] == ["task_delegated"]
+
+
+def test_delegate_accepts_a_json_detail(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    result = runner.invoke(
+        main,
+        [
+            "delegate", "test-agent",
+            "--to", "receiver-agent", "--route", "inbox", "--title", "Read it",
+            "--detail-json", '{"question": "what is on the list?"}',
+            "--residents", str(residents_dir), "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    with Store(db) as store:
+        (waiting,) = store.inbox("receiver-agent")
+    assert json.loads(waiting.detail) == {"question": "what is on the list?"}
+
+
+def test_delegate_refuses_loudly_and_writes_nothing(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    residents_dir = write_resident(valid_manifest()).parent.parent
+    db = tmp_path / "delegation.db"
+    result = runner.invoke(
+        main,
+        [
+            "delegate", "test-agent",
+            "--to", "nobody", "--route", "inbox", "--title", "Read it",
+            "--residents", str(residents_dir), "--db", str(db),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1
+    assert "refused (unknown_recipient)" in result.output
+    with Store(db) as store:
+        assert store.jobs() == []
+    assert not (tmp_path / "events.jsonl").exists(), "a refusal emits nothing"
+
+
+def test_delegate_refuses_two_kinds_of_detail(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = delegation_fleet(write_resident)
+    both = runner.invoke(
+        main,
+        [
+            "delegate", "test-agent", "--to", "receiver-agent", "--route", "inbox",
+            "--title", "t", "--detail", "a", "--detail-json", "{}",
+            "--residents", str(residents_dir), "--db", str(tmp_path / "d.db"),
+        ],
+    )  # fmt: skip
+    assert both.exit_code == 1
+    assert "not both" in both.output
+
+    broken = runner.invoke(
+        main,
+        [
+            "delegate", "test-agent", "--to", "receiver-agent", "--route", "inbox",
+            "--title", "t", "--detail-json", "{oops",
+            "--residents", str(residents_dir), "--db", str(tmp_path / "d.db"),
+        ],
+    )  # fmt: skip
+    assert broken.exit_code == 1
+    assert "--detail-json does not parse" in broken.output
+
+
+def test_delegate_needs_a_sender_that_exists(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = delegation_fleet(write_resident)
+    result = runner.invoke(
+        main,
+        [
+            "delegate", "ghost", "--to", "receiver-agent", "--route", "inbox", "--title", "t",
+            "--residents", str(residents_dir), "--db", str(tmp_path / "d.db"),
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 1
+    assert "no valid resident 'ghost'" in result.output
+
+
+def test_inbox_shows_what_is_waiting_and_what_is_not(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    empty = runner.invoke(
+        main, ["inbox", "receiver-agent", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert empty.exit_code == 0, empty.output
+    assert "nothing open in receiver-agent's inbox" in empty.output
+    assert "routes accepting delegated work: inbox" in empty.output
+
+    with Store(db) as store:
+        store.delegate_job(
+            title="Read the background",
+            assignee="receiver-agent",
+            delegated_by="test-agent",
+            route="inbox",
+        )
+    listed = runner.invoke(
+        main, ["inbox", "receiver-agent", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert "Read the background" in listed.output
+    assert "from test-agent via inbox" in listed.output
+
+    payload = json.loads(
+        runner.invoke(
+            main,
+            [
+                "inbox", "receiver-agent", "--status", "all", "--format", "json",
+                "--residents", str(residents_dir), "--db", str(db),
+            ],
+        ).output
+    )  # fmt: skip
+    assert payload[0]["assignee"] == "receiver-agent"
+
+
+def test_task_lineage_prints_the_whole_chain(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    with Store(db) as store:
+        root = store.post_job(title="The root task")
+        child = store.delegate_job(
+            title="The handed-over half",
+            assignee="receiver-agent",
+            delegated_by="test-agent",
+            route="inbox",
+            parent_task_id=root.task_id,
+            origin=f"task:{root.task_id}",
+        )
+    _ = residents_dir
+
+    result = runner.invoke(main, ["task", "lineage", child.task_id, "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    assert f"origin task:{root.task_id}" in result.output
+    assert "The root task" in result.output
+    assert "test-agent → receiver-agent" in result.output
+
+    payload = json.loads(
+        runner.invoke(
+            main, ["task", "lineage", child.task_id, "--db", str(db), "--format", "json"]
+        ).output
+    )
+    assert [item["task_id"] for item in payload] == [root.task_id, child.task_id]
+
+    missing = runner.invoke(main, ["task", "lineage", "nobody", "--db", str(db)])
+    assert missing.exit_code == 1
+
+
+def test_board_list_marks_a_letter_as_a_letter(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A delegated item is on the same table, and the listing must not call it claimable."""
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    with Store(db) as store:
+        store.delegate_job(
+            title="Read the background",
+            assignee="receiver-agent",
+            delegated_by="test-agent",
+            route="inbox",
+        )
+    result = runner.invoke(
+        main, ["board", "list", "--residents", str(residents_dir), "--db", str(db)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "delegated: test-agent → receiver-agent via inbox" in result.output
+    assert "claimable by" not in result.output
+
+
+def test_board_dispatch_reports_a_letter_it_worked(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, stub_bin: StubWriter
+) -> None:
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    with Store(db) as store:
+        store.delegate_job(
+            title="Read the background",
+            assignee="receiver-agent",
+            delegated_by="test-agent",
+            route="inbox",
+        )
+    stub_bin("claude", 'echo \'{"result": "read it", "is_error": false}\'')
+
+    result = runner.invoke(
+        main,
+        ["board", "dispatch", "--residents", str(residents_dir), "--db", str(db),
+         "--workdir", str(tmp_path)],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert "done receiver-agent" in result.output
+    assert "delegated by test-agent" in result.output

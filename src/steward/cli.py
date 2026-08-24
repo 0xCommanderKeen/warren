@@ -32,6 +32,7 @@ from steward.approvals import (
 )
 from steward.board import BoardReport, Dispatcher, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
+from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.journal import (
     JournalEntry,
     journal_complaint,
@@ -59,7 +60,13 @@ from steward.scheduler import (
     load_scheduled,
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
-from steward.store import APPROVAL_DECISIONS, Store, default_db_path
+from steward.store import (
+    APPROVAL_DECISIONS,
+    JobRecord,
+    OriginSpend,
+    Store,
+    default_db_path,
+)
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
@@ -409,13 +416,7 @@ def journal_command(resident_id: str, residents: Path, limit: int, output_format
     prints what the resident wrote; when it has written nothing it says so, because an
     empty journal is a real answer.
     """
-    result = validate_paths([residents])
-    resident = next((r for r in result.residents if r.id == resident_id), None)
-    if resident is None:
-        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
-        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
-        sys.exit(EXIT_INVALID)
-
+    resident = _resident_or_exit(residents, resident_id)
     try:
         entries = read_entries(resident.manifest, limit, source=resident.path)
         directory = resolve_journal_dir(resident.manifest, source=resident.path)
@@ -659,13 +660,23 @@ def board_dispatch(
 
 
 def _report_board(report: BoardReport) -> None:
-    label = f"{report.resident_id} → {report.task.task_id} ({report.task.title})"
+    kind = f"delegated by {report.task.delegated_by}" if report.delegated else "claimed"
+    label = f"{report.resident_id} → {report.task.task_id} ({report.task.title}, {kind})"
     if report.done:
         click.secho(f"done {label}", fg="green")
     else:
         click.secho(f"failed {label}: {report.reason}", fg="red", err=True)
     for record in report.raised:
         click.secho(f"  needs human: {record.message} [{record.request_id}]", fg="yellow")
+    for delivery in report.handed_over:
+        if delivery.task is not None:
+            click.secho(
+                f"  delegated: {delivery.task.title} → {delivery.task.assignee} "
+                f"[{delivery.task.task_id}]",
+                fg="cyan",
+            )
+        else:
+            click.secho(f"  delegation refused ({delivery.reason}): {delivery.message}", fg="red")
 
 
 @board.command("list")
@@ -693,11 +704,189 @@ def board_list(db: Path | None, residents: Path, output_format: str) -> None:
         click.secho(f"{job.status:<8} {job.task_id}  {job.title}", fg=colour)
         if job.required_skills:
             click.echo(f"         skills: {', '.join(job.required_skills)}")
+        if job.delegated:
+            click.echo(
+                f"         delegated: {job.delegated_by} → {job.assignee} via {job.route} "
+                f"(depth {job.depth})"
+            )
         if job.claimant:
             click.echo(f"         claimant: {job.claimant} (lease {job.lease_expires_at})")
-        elif job.status == "open":
+        elif job.status == "open" and not job.delegated:
             eligible = [name for name, skills in holders.items() if job.claimable_by <= skills]
             click.echo(f"         claimable by: {', '.join(eligible) or 'nobody on this tree'}")
+
+
+# --------------------------------------------------------------------------------------
+# delegation
+# --------------------------------------------------------------------------------------
+
+
+def _resident_or_exit(residents: Path, resident_id: str) -> Resident:
+    """Find one valid resident in a tree, or refuse with the ones that are there."""
+    result = validate_paths([residents])
+    resident = next((r for r in result.residents if r.id == resident_id), None)
+    if resident is None:
+        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
+        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
+        sys.exit(EXIT_INVALID)
+    return resident
+
+
+@main.command("delegate")
+@click.argument("resident_id")
+@click.option("--to", "recipient", required=True, help="The resident id receiving the work.")
+@click.option("--route", required=True, help="A delegation route that resident declares.")
+@click.option("--title", required=True, help="One line naming the work.")
+@click.option("--detail", default=None, help="Everything the receiver needs, as prose.")
+@click.option("--detail-json", default=None, help="The same, as a JSON object.")
+@click.option(
+    "--parent-task-id",
+    default=None,
+    help="The task this descends from. Carries lineage, depth, and budget attribution.",
+)
+@_RESIDENTS_OPTION
+@_DB_OPTION
+def delegate_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    resident_id: str,
+    recipient: str,
+    route: str,
+    title: str,
+    detail: str | None,
+    detail_json: str | None,
+    parent_task_id: str | None,
+    residents: Path,
+    db: Path | None,
+) -> None:
+    """Hand work from one resident to another, from inside a session.
+
+    Token-free and local, exactly like `steward approval raise`: a headless session with
+    shell access calls this directly rather than holding steward's API token. Steward is
+    still the arbiter — both manifests have to permit the handoff, the chain may not run
+    too deep, and it may never revisit a resident — and a refusal exits non-zero with the
+    reason, having written and emitted nothing.
+
+    Nothing waits: the receiver picks the work up on its own next wake-up.
+    """
+    sender = _resident_or_exit(residents, resident_id)
+    if detail and detail_json:
+        click.secho("pass --detail or --detail-json, not both", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    body = detail or ""
+    if detail_json:
+        try:
+            loaded = json.loads(detail_json)
+        except ValueError as exc:
+            click.secho(f"--detail-json does not parse: {exc}", fg="red", err=True)
+            sys.exit(EXIT_INVALID)
+        body = json.dumps(loaded, ensure_ascii=False, indent=2)
+
+    all_residents = validate_paths([residents]).residents
+    with _open_store(db) as store:
+        delegator = Delegator(
+            residents=all_residents,
+            store=store,
+            emitter=ev.EventEmitter.from_env(),
+            max_depth=max_depth(),
+        )
+        try:
+            task = delegator.delegate(
+                sender=sender,
+                handoff=Handoff(
+                    raw=f"steward delegate {resident_id} --to {recipient}",
+                    to=recipient,
+                    route=route,
+                    title=title,
+                    detail=body,
+                ),
+                parent_task_id=parent_task_id,
+            )
+        except DelegationError as exc:
+            click.secho(f"refused ({exc.reason}): {exc}", fg="red", err=True)
+            sys.exit(EXIT_INVALID)
+    click.secho(f"{sender.id} → {task.assignee} via {task.route}: {task.title}", fg="green")
+    click.echo(task.task_id)
+
+
+@main.command("inbox")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option(
+    "--status",
+    default="open",
+    show_default=True,
+    help="Which items to show: open, claimed, done, failed, or all.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def inbox_command(
+    resident_id: str,
+    residents: Path,
+    db: Path | None,
+    status: str,
+    output_format: str,
+) -> None:
+    """Show the work other residents have handed to this one.
+
+    ``open`` is the pending inbox: delivered and not yet picked up. Nothing here wakes a
+    resident — items are worked on its own next wake-up, and this is only the reading.
+    """
+    resident = _resident_or_exit(residents, resident_id)
+    with _open_store(db) as store:
+        items = store.inbox(resident.id, None if status == "all" else status)
+    if output_format == "json":
+        click.echo(json.dumps([item.to_dict() for item in items], indent=2))
+        return
+    routes = ", ".join(resident.delegation_routes) or "none"
+    click.secho(f"{resident.id}: routes accepting delegated work: {routes}", fg="bright_black")
+    if not items:
+        click.echo(f"nothing {status} in {resident.id}'s inbox")
+        return
+    for item in items:
+        colour = {"open": "cyan", "claimed": "yellow", "done": "green"}.get(item.status, "red")
+        click.secho(f"{item.status:<8} {item.task_id}  {item.title}", fg=colour)
+        click.echo(
+            f"         from {item.delegated_by} via {item.route} "
+            f"(depth {item.depth}, origin {item.origin})"
+        )
+
+
+@main.group("task")
+def task_group() -> None:
+    """Follow one piece of work: who asked for it, and who it passed through."""
+
+
+@task_group.command("lineage")
+@click.argument("task_id")
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def task_lineage(task_id: str, db: Path | None, output_format: str) -> None:
+    """Print the whole chain a task belongs to, root first. The audit query.
+
+    A task nobody delegated is a chain of one, which is a real answer and not an error.
+    """
+    with _open_store(db) as store:
+        chain = store.lineage(task_id)
+    if not chain:
+        click.secho(f"no task {task_id!r}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if output_format == "json":
+        click.echo(json.dumps([item.to_dict() for item in chain], indent=2))
+        return
+    click.secho(f"origin {chain[-1].origin or 'unrecorded'}", fg="cyan", bold=True)
+    for item in chain:
+        _render_lineage_hop(item)
+
+
+def _render_lineage_hop(item: JobRecord) -> None:
+    """Print one hop of a lineage chain: who held it, and what became of it."""
+    indent = "  " * item.depth
+    who = (
+        f"{item.delegated_by} → {item.assignee}"
+        if item.delegated
+        else f"posted by {item.posted_by}"
+    )
+    click.secho(f"{indent}{item.task_id}  {item.title}", bold=True)
+    click.echo(f"{indent}  {who} — {item.status}{f' ({item.outcome})' if item.outcome else ''}")
 
 
 # --------------------------------------------------------------------------------------
@@ -742,12 +931,7 @@ def approval_raise(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     request does. Prints the ``request_id``; the session then finishes its turn and
     stops. Nothing here waits for a decision.
     """
-    result = validate_paths([residents])
-    resident = next((r for r in result.residents if r.id == resident_id), None)
-    if resident is None:
-        known = ", ".join(sorted(r.id for r in result.residents)) or "none"
-        click.secho(f"no valid resident {resident_id!r} in {residents} (found: {known})", fg="red")
-        sys.exit(EXIT_INVALID)
+    resident = _resident_or_exit(residents, resident_id)
     if detail_json and note:
         click.secho("pass --detail-json or --note, not both", fg="red", err=True)
         sys.exit(EXIT_INVALID)
@@ -869,8 +1053,17 @@ def _render_budget(status: BudgetStatus) -> None:
 @_RESIDENTS_OPTION
 @_DB_OPTION
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+@click.option(
+    "--by-origin",
+    is_flag=True,
+    help="Also roll today's spend up by the origin each chain descends from.",
+)
 def budget_show(
-    resident_id: str | None, residents: Path, db: Path | None, output_format: str
+    resident_id: str | None,
+    residents: Path,
+    db: Path | None,
+    output_format: str,
+    by_origin: bool,  # noqa: FBT001 — click passes flags positionally
 ) -> None:
     """Show today's spend against each declared budget. All residents, or just one.
 
@@ -878,6 +1071,12 @@ def budget_show(
     its day, else the zone most of its routines run in — and the window is computed from
     the calendar right now, not from a counter some daemon has been holding since it
     started. A steward that restarted a minute ago prints the same numbers.
+
+    ``--by-origin`` answers the other question delegation made askable: not "what did Hob
+    spend" but "what did *this* question cost", summed across every resident the chain
+    passed through. A rollup is fleet-wide by nature — that is the point of it — so it
+    spans from the earliest window shown to the latest, and says which span it used
+    rather than picking one resident's day and calling it everybody's.
     """
     result = validate_paths([residents])
     wanted = [r for r in result.residents if resident_id is None or r.id == resident_id]
@@ -889,15 +1088,50 @@ def budget_show(
     with _open_store(db) as store:
         guard = BudgetGuard(store)
         statuses = [guard.status(resident.manifest) for resident in wanted]
+        origins = _origin_rollup(store, statuses) if by_origin else []
 
     if output_format == "json":
-        click.echo(json.dumps([status.to_dict() for status in statuses], indent=2))
+        # The bare list is the shape this command has always printed, and something is
+        # already parsing it. Asking for the rollup is what wraps it, so a caller that
+        # never asks never has to learn a new shape.
+        rendered = [status.to_dict() for status in statuses]
+        payload: list[dict[str, Any]] | dict[str, Any] = (
+            {"residents": rendered, "by_origin": [spend.to_dict() for spend in origins]}
+            if by_origin
+            else rendered
+        )
+        click.echo(json.dumps(payload, indent=2))
         return
     if not statuses:
         click.echo(f"no valid residents in {residents}")
         return
     for status in statuses:
         _render_budget(status)
+    if by_origin:
+        _render_origins(statuses, origins)
+
+
+def _origin_rollup(store: Store, statuses: Sequence[BudgetStatus]) -> list[OriginSpend]:
+    """Roll the ledger up by origin across the widest window any shown resident is in."""
+    if not statuses:
+        return []
+    return store.spend_by_origin(
+        since=min(status.window.start_iso for status in statuses),
+        until=max(status.window.end_iso for status in statuses),
+    )
+
+
+def _render_origins(statuses: Sequence[BudgetStatus], origins: Sequence[OriginSpend]) -> None:
+    """Print the origin rollup under the per-resident gauges, naming its span."""
+    span = f"{min(s.window.day for s in statuses)}..{max(s.window.day for s in statuses)}"
+    click.secho(f"\nby origin ({span}, all residents shown)", bold=True)
+    if not origins:
+        click.secho("  nothing on the ledger in this window", fg="bright_black")
+        return
+    for spend in origins:
+        click.echo(
+            f"  {spend.origin}: ${spend.cost_usd:.4f}, {spend.tokens} token(s), {spend.runs} run(s)"
+        )
 
 
 @budget.command("unpause")

@@ -34,6 +34,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
+| `delegation` | no | Handing work to other residents. Absent means this one never does. |
 | `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
 | `deploy` | no | Where this resident runs, for the watchdog. Absent means unsupervised. |
 
@@ -134,11 +135,21 @@ it starts. See [the journal](#the-journal).
 ```yaml
 routes:
   - id: inbox
-    kind: email              # email | chat | http | webhook | cron | cli | job-board
+    kind: email              # email | chat | http | webhook | cron | cli | job-board | delegation
     address: mailbox:household   # a reference, never a credential
     status: active           # active | pending | disabled
     note: Optional.
 ```
+
+Two kinds are more than description, because steward itself delivers through them:
+
+- **`job-board`** — required, and `active`, before `board: {claim: true}` is allowed. See
+  [`board`](#board--job-board-participation).
+- **`delegation`** — the door another resident's work arrives through. Declaring it *is*
+  the acceptance: steward delivers a handoff into an `active` route of this kind and into
+  no other, and the delegating session names the route by its `id`. A resident may declare
+  several — `inbox` and `research` are different doors. See
+  [`delegation`](#delegation--handing-work-to-another-resident).
 
 ## `app_grants` — declared app access
 
@@ -324,6 +335,42 @@ them from there), same charter with the last word — with one extra section nam
 task.
 See [docs/api.md](api.md) for posting to the board and the lifecycle events.
 
+## `delegation` — handing work to another resident
+
+```yaml
+delegation:
+  send: true                 # default false: a resident with no block never delegates
+  to: [life-agent]           # optional allowlist of resident ids; omit it to allow any
+  note: Background reading that is not village work.
+```
+
+The **sending** half of a handoff, and like `board.claim` it is one boolean that defaults
+to **off**: a resident that has never been told it may delegate never delegates, however
+sensible the handoff would have been. The **receiving** half is the other manifest's job —
+an `active` route of kind `delegation` (above) — and neither half can waive the other.
+
+Two things are checked at validation time rather than discovered when a session is refused:
+
+- **An allowlist with the switch off is an error.** `to:` names recipients while `send` is
+  false grants nothing while reading exactly like a grant.
+- **Naming yourself is an error.** A resident handing work to itself is one session
+  pretending to be two; steward rejects it at enqueue, so declaring it declares something
+  that can never happen.
+
+Steward enforces the rest at enqueue — a depth cap (`STEWARD_MAX_DELEGATION_DEPTH`,
+default 3) and cycle rejection — and refuses with a structured reason, writing and emitting
+nothing. Delivery is pull-based: the receiver drains its inbox on its own next wake-up,
+ahead of the open board, and works the item as an ordinary session.
+
+```console
+$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward inbox life-agent                 # what is waiting, from whom, at what depth
+$ steward task lineage <task_id>           # the whole chain, root first
+```
+
+The grammar a session writes, the guardrails, and the lineage model are in
+[docs/delegation.md](delegation.md).
+
 ## `budgets` — what a day may cost
 
 ```yaml
@@ -433,6 +480,7 @@ $ steward watchdog run --interval 60   # the daemon
 $ steward doctor                       # …and when the watchdog last made a pass
 ```
 
+
 ## The session prompt
 
 Every session steward launches is composed in one place, `steward.prompt`, in a fixed
@@ -448,8 +496,13 @@ order with fixed delimiters:
 5. **Decisions since you last ran** — answers to approval requests this resident raised
    in an earlier session, delivered exactly once. A record, not an order.
 6. **Your charter (authoritative, last word)** — mission, duties, hard rules, escalation,
-   and the exact mechanism for escalating (see [docs/approvals.md](approvals.md)).
-7. **Your task right now** — the routine's own prompt, or a task claimed off the board.
+   and the exact mechanism for escalating (see [docs/approvals.md](approvals.md)) — plus,
+   for a resident whose manifest permits it, the exact mechanism for handing work to
+   another resident (see [docs/delegation.md](delegation.md)). A resident that may not
+   delegate is not told how to.
+7. **Your task right now** — the routine's own prompt, a task claimed off the board, or
+   work another resident delegated (which names the sender and the route it arrived
+   through, and is framed as a request from a colleague rather than an instruction).
 8. **Close the day: write your journal** — only on the routine flagged
    `journal: close_of_day`.
 
@@ -461,9 +514,10 @@ many words that it outranks the task too. Voice is capped at 1200 characters, th
 and the decisions at 4000 each, and the whole skill set at 24000, before injection as well
 as at validation.
 
-There is no session type that skips the preamble. A close-of-day run and a board session
-are told who they are, how they write, and what their charter says exactly like every
-other run — which is the point of asking for a journal in the resident's own voice at all.
+There is no session type that skips the preamble. A close-of-day run, a board session, and
+a delegated one are told who they are, how they write, and what their charter says exactly
+like every other run — which is the point of asking for a journal in the resident's own
+voice at all.
 
 ## The soul body
 

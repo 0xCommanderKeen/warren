@@ -38,6 +38,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
+from steward import delegation as dg
 from steward import events as ev
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.journal import journal_complaint, read_entries
@@ -54,7 +55,7 @@ from steward.scheduler import (
     default_state_path,
 )
 from steward.skills import SkillLibrary, effective_skills, library_for
-from steward.store import JOB_STATUSES, Store, default_db_path, new_id
+from steward.store import JOB_STATUSES, STATUS_OPEN, Store, default_db_path, new_id
 
 __all__ = [
     "DEFAULT_HOST",
@@ -185,6 +186,33 @@ class ApprovalDecision(_Body):
     edit: dict[str, Any] | None = Field(
         default=None, description="The modified detail, for decision=edit."
     )
+
+
+class HandoffPost(_Body):
+    """Work handed to one named resident, through a route that resident declares."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
+
+    to: str = Field(min_length=1, description="The resident id receiving the work.")
+    route: str = Field(min_length=1, description="A delegation route that resident declares.")
+    title: str = Field(min_length=1, description="One line naming the work.")
+    detail: str = Field(default="", description="Everything the receiver needs to know.")
+    sender: str | None = Field(
+        default=None,
+        alias="from",
+        description="The resident handing the work over. Omit it when a person is.",
+    )
+    parent_task_id: str | None = Field(
+        default=None,
+        description="The task this work descends from, for lineage and attribution.",
+    )
+
+
+#: What a refusal costs over HTTP. A recipient steward has never heard of is a 404 like
+#: any other unknown resident; everything else is a conflict between the request and what
+#: the two manifests actually declare, which is a 409 and not a malformed request.
+DELEGATION_STATUS: Mapping[str, int] = {dg.UNKNOWN_RECIPIENT: 404, dg.UNKNOWN_PARENT: 404}
+DELEGATION_REFUSED_STATUS = 409
 
 
 # --------------------------------------------------------------------------------------
@@ -644,6 +672,96 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
                 "queued on the board; a resident claims it on its own next wake-up, and "
                 "task_claimed in burrow's log is the only proof that happened"
             ),
+        }
+
+    # -- delegation ------------------------------------------------------------------
+
+    @app.get("/residents/{resident_id}/inbox")
+    def get_inbox(resident_id: str, status: str | None = None) -> dict[str, Any]:
+        """List the work delegated to this resident. Pending by default.
+
+        Pending means *open*: handed over and not yet picked up. ``?status=`` narrows to
+        any board status, and ``all`` is everything ever addressed to this resident, which
+        is the audit view — who sent it, through which route, and what became of it.
+        """
+        wanted = status or STATUS_OPEN
+        if wanted not in (*JOB_STATUSES, APPROVAL_STATUS_ALL):
+            _refuse(
+                422,
+                "unknown_status",
+                f"status {status!r} is not an inbox status; use one of: "
+                f"{', '.join(JOB_STATUSES)}, all",
+            )
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        items = db.inbox(resident.id, None if wanted == APPROVAL_STATUS_ALL else wanted)
+        return {
+            "resident": resident.id,
+            "status": wanted,
+            "routes": list(resident.delegation_routes),
+            "inbox": [item.to_dict() for item in items],
+        }
+
+    @app.post("/delegate", status_code=202)
+    def delegate(body: HandoffPost, request: Request) -> dict[str, Any]:
+        """Hand work to one resident, if both manifests and the guardrails agree.
+
+        The human path into steward #7; a session uses the ``<delegate>`` block or
+        ``steward delegate``, neither of which needs this token. ``from`` names the
+        resident handing the work over and its manifest is checked exactly as it would be
+        for a block — a person must not be able to make a resident do what its own
+        declaration forbids. Omitting ``from`` means the person is the sender, and then
+        the receiver's route is the whole of the agreement.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        sender = (
+            _find_resident(result, body.sender, residents_dir) if body.sender is not None else None
+        )
+        delegator = dg.Delegator(residents=result.residents, store=db, emitter=sink)
+        handoff = dg.Handoff(
+            raw="POST /delegate",
+            to=body.to,
+            route=body.route,
+            title=body.title,
+            detail=body.detail,
+        )
+        try:
+            task = delegator.delegate(
+                sender=sender, handoff=handoff, parent_task_id=body.parent_task_id
+            )
+        except dg.DelegationError as exc:
+            # Refused: nothing was written and nothing was emitted. The reason is the
+            # error code, so a session or a panel can key on it without reading prose.
+            _refuse(
+                DELEGATION_STATUS.get(exc.reason, DELEGATION_REFUSED_STATUS), exc.reason, str(exc)
+            )
+        request_id = accept(request, "delegated", {"task_id": task.task_id, "to": task.assignee})
+        return {
+            "request_id": request_id,
+            "task_id": task.task_id,
+            "status": "accepted",
+            "to": task.assignee,
+            "route": task.route,
+            "depth": task.depth,
+            "parent_task_id": task.parent_task_id,
+            "origin": task.origin,
+            "message": (
+                "delivered into the receiver's inbox; it is worked on that resident's own "
+                "next wake-up, and task_claimed in burrow's log is the only proof of that"
+            ),
+        }
+
+    @app.get("/tasks/{task_id}/lineage")
+    def get_lineage(task_id: str) -> dict[str, Any]:
+        """Return the whole chain this task belongs to, root first. The audit query."""
+        chain = db.lineage(task_id)
+        if not chain:
+            _refuse(404, "unknown_task", f"no task {task_id!r}")
+        return {
+            "task_id": task_id,
+            "origin": chain[-1].origin,
+            "depth": chain[-1].depth,
+            "chain": [item.to_dict() for item in chain],
         }
 
     # -- approvals -------------------------------------------------------------------

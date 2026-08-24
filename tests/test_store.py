@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from steward.events import utc_now_iso
-from steward.store import ApprovalRecord, JobRecord, RequestRecord, Store, default_db_path
+from steward.store import (
+    ORIGIN_UNATTRIBUTED,
+    ApprovalRecord,
+    JobRecord,
+    RequestRecord,
+    Store,
+    default_db_path,
+)
 
 EARLY = "2026-08-24T09:00:00.000Z"
 LATER = "2026-08-24T10:00:00.000Z"
@@ -227,6 +234,29 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         claimed = migrated.claim_next_job(claimant="a:b", skills=[], lease_expires_at=LATER)
         assert claimed is not None
 
+        # Delegation (#7) added columns to this same table; the old row reads back with
+        # the defaults rather than blowing up, and it is not somebody's post.
+        assert (job.assignee, job.delegated_by, job.route, job.origin) == (None, None, None, None)
+        assert job.depth == 0
+        assert not job.delegated
+        assert migrated.inbox("a") == []
+
+        # The watchdog and budgets (#8) added whole tables. Both evolutions have to land
+        # on the same database — a steward upgraded across two releases at once is the
+        # ordinary case, not an exotic one — so the combined schema is exercised here in
+        # one open, on a file that predates both.
+        letter = migrated.delegate_job(
+            title="Read the background", assignee="hob", delegated_by="maren", route="inbox"
+        )
+        assert letter.origin is None
+        assert [item.task_id for item in migrated.inbox("hob")] == [letter.task_id]
+        migrated.record_run(
+            resident="hob", agent_id="a:b", kind="delegated", run_id="r", ref=letter.task_id
+        )
+        assert [entry.kind for entry in migrated.ledger("hob")] == ["delegated"]
+        assert migrated.budget_pause("hob") is None
+        assert migrated.last_watchdog_pass() is None
+
 
 # ------------------------------------------------------------------------ approvals
 
@@ -404,3 +434,69 @@ def test_the_database_lives_beside_the_scheduler_state(
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state" / "scheduler.json"))
     assert default_db_path() == tmp_path / "state" / "steward.db"
+
+
+# -------------------------------------------------------------- the ledger, by origin
+
+
+def test_spend_rolls_up_by_the_origin_a_task_carries(store: Store) -> None:
+    """Two hops of one chain are one bill, because both rows carry the same origin."""
+    first = store.delegate_job(
+        title="first hop", assignee="hob", delegated_by="maren", route="inbox", origin="task:root"
+    )
+    second = store.delegate_job(
+        title="second hop", assignee="pip", delegated_by="hob", route="inbox", origin="task:root"
+    )
+    for resident, task in (("hob", first), ("pip", second)):
+        store.record_run(
+            resident=resident,
+            agent_id=f"a:{resident}",
+            kind="delegated",
+            run_id=task.task_id,
+            ref=task.task_id,
+            cost_usd=1.5,
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+    (rolled,) = store.spend_by_origin()
+
+    assert rolled.origin == "task:root"
+    assert rolled.runs == 2
+    assert rolled.cost_usd == pytest.approx(3.0)
+    assert rolled.tokens == 30
+
+
+def test_a_run_behind_no_task_is_named_rather_than_dropped(store: Store) -> None:
+    """A routine has no chain above it, and money steward cannot attribute is still money."""
+    store.record_run(
+        resident="hob",
+        agent_id="a:hob",
+        kind="routine",
+        run_id="r",
+        ref="daily-summary",
+        cost_usd=2.0,
+    )
+
+    (rolled,) = store.spend_by_origin()
+
+    assert rolled.origin == ORIGIN_UNATTRIBUTED
+    assert rolled.cost_usd == pytest.approx(2.0)
+
+
+def test_the_rollup_is_ordered_by_what_each_origin_cost(store: Store) -> None:
+    """Whoever is spending the most is the first line somebody reads."""
+    for origin, cost in (("task:cheap", 1.0), ("task:dear", 9.0)):
+        task = store.delegate_job(
+            title=origin, assignee="hob", delegated_by="maren", route="inbox", origin=origin
+        )
+        store.record_run(
+            resident="hob",
+            agent_id="a:hob",
+            kind="delegated",
+            run_id=task.task_id,
+            ref=task.task_id,
+            cost_usd=cost,
+        )
+
+    assert [spend.origin for spend in store.spend_by_origin()] == ["task:dear", "task:cheap"]

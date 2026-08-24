@@ -94,3 +94,17 @@ def test_no_shipped_manifest_re_grants_a_default_skill() -> None:
     for resident in m.validate_tree(RESIDENTS_DIR).residents:
         repeated = {grant.id for grant in resident.manifest.skills} & defaults
         assert repeated == set(), f"{resident.id} re-grants {sorted(repeated)}"
+
+
+def test_maren_may_hand_work_to_hob_and_hob_declares_a_door() -> None:
+    """The shipped pilot: both halves of a handoff, written down in two manifests."""
+    residents = {r.id: r for r in m.validate_tree(RESIDENTS_DIR).residents}
+    maren = residents["burrow-builder"]
+    hob = residents["life-agent"]
+
+    assert maren.manifest.delegation.send is True
+    assert maren.manifest.delegation.may_send_to("life-agent") is True
+    assert maren.manifest.delegation.may_send_to("some-other-agent") is False
+    assert hob.delegation_routes == ("handoff",)
+    assert hob.manifest.delegation.send is False, "Hob receives; he escalates to a person"
+    assert maren.delegation_routes == (), "nothing is handed back to Maren yet"
