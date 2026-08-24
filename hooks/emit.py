@@ -2,12 +2,22 @@
 """burrow v0 emitter: adapts a Claude Code hook callback (JSON on stdin) to one
 burrow protocol event. See docs/protocol.md.
 
-Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; on any
-failure fall back to appending to ~/.burrow/events.jsonl locally. A failed POST
-trips a 60s circuit breaker so an unreachable server never slows hooks down.
-If BURROW_TOKEN is set it is sent as `Authorization: Bearer <token>`; a server
-that rejects it (401) is just another failed POST — the event still lands in the
-local log, so a wrong or missing token loses no events, only remoteness.
+Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; if no
+target takes it, fall back to appending to ~/.burrow/events.jsonl locally. A
+failed POST trips a per-target circuit breaker so an unreachable server never
+slows hooks down. If BURROW_TOKEN is set it is sent as `Authorization: Bearer
+<token>`; a server that rejects it (401) is just another failed POST — the event
+still lands in the local log, so a wrong or missing token loses no events, only
+remoteness.
+
+The same event is also POSTed to every BURROW_MIRROR target (default
+http://127.0.0.1:8737, the local dev server). A mirror is how you work on burrow
+against your own live fleet without deploying: run `python3 serve.py` and your
+real sessions show up locally *and* in the shared village. Nothing is listening
+most of the time, and a refused loopback connection costs nothing, so this is on
+by default; set BURROW_MIRROR= (empty) to turn it off. Mirrors get
+BURROW_MIRROR_TOKEN, not BURROW_TOKEN — a dev server runs with ingest open, and
+the shared secret has no business being handed to whatever holds port 8737.
 
 Resident agents (services that outlive any one Claude session, like a Telegram
 bot running claude -p per message) set BURROW_AGENT_ID (stable villager
@@ -18,6 +28,7 @@ process is gone but the agent-as-service is still home, resting.
 Must never break the hosting agent: swallow everything, always exit 0."""
 import datetime
 import fcntl
+import hashlib
 import json
 import os
 import sys
@@ -28,6 +39,12 @@ LOG_DIR = os.path.expanduser("~/.burrow")
 LOG = os.path.join(LOG_DIR, "events.jsonl")
 BREAKER = os.path.join(LOG_DIR, ".post-failed")
 BREAKER_SECONDS = 60
+# A loopback failure is an instant refused connection, not a timeout, so holding
+# the breaker for a full minute would only mean "the dev server you just started
+# stays invisible for another 50s".
+LOOPBACK_BREAKER_SECONDS = 5
+DEFAULT_MIRROR = "http://127.0.0.1:8737"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 
 ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
@@ -70,14 +87,44 @@ def to_event(hook):
     return None, None
 
 
-def post_event(url, event):
+def is_loopback(url):
+    host = url.split("//", 1)[-1].split("/")[0].rsplit(":", 1)[0]
+    return host in LOOPBACK_HOSTS
+
+
+def breaker_path(url):
+    """One breaker per target: a village that is down must not silence the dev
+    server running next to it (that pair is exactly the off-tailnet case)."""
+    return BREAKER + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+
+
+def targets():
+    """Where this event goes, in order, as (url, token) — BURROW_URL first, then
+    the mirrors. Both vars take a comma-separated list; duplicates collapse so a
+    URL named twice never doubles the event."""
+    out = []
+    seen = set()
+    mirror = os.environ.get("BURROW_MIRROR")
+    groups = ((os.environ.get("BURROW_URL"), os.environ.get("BURROW_TOKEN")),
+              (DEFAULT_MIRROR if mirror is None else mirror,
+               os.environ.get("BURROW_MIRROR_TOKEN")))
+    for raw, token in groups:
+        for url in (u.strip().rstrip("/") for u in (raw or "").split(",")):
+            if url and url not in seen:
+                seen.add(url)
+                out.append((url, (token or "").strip()))
+    return out
+
+
+def post_event(url, event, token=""):
+    breaker = breaker_path(url)
+    window = LOOPBACK_BREAKER_SECONDS if is_loopback(url) else BREAKER_SECONDS
     try:
-        if os.path.exists(BREAKER) and time.time() - os.path.getmtime(BREAKER) < BREAKER_SECONDS:
+        if os.path.exists(breaker) and time.time() - os.path.getmtime(breaker) < window:
             return False
     except OSError:
         pass
     headers = {"Content-Type": "application/json"}
-    token = (os.environ.get("BURROW_TOKEN") or "").strip()
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
@@ -93,7 +140,7 @@ def post_event(url, event):
     except Exception:
         try:
             os.makedirs(LOG_DIR, exist_ok=True)
-            with open(BREAKER, "w") as f:
+            with open(breaker, "w") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
@@ -125,8 +172,12 @@ def main():
         "type": etype,
         "payload": payload,
     }
-    url = os.environ.get("BURROW_URL")
-    if url and post_event(url, event):
+    delivered = False
+    for url, token in targets():
+        # No short-circuit: a mirror exists to see the same stream the village
+        # sees, so every target gets the event, not just the first one that answers.
+        delivered = post_event(url, event, token) or delivered
+    if delivered:
         return
     os.makedirs(LOG_DIR, exist_ok=True)
     with open(LOG, "a", encoding="utf-8") as f:

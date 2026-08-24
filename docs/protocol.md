@@ -10,8 +10,13 @@ Two transports; the event shape is the contract, not the pipe:
 
 - **HTTP ingest** (preferred): `POST <BURROW_URL>/events` with one JSON event as the
   body → 204. The server appends it to its own log. Emitters set `BURROW_URL`; a
-  failed POST trips a 60 s circuit breaker and falls back to the local file, so an
-  unreachable server never slows an agent down.
+  failed POST trips a 60 s circuit breaker (5 s for loopback, where failure is an
+  instant refusal rather than a timeout) and falls back to the local file, so an
+  unreachable server never slows an agent down. The breaker is per target.
+- **Mirrors**: the same event is POSTed to every `BURROW_MIRROR` target as well
+  (default `http://127.0.0.1:8737`, i.e. a local dev server). Delivery to *any*
+  target means no local fallback write — the event exists exactly once per log.
+  Mirrors carry `BURROW_MIRROR_TOKEN`, never `BURROW_TOKEN`.
 - **Local JSONL file**: append one event per line to `~/.burrow/events.jsonl`
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
   `BURROW_URL` is unset, or as the fallback above.
@@ -241,8 +246,9 @@ README.md") would be a lie; it is a heartbeat.
 
 The emitter must never break the agent: it swallows all errors and always exits 0.
 
-Env vars: `BURROW_URL` (POST target, see Transport) and `BURROW_TOKEN` (ingest secret,
-see Ingest auth — sent as a bearer header, omitted when unset). **Resident agents** — services
+Env vars: `BURROW_URL` (POST target, see Transport), `BURROW_TOKEN` (ingest secret,
+see Ingest auth — sent as a bearer header, omitted when unset), `BURROW_MIRROR` /
+`BURROW_MIRROR_TOKEN` (extra POST targets, see Transport; empty disables). **Resident agents** — services
 that outlive any one Claude session, like a bot running `claude -p` per message —
 set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
 `BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
