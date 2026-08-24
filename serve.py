@@ -5,8 +5,9 @@ protocol events over HTTP (POST /events, one JSON event per request).
     python3 serve.py [port]     # default 8737
 
 Env:
-    BURROW_HOST    bind address (default 127.0.0.1; 0.0.0.0 in the container)
-    BURROW_EVENTS  event log path (default ~/.burrow/events.jsonl)
+    BURROW_HOST      bind address (default 127.0.0.1; 0.0.0.0 in the container)
+    BURROW_EVENTS    event log path (default ~/.burrow/events.jsonl)
+    BURROW_VILLAGERS soul directory (default: villagers/ next to this file)
 """
 import http.server
 import json
@@ -19,7 +20,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events.jsonl")
 
 MAX_EVENT_BYTES = 64 * 1024
-VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.expanduser("~/.burrow/villagers")
+VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.join(ROOT, "villagers")
 
 
 CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
@@ -27,7 +28,7 @@ CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
 
 
 def read_villagers():
-    """Soul files: ~/.burrow/villagers/*.md with a simple `key: value` frontmatter
+    """Soul files: villagers/*.md with a simple `key: value` frontmatter
     between --- fences; the body is free-form markdown shown in the viewer panel."""
     out = []
     if not os.path.isdir(VILLAGERS_DIR):
