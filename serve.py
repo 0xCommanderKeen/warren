@@ -19,21 +19,64 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events.jsonl")
 
 MAX_EVENT_BYTES = 64 * 1024
+VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.expanduser("~/.burrow/villagers")
+
+
+CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
+          ".css": "text/css", ".png": "image/png", ".json": "application/json"}
+
+
+def read_villagers():
+    """Soul files: ~/.burrow/villagers/*.md with a simple `key: value` frontmatter
+    between --- fences; the body is free-form markdown shown in the viewer panel."""
+    out = []
+    if not os.path.isdir(VILLAGERS_DIR):
+        return out
+    for fn in sorted(os.listdir(VILLAGERS_DIR)):
+        if not fn.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(VILLAGERS_DIR, fn), encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        meta, body = {}, text.strip()
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) >= 3:
+                for line in parts[1].strip().splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip()
+                body = parts[2].strip()
+        out.append({"file": fn, "meta": meta, "body": body})
+    return out
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            self._send_file(os.path.join(ROOT, "viewer", "index.html"),
-                            "text/html; charset=utf-8")
-        elif self.path.split("?")[0] == "/events":
+        path = self.path.split("?")[0]
+        if path == "/villagers":
+            self._send(200, json.dumps(read_villagers()).encode("utf-8"),
+                       "application/json")
+            return
+        if path == "/events":
             data = b""
             if os.path.exists(EVENTS):
                 with open(EVENTS, "rb") as f:
                     data = f.read()
             self._send(200, data, "application/x-ndjson")
-        else:
+            return
+        # everything else is a static file under viewer/
+        if path in ("/", "/index.html"):
+            path = "/index.html"
+        base = os.path.join(ROOT, "viewer")
+        full = os.path.realpath(os.path.join(base, path.lstrip("/")))
+        if not full.startswith(base + os.sep) or not os.path.isfile(full):
             self._send(404, b"not found", "text/plain")
+            return
+        ctype = CTYPES.get(os.path.splitext(full)[1], "application/octet-stream")
+        self._send_file(full, ctype)
 
     def do_POST(self):
         if self.path.split("?")[0] != "/events":

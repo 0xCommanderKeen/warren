@@ -45,6 +45,33 @@ map of everything the fleet does.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
+## Souls
+
+Villagers get persistent identity from **soul files**: `~/.burrow/villagers/*.md`
+(override the directory with `BURROW_VILLAGERS`; on the NAS, mount it next to the
+event log). Frontmatter pins who the file is for and how they look; the body is
+free-form markdown shown when you click the villager (description, skills, anything).
+
+```md
+---
+project: burrow          # match ephemeral sessions by project…
+# agent_id: life-agent   # …or a resident agent by its stable id (wins over project)
+name: Maren
+char: Hunter             # sprite: Villager…Villager5, Woman, Boy, OldMan,
+                         # Princess, Hunter, Noble, Monk
+accent: "#4f7d5b"
+role: village builder
+---
+Works on burrow itself — the village you are looking at.
+
+## Skills
+- pixel-art viewer
+```
+
+Agents without a soul file get a stable hash-based name and sprite. The viewer's
+pixel art is the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
+(see `viewer/assets/README.md`).
+
 ## Not this project
 
 Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate project ([arcadia](https://github.com/0xCommanderKeen/arcadia)).
