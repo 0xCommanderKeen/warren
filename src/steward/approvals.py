@@ -168,7 +168,13 @@ class NeedsHuman:
     action: str = ""
     detail: Mapping[str, Any] = field(default_factory=dict)
     options: tuple[str, ...] = APPROVAL_DECISIONS
-    expires_in_s: int = DEFAULT_EXPIRES_IN_S
+    #: How long before this denies itself. ``None`` means it never does, which the
+    #: grammar cannot produce — :func:`parse_duration` only ever returns a positive
+    #: number of seconds — and which only a caller inside steward may ask for. It is for
+    #: the one shape of request where deny-by-default protects nothing: a budget pause
+    #: (:mod:`steward.budgets`) is *already* the safe state, so expiring the request would
+    #: throw away the only thing that can lift it while changing nothing for the better.
+    expires_in_s: int | None = DEFAULT_EXPIRES_IN_S
     problem: str | None = None
 
     @property
@@ -176,8 +182,10 @@ class NeedsHuman:
         """True when steward could read the request the session wrote."""
         return self.problem is None
 
-    def expires_at(self, now: datetime) -> str:
-        """Return the moment this request denies itself, as a protocol timestamp."""
+    def expires_at(self, now: datetime) -> str | None:
+        """Return the moment this request denies itself, or ``None`` when it never does."""
+        if self.expires_in_s is None:
+            return None
         return ev.utc_now_iso(now + timedelta(seconds=self.expires_in_s))
 
 
@@ -283,6 +291,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     *,
     manifest: ResidentManifest,
     request: NeedsHuman,
+    message: str | None = None,
     now: datetime | None = None,
     request_id: str | None = None,
 ) -> ApprovalRecord:
@@ -292,6 +301,12 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     :data:`UNREADABLE_ACTION`, with the raw block and the complaint in its detail. That
     is the whole reason this function takes a :class:`NeedsHuman` rather than an action
     string: an escalation steward failed to read still has to reach a person.
+
+    ``message`` overrides the derived one-liner, and only steward itself passes it. A
+    *session* never gets to write its own knock — :func:`human_message` derives that from
+    the action, so the message can never disagree with what the decision is recorded
+    against — but steward raising a request on a resident's behalf knows something the
+    action name cannot carry, such as the number that tripped a budget.
     """
     moment = now or datetime.now(UTC)
     agent_id = manifest.agent_id or f"steward:{manifest.id}"
@@ -309,7 +324,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
         agent_id=agent_id,
         project=project,
         action=request.action,
-        message=human_message(manifest, request.action),
+        message=message or human_message(manifest, request.action),
         resident=manifest.id,
         detail=detail,
         options=request.options,

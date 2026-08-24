@@ -23,6 +23,12 @@ Four kinds:
 Every runner returns the same :class:`RunResult` with a truthful ``outcome``:
 ``ok`` only when the process exited zero, ``timeout`` only when steward killed it,
 ``failed`` for everything else.
+
+One more thing lives here, and it is not a session: :func:`run_argv`, a short bounded
+command whose exit status is the whole answer. The watchdog needs it to ask ``docker``
+whether a container is running and to restart it when it is not. It is in this module
+rather than that one because the rule this repo enforces is *steward starts processes in
+exactly one file* — a rule worth keeping even for the processes that are not brains.
 """
 
 import contextlib
@@ -46,6 +52,8 @@ from steward.manifest import Runner as RunnerSpec
 __all__ = [
     "ClaudeRunner",
     "CodexRunner",
+    "CommandOutcome",
+    "CommandRun",
     "CommandRunner",
     "MockRunner",
     "Outcome",
@@ -55,12 +63,18 @@ __all__ = [
     "RunnerError",
     "build_runner",
     "check_runner",
+    "run_argv",
     "skills_home",
     "substitute",
 ]
 
 OUTPUT_MAX_CHARS = 20_000
 KILL_GRACE_S = 5.0
+
+#: How long a short bounded command (``docker inspect``, ``docker restart``) may take
+#: before steward stops waiting. Not a session timeout: this is a control-plane call that
+#: should answer in milliseconds, and one that hangs is itself the answer.
+COMMAND_TIMEOUT_S = 20.0
 
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
@@ -376,6 +390,67 @@ class MockRunner(Runner):
             exit_status=0,
             duration_s=0.0,
         )
+
+
+# --------------------------------------------------------------------------------------
+# short bounded commands — not sessions, but still processes, so still here
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CommandOutcome:
+    """What one short command did. A missing binary is a result, not an exception."""
+
+    argv: tuple[str, ...]
+    exit_status: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True only when the command ran and exited zero."""
+        return self.exit_status == 0
+
+    def summary(self) -> str:
+        """Describe the outcome in one line, for an event payload or a log."""
+        if self.error:
+            return self.error
+        detail = (self.stderr.strip() or self.stdout.strip()).splitlines()
+        return f"exit status {self.exit_status}" + (f": {detail[0]}" if detail else "")
+
+
+#: How the watchdog reaches a command. Injectable so its tests never need a real docker.
+type CommandRun = Callable[[Sequence[str]], CommandOutcome]
+
+
+def run_argv(argv: Sequence[str], timeout_s: float = COMMAND_TIMEOUT_S) -> CommandOutcome:
+    """Run one short command to completion and describe what happened. Never raises.
+
+    An argv list and ``shell=False``, exactly like a session: the container name comes out
+    of a manifest, and a manifest is data. A missing binary, a non-zero exit, and a hang
+    are all reported as outcomes, because the caller is a watchdog and a watchdog that
+    crashes is worse than the thing it was watching.
+    """
+    parts = [str(part) for part in argv]
+    try:
+        completed = subprocess.run(  # noqa: S603 — argv list, shell=False, no template
+            parts, capture_output=True, timeout=timeout_s, check=False
+        )
+    except OSError as exc:
+        return CommandOutcome(
+            argv=tuple(parts), error=f"cannot launch {parts[0]!r}: {exc.strerror or exc}"
+        )
+    except subprocess.TimeoutExpired:
+        return CommandOutcome(
+            argv=tuple(parts), error=f"{parts[0]!r} did not answer within {timeout_s:.0f}s"
+        )
+    return CommandOutcome(
+        argv=tuple(parts),
+        exit_status=completed.returncode,
+        stdout=completed.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        stderr=completed.stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+    )
 
 
 # --------------------------------------------------------------------------------------

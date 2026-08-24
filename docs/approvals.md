@@ -15,11 +15,20 @@ The pair of events is the whole audit trail:
 
 ## The two safety properties
 
-**Deny by default.** Every request carries an `expires_at`. Past it, steward resolves the
-request as `deny` with `decided_by: "expiry"` and emits `needs_human_resolved`. A gated
-action never proceeds because a person went to sleep. The sweep runs on every scheduler
-tick and every board dispatch, which is what makes the deadline real rather than
-decorative — nothing sweeps a queue nobody visits.
+**Deny by default.** Every request a *session* raises carries an `expires_at`. Past it,
+steward resolves the request as `deny` with `decided_by: "expiry"` and emits
+`needs_human_resolved`. A gated action never proceeds because a person went to sleep. The
+sweep runs on every scheduler tick, every board dispatch, and every watchdog pass, which
+is what makes the deadline real rather than decorative — nothing sweeps a queue nobody
+visits.
+
+Two request shapes steward raises *for itself* have no `expires_at` at all: a budget pause
+(`budget_unpause`) and a crash loop (`resident_restart_failed`). The grammar cannot
+produce one — `expires-in` only ever parses to a positive number of seconds — and the
+reason is that deny-by-default protects nothing here. Both requests are asking permission
+to *undo* a stop steward already applied, so the safe state is the current one. Expiring
+them would throw away the only thing that can lift the stop while changing nothing for the
+better. They wait for a person, because only a person can answer them.
 
 **First decision wins.** Decisions are recorded with a conditional write. A replay — a
 double-tapped notification, a retried request — changes nothing, returns the recorded

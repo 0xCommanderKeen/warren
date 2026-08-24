@@ -6,12 +6,14 @@ session launch goes through, the prompt assembly point, the skills library every
 resident draws on, the resident journal (the one read path into a resident's durable
 memory), the scheduler that fires routines and emits what really happened, and the job
 board and approvals that hang off it — how a resident picks work up without being told
-to, and what it does when its charter says stop.
+to, and what it does when its charter says stop — and the watchdog and budgets that keep
+an unattended resident both alive and bounded.
 """
 
 from steward.api import ApiConfig, ApiError, create_app
 from steward.approvals import NeedsHuman, extract_requests, harvest
 from steward.board import BoardReport, Dispatcher, DispatchRun, claimable_skills
+from steward.budgets import BudgetGuard, BudgetStatus, day_window, primary_tz
 from steward.events import Event, EventEmitter, NullEmitter
 from steward.journal import (
     JournalEntry,
@@ -52,23 +54,32 @@ from steward.skills import (
     library_for,
     load_library,
 )
-from steward.store import Store
+from steward.store import LedgerEntry, PauseRecord, Store
+from steward.watchdog import DockerSupervisor, Health, LocalProbe, ProcessSupervisor, Watchdog
 
 __all__ = [
     "ApiConfig",
     "ApiError",
     "BoardReport",
+    "BudgetGuard",
+    "BudgetStatus",
     "Diagnostic",
     "DispatchRun",
     "Dispatcher",
+    "DockerSupervisor",
     "Event",
     "EventEmitter",
+    "Health",
     "JournalEntry",
+    "LedgerEntry",
+    "LocalProbe",
     "ManifestError",
     "NeedsHuman",
     "NewResident",
     "NullEmitter",
     "Outcome",
+    "PauseRecord",
+    "ProcessSupervisor",
     "Resident",
     "ResidentManifest",
     "RunRequest",
@@ -83,12 +94,14 @@ __all__ = [
     "Store",
     "ValidationResult",
     "WakeHooks",
+    "Watchdog",
     "assemble_preamble",
     "assemble_routine_prompt",
     "assemble_task_prompt",
     "build_runner",
     "claimable_skills",
     "create_app",
+    "day_window",
     "declare_resident",
     "default_skills",
     "effective_skills",
@@ -101,6 +114,7 @@ __all__ = [
     "load_manifest",
     "load_scheduled",
     "manifest_json_schema",
+    "primary_tz",
     "read_entries",
     "resolve_journal_dir",
     "validate_manifest",

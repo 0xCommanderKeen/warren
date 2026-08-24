@@ -15,6 +15,15 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
 - ``approvals`` — a gated action waiting on a human, and the decision it received.
 - ``requests`` — every accepted mutating API request and how it turned out, so a
   queued action that later failed is traceable rather than silently gone.
+- ``run_ledger`` — one row per finished session, with the tokens, money, and seconds it
+  actually cost. This is what makes a daily budget survive a daemon restart: a cap that
+  resets because the process bounced is not a cap (steward #8).
+- ``budget_pauses`` — the residents steward has stopped firing, and the number that
+  stopped them. One row per paused resident, inserted conditionally, which is what makes
+  "exactly one knock at the door" true rather than hoped for.
+- ``watchdog_attempts`` / ``watchdog_passes`` / ``unbracketed_runs`` — what the watchdog
+  has already done, so a restart budget and a "run never reported back" complaint are
+  each spent exactly once however often the watchdog ticks.
 """
 
 import json
@@ -33,10 +42,14 @@ __all__ = [
     "APPROVAL_DECISIONS",
     "DECIDED_BY_EXPIRY",
     "JOB_STATUSES",
+    "RUN_KINDS",
     "ApprovalRecord",
     "JobRecord",
+    "LedgerEntry",
+    "PauseRecord",
     "RequestRecord",
     "Store",
+    "WatchdogAttempt",
     "default_db_path",
 ]
 
@@ -56,6 +69,13 @@ STATUS_RESOLVED = "resolved"
 
 #: Every status a task on the board can be in. The board reports these and no others.
 JOB_STATUSES = (STATUS_OPEN, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED)
+
+#: Why a session ran. The ledger keeps them apart so "what did the board cost me this
+#: week" and "what did Hob's own routines cost me" are two answerable questions.
+RUN_ROUTINE = "routine"
+RUN_TASK = "task"
+RUN_DELEGATED = "delegated"
+RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED)
 
 DB_FILENAME = "steward.db"
 
@@ -95,6 +115,69 @@ CREATE TABLE IF NOT EXISTS requests (
     path         TEXT NOT NULL,
     outcome      TEXT NOT NULL,
     detail       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS run_ledger (
+    entry_id      TEXT PRIMARY KEY,
+    resident      TEXT NOT NULL,
+    agent_id      TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    run_id        TEXT NOT NULL,
+    ref           TEXT NOT NULL DEFAULT '',
+    outcome       TEXT NOT NULL DEFAULT '',
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd      REAL NOT NULL DEFAULT 0.0,
+    duration_s    REAL NOT NULL DEFAULT 0.0,
+    usage_known   INTEGER NOT NULL DEFAULT 1,
+    recorded_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS run_ledger_window
+    ON run_ledger (resident, recorded_at);
+
+CREATE TABLE IF NOT EXISTS budget_pauses (
+    resident    TEXT PRIMARY KEY,
+    agent_id    TEXT NOT NULL,
+    budget      TEXT NOT NULL,
+    spent       REAL NOT NULL,
+    cap         REAL NOT NULL,
+    reason      TEXT NOT NULL DEFAULT '',
+    request_id  TEXT,
+    window_end  TEXT NOT NULL DEFAULT '',
+    paused_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS budget_allowances (
+    resident   TEXT PRIMARY KEY,
+    until      TEXT NOT NULL,
+    granted_by TEXT NOT NULL DEFAULT '',
+    reason     TEXT NOT NULL DEFAULT '',
+    granted_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS watchdog_attempts (
+    resident        TEXT PRIMARY KEY,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    reason          TEXT NOT NULL DEFAULT '',
+    last_attempt_at TEXT,
+    next_attempt_at TEXT,
+    gave_up_at      TEXT
+);
+
+CREATE TABLE IF NOT EXISTS watchdog_passes (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),
+    last_pass_at  TEXT NOT NULL,
+    passes        INTEGER NOT NULL DEFAULT 0,
+    interventions INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS unbracketed_runs (
+    run_id     TEXT PRIMARY KEY,
+    agent_id   TEXT NOT NULL,
+    routine    TEXT NOT NULL DEFAULT '',
+    started_at TEXT NOT NULL,
+    closed_at  TEXT NOT NULL
 );
 """
 
@@ -284,6 +367,162 @@ class ApprovalRecord:
             "decided_at": self.decided_at,
             "edit": dict(self.edit) if self.edit else None,
             "delivered_at": self.delivered_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerEntry:
+    """What one finished session actually cost. Never an estimate.
+
+    ``usage_known`` is the honest half. A ``claude`` run reports its usage and cost in
+    the JSON steward already asks for; a ``codex`` or ``command`` run reports nothing,
+    and steward writes zeroes with ``usage_known = False`` rather than inventing a
+    number. A budget can then say "0.00 of 5.00 spent, and 3 of today's 4 runs did not
+    report what they cost", which is a true sentence, where "0.00 spent" alone would be
+    a comfortable lie.
+    """
+
+    entry_id: str
+    resident: str
+    agent_id: str
+    kind: str
+    run_id: str
+    recorded_at: str
+    ref: str = ""
+    outcome: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    duration_s: float = 0.0
+    usage_known: bool = True
+
+    @property
+    def tokens(self) -> int:
+        """Input plus output — the number a daily token budget is counted against."""
+        return self.input_tokens + self.output_tokens
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> LedgerEntry:
+        """Rebuild one ledger entry from its database row."""
+        return cls(
+            entry_id=row["entry_id"],
+            resident=row["resident"],
+            agent_id=row["agent_id"],
+            kind=row["kind"],
+            run_id=row["run_id"],
+            recorded_at=row["recorded_at"],
+            ref=row["ref"],
+            outcome=row["outcome"],
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+            cost_usd=row["cost_usd"],
+            duration_s=row["duration_s"],
+            usage_known=bool(row["usage_known"]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view of one run's consumption."""
+        return {
+            "entry_id": self.entry_id,
+            "resident": self.resident,
+            "agent_id": self.agent_id,
+            "kind": self.kind,
+            "run_id": self.run_id,
+            "ref": self.ref,
+            "outcome": self.outcome,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": self.cost_usd,
+            "duration_s": round(self.duration_s, 3),
+            "usage_known": self.usage_known,
+            "recorded_at": self.recorded_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PauseRecord:
+    """A resident steward has stopped firing, and the number that stopped it."""
+
+    resident: str
+    agent_id: str
+    budget: str
+    spent: float
+    cap: float
+    paused_at: str
+    reason: str = ""
+    request_id: str | None = None
+    #: The end of the window this pause was tripped in. Lifting the pause grants the
+    #: resident the rest of *that* window and nothing more, so "carry on today" means
+    #: today rather than forever.
+    window_end: str = ""
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> PauseRecord:
+        """Rebuild one pause from its database row."""
+        return cls(
+            resident=row["resident"],
+            agent_id=row["agent_id"],
+            budget=row["budget"],
+            spent=row["spent"],
+            cap=row["cap"],
+            paused_at=row["paused_at"],
+            reason=row["reason"],
+            request_id=row["request_id"],
+            window_end=row["window_end"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view a fleet-ops panel renders as a stopped villager."""
+        return {
+            "resident": self.resident,
+            "agent_id": self.agent_id,
+            "budget": self.budget,
+            "spent": self.spent,
+            "cap": self.cap,
+            "reason": self.reason,
+            "request_id": self.request_id,
+            "window_end": self.window_end or None,
+            "paused_at": self.paused_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WatchdogAttempt:
+    """How many times the watchdog has tried to bring one resident back, and when next."""
+
+    resident: str
+    attempts: int = 0
+    reason: str = ""
+    last_attempt_at: str | None = None
+    next_attempt_at: str | None = None
+    gave_up_at: str | None = None
+
+    @property
+    def gave_up(self) -> bool:
+        """True once the watchdog stopped restarting and knocked at the door instead."""
+        return self.gave_up_at is not None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> WatchdogAttempt:
+        """Rebuild the restart budget of one resident from its database row."""
+        return cls(
+            resident=row["resident"],
+            attempts=row["attempts"],
+            reason=row["reason"],
+            last_attempt_at=row["last_attempt_at"],
+            next_attempt_at=row["next_attempt_at"],
+            gave_up_at=row["gave_up_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view of one resident's restart history."""
+        return {
+            "resident": self.resident,
+            "attempts": self.attempts,
+            "reason": self.reason,
+            "last_attempt_at": self.last_attempt_at,
+            "next_attempt_at": self.next_attempt_at,
+            "gave_up_at": self.gave_up_at,
         }
 
 
@@ -747,6 +986,329 @@ class Store:
                 "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
             ).fetchone()
         return ApprovalRecord.from_row(row), recorded
+
+    # -- the run ledger ----------------------------------------------------------------
+
+    def record_run(  # noqa: PLR0913 — one keyword per column of the entry
+        self,
+        *,
+        resident: str,
+        agent_id: str,
+        kind: str,
+        run_id: str,
+        ref: str = "",
+        outcome: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        duration_s: float = 0.0,
+        usage_known: bool = True,
+        now: str | None = None,
+    ) -> LedgerEntry:
+        """Append what one finished session cost. Append-only, and never revised.
+
+        Every run gets a row, including a failed one and one steward killed at its
+        timeout: a session that burned four minutes and produced nothing still burned
+        four minutes, and a budget that only counted successes would be a budget that
+        rewards crashing.
+        """
+        entry = LedgerEntry(
+            entry_id=new_id(),
+            resident=resident,
+            agent_id=agent_id,
+            kind=kind,
+            run_id=run_id,
+            ref=ref,
+            outcome=outcome,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=cost_usd,
+            duration_s=duration_s,
+            usage_known=usage_known,
+            recorded_at=now or utc_now_iso(),
+        )
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
+                "outcome, input_tokens, output_tokens, cost_usd, duration_s, usage_known, "
+                "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    entry.entry_id,
+                    entry.resident,
+                    entry.agent_id,
+                    entry.kind,
+                    entry.run_id,
+                    entry.ref,
+                    entry.outcome,
+                    entry.input_tokens,
+                    entry.output_tokens,
+                    entry.cost_usd,
+                    entry.duration_s,
+                    int(entry.usage_known),
+                    entry.recorded_at,
+                ),
+            )
+        return entry
+
+    def ledger(
+        self,
+        resident: str | None = None,
+        *,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[LedgerEntry]:
+        """Return ledger entries, oldest first, optionally within a half-open window.
+
+        ``since``/``until`` are protocol timestamps and the window is ``[since, until)``,
+        so two adjacent days can never both count the same run. The window is computed by
+        the caller at *read* time from real calendar arithmetic — nothing here is reset,
+        rolled over, or zeroed by a process starting up.
+        """
+        clauses: list[str] = []
+        params: list[str] = []
+        if resident is not None:
+            clauses.append("resident = ?")
+            params.append(resident)
+        if since is not None:
+            clauses.append("recorded_at >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("recorded_at < ?")
+            params.append(until)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM run_ledger{where} ORDER BY recorded_at, rowid",  # noqa: S608
+                params,
+            ).fetchall()
+        return [LedgerEntry.from_row(row) for row in rows]
+
+    # -- budget pauses -------------------------------------------------------------------
+
+    def pause_resident(  # noqa: PLR0913 — one keyword per column of the pause
+        self,
+        *,
+        resident: str,
+        agent_id: str,
+        budget: str,
+        spent: float,
+        cap: float,
+        reason: str = "",
+        request_id: str | None = None,
+        window_end: str = "",
+        now: str | None = None,
+    ) -> tuple[PauseRecord, bool]:
+        """Stop firing this resident. Returns the pause and whether *this* call made it.
+
+        ``INSERT … ON CONFLICT DO NOTHING`` is the whole dedupe: the first refusal writes
+        the row and knocks at the door, and every later refusal — the next scheduled fire,
+        the next board sweep, a run-now — reads back the same row and stays quiet. One
+        knock per pause, not one per refused fire, without a flag anybody has to remember
+        to clear.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO budget_pauses (resident, agent_id, budget, spent, cap, reason, "
+                "request_id, window_end, paused_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(resident) DO NOTHING",
+                (resident, agent_id, budget, spent, cap, reason, request_id, window_end, moment),
+            )
+            created = cursor.rowcount == 1
+            row = self._conn.execute(
+                "SELECT * FROM budget_pauses WHERE resident = ?", (resident,)
+            ).fetchone()
+        return PauseRecord.from_row(row), created
+
+    def budget_pause(self, resident: str) -> PauseRecord | None:
+        """Return this resident's pause, or ``None`` when it is free to run."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM budget_pauses WHERE resident = ?", (resident,)
+            ).fetchone()
+        return PauseRecord.from_row(row) if row else None
+
+    def budget_pauses(self) -> list[PauseRecord]:
+        """Return every paused resident, oldest pause first. The 'who is stopped' view."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM budget_pauses ORDER BY paused_at, resident"
+            ).fetchall()
+        return [PauseRecord.from_row(row) for row in rows]
+
+    def pause_for_request(self, request_id: str) -> PauseRecord | None:
+        """Return the pause a given approval request was raised for, if there is one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM budget_pauses WHERE request_id = ?", (request_id,)
+            ).fetchone()
+        return PauseRecord.from_row(row) if row else None
+
+    def unpause_resident(self, resident: str) -> PauseRecord | None:
+        """Lift a pause and return what it was. ``None`` when nothing was paused.
+
+        Deleting rather than flagging, because a lifted pause is not a fact about the
+        resident any more — what it *cost* is still in the ledger, which is where the
+        history belongs.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM budget_pauses WHERE resident = ?", (resident,)
+            ).fetchone()
+            if row is None:
+                return None
+            self._conn.execute("DELETE FROM budget_pauses WHERE resident = ?", (resident,))
+        return PauseRecord.from_row(row)
+
+    def grant_budget_allowance(
+        self,
+        resident: str,
+        *,
+        until: str,
+        granted_by: str,
+        reason: str = "",
+        now: str | None = None,
+    ) -> None:
+        """Record that a human said carry on, and until when.
+
+        Overwrites any earlier allowance for the same resident: a second "carry on" is a
+        newer answer to the same question, not a second answer to be reconciled.
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO budget_allowances (resident, until, granted_by, reason, granted_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(resident) DO UPDATE SET "
+                "until = excluded.until, granted_by = excluded.granted_by, "
+                "reason = excluded.reason, granted_at = excluded.granted_at",
+                (resident, until, granted_by, reason, now or utc_now_iso()),
+            )
+
+    def budget_allowance(self, resident: str) -> dict[str, Any] | None:
+        """Return the standing "carry on" for this resident, if a human granted one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM budget_allowances WHERE resident = ?", (resident,)
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "resident": row["resident"],
+            "until": row["until"],
+            "granted_by": row["granted_by"],
+            "reason": row["reason"],
+            "granted_at": row["granted_at"],
+        }
+
+    # -- the watchdog's own memory -------------------------------------------------------
+
+    def watchdog_attempt(self, resident: str) -> WatchdogAttempt:
+        """Return this resident's restart budget. An untouched resident is a fresh one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM watchdog_attempts WHERE resident = ?", (resident,)
+            ).fetchone()
+        return WatchdogAttempt.from_row(row) if row else WatchdogAttempt(resident=resident)
+
+    def record_watchdog_attempt(
+        self,
+        resident: str,
+        *,
+        reason: str,
+        next_attempt_at: str | None,
+        now: str | None = None,
+    ) -> WatchdogAttempt:
+        """Count one restart against this resident's budget and say when the next may be."""
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO watchdog_attempts (resident, attempts, reason, last_attempt_at, "
+                "next_attempt_at) VALUES (?, 1, ?, ?, ?) ON CONFLICT(resident) DO UPDATE SET "
+                "attempts = attempts + 1, reason = excluded.reason, "
+                "last_attempt_at = excluded.last_attempt_at, "
+                "next_attempt_at = excluded.next_attempt_at",
+                (resident, reason, moment, next_attempt_at),
+            )
+            row = self._conn.execute(
+                "SELECT * FROM watchdog_attempts WHERE resident = ?", (resident,)
+            ).fetchone()
+        return WatchdogAttempt.from_row(row)
+
+    def give_up_on(self, resident: str, *, reason: str, now: str | None = None) -> bool:
+        """Stop restarting this resident. Returns whether *this* call gave up.
+
+        Conditional on ``gave_up_at IS NULL``, for the same reason a budget pause is
+        conditional: the crash-loop knock is one knock, not one per pass for as long as
+        the container stays down.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO watchdog_attempts (resident, attempts, reason) "
+                "VALUES (?, 0, ?) ON CONFLICT(resident) DO NOTHING",
+                (resident, reason),
+            )
+            cursor = self._conn.execute(
+                "UPDATE watchdog_attempts SET gave_up_at = ?, reason = ? "
+                "WHERE resident = ? AND gave_up_at IS NULL",
+                (moment, reason, resident),
+            )
+            return cursor.rowcount == 1
+
+    def clear_watchdog_attempts(self, resident: str) -> None:
+        """Forget a resident's restart history, because it came back healthy."""
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM watchdog_attempts WHERE resident = ?", (resident,))
+
+    def close_unbracketed_run(
+        self, *, run_id: str, agent_id: str, routine: str, started_at: str, now: str | None = None
+    ) -> bool:
+        """Mark a run that never reported back as closed. Returns whether this call did it.
+
+        The row is the receipt for a ``routine_failed`` steward emitted on the session's
+        behalf. Conditional on the primary key, so a run that vanished is buried once even
+        if the watchdog passes over it every minute for a week.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO unbracketed_runs (run_id, agent_id, routine, started_at, closed_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+                (run_id, agent_id, routine, started_at, now or utc_now_iso()),
+            )
+            return cursor.rowcount == 1
+
+    def closed_unbracketed_runs(self) -> set[str]:
+        """Return every run steward has already buried, so nobody mourns one twice."""
+        with self._lock:
+            rows = self._conn.execute("SELECT run_id FROM unbracketed_runs").fetchall()
+        return {row["run_id"] for row in rows}
+
+    def record_watchdog_pass(self, *, interventions: int = 0, now: str | None = None) -> str:
+        """Record that the watchdog made a pass, and return when. ``doctor`` reads this."""
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO watchdog_passes (id, last_pass_at, passes, interventions) "
+                "VALUES (1, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET last_pass_at = excluded."
+                "last_pass_at, passes = passes + 1, interventions = interventions + ?",
+                (moment, interventions, interventions),
+            )
+        return moment
+
+    def last_watchdog_pass(self) -> dict[str, Any] | None:
+        """Return when the watchdog last swept, or ``None`` if it never has.
+
+        ``None`` is the important answer: it means nothing is watching, which is exactly
+        what ``steward doctor`` has to be able to say out loud.
+        """
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM watchdog_passes WHERE id = 1").fetchone()
+        if row is None:
+            return None
+        return {
+            "last_pass_at": row["last_pass_at"],
+            "passes": row["passes"],
+            "interventions": row["interventions"],
+        }
 
     # -- the request log -------------------------------------------------------------
 

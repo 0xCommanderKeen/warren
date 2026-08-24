@@ -51,6 +51,8 @@ __all__ = [
     "default_fallback_path",
     "needs_human_event",
     "needs_human_resolved_event",
+    "resident_restarted_event",
+    "routine_failed_event",
     "task_claimed_event",
     "task_done_event",
     "task_failed_event",
@@ -71,6 +73,7 @@ TASK_DONE = "task_done"
 TASK_FAILED = "task_failed"
 NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
+RESIDENT_RESTARTED = "resident_restarted"
 
 #: The event types steward adds to the protocol. Additive: a v0 consumer that does not
 #: know them ignores them, which is why burrow needs no change to stay correct.
@@ -84,6 +87,7 @@ EVENT_TYPES = (
     TASK_FAILED,
     NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
+    RESIDENT_RESTARTED,
 )
 
 #: Steward's own identity, for the work steward itself does rather than a resident.
@@ -350,6 +354,42 @@ class RunContext:
             ROUTINE_FAILED,
             {"error": truncate_error(error), "duration_s": round(duration_s, 3)},
         )
+
+
+def routine_failed_event(
+    *, agent_id: str, project: str, routine: str, run_id: str, error: str
+) -> Event:
+    """Close a run's bracket from outside the run, when the run itself never did.
+
+    :meth:`RunContext.failed` is what a scheduler that watched a session emits; this is
+    what the watchdog emits for a session nobody watched to the end — the daemon was
+    killed, the machine rebooted, the process vanished. There is no ``duration_s`` in the
+    payload on purpose: steward does not know how long that run lasted, only that it
+    started and never came back, and a made-up duration would be exactly the kind of
+    plausible detail this project refuses to invent.
+    """
+    return Event(
+        type=ROUTINE_FAILED,
+        agent_id=agent_id,
+        project=project,
+        payload={"routine": routine, "run_id": run_id, "error": truncate_error(error)},
+    )
+
+
+def resident_restarted_event(
+    *, agent_id: str, project: str, reason: str, attempt: int, supervisor: str = ""
+) -> Event:
+    """Say out loud that steward took a resident down and brought it back.
+
+    A silent restart is a lie by omission: the village would show an unbroken villager
+    where a process actually died. ``attempt`` is the number of this try within the
+    watchdog's bounded budget, so the log shows a crash loop as a crash loop rather than
+    as three unrelated hiccups.
+    """
+    payload: dict[str, Any] = {"reason": truncate_error(reason), "attempt": attempt}
+    if supervisor:
+        payload["supervisor"] = supervisor
+    return Event(type=RESIDENT_RESTARTED, agent_id=agent_id, project=project, payload=payload)
 
 
 def task_posted_event(  # noqa: PLR0913 — every field is keyword-only and part of the payload

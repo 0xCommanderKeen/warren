@@ -49,7 +49,7 @@ from steward import journal as journal_module
 from steward.manifest import ManifestError, Resident, ResidentManifest, validate_path
 from steward.prompt import assemble_task_prompt
 from steward.runners import Outcome, RunRequest, RunResult, build_runner, skills_home
-from steward.scheduler import RunnerFactory
+from steward.scheduler import RunGuard, RunnerFactory
 from steward.skills import (
     Skill,
     SkillError,
@@ -173,6 +173,10 @@ class Dispatcher:
     #: way :class:`steward.scheduler.Scheduler` threads it. An unconfigured library means
     #: no defaults, so matching falls back to exactly what each manifest grants.
     library: SkillLibrary = field(default_factory=SkillLibrary)
+    #: The budget seam (:class:`steward.scheduler.RunGuard`). A paused resident is skipped
+    #: *before* it claims anything, not after: a claim it cannot work would hold a real
+    #: task hostage for a full lease while the resident sat stopped.
+    guard: RunGuard | None = None
     #: Do the housekeeping and stop: reopen dead leases, deny stale approvals, claim
     #: nothing. Deliberately *not* called a dry run, because it writes — the scheduler's
     #: ``--dry-run`` is a rehearsal that changes nothing at all, and one word should not
@@ -190,6 +194,7 @@ class Dispatcher:
         runner_factory: RunnerFactory = build_runner,
         library: SkillLibrary | None = None,
         skills_dir: Path | str | None = None,
+        guard: RunGuard | None = None,
         sweep_only: bool = False,
     ) -> Dispatcher:
         """Build a dispatcher over the board-enabled residents of a residents tree.
@@ -206,6 +211,7 @@ class Dispatcher:
             workdir=workdir if workdir is not None else Path.cwd(),
             runner_factory=runner_factory,
             library=resolved,
+            guard=guard,
             sweep_only=sweep_only,
         )
 
@@ -358,7 +364,7 @@ class Dispatcher:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=board.timeout_s,
+                    timeout_s=self._timeout_for(resident, board.timeout_s),
                     model=resident.manifest.runner.model,
                     env=self._session_env(resident, job),
                 )
@@ -371,6 +377,7 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 — a broken runner is a failed task, not a crash
             result = RunResult(outcome=Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
 
+        self._ledger(resident, job, result, moment)
         raised = approvals.harvest(
             self.store,
             self.emitter,
@@ -379,6 +386,49 @@ class Dispatcher:
             now=moment,
         )
         return self._record(resident, job, result, moment, raised)
+
+    # -- the budget seam ---------------------------------------------------------------
+
+    def budget_refusal(self, resident: Resident, now: datetime | None = None) -> str | None:
+        """Return why this resident may not claim anything right now, or ``None``.
+
+        A board session is a session: it spends the same money out of the same daily cap
+        as a routine does, so a resident paused by its budget does not claim, exactly as
+        it does not fire.
+        """
+        if self.guard is None:
+            return None
+        try:
+            return self.guard.allow(resident.manifest, now)
+        except Exception as exc:  # noqa: BLE001 — an unreadable budget claims nothing
+            log.warning(
+                "%s: could not read the budget, so nothing is claimed: %s", resident.id, exc
+            )
+            return f"budget unreadable: {type(exc).__name__}: {exc}"
+
+    def _timeout_for(self, resident: Resident, declared_s: int) -> int:
+        """Return the board session's effective timeout, capped by the manifest's budget."""
+        if self.guard is None:
+            return declared_s
+        return self.guard.timeout_for(resident.manifest, declared_s)
+
+    def _ledger(
+        self, resident: Resident, job: JobRecord, result: RunResult, moment: datetime
+    ) -> None:
+        """Record what a claimed task cost. Never raises: the task still happened."""
+        if self.guard is None:
+            return
+        try:
+            self.guard.record(
+                resident.manifest,
+                result=result,
+                kind="task",
+                run_id=job.task_id,
+                ref=job.task_id,
+                now=moment,
+            )
+        except Exception as exc:  # noqa: BLE001 — the ledger must not take the board down
+            log.warning("%s: could not record what task %s cost: %s", resident.id, job.task_id, exc)
 
     def _record(
         self,
@@ -474,6 +524,10 @@ class Dispatcher:
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
         for resident in board_residents(self.residents):
+            refusal = self.budget_refusal(resident, moment)
+            if refusal is not None:
+                log.warning("%s: not claiming — %s", resident.id, refusal)
+                continue
             for _ in range(resident.manifest.board.max_claims_per_wake):
                 job = self.claim(resident, moment)
                 if job is None:

@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
 from steward import events as ev
+from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, validate_path
 from steward.nursery import CreatedResident, NewResident, NurseryError, declare_resident
@@ -272,6 +273,26 @@ def _fire_outcome(report: FireReport) -> tuple[str, dict[str, Any]]:
 # --------------------------------------------------------------------------------------
 
 
+def budget_summary(status: BudgetStatus) -> dict[str, Any]:
+    """Return the small budget block the list view carries on every resident.
+
+    Deliberately smaller than :meth:`BudgetStatus.to_dict` — a fleet list wants a fuel
+    gauge and a stopped flag, not a full ledger window — but never *quieter*: a resident
+    with no declared cap reports ``declared: false`` and a ``summary`` of ``no limit``,
+    because a panel that simply omits the gauge would let unlimited read as unknown.
+    """
+    return {
+        "declared": status.declared,
+        "paused": status.paused,
+        "summary": status.summary(),
+        "spent_usd": round(status.spend.cost_usd, 6),
+        "tokens": status.spend.tokens,
+        "runs": status.spend.runs,
+        "budgets": [gauge.to_dict() for gauge in status.gauges],
+        "window": status.window.to_dict(),
+    }
+
+
 def resident_view(resident: Resident, library: SkillLibrary | None = None) -> dict[str, Any]:
     """Return the JSON view of one validated manifest.
 
@@ -386,6 +407,9 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
 
     db = store if store is not None else Store(settings.db_path or default_db_path())
     sink: ev.Emitter = emitter if emitter is not None else ev.EventEmitter.from_env()
+    # One guard for the whole app: the run-now path refuses through it before it accepts
+    # anything, and the scheduler behind that path ledgers through the same object.
+    guard = BudgetGuard(db, sink)
     runs = ManualRuns(
         scheduler=Scheduler(
             [],
@@ -394,6 +418,7 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
             workdir=settings.workdir,
             runner_factory=runner_factory,
             library=library,
+            guard=guard,
         ),
         store=db,
     )
@@ -420,6 +445,7 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
     app.state.store = db
     app.state.runs = runs
     app.state.emitter = sink
+    app.state.guard = guard
     app.state.residents_dir = residents_dir
     app.state.library = library
     app.state.open_mode = token is None
@@ -443,7 +469,16 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         """List the validated residents, and name the manifests that did not validate."""
         result = validate_path(residents_dir, settings.skills_dir)
         return {
-            "residents": [resident_view(resident, library) for resident in result.residents],
+            "residents": [
+                {
+                    **resident_view(resident, library),
+                    # The fuel gauge burrow's fleet-ops view draws, on the one call that
+                    # already lists everybody. A stopped resident should not need a
+                    # second round trip to look stopped.
+                    "budget": budget_summary(guard.status(resident.manifest)),
+                }
+                for resident in result.residents
+            ],
             "errors": [diagnostic.render() for diagnostic in result.errors],
         }
 
@@ -452,6 +487,19 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         """Return one validated manifest, runner included, so "which brain" is answerable."""
         result = validate_path(residents_dir, settings.skills_dir)
         return resident_view(_find_resident(result, resident_id, residents_dir), library)
+
+    @app.get("/residents/{resident_id}/budget")
+    def get_resident_budget(resident_id: str) -> dict[str, Any]:
+        """Return spent-against-limit for each budget, the window, and the pause state.
+
+        The read burrow's fleet-ops view (burrow #40) draws fuel gauges from. Everything
+        in it is a sum over rows steward wrote when runs finished, inside a window
+        computed from the calendar at the moment of this request — so a steward that
+        restarted an hour ago answers exactly what one that has been up all day answers.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        return guard.status(resident.manifest).to_dict()
 
     @app.get("/residents/{resident_id}/journal")
     def get_resident_journal(resident_id: str, limit: int = 14) -> dict[str, Any]:
@@ -526,6 +574,12 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
                 f"routine {routine_id!r} is disabled in {resident.path}; enable it in the "
                 f"manifest rather than firing something the declaration says is off",
             )
+        refusal = guard.allow(resident.manifest)
+        if refusal is not None:
+            # Refused before anything is written, like every other refusal here. A human
+            # asking for a run now is not a way around a budget the same human set — the
+            # message names the number and how to lift it.
+            _refuse(409, PAUSED_ERROR, refusal)
         item = ScheduledRoutine(resident=resident, routine=routine)
         request_id = accept(request, "queued", {"routine": item.key})
         try:
@@ -655,17 +709,41 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         )
         accept(request, "recorded", {"approval": request_id, "decision": body.decision})
         response.status_code = 202
+        resumed = _resume_if_budget(record.action, body.decision, request_id)
         return {
             "request_id": request_id,
             "status": "recorded",
             "decision": record.decision,
             "decided_by": record.decided_by,
             "decided_at": record.decided_at,
+            "resumed": resumed,
             "message": (
-                "recorded; the resident acts on it when the blocked session reads it or "
-                "the parked work resumes on its next wake-up"
+                f"recorded; {resumed} is no longer paused and fires on its next schedule"
+                if resumed
+                else "recorded; the resident acts on it when the blocked session reads it "
+                "or the parked work resumes on its next wake-up"
             ),
         }
+
+    def _resume_if_budget(action: str, decision: str, request_id: str) -> str | None:
+        """Lift a budget pause when the human approved lifting it. Returns who resumed.
+
+        The unpause path the issue asks for, and it is the *same* approval machinery every
+        other gated action uses: a budget pause raises an ordinary ``needs_human``, and
+        answering it ``approve`` here is what resumes the resident. ``deny`` is a real
+        answer too — it leaves the resident paused, which is what the human just said.
+
+        ``decide=False`` because the decision has already been recorded and
+        ``needs_human_resolved`` already emitted, three lines up. Recording it twice would
+        put two answers in the log for one question.
+        """
+        if action != BUDGET_ACTION or decision != "approve":
+            return None
+        pause = db.pause_for_request(request_id)
+        if pause is None:
+            return None
+        guard.resume(pause.resident, decided_by=DECIDED_BY, decide=False)
+        return pause.resident
 
     return app
 
