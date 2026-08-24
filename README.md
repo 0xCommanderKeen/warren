@@ -47,6 +47,8 @@ map of everything the fleet does.
   `SessionEnd`) with `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
   secret>`. Off the tailnet it falls back to `~/.burrow/events.jsonl` locally.
   Sessions pick hooks up on start, so already-running sessions won't appear.
+  Every event is also mirrored to a local dev server if one is running — see
+  [Working on burrow locally](#working-on-burrow-locally).
 - **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
   `life-agent` container (via the `claude-config` volume), with
   `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
@@ -54,6 +56,37 @@ map of everything the fleet does.
   turns instead of leaving.
 - **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
   viewer over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
+
+### Working on burrow locally
+
+Nothing has to be deployed to the NAS to see a change work on real events. The
+emitter mirrors every event to `http://127.0.0.1:8737` as well as to the village,
+so:
+
+```sh
+python3 serve.py                  # then open http://127.0.0.1:8737
+```
+
+is a live copy of your own fleet — the same sessions, the same villagers, the same
+knocks — while the shared village keeps receiving everything as usual. The mirror is
+best-effort and off the critical path: when nothing is listening on 8737 the refused
+connection costs nothing, and the event still reaches the NAS. Turn it off with
+`BURROW_MIRROR=` (empty), point it somewhere else with `BURROW_MIRROR=http://host:port`
+(comma-separated for several), and give it a token with `BURROW_MIRROR_TOKEN` — the
+village's `BURROW_TOKEN` is deliberately never sent to a mirror.
+
+Two caveats worth knowing:
+
+- The local server's log defaults to `~/.burrow/events.jsonl`, which is also the
+  emitter's offline fallback. Use `BURROW_EVENTS=/tmp/burrow-dev.jsonl python3 serve.py`
+  to keep a dev run's history separate.
+- Hook *env* is read when a session starts, so changing `BURROW_MIRROR` only affects
+  sessions started afterwards. Changing `hooks/emit.py` itself applies immediately —
+  the script is re-read on every hook.
+
+No live fleet handy (or testing a projection rule that needs a specific sequence)?
+Replay a fixture instead: see [fixtures/README.md](fixtures/README.md). Run the whole
+test suite with `sh tests/run.sh`.
 
 ### Ingest auth
 

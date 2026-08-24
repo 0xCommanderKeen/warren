@@ -140,7 +140,9 @@ def main():
     def run_emitter(token, server):
         """Emit one event, routing the emitter's POST into `server`'s handler."""
         env = {"BURROW_URL": "http://village:8737", "BURROW_TOKEN": token,
-               "BURROW_AGENT_ID": None, "BURROW_PROJECT": None, "HOME": home}
+               "BURROW_AGENT_ID": None, "BURROW_PROJECT": None, "HOME": home,
+               # No dev-server mirror: this checks what the *village* receives.
+               "BURROW_MIRROR": ""}
         emit = load(emit_py, "emit_" + (token or "none"), env)
         emit.LOG_DIR = home
         emit.LOG = os.path.join(home, "events.jsonl")
@@ -192,7 +194,9 @@ def main():
     check("nothing written locally", lines_in(os.path.join(home, "events.jsonl")), 0)
 
     # against the closed server, with no token -> 401 -> local fallback
-    os.remove(os.path.join(home, ".post-failed")) if os.path.exists(os.path.join(home, ".post-failed")) else None
+    for name in os.listdir(home):          # breakers are per target: .post-failed-<hash>
+        if name.startswith(".post-failed"):
+            os.remove(os.path.join(home, name))
     log = os.path.join(tmp, "emit-401.jsonl")
     server = load(serve_py, "serve_emit_401", {"BURROW_EVENTS": log, "BURROW_TOKEN": "s3cret"})
     seen = run_emitter(None, server)
@@ -200,7 +204,8 @@ def main():
     check("server rejects", seen["status"], 401)
     check("nothing logged on server", lines_in(log), 0)
     check("event fell back to local file", lines_in(os.path.join(home, "events.jsonl")), 1)
-    check("circuit breaker tripped", os.path.exists(os.path.join(home, ".post-failed")), True)
+    check("circuit breaker tripped",
+          any(name.startswith(".post-failed") for name in os.listdir(home)), True)
 
     print()
     if failures:
