@@ -5,13 +5,18 @@
 (function (root, factory) {
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
-    : { parseEvents, routineRejections, foldEvents, foldArtifacts, reduce };
+    : { validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
+      foldEvents, foldArtifacts, reduce };
   const fleet = typeof module === "object" && module.exports
     ? require("./fleet-operations.js") : root.BurrowFleet;
-  const runtime = factory(projection, fleet);
+  const jobs = typeof module === "object" && module.exports
+    ? require("./job-board.js") : root.BurrowJobs;
+  const routines = typeof module === "object" && module.exports
+    ? require("./routine-ledger.js") : root.BurrowRoutines;
+  const runtime = factory(projection, fleet, jobs, routines);
   if (typeof module === "object" && module.exports) module.exports = runtime;
   else root.BurrowBrowser = runtime;
-})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet) {
+})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines) {
   const MAX_TRANSPORT_EVENTS = 4000;
 
   function createBrowserRuntime(options) {
@@ -43,13 +48,14 @@
     let transportStatusPromise = null;
     let reportedResidentDiagnostics = new Set();
     let fleetState = fleet.createFleetState();
+    let jobState = jobs.createState();
     let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
 
     function publishFleet(at = now(), routineBatch = [], reset = false,
-        cursor = eventCursor) {
+        cursor = eventCursor, taskEvidence = []) {
       onFleet({ state: fleetState, residents: residentReport.residents,
         diagnosticResidents: residentReport.diagnosticResidents,
-        diagnostics: residentReport.diagnostics, routineBatch, cursor, reset,
+        diagnostics: residentReport.diagnostics, routineBatch, taskEvidence, jobState, cursor, reset,
         directoryAvailable: residentReport.available, villagers, transport, now: at });
     }
 
@@ -65,8 +71,14 @@
     }
 
     function project(lines, reset = false, publishRoutineEvidence = true) {
-      if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState(); }
+      if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState();
+        jobState = jobs.createState(); }
       const batch = projection.parseEvents(lines);
+      // The strict v0 adapter owns parsing and validation for every browser
+      // consumer. Passing its validated batch and task-only rejection metadata
+      // keeps the board diagnostic without giving it a second, weaker raw parser.
+      jobs.foldValidated(jobState, batch, { isValidatedBatch: projection.isValidatedBatch,
+        rejections: projection.taskRejections(batch) });
       projection.foldEvents(agents, batch);
       projection.foldArtifacts(artifacts, batch);
       const at = now();
@@ -74,8 +86,10 @@
         projection.routineRejections(batch).length, at);
       villagers = projection.reduce(agents, at, souls);
       onProjection({ villagers, artifacts, souls, now: at });
+      const taskEvents = batch.filter(event => jobs.TYPES.has(event.type));
       publishFleet(at, publishRoutineEvidence ?
-        batch.filter(event => event.type.startsWith("routine_")) : [], reset);
+        batch.filter(event => event.type.startsWith("routine_")) : [], reset, eventCursor,
+        publishRoutineEvidence ? taskEvents : []);
       return batch;
     }
 
@@ -188,11 +202,40 @@
       }
       eventStream = stream;
       const stageEligible = eventCursor !== 0;
-      let stagedRoutineEvidence = [];
+      let stagedPublications = [];
+      let stagedEvidenceCount = 0;
       let stagingOverflowed = false;
       function clearStaging() {
-        stagedRoutineEvidence = [];
+        stagedPublications = [];
+        stagedEvidenceCount = 0;
         stagingOverflowed = false;
+      }
+      function publishStaging() {
+        if (!stageEligible || stagingOverflowed) return false;
+        for (const staged of stagedPublications) {
+          publishFleet(now(), staged.routineEvents, false, staged.cursor, staged.taskEvents);
+        }
+        return true;
+      }
+      function publishOrConservativeRebase() {
+        // A pre-ready cursor may already be past evidence that a subsequent
+        // grouped poll cannot return. Publish every retained exact record, or
+        // explicitly invalidate pending correlations when bounded staging
+        // cannot prove what was crossed. Projection state is deliberately left
+        // intact: `reset` here describes correlation authority, not the board.
+        if (!publishStaging()) publishFleet(now(), [], true, eventCursor);
+        clearStaging();
+      }
+      async function recoverStream() {
+        publishOrConservativeRebase();
+        stream.close();
+        eventStream = null;
+        streamReady = false;
+        setTransport("reconnecting");
+        await poll();
+        if (transport === "polling") setTransport("reconnecting");
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectStream, 2000);
       }
       stream.onopen = () => {
         if (eventStream !== stream) return;
@@ -207,44 +250,29 @@
         const batch = project([message.data], false, streamReady);
         if (streamReady || !stageEligible || stagingOverflowed) return;
         const evidence = batch.filter(event => event.type.startsWith("routine_"));
-        if (!evidence.length) return;
-        if (stagedRoutineEvidence.length + evidence.length > MAX_TRANSPORT_EVENTS) {
-          stagedRoutineEvidence = [];
+        const taskEvidence = batch.filter(event => jobs.TYPES.has(event.type));
+        if (!evidence.length && !taskEvidence.length) return;
+        if (stagedEvidenceCount + evidence.length + taskEvidence.length > MAX_TRANSPORT_EVENTS) {
+          stagedPublications = [];
+          stagedEvidenceCount = 0;
           stagingOverflowed = true;
           return;
         }
-        stagedRoutineEvidence.push({ events: evidence, cursor: message.lastEventId || 0 });
+        stagedPublications.push({ routineEvents: evidence, taskEvents: taskEvidence,
+          cursor: message.lastEventId || 0 });
+        stagedEvidenceCount += evidence.length + taskEvidence.length;
       };
       stream.addEventListener("ready", async message => {
         if (eventStream !== stream || streamReady) return;
         let declared;
         try { declared = JSON.parse(message.data).cursor; } catch { declared = null; }
         const exact = typeof declared === "string" && declared === message.lastEventId;
-        const parseCursor = value => {
-          const match = typeof value === "string" &&
-            value.match(/^v1:([0-9a-f]{32}):(\d+):(\d+):(\d+):(\d+)$/);
-          if (!match) return null;
-          const limit = 18446744073709551615n;
-          for (const field of match.slice(2)) {
-            const integer = BigInt(field);
-            if (integer > limit || String(integer) !== field) return null;
-          }
-          return { namespace: ["v1", ...match.slice(1, 5)].join(":") };
-        };
-        const readyCursor = exact ? parseCursor(declared) : null;
-        const previousCursor = eventCursor === 0 ? null : parseCursor(eventCursor);
+        const readyCursor = exact ? routines.parseCursor(declared) : null;
+        const previousCursor = eventCursor === 0 ? null : routines.parseCursor(eventCursor);
         if (!readyCursor || (eventCursor !== 0 && (!previousCursor ||
             previousCursor.namespace !== readyCursor.namespace)) ||
             (eventCursor !== 0 && eventCursor !== declared)) {
-          clearStaging();
-          stream.close();
-          eventStream = null;
-          streamReady = false;
-          setTransport("reconnecting");
-          await poll();
-          if (transport === "polling") setTransport("reconnecting");
-          clearTimeout(reconnectTimer);
-          reconnectTimer = setTimeout(connectStream, 2000);
+          await recoverStream();
           return;
         }
         eventCursor = declared;
@@ -254,9 +282,7 @@
           // ending cursor and consider only evidence that follows it.
           publishFleet(now(), [], true, declared);
         } else {
-          for (const staged of stagedRoutineEvidence) {
-            publishFleet(now(), staged.events, false, staged.cursor);
-          }
+          publishStaging();
         }
         clearStaging();
         streamReady = true;
@@ -281,21 +307,18 @@
       });
       stream.onerror = async () => {
         if (eventStream !== stream) return;
-        clearStaging();
-        stream.close();
-        eventStream = null;
-        streamReady = false;
-        setTransport("reconnecting");
-        await poll();
-        if (transport === "polling") setTransport("reconnecting");
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connectStream, 2000);
+        // Every staged record already passed strict validation and carries an
+        // exact cursor after the stream's known starting boundary. If the
+        // connection dies before `ready`, publish that evidence before polling
+        // from the advanced cursor; otherwise an accepted write can be visible
+        // on the board yet its exact acknowledgement is lost forever.
+        await recoverStream();
       };
     }
 
     function snapshot() {
       return { villagers, artifacts, souls, cursor: eventCursor, transport,
-        transportStatus, fleetState, residentReport };
+        transportStatus, fleetState, jobState, residentReport };
     }
 
     onTransport(transport);

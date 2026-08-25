@@ -13,6 +13,7 @@ EVENT_TYPES = frozenset({
     "task_started", "tool_called", "tool_failed", "artifact_produced",
     "heartbeat", "needs_human", "idle", "session_ended",
     "routine_started", "routine_finished", "routine_failed",
+    "task_posted", "task_claimed", "task_done", "task_failed",
 })
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _REQUIRED_TEXT = {
@@ -60,6 +61,32 @@ def _validate_routine_payload(event_type, payload):
     return None
 
 
+def _validate_task_payload(event_type, payload, agent_id):
+    for field in ("task_id", "title"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    if event_type == "task_posted":
+        if not _nonempty_text(payload.get("posted_by")):
+            return "invalid payload.posted_by"
+        skills = payload.get("required_skills")
+        if not isinstance(skills, list) or not all(isinstance(item, str) for item in skills):
+            return "invalid payload.required_skills"
+    else:
+        if not _nonempty_text(payload.get("claimant")):
+            return "invalid payload.claimant"
+        if payload["claimant"] != agent_id:
+            return "payload.claimant must match agent_id"
+    if "parent_task_id" in payload and not _nonempty_text(payload["parent_task_id"]):
+        return "invalid payload.parent_task_id"
+    if event_type == "task_done":
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list) or not all(_nonempty_text(item) for item in artifacts):
+            return "invalid payload.artifacts"
+    if event_type == "task_failed" and not _nonempty_text(payload.get("reason")):
+        return "invalid payload.reason"
+    return None
+
+
 def _plain_object(value):
     return isinstance(value, dict)
 
@@ -97,6 +124,12 @@ def validate_event(event):
             return error
         if event["source"] != "steward":
             return "routine events require source steward"
+    if event_type in ("task_posted", "task_claimed", "task_done", "task_failed"):
+        error = _validate_task_payload(event_type, payload, event["agent_id"])
+        if error:
+            return error
+        if event["source"] != "steward":
+            return "task events require source steward"
     for field in _OPTIONAL_TEXT:
         if field in payload and not isinstance(payload[field], str):
             return f"invalid payload.{field}"

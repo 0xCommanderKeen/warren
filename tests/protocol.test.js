@@ -9,6 +9,7 @@ const cases = JSON.parse(fs.readFileSync("tests/fixtures/protocol-v0-validation.
 test("ingestion and projection share the documented v0 fixture matrix", () => {
   for (const fixture of cases) {
     assert.equal(validateEvent(fixture.event) === null, fixture.valid, fixture.name);
+    if (fixture.error) assert.equal(validateEvent(fixture.event), fixture.error, fixture.name);
   }
 });
 

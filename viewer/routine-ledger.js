@@ -169,6 +169,8 @@
       offset: numbers[3] };
   }
 
+  function offsetAfter(candidate, boundary) { return laterOffset(candidate, boundary); }
+
   function laterOffset(candidate, boundary) {
     return candidate.length > boundary.length ||
       (candidate.length === boundary.length && candidate > boundary);
@@ -526,5 +528,6 @@
   return { TYPES, MAX_RUNS, MAX_ACKNOWLEDGEMENTS, DEFAULT_STALE_MS, DEFAULT_ACK_MS,
     DEFAULT_FETCH_MS, validate, project, declared, canRun,
     canRunAuthoritatively, runDisabled, boundaryAvailability, telemetryAvailability,
-    createAcknowledgements, fetchDeclarations, runNow };
+    createAcknowledgements, fetchDeclarations, runNow, parseCursor: cursor, offsetAfter,
+    requestOptions, requireConfig, withDeadline };
 });

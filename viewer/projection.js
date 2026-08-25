@@ -98,7 +98,8 @@ function doingLabel(ev) {
 const EVENT_TYPES = new Set(["task_started","tool_called","tool_failed",
                              "artifact_produced","heartbeat","needs_human",
                              "idle","session_ended","routine_started",
-                             "routine_finished","routine_failed"]);
+                             "routine_finished","routine_failed","task_posted",
+                             "task_claimed","task_done","task_failed"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 const TIMESTAMP_V0 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const REQUIRED_PAYLOAD_TEXT = {
@@ -165,6 +166,42 @@ function validateEvent(ev) {
     // history or acknowledge a run-now request.
     if (ev.source !== "steward") return "routine events require source steward";
   }
+  if (["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) {
+    for (const field of ["task_id", "title"]) {
+      if (typeof ev.payload[field] !== "string" || !ev.payload[field].trim()) {
+        return "invalid payload." + field;
+      }
+    }
+    if (ev.type === "task_posted") {
+      if (typeof ev.payload.posted_by !== "string" || !ev.payload.posted_by.trim()) {
+        return "invalid payload.posted_by";
+      }
+      if (!Array.isArray(ev.payload.required_skills) ||
+          !ev.payload.required_skills.every(item => typeof item === "string")) {
+        return "invalid payload.required_skills";
+      }
+    } else {
+      if (typeof ev.payload.claimant !== "string" || !ev.payload.claimant.trim()) {
+        return "invalid payload.claimant";
+      }
+      if (ev.payload.claimant !== ev.agent_id) {
+        return "payload.claimant must match agent_id";
+      }
+    }
+    if (Object.hasOwn(ev.payload, "parent_task_id") &&
+        (typeof ev.payload.parent_task_id !== "string" || !ev.payload.parent_task_id.trim())) {
+      return "invalid payload.parent_task_id";
+    }
+    if (ev.type === "task_done" && (!Array.isArray(ev.payload.artifacts) ||
+        !ev.payload.artifacts.every(item => typeof item === "string" && item.trim()))) {
+      return "invalid payload.artifacts";
+    }
+    if (ev.type === "task_failed" &&
+        (typeof ev.payload.reason !== "string" || !ev.payload.reason.trim())) {
+      return "invalid payload.reason";
+    }
+    if (ev.source !== "steward") return "task events require source steward";
+  }
   for (const field of OPTIONAL_PAYLOAD_TEXT) {
     if (Object.hasOwn(ev.payload, field) && typeof ev.payload[field] !== "string") {
       return "invalid payload." + field;
@@ -190,7 +227,8 @@ function parseEvents(batch) {
     }
     const reason = validateEvent(ev);
     if (reason) {
-      if (ev && typeof ev.type === "string" && ev.type.startsWith("routine_")) {
+      if (ev && typeof ev.type === "string" &&
+          (ev.type.startsWith("routine_") || ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type))) {
         rejections.push({ type: ev.type, reason });
       }
       continue;
@@ -203,14 +241,21 @@ function parseEvents(batch) {
 }
 function routineRejections(batch) {
   const parsed = parseEvents(batch);
-  return parsed[REJECTIONS] || [];
+  return (parsed[REJECTIONS] || []).filter(item => item.type.startsWith("routine_"));
+}
+function taskRejections(batch) {
+  const parsed = parseEvents(batch);
+  return (parsed[REJECTIONS] || []).filter(item => item.type.startsWith("task_"));
+}
+function isValidatedBatch(batch) {
+  return Boolean(batch && batch[VALIDATED_BATCH]);
 }
 
 function foldEvents(agents, batch) {
   for (const ev of parseEvents(batch)) {
     // Routines have their own run ledger. They neither create an ordinary
     // villager nor refresh/change one whose last interactive state is known.
-    if (ev.type.startsWith("routine_")) continue;
+    if (ev.type.startsWith("routine_") || ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) {
       a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
@@ -359,6 +404,7 @@ if (typeof module === "object" && module.exports) {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
-    validateEvent, parseEvents, routineRejections, foldEvents, foldArtifacts, nameArtifacts, reduce,
+    validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
+    foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

@@ -39,5 +39,18 @@ assert.match(html, /@media \(max-width: 680px\)/,
   "the ledger has an explicit narrow viewport layout");
 assert.match(html, /Visitors share the lodge and are never presented as configured residents/,
   "visitor grouping cannot imply residency");
+assert.match(html, /id="job-board"|JOB_BOARD_ID = "job-board"/,
+  "the square exposes a distinct job board");
+assert.match(html, /data-post-job/, "the job board exposes its post form");
+assert.match(html, /No tasks are open\./, "the empty job board states its truth plainly");
+assert.match(html, /status-mark missing">absent/, "unknown claimants are explicitly absent");
+assert.match(html, /jobAcks\.observe\(\{ events: view\.taskEvidence/,
+  "the production UI acknowledges only runtime-published task evidence");
+assert.match(html, /data-steward-change/, "Steward credentials can be changed accessibly");
+assert.match(html, /data-steward-clear/, "Steward credentials can be cleared accessibly");
+assert.match(html, /refreshJobListing\(view\.now\)/,
+  "quiet clock ticks refresh the job list without replacing the post form");
+assert.doesNotMatch(html, /(?:localStorage|sessionStorage)\s*\./,
+  "Steward credentials are never persisted by the page");
 
 console.log("viewer chrome reports truthful, accessible status");

@@ -136,6 +136,19 @@
   .artifact-empty { color: var(--ink-dim); font-size: 19px; margin-top: 18px; }
   .artifact-path { color: var(--ink); overflow-wrap: anywhere; }
   .artifact-by { color: var(--ink-dim); font-size: 15px; }
+  .job-form { border: 2px solid #6b4930; background: rgba(94,56,29,.18); padding: 10px; margin: 14px 0; }
+  .job-form label { display: grid; gap: 3px; margin-bottom: 8px; color: #d2a15c; }
+  .job-form input, .job-form textarea { width: 100%; min-width: 0; font: inherit; color: var(--ink); background: #100d0a; border: 1px solid #6f5533; padding: 7px; }
+  .job-form textarea { min-height: 72px; resize: vertical; }
+  .job-form button { font: inherit; color: var(--ink); background: #2b2115; border: 1px solid #d2a15c; padding: 6px 10px; cursor: pointer; }
+  .job-state { border-left: 4px solid #786344; padding-left: 9px; margin: 10px 0; }
+  .job-state.claimed { border-color: var(--busy); }
+  .job-state.done { opacity: .72; }
+  .job-state.failed { border-color: var(--alert); opacity: .82; }
+  .job-skills { color: #b8aa8d; font-size: 15px; }
+  .job-ack { color: #d8ad68; margin: 8px 0; }
+  .job-ack.failed, .job-ack.ambiguous, .job-ack.indeterminate, .job-ack.timeout { color: var(--alert); }
+  .job-diagnostic { color: #f2a17d; border: 1px solid #a65b4a; padding: 7px; margin-top: 10px; }
   .ledger-kicker { color: #d2a15c; letter-spacing: 2px; text-transform: uppercase; }
   .ledger-truth { color: #aa9d81; font-size: 16px; max-width: 58ch; margin: 4px 0 14px; }
   .ledger-tabs { display: flex; gap: 5px; border-bottom: 2px solid #6f5533; margin-bottom: 14px; }
@@ -264,6 +277,7 @@
 <script src="/fleet-operations.js"></script>
 <script src="/fleet-controller.js"></script>
 <script src="/routine-ledger.js"></script>
+<script src="/job-board.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -354,6 +368,7 @@ const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 const NOTICE_BOARD_ID = "notice-board";
+const JOB_BOARD_ID = "job-board";
 const FLEET_LEDGER_ID = "fleet-ledger";
 
 const PLOT_DOOR_X = 24;   // centre of the door opening inside the house frame
@@ -468,6 +483,7 @@ class Village extends Phaser.Scene {
     this.input.on("gameobjectdown", (_p, obj) => {
       if (obj.getData("agent")) openPanel(obj.getData("agent"));
       if (obj.getData("noticeBoard")) openPanel(NOTICE_BOARD_ID);
+      if (obj.getData("jobBoard")) openPanel(JOB_BOARD_ID);
     });
     this.events.on("update", () => {
       for (const v of this.viz.values()) {
@@ -701,6 +717,7 @@ class Village extends Phaser.Scene {
     this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
       .el.classList.add("you");
     this.buildNoticeBoard();
+    this.buildJobBoard();
     // shared locations: building, name label, and a doorway lit only while
     // somebody is genuinely there
     this.placeGlow = {};
@@ -732,6 +749,23 @@ class Village extends Phaser.Scene {
     board.setData("noticeBoard", true);
     this.makeChip(NOTICE_BOARD_ID, "#d2a15c", x + T, y - 22, "notice board")
       .el.classList.add("place");
+  }
+
+  buildJobBoard() {
+    const x = 12 * T, y = 10 * T;
+    this.block(12, 9); this.block(13, 9);
+    const board = this.add.container(x, y).setDepth(y + T);
+    const sign = this.add.rectangle(T, -T / 2, 30, 20, 0x59402c)
+      .setStrokeStyle(2, 0xffc86b);
+    const cards = [-7, 0, 7].map(dx => this.add.rectangle(T + dx, -T / 2, 5, 11, 0xe8dfc8));
+    const posts = [this.add.rectangle(4, 7, 4, 18, 0x47311f),
+                   this.add.rectangle(28, 7, 4, 18, 0x47311f)];
+    board.add([sign, ...cards, ...posts]);
+    board.setSize(32, 34).setInteractive({ useHandCursor: true });
+    board.setData("jobBoard", true);
+    const chip = this.makeChip(JOB_BOARD_ID, "#ffc86b", x + T, y - 54, "job board");
+    chip.el.classList.add("place");
+    chip.el.setAttribute("aria-label", "Job board. Open details");
   }
 
   makeChip(id, accent, wx, wy, name, sub) {
@@ -1181,7 +1215,7 @@ function renderChrome(now) {
     (knockers ? `<span class="dot"> · </span><span class="attn">${knockers} at your door</span>` : "");
   const newest = Math.max(0, ...villagers.map(v => v.lastTs));
   beatEl.textContent = newest ? "last signal " + ago(newest, now) : "";
-  if (selectedId) renderPanel(now);
+  if (selectedId && selectedId !== JOB_BOARD_ID) renderPanel(now);
 }
 
 const previewEl = document.getElementById("preview");
@@ -1213,15 +1247,29 @@ function placeLabel(v) {
 }
 
 let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
-  directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now() };
+  directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now(),
+  jobState: BurrowJobs.createState(), taskEvidence: [] };
 let fleetTab = "activity";
 const routineAcks = BurrowRoutines.createAcknowledgements();
 const routineRunNotices = new Map();
+const jobAcks = BurrowJobs.createAcknowledgements({ onChange() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  refreshJobFeedback();
+  refreshJobListing(Date.now());
+  refreshJobFormState();
+} });
+const jobDraft = { title: "", detail: "", required_skills: "" };
+let jobPostNotice = "";
 let stewardConfig = null; // deliberately memory-only: never localStorage, URL, server, or manifest
 let stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
 let stewardDeclarationGeneration = 0;
 const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
 function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
+function forgetStewardConfig() {
+  stewardConfig = null;
+  stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
+  stewardDeclarationGeneration += 1;
+}
 function routineNoticeKey(correlation, routine) {
   return `${correlation.agent_id ? `agent:${correlation.agent_id}` : `project:${correlation.project}`}\0${routine}`;
 }
@@ -1442,6 +1490,86 @@ function openPanel(id, opener = document.activeElement) {
   renderPanel(Date.now());
   showDialog(true);
 }
+function renderJobListing(now) {
+  const boardRows = BurrowJobs.rows(fleetView.jobState, now);
+  const active = boardRows.filter(job => !["done", "failed"].includes(job.state));
+  return `${active.length ? "" : `<div class="artifact-empty">No tasks are open.</div>`}
+      ${boardRows.map(job => {
+        const claimantTruth = agentId => {
+          if (!agentId) return `unknown <span class="status-mark missing">unknown</span>`;
+          const claimant = villagerFor(agentId);
+          return claimant ? `<button type="button" class="entry-link" data-agent="${esc(agentId)}" data-job-focus="claimant:${esc(job.id)}:${esc(agentId)}">${esc(claimant.name)}</button>` :
+            `${esc(agentId)} <span class="status-mark missing">absent</span>`;
+        };
+        const claim = job.state === "open" ? "open" :
+          `${job.state} by ${claimantTruth(job.claimant)}`;
+        const retry = job.reason === "lease_expired" ?
+          `<div class="job-diagnostic">retry after expired lease · former claimant ${claimantTruth(job.previous_claimant)}</div>` : "";
+        return `<article class="job-state ${esc(job.state)}" data-task-id="${esc(job.id)}">
+          <div><strong>${esc(job.title)}</strong> <span class="status-mark">${esc(job.state)}</span></div>
+          <div class="job-skills">${!Array.isArray(job.required_skills) ? "required skills unavailable" :
+            job.required_skills.length ? `skills: ${job.required_skills.map(skill => skill.trim() ?
+              esc(skill) : '<span class="job-skill-empty" aria-label="blank required skill">(unnamed skill)</span>').join(", ")}` : "no required skills"} · ${job.posted_at === null ?
+                `posted age unavailable · updated ${ago(job.updated_at, now)}` :
+                `posted ${ago(job.posted_at, now)}`}</div>
+          <div>${claim}</div>
+          ${job.reason ? `<div class="job-diagnostic">reason: ${esc(job.reason)}</div>` : ""}
+          ${retry}
+        </article>`;
+      }).join("")}
+      ${fleetView.jobState.malformed ? `<div class="job-diagnostic" role="status">Skipped ${fleetView.jobState.malformed} malformed task event${fleetView.jobState.malformed === 1 ? "" : "s"}; missing IDs or titles never become jobs.</div>` : ""}
+      ${fleetView.jobState.capacityDropped ? `<div class="job-diagnostic" role="status">${fleetView.jobState.capacityDropped} task record${fleetView.jobState.capacityDropped === 1 ? " was" : "s were"} omitted by the bounded board.</div>` : ""}`;
+}
+function refreshJobListing(now) {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const list = panelBody.querySelector("[data-job-list]");
+  if (!list) return;
+  const active = document.activeElement;
+  const focusKey = list.contains(active) && active.dataset ? active.dataset.jobFocus : null;
+  const selection = focusKey && typeof active.selectionStart === "number" ? {
+    start: active.selectionStart, end: active.selectionEnd,
+    direction: active.selectionDirection || "none",
+  } : null;
+  list.innerHTML = renderJobListing(now);
+  if (!focusKey) return;
+  const replacement = [...list.querySelectorAll("[data-job-focus]")]
+    .find(element => element.dataset.jobFocus === focusKey);
+  if (replacement && !replacement.disabled) {
+    replacement.focus({ preventScroll: true });
+    if (selection && typeof replacement.setSelectionRange === "function") {
+      const length = String(replacement.value || "").length;
+      replacement.setSelectionRange(Math.min(selection.start, length),
+        Math.min(selection.end, length), selection.direction);
+    }
+  } else {
+    // If the focused row expires, keep keyboard focus inside the open dialog
+    // while truthfully removing the record.
+    const heading = panelBody.querySelector("#panel-title");
+    if (heading) heading.focus({ preventScroll: true });
+  }
+}
+function jobFeedbackMarkup() {
+  const latestAck = jobAcks.latest();
+  const ackLabel = latestAck ?
+    latestAck.state === "requesting" ? "Sending directly to Steward…" :
+    latestAck.state === "pending" ? `Steward accepted ${latestAck.task_id}; waiting for its exact task_posted event.` :
+    latestAck.message : "";
+  return `${latestAck ? `<div class="job-ack ${esc(latestAck.state)}" role="${["failed","ambiguous","indeterminate","timeout"].includes(latestAck.state) ? "alert" : "status"}">${esc(ackLabel)}</div>` : ""}
+    ${jobPostNotice ? `<div class="job-diagnostic" role="alert">${esc(jobPostNotice)}</div>` : ""}`;
+}
+function refreshJobFeedback() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const feedback = panelBody.querySelector("[data-job-feedback]");
+  if (feedback) feedback.innerHTML = jobFeedbackMarkup();
+}
+function refreshJobFormState() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const form = panelBody.querySelector("[data-post-job]");
+  if (!form) return;
+  const blocked = jobAcks.blocksSubmission();
+  for (const control of form.elements) control.disabled = blocked;
+  form.setAttribute("aria-busy", jobAcks.hasActive() ? "true" : "false");
+}
 function renderPanel(now) {
   if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
   panelEl.classList.remove("ledger");
@@ -1457,6 +1585,26 @@ function renderPanel(now) {
           <div class="artifact-by">${esc(a.name)} · ${esc(a.project)} · ${ago(a.ts, now)}</div>
         </div>`).join("") :
         `<div class="artifact-empty">Nothing has been produced in the recent event log.</div>`}`;
+    return;
+  }
+  if (selectedId === JOB_BOARD_ID) {
+    panelEl.setAttribute("aria-label", "Job board");
+    const jobSubmissionBlocked = jobAcks.blocksSubmission();
+    panelBody.innerHTML = `
+      <h2 id="panel-title" tabindex="-1"><span style="color:#ffc86b">▪</span> Job board</h2>
+      <div class="meta">current work reconstructed only from Steward's task events · newest first · at most ${BurrowJobs.MAX_TASKS}</div>
+      <div class="ledger-truth">Steward credentials stay only in browser memory. ${stewardConfig ?
+        `<button type="button" class="routine-run" data-steward-change>change credentials</button>
+         <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+        `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+      <form class="job-form" data-post-job aria-busy="${jobAcks.hasActive() ? "true" : "false"}">
+        <label>Title <input name="title" required maxlength="240" autocomplete="off" value="${esc(jobDraft.title)}"${jobSubmissionBlocked ? " disabled" : ""}></label>
+        <label>Detail <textarea name="detail" maxlength="8000"${jobSubmissionBlocked ? " disabled" : ""}>${esc(jobDraft.detail)}</textarea></label>
+        <label>Required skills <input name="required_skills" autocomplete="off" placeholder="research, write-journal" value="${esc(jobDraft.required_skills)}"${jobSubmissionBlocked ? " disabled" : ""}></label>
+        <button type="submit"${jobSubmissionBlocked ? " disabled" : ""}>post job</button>
+      </form>
+      <div data-job-feedback>${jobFeedbackMarkup()}</div>
+      <div data-job-list>${renderJobListing(now)}</div>`;
     return;
   }
   const v = villagers.find(x => x.id === selectedId);
@@ -1610,11 +1758,36 @@ const fleetController = BurrowFleetController.createFleetController({
 fleetController.fitViewport(window.innerWidth);
 window.addEventListener("resize", () => fleetController.fitViewport(window.innerWidth));
 panelBody.addEventListener("input", event => {
+  if (selectedId === JOB_BOARD_ID && event.target.name in jobDraft) {
+    jobDraft[event.target.name] = event.target.value;
+    return;
+  }
   if (!event.target.name || !(event.target.name in fleetFilters)) return;
   fleetFilters[event.target.name] = event.target.value;
   renderFleet(Date.now());
 });
 panelBody.addEventListener("click", async event => {
+  const claimant = event.target.closest("[data-agent]");
+  if (claimant && selectedId === JOB_BOARD_ID) {
+    openPanel(claimant.dataset.agent, claimant);
+    return;
+  }
+  const changeCredentials = event.target.closest("[data-steward-change]");
+  if (changeCredentials && selectedId === JOB_BOARD_ID) {
+    forgetStewardConfig();
+    renderPanel(Date.now());
+    const config = await requestStewardConfig();
+    if (config) stewardConfig = config;
+    renderPanel(Date.now());
+    return;
+  }
+  const clearCredentials = event.target.closest("[data-steward-clear]");
+  if (clearCredentials && selectedId === JOB_BOARD_ID) {
+    forgetStewardConfig();
+    jobPostNotice = "Steward credentials cleared from browser memory.";
+    renderPanel(Date.now());
+    return;
+  }
   const connect = event.target.closest("[data-steward-connect]");
   if (connect) {
     const config = await requestStewardConfig();
@@ -1695,6 +1868,66 @@ panelBody.addEventListener("click", async event => {
   }
   renderPanel(Date.now());
 });
+panelBody.addEventListener("submit", async event => {
+  const form = event.target.closest("[data-post-job]");
+  if (!form) return;
+  event.preventDefault();
+  if (jobAcks.blocksSubmission()) {
+    jobPostNotice = "A previous post is still unresolved; no duplicate request was sent.";
+    refreshJobFeedback();
+    refreshJobFormState();
+    return;
+  }
+  if (!form.reportValidity()) return;
+  const initial = runtime.snapshot();
+  const telemetry = BurrowRoutines.telemetryAvailability(initial.transport, initial.cursor);
+  if (!telemetry.ok) {
+    jobPostNotice = telemetry.message;
+    renderPanel(Date.now());
+    return;
+  }
+  if (!stewardConfig) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+  }
+  const current = runtime.snapshot();
+  if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+    jobPostNotice = "Telemetry changed while authorizing; no job was sent.";
+    renderPanel(Date.now());
+    return;
+  }
+  const tracking = jobAcks.request(current.cursor);
+  if (!tracking.ok) {
+    jobPostNotice = tracking.message;
+    renderPanel(Date.now());
+    return;
+  }
+  jobPostNotice = "";
+  refreshJobFeedback();
+  refreshJobFormState();
+  try {
+    const accepted = await BurrowJobs.postJob(stewardConfig, jobDraft);
+    const acknowledgement = jobAcks.accepted(tracking.id, accepted.task_id, accepted.request_id);
+    if (acknowledgement && ["pending", "acknowledged"].includes(acknowledgement.state)) {
+      jobDraft.title = ""; jobDraft.detail = ""; jobDraft.required_skills = "";
+      for (const name of Object.keys(jobDraft)) form.elements[name].value = "";
+    }
+  } catch (error) {
+    jobAcks.failed(tracking.id, error && error.message || "Job request failed.",
+      Boolean(error && error.definitive), error && error.taskId);
+    if (error && error.authRejected) {
+      forgetStewardConfig();
+      jobPostNotice = "Steward rejected those credentials. Connect again to retry without reloading.";
+    }
+  }
+  if (stewardConfig) {
+    refreshJobFeedback();
+    refreshJobFormState();
+  } else {
+    renderPanel(Date.now());
+  }
+});
 
 let souls = [];
 let artifacts = [];
@@ -1716,7 +1949,16 @@ const runtime = BurrowBrowser.createBrowserRuntime({
     fleetView = view;
     routineAcks.observe({ events: view.routineBatch, cursor: view.cursor, reset: view.reset },
       view.now, validateEvent);
+    jobAcks.observe({ events: view.taskEvidence, cursor: view.cursor, reset: view.reset },
+      validateEvent);
     if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
+    if (selectedId === JOB_BOARD_ID) {
+      refreshJobListing(view.now);
+      if (view.taskEvidence.length || view.reset) {
+        refreshJobFeedback();
+        refreshJobFormState();
+      }
+    }
   },
   onTransport(state) {
     transportEl.dataset.state = state;

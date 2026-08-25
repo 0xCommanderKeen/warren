@@ -164,10 +164,16 @@ event-log lock, then releases it before any socket write or flush. An append is 
 included in that snapshot before the marker or tailed from its cursor after the marker;
 a slow stream cannot block ingestion, polling, or rotation. The viewer projects
 pre-marker records but keeps transport `recovering`. During a normal cursor resume it
-stages at most the same 4,000-record transport window of routine evidence and publishes
-that evidence once, with its original order and cursors, after validating `ready`.
+stages at most the same 4,000-record transport window of routine and task evidence and
+publishes that evidence once, with its original order and cursors, after validating
+`ready`. If that resumed stream errors before the marker, the already strictly validated,
+cursor-bearing stage is published once before polling continues from its ending cursor;
+this neither rereads it nor loses exact write acknowledgement evidence.
 Bootstrap/reset evidence and overflowed staging are conservatively suppressed and only
-rebase the acknowledgement boundary; malformed readiness, errors, and reconnects clear
+rebase the acknowledgement boundary. If an overflowed pre-ready stream errors, Burrow
+publishes that conservative rebase before polling from the already-advanced cursor, so
+an unresolved write becomes explicitly ambiguous instead of silently losing possible
+exact evidence. Malformed readiness and explicit reset clear
 staging. Only a valid marker in the
 current cursor namespace makes the transport `live`; a missing marker remains
 non-observable, while a malformed or mismatched marker closes the stream and enters
@@ -251,8 +257,14 @@ in `viewer/projection.js`. Both adapters run the same fixture matrix in
 - `type` is one of the types below. Unknown types are invalid in v0.
 - Required payload strings are non-empty: `task_started.prompt`,
   `tool_called.tool`, `tool_failed.tool`, `artifact_produced.artifact`, and
-  `needs_human.message`. Known optional detail and lineage fields are strings;
+  `needs_human.message`. Job events require non-empty `task_id` and `title`;
+  claims and completions also require `claimant`, exactly equal to the top-level
+  `agent_id` that Steward emits them under. Optional `parent_task_id`, when present on
+  any job event, is a non-empty string. Known optional detail fields are strings;
   `stop_hook_active`, when present, is boolean.
+- `task_posted.required_skills` follows Steward's exact `list[str]` contract. The
+  list may be empty and individual strings may be blank or whitespace-only; Burrow
+  preserves those values instead of rejecting or normalizing valid evidence.
 
 Invalid HTTP records return 400 and are never appended or notified. Projection
 silently ignores the same invalid records. Unknown extension fields remain
@@ -290,6 +302,10 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `routine_started`   | Steward began a declared routine           | `routine`, `run_id`, `trigger` |
 | `routine_finished`  | that run ended successfully                 | `routine`, `run_id`, `outcome`, `artifacts`, `duration_s` |
 | `routine_failed`    | that run ended unsuccessfully                | `routine`, `run_id`, `error`; optional `duration_s` |
+| `task_posted`       | Steward accepted a job                       | `task_id`, `title`, `required_skills`, `posted_by` |
+| `task_claimed`      | a resident atomically claimed that job       | `task_id`, `title`, `claimant` |
+| `task_done`         | the claimant finished the job                | `task_id`, `title`, `claimant`, `artifacts` |
+| `task_failed`       | the claimant failed or its lease expired      | `task_id`, `title`, `claimant`, `reason` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
 and run id. They do not by themselves rewrite ordinary tool/activity history. A start
@@ -347,6 +363,82 @@ The village notice board is a bounded cross-agent view of this stream. It keeps
 the 30 most recent valid `artifact_produced` events from the viewer's live log
 window, newest first, including artifacts from agents who have since left.
 
+The separate job board is reconstructed only from valid Steward `task_posted`,
+`task_claimed`, `task_done`, and `task_failed` events. A post requires the complete
+Steward payload, including non-empty `posted_by`; a failure requires its reason. It keeps
+at most 24 task identities, keyed by
+`task_id`; duplicates cannot create another card. Capacity is applied after every valid
+event, including each record in a grouped bootstrap/reset response. A later transition can
+reintroduce an identity whose post was already evicted, but cannot recover that missing post
+metadata; only a genuinely re-observed post can. This makes one-event SSE delivery, grouped
+replay, and rotation/reset batch-invariant without inventing skills. The greatest event
+timestamp is the current state. Equal-millisecond facts use a constant-space total order:
+post, lease expiry, claim, ordinary failure, then done, with stable event identity deciding
+conflicts within one kind. Exact duplicates compare equal. This preserves Steward's
+expiry-then-reclaim hand-off while even 10,000 distinct same-millisecond transitions retain
+only the latest post and transition. A later post supplies the canonical title,
+skills, and posted age even when its claim arrived first. Open and claimed jobs remain.
+When a claim or terminal event is retained without its post, Burrow renders required
+skills as unavailable rather than inventing an empty requirement set.
+An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
+entry in a non-empty list renders as an accessible “unnamed skill” marker, one marker per
+entry, so it cannot be confused with either an empty list or unavailable orphan metadata.
+Steward's `task_failed` with `reason: "lease_expired"` means its lease sweep has reopened
+that task: Burrow therefore renders it open again, clears the former claimant, and retains
+the reason/former claimant as truthful retry context. A present former claimant links to
+that villager, an absent one is marked absent, and missing claimant evidence is explicitly
+unknown rather than invented. Other failures and done jobs remain
+visibly terminal for 15 minutes after their close event and then leave. Relative ages and
+terminal expiry advance from the wall clock even when no event arrives; this refresh changes
+only the task-list region, preserving the focused post form and its draft.
+The browser performs one strict v0 parse/validation pass and gives every projection the
+same explicitly branded accepted batch. The trusted task fold rejects an unbranded batch;
+the raw public fold is fail-closed unless supplied the shared strict validator. Task-shaped
+rejections retain task diagnostics, but globally invalid records can never reach the board
+through a second handwritten validator. A cursor reset
+discards the entire reduced
+board before folding the grouped baseline, so work absent from that authority cannot haunt
+the square.
+
+Posting is a direct browser-to-Steward `POST /jobs`; Burrow's server remains a reader.
+The Tailnet URL and bearer token live only in JavaScript memory and the password field is
+cleared when its dialog closes. Burrow draws no optimistic task. It requires non-empty
+`task_id` and `request_id` values from Steward's `202` response, then acknowledges only an
+exact matching `task_posted` event beyond the validated pre-request cursor. Another task, an old replay,
+or reset baseline cannot acknowledge it. Only Steward's `401` authentication gate and
+`422` request validation are contractually before `/jobs` mutates its store, so only those
+HTTP refusals are definitive and retryable. A `5xx`, other HTTP/proxy status, network failure,
+invalid acceptance, or telemetry reset is explicitly ambiguous and blocks duplicate retry.
+If an ambiguous response—including a malformed `202` envelope—supplies an independently
+valid non-empty task identity, Burrow retains only that safe identity and a later exact valid
+event reconciles it; the malformed envelope itself is never acknowledgement. An invalid task
+identity remains unidentified ambiguity. A valid `202` that arrives after the request-start
+deadline retains its validated `task_id` and `request_id` for exact reconciliation, while the
+tracker records that the deadline elapsed and never relabels the response as timely success.
+The absence of matching
+evidence for 15 seconds from request start is an explicit timeout. The deadline transition
+notifies the renderer while the HTTP request is still in flight. Only already-staged or future
+exact post-boundary `task_posted` evidence may then confirm the job and unblock another post;
+the late response alone cannot rewrite that already-visible truth or clear the operator's draft. Exact
+validated evidence staged before an
+SSE readiness marker is replayed to correlation before recovery polling advances past its
+cursor, so a connection error or invalid readiness marker cannot leave a visible accepted
+job to time out. If more than 24 distinct posts arrive before Steward's response identifies
+the requested task, correlation becomes explicitly indeterminate instead of evicting possible
+proof. While a request is active, a timed-out request is still awaiting HTTP or is known
+accepted, or its outcome is ambiguous/indeterminate, the accessible form is disabled to
+prevent an unsafe duplicate; a definitive refusal remains visible and retryable. This bounded
+table retains at most 40 post attempts and refuses before sending when every slot is unresolved. A `401` clears the
+rejected in-memory credential and exposes accessible change/clear controls so an operator
+can correct it without reloading; credentials never enter storage, rendered markup, or logs.
+
+| `POST /jobs` outcome | Mutation certainty | Retry policy |
+|---|---|---|
+| `401` | definitely rejected by the auth dependency | correct credentials, then retry |
+| `422` | definitely rejected by request validation | correct the form, then retry |
+| `202` with valid acceptance | accepted; await exact `task_posted` | blocked until exact evidence |
+| other HTTP status, invalid response, timeout, or network failure | may have mutated | blocked; reconcile only an identified exact event |
+
 ## Projection rules (v0)
 
 The villager's state is decided by its **latest** event:
@@ -391,10 +483,16 @@ lines the viewer reads: the last 80 visible events of every villager the
 projection would still draw — plus its latest liveness-only heartbeat when
 present, plus one canonical lineage-bearing record for each active child, and
 skipping any whose latest signal is `session_ended` or older than
-the 12 h drop window — in their original order.
+the 12 h drop window — in their original order. Separately, it keeps the canonical post
+and latest transition for the same bounded 24 task IDs the job board selects, using the
+same per-event capacity and constant-space equal-time order. An already-evicted post is not
+reconstructed merely because a transition for that task appears later in the retained input.
+Task-ID retention crosses agent groups: a central `steward:api` post remains paired with
+claim/done/failed/lease-expiry evidence after the claimant session ends.
 
-That tail is exactly the input the rules above consume, so the village renders
-identically across a rotation: same states, same panel history. It also means the
+That tail is exactly the input the rules above consume, so the village and job board render
+identically across a rotation/reset: same states, same panel history and no resurrected
+task posts. It also means the
 live log has a floor of (live agents × 80 events); a very busy fleet can sit
 above the threshold, and rotation then waits rather than copying the log next to
 itself.

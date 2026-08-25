@@ -23,6 +23,7 @@ import datetime
 import email.header
 import errno
 import fcntl
+import functools
 import glob
 import hmac
 import http.server
@@ -61,6 +62,8 @@ EVENT_TYPES = set(PROTOCOL_EVENT_TYPES)
 KEEP_PER_AGENT = 80                  # events the viewer keeps per villager
 VIEWER_LINE_LIMIT = 4000             # viewer/index.html bootstrap window
 DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
+KEEP_TASKS = 24                       # viewer/job-board.js MAX_TASKS
+TASK_EVENT_TYPES = {"task_posted", "task_claimed", "task_done", "task_failed"}
 
 # every read, append and rotation of the log goes through this, so an event can
 # never land in the gap between reading the log and swapping it out
@@ -691,15 +694,122 @@ def event_ms(event):
     return int(when.timestamp() * 1000)
 
 
+def _task_event_identity(event):
+    """Stable final tie-breaker mirrored from viewer/job-board.js.
+
+    Steward identifiers and payload text are protocol strings.  Compact JSON
+    keeps array ordering significant without depending on Python's whitespace.
+    """
+    payload = event["payload"]
+    values = (
+        event["type"], event["ts"], event["agent_id"], event["project"],
+        payload["task_id"], payload["title"], payload.get("claimant", ""),
+        json.dumps(payload.get("required_skills", []), ensure_ascii=False,
+                   separators=(",", ":")),
+        json.dumps(payload.get("artifacts", []), ensure_ascii=False,
+                   separators=(",", ":")),
+        payload.get("reason", ""),
+        payload.get("parent_task_id", ""),
+    )
+    return "\0".join(str(value) for value in values)
+
+
+def _task_tie_rank(event):
+    """Constant-space semantic order for Steward's equal-ms transitions."""
+    if event["type"] == "task_posted":
+        return 0
+    if (event["type"] == "task_failed"
+            and event["payload"].get("reason", "").strip() == "lease_expired"):
+        return 1
+    if event["type"] == "task_claimed":
+        return 2
+    if event["type"] == "task_failed":
+        return 3
+    return 4  # task_done
+
+
+def _later_task_event(candidate, current):
+    candidate_ms, current_ms = event_ms(candidate), event_ms(current)
+    if candidate_ms != current_ms:
+        return candidate_ms > current_ms
+    candidate_rank = _task_tie_rank(candidate)
+    current_rank = _task_tie_rank(current)
+    if candidate_rank != current_rank:
+        return candidate_rank > current_rank
+    return _task_event_identity(candidate) > _task_event_identity(current)
+
+
+def _remember_task_event(task, slot, index, event):
+    """Mirror the browser's constant-space timestamp/tie-order fold."""
+    current = task[slot]
+    if current is None or _later_task_event(event, current[1]):
+        task[slot] = (index, event)
+
+
+def _task_keep_indexes(parsed):
+    """Return the bounded cross-agent task projection needed after rotation.
+
+    A task begins under ``steward:api`` and moves to its claimant.  It therefore
+    cannot share villager lifecycle retention: a claimant's ``session_ended``
+    must not erase a done/failed/reopened task or resurrect its older post.
+    """
+    def compare(left, right):
+        left_id, left_task = left
+        right_id, right_task = right
+        left_event, right_event = left_task["latest"][1], right_task["latest"][1]
+        left_terminal = left_event["type"] == "task_done" or (
+            left_event["type"] == "task_failed" and
+            left_event["payload"].get("reason", "").strip() != "lease_expired")
+        right_terminal = right_event["type"] == "task_done" or (
+            right_event["type"] == "task_failed" and
+            right_event["payload"].get("reason", "").strip() != "lease_expired")
+        if left_terminal != right_terminal:
+            return 1 if left_terminal else -1
+        if event_ms(left_event) != event_ms(right_event):
+            return -1 if event_ms(left_event) > event_ms(right_event) else 1
+        if left_id == right_id:
+            return 0
+        return -1 if left_id > right_id else 1
+
+    tasks = {}
+    for index, event in parsed:
+        if event.get("type") not in TASK_EVENT_TYPES or validate_event(event):
+            continue
+        task_id = event["payload"]["task_id"].strip()
+        task = tasks.setdefault(task_id, {"posted": None, "latest": None})
+        if event["type"] == "task_posted":
+            _remember_task_event(task, "posted", index, event)
+        _remember_task_event(task, "latest", index, event)
+        if len(tasks) > KEEP_TASKS:
+            # Mirror the browser after every accepted event. A post evicted at
+            # capacity cannot be silently reconstructed merely because its
+            # later claim appears in the same transport/reset batch.
+            selected_ids = {key for key, _ in sorted(
+                tasks.items(), key=functools.cmp_to_key(compare))[:KEEP_TASKS]}
+            tasks = {key: value for key, value in tasks.items()
+                     if key in selected_ids}
+
+    selected = sorted(tasks.items(), key=functools.cmp_to_key(compare))[:KEEP_TASKS]
+    keep = set()
+    for _, task in selected:
+        keep.add(task["latest"][0])
+        if task["posted"] is not None:
+            keep.add(task["posted"][0])
+    return keep
+
+
 def carry_forward(lines, now_ms):
-    """The minimal tail of `lines` that still reduces to the same village: the
-    last KEEP_PER_AGENT events of every villager the viewer would still draw —
-    skipping the ones that went home or fell out of the 12 h window — kept in
-    their original order, because the projection reads the latest event."""
+    """The bounded tail that preserves both village and job-board projections.
+
+    Villager history is retained per agent.  Task lifecycle is retained per
+    task ID because Steward posts centrally and emits later transitions under
+    the claimant; the two lifecycles intentionally have different owners.
+    """
     # The browser deliberately ignores anything older than this global window.
     # Applying it here too prevents rotation from resurrecting a sparse agent.
     lines = lines[-VIEWER_LINE_LIMIT:]
     per_agent = {}
+    parsed = []
     for i, line in enumerate(lines):
         try:
             event = json.loads(line)
@@ -708,6 +818,13 @@ def carry_forward(lines, now_ms):
         if not isinstance(event, dict) or not event.get("agent_id"):
             continue
         if event.get("type") not in EVENT_TYPES:
+            continue
+        parsed.append((i, event))
+        # Task events have their own cross-agent projection below. They never
+        # create or refresh a villager in viewer/projection.js, and allowing
+        # central posts back through per-agent retention could resurrect a task
+        # whose terminal transition was correctly dropped by board capacity.
+        if event["type"] in TASK_EVENT_TYPES:
             continue
         agent = per_agent.setdefault(
             event["agent_id"], {"events": [], "last": None, "lineage": None})
@@ -721,7 +838,7 @@ def carry_forward(lines, now_ms):
             agent["events"].append((i, event))
             if len(agent["events"]) > KEEP_PER_AGENT:
                 agent["events"].pop(0)
-    keep = []
+    keep = list(_task_keep_indexes(parsed))
     for agent in per_agent.values():
         last_i, last = agent["last"]
         if last["type"] == "session_ended" or now_ms - event_ms(last) > DROP_MS:

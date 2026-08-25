@@ -13,6 +13,8 @@ class ProtocolContractTest(unittest.TestCase):
         for case in json.loads(FIXTURES.read_text()):
             with self.subTest(case["name"]):
                 self.assertEqual(validate_event(case["event"]) is None, case["valid"])
+                if "error" in case:
+                    self.assertEqual(validate_event(case["event"]), case["error"])
 
     def test_shared_timestamp_range_rejects_year_zero_exactly(self):
         cases = json.loads(FIXTURES.read_text())

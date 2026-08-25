@@ -308,9 +308,10 @@ test("production fleet browser fixture runs isolated interaction and visual phas
       { name: "prefers-color-scheme", value: "dark" },
     ] });
     await send("Page.addScriptToEvaluateOnNewDocument", { source: `{
-      const NativeDate = Date; const now = ${frozenNow};
+      const NativeDate = Date; let now = ${frozenNow};
       class FrozenDate extends NativeDate { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
       FrozenDate.parse = NativeDate.parse; FrozenDate.UTC = NativeDate.UTC; window.Date = FrozenDate;
+      window.__advanceBurrowClock = milliseconds => { now += milliseconds; return now; };
       let randomState = 0x42c0ffee;
       Math.random = () => ((randomState = (1664525 * randomState + 1013904223) >>> 0) / 4294967296);
       window.setInterval = () => 0; window.clearInterval = () => {};
@@ -700,6 +701,456 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         failureErrors: ["run never reported back", "<img src=x onerror=window.__unsafe=1>"],
         failureMarkupEscaped: true,
         disabledRun: true, retiredRun: true, latestDeclarationWins: true });
+    });
+
+    await t.test("job form stays non-optimistic until exact production event acknowledgement", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const pending = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'job-only-secret'};
+        const originalFetch = window.fetch.bind(window);
+        window.__jobPost = null;
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs') {
+            window.__jobPost = {url:String(url),authorization:options.headers.Authorization,
+              credentials:options.credentials,body:JSON.parse(options.body)};
+            return {status:202,json:async()=>({status:'accepted',task_id:'exact-job',request_id:'request-job'})};
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const form = document.querySelector('[data-post-job]');
+        const set = (name, value) => { const input=form.elements[name]; input.value=value;
+          input.dispatchEvent(new Event('input',{bubbles:true})); };
+        set('title','Exact job'); set('detail','Only event truth');
+        set('required_skills','research, write-journal');
+        form.requestSubmit();
+        await new Promise(resolve => setTimeout(resolve,20));
+        const ack = jobAcks.latest();
+        return {post:window.__jobPost,state:ack && ack.state,
+          optimistic:document.querySelector('[data-task-id="exact-job"]') !== null,
+          tokenInput:document.querySelector('#steward-token').value,
+          tokenRendered:document.querySelector('#panel-body').textContent.includes('job-only-secret')};
+      })()`, signal, "direct job POST pending acknowledgement");
+      assert.deepEqual(pending, {post:{url:"http://127.0.0.1:8801/jobs",
+        authorization:"Bearer job-only-secret",credentials:"omit",
+        body:{title:"Exact job",detail:"Only event truth",required_skills:["research","write-journal"]}},
+        state:"pending",optimistic:false,tokenInput:"",tokenRendered:false});
+
+      const unrelated = {v:0,ts:new Date(frozenNow + 1).toISOString(),source:"steward",
+        agent_id:"steward:api",project:"steward",type:"task_posted",
+        payload:{task_id:"other-job",title:"Other",required_skills:[],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(unrelated) + "\n");
+      const stillPending = await eventually(send, `(async () => {
+        await runtime.poll();
+        const ack=jobAcks.latest();
+        return ack && {state:ack.state,other:!!document.querySelector('[data-task-id="other-job"]'),
+          exact:!!document.querySelector('[data-task-id="exact-job"]')};
+      })()`, signal, "unrelated job event does not acknowledge");
+      assert.deepEqual(stillPending,{state:"pending",other:true,exact:false});
+
+      const exact = {...unrelated,ts:new Date(frozenNow + 2).toISOString(),
+        payload:{task_id:"exact-job",title:"Exact job",required_skills:["research","write-journal"],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(exact) + "\n");
+      const acknowledged = await eventually(send, `(async () => {
+        await runtime.poll();
+        const ack=jobAcks.latest();
+        return ack && {state:ack.state,exact:!!document.querySelector('[data-task-id="exact-job"]'),
+          status:document.querySelector('.job-ack')?.textContent};
+      })()`, signal, "exact task_posted production acknowledgement");
+      assert.deepEqual(acknowledged,{state:"acknowledged",exact:true,
+        status:"Posted — confirmed by the matching task_posted event."});
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("slow successful job POST renders the request-start deadline before response", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'slow-secret'};
+        const originalFetch = window.fetch.bind(window);
+        let resolvePost; window.__slowPostStarted = false;
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs') {
+            window.__slowPostStarted = true;
+            return new Promise(resolve => { resolvePost = resolve; });
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const form = document.querySelector('[data-post-job]');
+        form.elements.title.value = 'Slow but accepted';
+        form.elements.title.dispatchEvent(new Event('input',{bubbles:true}));
+        form.requestSubmit();
+        while (!window.__slowPostStarted) await new Promise(resolve => setTimeout(resolve,5));
+        window.__advanceBurrowClock(BurrowJobs.DEFAULT_ACK_MS);
+        runtime.tick();
+        const atDeadline = {state:jobAcks.latest().state,
+          alert:document.querySelector('.job-ack')?.textContent,
+          draft:document.querySelector('[data-post-job]').elements.title.value};
+        resolvePost({status:202,json:async()=>({status:'accepted',task_id:'slow-job',request_id:'slow-request'})});
+        await new Promise(resolve => setTimeout(resolve,20));
+        const late = jobAcks.latest();
+        return {atDeadline,afterResponse:late.state,taskId:late.task_id,
+          requestId:late.request_id,deadlineRecorded:Number.isFinite(late.deadlineElapsedAt),
+          draftAfter:document.querySelector('[data-post-job]').elements.title.value,
+          optimistic:!!document.querySelector('[data-task-id="slow-job"]'),
+          disabled:[...document.querySelector('[data-post-job]').elements].every(control=>control.disabled)};
+      })()`, signal, "slow job response deadline");
+      assert.deepEqual(evidence, {atDeadline:{state:"timeout",
+        alert:"No matching task_posted event arrived before the acknowledgement timeout.",
+        draft:"Slow but accepted"},afterResponse:"timeout",taskId:"slow-job",
+        requestId:"slow-request",deadlineRecorded:true,draftAfter:"Slow but accepted",
+        optimistic:false,disabled:true});
+
+      const unrelated = {v:0,ts:new Date(frozenNow + 1).toISOString(),source:"steward",
+        agent_id:"steward:api",project:"steward",type:"task_posted",
+        payload:{task_id:"slow-unrelated",title:"Unrelated",required_skills:[],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(unrelated) + "\n");
+      const unrelatedState = await eventually(send, `(async () => {
+        await runtime.poll();
+        return {state:jobAcks.latest().state,
+          disabled:[...document.querySelector('[data-post-job]').elements].every(control=>control.disabled)};
+      })()`, signal, "unrelated event cannot reconcile late valid response");
+      assert.deepEqual(unrelatedState,{state:"timeout",disabled:true});
+
+      const exact = {...unrelated,ts:new Date(frozenNow + 2).toISOString(),
+        payload:{task_id:"slow-job",title:"Slow but accepted",required_skills:[],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(exact) + "\n");
+      const reconciled = await eventually(send, `(async () => {
+        await runtime.poll();
+        const ack=jobAcks.latest();
+        return {state:ack.state,deadlineRecorded:Number.isFinite(ack.deadlineElapsedAt),
+          status:document.querySelector('.job-ack')?.textContent,
+          enabled:[...document.querySelector('[data-post-job]').elements].every(control=>!control.disabled),
+          exact:!!document.querySelector('[data-task-id="slow-job"]')};
+      })()`, signal, "late exact job event reconciliation");
+      assert.deepEqual(reconciled,{state:"acknowledged",deadlineRecorded:true,
+        status:"Posted — confirmed by the matching task_posted event after the acknowledgement deadline had elapsed.",
+        enabled:true,exact:true});
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("malformed 202 uses a safe task identity only to match real production evidence", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const beforeEvidence = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'malformed-secret'};
+        const originalFetch = window.fetch.bind(window);
+        let resolvePost;
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs')
+            return new Promise(resolve => { resolvePost = resolve; });
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const form=document.querySelector('[data-post-job]');
+        form.elements.title.value='Malformed acceptance';
+        form.elements.title.dispatchEvent(new Event('input',{bubbles:true}));
+        form.requestSubmit();
+        while (!resolvePost) await new Promise(resolve=>setTimeout(resolve,5));
+        resolvePost({status:202,json:async()=>({status:'queued',task_id:'malformed-job'})});
+        await new Promise(resolve=>setTimeout(resolve,20));
+        const ack=jobAcks.latest();
+        return {state:ack.state,taskId:ack.task_id,requestId:ack.request_id ?? null,
+          optimistic:!!document.querySelector('[data-task-id="malformed-job"]'),
+          disabled:[...form.elements].every(control=>control.disabled)};
+      })()`, signal, "malformed 202 remains ambiguous without event proof");
+      assert.deepEqual(beforeEvidence,{state:"ambiguous",taskId:"malformed-job",
+        requestId:null,optimistic:false,disabled:true});
+
+      const unrelated = {v:0,ts:new Date(frozenNow + 3).toISOString(),source:"steward",
+        agent_id:"steward:api",project:"steward",type:"task_posted",
+        payload:{task_id:"malformed-other",title:"Other",required_skills:[],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(unrelated) + "\n");
+      const unrelatedState = await eventually(send, `(async()=>{ await runtime.poll();
+        return jobAcks.latest().state; })()`,signal,"malformed acceptance ignores unrelated event");
+      assert.equal(unrelatedState,"ambiguous");
+      const exact = {...unrelated,ts:new Date(frozenNow + 4).toISOString(),
+        payload:{task_id:"malformed-job",title:"Malformed acceptance",required_skills:[],posted_by:"api"}};
+      fs.appendFileSync(events, JSON.stringify(exact) + "\n");
+      const afterEvidence = await eventually(send, `(async()=>{ await runtime.poll();
+        const form=document.querySelector('[data-post-job]'); const ack=jobAcks.latest();
+        return {state:ack.state,enabled:[...form.elements].every(control=>!control.disabled),
+          exact:!!document.querySelector('[data-task-id="malformed-job"]')}; })()`,
+        signal,"malformed acceptance exact event reconciliation");
+      assert.deepEqual(afterEvidence,{state:"acknowledged",enabled:true,exact:true});
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("job form prevents overlap and keeps definitive refusal visible and retryable", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'overlap-secret'};
+        const originalFetch = window.fetch.bind(window);
+        let resolveFirst; let calls = 0;
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs') {
+            calls++;
+            if (calls === 1) return new Promise(resolve => { resolveFirst = resolve; });
+            return {status:422,json:async()=>({})};
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const form = document.querySelector('[data-post-job]');
+        const title = form.elements.title;
+        title.value = 'Only once';
+        title.dispatchEvent(new Event('input',{bubbles:true}));
+        title.focus();
+        form.requestSubmit();
+        while (calls !== 1) await new Promise(resolve => setTimeout(resolve,5));
+        const during = {sameForm:document.querySelector('[data-post-job]') === form,
+          disabled:[...form.elements].every(control=>control.disabled),
+          busy:form.getAttribute('aria-busy'),draft:title.value,
+          status:document.querySelector('.job-ack')?.textContent};
+        form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+        await new Promise(resolve => setTimeout(resolve,10));
+        const callsAfterOverlap = calls;
+        resolveFirst({status:422,json:async()=>({})});
+        await new Promise(resolve => setTimeout(resolve,20));
+        const afterFailure = {state:jobAcks.latest().state,
+          enabled:[...form.elements].every(control=>!control.disabled),
+          busy:form.getAttribute('aria-busy'),draft:title.value,
+          failure:document.querySelector('.job-ack')?.textContent};
+        form.requestSubmit();
+        await new Promise(resolve => setTimeout(resolve,20));
+        return {during,callsAfterOverlap,afterFailure,callsAfterRetry:calls,
+          sameFormAfter:document.querySelector('[data-post-job]') === form};
+      })()`, signal, "job submission overlap and definitive retry");
+      assert.deepEqual(evidence, {during:{sameForm:true,disabled:true,busy:"true",draft:"Only once",
+        status:"Sending directly to Steward…"},callsAfterOverlap:1,
+        afterFailure:{state:"failed",enabled:true,busy:"false",draft:"Only once",
+          failure:"Steward refused the job (422)."},callsAfterRetry:2,sameFormAfter:true});
+    });
+
+    await t.test("ambiguous job outcome disables unsafe duplicate submission", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'ambiguous-secret'};
+        const originalFetch = window.fetch.bind(window); let calls = 0;
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs') {
+            calls++; return {status:503,json:async()=>({error:'upstream failed'})};
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const form = document.querySelector('[data-post-job]');
+        form.elements.title.value = 'Maybe posted';
+        form.elements.title.dispatchEvent(new Event('input',{bubbles:true}));
+        form.requestSubmit();
+        await new Promise(resolve => setTimeout(resolve,20));
+        const beforeDuplicate = {state:jobAcks.latest().state,
+          disabled:[...form.elements].every(control=>control.disabled),
+          alert:document.querySelector('.job-ack')?.textContent};
+        form.dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}));
+        await new Promise(resolve => setTimeout(resolve,10));
+        return {beforeDuplicate,calls,notice:document.querySelector('[data-job-feedback]').textContent
+          .includes('no duplicate request was sent')};
+      })()`, signal, "ambiguous post duplicate prevention");
+      assert.deepEqual(evidence, {beforeDuplicate:{state:"ambiguous",disabled:true,
+        alert:"Steward returned 503 after the job may have been recorded; the outcome is ambiguous."},
+        calls:1,notice:true});
+    });
+
+    await t.test("job capacity reports newer omitted terminal records without an age claim", async () => {
+      const activePosts = Array.from({length:24}, (_, index) => ({
+        v:0,ts:new Date(frozenNow - 60_000 + index).toISOString(),source:"steward",
+        agent_id:"steward:api",project:"steward",type:"task_posted",
+        payload:{task_id:`capacity-open-${index}`,title:`Open ${index}`,
+          required_skills:[],posted_by:"api"},
+      }));
+      const newerDone = {v:0,ts:new Date(frozenNow - 1_000).toISOString(),source:"steward",
+        agent_id:"codex:done",project:"life",type:"task_done",
+        payload:{task_id:"newer-orphan-done",title:"Newer orphan done",
+          claimant:"codex:done",artifacts:[]}};
+      const malformed = {...activePosts[0],ts:new Date(frozenNow - 500).toISOString(),
+        payload:{...activePosts[0].payload,task_id:"malformed-capacity",title:""}};
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention,
+        ...activePosts, newerDone, malformed].map(value => JSON.stringify(value)).join("\n") + "\n");
+      await resetPage();
+      await waitForTelemetry();
+      const singular = await eventually(send, `(() => {
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const list=document.querySelector('[data-job-list]');
+        return {cards:list.querySelectorAll('[data-task-id]').length,
+          activePreserved:[...list.querySelectorAll('[data-task-id]')]
+            .every(card=>card.dataset.taskId.startsWith('capacity-open-')),
+          newerDoneVisible:!!list.querySelector('[data-task-id="newer-orphan-done"]'),
+          empty:!!list.querySelector('.artifact-empty'),
+          statuses:[...list.querySelectorAll('[role="status"]')]
+            .map(node=>node.textContent.replace(/\\s+/g,' ').trim())};
+      })()`, signal, "singular age-neutral job capacity diagnostic");
+      assert.deepEqual(singular, {cards:24,activePreserved:true,newerDoneVisible:false,
+        empty:false,statuses:[
+          "Skipped 1 malformed task event; missing IDs or titles never become jobs.",
+          "1 task record was omitted by the bounded board.",
+        ]});
+
+      const newerFailed = {v:0,ts:new Date(frozenNow).toISOString(),source:"steward",
+        agent_id:"codex:failed",project:"life",type:"task_failed",
+        payload:{task_id:"newer-orphan-failed",title:"Newer orphan failed",
+          claimant:"codex:failed",reason:"session_failed"}};
+      fs.appendFileSync(events, JSON.stringify(newerFailed) + "\n");
+      const plural = await eventually(send, `(async () => {
+        await runtime.poll();
+        const list=document.querySelector('[data-job-list]');
+        return {cards:list.querySelectorAll('[data-task-id]').length,
+          newerFailedVisible:!!list.querySelector('[data-task-id="newer-orphan-failed"]'),
+          empty:!!list.querySelector('.artifact-empty'),
+          statuses:[...list.querySelectorAll('[role="status"]')]
+            .map(node=>node.textContent.replace(/\\s+/g,' ').trim())};
+      })()`, signal, "plural age-neutral job capacity diagnostic");
+      assert.deepEqual(plural, {cards:24,newerFailedVisible:false,empty:false,statuses:[
+        "Skipped 1 malformed task event; missing IDs or titles never become jobs.",
+        "2 task records were omitted by the bounded board.",
+      ]});
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("quiet job board expires ordinary failures but keeps lease-expired work open", async () => {
+      const open = {v:0,ts:new Date(frozenNow - 61_000).toISOString(),source:"steward",
+        agent_id:"steward:api",project:"steward",type:"task_posted",
+        payload:{task_id:"aging-job",title:"Aging job",required_skills:[],posted_by:"api"}};
+      const failedPost = {...open,ts:new Date(frozenNow - 16 * 60_000).toISOString(),
+        payload:{task_id:"expiring-job",title:"Expiring job",required_skills:[],posted_by:"api"}};
+      const failed = {...failedPost,ts:new Date(frozenNow - 14 * 60_000).toISOString(),
+        agent_id:"layout-resident",project:"burrow",type:"task_failed",
+        payload:{task_id:"expiring-job",title:"Expiring job",claimant:"layout-resident",
+          reason:"session_failed"}};
+      const reopenedPost = {...open,ts:new Date(frozenNow - 18 * 60_000).toISOString(),
+        payload:{task_id:"reopened-job",title:"Reopened job",required_skills:[],posted_by:"api"}};
+      const reopened = {...reopenedPost,ts:new Date(frozenNow - 17 * 60_000).toISOString(),
+        agent_id:"codex:worker",project:"life",type:"task_failed",
+        payload:{task_id:"reopened-job",title:"Reopened job",claimant:"codex:worker",
+          reason:"lease_expired"}};
+      const presentPost = {...open,ts:new Date(frozenNow - 12 * 60_000).toISOString(),
+        payload:{task_id:"present-retry",title:"Present retry",required_skills:[],posted_by:"api"}};
+      const presentReopened = {...presentPost,ts:new Date(frozenNow - 11 * 60_000).toISOString(),
+        agent_id:"layout-resident",project:"burrow",type:"task_failed",
+        payload:{task_id:"present-retry",title:"Present retry",claimant:"layout-resident",
+          reason:"lease_expired"}};
+      const orphan = {...open,ts:new Date(frozenNow - 30_000).toISOString(),
+        agent_id:"codex:orphan",project:"life",type:"task_claimed",
+        payload:{task_id:"orphan-job",title:"Orphan job",claimant:"codex:orphan"}};
+      const blankSkills = {...open,ts:new Date(frozenNow - 40_000).toISOString(),
+        payload:{task_id:"blank-skills",title:"Blank skills",
+          required_skills:["","  ","research"],posted_by:"api"}};
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention, open, failedPost, failed,
+        reopenedPost, reopened, presentPost, presentReopened, orphan, blankSkills]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(() => {
+        document.querySelector('[data-panel-target="job-board"]').click();
+        const form = document.querySelector('[data-post-job]');
+        const title = form.elements.title;
+        title.value = 'draft survives time';
+        title.dispatchEvent(new Event('input',{bubbles:true}));
+        title.focus();
+        const initialAge = document.querySelector('[data-task-id="aging-job"] .job-skills').textContent;
+        const terminalInitiallyVisible = !!document.querySelector('[data-task-id="expiring-job"]');
+        const presentRetry = document.querySelector('[data-task-id="present-retry"]');
+        const presentRetryText = presentRetry.textContent.replace(/\\s+/g,' ').trim();
+        const presentRetryLink = !!presentRetry.querySelector('[data-agent="layout-resident"]');
+        const reopenedBefore = document.querySelector('[data-task-id="reopened-job"]')
+          .textContent.replace(/\\s+/g,' ').trim();
+        const orphanSkills = document.querySelector('[data-task-id="orphan-job"] .job-skills')
+          .textContent.replace(/\\s+/g,' ').trim();
+        const blankSkillsElement = document.querySelector('[data-task-id="blank-skills"] .job-skills');
+        const blankSkillsText = blankSkillsElement.textContent.replace(/\\s+/g,' ').trim();
+        const blankSkillMarkers = [...blankSkillsElement.querySelectorAll('.job-skill-empty')]
+          .map(element => element.getAttribute('aria-label'));
+        const retryLinkBefore = presentRetry.querySelector('[data-agent="layout-resident"]');
+        retryLinkBefore.focus();
+        runtime.tick();
+        const retryLinkAfter = document.querySelector('[data-task-id="present-retry"]')
+          .querySelector('[data-agent="layout-resident"]');
+        const claimantFocusSurvivesTick = document.activeElement === retryLinkAfter &&
+          retryLinkAfter !== retryLinkBefore;
+        const expiringLink = document.querySelector('[data-task-id="expiring-job"]')
+          .querySelector('[data-agent="layout-resident"]');
+        expiringLink.focus();
+        window.__advanceBurrowClock(2 * 60 * 1000);
+        runtime.tick();
+        const currentForm = document.querySelector('[data-post-job]');
+        return {initialAge, laterAge:document.querySelector('[data-task-id="aging-job"] .job-skills').textContent,
+          terminalInitiallyVisible, terminalGone:!document.querySelector('[data-task-id="expiring-job"]'),
+          reopenedStillVisible:!!document.querySelector('[data-task-id="reopened-job"]'),reopenedBefore,
+          presentRetryText,presentRetryLink,
+          sameForm:currentForm === form, sameTitle:currentForm.elements.title === title,
+          claimantFocusSurvivesTick,
+          expiryFocusInsideDialog:document.activeElement === document.querySelector('#panel-title'),
+          draft:title.value,orphanSkills,
+          blankSkillsText,blankSkillMarkers};
+      })()`, signal, "wall-clock job age and expiry");
+      assert.deepEqual(evidence, {initialAge:"no required skills · posted 1m ago",
+        laterAge:"no required skills · posted 3m ago",terminalInitiallyVisible:true,
+        terminalGone:true,reopenedStillVisible:true,
+        reopenedBefore:"Reopened job open no required skills · posted 18m ago open reason: lease_expired retry after expired lease · former claimant codex:worker absent",
+        presentRetryText:"Present retry open no required skills · posted 12m ago open reason: lease_expired retry after expired lease · former claimant Sorrel",
+        presentRetryLink:true,
+        sameForm:true,sameTitle:true,claimantFocusSurvivesTick:true,
+        expiryFocusInsideDialog:true,draft:"draft survives time",
+        orphanSkills:"required skills unavailable · posted age unavailable · updated 30s ago",
+        blankSkillsText:"skills: (unnamed skill), (unnamed skill), research · posted 40s ago",
+        blankSkillMarkers:["blank required skill","blank required skill"]});
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("rejected Steward credentials can be changed and retried without reload", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'rejected-secret'};
+        const originalFetch = window.fetch.bind(window);
+        const authorizations = [];
+        window.fetch = async (url, options = {}) => {
+          if (String(url) === 'http://127.0.0.1:8801/jobs') {
+            authorizations.push(options.headers.Authorization);
+            if (authorizations.length === 1) return {status:401,json:async()=>({})};
+            return {status:202,json:async()=>({status:'accepted',task_id:'retry-job',request_id:'retry-request'})};
+          }
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-panel-target="job-board"]').click();
+        let form = document.querySelector('[data-post-job]');
+        form.elements.title.value = 'Retry safely';
+        form.elements.title.dispatchEvent(new Event('input',{bubbles:true}));
+        form.requestSubmit();
+        await new Promise(resolve => setTimeout(resolve,20));
+        const rejected = {configCleared:stewardConfig === null,
+          retryMessage:document.querySelector('#panel-body').textContent.includes('Connect again to retry without reloading'),
+          connectVisible:!!document.querySelector('[data-steward-change]'),
+          oldSecretAbsent:!document.documentElement.innerHTML.includes('rejected-secret')};
+        document.querySelector('[data-steward-change]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const token = document.querySelector('#steward-token');
+        token.value = 'correct-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        form = document.querySelector('[data-post-job]');
+        form.requestSubmit();
+        await new Promise(resolve => setTimeout(resolve,20));
+        const state = jobAcks.latest().state;
+        const clear = document.querySelector('[data-steward-clear]');
+        const clearAccessible = clear && clear.type === 'button' && clear.textContent.includes('clear credentials');
+        clear.click();
+        return {rejected,authorizations,state,clearAccessible,configClearedAfter:stewardConfig === null,
+          tokenFieldCleared:token.value === '',newSecretAbsent:!document.documentElement.innerHTML.includes('correct-secret')};
+      })()`, signal, "credential rejection correction");
+      assert.deepEqual(evidence, {rejected:{configCleared:true,retryMessage:true,
+        connectVisible:true,oldSecretAbsent:true},authorizations:["Bearer rejected-secret","Bearer correct-secret"],
+        state:"pending",clearAccessible:true,configClearedAfter:true,tokenFieldCleared:true,newSecretAbsent:true});
     });
 
     await t.test("Run Now refusal stays retryable without corrupting next-run truth", async () => {

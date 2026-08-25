@@ -59,6 +59,36 @@ def village(lines, now_ms=None):
 
 
 class CarryForwardTest(unittest.TestCase):
+    def test_task_tie_projection_is_constant_space_under_ten_thousand_events(self):
+        timestamp = "2026-08-25T10:01:00.000Z"
+        post = {"v": 0, "ts": "2026-08-25T10:00:00.000Z", "source": "steward",
+                "agent_id": "steward:api", "project": "life", "type": "task_posted",
+                "payload": {"task_id": "stress", "title": "Stress",
+                            "required_skills": ["research"], "posted_by": "api"}}
+        transitions = []
+        for index in range(10_000):
+            claimant = "codex:holder-%05d" % index
+            transitions.append({"v": 0, "ts": timestamp, "source": "steward",
+                                "agent_id": claimant, "project": "life",
+                                "type": "task_claimed", "payload": {
+                                    "task_id": "stress", "title": "Stress",
+                                    "claimant": claimant}})
+
+        ordered = [post, *transitions, transitions[0], transitions[-1]]
+        keep = serve._task_keep_indexes(list(enumerate(ordered)))
+        retained = [ordered[index] for index in sorted(keep)]
+        self.assertLessEqual(len(retained), 2,
+                             "rotation retains only canonical post and transition")
+        self.assertEqual(retained[-1]["payload"]["claimant"], "codex:holder-09999")
+
+        reversed_input = [post, *reversed(transitions), transitions[-1], transitions[0]]
+        reverse_keep = serve._task_keep_indexes(list(enumerate(reversed_input)))
+        reverse_retained = [reversed_input[index] for index in sorted(reverse_keep)]
+        self.assertEqual(
+            [serve._task_event_identity(item) for item in retained],
+            [serve._task_event_identity(item) for item in reverse_retained],
+            "equal-time selection is independent of grouping, order, and exact replay")
+
     def test_matches_viewers_global_4000_line_window(self):
         sparse = json.dumps(event("sparse", "idle", 1))
         lines = [sparse] + [json.dumps(event("gone", "session_ended", 1, n=i))
@@ -332,6 +362,11 @@ class ServerRotationTest(unittest.TestCase):
         serve._rotate_floor = 0
         self.tmp.cleanup()
 
+    def write(self, events):
+        with open(self.events, "a", encoding="utf-8") as stream:
+            for item in events:
+                stream.write(json.dumps(item, ensure_ascii=False) + "\n")
+
     def post(self, ev):
         conn = http.client.HTTPConnection(*self.server.server_address)
         conn.request("POST", "/events", json.dumps(ev),
@@ -342,11 +377,52 @@ class ServerRotationTest(unittest.TestCase):
         return response.status
 
     def get_events(self):
-        conn = http.client.HTTPConnection(*self.server.server_address)
-        conn.request("GET", "/events")
-        body = conn.getresponse().read().decode("utf-8")
-        conn.close()
+        _, _, body = self.get_events_response()
         return [line for line in body.splitlines() if line]
+
+    def get_events_response(self, since=None):
+        conn = http.client.HTTPConnection(*self.server.server_address)
+        path = "/events" + ("?since=" + since if since else "")
+        conn.request("GET", path)
+        response = conn.getresponse()
+        status = response.status
+        headers = dict(response.getheaders())
+        body = response.read().decode("utf-8")
+        conn.close()
+        return status, headers, body
+
+    def project_jobs(self, lines):
+        script = """
+const fs = require('node:fs');
+const jobs = require('./viewer/job-board.js');
+const { validateEvent } = require('./viewer/projection.js');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+const state = jobs.createState();
+jobs.fold(state, input, { validateEvent });
+process.stdout.write(JSON.stringify(jobs.rows(state, Date.now())));
+"""
+        projected = subprocess.run(
+            ["node", "-e", script], input=json.dumps(lines), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        return json.loads(projected.stdout)
+
+    def task_event(self, task_id, etype, minutes_ago, claimant="codex:worker",
+                   reason="session_failed"):
+        payload = {"task_id": task_id, "title": "Task " + task_id}
+        agent_id = "steward:api"
+        if etype == "task_posted":
+            payload.update(required_skills=["research"], posted_by="api")
+        else:
+            agent_id = claimant
+            payload["claimant"] = claimant
+            if etype == "task_done":
+                payload["artifacts"] = ["notes/" + task_id + ".md"]
+            if etype == "task_failed":
+                payload["reason"] = reason
+        return {"v": 0, "ts": ts(minutes_ago), "source": "steward",
+                "agent_id": agent_id, "project": "life", "type": etype,
+                "payload": payload}
 
     def seed_departed_chatter(self, n=60):
         """History that rotation can actually reclaim: an agent that went home."""
@@ -355,6 +431,118 @@ class ServerRotationTest(unittest.TestCase):
                 f.write(json.dumps(event("departed", "tool_called", 300,
                                          tool="Read", detail="o" * 200, n=i)) + "\n")
             f.write(json.dumps(event("departed", "session_ended", 299)) + "\n")
+
+    def test_rotation_reset_preserves_cross_agent_task_lifecycles(self):
+        """The real reset response must reconstruct every Steward task state.
+
+        Posts belong to steward:api while claims and terminal evidence belong
+        to claimants whose sessions may then end. Orphans remain explicit
+        degraded evidence rather than acquiring invented post metadata.
+        """
+        serve.MAX_LOG_BYTES = 0
+        lifecycle = [
+            self.task_event("done", "task_posted", 9),
+            self.task_event("done", "task_claimed", 8, "codex:done"),
+            self.task_event("done", "task_done", 7, "codex:done"),
+            event("codex:done", "session_ended", 6),
+            self.task_event("failed", "task_posted", 9),
+            self.task_event("failed", "task_claimed", 8, "codex:failed"),
+            self.task_event("failed", "task_failed", 7, "codex:failed"),
+            event("codex:failed", "session_ended", 6),
+            self.task_event("reopened", "task_posted", 9),
+            self.task_event("reopened", "task_claimed", 8, "codex:reopened"),
+            self.task_event("reopened", "task_failed", 7, "codex:reopened",
+                            "lease_expired"),
+            event("codex:reopened", "session_ended", 6),
+            self.task_event("orphan-claim", "task_claimed", 5, "codex:orphan"),
+            self.task_event("orphan-done", "task_done", 4, "codex:orphan"),
+            event("codex:orphan", "session_ended", 3),
+            # Later facts arrive first; duplicates and older replay follow.
+            self.task_event("unordered", "task_posted", 9),
+            self.task_event("unordered", "task_done", 2, "codex:unordered"),
+            self.task_event("unordered", "task_claimed", 8, "codex:unordered"),
+            self.task_event("unordered", "task_posted", 10),
+            self.task_event("unordered", "task_done", 2, "codex:unordered"),
+            event("codex:unordered", "session_ended", 1),
+        ]
+        same_ts = ts(8)
+        same_post = self.task_event("same-ms-reclaim", "task_posted", 9)
+        same_expiry = self.task_event("same-ms-reclaim", "task_failed", 8,
+                                      "codex:old-holder", "lease_expired")
+        same_claim = self.task_event("same-ms-reclaim", "task_claimed", 8,
+                                     "codex:new-holder")
+        same_expiry["ts"] = same_ts
+        same_claim["ts"] = same_ts
+        lifecycle.extend([same_post, same_expiry, same_claim, same_expiry.copy()])
+        # More terminal identities than the board retains prove that central
+        # posts cannot leak back through per-agent history and resurrect work
+        # deliberately omitted by task-ID capacity.
+        for index in range(26):
+            task_id = "capacity-%02d" % index
+            claimant = "codex:capacity-%02d" % index
+            lifecycle.extend([
+                self.task_event(task_id, "task_posted", 14),
+                self.task_event(task_id, "task_done", 13, claimant),
+                event(claimant, "session_ended", 12),
+            ])
+        self.write(lifecycle)
+        status, headers, initial_body = self.get_events_response()
+        self.assertEqual(status, 200)
+        cursor = headers["X-Burrow-Cursor"]
+        before = self.project_jobs(initial_body.splitlines())
+
+        self.seed_departed_chatter(80)
+        serve.MAX_LOG_BYTES = 512
+        status, headers, reset_body = self.get_events_response(cursor)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("X-Burrow-Reset"), "1")
+        after = self.project_jobs(reset_body.splitlines())
+        self.assertEqual(after, before)
+
+        rows = {row["id"]: row for row in after}
+        self.assertEqual(rows["done"]["state"], "done")
+        self.assertEqual(rows["failed"]["state"], "failed")
+        self.assertEqual(rows["reopened"]["state"], "open")
+        self.assertEqual(rows["unordered"]["state"], "done")
+        self.assertEqual(rows["same-ms-reclaim"]["state"], "claimed")
+        self.assertEqual(rows["same-ms-reclaim"]["claimant"], "codex:new-holder")
+        self.assertIsNone(rows["orphan-claim"]["required_skills"])
+        self.assertIsNone(rows["orphan-done"]["required_skills"])
+
+    def test_rotation_preserves_event_granular_capacity_without_restoring_evicted_post(self):
+        """A claim may reintroduce an evicted ID, but not its missing post fields."""
+        serve.MAX_LOG_BYTES = 0
+        start = datetime.datetime(2026, 8, 25, 10, 0, tzinfo=datetime.timezone.utc)
+        posts = []
+        for index in range(serve.KEEP_TASKS + 1):
+            item = self.task_event("task-%02d" % index, "task_posted", 1)
+            item["ts"] = (start + datetime.timedelta(milliseconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            item["payload"]["required_skills"] = ["skill-%02d" % index]
+            posts.append(item)
+        claim = self.task_event("task-00", "task_claimed", 0, "codex:reintroduced")
+        claim["ts"] = (start + datetime.timedelta(seconds=1)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        claim["payload"]["title"] = "Claimed after eviction"
+        self.write([*posts, claim])
+
+        status, headers, initial_body = self.get_events_response()
+        self.assertEqual(status, 200)
+        before = self.project_jobs(initial_body.splitlines())
+        before_rows = {row["id"]: row for row in before}
+        self.assertIsNone(before_rows["task-00"]["required_skills"])
+        self.assertEqual(before_rows["task-00"]["title"], "Claimed after eviction")
+        self.assertNotIn("task-01", before_rows)
+
+        self.seed_departed_chatter(80)
+        serve.MAX_LOG_BYTES = 512
+        status, reset_headers, reset_body = self.get_events_response(
+            headers["X-Burrow-Cursor"])
+        self.assertEqual(status, 200)
+        self.assertEqual(reset_headers.get("X-Burrow-Reset"), "1")
+        after = self.project_jobs(reset_body.splitlines())
+        self.assertEqual(after, before,
+                         "rotation/reset preserves canonical rows and missing-post truth")
 
     def test_concurrent_posts_survive_rotation(self):
         self.seed_departed_chatter()

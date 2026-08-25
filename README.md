@@ -25,6 +25,26 @@ recent `artifact_produced` events. It shows each artifact path, its maker and
 project, and how recently it was produced; an empty board says plainly that the
 recent event log contains no artifacts.
 
+Beside it, the job board shows Steward's bounded current queue from `task_posted`,
+`task_claimed`, `task_done`, and `task_failed` events. Terminal work expires after a
+short visible window. A `task_failed` event whose reason is `lease_expired` instead
+reopens the job, matching Steward's queue, and identifies the expired attempt without
+leaving a ghost claim. Its
+post form writes directly to Steward with changeable browser-memory credentials; a job
+appears only after its exact, contract-valid event reaches Burrow.
+Blank skill names in valid Steward evidence are shown as explicit unnamed-skill markers,
+distinct from an empty requirement list and from unavailable post evidence.
+The form prevents overlapping or ambiguity-driven duplicate submissions. Only Steward's
+pre-mutation `401` and `422` refusals are retryable; server/proxy failures remain ambiguous
+unless their task identity is later proved by the exact event. Lease-expiry retry context
+links a present former claimant and marks an absent one explicitly.
+Rotation retains task lifecycle by task ID across the central poster and claimant
+sessions; an orphan transition says required skills are unavailable instead of claiming
+there were none. Post acknowledgement times out 15 seconds from request start even when
+Steward's HTTP response is still in flight. A late valid response retains its safe identities
+but remains visibly timed out until an exact post-boundary event proves the job; a malformed
+acceptance with a valid task identity follows the same evidence-only reconciliation rule.
+
 The **fleet ledger** beside the census is the compact operational view. It keeps
 the newest 200 validated events from the shared parsed stream and filters them by
 search text, project, runner/source, event-derived state, and villager. Its
