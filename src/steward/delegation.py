@@ -38,9 +38,10 @@ until the budget is gone.
 reason and write nothing. A block harvested out of a finished session has nobody left to
 answer, so the refusal knocks: it becomes an approval request under
 :data:`REJECTED_ACTION` (or :data:`UNREADABLE_ACTION` for a block steward could not read
-at all), carrying the reason and the raw block, and a person hears about it. A resident
-that tried to hand work over and failed must never look like a resident that had nothing
-to hand over.
+at all), carrying the reason and the raw block, and a person hears about it — every time,
+because both of those are catch-all actions and the refusal knock is exempt from the
+repeat-deny guard. A resident that tried to hand work over and failed must never look like
+a resident that had nothing to hand over.
 
 **An accepted handoff is a task addressed to one resident.** It is written into the same
 ``jobs`` table the board uses, with an ``assignee``, and from there the board machinery
@@ -674,7 +675,16 @@ class Delegator:
         error: DelegationError,
         now: datetime | None,
     ) -> Delivery:
-        """Raise a refused handoff as an approval request, so a person hears about it."""
+        """Raise a refused handoff as an approval request, so a person hears about it.
+
+        The knock is steward's own — steward refused, steward wrote the message — and it
+        is exempt from the repeat-deny guard (``repeat_guard=False``). Both actions here
+        are catch-alls: *every* refusal of this resident's, whatever recipient or route or
+        title it was about, is filed under :data:`REJECTED_ACTION` or
+        :data:`UNREADABLE_ACTION`. A deny on one of them — and a deny is the natural way to
+        dismiss a knock that is only telling you something — would otherwise answer for the
+        next refusal too, and that one would vanish with nobody left to tell.
+        """
         unreadable = error.reason == UNREADABLE_BLOCK
         name = sender.manifest.soul.name
         if unreadable:
@@ -699,5 +709,6 @@ class Delegator:
             request=approvals.NeedsHuman(raw=handoff.raw, action=action, detail=detail),
             now=now or datetime.now(UTC),
             message=message,
+            repeat_guard=False,
         )
         return Delivery(handoff=handoff, reason=error.reason, message=str(error), knock=record)

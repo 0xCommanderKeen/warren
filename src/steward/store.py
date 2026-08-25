@@ -45,6 +45,7 @@ from steward.scheduler import default_state_path
 __all__ = [
     "APPROVAL_DECISIONS",
     "DECIDED_BY_EXPIRY",
+    "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
     "RUN_KINDS",
@@ -66,6 +67,12 @@ APPROVAL_DECISIONS = ("approve", "deny", "edit")
 #: Who a request is recorded as decided by when nobody answered in time. Deny-by-default
 #: is a decision steward makes on its own, and the ledger says so out loud.
 DECIDED_BY_EXPIRY = "expiry"
+
+#: Who a request is recorded as decided by when steward answered it with a deny a human
+#: had already given for the same action (:func:`steward.approvals.raise_request`). Also
+#: a decision steward makes on its own, and also said out loud rather than filed as if a
+#: person had clicked deny a second time.
+DECIDED_BY_REPEAT = "repeat"
 
 STATUS_OPEN = "open"
 STATUS_CLAIMED = "claimed"
@@ -228,6 +235,15 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "origin": "TEXT NOT NULL DEFAULT ''",
     },
 }
+
+#: Indexes over columns that arrived after the first schema, and so can only be created
+#: once :meth:`Store._add_missing_columns` has added them. ``approvals_denials`` is what
+#: keeps the repeat-deny guard (:func:`steward.approvals.raise_request`) a lookup rather
+#: than a table scan on every knock: the table has grown one row per ask since phase 3.
+_LATE_INDEXES = """
+CREATE INDEX IF NOT EXISTS approvals_denials
+    ON approvals (resident, action, decided_at);
+"""
 
 
 def default_db_path() -> Path:
@@ -671,6 +687,7 @@ class Store:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
             self._add_missing_columns()
+            self._conn.executescript(_LATE_INDEXES)
 
     def _add_missing_columns(self) -> None:
         """Bring an older database up to the current shape without losing a row.
@@ -1077,6 +1094,7 @@ class Store:
         options: Sequence[str] = APPROVAL_DECISIONS,
         expires_at: str | None = None,
         request_id: str | None = None,
+        denied_by: str | None = None,
     ) -> ApprovalRecord:
         """Record a gated action that is waiting on a human.
 
@@ -1089,7 +1107,16 @@ class Store:
         ``resident`` is the manifest id, kept alongside the burrow ``agent_id`` because
         the decision has to find its way back to a directory under ``residents/`` on the
         resident's next wake-up, and an agent id is not that.
+
+        ``denied_by``, when given, files the request already resolved as a deny rather
+        than pending — a decision steward made itself, with nobody waiting on it. It is
+        how the repeat-deny guard (:func:`steward.approvals.raise_request`) records an ask
+        it answered instead of knocking about: the row still exists, so the ledger shows
+        the resident asked and what it was told, and the resident hears the answer in the
+        next preamble like any other decision.
         """
+        moment = utc_now_iso()
+        denied = denied_by is not None
         record = ApprovalRecord(
             request_id=request_id or new_id(),
             agent_id=agent_id,
@@ -1098,16 +1125,20 @@ class Store:
             message=message,
             detail=dict(detail or {}),
             options=tuple(options),
-            status=STATUS_PENDING,
-            created_at=utc_now_iso(),
+            status=STATUS_RESOLVED if denied else STATUS_PENDING,
+            created_at=moment,
             resident=resident,
             expires_at=expires_at,
+            decision="deny" if denied else None,
+            decided_by=denied_by,
+            decided_at=moment if denied else None,
         )
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO approvals (request_id, agent_id, project, action, message, "
-                "detail, options, status, created_at, expires_at, resident) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "detail, options, status, created_at, expires_at, resident, decision, "
+                "decided_by, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.request_id,
                     record.agent_id,
@@ -1120,9 +1151,34 @@ class Store:
                     record.created_at,
                     record.expires_at,
                     record.resident,
+                    record.decision,
+                    record.decided_by,
+                    record.decided_at,
                 ),
             )
         return record
+
+    def recent_denials(self, resident: str, action: str, since: str) -> int:
+        """Count the times this resident was told no about this action since ``since``.
+
+        A deny is ``status='resolved'`` with ``decision='deny'``, clocked by
+        ``decided_at``, so both a human's deny and expiry's deny-by-default count: from
+        the resident's side, "nobody answered in time" and "a person said no" are the same
+        answer, and both mean the action did not happen.
+
+        Steward's own repeat auto-denials (``decided_by='repeat'``) are **not** counted, on
+        purpose. If they were, every swallowed ask would push the window out again and one
+        deny would silence an action forever — a permanent ban nobody chose. The window is
+        measured from a real decision.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS denials FROM approvals WHERE resident = ? AND action = ? "
+                "AND status = ? AND decision = ? AND decided_at IS NOT NULL AND decided_at >= ? "
+                "AND (decided_by IS NULL OR decided_by != ?)",
+                (resident, action, STATUS_RESOLVED, "deny", since, DECIDED_BY_REPEAT),
+            ).fetchone()
+        return int(row["denials"])
 
     def approval(self, request_id: str) -> ApprovalRecord | None:
         """Return one approval request, decided or not, or ``None`` if unknown."""

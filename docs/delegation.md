@@ -134,7 +134,9 @@ The grammar, exactly:
 is nobody left to answer: the refusal becomes an approval request under
 `rejected_delegation` (or `unreadable_delegation` when steward could not read the block at
 all), carrying the reason and the raw block. A resident that tried to hand work over and
-failed must never look like a resident that had nothing to hand over.
+failed must never look like a resident that had nothing to hand over. Both of those are
+catch-all actions covering every refusal alike, so the knock is exempt from the
+[repeat-deny guard](approvals.md): a deny on one refusal never answers for the next.
 
 ### 2. `steward delegate`
 

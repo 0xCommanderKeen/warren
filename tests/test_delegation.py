@@ -583,6 +583,36 @@ def test_a_block_steward_cannot_read_knocks_too(
     assert [event.type for event in sink.events] == ["needs_human"]
 
 
+def test_a_second_refusal_knocks_even_after_the_first_was_denied(
+    make_delegator: MakeDelegator, store: Store, sink: ev.NullEmitter
+) -> None:
+    """Steward's refusal knocks are not the repeat guard's business (steward #33).
+
+    Every refusal this sender ever gets is filed under the same catch-all action, so a
+    deny — the natural way to dismiss a knock that is only telling you something — must
+    not answer for the next refusal, which is about a different handoff entirely.
+    """
+    delegator = make_delegator(resident_manifest(SENDER, name="Sender"), receiver_manifest())
+    sender = sender_of(delegator)
+    (first,) = delegator.harvest(
+        sender,
+        region(f'<delegate to="{RECEIVER}" route="inbox">{{"title": "Read this"}}</delegate>'),
+        now=NOW,
+    )
+    assert first.knock is not None
+    store.decide(first.knock.request_id, "deny", decided_by="api", now=ev.utc_now_iso(NOW))
+    sink.events.clear()
+
+    (second,) = delegator.harvest(
+        sender,
+        region('<delegate to="nobody-at-all" route="inbox">{"title": "Other work"}</delegate>'),
+        now=NOW + timedelta(hours=1),
+    )
+    assert second.knock is not None
+    assert second.knock.pending, "a different refused handoff is a different thing to say"
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
 def test_a_harvested_block_is_delivered(make_delegator: MakeDelegator, store: Store) -> None:
     delegator = make_delegator()
     output = region(f'<delegate to="{RECEIVER}" route="inbox">{{"title": "Read this"}}</delegate>')

@@ -513,6 +513,71 @@ def test_the_audit_view_holds_the_request_and_its_decision(store: Store) -> None
     assert [r.request_id for r in store.approvals("resolved")] == [record.request_id]
 
 
+def _ask(store: Store, action: str = "send_email", resident: str = "life-agent") -> ApprovalRecord:
+    return store.create_approval_request(
+        agent_id="a:b", project="p", action=action, message="…", resident=resident
+    )
+
+
+def test_recent_denials_counts_every_way_a_resident_was_told_no(store: Store) -> None:
+    """A human's deny and expiry's deny-by-default are the same answer to the resident."""
+    store.decide(_ask(store).request_id, "deny", decided_by="api", now=LATER)
+    store.create_approval_request(
+        agent_id="a:b",
+        project="p",
+        action="send_email",
+        message="…",
+        resident="life-agent",
+        expires_at=EARLY,
+    )
+    store.expire_approvals(LATER)
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 2
+
+
+def test_recent_denials_ignores_everything_that_is_not_this_residents_no(store: Store) -> None:
+    store.decide(_ask(store).request_id, "approve", decided_by="api", now=LATER)
+    store.decide(_ask(store, action="spend").request_id, "deny", decided_by="api", now=LATER)
+    store.decide(_ask(store, resident="burrow-builder").request_id, "deny", now=LATER)
+    _ask(store)  # Still pending: nobody has answered it either way.
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+
+
+def test_recent_denials_starts_counting_at_since(store: Store) -> None:
+    store.decide(_ask(store).request_id, "deny", decided_by="api", now=EARLY)
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 1
+    assert store.recent_denials("life-agent", "send_email", LATER) == 0
+
+
+def test_an_auto_denied_request_is_filed_resolved_and_not_counted_as_a_no(store: Store) -> None:
+    """Steward's own repeat deny is on the record, but it must not renew its own window."""
+    record = store.create_approval_request(
+        agent_id="a:b",
+        project="p",
+        action="send_email",
+        message="…",
+        resident="life-agent",
+        denied_by="repeat",
+    )
+    assert not record.pending
+    assert record.decision == "deny"
+    assert record.decided_at == record.created_at
+    assert store.pending_approvals() == []
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+    # It is a decision like any other, so the resident is told about it on its next run.
+    assert [r.request_id for r in store.undelivered_decisions("life-agent")] == [record.request_id]
+
+
+def test_the_denials_lookup_has_an_index_to_read(store: Store) -> None:
+    """The approvals table grows one row per ask; the guard runs on every knock."""
+    indexes = {
+        row["name"]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'approvals'"
+        ).fetchall()
+    }
+    assert "approvals_denials" in indexes
+
+
 def test_a_decision_and_its_delivery_survive_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "steward.db"
     with Store(path) as first:
