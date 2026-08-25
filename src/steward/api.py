@@ -503,6 +503,7 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     resolved = effective_skills(manifest, library) if library is not None else ()
     return {
         "id": manifest.id,
+        "uid": str(manifest.uid),
         "agent_id": manifest.agent_id,
         "project": manifest.project,
         "summary": manifest.summary,

@@ -1,4 +1,5 @@
 version: 0
+uid: 6770e0e3-a015-4b3d-b193-966e924b19b1
 id: burrow-builder
 project: burrow
 summary: Builds burrow itself — the village you are looking at.
