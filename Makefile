@@ -25,7 +25,12 @@ CLAUDE_VERSION ?= 2.1.243
 #: recorded upstream checksum, and CI runs that test; it does not run docker.
 BURROW ?= ../burrow
 
-.PHONY: dev lint format test check validate schema build clean image image-ship vendor-emitter
+#: The committed JSON Schema artifact, at the path the schema's own id promises. Burrow
+#: validates manifests against this file rather than importing this package, so a manifest
+#: change that would break its reader has to show up as a diff here.
+SCHEMA ?= schema/resident-manifest-v0.json
+
+.PHONY: dev lint format test check validate schema schema-write build clean image image-ship vendor-emitter
 
 dev:
 	$(UV) sync --all-groups
@@ -50,6 +55,12 @@ validate:
 
 schema:
 	$(UV) run steward schema
+
+# Rewrite the committed schema artifact. tests/test_schema_contract.py fails when it
+# drifts from what the models generate, so this is the command that answers that failure —
+# and the diff it produces is the review burrow's reader needs.
+schema-write:
+	$(UV) run steward schema --output $(SCHEMA)
 
 build:
 	$(UV) build

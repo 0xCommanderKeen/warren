@@ -190,8 +190,13 @@ Steward is the sole arbiter, and a refusal writes nothing and emits nothing:
 
 `GET /residents/{id}/inbox` lists what is waiting for a resident — open by default,
 `?status=open|claimed|done|failed|all` to narrow, anything else a `422`. Each item carries
-`delegated_by`, `route`, `depth`, `origin`, and `parent_task_id`, and `routes` names the
-doors that resident declares.
+`delegated_by`, `route`, `depth`, `origin`, and `parent_task_id`.
+
+`routes` names the doors that resident declares, **with their status** — `{"id": "handoff",
+"status": "disabled", "accepts": false}` — and `pending` is the open count whatever
+`?status=` asked for. Both because a route somebody shut stops pickup while the letters
+already delivered keep waiting: a caller shown only the accepting routes would see no door
+at all and could not say why nothing is moving.
 
 `GET /tasks/{task_id}/lineage` is the audit query: the whole chain, root first, with the
 origin it attributes to. `404` for a task steward has never seen.

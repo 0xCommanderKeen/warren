@@ -888,6 +888,9 @@ class Watchdog:
             ),
             message=summary,
             now=now,
+            # ``give_up_on`` above already makes this one knock per crash loop. A resident
+            # that fell over again a day after a denied restart is new news, not a repeat.
+            repeat_guard=False,
         )
 
     # -- burying runs that vanished ----------------------------------------------------

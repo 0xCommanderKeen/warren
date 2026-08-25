@@ -49,6 +49,7 @@ from steward.scheduler import default_state_path
 __all__ = [
     "APPROVAL_DECISIONS",
     "DECIDED_BY_EXPIRY",
+    "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
     "RUN_KINDS",
@@ -71,6 +72,12 @@ APPROVAL_DECISIONS = ("approve", "deny", "edit")
 #: Who a request is recorded as decided by when nobody answered in time. Deny-by-default
 #: is a decision steward makes on its own, and the ledger says so out loud.
 DECIDED_BY_EXPIRY = "expiry"
+
+#: Who a request is recorded as decided by when steward answered it with a deny a human
+#: had already given for the same action (:func:`steward.approvals.raise_request`). Also
+#: a decision steward makes on its own, and also said out loud rather than filed as if a
+#: person had clicked deny a second time.
+DECIDED_BY_REPEAT = "repeat"
 
 STATUS_OPEN = "open"
 STATUS_CLAIMED = "claimed"
@@ -141,6 +148,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     kind          TEXT NOT NULL,
     run_id        TEXT NOT NULL,
     ref           TEXT NOT NULL DEFAULT '',
+    origin        TEXT NOT NULL DEFAULT '',
     outcome       TEXT NOT NULL DEFAULT '',
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -238,7 +246,23 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
     },
+    "run_ledger": {
+        # Denormalized from the task the run came off (steward #45). Rolling spend up by
+        # joining ``ref`` to ``jobs.task_id`` guessed: a routine whose ref happens to
+        # equal some task's id would have inherited that task's bill. The row says what
+        # it descends from, so the ledger is self-describing and a join cannot misread it.
+        "origin": "TEXT NOT NULL DEFAULT ''",
+    },
 }
+
+#: Indexes over columns that arrived after the first schema, and so can only be created
+#: once :meth:`Store._add_missing_columns` has added them. ``approvals_denials`` is what
+#: keeps the repeat-deny guard (:func:`steward.approvals.raise_request`) a lookup rather
+#: than a table scan on every knock: the table has grown one row per ask since phase 3.
+_LATE_INDEXES = """
+CREATE INDEX IF NOT EXISTS approvals_denials
+    ON approvals (resident, action, decided_at);
+"""
 
 
 def default_db_path() -> Path:
@@ -456,6 +480,10 @@ class LedgerEntry:
     run_id: str
     recorded_at: str
     ref: str = ""
+    #: What this run descends from, in delegation's vocabulary (``task:``/``resident:``/
+    #: ``human:``). Written at record time rather than inferred later — see
+    #: :meth:`Store.spend_by_origin`. Empty only on rows written before the column existed.
+    origin: str = ""
     outcome: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
@@ -479,6 +507,7 @@ class LedgerEntry:
             run_id=row["run_id"],
             recorded_at=row["recorded_at"],
             ref=row["ref"],
+            origin=row["origin"],
             outcome=row["outcome"],
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
@@ -496,6 +525,7 @@ class LedgerEntry:
             "kind": self.kind,
             "run_id": self.run_id,
             "ref": self.ref,
+            "origin": self.origin,
             "outcome": self.outcome,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -737,6 +767,7 @@ class Store:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
             self._add_missing_columns()
+            self._conn.executescript(_LATE_INDEXES)
 
     def _add_missing_columns(self) -> None:
         """Bring an older database up to the current shape without losing a row.
@@ -897,6 +928,22 @@ class Store:
         with self._lock:
             rows = self._conn.execute(f"{query} ORDER BY created_at, rowid", params).fetchall()
         return [JobRecord.from_row(row) for row in rows]
+
+    def inbox_count(self, assignee: str, status: str | None = STATUS_OPEN) -> int:
+        """Return how many items sit in one resident's inbox, without reading them.
+
+        ``doctor`` and the console want the size of the pile, not the letters — a count is
+        the whole answer there, and reading every row to call ``len`` on it is a page of
+        work to print one number.
+        """
+        query = "SELECT COUNT(*) FROM jobs WHERE assignee = ?"
+        params: tuple[str, ...] = (assignee,)
+        if status is not None:
+            query += " AND status = ?"
+            params = (assignee, status)
+        with self._lock:
+            row = self._conn.execute(query, params).fetchone()
+        return int(row[0])
 
     def lineage(self, task_id: str) -> list[JobRecord]:
         """Return the chain this task belongs to, root first, ending at the task itself.
@@ -1127,6 +1174,7 @@ class Store:
         options: Sequence[str] = APPROVAL_DECISIONS,
         expires_at: str | None = None,
         request_id: str | None = None,
+        denied_by: str | None = None,
     ) -> ApprovalRecord:
         """Record a gated action that is waiting on a human.
 
@@ -1139,7 +1187,16 @@ class Store:
         ``resident`` is the manifest id, kept alongside the burrow ``agent_id`` because
         the decision has to find its way back to a directory under ``residents/`` on the
         resident's next wake-up, and an agent id is not that.
+
+        ``denied_by``, when given, files the request already resolved as a deny rather
+        than pending — a decision steward made itself, with nobody waiting on it. It is
+        how the repeat-deny guard (:func:`steward.approvals.raise_request`) records an ask
+        it answered instead of knocking about: the row still exists, so the ledger shows
+        the resident asked and what it was told, and the resident hears the answer in the
+        next preamble like any other decision.
         """
+        moment = utc_now_iso()
+        denied = denied_by is not None
         record = ApprovalRecord(
             request_id=request_id or new_id(),
             agent_id=agent_id,
@@ -1148,16 +1205,20 @@ class Store:
             message=message,
             detail=dict(detail or {}),
             options=tuple(options),
-            status=STATUS_PENDING,
-            created_at=utc_now_iso(),
+            status=STATUS_RESOLVED if denied else STATUS_PENDING,
+            created_at=moment,
             resident=resident,
             expires_at=expires_at,
+            decision="deny" if denied else None,
+            decided_by=denied_by,
+            decided_at=moment if denied else None,
         )
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO approvals (request_id, agent_id, project, action, message, "
-                "detail, options, status, created_at, expires_at, resident) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "detail, options, status, created_at, expires_at, resident, decision, "
+                "decided_by, decided_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.request_id,
                     record.agent_id,
@@ -1170,9 +1231,34 @@ class Store:
                     record.created_at,
                     record.expires_at,
                     record.resident,
+                    record.decision,
+                    record.decided_by,
+                    record.decided_at,
                 ),
             )
         return record
+
+    def recent_denials(self, resident: str, action: str, since: str) -> int:
+        """Count the times this resident was told no about this action since ``since``.
+
+        A deny is ``status='resolved'`` with ``decision='deny'``, clocked by
+        ``decided_at``, so both a human's deny and expiry's deny-by-default count: from
+        the resident's side, "nobody answered in time" and "a person said no" are the same
+        answer, and both mean the action did not happen.
+
+        Steward's own repeat auto-denials (``decided_by='repeat'``) are **not** counted, on
+        purpose. If they were, every swallowed ask would push the window out again and one
+        deny would silence an action forever — a permanent ban nobody chose. The window is
+        measured from a real decision.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS denials FROM approvals WHERE resident = ? AND action = ? "
+                "AND status = ? AND decision = ? AND decided_at IS NOT NULL AND decided_at >= ? "
+                "AND (decided_by IS NULL OR decided_by != ?)",
+                (resident, action, STATUS_RESOLVED, "deny", since, DECIDED_BY_REPEAT),
+            ).fetchone()
+        return int(row["denials"])
 
     def approval(self, request_id: str) -> ApprovalRecord | None:
         """Return one approval request, decided or not, or ``None`` if unknown."""
@@ -1363,6 +1449,7 @@ class Store:
         kind: str,
         run_id: str,
         ref: str = "",
+        origin: str = "",
         outcome: str = "",
         input_tokens: int = 0,
         output_tokens: int = 0,
@@ -1377,6 +1464,10 @@ class Store:
         timeout: a session that burned four minutes and produced nothing still burned
         four minutes, and a budget that only counted successes would be a budget that
         rewards crashing.
+
+        ``origin`` is what the run descends from, recorded here rather than reconstructed
+        later: a caller that knows the chain says so, and the row stops depending on a
+        join that can only guess.
         """
         entry = LedgerEntry(
             entry_id=new_id(),
@@ -1385,6 +1476,7 @@ class Store:
             kind=kind,
             run_id=run_id,
             ref=ref,
+            origin=origin,
             outcome=outcome,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1396,8 +1488,8 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
-                "outcome, input_tokens, output_tokens, cost_usd, duration_s, usage_known, "
-                "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
+                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
@@ -1405,6 +1497,7 @@ class Store:
                     entry.kind,
                     entry.run_id,
                     entry.ref,
+                    entry.origin,
                     entry.outcome,
                     entry.input_tokens,
                     entry.output_tokens,
@@ -1463,10 +1556,15 @@ class Store:
         an answer stays with the answer rather than scattering across whichever residents
         happened to be in the line.
 
-        The join is ``run_ledger.ref = jobs.task_id``, because the board ledgers a task
-        under its own id. A run with no task behind it — a scheduled routine — has no
-        origin to roll up to and is reported under :data:`ORIGIN_UNATTRIBUTED` rather than
-        dropped: money steward cannot attribute is still money somebody spent.
+        The origin is read off the ledger row itself, written there by whoever recorded
+        the run. It used to be inferred by joining ``run_ledger.ref`` to ``jobs.task_id``,
+        which is only a task id for board and delegated runs — a routine whose ref
+        collided with a task's id inherited that task's bill. The join survives for rows
+        written before the column existed, and nothing else.
+
+        A run that descends from nobody — one recorded without an origin, on an old
+        database — is reported under :data:`ORIGIN_UNATTRIBUTED` rather than dropped:
+        money steward cannot attribute is still money somebody spent.
         """
         clauses: list[str] = []
         params: list[str] = []
@@ -1479,12 +1577,15 @@ class Store:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT COALESCE(NULLIF(j.origin, ''), ?) AS origin, COUNT(*) AS runs, "  # noqa: S608
+                "SELECT COALESCE(NULLIF(l.origin, ''), NULLIF(j.origin, ''), ?) AS origin, "  # noqa: S608
+                "COUNT(*) AS runs, "
                 "SUM(l.cost_usd) AS cost_usd, "
                 "SUM(l.input_tokens + l.output_tokens) AS tokens, "
                 "SUM(l.duration_s) AS duration_s "
                 "FROM run_ledger l LEFT JOIN jobs j ON j.task_id = l.ref"
-                f"{where} GROUP BY origin ORDER BY cost_usd DESC, origin",
+                # Grouped by ordinal, not by name: both joined tables have an ``origin``
+                # column now, so ``GROUP BY origin`` is ambiguous rather than the alias.
+                f"{where} GROUP BY 1 ORDER BY cost_usd DESC, 1",
                 (ORIGIN_UNATTRIBUTED, *params),
             ).fetchall()
         return [

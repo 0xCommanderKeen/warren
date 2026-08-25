@@ -31,15 +31,27 @@ past ``expires_at``, the request is resolved as ``deny`` with ``decided_by: "exp
 ``needs_human_resolved`` is emitted, and the gated action never ran. A human going to
 sleep must never be the reason something irreversible happened.
 
+**A deny answers for a while.** The decisions preamble tells a resident that a deny means
+"do not ask again this session"; :func:`raise_request` is the enforcement. When the same
+resident raises the same action again within :data:`DEFAULT_REPEAT_DENY_WINDOW_H` hours of
+being told no, the ask is recorded as an auto-deny (``decided_by: "repeat"``) and nobody's
+phone buzzes. A looping resident cannot knock on every wake-up. The guard answers only for
+actions a *session chose*: steward's own knocks — a budget pause, a watchdog give-up —
+pass ``repeat_guard=False``, and the slugs steward assigns itself
+(:data:`REPEAT_GUARD_EXEMPT_ACTIONS`) are never swallowed, because one deny of a catch-all
+would stand in for every future ask that lands under it.
+
 **A malformed block still knocks.** An escalation steward cannot parse is not dropped
 and is not silently ignored: it becomes a request with the action
 :data:`UNREADABLE_ACTION`, carrying the raw block and the complaint, so a person hears
-about it. A session that tried to ask and failed is a session that must not be mistaken
-for a session that had nothing to ask.
+about it — every time, including the second one, because that action is exempt from the
+repeat guard. A session that tried to ask and failed is a session that must not be
+mistaken for a session that had nothing to ask.
 """
 
 import json
 import logging
+import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -49,14 +61,17 @@ from typing import Any
 from steward import events as ev
 from steward import prompt
 from steward.manifest import ResidentManifest
-from steward.store import APPROVAL_DECISIONS, ApprovalRecord, Store
+from steward.store import APPROVAL_DECISIONS, DECIDED_BY_REPEAT, ApprovalRecord, Store
 
 __all__ = [
     "BLOCK_CLOSE",
     "BLOCK_OPEN",
     "DEFAULT_EXPIRES_IN_S",
+    "DEFAULT_REPEAT_DENY_WINDOW_H",
     "DETAIL_MAX_CHARS",
     "MAX_EXPIRES_IN_S",
+    "REPEAT_DENY_WINDOW_ENV",
+    "REPEAT_GUARD_EXEMPT_ACTIONS",
     "UNREADABLE_ACTION",
     "ApprovalError",
     "NeedsHuman",
@@ -68,6 +83,7 @@ __all__ = [
     "human_message",
     "parse_duration",
     "raise_request",
+    "repeat_deny_window_s",
 ]
 
 log = logging.getLogger("steward.approvals")
@@ -93,6 +109,24 @@ DETAIL_MAX_CHARS = 8000
 
 #: The action recorded when a session tried to escalate and steward could not read it.
 UNREADABLE_ACTION = "unreadable_escalation"
+
+#: How long a deny goes on answering for the same resident and action (steward #33). Half
+#: a day covers the wake-ups between one night's sleep and the next without turning a
+#: single no into a permanent ban: a resident that still wants the thing tomorrow may ask
+#: tomorrow, and a human who meant "never" says so in the charter, which is where forever
+#: belongs. ``0`` turns the guard off and every repeat knocks again.
+DEFAULT_REPEAT_DENY_WINDOW_H = 12
+REPEAT_DENY_WINDOW_ENV = "STEWARD_REPEAT_DENY_WINDOW_H"
+
+#: Actions the repeat guard never answers for. The guard's fingerprint is
+#: ``(resident, action)``, which only means "the same question asked twice" when the
+#: action is one a *session chose*. :data:`UNREADABLE_ACTION` is not: steward assigns it
+#: to every escalation it could not read, so a deny of one malformed block would stand in
+#: for the next malformed block too — a different intended action, swallowed unheard, in
+#: exactly the case this module promises never to swallow. :mod:`steward.delegation` has
+#: two catch-alls of its own and keeps them out of the guard the other way, by passing
+#: ``repeat_guard=False``, because approvals cannot import it.
+REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION})
 
 ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _BLOCK = re.compile(
@@ -302,6 +336,59 @@ def human_message(manifest: ResidentManifest, action: str) -> str:
     return f"{manifest.soul.name} wants to {action.replace('_', ' ')}"
 
 
+def repeat_deny_window_s(env: Mapping[str, str] | None = None) -> int:
+    """Return how long a deny keeps answering, in seconds.
+
+    ``$STEWARD_REPEAT_DENY_WINDOW_H`` overrides :data:`DEFAULT_REPEAT_DENY_WINDOW_H`, in
+    whole hours. ``0`` is a legitimate value and it is the kill switch: no ask is ever
+    inside a zero-length window, so every repeat knocks again. Anything that is not a
+    whole number ≥ 0 is a misconfiguration, and steward says so and falls back to the
+    default rather than quietly running with a window nobody chose.
+    """
+    source = os.environ if env is None else env
+    raw = (source.get(REPEAT_DENY_WINDOW_ENV) or "").strip()
+    hours = DEFAULT_REPEAT_DENY_WINDOW_H
+    if raw:
+        try:
+            hours = int(raw)
+        except ValueError:
+            hours = -1
+        if hours < 0:
+            log.warning(
+                "%s=%r is not a number of hours; using the default of %d",
+                REPEAT_DENY_WINDOW_ENV,
+                raw,
+                DEFAULT_REPEAT_DENY_WINDOW_H,
+            )
+            hours = DEFAULT_REPEAT_DENY_WINDOW_H
+    return hours * 3600
+
+
+def _denied_recently(store: Store, resident: str, action: str, moment: datetime) -> bool:
+    """Report whether this resident has already been told no about this action, recently.
+
+    The fingerprint is deliberately coarse: ``(resident, action)`` and nothing else. A
+    request's ``detail`` is free-form, un-normalized JSON (:func:`parse_detail`), so two
+    asks that differ only in a timestamp inside it would read as different questions to
+    any comparison and the guard would catch nothing. Coarse means a resident denied
+    ``send_email`` to one address cannot ask about a *different* address for the rest of
+    the window either — the trade steward makes on purpose, because the failure it exists
+    to stop is a resident knocking on every wake-up.
+
+    That trade is only payable when the action names what the resident asked for. For the
+    slugs in :data:`REPEAT_GUARD_EXEMPT_ACTIONS` it does not: they are catch-alls steward
+    assigns, and every ask that lands under one is a *different* question wearing the same
+    name. Those are never answered by an earlier deny.
+    """
+    if action in REPEAT_GUARD_EXEMPT_ACTIONS:
+        return False
+    window_s = repeat_deny_window_s()
+    if window_s <= 0:
+        return False
+    since = ev.utc_now_iso(moment - timedelta(seconds=window_s))
+    return store.recent_denials(resident, action, since) > 0
+
+
 def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all keyword-only
     store: Store,
     emitter: ev.Emitter,
@@ -311,6 +398,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     message: str | None = None,
     now: datetime | None = None,
     request_id: str | None = None,
+    repeat_guard: bool = True,
 ) -> ApprovalRecord:
     """Persist one request and knock. Returns the record the human will answer.
 
@@ -326,6 +414,16 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     action name cannot carry: :mod:`steward.budgets` names the number that tripped a cap,
     and :mod:`steward.delegation` says "steward refused this handoff" in words the action
     slug has no room for.
+
+    ``repeat_guard`` is on for everything a *session* chose to ask, and off for the two
+    knocks steward raises about a resident rather than for it: a budget pause
+    (:mod:`steward.budgets`) and a watchdog give-up (:mod:`steward.watchdog`) are
+    one-per-condition by their own conditional insert, they never expire, and the deny a
+    human gives them is the answer to a *different* question — turning that deny into a
+    reason to swallow the next pause would hide the thing steward most needs to say. The
+    same reasoning exempts the catch-all actions steward assigns rather than a session
+    choosing them (:data:`REPEAT_GUARD_EXEMPT_ACTIONS`), whichever way ``repeat_guard`` is
+    set.
     """
     moment = now or datetime.now(UTC)
     agent_id = manifest.agent_id or f"steward:{manifest.id}"
@@ -339,6 +437,7 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
         )
         detail = {"problem": request.problem, "raw": request.raw[:DETAIL_MAX_CHARS]}
 
+    repeat = repeat_guard and _denied_recently(store, manifest.id, request.action, moment)
     record = store.create_approval_request(
         agent_id=agent_id,
         project=project,
@@ -349,7 +448,17 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
         options=request.options,
         expires_at=request.expires_at(moment),
         request_id=request_id,
+        denied_by=DECIDED_BY_REPEAT if repeat else None,
     )
+    if repeat:
+        log.info(
+            "%s: %s was already denied within the last %d h — auto-denied as a repeat, "
+            "nobody knocked",
+            manifest.id,
+            request.action,
+            repeat_deny_window_s() // 3600,
+        )
+        return record
     emitter.emit(
         ev.needs_human_event(
             message=record.message,
@@ -445,7 +554,10 @@ def decisions_preamble(records: Sequence[ApprovalRecord]) -> str | None:
             "you may now do exactly the action you asked about and nothing more; a 'deny' "
             "means you must not do it and must not ask again this session; an 'edit' "
             "means do it with the human's changes. A decision recorded by 'expiry' is a "
-            "deny: nobody answered in time, so the answer is no."
+            "deny: nobody answered in time, so the answer is no. A decision recorded by "
+            "'repeat' is also a deny: you had already been told no about that action "
+            "recently, so steward answered for the human and did not wake anybody. Asking "
+            "the same thing again will get the same answer — take the no and move on."
         ),
         "",
         *[_render_decision(record) for record in records],

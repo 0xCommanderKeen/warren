@@ -22,10 +22,10 @@ from steward import delegation as dg
 from steward import events as ev
 from steward import prompt
 from steward.budgets import BudgetGuard
-from steward.manifest import Resident, load_manifest, validate_tree
+from steward.manifest import Resident, ResidentManifest, load_manifest, validate_tree
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.skills import library_for
-from steward.store import ORIGIN_UNATTRIBUTED, JobRecord, Store
+from steward.store import JobRecord, Store
 
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
@@ -356,6 +356,27 @@ def test_a_route_that_is_not_open_yet_takes_no_letters(
     assert sink.events == []
 
 
+def test_a_shut_route_is_still_a_declared_door(fleet: Fleet) -> None:
+    """``inbound_routes`` sees what ``delegation_routes`` hides: the door somebody closed.
+
+    Which is the whole of steward #46 — a report built on accepting routes alone shows no
+    route at all, and cannot say why the letters behind it are not moving.
+    """
+    (receiver,) = fleet(
+        resident_manifest(
+            RECEIVER,
+            name="Receiver",
+            routes=[inbox_route(status="disabled"), inbox_route("research")],
+        )
+    )
+
+    assert receiver.delegation_routes == ("research",)
+    assert [(route.id, route.status) for route in receiver.inbound_routes] == [
+        ("inbox", "disabled"),
+        ("research", "active"),
+    ]
+
+
 def test_a_recipient_nobody_has_heard_of_refuses_with_the_near_miss(
     make_delegator: MakeDelegator, sink: ev.NullEmitter
 ) -> None:
@@ -559,6 +580,36 @@ def test_a_block_steward_cannot_read_knocks_too(
     assert record.action == dg.UNREADABLE_ACTION
     assert "could not read" in record.message
     assert record.detail["raw"].startswith("<delegate")
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_a_second_refusal_knocks_even_after_the_first_was_denied(
+    make_delegator: MakeDelegator, store: Store, sink: ev.NullEmitter
+) -> None:
+    """Steward's refusal knocks are not the repeat guard's business (steward #33).
+
+    Every refusal this sender ever gets is filed under the same catch-all action, so a
+    deny — the natural way to dismiss a knock that is only telling you something — must
+    not answer for the next refusal, which is about a different handoff entirely.
+    """
+    delegator = make_delegator(resident_manifest(SENDER, name="Sender"), receiver_manifest())
+    sender = sender_of(delegator)
+    (first,) = delegator.harvest(
+        sender,
+        region(f'<delegate to="{RECEIVER}" route="inbox">{{"title": "Read this"}}</delegate>'),
+        now=NOW,
+    )
+    assert first.knock is not None
+    store.decide(first.knock.request_id, "deny", decided_by="api", now=ev.utc_now_iso(NOW))
+    sink.events.clear()
+
+    (second,) = delegator.harvest(
+        sender,
+        region('<delegate to="nobody-at-all" route="inbox">{"title": "Other work"}</delegate>'),
+        now=NOW + timedelta(hours=1),
+    )
+    assert second.knock is not None
+    assert second.knock.pending, "a different refused handoff is a different thing to say"
     assert [event.type for event in sink.events] == ["needs_human"]
 
 
@@ -1185,8 +1236,9 @@ def test_spend_rolls_up_to_the_origin_the_chain_descends_from(
 
     The question ``origin`` was recorded for. A human posts one task, the holder hands a
     piece of it to a neighbour, and the neighbour's spend rolls up to the original task
-    rather than stopping at whichever resident was last in the line. A routine that came
-    off no task at all is reported as unattributed rather than dropped.
+    rather than stopping at whichever resident was last in the line. A routine belongs to
+    no chain, so it rolls up under the resident whose day it was (#45) — its own line,
+    never folded into somebody else's question.
     """
     residents = fleet(sender_manifest(), receiver_manifest())
     dispatcher = guarded_dispatcher(residents, store, sink, guard, tmp_path, costly_runner(1.5))
@@ -1194,23 +1246,24 @@ def test_spend_rolls_up_to_the_origin_the_chain_descends_from(
     dispatcher.delegator.delegate(
         sender=residents[0], handoff=handoff(), parent_task_id=root.task_id
     )
-    # A routine of the sender's own, which belongs to no chain.
+    # A routine of the sender's own, ledgered the way the scheduler ledgers one.
     guard.record(
         residents[0].manifest,
         result=RunResult(outcome=Outcome.OK, cost_usd=0.75),
         ref="daily-summary",
+        origin=f"resident:{residents[0].id}",
         now=NOW,
     )
 
     dispatcher.dispatch(NOW)
 
     rollup = {spend.origin: spend for spend in store.spend_by_origin()}
-    assert set(rollup) == {f"task:{root.task_id}", ORIGIN_UNATTRIBUTED}
+    assert set(rollup) == {f"task:{root.task_id}", f"resident:{residents[0].id}"}
     chained = rollup[f"task:{root.task_id}"]
     assert chained.cost_usd == pytest.approx(1.5)
     assert chained.tokens == 1000
     assert chained.runs == 1
-    assert rollup[ORIGIN_UNATTRIBUTED].cost_usd == pytest.approx(0.75)
+    assert rollup[f"resident:{residents[0].id}"].cost_usd == pytest.approx(0.75)
 
 
 def test_the_rollup_honours_the_window_it_is_asked_about(
@@ -1233,11 +1286,12 @@ def test_the_rollup_honours_the_window_it_is_asked_about(
 def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
     fleet: Fleet, store: Store, sink: ev.NullEmitter, guard: BudgetGuard, tmp_path: Path
 ) -> None:
-    """The inbox and the board each ask the budget, and one exhausted cap is one knock.
+    """The budget is asked once per resident per dispatch, and one exhausted cap is one knock.
 
-    The dedupe is the conditional insert in the store, not an order the two loops have to
-    remember to keep. A household woken by two notifications for one budget would learn to
-    ignore both.
+    The dedupe is the single refusal pass the dispatch makes ahead of every work source
+    (steward #44), not two loops remembering to agree — the store's conditional insert
+    still backs it up across processes, but nothing in one dispatch leans on it any more.
+    A household woken by two notifications for one budget would learn to ignore both.
     """
     receiver = budgeted_receiver(daily_cost_usd=1.0)
     receiver["routes"] = [
@@ -1250,8 +1304,8 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
     dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
     store.post_job(title="A notice for anybody")
     # Over budget already, but not yet paused: seed the spend onto the ledger directly so
-    # the dedupe under test is the two dispatch loops sharing one pause, not a pause the
-    # setup handed them.
+    # the ask under test is this dispatch noticing and knocking, not a pause the setup
+    # handed it.
     store.record_run(
         resident=residents[1].manifest.id,
         agent_id=residents[1].manifest.agent_id or "",
@@ -1261,9 +1315,19 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
         now=ev.utc_now_iso(NOW),
     )
     sink.events.clear()  # drop the delivery event; the knock under test comes at dispatch
+    asked: list[str] = []
+    allow = guard.allow
 
-    assert dispatcher.dispatch(NOW).reports == ()
+    def counting_allow(manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+        """Record whose budget was read, then answer exactly as the guard would."""
+        asked.append(manifest.id)
+        return allow(manifest, now)
 
+    with pytest.MonkeyPatch.context() as counted:
+        counted.setattr(guard, "allow", counting_allow)
+        assert dispatcher.dispatch(NOW).reports == ()
+
+    assert asked.count(RECEIVER) == 1, "one resident, one ask, however many lists it is on"
     assert [event.type for event in sink.events] == ["needs_human"]
     assert [item.status for item in store.inbox(RECEIVER)] == ["open"]
     assert [item.status for item in store.jobs()] == ["open", "open"]
