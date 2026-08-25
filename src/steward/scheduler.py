@@ -401,6 +401,17 @@ def default_state_path(env: dict[str, str] | None = None) -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_STATE_PATH
 
 
+def _lock_holder(path: Path) -> str:
+    """Name the PID recorded in a daemon lock file, for the refusal — or say nothing.
+
+    Best effort by design: an unreadable or half-written lock file must still produce a
+    clean refusal, just a less helpful one.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        return f" (pid {int(path.read_text(encoding='utf-8').strip())})"
+    return ""
+
+
 # --------------------------------------------------------------------------------------
 # the scheduler
 # --------------------------------------------------------------------------------------
@@ -593,19 +604,71 @@ class Scheduler:
 
     @contextlib.contextmanager
     def _state_lock(self) -> Iterator[None]:
-        """Hold an exclusive OS lock over the whole tick, so two ticks never both fire.
+        """Hold an exclusive OS lock over one wake-up, so two of them never both fire.
 
         The documented ``scheduler tick`` deployment runs under external cron, so two ticks
         really can overlap — a slow run, a cron that fires while the last one is still
-        going. Without a cross-process lock both see the same occurrence due and both fire
-        it (steward #76). ``flock`` on a sidecar ``.lock`` file serialises them: the second
-        tick blocks until the first has anchored, saved, and fired, then reloads the state
-        the first one wrote and finds nothing due.
+        going; and a cron tick can overlap a running daemon. Without a cross-process lock
+        both see the same occurrence due and both fire it (steward #76, #25). ``flock`` on a
+        sidecar ``.lock`` file serialises them: the second waiter blocks until the first has
+        anchored, saved, and fired, then reloads the state the first one wrote and finds
+        nothing due.
+
+        Held around the *decision*, never around the work: the daemon releases it once the
+        fires are submitted (:meth:`run`), because holding it across a 15-minute session
+        would serialise every runner in the fleet across processes.
+
+        ``fcntl.flock`` is advisory and unreliable over NFS. That is fine for the repo-local
+        default ``.steward/state/`` and bites only an operator who points ``STEWARD_STATE``
+        at a network mount, where two schedulers can still both believe they hold it.
         """
+        if self.dry_run:
+            # A rehearsal takes nothing and leaves no sidecar behind, like ``_save_state``.
+            yield
+            return
         lock_path = self.state.path.with_suffix(f"{self.state.path.suffix}.lock")
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    @contextlib.contextmanager
+    def _daemon_lock(self) -> Iterator[None]:
+        """Hold a lock for the daemon's whole lifetime, so a second daemon refuses to start.
+
+        The per-wake-up :meth:`_state_lock` keeps two schedulers from firing one occurrence
+        twice, but two daemons over one state file are still a mistake worth saying out
+        loud: doubled sessions, doubled budgets, doubled board dispatch. A **non-blocking**
+        ``LOCK_EX`` means the second ``steward scheduler run`` exits red immediately instead
+        of sitting silent until the first one dies, and the PID written into the file lets
+        the refusal name who is holding it.
+
+        A *separate* sidecar from ``_state_lock`` on purpose: this one is held from start to
+        stop, so sharing one file would make every cron ``tick`` block forever behind a
+        running daemon rather than merely take its turn.
+
+        Advisory, and unreliable over NFS — see :meth:`_state_lock`.
+        """
+        if self.dry_run:
+            # A rehearsal is not a daemon; it must never refuse to start beside a real one.
+            yield
+            return
+        lock_path = self.state.path.with_suffix(f"{self.state.path.suffix}.daemon.lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise SchedulerError(
+                    f"another scheduler daemon is already running{_lock_holder(lock_path)} "
+                    f"over {self.state.path} — two daemons over one state file double-fire. "
+                    "Stop the running one, or point STEWARD_STATE somewhere else."
+                ) from exc
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode())
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1090,20 +1153,30 @@ class Scheduler:
         Long routines run on a small thread pool so a 15-minute daily summary does not
         hold up an hourly inbox read; the per-routine overlap guard is what makes that
         safe. ``max_ticks`` bounds the loop for tests.
+
+        Two cross-process locks, because the daemon shares its state file with whatever
+        else an operator started (steward #25). The daemon-lifetime lock makes a *second*
+        daemon refuse to start rather than quietly double every session; the per-wake-up
+        state lock makes the daemon take its turn against a cron ``tick``, reloading the
+        anchors that tick just wrote and anchoring its own before anything fires. The lock
+        is released before ``future.result()`` — waiting on the sessions under it would
+        serialise every runner in the fleet across processes.
         """
         self.require_ready()
         clock = now_fn or (lambda: datetime.now(UTC))
         reports: list[FireReport] = []
         ticks = 0
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+        with self._daemon_lock(), ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             while max_ticks is None or ticks < max_ticks:
                 ticks += 1
                 moment = clock()
-                due = self.due(moment)
-                for item in due:
-                    self.state.set_anchor(item.key, moment)
-                self._save_state()
-                futures = [pool.submit(self.fire, item, now=moment) for item in due]
+                with self._state_lock():
+                    self.state.reload()
+                    due = self.due(moment)
+                    for item in due:
+                        self.state.set_anchor(item.key, moment)
+                    self._save_state()
+                    futures = [pool.submit(self.fire, item, now=moment) for item in due]
                 self._dispatch(moment)
                 if not due:
                     sleep(self._sleep_for(moment))
