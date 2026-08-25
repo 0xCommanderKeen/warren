@@ -547,6 +547,10 @@ class BudgetGuard:
             message=knock_message(manifest, tripped),
             now=now,
             request_id=request_id,
+            # The pause row above already makes this exactly one knock per tripped budget.
+            # A human denying yesterday's unpause must not swallow today's pause: that
+            # deny answered "may this resident run again", not "has it stopped again".
+            repeat_guard=False,
         )
         return record
 

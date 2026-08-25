@@ -2,7 +2,7 @@
 
 import threading
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,7 @@ from steward import approvals as ap
 from steward import events as ev
 from steward import prompt as p
 from steward.manifest import ResidentManifest, load_manifest
-from steward.store import Store
+from steward.store import ApprovalRecord, Store
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -201,6 +201,160 @@ def test_the_message_is_derived_so_it_can_never_disagree_with_the_action(
     manifest: ResidentManifest,
 ) -> None:
     assert ap.human_message(manifest, "spend_money") == "Testy wants to spend money"
+
+
+# --------------------------------------------------------------- the repeat-deny guard
+
+
+def ask(  # noqa: PLR0913 — the collaborators, plus every knob one of these tests varies
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+    *,
+    at: datetime,
+    action: str = "send_email",
+    repeat_guard: bool = True,
+) -> ApprovalRecord:
+    """Raise one ordinary session-chosen request at a chosen moment."""
+    (parsed,) = ap.extract_requests(block(f'action="{action}" expires-in="1h"'))
+    return ap.raise_request(
+        store, sink, manifest=manifest, request=parsed, now=at, repeat_guard=repeat_guard
+    )
+
+
+def deny(store: Store, record: ApprovalRecord, *, at: datetime) -> None:
+    """Answer a knock the way a human at burrow's panel does."""
+    _, recorded = store.decide(record.request_id, "deny", decided_by="api", now=ev.utc_now_iso(at))
+    assert recorded, "the fixture's deny has to be the decision that was recorded"
+
+
+def test_asking_again_after_a_deny_is_auto_denied_without_waking_anybody(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """The enforcement behind "a deny means do not ask again" (steward #33)."""
+    deny(store, ask(store, sink, manifest, at=NOW), at=NOW)
+    sink.events.clear()
+
+    again = ask(store, sink, manifest, at=NOW + timedelta(hours=2))
+    assert not again.pending
+    assert again.decision == "deny"
+    assert again.decided_by == "repeat"
+    assert again.decided_at
+    assert sink.events == [], "nobody's phone buzzes for a question already answered"
+    assert store.pending_approvals() == []
+    assert len(store.approvals()) == 2, "the swallowed ask is still on the record"
+
+
+def test_a_deny_by_expiry_silences_the_repeat_too(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """Nobody answering in time is the same answer, to the resident, as a person saying no."""
+    ask(store, sink, manifest, at=NOW)
+    ap.expire(store, sink, NOW + timedelta(hours=2))
+    sink.events.clear()
+
+    again = ask(store, sink, manifest, at=NOW + timedelta(hours=3))
+    assert again.decided_by == "repeat"
+    assert sink.events == []
+
+
+def test_the_same_question_a_day_later_knocks_again(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """The window is a pause, not a ban: forever belongs in the charter, not here."""
+    deny(store, ask(store, sink, manifest, at=NOW), at=NOW)
+    sink.events.clear()
+
+    again = ask(store, sink, manifest, at=NOW + timedelta(hours=13))
+    assert again.pending
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_an_auto_deny_does_not_push_the_window_out_again(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """Otherwise a resident that kept asking would silence itself for good."""
+    deny(store, ask(store, sink, manifest, at=NOW), at=NOW)
+    swallowed = ask(store, sink, manifest, at=NOW + timedelta(hours=11))
+    assert swallowed.decided_by == "repeat"
+    sink.events.clear()
+
+    again = ask(store, sink, manifest, at=NOW + timedelta(hours=13))
+    assert again.pending, "the window is measured from the human's deny, not from a repeat"
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_a_deny_only_answers_for_the_action_it_was_about(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    deny(store, ask(store, sink, manifest, at=NOW, action="send_email"), at=NOW)
+    sink.events.clear()
+
+    other = ask(store, sink, manifest, at=NOW + timedelta(hours=1), action="spend_money")
+    assert other.pending
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_stewards_own_knocks_are_never_swallowed_as_repeats(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """A budget pause and a crash loop knock about the resident, not for it."""
+    deny(store, ask(store, sink, manifest, at=NOW, action="budget_unpause"), at=NOW)
+    sink.events.clear()
+
+    again = ask(
+        store,
+        sink,
+        manifest,
+        at=NOW + timedelta(hours=1),
+        action="budget_unpause",
+        repeat_guard=False,
+    )
+    assert again.pending
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_the_resident_hears_that_its_ask_was_auto_denied(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """Swallowed at the door is not swallowed in silence: the next session is told."""
+    first = ask(store, sink, manifest, at=NOW)
+    deny(store, first, at=NOW)
+    ask(store, sink, manifest, at=NOW + timedelta(hours=2))
+
+    preamble, records = ap.deliver_decisions(store, manifest.id)
+    assert preamble is not None
+    assert "'repeat' is also a deny" in preamble
+    assert [record.decided_by for record in records] == ["api", "repeat"]
+    assert "send_email: deny (decided by repeat" in preamble
+
+
+def test_the_window_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    hour_s = 3600
+    assert ap.repeat_deny_window_s({}) == ap.DEFAULT_REPEAT_DENY_WINDOW_H * hour_s
+    assert ap.repeat_deny_window_s({ap.REPEAT_DENY_WINDOW_ENV: "4"}) == 4 * hour_s
+    assert ap.repeat_deny_window_s({ap.REPEAT_DENY_WINDOW_ENV: "0"}) == 0
+    for bad in ("soon", "-2", "1.5"):
+        assert ap.repeat_deny_window_s({ap.REPEAT_DENY_WINDOW_ENV: bad}) == (
+            ap.DEFAULT_REPEAT_DENY_WINDOW_H * hour_s
+        )
+    monkeypatch.setenv(ap.REPEAT_DENY_WINDOW_ENV, "2")
+    assert ap.repeat_deny_window_s() == 2 * hour_s
+
+
+def test_a_zero_window_turns_the_guard_off_fleet_wide(
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(ap.REPEAT_DENY_WINDOW_ENV, "0")
+    deny(store, ask(store, sink, manifest, at=NOW), at=NOW)
+    sink.events.clear()
+
+    again = ask(store, sink, manifest, at=NOW + timedelta(minutes=1))
+    assert again.pending
+    assert [event.type for event in sink.events] == ["needs_human"]
 
 
 # ---------------------------------------------------------------------------- expiry

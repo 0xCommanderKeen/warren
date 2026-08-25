@@ -201,6 +201,32 @@ delivered: 2026-08-25T07:00:03.119Z
 for the same thing over HTTP. Requests, decisions, and deliveries all survive a steward
 restart: pending requests are still listed and still expire on schedule.
 
+Three deciders show up in `decided_by`, and the ledger keeps them apart rather than
+flattening them into one "denied":
+
+| `decided_by` | what happened |
+|---|---|
+| a person (`api`, a burrow user) | somebody answered the knock |
+| `expiry` | nobody answered before `expires_at`, so deny-by-default answered |
+| `repeat` | the resident had already been told no about this action, so steward answered |
+
+A `repeat` row is an ask steward **swallowed**: no `needs_human` event, no push
+notification, no pending request. The row still exists, so "what has this resident been
+asking for?" stays answerable — a wall of `repeat` denials for one action is a resident
+whose charter or brain needs fixing, and that shows up in the log rather than in somebody's
+phone at 03:00. The resident is told: the auto-deny is delivered in its next preamble like
+any other decision, reading *"you had already been told no about that action recently"*
+rather than nothing at all.
+
+The fingerprint is `(resident, action)` and nothing finer — `detail` is free-form JSON, so
+two asks that differ only in a timestamp would read as different questions and the guard
+would catch nothing. The window is 12 hours, overridable fleet-wide with
+`STEWARD_REPEAT_DENY_WINDOW_H` (whole hours; `0` turns the guard off). It is measured from
+a *real* decision — a human's deny or an `expiry` one — never from another `repeat`, so one
+no cannot renew itself into a permanent ban. Steward's own two knocks, the budget pause and
+the crash loop, are exempt: they are one-per-condition already, and the deny they carry
+answers a different question.
+
 ## The event payloads
 
 `needs_human` — backwards compatible. `message` is still the one-line knock burrow
