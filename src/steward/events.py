@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from steward.manifest import redact_secrets
+from steward.manifest import redact_mapping, redact_secrets
 
 __all__ = [
     "API_AGENT_ID",
@@ -643,35 +643,11 @@ def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
             "message": truncate_error(redact_secrets(message)),
             "request_id": request_id,
             "action": action,
-            "detail": bounded_detail(_redact_detail(detail)),
+            "detail": bounded_detail(redact_mapping(detail)),
             "options": list(options),
             "expires_at": expires_at,
         },
     )
-
-
-def _redact_detail(detail: Mapping[str, Any] | None) -> dict[str, object] | None:
-    """Redact every string a knock's ``detail`` carries, at any depth, secrets removed.
-
-    Recurses into nested maps and lists so a secret a session buries under a key or inside
-    a list is scrubbed as surely as one at the top level; non-string leaves (the numbers a
-    budget pause reports, the ISO instants of a window) are facts steward built and pass
-    through untouched.
-    """
-    if detail is None:
-        return None
-    return {str(key): _redact_node(value) for key, value in detail.items()}
-
-
-def _redact_node(value: object) -> object:
-    """Redact one node of a detail tree: a string, a nested map, a list, or a leaf."""
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, Mapping):
-        return {str(key): _redact_node(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_node(item) for item in value]
-    return value
 
 
 def needs_human_resolved_event(  # noqa: PLR0913 — the payload the protocol documents

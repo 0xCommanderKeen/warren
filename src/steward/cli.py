@@ -32,6 +32,7 @@ from steward.approvals import (
     parse_duration,
     parse_options,
     raise_request,
+    redact_decision,
 )
 from steward.board import BoardReport, Dispatcher, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
@@ -516,9 +517,13 @@ def show_command(resident_id: str, residents: Path, db: Path | None, output_form
 
     Read-only in the strong sense. Decisions are *peeked* — never marked delivered — so
     previewing a preamble cannot eat the answer the resident's next real session is owed
-    (steward #74). The journal is redacted on the way out, like anything else steward
-    prints: it is the one section here no validator ever scanned, because a model wrote it
-    at runtime, and this output is made to be pasted into a review.
+    (steward #74).
+
+    Nothing a model wrote at runtime leaves here unscanned. Two sections carry such text —
+    the last journal entry and the detail of each decision, both typed by a session, neither
+    ever seen by a validator — so both go out through ``redact_secrets``, like anything else
+    steward emits. This output is made to be pasted into a review; a review must not be
+    where a live key goes.
     """
     resident = _resident_or_exit(residents, resident_id)
     try:
@@ -537,7 +542,7 @@ def show_command(resident_id: str, residents: Path, db: Path | None, output_form
         resident.soul.body,
         journal_entry,
         skills,
-        decisions_preamble(pending),
+        decisions_preamble([redact_decision(record) for record in pending]),
     )
 
     if output_format == "json":

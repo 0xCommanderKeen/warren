@@ -376,6 +376,43 @@ def test_show_redacts_a_secret_the_resident_journaled(
     assert "[redacted:secret]" in result.output
 
 
+def test_show_redacts_a_secret_a_decision_carries(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A decision's detail and edit are model-written too, and just as unscanned.
+
+    The detail is whatever the session typed into its ``<needs-human>`` block and is stored
+    verbatim; the edit is whatever the human answered with. Only burrow's egress redacted
+    them until now, so ``steward show`` printed a live key to anyone previewing a preamble.
+    """
+    path = write_resident(journaling_resident(tmp_path))
+    resident = load_manifest(path)
+    db = tmp_path / "show.db"
+    with Store(db) as store:
+        request = store.create_approval_request(
+            agent_id=resident.agent_id,
+            project="p",
+            action="rotate_token",
+            message="rotate the deploy key",
+            resident=resident.id,
+            detail={"cmd": "curl -H 'Authorization: Bearer sk-ant-abcdef0123456789ghij'"},
+        )
+        store.decide(
+            request.request_id,
+            "edit",
+            decided_by="miha",
+            edit={"nested": ["use ghp_abcdefghijklmnopqrstuvwxyz012345 instead"]},
+        )
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "sk-ant-" not in result.output
+    assert "ghp_" not in result.output
+    assert result.output.count("[redacted:secret]") == 2
+    # The decision itself still reads as itself: only the secret is cut.
+    assert "rotate_token: edit (decided by miha" in result.output
+
+
 def test_show_names_the_residents_it_knows_about(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
