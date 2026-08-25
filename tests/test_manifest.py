@@ -648,6 +648,23 @@ def test_validate_path_accepts_file_directory_or_tree(
     assert m.validate_path(tmp_path / "residents").ok
 
 
+def test_residents_root_reduces_all_three_shapes_to_the_tree(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Whatever shape names a target, the tree is where ``../skills`` is found from.
+
+    A caller that resolves the library from the target instead of the tree gets an
+    unconfigured library for two of these three, and an unconfigured library says every
+    skill resolves and no run would materialize anything.
+    """
+    manifest_path = write_resident()
+    tree = (tmp_path / "residents").resolve()
+
+    assert m.residents_root(manifest_path) == tree
+    assert m.residents_root(manifest_path.parent) == tree
+    assert m.residents_root(tmp_path / "residents") == tmp_path / "residents"
+
+
 def test_validate_paths_merges_results(write_resident: ResidentWriter, tmp_path: Path) -> None:
     manifest_path = write_resident()
     broken = tmp_path / "broken"

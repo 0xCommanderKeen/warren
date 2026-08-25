@@ -250,6 +250,93 @@ def test_doctor_says_a_board_claimant_is_ready_to_claim(
     assert "test-agent: board — claimant" in result.output
 
 
+def test_doctor_names_a_board_claimants_missing_skill(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """Issue #37's headline scenario: a claimant granted a skill the library does not hold.
+
+    Doctor exits non-zero and names the grant — and it is *validation* that says so, not the
+    board pre-flight below it. ``validate_paths`` resolves the same library the pre-flight
+    would and turns a grant that names nothing into an error for every resident, claimant or
+    not, so doctor stops before it prints any resident's line at all. The third assertion is
+    the point of this test: the pre-flight was written believing doctor validated without a
+    library and that its own missing-skill leg was the only thing that could catch this. It
+    is the reverse. Pinning the real order here keeps that belief from coming back as a
+    rewrite of the check that actually works.
+    """
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = ["surgery"]
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 1, result.output
+    assert "surgery" in result.output
+    assert "board — " not in result.output, "validation had already stopped doctor"
+
+
+def test_doctor_will_not_call_a_claimant_ready_because_it_looked_at_no_library(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+) -> None:
+    """The pre-flight must read the library beside the *tree*, however the target is named.
+
+    ``steward doctor residents/<id>`` is a shape validation accepts, and the library is at
+    ``residents/../skills`` in every shape. Resolving it from the target instead found
+    ``residents/<id>/skills``, got an unconfigured library back — and an unconfigured
+    library makes :func:`steward.scheduler.workdir_refusal` return ``None``, because a run
+    that materializes no skills deletes nothing. The claimant was then called ready on the
+    grounds that nothing had been checked.
+    """
+    stub_bin("claude", "exit 0")
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "absent" / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    resident_dir = write_resident(data).parent
+
+    result = runner.invoke(main, ["doctor", str(resident_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "current working directory" in result.output
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_doctor_tells_a_claimant_with_no_binary_it_must_not_keep_claiming(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """The pre-flight's red line, said in the claimant's own terms and counted as a problem.
+
+    The runner line above it already fails doctor over the same missing binary — this is the
+    second half of the sentence, not a second verdict: "this resident cannot run, *so it
+    must not be left claiming*". The board line has to be red for the claimant whose only
+    wake-up is a claim, or the fleet reads as one broken routine rather than a resident
+    that will take a task off the board and drop it.
+    """
+    write_skill("research", defaults=True)
+    (tmp_path / "memory").mkdir()
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 1, result.output
+    assert "test-agent: board — " in result.output
+    assert result.output.count("not on PATH") == 2, "once as a runner, once as a claimant"
+
+
 # ------------------------------------------------------------------------------ journal
 
 

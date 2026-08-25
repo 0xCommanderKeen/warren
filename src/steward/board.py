@@ -214,6 +214,13 @@ def board_preflight(
     close failed a second later (steward #37). Asked here it is a complaint at a
     reasonable hour instead.
 
+    All three questions are asked of every claimant, even though a caller that reached here
+    through :func:`steward.manifest.validate_path` has already been told about the grant —
+    validation resolves the same library and an unresolvable grant is an error there, so
+    :command:`steward doctor` never gets this far. A caller that did not validate first (a
+    dispatch-time dry run) has not, and half a pre-flight that depends on how you arrived is
+    worse than one redundant line.
+
     The journal is deliberately not asked about: a board session reads one when there is
     one and works the task without complaint when there is not, so an unjournalable memory
     is the scheduler's refusal to make, not this one's.

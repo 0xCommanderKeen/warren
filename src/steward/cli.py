@@ -49,6 +49,7 @@ from steward.manifest import (
     Severity,
     ValidationResult,
     manifest_json_schema,
+    residents_root,
     validate_paths,
 )
 from steward.nursery import (
@@ -222,7 +223,9 @@ def skills_command(residents: Path, skills_dir: Path | None, output_format: str)
     The effective set is the library's defaults plus the resident's own grants — what a
     session for that resident will actually be told, without opening a manifest.
     """
-    library = library_for(residents, skills_dir)
+    # residents_root for the same reason doctor needs it: --residents may name one resident,
+    # and the library is beside the tree, not beside the target.
+    library = library_for(residents_root(residents), skills_dir)
     result = validate_paths([residents], skills_dir)
     sets = {
         resident.id: effective_skills(resident.manifest, library) for resident in result.residents
@@ -305,10 +308,11 @@ def doctor(residents: Path, db: Path | None) -> None:
         sys.exit(EXIT_INVALID)
 
     problems = 0
-    # Resolved once, above the loop, because doctor's own validate_paths above was given no
-    # skills dir — grant diagnostics are not applied there, so the board pre-flight has to
-    # look the library up itself to know a grant names nothing.
-    library = library_for(residents)
+    # The same library validate_paths above resolved for itself: passing no skills dir does
+    # not mean no library, it means "the one beside the tree" — hence residents_root, since
+    # this argument may name one resident rather than the tree. Resolved once here because
+    # two things below need it, the board pre-flight in the loop and the Scheduler after it.
+    library = library_for(residents_root(residents))
     with _open_store(db) as store:
         guard = BudgetGuard(store)
         for resident in result.residents:
@@ -408,15 +412,29 @@ def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
 
     The per-resident loop is the right hook: a resident that claims board work and declares
     no routine is invisible to the scheduler block below, which is exactly the resident
-    whose broken runner or unresolvable grant would otherwise first be heard as a task the
-    village saw claimed and failed in the same breath (#37). A resident that does not claim
-    says nothing here — the board is a declaration, and so is this line.
+    whose broken runner or missing working directory would otherwise first be heard as a
+    task the village saw claimed and failed in the same breath (#37). A resident that does
+    not claim says nothing here — the board is a declaration, and so is this line.
 
-    The working-directory refusal is a warning rather than a failure, for the same reason
-    the journal probe's is: a shipped resident's ``memory.path`` is a container path that
-    is missing on the laptop running doctor and present where it actually runs. Doctor says
-    it out loud — a dispatch *from this host* really would refuse to claim — and does not
-    go red over a path that is not this host's to have.
+    Of :func:`board_preflight`'s three questions only one is doctor's alone, and it is worth
+    being exact about which, because two of these lines are second opinions:
+
+    - the **runner** is already checked a few lines above, for every resident, claimant or
+      not. Saying it twice is deliberate — the first line is "this resident cannot run",
+      this one is "so it must not be left claiming" — but the exit code was decided there.
+    - an **unresolvable grant** never reaches here at all. ``validate_paths`` at the top of
+      doctor resolves *this same* library and turns a grant that names nothing into an
+      error, so doctor has already printed it and exited ``EXIT_INVALID`` before the loop
+      starts (``test_doctor_names_a_board_claimants_missing_skill``). That leg belongs to
+      :func:`board_preflight` for the callers that reach it without validating first — a
+      dispatch-time dry run (#88) — and is dead weight here, kept only so a claimant is
+      asked the whole question by one function rather than half of it by two.
+    - the **working directory** is the one thing nothing else asks of a claimant. It is
+      reported as a warning rather than a failure, for the same reason the journal probe's
+      is: a shipped resident's ``memory.path`` is a container path that is missing on the
+      laptop running doctor and present where it actually runs. Doctor says it out loud — a
+      dispatch *from this host* really would refuse to claim — and does not go red over a
+      path that is not this host's to have.
     """
     if not resident.manifest.board.claim:
         return 0
@@ -432,9 +450,8 @@ def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
         if complaint == off_host:
             click.secho(f"{complaint} (a directory it has on its own host?)", fg="yellow", err=True)
             continue
-        # A missing binary is said twice, once as the runner line above and once here. Both
-        # are true and neither is redundant to a reader: the first is "this resident cannot
-        # run", the second is "so it must not be left claiming".
+        # Red, and counted — see the docstring for which of these doctor can actually reach
+        # and which the caller above already decided the exit code on.
         click.secho(complaint, fg="red", err=True)
         problems += 1
     return problems
