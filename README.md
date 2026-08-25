@@ -370,7 +370,11 @@ an inline secret, in a manifest or in a `SKILL.md`, fails validation and is neve
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
 `steward schema` emits it as JSON Schema so burrow can read manifests without
-translation.
+translation. The generated copy is committed at
+[schema/resident-manifest-v0.json](schema/resident-manifest-v0.json) — the path the
+schema's own `$id` promises — and a test fails when it drifts from the models, so a
+manifest change that would break burrow's reader shows up as a diff in the pull request
+that makes it. Regenerate with `make schema-write` and read the diff.
 
 ```console
 $ steward validate                         # the whole residents/ tree

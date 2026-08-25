@@ -97,6 +97,22 @@ def test_schema_command_emits_json_schema(runner: CliRunner) -> None:
     assert schema["title"] == "steward resident manifest v0"
 
 
+def test_schema_output_writes_exactly_what_stdout_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """`make schema-write` regenerates the committed artifact through this flag.
+
+    Byte-identical to stdout, or the committed copy and the printed one would be two
+    different contracts and tests/test_schema_contract.py would fail for no real reason.
+    """
+    target = tmp_path / "nested" / "resident-manifest-v0.json"
+    printed = runner.invoke(main, ["schema"])
+    written = runner.invoke(main, ["schema", "--output", str(target)])
+
+    assert written.exit_code == 0, written.output
+    assert not written.output, "--output writes the file; it does not also print it"
+    assert target.read_text(encoding="utf-8") == printed.output
+    assert printed.output.endswith("}\n")
+
+
 def test_help_lists_the_commands(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
