@@ -380,7 +380,7 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     record = approvals.raise_request(
         store, sink, manifest=resident.manifest, request=parsed, now=NOW
     )
-    store.decide(record.request_id, "approve", decided_by="api")
+    store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
     dispatcher = b.Dispatcher(
         residents=[resident],

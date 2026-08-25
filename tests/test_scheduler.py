@@ -182,6 +182,7 @@ def test_hourly_and_daily_schedules_agree_with_the_manifest() -> None:
         "life-agent/daily-summary",
         "life-agent/inbox-read",
         "life-agent/close-of-day",
+        "pip/heartbeat",
     }
     assert all(item.routine.schedule_tz == "Europe/Ljubljana" for item in scheduled)
 

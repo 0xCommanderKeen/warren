@@ -422,7 +422,7 @@ def test_a_decision_is_injected_once_and_then_marked_delivered(
 ) -> None:
     (parsed,) = ap.extract_requests(block())
     record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
-    store.decide(record.request_id, "approve", decided_by="api")
+    store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
     text, delivered = ap.deliver_decisions(store, manifest.id)
     assert text is not None
@@ -438,7 +438,13 @@ def test_an_edited_decision_carries_the_humans_version_into_the_next_session(
 ) -> None:
     (parsed,) = ap.extract_requests(block())
     record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
-    store.decide(record.request_id, "edit", decided_by="api", edit={"subject": "shorter"})
+    store.decide(
+        record.request_id,
+        "edit",
+        decided_by="api",
+        edit={"subject": "shorter"},
+        now=ev.utc_now_iso(NOW),
+    )
     text, _ = ap.deliver_decisions(store, manifest.id)
     assert text is not None
     assert "shorter" in text
@@ -454,7 +460,7 @@ def test_the_decisions_section_is_framed_as_a_record_not_an_order(
 ) -> None:
     (parsed,) = ap.extract_requests(block())
     record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
-    store.decide(record.request_id, "deny", decided_by="api")
+    store.decide(record.request_id, "deny", decided_by="api", now=ev.utc_now_iso(NOW))
     text, _ = ap.deliver_decisions(store, manifest.id)
     assembled = p.assemble_preamble(manifest, None, None, (), text)
     assert assembled.index("DECISIONS SINCE YOU LAST RAN") < assembled.index("YOUR CHARTER")

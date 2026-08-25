@@ -431,7 +431,7 @@ SECRET_REDACTION = "[redacted:secret]"  # noqa: S105 — a redaction marker, not
 #: so a secret a session writes into a ``needs_human`` detail is scrubbed by the same
 #: definition of "credential" that keeps one out of a manifest.
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    rf"(?P<key>[A-Za-z0-9]+(?:[_.\- ][A-Za-z0-9]+)*?[_.\- ]?(?:{_CREDENTIAL_WORDS}))"
+    rf"(?<![A-Za-z0-9])(?P<key>(?:[A-Za-z0-9]+[_.\- ])*(?:{_CREDENTIAL_WORDS}))"
     r"(?P<sep>\s*[:=]\s*)(?P<value>\S+)",
     re.IGNORECASE,
 )
