@@ -1,7 +1,7 @@
 """The CLI is what CI gates on, so its exit codes are part of the contract."""
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
 from steward.journal import write_entry
 from steward.manifest import load_manifest
+from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState
 from steward.store import Store
 
 
@@ -1315,6 +1316,41 @@ def test_doctor_names_the_last_watchdog_pass(
     assert result.exit_code == 0, result.output
     assert "watchdog: last pass 2026-08-24T12:00:00.000Z" in result.output
     assert "2 intervention(s)" in result.output
+
+
+def test_doctor_says_whether_a_scheduler_is_up(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The list of next fires below is a promise; this is the line that says who keeps it."""
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest()
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    state_path = tmp_path / "scheduler.json"
+    monkeypatch.setenv("STEWARD_STATE", str(state_path))
+    db = tmp_path / "steward.db"
+
+    never = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+    assert never.exit_code == 0, never.output
+    assert "scheduler: has never ticked" in never.output
+
+    state = SchedulerState(path=state_path)
+    state.record_tick(datetime.now(UTC))
+    state.save()
+    up = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+    assert "scheduler: last tick" in up.output
+    assert "— up" in up.output
+
+    state.record_tick(datetime.now(UTC) - timedelta(seconds=STALE_TICK_AFTER_S + 1))
+    state.save()
+    stopped = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+    # A stopped daemon is still not doctor's exit code: doctor runs on laptops too.
+    assert stopped.exit_code == 0, stopped.output
+    assert "so nothing is firing the routines below" in stopped.output
 
 
 # --------------------------------------------------------------------------------------

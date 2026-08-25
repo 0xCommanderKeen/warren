@@ -67,6 +67,7 @@ from steward.scheduler import (
     Scheduler,
     SchedulerState,
     default_state_path,
+    scheduler_liveness,
 )
 from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
@@ -788,8 +789,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         which is the last fire *or* the moment steward first saw the routine. Calling it
         "last run" would let a routine that has never fired look like one that has.
 
-        None of this means anything is firing. Routines fire when
-        ``steward scheduler run`` is up; a ledger is a declaration, not a heartbeat.
+        ``scheduler`` is the one thing here that *is* a heartbeat: when a scheduler process
+        last woke up against that state file, how stale that may get before it stops
+        meaning anything is up, and the verdict. ``alive: null`` — never ticked — is its
+        own answer, distinct from a daemon that died. A ledger is still a declaration; this
+        is what says whether the declarations have anything to fire them.
         """
         result = validate_path(residents_dir, settings.skills_dir)
         state = SchedulerState.load(default_state_path())
@@ -824,6 +828,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "routines": routines,
             "state_path": str(default_state_path()),
+            "scheduler": scheduler_liveness(state, now),
             "errors": [diagnostic.render() for diagnostic in result.errors],
         }
 

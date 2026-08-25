@@ -22,6 +22,7 @@ import json
 import re
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +46,7 @@ from steward.nursery import (
     raise_resident,
 )
 from steward.runners import MockRunner
-from steward.scheduler import load_scheduled
+from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState, load_scheduled
 from steward.store import RequestRecord, Store
 
 TOKEN = "a-shared-secret"
@@ -241,6 +242,39 @@ def test_the_ledger_carries_what_became_of_the_last_asked_for_run(
     row = built.client.get("/routines").json()["routines"][0]
     assert row["last_request"]["request_id"] == accepted.json()["request_id"]
     assert row["last_request"]["outcome"] == "ran"
+
+
+def test_a_fleet_nothing_has_ever_ticked_says_so_rather_than_dead(
+    console: ConsoleFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The reason `alive` is a tri-state: a fresh install where no daemon was ever started
+    # and a daemon that died an hour ago are different problems with different fixes.
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "never.json"))
+    scheduler = console().client.get("/routines").json()["scheduler"]
+
+    assert scheduler["alive"] is None
+    assert scheduler["last_tick"] is None
+    assert scheduler["stale_after_s"] == STALE_TICK_AFTER_S
+
+
+def test_the_ledger_reads_back_whether_a_scheduler_is_still_ticking(
+    console: ConsoleFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_path = tmp_path / "heartbeat.json"
+    monkeypatch.setenv("STEWARD_STATE", str(state_path))
+    built = console()
+    state = SchedulerState(path=state_path)
+
+    state.record_tick(datetime.now(UTC))
+    state.save()
+    live = built.client.get("/routines").json()["scheduler"]
+    assert live["alive"] is True
+    assert live["last_tick"] is not None
+
+    # The daemon stopped. The next fires below are still promised and nothing keeps them.
+    state.record_tick(datetime.now(UTC) - timedelta(seconds=STALE_TICK_AFTER_S + 1))
+    state.save()
+    assert built.client.get("/routines").json()["scheduler"]["alive"] is False
 
 
 def test_the_ledger_names_manifests_that_did_not_validate(console: ConsoleFactory) -> None:

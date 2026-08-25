@@ -69,6 +69,7 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
     load_scheduled,
+    scheduler_liveness,
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 from steward.store import (
@@ -323,6 +324,7 @@ def doctor(residents: Path, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
         problems += _report_watchdog(store.last_watchdog_pass())
+    problems += _report_scheduler(SchedulerState.load(default_state_path()))
 
     scheduled = _load_or_exit(residents)
     if scheduled:
@@ -416,6 +418,33 @@ def _report_watchdog(last: dict[str, Any] | None) -> int:
         f"({last['passes']} pass(es), {last['interventions']} intervention(s))",
         fg="green",
     )
+    return 0
+
+
+def _report_scheduler(state: SchedulerState) -> int:
+    """Say when a scheduler last woke up, so the next-fire list below can be read.
+
+    Never a problem worth exiting on: doctor is routinely run on a laptop while the daemon
+    lives on the NAS, and a state file this host cannot see is not a broken fleet. It is
+    still said out loud — the list of next fires that follows is a promise, and this is the
+    only line that says whether anything is around to keep it.
+    """
+    liveness = scheduler_liveness(state)
+    if liveness["alive"] is None:
+        click.secho(
+            f"scheduler: has never ticked {state.path} — nothing has ever fired from this "
+            "state file; run `steward scheduler run`",
+            fg="yellow",
+        )
+        return 0
+    if not liveness["alive"]:
+        click.secho(
+            f"scheduler: last tick {liveness['last_tick']} — older than "
+            f"{liveness['stale_after_s']:.0f}s, so nothing is firing the routines below",
+            fg="yellow",
+        )
+        return 0
+    click.secho(f"scheduler: last tick {liveness['last_tick']} — up", fg="green")
     return 0
 
 

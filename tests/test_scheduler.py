@@ -297,6 +297,116 @@ def test_state_round_trips(tmp_path: Path) -> None:
     assert s.SchedulerState.load(state.path).anchor("a/b") == moment
 
 
+# --------------------------------------------------------------------------- heartbeat
+
+
+def test_the_heartbeat_round_trips(tmp_path: Path) -> None:
+    state = s.SchedulerState(path=tmp_path / "state.json")
+    assert state.last_tick_at() is None, "a state nobody has ticked has never ticked"
+
+    moment = datetime(2026, 8, 24, 7, 0, tzinfo=LJUBLJANA)
+    state.record_tick(moment)
+    state.save()
+    assert s.SchedulerState.load(state.path).last_tick_at() == moment
+
+
+def test_a_state_file_written_before_the_heartbeat_reads_as_never_ticked(tmp_path: Path) -> None:
+    # Old files must stay readable, and the safe reading of a file with no heartbeat in it
+    # is that nothing has ticked — never that something is up.
+    path = tmp_path / "old.json"
+    path.write_text('{"routines": {"a/b": {"anchor": "2026-08-24T07:00:00+00:00"}}}', "utf-8")
+    state = s.SchedulerState.load(path)
+    assert state.anchor("a/b") is not None
+    assert state.last_tick_at() is None
+
+
+def test_an_unreadable_heartbeat_is_no_heartbeat(tmp_path: Path) -> None:
+    junk = tmp_path / "junk.json"
+    junk.write_text('{"routines": {}, "last_tick": "whenever"}', encoding="utf-8")
+    assert s.SchedulerState.load(junk).last_tick_at() is None
+
+    wrong_type = tmp_path / "wrong.json"
+    wrong_type.write_text('{"routines": {}, "last_tick": 17}', encoding="utf-8")
+    assert s.SchedulerState.load(wrong_type).last_tick_at() is None
+
+    # A heartbeat survives a routines block that does not parse: they are separate facts.
+    partial = tmp_path / "partial.json"
+    partial.write_text('{"routines": [1, 2], "last_tick": "2026-08-24T07:00:00+00:00"}', "utf-8")
+    assert s.SchedulerState.load(partial).last_tick_at() is not None
+
+
+def test_liveness_tells_never_ticked_apart_from_stopped(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    state = s.SchedulerState(path=tmp_path / "state.json")
+
+    fresh = s.scheduler_liveness(state, now)
+    assert fresh["alive"] is None, "never ticked is its own answer, not a dead daemon"
+    assert fresh["last_tick"] is None
+    assert fresh["stale_after_s"] == s.STALE_TICK_AFTER_S
+
+    state.record_tick(now - timedelta(seconds=s.STALE_TICK_AFTER_S - 1))
+    assert s.scheduler_liveness(state, now)["alive"] is True
+
+    state.record_tick(now - timedelta(seconds=s.STALE_TICK_AFTER_S + 1))
+    assert s.scheduler_liveness(state, now)["alive"] is False
+
+
+def test_a_tick_stamps_the_heartbeat_even_with_nothing_due(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    quiet = datetime(2026, 8, 24, 10, 40, tzinfo=UTC)  # nothing is due at :40
+    assert engine.tick(quiet) == []
+
+    assert s.SchedulerState.load(state_path).last_tick_at() == quiet
+
+
+def test_the_daemon_stamps_the_heartbeat_every_iteration(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    # An idle daemon is still a live one, and the loop is the only place that can say so.
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    moments = iter(
+        [datetime(2026, 8, 24, 10, 40, tzinfo=UTC) + timedelta(minutes=i) for i in range(3)]
+    )
+    engine.run(max_ticks=2, sleep=lambda _s: None, now_fn=lambda: next(moments))
+
+    assert s.SchedulerState.load(state_path).last_tick_at() == datetime(
+        2026, 8, 24, 10, 41, tzinfo=UTC
+    )
+
+
+def test_a_dry_run_leaves_no_heartbeat(write_resident: ResidentWriter, tmp_path: Path) -> None:
+    # A rehearsal must not make the fleet look attended: nothing is firing on its account.
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+        dry_run=True,
+    )
+    engine.run(
+        max_ticks=1, sleep=lambda _s: None, now_fn=lambda: datetime(2026, 8, 24, 10, 40, tzinfo=UTC)
+    )
+
+    assert not state_path.exists()
+
+
 # -------------------------------------------------------------------------- concurrency
 
 

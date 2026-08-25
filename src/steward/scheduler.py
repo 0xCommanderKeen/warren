@@ -64,7 +64,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -104,6 +104,7 @@ from steward.skills import (
 __all__ = [
     "DEFAULT_CATCHUP_S",
     "DEFAULT_STATE_PATH",
+    "STALE_TICK_AFTER_S",
     "TRIGGER_MANUAL",
     "TRIGGER_SCHEDULE",
     "FireReport",
@@ -117,6 +118,7 @@ __all__ = [
     "latest_fire_at_or_before",
     "load_scheduled",
     "next_fire_after",
+    "scheduler_liveness",
     "workdir_refusal",
 ]
 
@@ -132,6 +134,12 @@ DEFAULT_CATCHUP_S = 300.0
 #: strand it past the next occurrence.
 MAX_SLEEP_S = 60.0
 MIN_SLEEP_S = 0.05
+
+#: How long a state file may go untouched before "a scheduler is up" stops being a safe
+#: reading of it. Not a new number: a living daemon stamps the file at least every
+#: :data:`MAX_SLEEP_S`, and a fire is still honest work up to ``catchup_s`` late, so a
+#: heartbeat older than the two together could not have fired anything on time anyway.
+STALE_TICK_AFTER_S = MAX_SLEEP_S + DEFAULT_CATCHUP_S
 
 #: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
 #: asking for it now through the API. The ledger has to be able to tell them apart.
@@ -323,6 +331,17 @@ class FireReport:
 # --------------------------------------------------------------------------------------
 
 
+def _moment(raw: str | None) -> datetime | None:
+    """Read a stored ISO timestamp back. Unparseable is ``None``; naive is read as UTC."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 @dataclass
 class SchedulerState:
     """The minimum steward must remember across restarts: when each routine last ran.
@@ -331,22 +350,37 @@ class SchedulerState:
     fire, or the moment the routine was first seen. Keeping it is what makes a restart
     truthful in both directions: nothing re-fires, and nothing is silently skipped
     because the process forgot it existed.
+
+    ``last_tick`` is the one liveness fact in the file: when a scheduler process last woke
+    up here. Anchors say what already ran; only this says whether anything is still around
+    to run the next occurrence — which is what turns a ledger of promises into a report.
     """
 
     path: Path
     anchors: dict[str, str] = field(default_factory=dict)
+    #: When a scheduler last woke up against this file, in UTC. ``None`` is a real answer:
+    #: nothing has ever ticked here, so nothing has ever fired from it.
+    last_tick: str | None = None
 
     @classmethod
     def load(cls, path: Path | str) -> SchedulerState:
-        """Read state from disk. A missing or unreadable file is an empty state."""
+        """Read state from disk. A missing or unreadable file is an empty state.
+
+        A file written before ``last_tick`` existed simply has never ticked as far as this
+        reader is concerned — old files stay readable, and old readers ignore the new key.
+        """
         target = Path(path)
         try:
             raw = json.loads(target.read_text(encoding="utf-8"))
         except OSError, ValueError:
             return cls(path=target)
-        anchors = raw.get("routines") if isinstance(raw, dict) else None
-        if not isinstance(anchors, dict):
+        if not isinstance(raw, dict):
             return cls(path=target)
+        tick = raw.get("last_tick")
+        last_tick = tick if isinstance(tick, str) and tick else None
+        anchors = raw.get("routines")
+        if not isinstance(anchors, dict):
+            return cls(path=target, last_tick=last_tick)
         return cls(
             path=target,
             anchors={
@@ -354,6 +388,7 @@ class SchedulerState:
                 for key, value in anchors.items()
                 if isinstance(value, dict) and value.get("anchor")
             },
+            last_tick=last_tick,
         )
 
     def reload(self) -> None:
@@ -369,29 +404,48 @@ class SchedulerState:
 
     def anchor(self, key: str) -> datetime | None:
         """Return the moment this routine's next occurrence is computed from, if known."""
-        raw = self.anchors.get(key)
-        if not raw:
-            return None
-        try:
-            parsed = datetime.fromisoformat(raw)
-        except ValueError:
-            return None
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        return _moment(self.anchors.get(key))
 
     def set_anchor(self, key: str, moment: datetime) -> None:
         """Record a new anchor, in UTC."""
         self.anchors[key] = moment.astimezone(UTC).isoformat()
 
+    def last_tick_at(self) -> datetime | None:
+        """Return when a scheduler last woke up here, or ``None`` if none ever has."""
+        return _moment(self.last_tick)
+
+    def record_tick(self, moment: datetime) -> None:
+        """Record that a scheduler woke up now, in UTC. Persisted by the next ``save()``."""
+        self.last_tick = moment.astimezone(UTC).isoformat()
+
     def save(self) -> None:
         """Write the state atomically, so a kill mid-write cannot corrupt it."""
-        payload = {
+        payload: dict[str, Any] = {
             "version": STATE_VERSION,
             "routines": {key: {"anchor": value} for key, value in sorted(self.anchors.items())},
+            "last_tick": self.last_tick,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         temporary.replace(self.path)
+
+
+def scheduler_liveness(state: SchedulerState, now: datetime | None = None) -> dict[str, Any]:
+    """Say whether anything is still ticking this state file. The API and doctor share it.
+
+    Three answers, and the third is the one worth having a shape for: ``alive`` is ``True``
+    when the heartbeat is fresher than :data:`STALE_TICK_AFTER_S`, ``False`` when it is
+    older — a daemon that died is not the same as one that never existed — and ``None``
+    when nothing has ever ticked, which is what a fresh install honestly reports.
+    """
+    last = state.last_tick_at()
+    moment = now or datetime.now(UTC)
+    return {
+        "last_tick": last.isoformat() if last is not None else None,
+        "stale_after_s": STALE_TICK_AFTER_S,
+        "alive": None if last is None else (moment - last).total_seconds() <= STALE_TICK_AFTER_S,
+    }
 
 
 def default_state_path(env: dict[str, str] | None = None) -> Path:
@@ -1059,6 +1113,7 @@ class Scheduler:
             due = self.due(moment)
             for item in due:
                 self.state.set_anchor(item.key, moment)
+            self.state.record_tick(moment)
             self._save_state()
             reports = [self.fire(item, now=moment) for item in due]
         self._dispatch(moment)
@@ -1102,6 +1157,9 @@ class Scheduler:
                 due = self.due(moment)
                 for item in due:
                     self.state.set_anchor(item.key, moment)
+                # Every iteration, including the ones where nothing is due: an idle daemon
+                # is still a live one, and this stamp is the only thing that says so.
+                self.state.record_tick(moment)
                 self._save_state()
                 futures = [pool.submit(self.fire, item, now=moment) for item in due]
                 self._dispatch(moment)

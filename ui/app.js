@@ -340,6 +340,67 @@ function tickClock(node) {
 
 setInterval(() => document.querySelectorAll("time[data-clock]").forEach(tickClock), 1000);
 
+/* -- the scheduler's heartbeat -------------------------------------------------------- */
+
+/**
+ * Read whether a scheduler is up. The console never infers this: `GET /routines` carries
+ * steward's own `{last_tick, stale_after_s, alive}`, and `alive: null` — nothing has ever
+ * ticked — is a third answer, not a missing one. A read that fails is `null` here, which
+ * every caller below renders as "unknown" rather than as bad news.
+ */
+async function schedulerLiveness() {
+  try {
+    return (await call("routines")).scheduler || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The badge, so a page of next-fire promises says up front whether anything keeps them. */
+function schedulerBadge(scheduler) {
+  if (!scheduler) return badge("scheduler unknown", "");
+  if (scheduler.alive === null) return badge("scheduler has never ticked", "fail");
+  if (!scheduler.alive) return badge("scheduler not up", "fail");
+  return badge("scheduler up", "live");
+}
+
+/** The badge's fine print: when the last tick was, and what it means for what is listed. */
+function schedulerNote(scheduler) {
+  if (!scheduler) {
+    return frag(" — this steward reports no heartbeat, so nothing here says whether the " +
+      "next fires below will happen.");
+  }
+  if (scheduler.alive === null) {
+    return frag(" — nothing has ever ticked steward's state file, so every next fire " +
+      "below is a promise with nobody to keep it.");
+  }
+  if (!scheduler.alive) {
+    return frag(" — last tick ", clock(scheduler.last_tick, "ago"), ", older than ",
+      span(0, scheduler.stale_after_s * 1000),
+      ": nothing below fires until steward scheduler run is up again.");
+  }
+  return frag(" — last tick ", clock(scheduler.last_tick, "ago"),
+    ", so what is listed below really does fire.");
+}
+
+/** The same fact as a sentence, for a pending action that steward has gone quiet on. */
+function schedulerBlame(scheduler) {
+  if (!scheduler) {
+    return "It is still queued, or whatever would run it is not up — steward's heartbeat " +
+      "could not be read.";
+  }
+  if (scheduler.alive === null) {
+    return "No scheduler has ever ticked steward's state file, so a scheduled run has " +
+      "nothing to fire it.";
+  }
+  if (!scheduler.alive) {
+    return `No scheduler has ticked since ${stamp(scheduler.last_tick)}, so a scheduled ` +
+      "run has nothing to fire it.";
+  }
+  return `A scheduler ticked at ${stamp(scheduler.last_tick)}, so it is queued or still ` +
+    "running rather than unattended.";
+}
+
 /* ------------------------------------------------------------------------------------
  * the pending ledger
  *
@@ -400,9 +461,11 @@ function ticket({ what, requestId, why, confirm, refused }) {
     }
     if (verdict) { settle(verdict); return; }
     if (tries >= POLL_LIMIT) {
-      reason.textContent =
-        "accepted, and steward has recorded no outcome in three minutes. It is still " +
-        "queued, or the scheduler that would run it is not up.";
+      // Three minutes of silence used to be explained with a guess. Ask steward instead:
+      // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
+      // are very different reasons for the same silence.
+      reason.textContent = "accepted, and steward has recorded no outcome in three " +
+        "minutes. " + schedulerBlame(await schedulerLiveness());
       return;
     }
     setTimeout(poll, POLL_MS);
@@ -1251,14 +1314,17 @@ async function viewRoutines() {
   const data = await call("routines");
   const routines = data.routines || [];
 
+  const scheduler = data.scheduler || null;
+
   const out = frag(
     head("Routines",
-      "Every routine every valid resident declares, fleet-wide. ",
-      el("strong", {}, "Nothing here fires unless steward's scheduler is up"),
-      " — an enabled routine is a declaration, not a heartbeat. The anchor is the moment the " +
-      "next occurrence is computed from: the last fire, or when steward first saw the routine. " +
-      "A retired resident's routines are still listed and never fire: they are what used to " +
-      "run here, which is a question a ledger should be able to answer."),
+      "Every routine every valid resident declares, fleet-wide. An enabled routine is a " +
+      "declaration, not a heartbeat — so the heartbeat is here too: ",
+      schedulerBadge(scheduler), schedulerNote(scheduler),
+      " The anchor is the moment the next occurrence is computed from: the last fire, or " +
+      "when steward first saw the routine. A retired resident's routines are still listed " +
+      "and never fire: they are what used to run here, which is a question a ledger should " +
+      "be able to answer."),
     (data.errors || []).map((line) =>
       el("div", { class: "problem" },
         el("div", { class: "code" }, "manifest does not validate"),
