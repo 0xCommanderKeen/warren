@@ -284,6 +284,7 @@ def test_a_grant_the_library_does_not_have_fails_the_task_before_it_runs(
     assert posted.task_id == report.task.task_id
 
 
+@pytest.mark.usefixtures("empty_path")
 def test_preflight_names_the_grant_before_a_task_is_ever_claimed(
     write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
 ) -> None:
@@ -293,6 +294,7 @@ def test_preflight_names_the_grant_before_a_task_is_ever_claimed(
     look at: this is the only pre-flight a board-only claimant gets.
     """
     data = board_manifest()
+    data["runner"] = {"kind": "mock"}
     data["skills"] = ["surgery"]
     data["routines"] = []
     resident = load_manifest(write_resident(data))
@@ -380,7 +382,7 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     record = approvals.raise_request(
         store, sink, manifest=resident.manifest, request=parsed, now=NOW
     )
-    store.decide(record.request_id, "approve", decided_by="api")
+    store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
     dispatcher = b.Dispatcher(
         residents=[resident],

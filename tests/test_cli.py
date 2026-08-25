@@ -36,7 +36,7 @@ def test_validate_defaults_to_the_residents_tree(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["validate"])
     assert result.exit_code == 0, result.output
-    assert "2 valid resident(s)" in result.output
+    assert "3 valid resident(s)" in result.output
 
 
 def test_validate_accepts_explicit_paths(runner: CliRunner, write_resident: ResidentWriter) -> None:

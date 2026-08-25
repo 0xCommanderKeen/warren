@@ -9,7 +9,11 @@ from steward.skills import default_skills, effective_names, load_library, missin
 def test_the_residents_tree_validates() -> None:
     result = m.validate_tree(RESIDENTS_DIR)
     assert result.ok, "\n".join(d.render() for d in result.diagnostics)
-    assert {resident.id for resident in result.residents} == {"life-agent", "burrow-builder"}
+    assert {resident.id for resident in result.residents} == {
+        "life-agent",
+        "burrow-builder",
+        "pip",
+    }
 
 
 def test_hob_is_the_life_agent() -> None:
