@@ -46,6 +46,7 @@ not a manual.
 """
 
 import re
+import unicodedata
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -131,6 +132,22 @@ _RULE = "=" * 72
 #: a machine-read region that was never the session's (steward #62) — so it is broken.
 _RULE_RUN = re.compile(r"={3,}")
 
+#: The other codepoints that draw a long horizontal line, so a rule forged out of them
+#: reads exactly like steward's own 72-long ``=`` delimiter (steward #63). The
+#: compatibility forms that merely *look* like ``=`` — the fullwidth (U+FF1D) and small
+#: (U+FE66) equals signs — are *not* listed here, because :func:`_neutralize` NFKC-
+#: normalizes first, which folds them into a plain ``=`` so they land in the ASCII run
+#: above. What remains is the set NFKC leaves alone: box-drawing horizontals and the long
+#: typographic bars. A single one is ordinary prose (an em dash, a table edge), so — like
+#: the ``=`` rule — only a *run* of three or more is collapsed.
+_RULE_CHARS = (
+    "─━┄┅┈┉╌╍"  # box-drawing light/heavy/dashed
+    "═"  # box-drawing double horizontal
+    "―"  # horizontal bar
+    "⸺⸻"  # two- and three-em dash
+)
+_UNICODE_RULE_RUN = re.compile(rf"[{re.escape(_RULE_CHARS)}]{{3,}}")
+
 #: Fenced code, inline code, and Markdown blockquotes: the shapes a session uses to *show*
 #: a control block rather than ask steward to act on it. Removed before harvesting.
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
@@ -139,8 +156,20 @@ _BLOCKQUOTE = re.compile(r"(?m)^[ \t]*>.*$")
 
 
 def _neutralize(text: str) -> str:
-    """Break anything in injected text that could forge steward's own prompt structure."""
-    return _RULE_RUN.sub("=", text)
+    """Break anything in injected text that could forge steward's own prompt structure.
+
+    NFKC-normalized *first*, then collapsed. Normalization folds the compatibility forms
+    that render like ``=`` — the fullwidth (U+FF1D) and small (U+FE66) equals signs — down
+    to a plain ``=``, so a rule the ASCII pass alone would miss (steward #63: a 72-long
+    fullwidth-equals run forging an AUTHORITATIVE CHARTER header that outranks the real
+    charter) lands in the ``={3,}`` run and is broken with everything else. A second pass
+    collapses runs of the box-drawing and long-bar codepoints normalization leaves alone.
+    Only *runs* of three or more are touched: a single em dash or a couple of ``=`` signs
+    is ordinary prose and survives byte-for-byte.
+    """
+    normalized = unicodedata.normalize("NFKC", text)
+    collapsed = _RULE_RUN.sub("=", normalized)
+    return _UNICODE_RULE_RUN.sub("=", collapsed)
 
 
 def strip_uncertain(text: str) -> str:

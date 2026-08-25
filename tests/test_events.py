@@ -131,6 +131,52 @@ def test_a_needs_human_detail_that_fits_is_kept_but_each_field_is_capped() -> No
     assert detail["reason"].endswith("…")
 
 
+def test_a_needs_human_knock_has_its_secrets_redacted_before_it_leaves() -> None:
+    """A secret a session buries in a knock's message or detail is scrubbed, not egressed (#65)."""
+    event = ev.needs_human_event(
+        message="my key is sk-ant-abcdef0123456789ghij and it broke",
+        request_id="r1",
+        action="debug",
+        agent_id="claude-code:life-agent",
+        project="household",
+        detail={
+            "env": "BURROW_TOKEN=supersecretvalue1234567890",
+            "pem": "-----BEGIN PRIVATE KEY-----\nMIIBjunk\n-----END PRIVATE KEY-----",
+            "jwt": "eyJhbGciOiJIUzI1Niabc.eyJzdWIiOiIxMjM0NQ.SflKxwRJSMeKKF2QT4",
+            "url": "postgres://user:hunter2secret@db.internal/app",
+            "nested": {"deeper": ["ok", "sk-ant-ZZZZZZZZZZZZZZZZ1234"]},
+            "runs": 3,  # a non-string fact steward built passes through untouched
+        },
+    )
+    payload = event.payload
+    assert "sk-ant-" not in payload["message"]
+    assert "[redacted:secret]" in payload["message"]
+    # The rest of the knock is intact — a human still reads the question.
+    assert "it broke" in payload["message"]
+    encoded = json.dumps(payload["detail"])
+    for leaked in ("supersecretvalue", "MIIBjunk", "SflKxwRJSMeKKF2QT4", "hunter2secret", "ZZZZ"):
+        assert leaked not in encoded
+    assert "BURROW_TOKEN=[redacted:secret]" in payload["detail"]["env"]
+    assert payload["detail"]["runs"] == 3
+    assert payload["detail"]["nested"]["deeper"][0] == "ok"
+
+
+def test_a_clean_needs_human_knock_is_byte_for_byte_unchanged() -> None:
+    """Redaction never touches a knock that carries no secret (#65)."""
+    message = "Testy wants to send email"
+    detail = {"to": "anna@example.com", "subject": "Re: Thursday", "runs": 2}
+    event = ev.needs_human_event(
+        message=message,
+        request_id="r1",
+        action="send_email",
+        agent_id="claude-code:life-agent",
+        project="household",
+        detail=detail,
+    )
+    assert event.payload["message"] == message
+    assert event.payload["detail"] == detail
+
+
 def test_needs_human_resolved_is_emitted_as_the_villager_who_knocked() -> None:
     event = ev.needs_human_resolved_event(
         request_id="r1",

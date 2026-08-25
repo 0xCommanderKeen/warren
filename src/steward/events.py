@@ -39,6 +39,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from steward.manifest import redact_secrets
+
 __all__ = [
     "API_AGENT_ID",
     "API_PROJECT",
@@ -627,20 +629,49 @@ def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
     Both ``message`` and ``detail`` are bounded here rather than trusted from the caller:
     a knock is a notice, and a session that prints a 200KB escalation must not be able to
     turn that into a 200KB event POSTed to burrow.
+
+    They are also *scrubbed* here (steward #65): a secret a session writes into its
+    message or a detail value — an ``sk-…`` key, a ``BURROW_TOKEN=…``, a PEM/JWT/URL
+    password — is redacted before it can leave the village, and redacted *before* it is
+    bounded so a secret cut in half by the length cap can never surface a live prefix.
     """
     return Event(
         type=NEEDS_HUMAN,
         agent_id=agent_id,
         project=project,
         payload={
-            "message": truncate_error(message),
+            "message": truncate_error(redact_secrets(message)),
             "request_id": request_id,
             "action": action,
-            "detail": bounded_detail(detail),
+            "detail": bounded_detail(_redact_detail(detail)),
             "options": list(options),
             "expires_at": expires_at,
         },
     )
+
+
+def _redact_detail(detail: Mapping[str, Any] | None) -> dict[str, object] | None:
+    """Redact every string a knock's ``detail`` carries, at any depth, secrets removed.
+
+    Recurses into nested maps and lists so a secret a session buries under a key or inside
+    a list is scrubbed as surely as one at the top level; non-string leaves (the numbers a
+    budget pause reports, the ISO instants of a window) are facts steward built and pass
+    through untouched.
+    """
+    if detail is None:
+        return None
+    return {str(key): _redact_node(value) for key, value in detail.items()}
+
+
+def _redact_node(value: object) -> object:
+    """Redact one node of a detail tree: a string, a nested map, a list, or a leaf."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, Mapping):
+        return {str(key): _redact_node(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_node(item) for item in value]
+    return value
 
 
 def needs_human_resolved_event(  # noqa: PLR0913 — the payload the protocol documents

@@ -456,6 +456,132 @@ def test_a_second_caller_in_the_same_instant_does_not_knock_twice(
 
 
 # --------------------------------------------------------------------------------------
+# the post-run kill-switch (steward #68)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_once_daily_over_cap_routine_pauses_after_night_one(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """Seven nights of a 10.00 run under a 5.00 cap → one run and a pause, not seven runs.
+
+    The pre-fire check alone never trips here: the first fire of each day reads an empty
+    window, so a once-daily run whose single cost exceeds the cap would spend forever. The
+    post-run check pauses the resident after night one, and the pause persists across the
+    date boundary until a person lifts it, so every later night is refused before it fires.
+    """
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+
+    fired = 0
+    for night in range(7):
+        moment = NOON + timedelta(days=night)
+        if guard.allow(manifest, moment) is not None:
+            continue  # refused before it fires — the kill-switch is engaged
+        guard.record(manifest, result=spent(cost=10.0), run_id=f"night-{night}", now=moment)
+        fired += 1
+
+    assert fired == 1
+    assert len(store.ledger(manifest.id)) == 1
+    assert store.budget_pause(manifest.id) is not None
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+def test_a_single_run_that_exceeds_the_cap_pauses_the_resident(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """A run whose own cost blows the whole cap can't be un-spent, but it does stop the next."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+
+    # Nothing refuses the very first fire — the window is empty when it is asked.
+    assert guard.allow(manifest, NOON) is None
+    guard.record(manifest, result=spent(cost=10.0), run_id="one-big-run", now=NOON)
+
+    assert store.budget_pause(manifest.id) is not None
+    refusal = guard.allow(manifest, NOON)
+    assert refusal is not None
+    assert refusal.startswith(bg.PAUSED_MESSAGE)
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+def test_recording_over_an_already_paused_resident_does_not_double_knock(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """The over-budget run finishes and is ledgered, but the door is only knocked on once."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+    guard.record(manifest, result=spent(cost=10.0), run_id="a", now=NOON)  # pauses + knocks
+    guard.record(manifest, result=spent(cost=10.0), run_id="b", now=NOON)  # already paused
+
+    assert len(store.ledger(manifest.id)) == 2
+    assert len(store.approvals()) == 1
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+def test_a_token_run_over_the_cap_pauses_after_it_is_recorded(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """The kill-switch watches the token cap too, not only the money one."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_tokens=100))
+    guard.record(manifest, result=spent(tokens=500), run_id="chatty", now=NOON)
+
+    refusal = guard.allow(manifest, NOON)
+    assert refusal is not None
+    assert "daily_tokens" in refusal
+
+
+def test_the_pre_fire_check_still_permits_intra_day_runs_under_the_cap(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """Under the cap the pre-fire check lets a resident keep going; it stops it at the cap."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+
+    fired = 0
+    for run in range(5):
+        if guard.allow(manifest, NOON) is not None:
+            break
+        guard.record(manifest, result=spent(cost=2.0), run_id=f"run-{run}", now=NOON)
+        fired += 1
+
+    # 2 + 2 + 2 = 6 crosses 5 on the third run, which the post-run check then pauses on.
+    assert fired == 3
+    assert guard.allow(manifest, NOON) is not None
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+def test_a_run_under_the_cap_records_without_pausing(store: Store, sink: ev.NullEmitter) -> None:
+    """A run that stays under the cap is ledgered and leaves the door unknocked."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+    guard.record(manifest, result=spent(cost=1.0), run_id="cheap", now=NOON)
+
+    assert store.budget_pause(manifest.id) is None
+    assert guard.allow(manifest, NOON) is None
+    assert [e for e in sink.events if e.type == ev.NEEDS_HUMAN] == []
+
+
+def test_a_carry_on_allowance_survives_a_later_over_cap_run(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """A person who said 'carry on' for today is not re-paused by the next over-cap run."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=5.0))
+    guard.record(manifest, result=spent(cost=10.0), run_id="a", now=NOON)  # pauses
+    guard.resume(manifest.id, decided_by="human")  # grants the allowance for the window
+
+    # A further over-cap run inside the same window finishes and is ledgered, and the
+    # post-run check leaves the resident running because a person said so.
+    guard.record(manifest, result=spent(cost=10.0), run_id="b", now=NOON)
+
+    assert store.budget_pause(manifest.id) is None
+    assert guard.allow(manifest, NOON) is None
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+# --------------------------------------------------------------------------------------
 # max_run_seconds
 # --------------------------------------------------------------------------------------
 

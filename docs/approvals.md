@@ -229,3 +229,12 @@ the one who knocked.
 The message is **derived** from the resident's name and the action (`"<name> wants to
 <action>"`), never authored by the session, so it can never disagree with the action a
 decision is recorded against.
+
+**A knock is scrubbed before it leaves the village.** The `message` and every value in
+`detail` — at any depth — are bounded (a knock is a notice, not a transcript) *and*
+scanned for secrets before the event is emitted. A secret a session places in a detail
+field or an unstructured note — an `sk-…` key, a `BURROW_TOKEN=…` assignment, a PEM
+private key, a JWT, a password in a URL — is replaced with `[redacted:secret]`, using the
+same detectors that refuse a credential in a manifest. Only the secret is removed; the
+rest of the knock is intact, so a person still reads the question. Redaction runs *before*
+the length bound, so a secret cut in half by the cap can never surface a live prefix.

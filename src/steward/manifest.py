@@ -74,6 +74,7 @@ __all__ = [
     "extract_voice",
     "load_manifest",
     "manifest_json_schema",
+    "redact_secrets",
     "retired_complaint",
     "split_frontmatter",
     "validate_manifest",
@@ -266,13 +267,18 @@ class ManifestError(Exception):
 # credential rejection
 # --------------------------------------------------------------------------------------
 
-CREDENTIAL_KEY_PATTERN = re.compile(
-    r"(?:^|[_.\- ])(?:"
+#: The vocabulary a credential-shaped name is built from — one source, so the validator
+#: that rejects such a field in a manifest and the redactor that scrubs one out of a knock
+#: (:func:`redact_secrets`) can never disagree about what the word "token" means.
+_CREDENTIAL_WORDS = (
     r"token|tokens|secret|secrets|password|passwd|passphrase|"
     r"api[_-]?key|apikey|access[_-]?key|private[_-]?key|signing[_-]?key|session[_-]?key|"
     r"client[_-]?secret|credential|credentials|bearer|authorization|cookie|"
     r"refresh[_-]?token|access[_-]?token|auth[_-]?token"
-    r")(?:$|[_.\- ])",
+)
+
+CREDENTIAL_KEY_PATTERN = re.compile(
+    rf"(?:^|[_.\- ])(?:{_CREDENTIAL_WORDS})(?:$|[_.\- ])",
     re.IGNORECASE,
 )
 
@@ -411,6 +417,52 @@ def scan_text_for_secrets(text: str, source: Path, field_path: str) -> list[Diag
                 )
             )
     return diagnostics
+
+
+#: What a scrubbed secret leaves behind. A marker, not a deletion: a human reading the
+#: knock still sees that a secret *was* there and that steward removed it, rather than a
+#: gap that reads like the session simply said nothing.
+SECRET_REDACTION = "[redacted:secret]"  # noqa: S105 — a redaction marker, not a credential
+
+#: A credential-shaped assignment in free-form text — ``BURROW_TOKEN=…``, ``api_key: …`` —
+#: built from the same vocabulary the manifest validator rejects (:data:`_CREDENTIAL_WORDS`)
+#: so a secret a session writes into a ``needs_human`` detail is scrubbed by the same
+#: definition of "credential" that keeps one out of a manifest.
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    rf"(?P<key>[A-Za-z0-9]+(?:[_.\- ][A-Za-z0-9]+)*?[_.\- ]?(?:{_CREDENTIAL_WORDS}))"
+    r"(?P<sep>\s*[:=]\s*)(?P<value>\S+)",
+    re.IGNORECASE,
+)
+
+#: A whole PEM private key, header to footer. :data:`SECRET_VALUE_PATTERNS` matches only
+#: the ``BEGIN`` marker — enough to *detect* one in a manifest — but redaction has to take
+#: the key material with it, not leave the base64 body behind, so egress gets its own
+#: block-spanning pattern.
+_PEM_BLOCK = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+
+def redact_secrets(text: str) -> str:
+    """Return ``text`` with any inline secret replaced by :data:`SECRET_REDACTION`.
+
+    The egress twin of the manifest scanners (steward #65): where
+    :func:`scan_for_credentials` and :func:`scan_text_for_secrets` *refuse* a secret on
+    the way into the repo, this *removes* one on the way out to the village — a session
+    that puts an ``sk-…`` key, a PEM block, a JWT, a URL password, or a ``TOKEN=…``
+    assignment into a ``needs_human`` message or detail must not have it POSTed to burrow
+    verbatim. It reuses the very patterns those scanners use — the value shapes in
+    :data:`SECRET_VALUE_PATTERNS` and the credential vocabulary in
+    :data:`_CREDENTIAL_ASSIGNMENT` — so "what counts as a secret" is defined once. Only the
+    secret is cut; the words around it survive, so the knock still reads as a question.
+    """
+    text = _PEM_BLOCK.sub(SECRET_REDACTION, text)
+    for pattern, _ in SECRET_VALUE_PATTERNS:
+        text = pattern.sub(SECRET_REDACTION, text)
+    return _CREDENTIAL_ASSIGNMENT.sub(
+        lambda match: f"{match.group('key')}{match.group('sep')}{SECRET_REDACTION}", text
+    )
 
 
 # --------------------------------------------------------------------------------------
