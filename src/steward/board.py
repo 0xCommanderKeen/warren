@@ -79,7 +79,6 @@ from steward.sessions import (
     RunnerFactory,
     SessionHarvest,
     TaskWake,
-    Wake,
     workdir_refusal,
 )
 from steward.skills import (
@@ -374,7 +373,6 @@ class Dispatcher:
             library=self.library,
             guard=self.guard,
             hooks=self,
-            completion=self,
             residents=self.residents,
         )
 
@@ -671,7 +669,6 @@ class Dispatcher:
                 delegated_by=job.delegated_by,
                 route=job.route or "delegation",
                 parent_task_id=job.parent_task_id,
-                registry_run_id=run_id,
             )
         else:
             wake = TaskWake(
@@ -682,7 +679,6 @@ class Dispatcher:
                 timeout_s=declared_s,
                 origin=job.origin or f"task:{job.task_id}",
                 parent_task_id=job.parent_task_id,
-                registry_run_id=run_id,
             )
         # The deadline this session actually gets, read once: the run registry is judged
         # against it, and the runner is given it.
@@ -692,13 +688,11 @@ class Dispatcher:
         session = self.sessions.run(admitted, wake)
         result = session.require_result()
 
-        # The session is over the moment the runner returns, so the row is answered here
-        # rather than after the bookkeeping below. The other order left a window — die
-        # while ledgering, harvesting or recording, and the row of a session that plainly
-        # reported back stays open, and the watchdog calls a healthy resident dead. The
-        # scheduler closes its row the other way round on purpose: nobody but the watchdog
-        # would ever emit a routine's missing ``routine_failed``, while a task whose close
-        # never got written is the lease sweep's to reopen and to mourn.
+        # The shared lifecycle contains and returns from every ordinary accounting or
+        # harvest failure, so reaching here means this board-owned registry row can close
+        # before the board records its task-specific conclusion. A process that vanishes
+        # inside the lifecycle deliberately leaves the row open for the watchdog.
+        self._close_run(run_id, job.task_id, session.completed_at or moment)
         return self._record(
             resident,
             job,
@@ -755,12 +749,6 @@ class Dispatcher:
                 run_id,
                 job.task_id,
             )
-
-    def runner_returned(self, wake: Wake, completed_at: datetime) -> None:
-        """Close a board-owned registry row at the lifecycle's runner-return boundary."""
-        if not isinstance(wake, (DelegatedWake, TaskWake)) or wake.registry_run_id is None:
-            return
-        self._close_run(wake.registry_run_id, wake.task_id, completed_at)
 
     def _close_run(self, run_id: str, task_id: str, moment: datetime) -> None:
         """Answer this session's registry row. Never raises, and never emits: ``_record`` does."""

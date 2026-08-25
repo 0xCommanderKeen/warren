@@ -14,7 +14,7 @@ from steward import board as b
 from steward import events as ev
 from steward import sessions as ss
 from steward import watchdog as w
-from steward.manifest import Resident, load_manifest, validate_path
+from steward.manifest import Resident, ResidentManifest, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
 from steward.skills import SkillLibrary, library_for
@@ -1035,6 +1035,40 @@ def test_a_claimed_task_opens_and_closes_a_registry_row(
 
     assert len(run.reports) == 1
     assert store.open_runs() == [], "the task reported back, so its row is answered"
+
+
+def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Shared bookkeeping is contained before the board closes its own registry row."""
+
+    class BrokenGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            raise OSError("ledger unavailable")
+
+    store.post_job(title="Read the mail")
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(board_manifest()))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(),
+        guard=BrokenGuard(),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.done
+    assert store.open_runs() == []
 
 
 def test_a_task_whose_session_vanishes_leaves_its_row_open(

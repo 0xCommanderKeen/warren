@@ -14,10 +14,8 @@ from steward.sessions import (
     Refusal,
     ResidentSessions,
     RoutineWake,
-    SessionCompletion,
     SessionHarvest,
     TaskWake,
-    Wake,
 )
 from steward.skills import Skill, SkillLibrary
 
@@ -330,7 +328,7 @@ def test_timeout_is_resolved_once_before_the_caller_opens_its_registry(
     assert guard.timeout_calls == 1
 
 
-def test_runner_return_is_reported_before_fallible_accounting_and_harvest(
+def test_accounting_and_harvest_failures_do_not_erase_the_run_result(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     data = valid_manifest()
@@ -357,17 +355,11 @@ def test_runner_return_is_reported_before_fallible_accounting_and_harvest(
             order.append("harvest")
             return super().harvest_session(manifest, output, parent_task_id=parent_task_id, now=now)
 
-    class OrderedCompletion(SessionCompletion):
-        def runner_returned(self, wake: Wake, completed_at: datetime) -> None:
-            del wake, completed_at
-            order.append("returned")
-
     sessions = ResidentSessions(
         workdir=tmp_path,
         runner_factory=lambda _spec: runner,
         guard=BrokenGuard(),
         hooks=OrderedHooks(),
-        completion=OrderedCompletion(),
     )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
@@ -378,42 +370,40 @@ def test_runner_return_is_reported_before_fallible_accounting_and_harvest(
     )
 
     assert result.require_result().ok
-    assert order == ["returned", "account", "harvest"]
+    assert order == ["account", "harvest"]
 
 
-def test_runner_exceptions_become_failed_sessions_after_reporting_return(
+def test_board_runner_exceptions_preserve_their_zero_duration_result(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     data = valid_manifest()
     data["runner"] = {"kind": "mock"}
     resident = load_manifest(write_resident(data))
-    returned: list[datetime] = []
-
-    class RecordingCompletion(SessionCompletion):
-        def runner_returned(self, wake: Wake, completed_at: datetime) -> None:
-            del wake
-            returned.append(completed_at)
 
     def broken_factory(_spec) -> Runner:
         raise RuntimeError("runner construction failed")
 
-    sessions = ResidentSessions(
-        workdir=tmp_path,
-        runner_factory=broken_factory,
-        completion=RecordingCompletion(),
-    )
+    sessions = ResidentSessions(workdir=tmp_path, runner_factory=broken_factory)
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
 
     result = sessions.run(
         admission,
-        RoutineWake(resident.manifest.routines[0], "run-1", "schedule"),
+        TaskWake(
+            task_id="task-1",
+            title="A task",
+            detail="Do it.",
+            required_skills=(),
+            timeout_s=900,
+            origin="task:task-1",
+        ),
     )
 
     run_result = result.require_result()
     assert run_result.outcome is Outcome.FAILED
     assert "runner construction failed" in (run_result.error or "")
-    assert returned == [result.completed_at]
+    assert run_result.duration_s == 0
+    assert result.completed_at == NOW
 
 
 def test_a_delegated_letter_and_a_rehearsal_use_the_same_seam_without_dry_run_writes(

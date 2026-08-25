@@ -39,7 +39,6 @@ __all__ = [
     "RoutineWake",
     "RunGuard",
     "RunnerFactory",
-    "SessionCompletion",
     "SessionHarvest",
     "SessionHooks",
     "SessionResult",
@@ -183,6 +182,10 @@ class RoutineWake:
             "STEWARD_RUN_ID": self.run_id,
         }
 
+    def pre_run_failure_duration(self, elapsed_s: float) -> float:
+        """Preserve routine failures' elapsed duration accounting."""
+        return elapsed_s
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _BoardWake:
@@ -194,7 +197,6 @@ class _BoardWake:
     timeout_s: int
     origin: str
     parent_task_id: str | None = None
-    registry_run_id: str | None = None
 
     @property
     def run_id(self) -> str:
@@ -227,6 +229,11 @@ class _BoardWake:
             env["STEWARD_PARENT_TASK_ID"] = self.parent_task_id
         return env
 
+    def pre_run_failure_duration(self, elapsed_s: float) -> float:
+        """Preserve board failures' historical zero-duration result."""
+        del elapsed_s
+        return 0.0
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TaskWake(_BoardWake):
@@ -254,14 +261,6 @@ class DelegatedWake(_BoardWake):
 
 
 type Wake = DelegatedWake | RoutineWake | TaskWake
-
-
-class SessionCompletion(Protocol):
-    """A caller-owned registry notified internally when the runner has returned."""
-
-    def runner_returned(self, wake: Wake, completed_at: datetime) -> None:
-        """Record that a launched runner is no longer outstanding."""
-        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,7 +317,6 @@ class ResidentSessions:
         library: SkillLibrary | None = None,
         guard: RunGuard | None = None,
         hooks: SessionHooks | LegacySessionHooks | None = None,
-        completion: SessionCompletion | None = None,
         residents: Sequence[Resident] = (),
     ) -> None:
         """Assemble the lifecycle over its stable collaborators."""
@@ -327,7 +325,6 @@ class ResidentSessions:
         self.library = library if library is not None else SkillLibrary()
         self.guard = guard
         self.hooks = hooks
-        self.completion = completion
         self.residents = tuple(residents)
 
     def admit(
@@ -417,20 +414,17 @@ class ResidentSessions:
         except SkillError as exc:
             log.error("%s: %s", resident.id, exc)  # noqa: TRY400
             result = RunResult(
-                outcome=Outcome.FAILED, duration_s=time.monotonic() - started, error=str(exc)
+                outcome=Outcome.FAILED,
+                duration_s=wake.pre_run_failure_duration(time.monotonic() - started),
+                error=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - a broken runner is a failed session
             result = RunResult(
                 outcome=Outcome.FAILED,
-                duration_s=time.monotonic() - started,
+                duration_s=wake.pre_run_failure_duration(time.monotonic() - started),
                 error=f"{type(exc).__name__}: {exc}",
             )
         completed_at = admission.admitted_at + timedelta(seconds=result.duration_s)
-        if self.completion is not None:
-            try:
-                self.completion.runner_returned(wake, completed_at)
-            except Exception as exc:  # noqa: BLE001 - registry failure cannot reopen the runner
-                log.warning("%s: could not record that this run returned: %s", resident.id, exc)
         self._account(resident, wake, result, completed_at)
         harvested = self._harvest(
             resident,
