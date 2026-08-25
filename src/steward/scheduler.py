@@ -1044,7 +1044,7 @@ class Scheduler:
         if self.registry is None:
             return
         try:
-            self.registry.open_run(
+            opened = self.registry.open_run(
                 run_id=run_id,
                 kind="routine",
                 agent_id=item.agent_id,
@@ -1055,6 +1055,13 @@ class Scheduler:
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine
             log.warning("%s: could not record that this run started: %s", item.key, exc)
+            return
+        if not opened:  # pragma: no cover — a fresh id per fire cannot collide
+            # An ignored open means the watchdog cannot see this session at all, and a
+            # run nobody is watching must not look like a run that is fine.
+            log.warning(
+                "%s: run %s was already recorded, so it is not being watched", item.key, run_id
+            )
 
     def _close_run(self, run_id: str, moment: datetime) -> None:
         """Answer this run's registry row. Never raises, and never emits: the events did."""

@@ -82,6 +82,21 @@ def finished(run_id: str, *, ts: datetime, agent: str = "claude-code:test-agent"
     )
 
 
+def task_closed(task_id: str, *, ts: datetime, agent: str = "claude-code:test-agent") -> str:
+    """Render the closing event a board session writes. It names the task, not the run."""
+    return json.dumps(
+        {
+            "v": 0,
+            "ts": ev.utc_now_iso(ts),
+            "source": "steward",
+            "agent_id": agent,
+            "project": "test-agent",
+            "type": "task_done",
+            "payload": {"task_id": task_id, "title": "Read the mail", "claimant": agent},
+        }
+    )
+
+
 def write_log(path: Path, *lines: str) -> Path:
     """Write a fallback event log, exactly as steward's emitter appends to one."""
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -275,6 +290,60 @@ def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
     assert [run.run_id for run in report.buried] == ["task-1"]
     assert store.open_runs() == [], "the registry row is answered"
     assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
+
+
+def test_a_task_closing_event_in_the_log_answers_an_open_registry_row(
+    store: Store, tmp_path: Path
+) -> None:
+    """The same recovery routines get, for the events that name a task rather than a run.
+
+    Steward died between emitting ``task_done`` and answering the row — or the write that
+    should have answered it threw. The log says this task finished, so the session that
+    finished it is not a resident to report as down (steward #39).
+    """
+    store.open_run(
+        run_id="session-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", task_closed("task-1", ts=NOW - timedelta(hours=1)))
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_second_attempt_at_one_task_is_watched_like_the_first(
+    store: Store, tmp_path: Path
+) -> None:
+    """A row per session, not per task: a retry that vanishes is still found.
+
+    The board's ordinary flow is claim, die, expire the lease, re-claim. Keying the
+    registry on the task id meant the second attempt hit a row the first one had already
+    closed, the insert was dropped, and the retry ran unwatched — which is the exact
+    death this registry exists to catch.
+    """
+
+    def attempt(run_id: str, *, ago: timedelta) -> bool:
+        return store.open_run(
+            run_id=run_id,
+            kind="task",
+            agent_id="claude-code:test-agent",
+            project="test-agent",
+            ref="task-1",
+            timeout_s=900.0,
+            now=ev.utc_now_iso(NOW - ago),
+        )
+
+    attempt("session-1", ago=timedelta(hours=4))
+    store.close_run("session-1", now=ev.utc_now_iso(NOW - timedelta(hours=3)))
+    assert attempt("session-2", ago=timedelta(hours=2)), "the retry gets a row of its own"
+
+    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["session-2"]
 
 
 def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(

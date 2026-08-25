@@ -634,12 +634,15 @@ class OpenRun:
     than against the one its manifest declares.
     """
 
+    #: This session, and only this one. A routine fired twice and a task claimed twice
+    #: are two runs with two ids; what they have in common lives in ``ref``.
     run_id: str
     kind: str
     agent_id: str
     started_at: str
     project: str = ""
-    #: What the run was: a routine id, or the task id a board session claimed.
+    #: What the run was about: a routine id, or the task id a board session claimed.
+    #: Not unique — every attempt at one task carries the same ``ref``.
     ref: str = ""
     timeout_s: float = 0.0
     closed_at: str | None = None
@@ -1711,8 +1714,15 @@ class Store:
 
         Written where the opening event is emitted, so steward's own knowledge that a run
         exists does not depend on where that event ended up. Conditional on the primary
-        key like its neighbours: a run id is one run, and a second open of the same id is
-        a repeat rather than a second session.
+        key like its neighbours: a run id is one *session*, and a second open of the same
+        id is a repeat rather than a second session.
+
+        Which puts the burden on callers, and it is worth naming: whatever a session is
+        about — a routine, a task — the id has to be the session's own. The board learnt
+        this the hard way by keying rows on the task id, so a task claimed, dropped on a
+        dead lease and re-claimed opened a row the first attempt had already closed, the
+        insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
+        thing the session was about goes; several rows may share one.
         """
         with self._lock, self._conn:
             cursor = self._conn.execute(

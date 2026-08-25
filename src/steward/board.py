@@ -88,6 +88,7 @@ from steward.store import (
     ApprovalRecord,
     JobRecord,
     Store,
+    new_id,
 )
 
 __all__ = [
@@ -638,7 +639,11 @@ class Dispatcher:
         # The deadline this session actually gets, read once: the run registry is judged
         # against it, and the runner is given it.
         timeout_s = self._timeout_for(resident, declared_s)
-        self._open_run(resident, job, timeout_s, moment)
+        # This session's own id, and not the task's: a task claimed, dropped on a dead
+        # lease and claimed again is *two* sessions, and the registry has to be able to
+        # hold both of them open at once (steward #39).
+        run_id = new_id()
+        self._open_run(resident, job, run_id, timeout_s, moment)
 
         prompt = ""
         try:
@@ -666,6 +671,14 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 — a broken runner is a failed task, not a crash
             result = RunResult(outcome=Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
 
+        # The session is over the moment the runner returns, so the row is answered here
+        # rather than after the bookkeeping below. The other order left a window — die
+        # while ledgering, harvesting or recording, and the row of a session that plainly
+        # reported back stays open, and the watchdog calls a healthy resident dead. The
+        # scheduler closes its row the other way round on purpose: nobody but the watchdog
+        # would ever emit a routine's missing ``routine_failed``, while a task whose close
+        # never got written is the lease sweep's to reopen and to mourn.
+        self._close_run(run_id, job, moment + timedelta(seconds=result.duration_s))
         # Stamp the ledger at completion, so a task that crossed midnight bills the day it
         # finished in rather than an already-closed window (steward #68).
         self._ledger(resident, job, result, moment + timedelta(seconds=result.duration_s))
@@ -675,9 +688,7 @@ class Dispatcher:
         handed = self.hand_over(
             resident.manifest, result.output, parent_task_id=job.task_id, now=moment
         )
-        report = self._record(resident, job, result, moment, raised, handed=handed)
-        self._close_run(job, moment + timedelta(seconds=result.duration_s))
-        return report
+        return self._record(resident, job, result, moment, raised, handed=handed)
 
     # -- the budget seam ---------------------------------------------------------------
 
@@ -714,7 +725,7 @@ class Dispatcher:
     # -- the run registry ---------------------------------------------------------------
 
     def _open_run(
-        self, resident: Resident, job: JobRecord, timeout_s: int, moment: datetime
+        self, resident: Resident, job: JobRecord, run_id: str, timeout_s: int, moment: datetime
     ) -> None:
         """Write this session into steward's run registry. Never raises.
 
@@ -725,10 +736,17 @@ class Dispatcher:
         buried with the ``routine_failed`` its session never sent, while a task that
         vanished is the lease sweep's to reopen — but "steward started this and heard
         nothing back" is one fact with one home.
+
+        The row is keyed by ``run_id`` — this session — and carries the task as its
+        ``ref``. Keying it by the task instead used to lose every retry: the board's
+        ordinary flow is claim, die, expire the lease, re-claim, and a second row under
+        the id of a task the first attempt already closed is a conflict the registry
+        drops. The second session then vanished with nothing left open to find, which is
+        precisely the death this registry exists to catch.
         """
         try:
-            self.store.open_run(
-                run_id=job.task_id,
+            opened = self.store.open_run(
+                run_id=run_id,
                 kind=RUN_DELEGATED if job.delegated else RUN_TASK,
                 agent_id=resident.agent_id,
                 project=resident.project,
@@ -740,11 +758,21 @@ class Dispatcher:
             log.warning(
                 "%s: could not record that task %s started: %s", resident.id, job.task_id, exc
             )
+            return
+        if not opened:  # pragma: no cover — a fresh id per session cannot collide
+            # Said out loud rather than shrugged off: an ignored open means this session
+            # is invisible to the watchdog, and silence would make that look like health.
+            log.warning(
+                "%s: run %s was already recorded, so task %s is not being watched",
+                resident.id,
+                run_id,
+                job.task_id,
+            )
 
-    def _close_run(self, job: JobRecord, moment: datetime) -> None:
-        """Answer this session's registry row. Never raises, and never emits: ``_record`` did."""
+    def _close_run(self, run_id: str, job: JobRecord, moment: datetime) -> None:
+        """Answer this session's registry row. Never raises, and never emits: ``_record`` does."""
         try:
-            self.store.close_run(job.task_id, now=ev.utc_now_iso(moment))
+            self.store.close_run(run_id, now=ev.utc_now_iso(moment))
         except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
             log.warning("could not record that task %s reported back: %s", job.task_id, exc)
 

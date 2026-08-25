@@ -1003,9 +1003,38 @@ def test_a_task_whose_session_vanishes_leaves_its_row_open(
         make_dispatcher(runner=Vanishing()).dispatch(NOW)
 
     (open_run,) = store.open_runs()
-    assert (open_run.run_id, open_run.kind, open_run.ref) == (
-        posted.task_id,
-        "task",
-        posted.task_id,
-    )
+    assert (open_run.kind, open_run.ref) == ("task", posted.task_id)
+    assert open_run.run_id != posted.task_id, "the row names the session, not the task"
     assert open_run.timeout_s == pytest.approx(900.0)
+
+
+def test_a_re_claimed_task_opens_a_second_row_of_its_own(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """Claim, die, expire the lease, re-claim: two sessions, and both of them watched.
+
+    The registry used to key its rows on the task id, so the retry's ``open_run`` hit the
+    row the first attempt had already closed and was quietly dropped. The second session
+    then vanished with nothing open to find — the very death the registry exists for.
+    """
+
+    class Vanishing(Runner):
+        def run(self, request: RunRequest) -> RunResult:  # noqa: ARG002 — it never returns
+            raise KeyboardInterrupt("the machine went away")
+
+    posted = store.post_job(title="Read the mail")
+    with pytest.raises(KeyboardInterrupt):
+        make_dispatcher(runner=Vanishing()).dispatch(NOW)
+    (first,) = store.open_runs()
+
+    # The lease nobody is holding runs out, so the task goes back on the board — the
+    # sweep stamps real time, which is why the clock is pushed past it here — and the
+    # next dispatch claims it again. That second session vanishes too.
+    store.expire_leases(ev.utc_now_iso(datetime.now(UTC) + timedelta(days=1)))
+    with pytest.raises(KeyboardInterrupt):
+        make_dispatcher(runner=Vanishing()).dispatch(NOW + timedelta(hours=1))
+
+    ids = {run.run_id for run in store.open_runs()}
+    assert first.run_id in ids, "the first session is still unaccounted for"
+    assert len(ids) == 2, "and so is the one that claimed the task after it"
+    assert {run.ref for run in store.open_runs()} == {posted.task_id}

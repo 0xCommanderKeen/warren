@@ -60,7 +60,15 @@ from steward.budgets import BudgetGuard
 from steward.manifest import Resident, active_residents, validate_path
 from steward.runners import CommandRun, run_argv
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
-from steward.store import RUN_ROUTINE, ApprovalRecord, JobRecord, OpenRun, Store
+from steward.store import (
+    RUN_DELEGATED,
+    RUN_ROUTINE,
+    RUN_TASK,
+    ApprovalRecord,
+    JobRecord,
+    OpenRun,
+    Store,
+)
 
 __all__ = [
     "BACKOFF_S",
@@ -104,7 +112,15 @@ NEVER_REPORTED_BACK = "run never reported back"
 #: The action the crash-loop knock is raised under.
 RESTART_FAILED_ACTION = "resident_restart_failed"
 
+#: The events that answer a routine's bracket. They carry the ``run_id`` they close.
 _CLOSING_TYPES = frozenset({ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED})
+
+#: The events that answer a *task's* bracket. They carry the ``task_id`` they close and
+#: no run id at all, which is why the log has to be read for both names (steward #39).
+_TASK_CLOSING_TYPES = frozenset({ev.TASK_DONE, ev.TASK_FAILED})
+
+#: The run kinds a task-closing event can answer.
+_TASK_KINDS = frozenset({RUN_TASK, RUN_DELEGATED})
 
 
 # --------------------------------------------------------------------------------------
@@ -174,9 +190,13 @@ class ProcessSupervisor(Protocol):
 class StaleRun:
     """A run steward started and that nothing ever answered — past its own deadline."""
 
+    #: The session, not the thing it was doing: one routine fired twice, or one task
+    #: claimed twice, is two runs under two ids.
     run_id: str
     agent_id: str
     project: str
+    #: What the session was about — the routine it fired, or, for a ``task`` /
+    #: ``delegated`` run, the id of the task it claimed (:attr:`steward.store.OpenRun.ref`).
     routine: str
     started_at: datetime
     #: What kind of session this was, from :data:`steward.store.RUN_KINDS`. A run found
@@ -226,6 +246,10 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     nowhere. Where both know a run, the registry wins, because it knows the deadline the
     session was actually given.
 
+    A *closing* event in the log wins over both, for either kind of session: steward that
+    emitted a finish and then died before answering the row did hear back, and burying
+    that run would be inventing a death the log itself disproves.
+
     ``timeouts`` maps ``<agent_id>/<routine>`` to that routine's declared timeout, so each
     run is judged against its own deadline plus the grace window. A run steward has no
     manifest for gets ``default_timeout_s``, because "I do not know your timeout" must not
@@ -233,56 +257,89 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     against that instead: it is the deadline the session was actually given.
     """
     started = {run.run_id: run for run in _from_registry(registry)}
-    logged, closed = _from_log(path)
+    logged = _from_log(path)
     # The registry wins where both know a run; a closing event in the log wins over both,
     # because a run whose finish steward actually emitted did report back, however the
     # row it should have answered ended up.
-    started.update({run_id: run for run_id, run in logged.items() if run_id not in started})
+    for run_id, run in logged.started.items():
+        started.setdefault(run_id, run)
 
     deadlines = dict(timeouts or {})
     return [
         run
-        for run_id, run in started.items()
-        if run_id not in closed
+        for run in started.values()
+        if not logged.answers(run)
         and run.age_s(now) > _deadline_s(run, deadlines, default_timeout_s) + grace_s
     ]
 
 
-def _from_log(path: Path) -> tuple[dict[str, StaleRun], set[str]]:
-    """Return what the fallback log says started, and every run id it says closed.
+@dataclass(frozen=True, slots=True)
+class _LogScan:
+    """What the fallback log says started, and what it says has already reported back.
+
+    Two sets of answers rather than one, because the two kinds of session are named
+    differently by the events that close them: a routine's bracket is joined by
+    ``run_id``, while a task's ``task_done`` / ``task_failed`` names the *task*, which is
+    a registry row's ``ref`` and not its id. Matching only on ``run_id`` left every task
+    row unanswerable by this log — a completed task whose row was never closed stayed
+    "stale" for ever, and the watchdog reported a healthy resident as down over work the
+    same log plainly showed finished.
+    """
+
+    started: dict[str, StaleRun]
+    closed_runs: set[str]
+    closed_tasks: set[str]
+
+    def answers(self, run: StaleRun) -> bool:
+        """Say whether the log holds a closing event for this run."""
+        if run.run_id in self.closed_runs:
+            return True
+        return run.kind in _TASK_KINDS and run.routine in self.closed_tasks
+
+
+def _from_log(path: Path) -> _LogScan:
+    """Return what the fallback log says started, and what it says closed.
 
     A malformed line is skipped, not raised on: this file is append-only from several
     processes, and a half-written last line is an ordinary thing to find.
     """
-    started: dict[str, StaleRun] = {}
-    closed: set[str] = set()
+    scan = _LogScan(started={}, closed_runs=set(), closed_tasks=set())
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return started, closed
+        return scan
     for line in text.splitlines():
         event = _parse_line(line)
         if event is None:
             continue
         payload = event.get("payload")
         payload = payload if isinstance(payload, Mapping) else {}
-        run_id = payload.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
-            continue
         kind = event.get("type")
         if kind in _CLOSING_TYPES:
-            closed.add(run_id)
+            _add(scan.closed_runs, payload.get("run_id"))
             continue
+        if kind in _TASK_CLOSING_TYPES:
+            _add(scan.closed_tasks, payload.get("task_id"))
+            continue
+        if kind != ev.ROUTINE_STARTED:
+            continue
+        run_id = payload.get("run_id")
         moment = _parse_ts(event.get("ts"))
-        if kind == ev.ROUTINE_STARTED and moment is not None:
-            started[run_id] = StaleRun(
+        if moment is not None and isinstance(run_id, str) and run_id:
+            scan.started[run_id] = StaleRun(
                 run_id=run_id,
                 agent_id=str(event.get("agent_id") or ""),
                 project=str(event.get("project") or ""),
                 routine=str(payload.get("routine") or ""),
                 started_at=moment,
             )
-    return started, closed
+    return scan
+
+
+def _add(ids: set[str], value: object) -> None:
+    """Note one id an event named, ignoring an event that named nothing readable."""
+    if isinstance(value, str) and value:
+        ids.add(value)
 
 
 def _parse_line(line: str) -> Mapping[str, Any] | None:
