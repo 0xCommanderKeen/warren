@@ -22,7 +22,7 @@ from steward import delegation as dg
 from steward import events as ev
 from steward import prompt
 from steward.budgets import BudgetGuard
-from steward.manifest import Resident, load_manifest, validate_tree
+from steward.manifest import Resident, ResidentManifest, load_manifest, validate_tree
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.skills import library_for
 from steward.store import ORIGIN_UNATTRIBUTED, JobRecord, Store
@@ -1233,11 +1233,12 @@ def test_the_rollup_honours_the_window_it_is_asked_about(
 def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
     fleet: Fleet, store: Store, sink: ev.NullEmitter, guard: BudgetGuard, tmp_path: Path
 ) -> None:
-    """The inbox and the board each ask the budget, and one exhausted cap is one knock.
+    """The budget is asked once per resident per dispatch, and one exhausted cap is one knock.
 
-    The dedupe is the conditional insert in the store, not an order the two loops have to
-    remember to keep. A household woken by two notifications for one budget would learn to
-    ignore both.
+    The dedupe is the single refusal pass the dispatch makes ahead of every work source
+    (steward #44), not two loops remembering to agree — the store's conditional insert
+    still backs it up across processes, but nothing in one dispatch leans on it any more.
+    A household woken by two notifications for one budget would learn to ignore both.
     """
     receiver = budgeted_receiver(daily_cost_usd=1.0)
     receiver["routes"] = [
@@ -1250,8 +1251,8 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
     dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
     store.post_job(title="A notice for anybody")
     # Over budget already, but not yet paused: seed the spend onto the ledger directly so
-    # the dedupe under test is the two dispatch loops sharing one pause, not a pause the
-    # setup handed them.
+    # the ask under test is this dispatch noticing and knocking, not a pause the setup
+    # handed it.
     store.record_run(
         resident=residents[1].manifest.id,
         agent_id=residents[1].manifest.agent_id or "",
@@ -1261,9 +1262,19 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
         now=ev.utc_now_iso(NOW),
     )
     sink.events.clear()  # drop the delivery event; the knock under test comes at dispatch
+    asked: list[str] = []
+    allow = guard.allow
 
-    assert dispatcher.dispatch(NOW).reports == ()
+    def counting_allow(manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+        """Record whose budget was read, then answer exactly as the guard would."""
+        asked.append(manifest.id)
+        return allow(manifest, now)
 
+    with pytest.MonkeyPatch.context() as counted:
+        counted.setattr(guard, "allow", counting_allow)
+        assert dispatcher.dispatch(NOW).reports == ()
+
+    assert asked.count(RECEIVER) == 1, "one resident, one ask, however many lists it is on"
     assert [event.type for event in sink.events] == ["needs_human"]
     assert [item.status for item in store.inbox(RECEIVER)] == ["open"]
     assert [item.status for item in store.jobs()] == ["open", "open"]

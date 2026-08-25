@@ -47,7 +47,7 @@ reconstructible from those four events alone.
 """
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -684,10 +684,12 @@ class Dispatcher:
         the letter does not get to spend money this resident no longer has — so the inbox
         is gated by this same question.
 
-        A resident that both receives letters and claims notices is therefore asked twice
-        in one dispatch, and that is safe rather than merely tolerable: the pause is a
-        conditional insert, so the second ask reads back the pause the first one wrote and
-        nobody's door is knocked on twice for one exhausted budget.
+        Asked **once per resident per dispatch**, from the single pass
+        :meth:`_claim_refusals` makes ahead of every work source, so a resident that both
+        receives letters and claims notices is knocked at once rather than twice for one
+        exhausted budget. The pause is still a conditional insert, which dedupes across
+        processes and against the post-run check (:mod:`steward.budgets`) — it is just no
+        longer the only thing holding the single-knock guarantee inside a dispatch.
         """
         if self.guard is None:
             return None
@@ -832,9 +834,12 @@ class Dispatcher:
         inbox whether or not it claims from the board at all — accepting a letter is
         declared in ``routes``, not in ``board`` — and only while that route is open.
 
-        Both loops ask the budget first. A resident out of money is out of money for every
-        way work can reach it, and a letter is not a loophole: the item stays in the inbox,
-        addressed and unread, for whoever unpauses the resident tomorrow.
+        Who may work at all is settled *before* either loop, in one pass over every
+        resident a source could reach (:meth:`_claim_refusals`). A resident out of money is
+        out of money for every way work can reach it, and a letter is not a loophole: the
+        item stays in the inbox, addressed and unread, for whoever unpauses the resident
+        tomorrow. Asking once rather than once per source is what keeps one exhausted
+        budget to one knock, whatever a resident has opted into.
         """
         moment = now or self.clock()
         if self.dry_run:
@@ -844,19 +849,20 @@ class Dispatcher:
 
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
+        refusals = self._claim_refusals(moment)
         reports = self._drain(
             delegation_residents(self.residents),
             moment,
+            refusals,
             pick=self.take_delivery,
             count_for=lambda _r: self.max_delegations_per_wake,
-            what="draining the inbox",
         )
         reports += self._drain(
             board_residents(self.residents),
             moment,
+            refusals,
             pick=self.claim,
             count_for=lambda r: r.manifest.board.max_claims_per_wake,
-            what="claiming",
         )
         return DispatchRun(
             reopened=tuple(reopened),
@@ -868,12 +874,16 @@ class Dispatcher:
         self,
         residents: Sequence[Resident],
         moment: datetime,
+        refusals: Mapping[str, str],
         *,
         pick: Callable[[Resident, datetime], JobRecord | None],
         count_for: Callable[[Resident], int],
-        what: str,
     ) -> list[BoardReport]:
         """Let each un-refused resident claim and work up to its cap. Never raises.
+
+        ``refusals`` is the map :meth:`_claim_refusals` already built for this dispatch;
+        a resident named in it has been asked, told, and logged once, so the drain only
+        has to skip it rather than ask again.
 
         ``pick`` is the claim — an inbox pickup or a board claim — and the clock is read
         *per claim*, not once, so a slow drain's Nth lease is measured from when it was
@@ -881,9 +891,7 @@ class Dispatcher:
         """
         reports: list[BoardReport] = []
         for resident in residents:
-            refusal = self._claim_refusal(resident, moment)
-            if refusal is not None:
-                log.warning("%s: not %s — %s", resident.id, what, refusal)
+            if resident.id in refusals:
                 continue
             for _ in range(count_for(resident)):
                 job = pick(resident, self.clock())
@@ -891,6 +899,40 @@ class Dispatcher:
                     break
                 reports.append(self.work(resident, job, moment))
         return reports
+
+    def _claimants(self) -> list[Resident]:
+        """Return every resident a dispatch could hand work to, in declared order.
+
+        The union of the two work sources, inbox first and board second, deduped by id —
+        so a resident that has opted into both appears once. This is the list the refusal
+        pass walks, and the reason it can be walked ahead of any particular source.
+        """
+        seen: set[str] = set()
+        claimants: list[Resident] = []
+        for resident in (*delegation_residents(self.residents), *board_residents(self.residents)):
+            if resident.id in seen:
+                continue
+            seen.add(resident.id)
+            claimants.append(resident)
+        return claimants
+
+    def _claim_refusals(self, moment: datetime) -> dict[str, str]:
+        """Ask every claimant once, before any work source, and map id → why not.
+
+        One pass, one ask, one knock. Asking per source instead left the single-knock
+        guarantee to two call sites agreeing plus the store's conditional insert, which
+        held only because there were exactly two of them; a third work source would have
+        made it three. ``moment`` is the dispatch's own fixed clock — the answer to "may
+        this resident work" is one answer for the whole dispatch, even though each claim
+        still takes a fresh reading for its lease.
+        """
+        refusals: dict[str, str] = {}
+        for resident in self._claimants():
+            refusal = self._claim_refusal(resident, moment)
+            if refusal is not None:
+                log.warning("%s: not working — %s", resident.id, refusal)
+                refusals[resident.id] = refusal
+        return refusals
 
     def _claim_refusal(self, resident: Resident, moment: datetime) -> str | None:
         """Return why this resident may not pick anything up right now, or ``None``.
@@ -914,6 +956,10 @@ class Dispatcher:
         a rehearsal never *pauses* a resident, so an exhausted one is simply reported as
         claiming nothing. Claims are planned against a running set of already-spoken-for
         task ids, so the plan does not hand the same notice to two residents.
+
+        The shape mirrors the real dispatch deliberately, down to the single refusal pass
+        ahead of both sources: a rehearsal that decided who may work differently from the
+        thing it rehearses would be a rehearsal of something else.
         """
         now_iso = ev.utc_now_iso(moment)
         reopened = tuple(
@@ -927,16 +973,21 @@ class Dispatcher:
             if record.expires_at is not None and record.expires_at <= now_iso
         )
         spoken_for: set[str] = set()
-        planned = self._plan_delegations(spoken_for) + self._plan_board_claims(spoken_for)
+        refusals = self._rehearsal_refusals()
+        planned = self._plan_delegations(spoken_for, refusals) + self._plan_board_claims(
+            spoken_for, refusals
+        )
         return DispatchRun(
             reopened=reopened, expired_approvals=expired_approvals, planned=tuple(planned)
         )
 
-    def _plan_delegations(self, spoken_for: set[str]) -> list[PlannedClaim]:
+    def _plan_delegations(
+        self, spoken_for: set[str], refusals: Mapping[str, str]
+    ) -> list[PlannedClaim]:
         """Plan the letters each delegation resident would pick up, up to its cap."""
         planned: list[PlannedClaim] = []
         for resident in delegation_residents(self.residents):
-            if self._rehearsal_refusal(resident) is not None:
+            if resident.id in refusals:
                 continue
             taken = 0
             for job in self.store.inbox(resident.id, status=STATUS_OPEN):
@@ -951,11 +1002,13 @@ class Dispatcher:
                 )
         return planned
 
-    def _plan_board_claims(self, spoken_for: set[str]) -> list[PlannedClaim]:
+    def _plan_board_claims(
+        self, spoken_for: set[str], refusals: Mapping[str, str]
+    ) -> list[PlannedClaim]:
         """Plan the notices each board resident would claim, honouring skills and its cap."""
         planned: list[PlannedClaim] = []
         for resident in board_residents(self.residents):
-            if self._rehearsal_refusal(resident) is not None:
+            if resident.id in refusals:
                 continue
             claimed_here = 0
             held = claimable_skills(resident.manifest, self.library)
@@ -970,6 +1023,18 @@ class Dispatcher:
                 claimed_here += 1
                 planned.append(PlannedClaim(resident.id, resident.agent_id, job, source="board"))
         return planned
+
+    def _rehearsal_refusals(self) -> dict[str, str]:
+        """Map id → why not for every claimant, the read-only twin of :meth:`_claim_refusals`.
+
+        One pass over the same union, so a rehearsal answers "who may work" exactly once
+        per resident too — and reports the same resident as idle for both of its sources.
+        """
+        return {
+            resident.id: refusal
+            for resident in self._claimants()
+            if (refusal := self._rehearsal_refusal(resident)) is not None
+        }
 
     def _rehearsal_refusal(self, resident: Resident) -> str | None:
         """Return why a rehearsal shows this resident claiming nothing, writing nothing.
