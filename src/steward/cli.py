@@ -28,9 +28,11 @@ from steward.approvals import (
     DEFAULT_EXPIRES_IN_S,
     ApprovalError,
     NeedsHuman,
+    decisions_preamble,
     parse_duration,
     parse_options,
     raise_request,
+    redact_decision,
 )
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
@@ -39,6 +41,7 @@ from steward.deploy import TransportError
 from steward.journal import (
     JournalEntry,
     journal_complaint,
+    latest_entry,
     read_entries,
     resolve_journal_dir,
 )
@@ -50,6 +53,7 @@ from steward.manifest import (
     Severity,
     ValidationResult,
     manifest_schema_json,
+    redact_secrets,
     residents_root,
     validate_paths,
 )
@@ -61,6 +65,7 @@ from steward.nursery import (
     raise_resident,
     retire_resident,
 )
+from steward.prompt import assemble_preamble
 from steward.runners import check_runner, skills_home
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
@@ -602,6 +607,77 @@ def journal_command(resident_id: str, residents: Path, limit: int, output_format
         return
     for entry in entries:
         _render_entry(entry)
+
+
+# --------------------------------------------------------------------------------------
+# show
+# --------------------------------------------------------------------------------------
+
+
+@main.command("show")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def show_command(resident_id: str, residents: Path, db: Path | None, output_format: str) -> None:
+    """Print the preamble a session for this resident would open with.
+
+    Everything a real session is told before its task — identity, voice, last journal
+    entry, effective skills, decisions it has not been told about yet, charter — assembled
+    by the one prompt module the scheduler uses, in the same order. The task section is the
+    only thing missing: that belongs to a routine, not to a resident.
+
+    Reading this prints steward's own framing text verbatim — the voice frame, the charter
+    frame, the escalation and delegation protocols, all of them constants in
+    :mod:`steward.prompt`. That is by design: a human who cannot read exactly what an agent
+    is told cannot review it.
+
+    Read-only in the strong sense. Decisions are *peeked* — never marked delivered — so
+    previewing a preamble cannot eat the answer the resident's next real session is owed
+    (steward #74).
+
+    Nothing a model wrote at runtime leaves here unscanned. Two sections carry such text —
+    the last journal entry and the detail of each decision, both typed by a session, neither
+    ever seen by a validator — so both go out through ``redact_secrets``, like anything else
+    steward emits. This output is made to be pasted into a review; a review must not be
+    where a live key goes.
+    """
+    resident = _resident_or_exit(residents, resident_id)
+    try:
+        journal_entry = latest_entry(resident.manifest, source=resident.path)
+    except ManifestError as exc:
+        click.secho(f"{resident.path}: {exc}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if journal_entry is not None:
+        journal_entry = redact_secrets(journal_entry)
+
+    skills = effective_skills(resident.manifest, library_for(residents))
+    with _open_store(db) as store:
+        pending = store.undelivered_decisions(resident.id)
+    preamble = assemble_preamble(
+        resident.manifest,
+        resident.soul.body,
+        journal_entry,
+        skills,
+        decisions_preamble([redact_decision(record) for record in pending]),
+    )
+
+    if output_format == "json":
+        click.echo(
+            json.dumps(
+                {
+                    "resident": resident.id,
+                    "manifest": str(resident.path),
+                    "skills": [skill.name for skill in skills],
+                    "journal": journal_entry is not None,
+                    "decisions": len(pending),
+                    "preamble": preamble,
+                },
+                indent=2,
+            )
+        )
+        return
+    click.echo(preamble)
 
 
 # --------------------------------------------------------------------------------------

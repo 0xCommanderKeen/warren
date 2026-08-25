@@ -75,6 +75,7 @@ __all__ = [
     "extract_voice",
     "load_manifest",
     "manifest_json_schema",
+    "redact_mapping",
     "redact_secrets",
     "residents_root",
     "retired_complaint",
@@ -429,10 +430,18 @@ SECRET_REDACTION = "[redacted:secret]"  # noqa: S105 — a redaction marker, not
 #: A credential-shaped assignment in free-form text — ``BURROW_TOKEN=…``, ``api_key: …`` —
 #: built from the same vocabulary the manifest validator rejects (:data:`_CREDENTIAL_WORDS`)
 #: so a secret a session writes into a ``needs_human`` detail is scrubbed by the same
-#: definition of "credential" that keeps one out of a manifest.
+#: definition of "credential" that keeps one out of a manifest. Authorization headers
+#: have their own matcher below: their scheme is context, not the value to remove.
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    rf"(?<![A-Za-z0-9])(?P<key>(?:[A-Za-z0-9]+[_.\- ])*(?:{_CREDENTIAL_WORDS}))"
+    rf"(?<![A-Za-z0-9])(?!authorization\s*[:=])"
+    rf"(?P<key>(?:[A-Za-z0-9]+[_.\- ])*(?:{_CREDENTIAL_WORDS}))"
     r"(?P<sep>\s*[:=]\s*)(?P<value>\S+)",
+    re.IGNORECASE,
+)
+
+_AUTHORIZATION_ASSIGNMENT = re.compile(
+    r"(?P<key>\bauthorization)(?P<sep>\s*[:=]\s*)"
+    r"(?P<scheme>(?:bearer|basic)\s+)?(?P<value>[^\s'\"]+)",
     re.IGNORECASE,
 )
 
@@ -462,9 +471,43 @@ def redact_secrets(text: str) -> str:
     text = _PEM_BLOCK.sub(SECRET_REDACTION, text)
     for pattern, _ in SECRET_VALUE_PATTERNS:
         text = pattern.sub(SECRET_REDACTION, text)
+    text = _AUTHORIZATION_ASSIGNMENT.sub(
+        lambda match: (
+            f"{match.group('key')}{match.group('sep')}"
+            f"{match.group('scheme') or ''}{SECRET_REDACTION}"
+        ),
+        text,
+    )
     return _CREDENTIAL_ASSIGNMENT.sub(
         lambda match: f"{match.group('key')}{match.group('sep')}{SECRET_REDACTION}", text
     )
+
+
+def redact_mapping(mapping: Mapping[str, Any] | None) -> dict[str, object] | None:
+    """Return ``mapping`` with every string it carries, at any depth, scrubbed of secrets.
+
+    The structured twin of :func:`redact_secrets`, and it lives here rather than at any one
+    egress because the same model-written ``detail`` reaches humans by more than one road —
+    a ``needs_human`` event POSTed to burrow, a decision printed by ``steward show``. It
+    recurses into nested maps and lists so a secret buried under a key or inside a list is
+    scrubbed as surely as one at the top level; non-string leaves (the numbers a budget
+    pause reports, the ISO instants of a window) are facts steward built and pass through
+    untouched.
+    """
+    if mapping is None:
+        return None
+    return {str(key): _redact_node(value) for key, value in mapping.items()}
+
+
+def _redact_node(value: object) -> object:
+    """Redact one node of a detail tree: a string, a nested map, a list, or a leaf."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, Mapping):
+        return {str(key): _redact_node(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_node(item) for item in value]
+    return value
 
 
 # --------------------------------------------------------------------------------------

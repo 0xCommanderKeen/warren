@@ -11,7 +11,7 @@ from conftest import ResidentWriter
 from steward import approvals as ap
 from steward import events as ev
 from steward import prompt as p
-from steward.manifest import ResidentManifest, load_manifest
+from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
 from steward.store import ApprovalRecord, Store
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
@@ -453,6 +453,43 @@ def test_an_edited_decision_carries_the_humans_version_into_the_next_session(
 
 def test_an_empty_set_of_decisions_renders_nothing() -> None:
     assert ap.decisions_preamble([]) is None
+
+
+def test_a_decision_rendered_for_a_human_carries_no_secret(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    """Everything a model or a human typed is scrubbed; the request still reads as itself.
+
+    ``steward show`` prints a decision to a person, and the stored ``message``/``detail``
+    are session-written text no validator scanned. Field-level redaction, not a pass over
+    the rendered line, so ``rotate_token: approve`` is not mistaken for an assignment.
+    """
+    record = store.create_approval_request(
+        agent_id="testy",
+        project="p",
+        action="rotate_token",
+        message="reuse sk-ant-messagesecret0123456",
+        resident=manifest.id,
+        detail={
+            "cmd": ["curl -H 'Authorization: Bearer sk-ant-abcdef0123456789ghij'"],
+            "tries": 2,
+        },
+    )
+    store.decide(record.request_id, "edit", decided_by="miha", edit={"key": "AKIA0123456789ABCDEF"})
+    (decided,) = store.undelivered_decisions(manifest.id)
+
+    safe = ap.redact_decision(decided)
+    assert "sk-ant-" not in safe.message
+    assert safe.detail["cmd"] == [f"curl -H 'Authorization: Bearer {SECRET_REDACTION}'"]
+    assert safe.detail["tries"] == 2
+    assert safe.edit == {"key": SECRET_REDACTION}
+    assert "rotate_token: edit" in (ap.decisions_preamble([safe]) or "")
+
+    # A copy for the reader, not an edit of the record: the row still holds what was asked.
+    assert decided.detail == {
+        "cmd": ["curl -H 'Authorization: Bearer sk-ant-abcdef0123456789ghij'"],
+        "tries": 2,
+    }
 
 
 def test_the_decisions_section_is_framed_as_a_record_not_an_order(
