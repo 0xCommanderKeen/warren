@@ -577,7 +577,7 @@ class BudgetGuard:
             or result.input_tokens is not None
             or result.output_tokens is not None
         )
-        return self.store.record_run(
+        entry = self.store.record_run(
             resident=manifest.id,
             agent_id=_agent_id(manifest),
             kind=kind,
@@ -591,6 +591,35 @@ class BudgetGuard:
             usage_known=known,
             now=ev.utc_now_iso(now) if now is not None else None,
         )
+        self._pause_if_over(manifest, now)
+        return entry
+
+    def _pause_if_over(self, manifest: ResidentManifest, now: datetime | None) -> None:
+        """Pause this resident, once, if the run just ledgered pushed its day over a cap.
+
+        The other half of the kill-switch (steward #68). :meth:`allow` reads the ledger
+        *before* a run and cannot stop a run whose own single cost crosses the cap: the
+        first fire of a day always reads an empty window, so a once-daily 10.00 routine
+        under a 5.00 cap fired seven nights and spent 70.00 without ever pausing. The
+        over-budget run has already spent and cannot be un-spent — but once its cost is on
+        the ledger the *next* fire, board claim, or delegated pickup must be refused, and
+        that refusal is a pause, written here.
+
+        Knocks exactly once. It reuses :meth:`_pause`, whose conditional insert means an
+        already-paused resident (its pre-fire refusal, or an earlier over-cap run) is read
+        back rather than knocked on again — and a resident a person told to carry on for
+        this window is left alone, the same standing "carry on" :meth:`allow` honours.
+        """
+        status = self.status(manifest, now)
+        if status.paused:
+            return
+        tripped = status.tripped
+        if tripped is None:
+            return
+        moment = now or datetime.now(UTC)
+        if status.allowance is not None and status.allowance.covers(moment):
+            return
+        self._pause(manifest, status, tripped, now)
 
     # -- lifting a pause ---------------------------------------------------------------
 

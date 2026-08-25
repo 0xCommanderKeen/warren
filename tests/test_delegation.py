@@ -1151,9 +1151,18 @@ def test_a_paused_receiver_leaves_its_post_on_the_mat(
     runner = costly_runner(0.25)
     dispatcher = guarded_dispatcher(residents, store, sink, guard, tmp_path, runner)
     letter = dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
-    # Yesterday's answer already blew today's dollar.
-    guard.record(residents[1].manifest, result=RunResult(outcome=Outcome.OK, cost_usd=4.0), now=NOW)
-    sink.events.clear()
+    # An earlier run already blew today's dollar. Seed it straight onto the ledger, not
+    # through the guard, so the resident is over budget but not yet paused — it is *this
+    # dispatch* that has to notice and knock.
+    store.record_run(
+        resident=residents[1].manifest.id,
+        agent_id=residents[1].manifest.agent_id or "",
+        kind="routine",
+        run_id="earlier",
+        cost_usd=4.0,
+        now=ev.utc_now_iso(NOW),
+    )
+    sink.events.clear()  # drop the delivery event; the knock under test comes at dispatch
 
     run = dispatcher.dispatch(NOW).reports
 
@@ -1240,8 +1249,18 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
     dispatcher = guarded_dispatcher(residents, store, sink, guard, tmp_path, costly_runner(0.25))
     dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
     store.post_job(title="A notice for anybody")
-    guard.record(residents[1].manifest, result=RunResult(outcome=Outcome.OK, cost_usd=9.0), now=NOW)
-    sink.events.clear()
+    # Over budget already, but not yet paused: seed the spend onto the ledger directly so
+    # the dedupe under test is the two dispatch loops sharing one pause, not a pause the
+    # setup handed them.
+    store.record_run(
+        resident=residents[1].manifest.id,
+        agent_id=residents[1].manifest.agent_id or "",
+        kind="routine",
+        run_id="earlier",
+        cost_usd=9.0,
+        now=ev.utc_now_iso(NOW),
+    )
+    sink.events.clear()  # drop the delivery event; the knock under test comes at dispatch
 
     assert dispatcher.dispatch(NOW).reports == ()
 

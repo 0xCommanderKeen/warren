@@ -20,7 +20,7 @@ from steward import budgets as bg
 from steward import events as ev
 from steward import watchdog as w
 from steward.manifest import Resident, load_manifest
-from steward.runners import Outcome, RunResult, run_argv
+from steward.runners import run_argv
 from steward.scheduler import SchedulerState
 from steward.store import Store
 
@@ -724,11 +724,15 @@ def test_a_pass_pauses_a_resident_that_has_spent_its_day(
     """A cap trips even on a day nothing was scheduled, so the fuel gauge is right."""
     resident = load_manifest(write_resident(watched_manifest(budgets={"daily_cost_usd": 1.0})))
     guard = bg.BudgetGuard(store, sink)
-    guard.record(
-        resident.manifest,
-        result=RunResult(outcome=Outcome.OK, cost_usd=4.0),
+    # Seed the day's spend straight onto the ledger, not through the guard, so the resident
+    # is over budget but not yet paused — it is the watchdog's own pass that must pause it.
+    store.record_run(
+        resident=resident.manifest.id,
+        agent_id=resident.manifest.agent_id or "",
+        kind="routine",
         run_id="a",
-        now=NOW,
+        cost_usd=4.0,
+        now=ev.utc_now_iso(NOW),
     )
     dog = build(resident, store, sink, tmp_path, guard=guard)
 

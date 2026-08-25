@@ -415,6 +415,18 @@ fires, refuses its board claims, answers run-now with `409 paused: budget exceed
 raises **one** structured `needs_human` naming the budget and the number — not one per
 refused fire. Lifting it is a human act, through either path:
 
+A cap is checked in two places, and it has to be. The check *before* a fire refuses a
+resident that is already over — but the first fire of a day reads an empty window, so a
+run whose own single cost blows the whole cap (a once-daily routine, say) would never be
+stopped by a pre-fire check alone: it fires, spends, and the next day starts a fresh empty
+window. So steward also checks *after* the run's cost is recorded: once the day's total
+meets or exceeds a cap, the resident is paused then and there. The over-budget run itself
+finishes and is ledgered — it has already spent, and steward does not pretend otherwise —
+but the **next** scheduled fire, board claim, or delegated pickup is refused. The post-run
+pause reuses the same one-knock machinery, so a resident already paused (by the pre-fire
+check, or by an earlier over-cap run) is not knocked on a second time, and a resident a
+person told to "carry on" for the window is left running.
+
 ```console
 $ steward budget show                  # today's spend against every declared cap
 $ steward budget unpause life-agent    # or approve the needs_human from burrow's panel
