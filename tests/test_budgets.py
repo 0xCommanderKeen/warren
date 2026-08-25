@@ -6,10 +6,12 @@ that knocks exactly once however many times it is asked.
 """
 
 import copy
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -184,6 +186,24 @@ def test_a_dst_day_is_genuinely_longer_than_twenty_four_hours() -> None:
     # Ljubljana falls back on 2026-10-25, so that local day has twenty-five hours in it.
     window = bg.day_window(LJUBLJANA, datetime(2026, 10, 25, 12, 0, tzinfo=UTC))
     assert (window.end - window.start) == timedelta(hours=25)
+
+
+def test_a_dst_fall_back_day_is_summed_in_full(store: Store) -> None:
+    """A ``now`` in the repeated hour must not shrink the day and drop that hour's spend."""
+    guard = bg.BudgetGuard(store)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=100.0))
+    # 02:30 on the fall-back morning happens twice; the second pass carries fold=1. Pinning
+    # fold=0 in day_window is what keeps the window a full 25 hours regardless (steward #68).
+    ambiguous = datetime(2026, 10, 25, 2, 30, fold=1, tzinfo=ZoneInfo(LJUBLJANA)).astimezone(UTC)
+    window = bg.day_window(LJUBLJANA, ambiguous)
+    assert (window.end - window.start) == timedelta(hours=25)
+    guard.record(manifest, result=spent(cost=1.0), run_id="dawn", now=window.start)
+    guard.record(
+        manifest, result=spent(cost=1.0), run_id="dusk", now=window.end - timedelta(seconds=1)
+    )
+    status = guard.status(manifest, ambiguous)
+    assert status.spend.runs == 2
+    assert status.spend.cost_usd == pytest.approx(2.0)
 
 
 # --------------------------------------------------------------------------------------
@@ -805,3 +825,132 @@ def test_being_exactly_at_the_limit_is_exhausted(store: Store) -> None:
     manifest = manifest_of(budget_manifest(daily_cost_usd=1.0))
     guard.record(manifest, result=spent(cost=1.0), run_id="a", now=NOON)
     assert guard.status(manifest, NOON).tripped is not None
+
+
+# --------------------------------------------------------------------------------------
+# stamping at completion, and one lock across allow → run → record (steward #68)
+# --------------------------------------------------------------------------------------
+
+
+def _routine(rid: str, hour: int) -> dict[str, Any]:
+    return {
+        "id": rid,
+        "schedule": f"0 {hour} * * *",
+        "schedule_tz": LJUBLJANA,
+        "prompt": "do it",
+        "timeout_s": 60,
+        "enabled": True,
+    }
+
+
+def test_a_nightly_over_cap_run_that_crosses_midnight_still_pauses(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+) -> None:
+    """Stamped at completion, last night's 23:50 spend lands in the window tonight re-reads."""
+    data = budget_manifest(daily_cost_usd=5.0)
+    data["routines"] = [_routine("nightly", 23)]
+    resident = load_manifest(write_resident(data))
+    over_and_long = RunResult(outcome=Outcome.OK, cost_usd=10.0, duration_s=1200.0)
+    engine = s.Scheduler(
+        [s.ScheduledRoutine(resident=resident, routine=resident.manifest.routines[0])],
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(over_and_long),
+        guard=bg.BudgetGuard(store, ev.NullEmitter()),
+    )
+    item = engine.scheduled[0]
+    # 23:50 Ljubljana is 21:50 UTC in August; a 20-minute run finishes at 00:10 local.
+    night_one = datetime(2026, 8, 24, 21, 50, tzinfo=UTC)
+    night_two = datetime(2026, 8, 25, 21, 50, tzinfo=UTC)
+
+    assert engine.fire(item, now=night_one).fired
+    second = engine.fire(item, now=night_two)
+    assert not second.fired
+    assert second.skipped_reason is not None
+    assert second.skipped_reason.startswith(bg.PAUSED_MESSAGE)
+    assert store.budget_pause(resident.id) is not None
+
+
+def test_concurrent_due_routines_of_one_resident_respect_the_cap(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+) -> None:
+    """The per-resident lock stops two due routines both passing one pre-ledger read."""
+    data = budget_manifest(daily_cost_usd=1.0)
+    data["routines"] = [_routine("one", 7), _routine("two", 8)]
+    resident = load_manifest(write_resident(data))
+    engine = s.Scheduler(
+        [
+            s.ScheduledRoutine(resident=resident, routine=routine)
+            for routine in resident.manifest.routines
+        ],
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(spent(cost=2.0)),
+        guard=bg.BudgetGuard(store, ev.NullEmitter()),
+    )
+    reports: list[s.FireReport] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def go(item: s.ScheduledRoutine) -> None:
+        barrier.wait()
+        report = engine.fire(item, now=NOON)
+        with lock:
+            reports.append(report)
+
+    threads = [threading.Thread(target=go, args=(item,)) for item in engine.scheduled]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sum(1 for report in reports if report.fired) == 1, "only one run spends the cap"
+    assert len(store.ledger(resident.id)) == 1
+
+
+# --------------------------------------------------------------------------------------
+# a denied pause, and a clock read in the resident's own zone (steward #82)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_denied_pause_points_at_unpause_not_a_dead_request(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """After a deny, 'approve request <id>' can never work again — the refusal drops it."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=1.0))
+    guard.record(manifest, result=spent(cost=2.0), run_id="a", now=NOON)
+    first = guard.allow(manifest, NOON)
+    assert first is not None
+    assert "approve request" in first
+
+    pause = store.budget_pause(manifest.id)
+    assert pause is not None
+    assert pause.request_id is not None
+    decided, recorded = store.decide(pause.request_id, "deny", decided_by="human")
+    assert recorded
+    assert decided is not None
+
+    after = guard.allow(manifest, NOON)
+    assert after is not None
+    assert "approve request" not in after
+    assert f"steward budget unpause {manifest.id}" in after
+    # And that path still lifts the pause, however the request was answered.
+    assert guard.resume(manifest.id, decide=False) is not None
+
+
+def test_the_carry_on_summary_reads_in_the_local_zone_not_utc(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    """A Ljubljana resident's day ends at local 00:00, not the 22:00 its UTC instant prints."""
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=1.0))
+    guard.record(manifest, result=spent(cost=2.0), run_id="a", now=NOON)
+    guard.allow(manifest, NOON)  # pauses
+    guard.resume(manifest.id, decided_by="human")  # grants "carry on" until the local day's end
+
+    summary = guard.status(manifest, NOON).summary()
+    assert "until 00:00" in summary
+    assert "until 22:00" not in summary

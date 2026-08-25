@@ -966,6 +966,7 @@ class Store:
         outcome: str | None = None,
         reason: str | None = None,
         artifacts: Sequence[str] = (),
+        lease: str | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
         """Close out a claimed task. Only its own claimant may, and only once.
@@ -973,12 +974,20 @@ class Store:
         Conditional on ``status = 'claimed' AND claimant = ?`` so a resident whose lease
         already expired — and whose task is open again, or held by somebody else — cannot
         come back and mark somebody else's work done.
+
+        ``lease`` is the token :meth:`claim_next_job` / :meth:`claim_next_delegated` handed
+        back (the ``claimed_at`` stamp of *this* claim). When given, the close is also
+        conditional on ``claimed_at = lease``, so a session whose lease expired, was swept,
+        and re-claimed — by itself or by anyone — cannot come back and close the *live*
+        claim it no longer holds (steward #72). A dead handle carries the old stamp; the
+        row now carries the new one, and the stale close matches nothing.
         """
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
                 "finished_at = ?, lease_expires_at = NULL "
-                "WHERE task_id = ? AND status = ? AND claimant = ?",
+                "WHERE task_id = ? AND status = ? AND claimant = ? "
+                "AND (? IS NULL OR claimed_at = ?)",
                 (
                     status,
                     outcome,
@@ -988,6 +997,8 @@ class Store:
                     task_id,
                     STATUS_CLAIMED,
                     claimant,
+                    lease,
+                    lease,
                 ),
             )
             if cursor.rowcount == 0:
@@ -1158,6 +1169,39 @@ class Store:
             ).fetchall()
         return [ApprovalRecord.from_row(row) for row in rows]
 
+    def claim_undelivered_decisions(
+        self, resident: str, now: str | None = None
+    ) -> list[ApprovalRecord]:
+        """Take this resident's decided-but-untold decisions, marking them delivered, atomically.
+
+        The read and the mark are one transaction under one lock, so two sessions of the
+        same resident waking at the same instant cannot both walk away believing they were
+        handed the same answer (steward #74). Each ``UPDATE`` is conditional on
+        ``delivered_at IS NULL``, so only the records *this* call actually flips are
+        returned; a concurrent caller gets the ones it flipped, or none. Told once, to one
+        session — the honest reading of "the decision reached the resident".
+        """
+        moment = now or utc_now_iso()
+        claimed: list[ApprovalRecord] = []
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT * FROM approvals WHERE resident = ? AND status = ? "
+                "AND delivered_at IS NULL ORDER BY decided_at, rowid",
+                (resident, STATUS_RESOLVED),
+            ).fetchall()
+            for row in rows:
+                cursor = self._conn.execute(
+                    "UPDATE approvals SET delivered_at = ? "
+                    "WHERE request_id = ? AND delivered_at IS NULL",
+                    (moment, row["request_id"]),
+                )
+                if cursor.rowcount == 1:
+                    fresh = self._conn.execute(
+                        "SELECT * FROM approvals WHERE request_id = ?", (row["request_id"],)
+                    ).fetchone()
+                    claimed.append(ApprovalRecord.from_row(fresh))
+        return claimed
+
     def mark_delivered(self, request_ids: Sequence[str], now: str | None = None) -> int:
         """Record that these decisions have been put in front of the resident.
 
@@ -1184,13 +1228,24 @@ class Store:
         *,
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
+        now: str | None = None,
     ) -> tuple[ApprovalRecord | None, bool]:
         """Record a decision. Returns the record and whether *this* call recorded it.
 
         The first decision wins. A replay — a double-tapped notification, a retried
         request — changes nothing and reads back what was already recorded, which is
         what makes the endpoint idempotent all the way down to the disk.
+
+        An **expired** request is never decided, however it is answered (steward #66): the
+        conditional write is narrowed by ``expires_at IS NULL OR expires_at > now``, so a
+        human clicking *approve* a minute after the deadline cannot slip an action through
+        ahead of the deny-by-default sweep. That case is distinct and readable in the
+        return: ``recorded`` is ``False`` and the record comes back *still pending* (rather
+        than resolved, which is what a replay of an already-decided request reads back), so
+        a caller can tell "too late, it expired" from "somebody already answered". The
+        sweep (:meth:`expire_approvals`) still denies it and closes the loop in the log.
         """
+        moment = now or utc_now_iso()
         with self._lock, self._conn:
             existing = self._conn.execute(
                 "SELECT request_id FROM approvals WHERE request_id = ?", (request_id,)
@@ -1199,15 +1254,17 @@ class Store:
                 return None, False
             cursor = self._conn.execute(
                 "UPDATE approvals SET status = ?, decision = ?, decided_by = ?, "
-                "decided_at = ?, edit = ? WHERE request_id = ? AND status = ?",
+                "decided_at = ?, edit = ? WHERE request_id = ? AND status = ? "
+                "AND (expires_at IS NULL OR expires_at > ?)",
                 (
                     STATUS_RESOLVED,
                     decision,
                     decided_by,
-                    utc_now_iso(),
+                    moment,
                     _dumps(dict(edit)) if edit else None,
                     request_id,
                     STATUS_PENDING,
+                    moment,
                 ),
             )
             recorded = cursor.rowcount == 1

@@ -47,7 +47,7 @@ reconstructible from those four events alone.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -67,7 +67,7 @@ from steward.manifest import (
 )
 from steward.prompt import assemble_delegated_prompt, assemble_task_prompt
 from steward.runners import Outcome, RunRequest, RunResult, build_runner, skills_home
-from steward.scheduler import RunGuard, RunnerFactory
+from steward.scheduler import RunGuard, RunnerFactory, workdir_refusal
 from steward.skills import (
     Skill,
     SkillError,
@@ -84,6 +84,7 @@ from steward.store import (
     RUN_TASK,
     STATUS_DONE,
     STATUS_FAILED,
+    STATUS_OPEN,
     ApprovalRecord,
     JobRecord,
     Store,
@@ -94,6 +95,7 @@ __all__ = [
     "BoardReport",
     "DispatchRun",
     "Dispatcher",
+    "PlannedClaim",
     "board_residents",
     "claimable_skills",
     "delegation_residents",
@@ -105,6 +107,11 @@ log = logging.getLogger("steward.board")
 
 #: The reason a ``task_failed`` carries when nobody finished what they claimed.
 LEASE_EXPIRED = "lease_expired"
+
+
+def _utcnow() -> datetime:
+    """Read the wall clock, in UTC. The default source of each lease's own birth moment."""
+    return datetime.now(UTC)
 
 
 def claimable_skills(manifest: ResidentManifest, library: SkillLibrary) -> frozenset[str]:
@@ -216,10 +223,35 @@ class DispatchRun:
     reopened: tuple[JobRecord, ...] = ()
     expired_approvals: tuple[ApprovalRecord, ...] = ()
     reports: tuple[BoardReport, ...] = ()
+    #: What a ``dry_run`` dispatch *would* have claimed and worked, resident by resident,
+    #: without claiming or working any of it (steward #88). Empty on a real dispatch, where
+    #: the work is in ``reports`` because it actually happened.
+    planned: tuple[PlannedClaim, ...] = ()
 
     def __bool__(self) -> bool:
         """Report whether this dispatch actually changed anything."""
-        return bool(self.reopened or self.expired_approvals or self.reports)
+        return bool(self.reopened or self.expired_approvals or self.reports or self.planned)
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedClaim:
+    """One task a ``dry_run`` dispatch would have claimed. A rehearsal, never a write."""
+
+    resident_id: str
+    claimant: str
+    task: JobRecord
+    #: ``delegated`` for a letter waiting in the inbox, ``board`` for an open notice.
+    source: str
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the JSON view a ``--dry-run`` CLI prints as "would claim"."""
+        return {
+            "resident": self.resident_id,
+            "claimant": self.claimant,
+            "task_id": self.task.task_id,
+            "title": self.task.title,
+            "source": self.source,
+        }
 
 
 # --------------------------------------------------------------------------------------
@@ -254,6 +286,16 @@ class Dispatcher:
     #: ``--dry-run`` is a rehearsal that changes nothing at all, and one word should not
     #: mean two things.
     sweep_only: bool = False
+    #: Resolve and report what *would* be claimed and worked, launching no session and
+    #: writing nothing — no claim, no ledger, no events (steward #88). The board's honest
+    #: rehearsal, mirroring the scheduler's ``--dry-run``: the first ``dispatch`` a new
+    #: operator runs against shipped ``claude`` residents otherwise spends real money.
+    #: Distinct from ``sweep_only``, which writes (it reopens dead leases).
+    dry_run: bool = False
+    #: The clock each lease's length is measured from. Read *per claim*, not once per
+    #: dispatch, so the Nth claim of a slow ``max_claims_per_wake`` dispatch is born with a
+    #: full lease rather than one already eaten into by the sessions before it (steward #73).
+    clock: Callable[[], datetime] = _utcnow
     #: How deep a chain of delegated work may run before steward refuses (steward #7).
     max_delegation_depth: int = field(default_factory=dg.max_depth)
     #: How many delegated items one wake-up drains. A wake-up is a wake-up, not a shift:
@@ -364,9 +406,15 @@ class Dispatcher:
 
         Handed to the scheduler as a callable so a parked session's answer arrives on the
         resident's *next* wake-up whatever that wake-up is — a routine or a board task.
+
+        The read and the mark are one atomic store transaction
+        (:meth:`steward.store.Store.claim_undelivered_decisions`), so two wake-ups of the
+        same resident at the same instant cannot both be handed the same decision — one
+        gets it, the other opens without it, and it is delivered exactly once (steward #74).
+        The preamble is rendered from what *this* call claimed.
         """
-        text, _records = approvals.deliver_decisions(self.store, resident_id)
-        return text
+        records = self.store.claim_undelivered_decisions(resident_id)
+        return approvals.decisions_preamble(records)
 
     def harvest(self, manifest: ResidentManifest, output: str) -> list[ApprovalRecord]:
         """Turn what a finished session wrote into requests and handoffs.
@@ -380,7 +428,7 @@ class Dispatcher:
         A routine session has no task above it, so anything it hands over is attributed to
         the resident's own initiative rather than to a parent task.
         """
-        raised = approvals.harvest(self.store, self.emitter, manifest=manifest, output=output)
+        raised = self._harvest_approvals(manifest, output, None)
         self.hand_over(manifest, output)
         return raised
 
@@ -549,14 +597,36 @@ class Dispatcher:
             return journal_module.latest_entry(resident.manifest, source=resident.path)
         except ManifestError as exc:
             log.warning("%s: no journal — %s", resident.id, exc)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 — a bad byte in a journal is not a failed task
+            # Widened past OSError: a session-written journal with one undecodable byte
+            # raises UnicodeDecodeError, and a board session must not be bricked by it any
+            # more than a routine session is (steward #75).
             log.warning("%s: could not reach the journal: %s", resident.id, exc)
         return None
+
+    def _harvest_approvals(
+        self, manifest: ResidentManifest, output: str, now: datetime | None
+    ) -> list[ApprovalRecord]:
+        """Raise every approval a session asked for. Never raises: a task is still closed.
+
+        Wrapped like its neighbours (steward #80): a hook that throws while reading a
+        session's escalations must not leave a claimed task with only ``task_claimed``
+        emitted and no close, showing the village work that ended minutes ago as still
+        in progress.
+        """
+        if not output:
+            return []
+        try:
+            return approvals.harvest(
+                self.store, self.emitter, manifest=manifest, output=output, now=now
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed escalation is not a failed task
+            log.warning("%s: could not record an approval from this session: %s", manifest.id, exc)
+            return []
 
     def work(self, resident: Resident, job: JobRecord, now: datetime | None = None) -> BoardReport:
         """Run one claimed task to a conclusion and record it. Never raises."""
         moment = now or datetime.now(UTC)
-        prompt = self.build_prompt(resident, job)
         workdir = resident.workdir(self.workdir)
         # A letter and a notice declare their own timeouts, and the budget caps whichever
         # one applies: ``max_run_seconds`` is a ceiling on any session, however it woke up.
@@ -564,8 +634,14 @@ class Dispatcher:
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
 
+        prompt = ""
         try:
+            # Provision *before* the prompt is assembled: assembling it delivers the
+            # resident's pending decisions, and a session refused for a missing skill must
+            # not consume an answer the next real session still needs — a provision failure
+            # used to close the task failed with the decision already gone (steward #74).
             self.provision(resident, workdir)
+            prompt = self.build_prompt(resident, job)
             runner = self.runner_factory(resident.manifest.runner)
             result = runner.run(
                 RunRequest(
@@ -584,14 +660,10 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 — a broken runner is a failed task, not a crash
             result = RunResult(outcome=Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
 
-        self._ledger(resident, job, result, moment)
-        raised = approvals.harvest(
-            self.store,
-            self.emitter,
-            manifest=resident.manifest,
-            output=result.output,
-            now=moment,
-        )
+        # Stamp the ledger at completion, so a task that crossed midnight bills the day it
+        # finished in rather than an already-closed window (steward #68).
+        self._ledger(resident, job, result, moment + timedelta(seconds=result.duration_s))
+        raised = self._harvest_approvals(resident.manifest, result.output, moment)
         # This task is the parent of anything the session handed on, which is what makes
         # the chain — and the budget it rolls up to — traceable past the first hop.
         handed = self.hand_over(
@@ -674,6 +746,7 @@ class Dispatcher:
             outcome=str(result.outcome),
             reason=reason,
             artifacts=result.artifacts,
+            lease=job.claimed_at,
             now=ev.utc_now_iso(moment),
         )
         if closed is None:
@@ -761,35 +834,148 @@ class Dispatcher:
         way work can reach it, and a letter is not a loophole: the item stays in the inbox,
         addressed and unread, for whoever unpauses the resident tomorrow.
         """
-        moment = now or datetime.now(UTC)
+        moment = now or self.clock()
+        if self.dry_run:
+            return self._rehearse(moment)
         reopened = self.expire_leases(moment)
         expired_approvals = approvals.expire(self.store, self.emitter, moment)
 
-        reports: list[BoardReport] = []
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
-        for resident in delegation_residents(self.residents):
-            refusal = self.budget_refusal(resident, moment)
-            if refusal is not None:
-                log.warning("%s: not draining the inbox — %s", resident.id, refusal)
-                continue
-            for _ in range(self.max_delegations_per_wake):
-                job = self.take_delivery(resident, moment)
-                if job is None:
-                    break
-                reports.append(self.work(resident, job, moment))
-        for resident in board_residents(self.residents):
-            refusal = self.budget_refusal(resident, moment)
-            if refusal is not None:
-                log.warning("%s: not claiming — %s", resident.id, refusal)
-                continue
-            for _ in range(resident.manifest.board.max_claims_per_wake):
-                job = self.claim(resident, moment)
-                if job is None:
-                    break
-                reports.append(self.work(resident, job, moment))
+        reports = self._drain(
+            delegation_residents(self.residents),
+            moment,
+            pick=self.take_delivery,
+            count_for=lambda _r: self.max_delegations_per_wake,
+            what="draining the inbox",
+        )
+        reports += self._drain(
+            board_residents(self.residents),
+            moment,
+            pick=self.claim,
+            count_for=lambda r: r.manifest.board.max_claims_per_wake,
+            what="claiming",
+        )
         return DispatchRun(
             reopened=tuple(reopened),
             expired_approvals=tuple(expired_approvals),
             reports=tuple(reports),
         )
+
+    def _drain(
+        self,
+        residents: Sequence[Resident],
+        moment: datetime,
+        *,
+        pick: Callable[[Resident, datetime], JobRecord | None],
+        count_for: Callable[[Resident], int],
+        what: str,
+    ) -> list[BoardReport]:
+        """Let each un-refused resident claim and work up to its cap. Never raises.
+
+        ``pick`` is the claim — an inbox pickup or a board claim — and the clock is read
+        *per claim*, not once, so a slow drain's Nth lease is measured from when it was
+        actually handed out rather than from the top of the dispatch (steward #73).
+        """
+        reports: list[BoardReport] = []
+        for resident in residents:
+            refusal = self._claim_refusal(resident, moment)
+            if refusal is not None:
+                log.warning("%s: not %s — %s", resident.id, what, refusal)
+                continue
+            for _ in range(count_for(resident)):
+                job = pick(resident, self.clock())
+                if job is None:
+                    break
+                reports.append(self.work(resident, job, moment))
+        return reports
+
+    def _claim_refusal(self, resident: Resident, moment: datetime) -> str | None:
+        """Return why this resident may not pick anything up right now, or ``None``.
+
+        Two reasons, both of which stop a claim before it happens: the budget is exhausted,
+        or the resident has nowhere safe to run. The second is why the board never claims a
+        task it would only work against the current working directory, wiping skills it does
+        not own (steward #64) — the notice stays open for a resident that *can* work it.
+        """
+        return self.budget_refusal(resident, moment) or workdir_refusal(
+            resident, self.workdir, self.library
+        )
+
+    def _rehearse(self, moment: datetime) -> DispatchRun:
+        """Resolve what a real dispatch *would* do, writing nothing (steward #88).
+
+        The board's honest ``--dry-run``: it reports the leases it would reopen, the
+        approvals it would deny, and the tasks each resident would claim — reading the
+        store, launching no session, and touching neither the ledger nor the event stream.
+        Budget and workdir are read the same read-only way a real dispatch checks them, but
+        a rehearsal never *pauses* a resident, so an exhausted one is simply reported as
+        claiming nothing. Claims are planned against a running set of already-spoken-for
+        task ids, so the plan does not hand the same notice to two residents.
+        """
+        now_iso = ev.utc_now_iso(moment)
+        reopened = tuple(
+            job
+            for job in self.store.jobs(status="claimed")
+            if job.lease_expires_at is not None and job.lease_expires_at <= now_iso
+        )
+        expired_approvals = tuple(
+            record
+            for record in self.store.pending_approvals()
+            if record.expires_at is not None and record.expires_at <= now_iso
+        )
+        spoken_for: set[str] = set()
+        planned = self._plan_delegations(spoken_for) + self._plan_board_claims(spoken_for)
+        return DispatchRun(
+            reopened=reopened, expired_approvals=expired_approvals, planned=tuple(planned)
+        )
+
+    def _plan_delegations(self, spoken_for: set[str]) -> list[PlannedClaim]:
+        """Plan the letters each delegation resident would pick up, up to its cap."""
+        planned: list[PlannedClaim] = []
+        for resident in delegation_residents(self.residents):
+            if self._rehearsal_refusal(resident) is not None:
+                continue
+            taken = 0
+            for job in self.store.inbox(resident.id, status=STATUS_OPEN):
+                if taken >= self.max_delegations_per_wake:
+                    break
+                if job.task_id in spoken_for:
+                    continue
+                spoken_for.add(job.task_id)
+                taken += 1
+                planned.append(
+                    PlannedClaim(resident.id, resident.agent_id, job, source="delegated")
+                )
+        return planned
+
+    def _plan_board_claims(self, spoken_for: set[str]) -> list[PlannedClaim]:
+        """Plan the notices each board resident would claim, honouring skills and its cap."""
+        planned: list[PlannedClaim] = []
+        for resident in board_residents(self.residents):
+            if self._rehearsal_refusal(resident) is not None:
+                continue
+            claimed_here = 0
+            held = claimable_skills(resident.manifest, self.library)
+            for job in self.store.jobs(status=STATUS_OPEN):
+                if claimed_here >= resident.manifest.board.max_claims_per_wake:
+                    break
+                if job.assignee is not None or job.task_id in spoken_for:
+                    continue
+                if not job.claimable_by <= held:
+                    continue
+                spoken_for.add(job.task_id)
+                claimed_here += 1
+                planned.append(PlannedClaim(resident.id, resident.agent_id, job, source="board"))
+        return planned
+
+    def _rehearsal_refusal(self, resident: Resident) -> str | None:
+        """Return why a rehearsal shows this resident claiming nothing, writing nothing.
+
+        Read-only on purpose: a real refusal *pauses* an exhausted resident and knocks at a
+        door, and a rehearsal must do neither. It reports an existing pause or a missing
+        workdir, and leaves the trip-check to the real dispatch.
+        """
+        if self.store.budget_pause(resident.id) is not None:
+            return "paused"
+        return workdir_refusal(resident, self.workdir, self.library)

@@ -169,6 +169,38 @@ def test_only_the_holder_of_the_claim_may_finish_it(store: Store) -> None:
     assert _job(store, posted.task_id).status == "claimed"
 
 
+def test_a_stale_session_cannot_close_the_live_re_claim(store: Store) -> None:
+    """A dead lease's old handle carries the old stamp; the live re-claim carries a new one."""
+    posted = store.post_job(title="Handed back and forth")
+    first = store.claim_next_job(
+        claimant="a:b", skills=[], lease_expires_at=EARLY, now="2026-08-24T08:00:00.000Z"
+    )
+    assert first is not None
+    # The lease dies and the sweep reopens the task; the same claimant picks it back up.
+    store.expire_leases(LATER)
+    second = store.claim_next_job(
+        claimant="a:b",
+        skills=[],
+        lease_expires_at="2026-08-24T12:00:00.000Z",
+        now="2026-08-24T09:30:00.000Z",
+    )
+    assert second is not None
+    assert first.claimed_at != second.claimed_at
+
+    # The dead handle's stamp no longer matches the live row: its close is rejected.
+    assert (
+        store.finish_job(posted.task_id, status="done", claimant="a:b", lease=first.claimed_at)
+        is None
+    )
+    assert _job(store, posted.task_id).status == "claimed"
+    # The live handle closes it.
+    closed = store.finish_job(
+        posted.task_id, status="done", claimant="a:b", lease=second.claimed_at
+    )
+    assert closed is not None
+    assert closed.status == "done"
+
+
 def test_an_expired_lease_reopens_the_task_and_names_who_dropped_it(store: Store) -> None:
     posted = store.post_job(title="Abandoned")
     store.claim_next_job(claimant="claude-code:hob", skills=[], lease_expires_at=EARLY)
@@ -333,11 +365,30 @@ def test_an_expired_request_is_denied_by_default_and_says_who_by(store: Store) -
 
 def test_a_request_that_a_human_already_answered_is_not_re_expired(store: Store) -> None:
     record = store.create_approval_request(
-        agent_id="a:b", project="p", action="spend", message="…", expires_at=EARLY
+        agent_id="a:b", project="p", action="spend", message="…", expires_at=LATER
     )
-    store.decide(record.request_id, "approve", decided_by="api")
+    # Answered before the deadline, so it is recorded; the later sweep leaves it alone.
+    _, recorded = store.decide(record.request_id, "approve", decided_by="api", now=EARLY)
+    assert recorded
     assert store.expire_approvals(LATER) == []
     assert _approval(store, record.request_id).decision == "approve"
+
+
+def test_an_expired_request_is_refused_as_expired_not_approved(store: Store) -> None:
+    """A human clicking approve after the deadline cannot slip an expired action through."""
+    record = store.create_approval_request(
+        agent_id="a:b", project="p", action="spend", message="…", expires_at=EARLY
+    )
+    decided, recorded = store.decide(record.request_id, "approve", decided_by="api", now=LATER)
+    assert recorded is False, "an expired request is not decided"
+    # Still pending — distinct from an already-decided replay, which reads back resolved —
+    # so the deny-by-default sweep can close the loop in the log.
+    assert decided is not None
+    assert decided.pending
+    assert decided.decision is None
+    (denied,) = store.expire_approvals(LATER)
+    assert denied.decision == "deny"
+    assert denied.decided_by == "expiry"
 
 
 def test_a_request_with_no_deadline_never_expires(store: Store) -> None:
@@ -359,6 +410,45 @@ def test_a_decision_is_delivered_to_its_resident_exactly_once(store: Store) -> N
     assert store.undelivered_decisions("life-agent") == []
     assert store.mark_delivered([record.request_id]) == 0, "delivering twice marks nothing"
     assert _approval(store, record.request_id).delivered_at
+
+
+def test_claiming_decisions_marks_them_delivered_in_one_pass(store: Store) -> None:
+    record = store.create_approval_request(
+        agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+    )
+    store.decide(record.request_id, "approve")
+    claimed = store.claim_undelivered_decisions("life-agent")
+    assert [r.request_id for r in claimed] == [record.request_id]
+    # The read and the mark were one pass: a second wake-up finds nothing.
+    assert store.claim_undelivered_decisions("life-agent") == []
+    assert _approval(store, record.request_id).delivered_at
+
+
+def test_two_concurrent_wake_ups_claim_a_decision_exactly_once(tmp_path: Path) -> None:
+    """The read-then-mark is atomic, so a decision reaches exactly one of two racing sessions."""
+    with Store(tmp_path / "steward.db") as store:
+        record = store.create_approval_request(
+            agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+        )
+        store.decide(record.request_id, "approve")
+
+        barrier = threading.Barrier(2)
+        results: list[list[ApprovalRecord]] = []
+        lock = threading.Lock()
+
+        def grab() -> None:
+            barrier.wait()
+            claimed = store.claim_undelivered_decisions("life-agent")
+            with lock:
+                results.append(claimed)
+
+        threads = [threading.Thread(target=grab) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sum(len(claimed) for claimed in results) == 1, "delivered exactly once"
 
 
 def test_one_resident_never_reads_another_residents_decisions(store: Store) -> None:

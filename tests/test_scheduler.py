@@ -1015,3 +1015,174 @@ def test_a_scheduler_without_a_library_injects_and_writes_nothing(build, tmp_pat
     assert "YOUR SKILLS" not in engine.build_prompt(engine.scheduled[0])
     engine.fire(engine.scheduled[0])
     assert not (tmp_path / ".claude").exists()
+
+
+# --------------------------------------------------------------- state safety (steward #76, #85)
+
+
+def test_a_directory_shaped_state_is_fatal_and_cleans_the_stray_tmp(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A STEWARD_STATE that names a directory silently disabled persistence; now it is fatal."""
+    path = write_resident(manifest_with(HOURLY))
+    state = tmp_path / "state.json"
+    state.mkdir()  # STEWARD_STATE points at a directory
+    stray = tmp_path / "state.json.tmp"
+    stray.write_text("half a write from a crash", encoding="utf-8")
+
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=state),
+        workdir=tmp_path,
+    )
+    with pytest.raises(s.SchedulerError, match="directory"):
+        engine.tick(datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+    assert not stray.exists(), "the stray temp file is cleaned up"
+
+
+def test_two_ticks_over_one_state_file_fire_an_occurrence_exactly_once(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Two tick processes over one state file must not both fire the same occurrence."""
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    anchor = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)  # 12:00 local
+    due_at = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)  # 12:15:30 local
+
+    seed = s.SchedulerState.load(state_path)
+    seed.set_anchor("test-agent/inbox-read", anchor)
+    seed.save()
+
+    def daemon() -> s.Scheduler:
+        return s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+            state=s.SchedulerState.load(state_path),
+            workdir=tmp_path,
+        )
+
+    first, second = daemon(), daemon()
+    reports = [*first.tick(due_at), *second.tick(due_at)]
+    assert sum(1 for report in reports if report.fired) == 1
+
+
+def test_a_crash_after_saving_the_anchor_does_not_re_fire(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The anchor is saved before the fire, so a crash mid-run does not re-fire on restart."""
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    anchor = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
+    seed = s.SchedulerState.load(state_path)
+    seed.set_anchor("test-agent/inbox-read", anchor)
+    seed.save()
+
+    class Crashing(r.Runner):
+        """Mimics a session that dies partway: the anchor is already on disk by now."""
+
+        def run(self, request: r.RunRequest) -> r.RunResult:  # noqa: ARG002
+            raise RuntimeError("killed mid-run")
+
+    crashed = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState.load(state_path),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: Crashing(),
+    )
+    crashed.tick(datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC))
+
+    restarted = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState.load(state_path),
+        workdir=tmp_path,
+    )
+    assert restarted.tick(datetime(2026, 8, 24, 10, 16, tzinfo=UTC)) == []
+
+
+# --------------------------------------------------------------- nowhere to run (steward #64)
+
+
+def test_a_resident_with_an_absent_memory_dir_is_refused_not_run_in_cwd(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    """A skills-loading session whose memory dir is missing must not materialize into cwd."""
+    write_skill("write-journal", defaults=True, body="Write it.\n")
+    write_skill("read-inbox", body="Read the mail.\n")
+    data = manifest_with(HOURLY, skills=["read-inbox"])
+    data["runner"] = {"kind": "claude", "model": "pretend"}
+    # memory stays valid_manifest's /data/... path, which is not a directory on this host.
+    path = write_resident(data)
+
+    seen: list[r.RunRequest] = []
+
+    def factory(spec: m.Runner) -> r.Runner:
+        return r.MockRunner(
+            spec,
+            behavior=lambda req: (
+                seen.append(req) or r.RunResult(outcome=r.Outcome.OK, output="done", exit_status=0)
+            ),
+        )
+
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        # No workdir given, so the fallback is the process cwd: the dangerous case.
+        runner_factory=factory,
+        library=sk.load_library(tmp_path / "skills"),
+    )
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+    assert not report.fired
+    assert report.skipped_reason is not None
+    assert "current working directory" in report.skipped_reason
+    assert seen == [], "the session never ran against the cwd"
+    assert any("current working directory" in complaint for complaint in engine.check())
+
+
+# --------------------------------------------------------------- guarded collaborators (#80)
+
+
+def test_a_decisions_hook_that_raises_still_brackets_the_run(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A hook that throws while delivering decisions must not take the whole fire down."""
+    path = write_resident(manifest_with(HOURLY))
+
+    class Hooks:
+        def decisions_for(self, resident_id: str) -> str | None:  # noqa: ARG002
+            raise RuntimeError("the inbox is on fire")
+
+        def harvest(self, manifest: m.ResidentManifest, output: str) -> object:  # noqa: ARG002
+            return []
+
+        def dispatch(self, now: datetime) -> object:  # noqa: ARG002
+            return None
+
+    sink = ev.NullEmitter()
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=sink,
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        hooks=Hooks(),
+    )
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+    assert report.fired
+    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]
+
+
+def test_a_journal_that_raises_a_decode_error_is_a_missing_journal_not_a_crash(
+    build, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One undecodable byte raises a ValueError, not an OSError; the fire must survive it."""
+    engine = build(HOURLY)
+
+    def undecodable(*_args: object, **_kwargs: object) -> str:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "one bad byte")
+
+    monkeypatch.setattr(j, "latest_entry", undecodable)
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+    assert report.fired, "a bad byte degrades to no journal rather than bricking the routine"
