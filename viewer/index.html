@@ -307,12 +307,6 @@ const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 const NOTICE_BOARD_ID = "notice-board";
 const FLEET_LEDGER_ID = "fleet-ledger";
 
-// standing spots in front of a shared door: first arrival takes the middle, the
-// rest fan out in a staggered arc so their name chips stay readable. Fixed, so
-// nobody is nudged aside when a neighbour arrives or leaves.
-const SLOT_SPOTS = [[0, 0], [-24, 14], [24, 14], [-48, 0], [48, 0], [0, 28]];
-const SLOT_WRAP = 30;   // extra row offset once the arc is full
-
 const PLOT_DOOR_X = 24;   // centre of the door opening inside the house frame
 function plotDoor(i) {
   const [px, py] = PLOTS[i];
@@ -322,52 +316,8 @@ function placeDoor(name) {
   const p = PLACES[name];
   return { x: p.tx * T + p.w * T / 2, y: (p.ty + p.h) * T };
 }
-
-/* Where the nth visitor to a shared place stands. One definition, because the
-   sprite, the map self-check and the decor pass all have to agree: when they
-   drifted, a prop was scattered onto a slot and the villager standing there was
-   inside a barrel. */
-function placeSlot(name, slot) {
-  const d = placeDoor(name);
-  const [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
-  return { x: d.x + dx,
-           y: d.y + 6 + dy + Math.floor(slot / SLOT_SPOTS.length) * SLOT_WRAP };
-}
 const yourDoor = { x: YOUR_HOUSE.tx * T + 24, y: (YOUR_HOUSE.ty + 3) * T };
 const grid = fill => Array.from({ length: MAPH }, () => Array(MAPW).fill(fill));
-
-/* Binary min-heap for A*: small, hand-rolled, no dependencies. */
-class Heap {
-  constructor() { this.node = []; this.f = []; }
-  get size() { return this.node.length; }
-  push(n, f) {
-    let i = this.node.length;
-    this.node.push(n); this.f.push(f);
-    while (i > 0) {
-      const p = (i - 1) >> 1;
-      if (this.f[p] <= this.f[i]) break;
-      this.swap(p, i); i = p;
-    }
-  }
-  pop() {
-    const top = this.node[0], last = this.node.length - 1;
-    this.swap(0, last); this.node.pop(); this.f.pop();
-    let i = 0;
-    for (;;) {
-      const l = i * 2 + 1, r = l + 1;
-      let s = i;
-      if (l < this.node.length && this.f[l] < this.f[s]) s = l;
-      if (r < this.node.length && this.f[r] < this.f[s]) s = r;
-      if (s === i) break;
-      this.swap(s, i); i = s;
-    }
-    return top;
-  }
-  swap(a, b) {
-    [this.node[a], this.node[b]] = [this.node[b], this.node[a]];
-    [this.f[a], this.f[b]] = [this.f[b], this.f[a]];
-  }
-}
 
 /* Where each villager belongs, as { kind, ... } rather than a string — see
    viewer/destinations.js. The viewer supplies what the projection cannot know:
@@ -393,7 +343,8 @@ class Village extends Phaser.Scene {
     super("village");
     this.viz = new Map();
     this.plotOf = new Map();
-    this.slots = new Map();   // shared location → [agent id per slot, null = free]
+    this.routing = null;
+    this.slotAllocator = null;
   }
 
   preload() {
@@ -438,6 +389,18 @@ class Village extends Phaser.Scene {
     this.buildTrees();
     this.buildFences();
     this.buildDecor();
+    this.routing = BurrowRoutes.createRoutingMap({
+      width: MAPW, height: MAPH, tileSize: T, places: PLACES, plots: PLOTS,
+      ownDoor: yourDoor, roadCost: ROAD_COST, grassCost: GRASS_COST,
+      turnCost: TURN_COST, blocked: (x, y) => this.blocked[y][x],
+      costAt: (x, y) => this.dirt[y][x] ? ROAD_COST : GRASS_COST,
+    });
+    this.slotAllocator = BurrowRoutes.createSlotAllocator(where => {
+      const [kind, value] = where.split(":");
+      if (kind === "building") return this.routing.capacity({ kind, id: value });
+      if (kind === "plot") return this.routing.capacity({ kind, plot: Number(value) });
+      return this.routing.capacity({ kind: where });
+    });
     this.buildSky();
     this.reportMap();
     this.reportPlaces();
@@ -552,11 +515,16 @@ class Village extends Phaser.Scene {
       for (let y = p.ty - 1; y <= p.ty + p.h; y++)
         for (let x = p.tx - 1; x <= p.tx + p.w; x++) clear.add(x + "," + y);
     // the slots in front of a shared place reach further out than its footprint
-    for (const name of Object.keys(PLACES))
-      for (let s = 0; s < SLOT_SPOTS.length; s++) {
-        const t = this.tileAt(placeSlot(name, s).x, placeSlot(name, s).y);
-        reserve(t.x, t.y);
-      }
+    // Routing endpoints are deterministic, so reserve their complete promised
+    // capacity before procedural decor gets a chance to block one.
+    const clearRouting = BurrowRoutes.createRoutingMap({
+      width: MAPW, height: MAPH, tileSize: T, places: PLACES, plots: PLOTS,
+      ownDoor: yourDoor, blocked: () => false,
+    });
+    for (const { point } of clearRouting.allocatableEndpoints()) {
+      const t = { x: Math.floor(point.x / T), y: Math.floor(point.y / T) };
+      reserve(t.x, t.y);
+    }
     for (const [px, py] of PLOTS) { reserve(px + 1, py + 3); reserve(px + 2, py + 3); }
     for (let y = 6; y <= 8; y++) for (let x = 12; x <= 19; x++) reserve(x, y);
     // the lane behind the lower houses is the only way to their doors: keep it clear
@@ -771,149 +739,38 @@ class Village extends Phaser.Scene {
   }
   tileCost(x, y) { return this.dirt[y][x] ? ROAD_COST : GRASS_COST; }
 
-  // nearest walkable tile, breadth-first — used when a spot lands on solid ground
-  nearestWalkable(x, y) {
-    const seen = new Uint8Array(MAPW * MAPH);
-    const q = [[x, y]];
-    seen[y * MAPW + x] = 1;
-    for (let i = 0; i < q.length; i++) {
-      const [cx, cy] = q[i];
-      if (this.walkable(cx, cy)) return { x: cx, y: cy };
-      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
-        const nx = cx + dx, ny = cy + dy;
-        if (nx < 0 || ny < 0 || nx >= MAPW || ny >= MAPH) continue;
-        if (seen[ny * MAPW + nx]) continue;
-        seen[ny * MAPW + nx] = 1;
-        q.push([nx, ny]);
-      }
-    }
-    return null;
-  }
-
-  // A* over the walkability map, 4-way (the sprites only face 4 ways).
-  // Roads cost less than grass, so a walk takes the street when the detour is
-  // reasonable; turning costs a little, so paths come out straight.
   findPath(sx, sy, gx, gy) {
-    if (!this.walkable(sx, sy)) {
-      const n = this.nearestWalkable(sx, sy);
-      if (!n) return null;
-      sx = n.x; sy = n.y;
-    }
-    if (!this.walkable(gx, gy)) {
-      const n = this.nearestWalkable(gx, gy);
-      if (!n) return null;
-      gx = n.x; gy = n.y;
-    }
-    const N = MAPW * MAPH, start = sy * MAPW + sx, goal = gy * MAPW + gx;
-    if (start === goal) return [{ x: sx, y: sy }];
-    // The incoming direction is part of the A* state: reaching the same tile
-    // from different sides can change the cost of every route that follows.
-    const STATES = 5, NO_DIR = 4;
-    const startState = start * STATES + NO_DIR;
-    const g = new Float64Array(N * STATES).fill(Infinity);
-    const from = new Int32Array(N * STATES).fill(-1);
-    const done = new Uint8Array(N * STATES);
-    const h = (x, y) => ROAD_COST * (Math.abs(x - gx) + Math.abs(y - gy));
-    const DIRS = [[1,0],[-1,0],[0,1],[0,-1]];
-    const open = new Heap();
-    g[startState] = 0;
-    open.push(startState, h(sx, sy));
-    let goalState = -1;
-    while (open.size) {
-      const cur = open.pop();
-      if (done[cur]) continue;
-      done[cur] = 1;
-      const tile = (cur / STATES) | 0;
-      if (tile === goal) { goalState = cur; break; }
-      const incoming = cur % STATES;
-      const cx = tile % MAPW, cy = (tile / MAPW) | 0;
-      for (let d = 0; d < 4; d++) {
-        const nx = cx + DIRS[d][0], ny = cy + DIRS[d][1];
-        if (!this.walkable(nx, ny)) continue;
-        const ni = (ny * MAPW + nx) * STATES + d;
-        if (done[ni]) continue;
-        const cost = this.tileCost(nx, ny) +
-                     (incoming !== NO_DIR && incoming !== d ? TURN_COST : 0);
-        if (g[cur] + cost >= g[ni]) continue;
-        g[ni] = g[cur] + cost;
-        from[ni] = cur;
-        open.push(ni, g[ni] + h(nx, ny));
-      }
-    }
-    if (goalState < 0) return null;
-    const path = [];
-    for (let i = goalState; i >= 0; i = from[i]) {
-      const tile = (i / STATES) | 0;
-      path.push({ x: tile % MAPW, y: (tile / MAPW) | 0 });
-      if (i === startState) break;
-    }
-    return path.reverse();
+    return this.routing.findPath(sx, sy, gx, gy);
   }
 
   // pixel waypoints for a walk: tile centres along the path, collinear runs
   // collapsed into one leg, ending exactly on the spot the villager is headed for
   route(fromX, fromY, toX, toY) {
-    const s = this.tileAt(fromX, fromY), e = this.tileAt(toX, toY);
-    const tiles = this.findPath(s.x, s.y, e.x, e.y);
-    if (!tiles) return null;
-    const pts = tiles.slice(1).map(t => ({ x: t.x * T + T / 2, y: t.y * T + T / 2 }));
-    pts.push({ x: toX, y: toY });
-    const out = [];
-    let prev = { x: fromX, y: fromY };
-    for (let i = 0; i < pts.length; i++) {
-      const cur = pts[i], next = pts[i + 1];
-      if (next && ((prev.x === cur.x && cur.x === next.x) ||
-                   (prev.y === cur.y && cur.y === next.y))) continue;
-      out.push(cur);
-      prev = cur;
-    }
-    return out;
+    return this.routing.route({ x: fromX, y: fromY }, { x: toX, y: toY });
   }
 
   // every doorstep, work spot and knock slot the projection can ask for
   spots() {
-    const out = [];
-    PLOTS.forEach((_p, i) => {
-      const d = plotDoor(i);
-      out.push({ name: "plot " + i + " rest", x: d.x, y: d.y + 2 });
-      out.push({ name: "plot " + i + " work", x: d.x, y: d.y + 14 });
-    });
-    for (let s = 0; s < 8; s++)
-      out.push({ name: "knock " + s, x: yourDoor.x + (s % 4) * 26 - 39,
-                 y: yourDoor.y + 10 + Math.floor(s / 4) * 16 });
-    for (const name of Object.keys(PLACES))
-      for (let s = 0; s < SLOT_SPOTS.length; s++)
-        out.push({ name: name + " " + s, ...placeSlot(name, s) });
+    const out = this.routing.allocatableEndpoints().map(({ dest, slot, point }) => ({
+      name: destinationKey(dest) + " " + slot, ...point,
+    }));
     for (let i = 0; i < 14; i++)
       out.push({ name: "street " + i, x: 48 + i * 28, y: 13 * T + 8 });
     return out;
   }
 
-  // Every spot must stand on open ground and every walk between two spots must
-  // stay on it. Cheap enough to run on load; `village.checkMap()` re-runs it.
+  // One component traversal proves that every allocatable endpoint and street
+  // spot is open and mutually reachable; `village.checkMap()` re-runs it.
   checkMap() {
-    const spots = this.spots(), bad = [];
-    for (const s of spots) {
-      const t = this.tileAt(s.x, s.y);
-      if (!this.walkable(t.x, t.y)) bad.push(s.name + ": stands on solid ground");
-    }
-    for (const a of spots) {
-      for (const b of spots) {
-        if (a === b) continue;
-        const ta = this.tileAt(a.x, a.y), tb = this.tileAt(b.x, b.y);
-        const path = this.findPath(ta.x, ta.y, tb.x, tb.y);
-        if (!path) { bad.push(a.name + " → " + b.name + ": no path"); continue; }
-        for (const t of path)
-          if (!this.walkable(t.x, t.y))
-            bad.push(a.name + " → " + b.name + ": crosses " + t.x + "," + t.y);
-      }
-    }
+    const spots = this.spots();
+    const streets = spots.filter(spot => spot.name.startsWith("street "));
+    const validation = this.routing.validate(streets), bad = [...validation.problems];
     let open = 0, road = 0;
     for (let y = 0; y < MAPH; y++)
       for (let x = 0; x < MAPW; x++)
         if (!this.blocked[y][x]) { open++; if (this.dirt[y][x]) road++; }
     return { tiles: MAPW * MAPH, walkable: open, road, spots: spots.length,
-             connected: this.connected(), offRoute: this.offRoute, problems: bad };
+             connected: validation.connected, offRoute: this.offRoute, problems: bad };
   }
 
   /* A place the projection can name but the map cannot draw is the bug this
@@ -961,47 +818,21 @@ class Village extends Phaser.Scene {
      for as long as it stays, so nobody shuffles sideways because a neighbour
      arrived or left — that would be movement no event asked for. */
   slotAt(where, id) {
-    let taken = this.slots.get(where);
-    if (!taken) { taken = []; this.slots.set(where, taken); }
-    const mine = taken.indexOf(id);
-    if (mine >= 0) return mine;
-    const free = taken.indexOf(null);
-    if (free >= 0) { taken[free] = id; return free; }
-    return taken.push(id) - 1;
+    return this.slotAllocator.allocate(where, id);
   }
 
   leaveSlots(id, except) {
-    for (const [where, taken] of this.slots) {
-      if (where === except) continue;
-      const at = taken.indexOf(id);
-      if (at >= 0) taken[at] = null;
-    }
+    this.slotAllocator.release(id, except);
   }
 
   spotFor(v, viz, dest, slot) {
-    if (dest.kind === "plot") {   // handing work over at a neighbour's door
-      const d = plotDoor(dest.plot), [dx, dy] = SLOT_SPOTS[slot % SLOT_SPOTS.length];
-      return { x: d.x + dx, y: d.y + 6 + dy, kind: "delegation" };
-    }
-    if (dest.kind === "building") {
-      const p = PLACES[dest.id];
-      return { ...placeSlot(dest.id, slot),
-               approachX: (p.tx - 2) * T + T / 2,
-               kind: dest.id };
-    }
+    if (dest.kind === "plot" || dest.kind === "building" || dest.kind === "door")
+      return this.routing.endpoint(dest, slot, v.state);
     if (viz.plot < 0) {   // traveler rests/works on the street
       const rx = 48 + (hashCode(viz.id) % 14) * 28;
-      if (v.state === "knocking") { /* fall through to door */ }
-      else return { x: rx, y: 13 * T + 8, kind: v.state };
+      return { x: rx, y: 13 * T + 8, kind: v.state };
     }
-    const door = viz.plot >= 0 ? plotDoor(viz.plot) : null;
-    switch (v.state) {
-      case "knocking": return { x: yourDoor.x + (slot % 4) * 26 - 39,
-                                y: yourDoor.y + 10 + Math.floor(slot / 4) * 16,
-                                kind: "knocking" };
-      case "working":  return { x: door.x, y: door.y + 14, kind: "working" };
-      default:         return { x: door.x, y: door.y + 2,  kind: "resting" };
-    }
+    return this.routing.endpoint({ kind: "home", plot: viz.plot }, 0, v.state);
   }
 
   spawn(v, dest) {
@@ -1040,22 +871,20 @@ class Village extends Phaser.Scene {
     this.plotOf.delete(id);
   }
 
-  walkTo(viz, target, targetY, arrivesHome) {
-    if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+  walkTo(viz, target, targetY, arrivesHome, preparedPath) {
     const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
     const tx = typeof target === "object" ? target.x : target;
     const ty = typeof target === "object" ? target.y : targetY;
     if (typeof target === "object") arrivesHome = targetY;
-    BurrowPresence.startJourney(viz, Boolean(arrivesHome));
-    let path = this.route(c.x, c.y, tx, ty);
+    const path = preparedPath || this.route(c.x, c.y, tx, ty);
     if (!path) {
       // Staying put is truthful. A straight fallback could cross solid terrain
       // and show the villager somewhere it could never have walked.
       console.error("burrow invariant: no walkable path to", tx, ty);
-      viz.spr.stop();
-      viz.spr.setTexture(char + "-idle", D_DOWN);
       return false;
     }
+    if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+    BurrowPresence.startJourney(viz, Boolean(arrivesHome));
     const legs = [];
     let px = c.x, py = c.y;
     for (const p of path) {
@@ -1086,24 +915,78 @@ class Village extends Phaser.Scene {
   }
 
   updateVillage(list) {
-    const seen = new Set();
-    const busyPlaces = new Set();
-    let knockers = 0;
-    /* Which plots have somebody behind the door right now. Plots are assigned
-       up front so a delegating villager cannot be sent to the house of a
-       villager this same pass is about to spawn into a different one. */
-    const occupied = list.map(v => this.assignPlot(v)).filter(plot => plot >= 0);
+    /* Plan the whole snapshot before touching the scene. This is deliberately
+       one transaction: capacity overflow or one impossible route means the
+       previous truthful frame remains completely intact. */
+    const ids = new Set();
     for (const v of list) {
-      seen.add(v.id);
-      let viz = this.viz.get(v.id);
-      if (viz) viz.plot = this.assignPlot(v);
+      if (ids.has(v.id)) {
+        console.error("burrow snapshot rejected: duplicate villager id", v.id);
+        return false;
+      }
+      ids.add(v.id);
+    }
+    const plannedPlots = new Map(list.map(v => [v.id,
+      v.residency === "resident" && Number.isInteger(v.home) ? v.home : -1]));
+    const occupied = [...plannedPlots.values()].filter(plot => plot >= 0);
+    const plans = [], claims = [];
+    for (const v of list) {
+      const viz = this.viz.get(v.id), isNew = !viz;
       const dest = destinationFor(v, {
-        held: viz && viz.delegateTo, ownPlot: this.plotOf.get(v.id),
+        held: viz && viz.delegateTo, ownPlot: plannedPlots.get(v.id),
         occupied, hash: hashCode(v.id), places: PLACES,
       });
-      const isNew = !viz;
-      if (isNew) viz = this.spawn(v, dest);
+      const key = dest.kind === "home" ? null : destinationKey(dest);
+      const targetClaim = { where: key, id: v.id };
+      claims.push(targetClaim);
+      let sourceClaim = null;
+      if (isNew && v.residency === "visitor" && key !== "building:visitor-lodge") {
+        sourceClaim = { where: "building:visitor-lodge", id: v.id };
+        claims.push(sourceClaim);
+      }
+      plans.push({ v, viz, isNew, dest, key, targetClaim, sourceClaim,
+        plot: plannedPlots.get(v.id) });
+    }
+    const preview = this.slotAllocator.reconcile(claims, false);
+    if (!preview) {
+      console.error("burrow snapshot rejected: destination capacity exhausted");
+      return false;
+    }
+    const slotOf = new Map(claims.map((claim, index) => [claim, preview[index]]));
+    for (const plan of plans) {
+      const { v, viz, isNew, dest, targetClaim, sourceClaim, plot } = plan;
+      const target = this.spotFor(v, viz || { id: v.id, plot }, dest, slotOf.get(targetClaim));
+      if (!target) {
+        console.error("burrow snapshot rejected: invalid destination endpoint");
+        return false;
+      }
+      const source = sourceClaim ? this.routing.endpoint(
+        { kind: "building", id: "visitor-lodge" }, slotOf.get(sourceClaim), v.state) : null;
+      const from = source || (viz && { x: viz.cont.x, y: viz.cont.y });
+      const moved = !viz || !viz.target || viz.target.x !== target.x || viz.target.y !== target.y;
+      const needsRoute = Boolean(from) && (moved || v.state !== viz?.state);
+      const path = needsRoute ? this.routing.route(from, target) : [];
+      if (needsRoute && !path) {
+        console.error("burrow snapshot rejected: no walkable path to", target.x, target.y);
+        return false;
+      }
+      Object.assign(plan, { target, source, moved, needsRoute, path });
+    }
+    const committed = this.slotAllocator.reconcile(claims);
+    if (!committed) throw new Error("burrow invariant: validated allocation did not commit");
 
+    const seen = new Set(list.map(v => v.id));
+    const busyPlaces = new Set();
+    let knockers = 0;
+    for (const plan of plans) {
+      const { v, isNew, dest, key, plot, target: spot, source, moved, needsRoute, path } = plan;
+      let viz = plan.viz;
+      this.plotOf.set(v.id, plot);
+      if (viz) viz.plot = plot;
+      if (isNew) {
+        viz = this.spawn(v, source ? { kind: "building", id: "visitor-lodge" } : dest);
+        if (source) viz.cont.setPosition(source.x, source.y);
+      }
       viz.chip.el.className = "chip " + v.state;
       viz.chip.el.querySelector(".nm").textContent = v.name;
       viz.chip.el.querySelector(".dot").style.background = v.accent;
@@ -1125,25 +1008,25 @@ class Village extends Phaser.Scene {
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
 
-      // held so a neighbour arriving or leaving cannot drag it to another door
-      viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
-      viz.dest = dest;
-      const key = dest.kind === "home" ? null : destinationKey(dest);
-      this.leaveSlots(v.id, key);
-      const slot = key ? this.slotAt(key, v.id) : 0;
       if (dest.kind === "building" && v.state === "working") busyPlaces.add(dest.id);
       if (v.state === "knocking") knockers++;
-      const spot = this.spotFor(v, viz, dest, slot);
-      const moved = !viz.target || viz.target.x !== spot.x || viz.target.y !== spot.y;
-      if (isNew) {
+      if (isNew && !source) {
         viz.cont.setPosition(spot.x, spot.y);
         viz.target = spot;
+        viz.dest = dest;
+        viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
+        viz.slotKey = key;
         viz.spr.setTexture(v.char + "-idle", D_DOWN);
-      } else if (moved || v.state !== viz.state) {
+      } else if (needsRoute) {
+        if (!this.walkTo(viz, spot, BurrowPresence.atHome(v.state, dest), undefined, path))
+          throw new Error("burrow invariant: validated route did not start");
         viz.target = spot;
-        this.walkTo(viz, spot, BurrowPresence.atHome(v.state, dest));
+        viz.state = v.state;
+        viz.dest = dest;
+        viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
+        viz.slotKey = key;
       }
-      viz.state = v.state;
+      if (isNew || (!moved && v.state === viz.state)) viz.state = v.state;
 
       const stale = v.state === "stale";
       viz.cont.setAlpha(stale ? .45 : 1);
@@ -1156,6 +1039,7 @@ class Village extends Phaser.Scene {
       if (!seen.has(id)) this.despawn(id);
     this.knockers=knockers;
     this.applySky();
+    return true;
   }
 }
 

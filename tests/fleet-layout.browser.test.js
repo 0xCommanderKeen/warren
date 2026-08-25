@@ -8,6 +8,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const { stop } = require("./browser-process");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -90,22 +91,6 @@ async function eventually(evaluate, expression) {
   throw new Error(`browser condition timed out: ${expression}`);
 }
 
-async function stop(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  const waitForExit = timeout => new Promise(resolve => {
-    if (child.exitCode !== null || child.signalCode !== null) { resolve(true); return; }
-    const timer = setTimeout(() => { child.removeListener("exit", onExit); resolve(false); }, timeout);
-    function onExit() { clearTimeout(timer); resolve(true); }
-    child.once("exit", onExit);
-  });
-  child.kill("SIGTERM");
-  if (await waitForExit(3000)) return;
-  child.kill("SIGKILL");
-  if (!await waitForExit(3000)) {
-    throw new Error(`child ${child.pid} did not exit after SIGTERM and SIGKILL`);
-  }
-}
-
 test("production fleet ledger has no horizontal overflow at 320px", { timeout: 30000 }, async () => {
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "burrow-layout-"));
   const events = path.join(temporary, "events.jsonl");
@@ -133,12 +118,13 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
     cwd: ROOT, env: { ...process.env, BURROW_EVENTS: events, BURROW_VILLAGERS: villagers },
     stdio: ["ignore", "ignore", "pipe"],
   });
-  let chrome;
+  let chrome, testFailure;
   try {
     await waitForServer(port, server);
     chrome = spawn(chromeExecutable(), ["--headless=new", "--disable-gpu", "--no-sandbox",
       "--remote-debugging-pipe", `--user-data-dir=${path.join(temporary, "chrome")}`, "about:blank"],
-    { stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
+    { detached: process.platform !== "win32",
+      stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
     let chromeErrors = "";
     chrome.stderr.on("data", chunk => { chromeErrors += chunk; });
     const send = cdp(chrome);
@@ -152,6 +138,145 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
     await send("Runtime.enable");
     await send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
     await eventually(send, "document.readyState === 'complete' && !!window.BurrowFleetController");
+    const routing = await eventually(send, `(() => {
+      if (!scene || !scene.routing) return false;
+      let findPathCalls = 0;
+      const productionRouting = scene.routing;
+      scene.routing = { ...productionRouting, findPath: (...args) => {
+        findPathCalls++; return productionRouting.findPath(...args);
+      }};
+      const check = scene.checkMap();
+      scene.routing = productionRouting;
+      const lodge = { kind: 'building', id: 'visitor-lodge' };
+      const endpoints = Array.from({ length: scene.routing.capacity(lodge) },
+        (_, slot) => scene.routing.endpoint(lodge, slot));
+      return { problems: check.problems, findPathCalls, lodgeCapacity: endpoints.length,
+        distinctLodgeEndpoints: new Set(endpoints.map(p => p.x + ',' + p.y)).size,
+        validatedEndpoints: scene.routing.validate().endpoints.length };
+    })()`);
+    assert.deepEqual(routing.problems, [], `production map routing failed: ${routing.problems}`);
+    assert.equal(routing.findPathCalls, 0, "production map self-check must not run all-pairs A*");
+    assert.equal(routing.lodgeCapacity, 32);
+    assert.equal(routing.distinctLodgeEndpoints, 32);
+    assert.ok(routing.validatedEndpoints >= 8 * 4 + 32 + 16,
+      "production self-check did not cover the promised shared/lodge/knock fleet");
+    const lifecycle = await eventually(send, `(() => {
+      if (!scene || !scene.routing || !scene.slotAllocator) return false;
+      scene.updateVillage([]);
+      const villager = (id, place, residency = 'resident') => ({ id, name: id,
+        char: 'Villager', accent: '#abcdef', project: 'routing-test', residency,
+        home: residency === 'resident' ? 0 : null, base: residency === 'visitor'
+          ? 'visitor-lodge' : 'resident-home', state: 'working', place, doing: 'test', lastTs: 1 });
+
+      const first = villager('first-visitor', 'library', 'visitor');
+      const firstAccepted = scene.updateVillage([first]);
+      const firstViz = scene.viz.get(first.id);
+      const lodge = { kind: 'building', id: 'visitor-lodge' };
+      const lodgeStarts = Array.from({ length: scene.routing.capacity(lodge) },
+        (_, slot) => scene.routing.endpoint(lodge, slot));
+      const startsAtLodge = lodgeStarts.some(point =>
+        point.x === firstViz.cont.x && point.y === firstViz.cont.y);
+      const visitorJourney = { accepted: firstAccepted, startsAtLodge,
+        hasTween: Boolean(firstViz.walk), destination: firstViz.dest && firstViz.dest.id,
+        targetDiffers: firstViz.target.x !== firstViz.cont.x || firstViz.target.y !== firstViz.cont.y,
+        residentDoor: scene.routing.endpoint({ kind: 'home', plot: 0 }, 0, first.state),
+        actualStart: { x: firstViz.cont.x, y: firstViz.cont.y } };
+
+      scene.updateVillage([]);
+      const left = Array.from({ length: 16 }, (_, i) => villager('left-' + i, 'library'));
+      const right = Array.from({ length: 16 }, (_, i) => villager('right-' + i, 'workshop'));
+      const seeded = scene.updateVillage([...left, ...right]);
+      const exchange = [...left.map(v => ({ ...v, place: 'workshop', lastTs: 2 })),
+        ...right.map(v => ({ ...v, place: 'library', lastTs: 2 }))];
+      const exchanged = scene.updateVillage(exchange);
+      const exchangeCorrect = exchange.every(v => scene.viz.get(v.id).dest.id === v.place);
+
+      const watched = scene.viz.get('left-0');
+      const beforeOverflow = { count: scene.viz.size, lastTs: watched.lastTs,
+        chip: watched.chip.el.outerHTML, walk: watched.walk, x: watched.cont.x, y: watched.cont.y,
+        target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+        state: watched.state, home: watched.home, texture: watched.spr.texture.key };
+      const overflow = [...exchange,
+        villager('overflow', 'workshop')];
+      const overflowAccepted = scene.updateVillage(overflow);
+      const afterOverflow = { count: scene.viz.size, lastTs: watched.lastTs,
+        chip: watched.chip.el.outerHTML, walk: watched.walk, x: watched.cont.x, y: watched.cont.y,
+        target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+        state: watched.state, home: watched.home, texture: watched.spr.texture.key };
+
+      const originalRoute = scene.routing.route;
+      const beforeFailure = { walk: watched.walk, x: watched.cont.x, y: watched.cont.y,
+        target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+        state: watched.state, home: watched.home, texture: watched.spr.texture.key,
+        lastTs: watched.lastTs, chip: watched.chip.el.outerHTML };
+      scene.routing = { ...scene.routing, route: () => null };
+      const failed = scene.updateVillage(exchange.map(v => v.id === 'left-0'
+        ? { ...v, place: 'library', char: 'Monk', name: 'mutated', lastTs: 99 } : v));
+      scene.routing = { ...scene.routing, route: originalRoute };
+      const afterFailure = { walk: watched.walk, x: watched.cont.x, y: watched.cont.y,
+        target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+        state: watched.state, home: watched.home, texture: watched.spr.texture.key,
+        lastTs: watched.lastTs, chip: watched.chip.el.outerHTML };
+      let allocatorCalls = 0, routeCalls = 0, spawnCalls = 0, walkCalls = 0, tweenCalls = 0;
+      const allocator = scene.slotAllocator, routingNow = scene.routing;
+      const originalSpawn = scene.spawn, originalWalkTo = scene.walkTo;
+      const originalTweenAdd = scene.tweens.add, originalTweenChain = scene.tweens.chain;
+      scene.slotAllocator = { ...allocator, reconcile: (...args) => {
+        allocatorCalls++; return allocator.reconcile(...args);
+      }};
+      scene.routing = { ...routingNow, route: (...args) => {
+        routeCalls++; return routingNow.route(...args);
+      }};
+      scene.spawn = (...args) => { spawnCalls++; return originalSpawn.apply(scene, args); };
+      scene.walkTo = (...args) => { walkCalls++; return originalWalkTo.apply(scene, args); };
+      scene.tweens.add = (...args) => { tweenCalls++; return originalTweenAdd.apply(scene.tweens, args); };
+      scene.tweens.chain = (...args) => { tweenCalls++; return originalTweenChain.apply(scene.tweens, args); };
+      const beforeDuplicate = { containers: scene.children.list.length,
+        labels: document.querySelector('#labels').children.length, chips: scene.chips.length,
+        viz: scene.viz.size,
+        plot: scene.plotOf.get('left-0'), watched: JSON.stringify({ lastTs: watched.lastTs,
+          target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+          state: watched.state, chip: watched.chip.el.outerHTML }) };
+      const duplicateAccepted = scene.updateVillage([
+        { ...exchange[0], place: 'library', lastTs: 101 },
+        { ...exchange[0], place: 'workshop', lastTs: 102 },
+        ...exchange.slice(1),
+      ]);
+      const afterDuplicate = { containers: scene.children.list.length,
+        labels: document.querySelector('#labels').children.length, chips: scene.chips.length,
+        viz: scene.viz.size,
+        plot: scene.plotOf.get('left-0'), watched: JSON.stringify({ lastTs: watched.lastTs,
+          target: watched.target, dest: watched.dest, slotKey: watched.slotKey,
+          state: watched.state, chip: watched.chip.el.outerHTML }) };
+      scene.slotAllocator = allocator; scene.routing = routingNow;
+      scene.spawn = originalSpawn; scene.walkTo = originalWalkTo;
+      scene.tweens.add = originalTweenAdd; scene.tweens.chain = originalTweenChain;
+      return { visitorJourney, residentHomeWasNotStart:
+          visitorJourney.actualStart.x !== visitorJourney.residentDoor.x ||
+          visitorJourney.actualStart.y !== visitorJourney.residentDoor.y,
+        seeded, exchanged, exchangeCorrect, overflowAccepted,
+        overflowAtomic: Object.keys(beforeOverflow).every(key => beforeOverflow[key] === afterOverflow[key]),
+        failed, failureAtomic: Object.keys(beforeFailure).every(key => beforeFailure[key] === afterFailure[key]),
+        duplicateAccepted, duplicateAtomic: JSON.stringify(beforeDuplicate) === JSON.stringify(afterDuplicate),
+        duplicateCalls: { allocatorCalls, routeCalls, spawnCalls, walkCalls, tweenCalls } };
+    })()`);
+    assert.deepEqual(lifecycle.visitorJourney,
+      { accepted: true, startsAtLodge: true, hasTween: true, destination: "library",
+        targetDiffers: true, residentDoor: lifecycle.visitorJourney.residentDoor,
+        actualStart: lifecycle.visitorJourney.actualStart });
+    assert.equal(lifecycle.residentHomeWasNotStart, true);
+    assert.equal(lifecycle.seeded, true);
+    assert.equal(lifecycle.exchanged, true, "a full destination exchange needs no spare slot");
+    assert.equal(lifecycle.exchangeCorrect, true);
+    assert.equal(lifecycle.overflowAccepted, false);
+    assert.equal(lifecycle.overflowAtomic, true, "overflow partially mutated the production scene");
+    assert.equal(lifecycle.failed, false);
+    assert.equal(lifecycle.failureAtomic, true, "failed active reroute mutated the production scene");
+    assert.equal(lifecycle.duplicateAccepted, false);
+    assert.equal(lifecycle.duplicateAtomic, true,
+      "duplicate snapshot left an orphan container/chip or mutated the production scene");
+    assert.deepEqual(lifecycle.duplicateCalls,
+      { allocatorCalls: 0, routeCalls: 0, spawnCalls: 0, walkCalls: 0, tweenCalls: 0 });
     await eventually(send, "window.dispatchEvent(new Event('resize')); " +
       "document.querySelector('#fleet-open').click(); " +
       "document.querySelector('#panel.open.ledger .ledger-filters') && true");
@@ -234,10 +359,22 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
     assert.ok(result.panelScrollWidth <= result.panelClientWidth,
       `ledger overflowed: ${result.panelScrollWidth}px > ${result.panelClientWidth}px; ` +
       JSON.stringify(result.scrollOffenders));
+  } catch (error) {
+    testFailure = error;
   } finally {
-    const stopped = await Promise.allSettled([stop(chrome), stop(server)]);
-    const failure = stopped.find(result => result.status === "rejected");
-    if (failure) throw failure.reason;
-    fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    const failures = testFailure ? [testFailure] : [];
+    const stopped = await Promise.allSettled([
+      stop(chrome, { processGroup: true }),
+      stop(server),
+    ]);
+    failures.push(...stopped.filter(result => result.status === "rejected")
+      .map(result => result.reason));
+    try {
+      fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) throw failures[0];
+    if (failures.length > 1) throw new AggregateError(failures, "layout test and cleanup failed");
   }
 });
