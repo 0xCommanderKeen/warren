@@ -76,6 +76,7 @@ __all__ = [
     "load_manifest",
     "manifest_json_schema",
     "redact_secrets",
+    "residents_root",
     "retired_complaint",
     "split_frontmatter",
     "validate_manifest",
@@ -1834,6 +1835,26 @@ def validate_path(path: Path | str, skills_dir: Path | str | None = None) -> Val
     if (target / MANIFEST_FILENAME).is_file():
         return validate_manifest(target / MANIFEST_FILENAME, skills_dir)
     return validate_tree(target, skills_dir)
+
+
+def residents_root(path: Path | str) -> Path:
+    """Return the residents tree a :func:`validate_path` target belongs to.
+
+    All three shapes that function accepts live *in* a tree, and the skills library is
+    beside the tree — ``<residents_dir>/../skills`` — never beside the target. Validation
+    already makes this reduction internally, which is why a manifest file is validated
+    against ``source.parent.parent``'s library. A caller that has to name the same library
+    for itself must make it too: handing :func:`steward.skills.library_for` a *resident*
+    directory looks for ``residents/<id>/../skills`` and finds nothing, and an unconfigured
+    library answers "no skill is missing, no run would materialize anything" to every
+    question asked of it — a green line that means "there was nothing to check".
+    """
+    target = Path(path)
+    if target.is_file():
+        return target.resolve().parent.parent
+    if (target / MANIFEST_FILENAME).is_file():
+        return target.resolve().parent
+    return target
 
 
 def validate_paths(

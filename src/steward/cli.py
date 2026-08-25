@@ -32,7 +32,7 @@ from steward.approvals import (
     parse_options,
     raise_request,
 )
-from steward.board import BoardReport, Dispatcher, claimable_skills
+from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError
@@ -50,6 +50,7 @@ from steward.manifest import (
     Severity,
     ValidationResult,
     manifest_schema_json,
+    residents_root,
     validate_paths,
 )
 from steward.nursery import (
@@ -70,6 +71,7 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
     load_scheduled,
+    workdir_refusal,
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 from steward.store import (
@@ -239,7 +241,9 @@ def skills_command(residents: Path, skills_dir: Path | None, output_format: str)
     The effective set is the library's defaults plus the resident's own grants — what a
     session for that resident will actually be told, without opening a manifest.
     """
-    library = library_for(residents, skills_dir)
+    # residents_root for the same reason doctor needs it: --residents may name one resident,
+    # and the library is beside the tree, not beside the target.
+    library = library_for(residents_root(residents), skills_dir)
     result = validate_paths([residents], skills_dir)
     sets = {
         resident.id: effective_skills(resident.manifest, library) for resident in result.residents
@@ -314,7 +318,8 @@ def doctor(residents: Path, db: Path | None) -> None:
     binary is an error at a reasonable hour rather than a routine that silently never
     happens at 7am, a resident paused by its budget is a resident that will not fire
     tonight however green everything else looks, and letters stacked behind a closed route
-    are work nobody will ever pick up.
+    are work nobody will ever pick up. Board claimants are pre-flighted here too — a
+    resident that claims work and schedules none is a resident nothing else checks.
     """
     result = validate_paths([residents])
     if not result.ok:
@@ -322,6 +327,11 @@ def doctor(residents: Path, db: Path | None) -> None:
         sys.exit(EXIT_INVALID)
 
     problems = 0
+    # The same library validate_paths above resolved for itself: passing no skills dir does
+    # not mean no library, it means "the one beside the tree" — hence residents_root, since
+    # this argument may name one resident rather than the tree. Resolved once here because
+    # two things below need it, the board pre-flight in the loop and the Scheduler after it.
+    library = library_for(residents_root(residents))
     with _open_store(db) as store:
         guard = BudgetGuard(store)
         for resident in result.residents:
@@ -340,6 +350,10 @@ def doctor(residents: Path, db: Path | None) -> None:
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
                 click.secho(f"{label} — ready", fg="green")
+            # Before the journal line, which probes by creating the directory it names: a
+            # claimant with no working directory must be reported as doctor found it, not
+            # as doctor left it.
+            problems += _report_claimant(resident, library)
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
@@ -350,7 +364,7 @@ def doctor(residents: Path, db: Path | None) -> None:
         engine = Scheduler(
             scheduled,
             state=SchedulerState(path=default_state_path()),
-            library=library_for(residents),
+            library=library,
         )
         for item, moment in engine.upcoming(datetime.now(UTC)):
             local = moment.strftime("%Y-%m-%d %H:%M")
@@ -411,6 +425,56 @@ def _report_journal(resident: Resident) -> int:
         return 0
     click.secho(f"{resident.id}: journal {directory} — writable, {ends_with}", fg="green")
     return 0
+
+
+def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
+    """Pre-flight a board claimant, so a notice is not claimed and dropped. Returns problems.
+
+    The per-resident loop is the right hook: a resident that claims board work and declares
+    no routine is invisible to the scheduler block below, which is exactly the resident
+    whose broken runner or missing working directory would otherwise first be heard as a
+    task the village saw claimed and failed in the same breath (#37). A resident that does
+    not claim says nothing here — the board is a declaration, and so is this line.
+
+    Of :func:`board_preflight`'s three questions only one is doctor's alone, and it is worth
+    being exact about which, because two of these lines are second opinions:
+
+    - the **runner** is already checked a few lines above, for every resident, claimant or
+      not. Saying it twice is deliberate — the first line is "this resident cannot run",
+      this one is "so it must not be left claiming" — but the exit code was decided there.
+    - an **unresolvable grant** never reaches here at all. ``validate_paths`` at the top of
+      doctor resolves *this same* library and turns a grant that names nothing into an
+      error, so doctor has already printed it and exited ``EXIT_INVALID`` before the loop
+      starts (``test_doctor_names_a_board_claimants_missing_skill``). That leg belongs to
+      :func:`board_preflight` for the callers that reach it without validating first — a
+      dispatch-time dry run (#88) — and is dead weight here, kept only so a claimant is
+      asked the whole question by one function rather than half of it by two.
+    - the **working directory** is the one thing nothing else asks of a claimant. It is
+      reported as a warning rather than a failure, for the same reason the journal probe's
+      is: a shipped resident's ``memory.path`` is a container path that is missing on the
+      laptop running doctor and present where it actually runs. Doctor says it out loud — a
+      dispatch *from this host* really would refuse to claim — and does not go red over a
+      path that is not this host's to have.
+    """
+    if not resident.manifest.board.claim:
+        return 0
+    cwd = Path.cwd()
+    complaints = board_preflight([resident], library, cwd)
+    if not complaints:
+        click.secho(f"{resident.id}: board — claimant, runner and skills resolve", fg="green")
+        return 0
+    refusal = workdir_refusal(resident, cwd, library)
+    off_host = f"{resident.id}: board — {refusal}" if refusal else None
+    problems = 0
+    for complaint in complaints:
+        if complaint == off_host:
+            click.secho(f"{complaint} (a directory it has on its own host?)", fg="yellow", err=True)
+            continue
+        # Red, and counted — see the docstring for which of these doctor can actually reach
+        # and which the caller above already decided the exit code on.
+        click.secho(complaint, fg="red", err=True)
+        problems += 1
+    return problems
 
 
 def _report_budget(status: BudgetStatus) -> int:
