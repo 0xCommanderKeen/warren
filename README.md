@@ -68,6 +68,7 @@ $ steward scheduler run              # the daemon: sleep to the next due routine
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
 $ steward journal life-agent         # what Hob has actually written, newest first
+$ steward show life-agent            # the exact preamble Hob's next session opens with
 ```
 
 **The HTTP API** (#3). The token-gated write path burrow's viewer calls directly, so
@@ -172,7 +173,11 @@ and attempt number, because a silent restart is a lie by omission; attempts are 
 (1m, 5m, 25m, three of them) and then steward stops and asks a person instead. And a
 `routine_started` that no closing event ever answered becomes `routine_failed` with
 `error: "run never reported back"`, emitted exactly once — the village must never show
-eternal work.
+eternal work. What "never answered" is read from is steward's own **run registry** (#39):
+a row per session, written where the opening event is emitted and closed where the closing
+one is. That row exists whatever happened to the events, so a session that died after its
+`routine_started` reached burrow is found — which it was not while the only thing the
+watchdog could read was the log of events burrow never received.
 
 ```console
 $ steward budget show                # today's spend against every declared cap

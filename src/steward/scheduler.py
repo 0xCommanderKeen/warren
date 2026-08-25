@@ -110,6 +110,7 @@ __all__ = [
     "TRIGGER_SCHEDULE",
     "FireReport",
     "RunGuard",
+    "RunRegistry",
     "ScheduledRoutine",
     "Scheduler",
     "SchedulerError",
@@ -229,6 +230,40 @@ class RunGuard(Protocol):
         now: datetime | None = None,
     ) -> object:
         """Append what one finished session cost to the durable ledger."""
+        ...
+
+
+class RunRegistry(Protocol):
+    """Where steward writes down that a session is open, and that it closed.
+
+    A structural protocol for the third time, and for a duller reason than its
+    neighbours: :class:`steward.store.Store` imports this module, so this module cannot
+    import it back. What satisfies it is that ``Store``.
+
+    The registry exists because the watchdog needs to know a run started without having
+    to find the *event* that said so. Events go to burrow, and the copy steward keeps of
+    them is a fallback log — written on the host that fired the run, and only useful for
+    the runs burrow could not be told about at all. A run steward opened is steward's own
+    fact, so steward records it (steward #39). A scheduler with no registry brackets its
+    runs exactly as it did before, and the watchdog falls back to reading the log.
+    """
+
+    def open_run(  # noqa: PLR0913 — one parameter per fact about the session that opened
+        self,
+        *,
+        run_id: str,
+        kind: str,
+        agent_id: str,
+        project: str = "",
+        ref: str = "",
+        timeout_s: float = 0.0,
+        now: str | None = None,
+    ) -> bool:
+        """Record that a session has started, and return whether this call opened it."""
+        ...
+
+    def close_run(self, run_id: str, *, now: str | None = None) -> bool:
+        """Record that a session reported back, and return whether this call closed it."""
         ...
 
 
@@ -632,12 +667,16 @@ class Scheduler:
         library: SkillLibrary | None = None,
         hooks: WakeHooks | None = None,
         guard: RunGuard | None = None,
+        registry: RunRegistry | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
         self.dry_run = dry_run
         # No guard means no budget: unbounded, exactly as it was before steward #8.
         self.guard = guard
+        # No registry means the watchdog is back to reading the fallback log for runs
+        # that vanished — which is what it read before steward #39, and no worse.
+        self.registry = registry
         # One library for the fleet: improving a skill improves every resident holding
         # it. An unconfigured library means no skill is injected and none is written.
         self.library = library if library is not None else SkillLibrary()
@@ -1112,7 +1151,15 @@ class Scheduler:
             run_id=run_id,
             cwd=cwd,
         )
+        # The deadline the session actually gets, read once: the registry is judged
+        # against it, and the runner is given it.
+        timeout_s = self._timeout_for(item)
+        # The event first, then the row. A crash between the two leaves a run steward
+        # cannot find, which is where this stood before the registry existed; the other
+        # order would leave a row the watchdog buries as ``routine_failed`` for a run the
+        # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
+        self._open_run(item, run_id, timeout_s, moment)
 
         started = time.monotonic()
         prompt = ""
@@ -1127,7 +1174,7 @@ class Scheduler:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=self._timeout_for(item),
+                    timeout_s=timeout_s,
                     model=item.resident.manifest.runner.model,
                     env=self._session_env(item, run_id),
                 )
@@ -1176,6 +1223,10 @@ class Scheduler:
                     duration_s=result.duration_s,
                 )
             )
+        # The bracket is closed in the village and in steward's own registry, in that
+        # order: the event is the thing burrow renders, and the row only has to be right
+        # before the next watchdog pass reads it.
+        self._close_run(run_id, moment + timedelta(seconds=result.duration_s))
         return FireReport(
             scheduled=item,
             run_id=run_id,
@@ -1235,6 +1286,41 @@ class Scheduler:
         if self.guard is None:
             return item.routine.timeout_s
         return self.guard.timeout_for(item.resident.manifest, item.routine.timeout_s)
+
+    def _open_run(
+        self, item: ScheduledRoutine, run_id: str, timeout_s: int, moment: datetime
+    ) -> None:
+        """Write this run into the registry. Never raises: a lost row is not a lost run."""
+        if self.registry is None:
+            return
+        try:
+            opened = self.registry.open_run(
+                run_id=run_id,
+                kind="routine",
+                agent_id=item.agent_id,
+                project=item.project,
+                ref=item.routine.id,
+                timeout_s=float(timeout_s),
+                now=ev.utc_now_iso(moment),
+            )
+        except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine
+            log.warning("%s: could not record that this run started: %s", item.key, exc)
+            return
+        if not opened:  # pragma: no cover — a fresh id per fire cannot collide
+            # An ignored open means the watchdog cannot see this session at all, and a
+            # run nobody is watching must not look like a run that is fine.
+            log.warning(
+                "%s: run %s was already recorded, so it is not being watched", item.key, run_id
+            )
+
+    def _close_run(self, run_id: str, moment: datetime) -> None:
+        """Answer this run's registry row. Never raises, and never emits: the events did."""
+        if self.registry is None:
+            return
+        try:
+            self.registry.close_run(run_id, now=ev.utc_now_iso(moment))
+        except Exception as exc:  # noqa: BLE001 — the registry must not take a routine down
+            log.warning("could not record that run %s reported back: %s", run_id, exc)
 
     def _ledger(
         self, item: ScheduledRoutine, run_id: str, result: RunResult, moment: datetime

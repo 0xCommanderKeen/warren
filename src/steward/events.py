@@ -39,7 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from steward.manifest import redact_secrets
+from steward.manifest import redact_mapping, redact_secrets
 
 __all__ = [
     "API_AGENT_ID",
@@ -486,6 +486,22 @@ def _lineage(parent_task_id: str | None) -> dict[str, Any]:
     return {"parent_task_id": parent_task_id} if parent_task_id else {}
 
 
+def _session(run_id: str | None) -> dict[str, Any]:
+    """Name the session a task's close came out of, and only when there was one.
+
+    A ``task_done`` / ``task_failed`` names a *task*, and a task id outlives its attempts:
+    the board's ordinary flow is claim, die, expire the lease, re-claim, and every attempt
+    carries the same id. ``run_id`` is what tells those attempts apart — it is the id of
+    the run registry row this close answers, so the watchdog can match a close to the one
+    session it belongs to instead of guessing from timestamps (steward #39).
+
+    The lease sweep's ``task_failed`` has no session to name — it is the board mourning a
+    claim, not a run reporting back — so the key is absent there, and absent is the whole
+    point: a close that names no session answers no session's row.
+    """
+    return {"run_id": run_id} if run_id else {}
+
+
 def task_claimed_event(
     *, task_id: str, title: str, claimant: str, project: str, parent_task_id: str | None = None
 ) -> Event:
@@ -521,11 +537,15 @@ def task_done_event(  # noqa: PLR0913 — every field is keyword-only and part o
     project: str,
     artifacts: Sequence[str] = (),
     parent_task_id: str | None = None,
+    run_id: str | None = None,
 ) -> Event:
     """Report a claimed task the resident finished, and what it left behind.
 
     ``artifacts`` is best effort, exactly as it is for a routine: steward reports what
     the run actually named and never invents a file it did not see.
+
+    ``run_id`` names the session that finished it, so this close can be told from the
+    close of an earlier attempt at the same task — see :func:`_session`.
     """
     return Event(
         type=TASK_DONE,
@@ -536,6 +556,7 @@ def task_done_event(  # noqa: PLR0913 — every field is keyword-only and part o
             "title": title,
             "claimant": claimant,
             "artifacts": list(artifacts),
+            **_session(run_id),
             **_lineage(parent_task_id),
         },
     )
@@ -549,6 +570,7 @@ def task_failed_event(  # noqa: PLR0913 — every field is keyword-only and part
     project: str,
     reason: str,
     parent_task_id: str | None = None,
+    run_id: str | None = None,
 ) -> Event:
     """Report a task its claimant did not finish — including one whose lease ran out.
 
@@ -556,6 +578,10 @@ def task_failed_event(  # noqa: PLR0913 — every field is keyword-only and part
     that quietly returned to the board would let the village show a task nobody is doing
     as a task somebody is doing. A delegated item that nobody finished fails the same way,
     still naming its parent, so the chain shows where the work stopped.
+
+    ``run_id`` names the session that failed, where there was one. A lease expiry passes
+    none: the session it mourns is precisely the one that never reported back, and saying
+    otherwise would answer its registry row — see :func:`_session`.
     """
     return Event(
         type=TASK_FAILED,
@@ -566,6 +592,7 @@ def task_failed_event(  # noqa: PLR0913 — every field is keyword-only and part
             "title": title,
             "claimant": claimant,
             "reason": truncate_error(reason),
+            **_session(run_id),
             **_lineage(parent_task_id),
         },
     )
@@ -643,35 +670,11 @@ def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
             "message": truncate_error(redact_secrets(message)),
             "request_id": request_id,
             "action": action,
-            "detail": bounded_detail(_redact_detail(detail)),
+            "detail": bounded_detail(redact_mapping(detail)),
             "options": list(options),
             "expires_at": expires_at,
         },
     )
-
-
-def _redact_detail(detail: Mapping[str, Any] | None) -> dict[str, object] | None:
-    """Redact every string a knock's ``detail`` carries, at any depth, secrets removed.
-
-    Recurses into nested maps and lists so a secret a session buries under a key or inside
-    a list is scrubbed as surely as one at the top level; non-string leaves (the numbers a
-    budget pause reports, the ISO instants of a window) are facts steward built and pass
-    through untouched.
-    """
-    if detail is None:
-        return None
-    return {str(key): _redact_node(value) for key, value in detail.items()}
-
-
-def _redact_node(value: object) -> object:
-    """Redact one node of a detail tree: a string, a nested map, a list, or a leaf."""
-    if isinstance(value, str):
-        return redact_secrets(value)
-    if isinstance(value, Mapping):
-        return {str(key): _redact_node(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_node(item) for item in value]
-    return value
 
 
 def needs_human_resolved_event(  # noqa: PLR0913 — the payload the protocol documents

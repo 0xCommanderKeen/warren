@@ -54,13 +54,13 @@ import logging
 import os
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from steward import events as ev
 from steward import prompt
-from steward.manifest import ResidentManifest
+from steward.manifest import ResidentManifest, redact_mapping, redact_secrets
 from steward.store import APPROVAL_DECISIONS, DECIDED_BY_REPEAT, ApprovalRecord, Store
 
 __all__ = [
@@ -83,6 +83,7 @@ __all__ = [
     "human_message",
     "parse_duration",
     "raise_request",
+    "redact_decision",
     "repeat_deny_window_s",
 ]
 
@@ -537,6 +538,31 @@ def _render_decision(record: ApprovalRecord) -> str:
     if record.detail:
         line += f"\n  what you asked: {json.dumps(dict(record.detail), ensure_ascii=False)}"
     return line
+
+
+def redact_decision(record: ApprovalRecord) -> ApprovalRecord:
+    """Return ``record`` with every string a model wrote scrubbed of inline secrets.
+
+    A request's ``message`` and ``detail`` are written by a resident at runtime and stored
+    verbatim (:func:`raise_request`); the ``edit`` is written by whoever answered. No
+    validator ever scanned any of them — the manifest scanners guard what enters the repo,
+    not what a session types — so anything that renders a decision *outside* the session
+    that asked (``steward show``, a report pasted into an issue) must scrub it first, the
+    way :func:`steward.events.needs_human_event` scrubs the same detail on its way to
+    burrow. Redaction is per field, not over the rendered line, so an action legitimately
+    named ``rotate_token`` still reads as itself rather than as a redacted assignment.
+
+    Deliberately not applied by :func:`decisions_preamble` itself: a resident's own next
+    session is being handed back the detail it wrote, and mangling that is a lie about what
+    it asked. This is the egress-to-a-human copy.
+    """
+    return replace(
+        record,
+        action=redact_secrets(record.action),
+        message=redact_secrets(record.message),
+        detail=redact_mapping(record.detail) or {},
+        edit=redact_mapping(record.edit),
+    )
 
 
 def decisions_preamble(records: Sequence[ApprovalRecord]) -> str | None:

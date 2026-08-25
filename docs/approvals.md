@@ -273,3 +273,10 @@ private key, a JWT, a password in a URL — is replaced with `[redacted:secret]`
 same detectors that refuse a credential in a manifest. Only the secret is removed; the
 rest of the knock is intact, so a person still reads the question. Redaction runs *before*
 the length bound, so a secret cut in half by the cap can never surface a live prefix.
+
+The stored row keeps what the session actually typed, so **every rendering meant for a
+human scrubs it again**: `steward show` runs each decision through
+`approvals.redact_decision` before printing it, since that output is made to be pasted
+into a review. The one reader that gets the raw text back is the resident that wrote it,
+in the `DECISIONS SINCE YOU LAST RAN` section of its own next session — redacting there
+would misquote the question it asked.

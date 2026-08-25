@@ -19,6 +19,7 @@ from steward import prompt as p
 from steward import runners as r
 from steward import scheduler as s
 from steward import skills as sk
+from steward.store import Store
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
 
@@ -1594,3 +1595,84 @@ def test_a_journal_that_raises_a_decode_error_is_a_missing_journal_not_a_crash(
     monkeypatch.setattr(j, "latest_entry", undecodable)
     report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
     assert report.fired, "a bad byte degrades to no journal rather than bricking the routine"
+
+
+# ------------------------------------------------------------- the run registry (steward #39)
+
+
+def _engine_with_registry(
+    path: Path,
+    store: Store,
+    tmp_path: Path,
+    runner_factory: s.RunnerFactory = r.build_runner,
+) -> s.Scheduler:
+    """Build a scheduler that writes its runs into steward's own store."""
+    return s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        registry=store,
+        runner_factory=runner_factory,
+    )
+
+
+def test_a_fire_opens_a_registry_row_and_closes_it(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Steward's own record of the bracket, so the watchdog needs no event to find it."""
+    path = write_resident(manifest_with(HOURLY))
+    with Store(":memory:") as store:
+        engine = _engine_with_registry(path, store, tmp_path)
+
+        report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+        assert report.fired
+        assert store.open_runs() == [], "the run reported back, so its row is answered"
+
+
+def test_a_run_that_never_finishes_leaves_its_row_open(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The whole point: a session that dies mid-run is a row the watchdog can still read."""
+    path = write_resident(manifest_with(HOURLY))
+
+    def dies(_spec: m.Runner) -> r.Runner:
+        raise KeyboardInterrupt("the machine went away")
+
+    with Store(":memory:") as store:
+        engine = _engine_with_registry(path, store, tmp_path, runner_factory=dies)
+        with pytest.raises(KeyboardInterrupt):
+            engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+        (open_run,) = store.open_runs()
+        assert (open_run.kind, open_run.ref) == ("routine", "inbox-read")
+        assert open_run.timeout_s == pytest.approx(60.0)
+
+
+def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The village hears the bracket even when steward's own bookkeeping is broken."""
+    path = write_resident(manifest_with(HOURLY))
+
+    class Broken:
+        def open_run(self, **_kwargs: object) -> bool:
+            raise RuntimeError("the disk is full")
+
+        def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
+            raise RuntimeError("the disk is still full")
+
+    sink = ev.NullEmitter()
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=sink,
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        registry=Broken(),
+    )
+
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+    assert report.fired
+    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]

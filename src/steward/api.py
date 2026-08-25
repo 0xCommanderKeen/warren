@@ -588,6 +588,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             library=library,
             guard=guard,
             hooks=hooks,
+            registry=db,
         ),
         store=db,
     )

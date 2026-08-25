@@ -239,6 +239,38 @@ def test_done_and_failed_carry_the_parent_when_delegated() -> None:
     assert "parent_task_id" not in plain_failed.payload
 
 
+def test_a_tasks_close_names_the_session_that_closed_it() -> None:
+    """A task id is shared by every attempt; ``run_id`` is what tells them apart (#39).
+
+    Absent when there is no session to name — the lease sweep mourns a claim rather than
+    reporting a run back — because a close that names no session must answer none.
+    """
+    done = ev.task_done_event(
+        task_id="t2", title="Y", claimant="claude-code:hob", project="hob", run_id="run-7"
+    )
+    assert done.payload["run_id"] == "run-7"
+    failed = ev.task_failed_event(
+        task_id="t2",
+        title="Y",
+        claimant="claude-code:hob",
+        project="hob",
+        reason="boom",
+        run_id="run-7",
+    )
+    assert failed.payload["run_id"] == "run-7"
+
+    swept = ev.task_failed_event(
+        task_id="t2", title="Y", claimant="claude-code:hob", project="hob", reason="lease_expired"
+    )
+    assert "run_id" not in swept.payload
+    assert (
+        "run_id"
+        not in ev.task_done_event(
+            task_id="t2", title="Y", claimant="claude-code:hob", project="hob"
+        ).payload
+    )
+
+
 def test_an_error_is_truncated_to_one_line() -> None:
     truncated = ev.truncate_error("a\nvery " + "long " * 400 + "story")
     assert len(truncated) == ev.ERROR_MAX_CHARS

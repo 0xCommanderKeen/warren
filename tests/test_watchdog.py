@@ -82,6 +82,35 @@ def finished(run_id: str, *, ts: datetime, agent: str = "claude-code:test-agent"
     )
 
 
+def task_closed(
+    task_id: str,
+    *,
+    ts: datetime,
+    agent: str = "claude-code:test-agent",
+    type: str = "task_done",  # noqa: A002 — the event's own field name
+    run_id: str | None = None,
+) -> str:
+    """Render the closing event a board session writes: it names the task *and* the run.
+
+    ``run_id=None`` renders the lease sweep's ``task_failed``, which names no session
+    because it is the board mourning a claim rather than a run reporting back.
+    """
+    payload: dict[str, Any] = {"task_id": task_id, "title": "Read the mail", "claimant": agent}
+    if run_id:
+        payload["run_id"] = run_id
+    return json.dumps(
+        {
+            "v": 0,
+            "ts": ev.utc_now_iso(ts),
+            "source": "steward",
+            "agent_id": agent,
+            "project": "test-agent",
+            "type": type,
+            "payload": payload,
+        }
+    )
+
+
 def write_log(path: Path, *lines: str) -> Path:
     """Write a fallback event log, exactly as steward's emitter appends to one."""
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -183,6 +212,273 @@ def test_a_half_written_line_is_skipped_not_raised_on(tmp_path: Path) -> None:
 def test_a_missing_log_is_no_stale_runs(tmp_path: Path) -> None:
     """A steward that has never fallen back has nothing to bury."""
     assert w.scan_unbracketed(tmp_path / "never-written.jsonl", now=NOW) == []
+
+
+def test_a_run_only_the_registry_knows_about_is_still_found(store: Store, tmp_path: Path) -> None:
+    """The case the log could never answer: every event reached burrow, the session did not."""
+    store.open_run(
+        run_id="delivered",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+
+    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["delivered"]
+    assert stale[0].routine == "daily-summary"
+
+
+def test_a_registry_run_is_judged_against_the_timeout_it_was_given(
+    store: Store, tmp_path: Path
+) -> None:
+    """The row carries the deadline the session actually got, budget cap included."""
+    store.open_run(
+        run_id="capped",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        timeout_s=60.0,
+        now=ev.utc_now_iso(NOW - timedelta(seconds=150)),
+    )
+    log = tmp_path / "nothing.jsonl"
+    # The manifest declares 900s; the registry says this run was only ever given 60, and
+    # the registry is what a run past 60 + 120 seconds of grace is judged against.
+    timeouts = {"claude-code:test-agent/daily-summary": 900.0}
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store, timeouts=timeouts) == []
+    later = NOW + timedelta(seconds=60)
+    stale = w.scan_unbracketed(log, now=later, registry=store, timeouts=timeouts)
+    assert [run.run_id for run in stale] == ["capped"]
+
+
+def test_a_closed_registry_row_is_not_a_stale_run(store: Store, tmp_path: Path) -> None:
+    """A session that reported back closed its own row, and the scan never sees it."""
+    store.open_run(
+        run_id="done",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    store.close_run("done", now=ev.utc_now_iso(NOW - timedelta(hours=1)))
+
+    assert w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store) == []
+
+
+def test_a_closing_event_in_the_log_answers_an_open_registry_row(
+    store: Store, tmp_path: Path
+) -> None:
+    """Steward died between emitting the finish and writing the row. The finish wins."""
+    store.open_run(
+        run_id="fine",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", finished("fine", ts=NOW - timedelta(hours=1)))
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The board's lease sweep owns a task's death; the watchdog only answers the row."""
+    store.open_run(
+        run_id="task-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+
+    report = build(resident, store, sink, tmp_path).tick(NOW)
+
+    assert [run.run_id for run in report.buried] == ["task-1"]
+    assert store.open_runs() == [], "the registry row is answered"
+    assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
+
+
+def test_a_task_closing_event_in_the_log_answers_an_open_registry_row(
+    store: Store, tmp_path: Path
+) -> None:
+    """The same recovery routines get, for the events that name a task rather than a run.
+
+    Steward died between emitting ``task_done`` and answering the row — or the write that
+    should have answered it threw. The log says this task finished, so the session that
+    finished it is not a resident to report as down (steward #39).
+    """
+    store.open_run(
+        run_id="session-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-1"),
+    )
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_second_attempt_at_one_task_is_watched_like_the_first(
+    store: Store, tmp_path: Path
+) -> None:
+    """A row per session, not per task: a retry that vanishes is still found.
+
+    The board's ordinary flow is claim, die, expire the lease, re-claim. Keying the
+    registry on the task id meant the second attempt hit a row the first one had already
+    closed, the insert was dropped, and the retry ran unwatched — which is the exact
+    death this registry exists to catch.
+    """
+
+    def attempt(run_id: str, *, ago: timedelta) -> bool:
+        return store.open_run(
+            run_id=run_id,
+            kind="task",
+            agent_id="claude-code:test-agent",
+            project="test-agent",
+            ref="task-1",
+            timeout_s=900.0,
+            now=ev.utc_now_iso(NOW - ago),
+        )
+
+    attempt("session-1", ago=timedelta(hours=4))
+    store.close_run("session-1", now=ev.utc_now_iso(NOW - timedelta(hours=3)))
+    assert attempt("session-2", ago=timedelta(hours=2)), "the retry gets a row of its own"
+
+    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["session-2"]
+
+
+def test_the_close_of_a_dead_first_attempt_does_not_answer_the_retry(
+    store: Store, tmp_path: Path
+) -> None:
+    """The retry flow again, with the log the first attempt's death actually leaves behind.
+
+    Claim, die, expire the lease, re-claim: the sweep's ``task_failed`` for the first
+    attempt is appended to this log and stays there for ever. It names the *task*, which
+    the retry shares, so matching on the id alone let one old line silence every later
+    attempt — the retry ran unwatched, which is exactly what the registry is for.
+
+    Nor is "only a close after the row opened" enough. One dispatch pass expires the dead
+    lease and re-claims the task, so the sweep's ``task_failed`` is stamped *after* the
+    retry's row opens: the timestamps here are the ones that flow actually produces.
+    """
+    opened = NOW - timedelta(hours=2)
+    store.open_run(
+        run_id="session-2",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(opened),
+    )
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=opened + timedelta(milliseconds=1), type="task_failed"),
+    )
+
+    stale = w.scan_unbracketed(log, now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["session-2"]
+    assert w.answered_runs(log, store) == [], "and nothing quietly closes its row either"
+    # And the retry's own close, once it lands, does answer it: it names the session.
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=opened + timedelta(milliseconds=1), type="task_failed"),
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-2"),
+    )
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_row_the_log_has_answered_is_closed_rather_than_left_open(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Nobody else ever comes back for it: the scan filters it out before burial can.
+
+    Steward died between emitting the finish and writing the close. The finish means this
+    is no death to mourn — and the row still has to go, or ``open_runs`` keeps a session
+    that ended hours ago and every pass from here to forever re-reads it.
+    """
+    store.open_run(
+        run_id="fine",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", finished("fine", ts=NOW - timedelta(hours=1)))
+
+    report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
+
+    assert report.buried == (), "a run the log answered is not a death"
+    assert store.open_runs() == [], "and not an open row either"
+    assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == []
+
+
+def test_a_task_row_the_log_has_answered_is_closed_too(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The same for the events that name a task: answered, closed, and nothing announced."""
+    store.open_run(
+        run_id="session-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-1"),
+    )
+
+    report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
+
+    assert report.buried == ()
+    assert store.open_runs() == []
+
+
+def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """One death, one event, and a row that is not read as a fresh outage a minute later."""
+    store.open_run(
+        run_id="gone",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    dog = build(resident, store, sink, tmp_path)
+
+    first = dog.tick(NOW)
+    second = dog.tick(NOW + timedelta(minutes=1))
+
+    assert [run.run_id for run in first.buried] == ["gone"]
+    assert second.buried == ()
+    assert store.open_runs() == []
+    failures = [e for e in sink.events if e.type == ev.ROUTINE_FAILED]
+    assert [e.payload["run_id"] for e in failures] == ["gone"]
 
 
 def test_an_unbracketed_run_is_closed_as_routine_failed_exactly_once(
