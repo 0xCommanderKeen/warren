@@ -43,12 +43,13 @@ from steward.journal import (
     resolve_journal_dir,
 )
 from steward.manifest import (
+    SCHEMA_ARTIFACT,
     Diagnostic,
     ManifestError,
     Resident,
     Severity,
     ValidationResult,
-    manifest_json_schema,
+    manifest_schema_json,
     validate_paths,
 )
 from steward.nursery import (
@@ -189,9 +190,26 @@ def validate(paths: tuple[Path, ...], output_format: str, skills_dir: Path | Non
 
 
 @main.command()
-def schema() -> None:
-    """Print the resident manifest JSON Schema (burrow reads manifests from this)."""
-    click.echo(json.dumps(manifest_json_schema(), indent=2))
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the schema here instead of stdout. `make schema-write` points it at "
+    f"{SCHEMA_ARTIFACT}, the copy this repo commits.",
+)
+def schema(output: Path | None) -> None:
+    """Print the resident manifest JSON Schema (burrow reads manifests from this).
+
+    The generated schema is also committed, at the path its own `$id` promises, so a
+    manifest change that would break burrow's reader shows up as a diff in the pull
+    request that makes it. Regenerate it with `make schema-write`.
+    """
+    text = manifest_schema_json()
+    if output is None:
+        click.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------------------
