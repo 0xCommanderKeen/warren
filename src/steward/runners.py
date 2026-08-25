@@ -50,6 +50,7 @@ from typing import Any, ClassVar
 from steward.manifest import Runner as RunnerSpec
 
 __all__ = [
+    "TRANSFER_TIMEOUT_S",
     "ClaudeRunner",
     "CodexRunner",
     "CommandOutcome",
@@ -57,6 +58,7 @@ __all__ = [
     "CommandRunner",
     "MockRunner",
     "Outcome",
+    "PipedRun",
     "RunRequest",
     "RunResult",
     "Runner",
@@ -423,19 +425,41 @@ class CommandOutcome:
 #: How the watchdog reaches a command. Injectable so its tests never need a real docker.
 type CommandRun = Callable[[Sequence[str]], CommandOutcome]
 
+#: The same seam for callers that also feed the command something on stdin — the nursery
+#: pipes a tar archive into ``ssh … tar -xf -``, because UGOS's ``scp`` is broken and a
+#: pipe is the transport that actually works against the NAS. Loosely typed on purpose:
+#: a fake in a test may take ``(argv)`` and ignore the rest.
+type PipedRun = Callable[..., CommandOutcome]
 
-def run_argv(argv: Sequence[str], timeout_s: float = COMMAND_TIMEOUT_S) -> CommandOutcome:
+#: How long steward waits on a command that is moving bytes rather than answering a
+#: question. A tar of a resident's bundle over the tailnet is small, but it is not
+#: instant, and killing it at the control-plane timeout would leave a half-written
+#: directory on the far side.
+TRANSFER_TIMEOUT_S = 120.0
+
+
+def run_argv(
+    argv: Sequence[str],
+    timeout_s: float = COMMAND_TIMEOUT_S,
+    *,
+    stdin: bytes | None = None,
+) -> CommandOutcome:
     """Run one short command to completion and describe what happened. Never raises.
 
     An argv list and ``shell=False``, exactly like a session: the container name comes out
     of a manifest, and a manifest is data. A missing binary, a non-zero exit, and a hang
     are all reported as outcomes, because the caller is a watchdog and a watchdog that
     crashes is worse than the thing it was watching.
+
+    ``stdin`` feeds the process a fixed payload and closes the pipe. It exists for exactly
+    one caller — the nursery piping a tar archive into ``tar -xf -`` on the far side of an
+    ``ssh`` — and it is bytes rather than a stream because steward only ever sends
+    something it has already finished building.
     """
     parts = [str(part) for part in argv]
     try:
         completed = subprocess.run(  # noqa: S603 — argv list, shell=False, no template
-            parts, capture_output=True, timeout=timeout_s, check=False
+            parts, input=stdin, capture_output=True, timeout=timeout_s, check=False
         )
     except OSError as exc:
         return CommandOutcome(

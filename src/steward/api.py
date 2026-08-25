@@ -48,9 +48,15 @@ from pydantic import BaseModel, ConfigDict, Field
 from steward import delegation as dg
 from steward import events as ev
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.deploy import Transport
 from steward.journal import journal_complaint, read_entries
-from steward.manifest import Resident, ValidationResult, validate_path
-from steward.nursery import CreatedResident, NewResident, NurseryError, declare_resident
+from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
+from steward.nursery import (
+    NewResident,
+    NurseryError,
+    NurseryReport,
+    raise_resident,
+)
 from steward.runners import build_runner
 from steward.scheduler import (
     TRIGGER_MANUAL,
@@ -77,10 +83,17 @@ __all__ = [
     "ApiConfig",
     "ApiError",
     "ManualRuns",
+    "NurseryPipeline",
+    "ResidentPost",
     "create_app",
     "default_ui_dir",
     "run_server",
 ]
+
+#: How the API reaches the nursery. Injectable so a test can prove the endpoint and
+#: ``steward new-resident`` run *the same* pipeline rather than two that agree by
+#: convention — hand it a recorder and assert on what the route asked for.
+type NurseryPipeline = Callable[..., NurseryReport]
 
 log = logging.getLogger("steward.api")
 
@@ -239,6 +252,22 @@ class JobPost(_Body):
     required_skills: list[str] = Field(
         default_factory=list,
         description="Skills a resident must be granted before it may claim this.",
+    )
+
+
+class ResidentPost(NewResident):
+    """A resident to declare, and whether to actually build it.
+
+    Everything a :class:`~steward.nursery.NewResident` says, plus one flag. ``deploy``
+    defaults to **false**, which keeps ``POST /residents`` exactly what it has always
+    been: two files written for review, no container, no schedule, no event. Asking for
+    ``deploy: true`` is asking steward to reach a machine over ssh and start something
+    there, and that is not a thing a request should be able to do by leaving a field out.
+    """
+
+    deploy: bool = Field(
+        default=False,
+        description="Provision the container and check the schedule, not just declare.",
     )
 
 
@@ -407,6 +436,10 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "agent_id": manifest.agent_id,
         "project": manifest.project,
         "summary": manifest.summary,
+        # Retirement is a lifecycle state, so a retired resident is *listed* rather than
+        # hidden — a fleet view that quietly dropped it would be a fleet view that cannot
+        # answer what used to run here.
+        "retired": manifest.retired,
         "path": str(resident.path),
         "soul": manifest.soul.model_dump(mode="json"),
         "voice": resident.soul.voice,
@@ -440,6 +473,13 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
 def _refuse(status: int, error: str, message: str) -> NoReturn:
     """Fail a request immediately, with a reason a UI can key on and a human can read."""
     raise HTTPException(status_code=status, detail={"error": error, "message": message})
+
+
+def _refuse_if_retired(resident: Resident) -> None:
+    """Refuse to give work to a retired resident, with the reason every path shares."""
+    complaint = retired_complaint(resident)
+    if complaint is not None:
+        _refuse(409, "resident_retired", complaint)
 
 
 def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Path) -> Resident:
@@ -485,17 +525,24 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     return require_token
 
 
-def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is the endpoint list
+def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collaborator is a seam
     config: ApiConfig | None = None,
     *,
     store: Store | None = None,
     emitter: ev.Emitter | None = None,
     runner_factory: RunnerFactory = build_runner,
+    nursery: NurseryPipeline = raise_resident,
+    transport: Transport | None = None,
 ) -> FastAPI:
     """Build the API. Raises :class:`ApiError` rather than serving without a token.
 
     Collaborators are injectable so tests exercise the real routes with a mock runner,
     a scratch database, and an emitter that writes to a file instead of a village.
+
+    ``nursery`` and ``transport`` are the deploy path's two seams. ``transport=None``
+    means each provision builds the ssh transport its own manifest addresses, which is
+    what a real steward wants; a test hands over a
+    :class:`steward.deploy.LocalTransport` and the endpoint deploys to a directory.
     """
     settings = config if config is not None else ApiConfig.from_env()
     token = resolve_token(settings.token, allow_open=settings.allow_open)
@@ -612,22 +659,67 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         return {"resident": resident.id, "entries": [entry.as_dict() for entry in entries]}
 
     @app.post("/residents", status_code=201)
-    def create_resident(spec: NewResident, request: Request) -> dict[str, Any]:
-        """Write a manifest skeleton and soul body for review. Deploys nothing."""
+    def create_resident(body: ResidentPost, request: Request) -> dict[str, Any]:
+        """Declare a resident, and — only when asked — provision and check it.
+
+        The same :func:`steward.nursery.raise_resident` pipeline ``steward new-resident``
+        runs, with two settings the API always makes for itself:
+
+        ``commit=False``
+            **Never.** The server is not guaranteed to own the checkout it is reading —
+            it may be a tailnet process on a machine where nobody is watching git — and a
+            commit appearing there is a commit that surprises somebody. The response says
+            so, so a panel can tell the human what is still theirs to do.
+        ``provision=body.deploy``
+            Default false, so the endpoint's old behaviour is its default behaviour: files
+            for review and nothing else.
+        """
         try:
-            created: CreatedResident = declare_resident(spec, residents_dir)
+            report = nursery(
+                body,
+                residents_dir=residents_dir,
+                skills_dir=settings.skills_dir,
+                transport=transport,
+                provision=body.deploy,
+                commit=False,
+            )
         except NurseryError as exc:
-            status = 409 if (residents_dir / spec.id).exists() else 400
-            _refuse(status, "resident_not_declared", str(exc))
-        request_id = accept(request, "declared", {"resident": created.id})
+            status = 409 if (residents_dir / body.id).exists() else 400
+            _refuse(status, exc.reason or "resident_not_declared", str(exc))
+        request_id = accept(
+            request, "deployed" if body.deploy else "declared", {"resident": body.id}
+        )
+        uncommitted = (
+            "the declaration is written but NOT committed — steward does not commit from "
+            "the server, because it may not own this checkout; commit "
+            f"residents/{body.id}/ yourself"
+        )
+        if not body.deploy:
+            deployed = "nothing is deployed and no routine is scheduled: this is a file for review"
+        elif report.register is not None and not report.register.ok:
+            # The container went up; the check that follows it did not pass. Saying only
+            # the first half would be the console's one unforgivable sin, so say both and
+            # let `register.problems` carry the detail.
+            deployed = (
+                "the container is up, but the schedule check did not pass — see "
+                "register.problems; nothing fires until those are fixed"
+            )
+        else:
+            deployed = (
+                "the container is up and the schedule was checked; the resident appears in "
+                "the village when it emits its own first event, and never before"
+            )
         return {
             "request_id": request_id,
             "status": "accepted",
-            "message": (
-                "declaration written for review; nothing is deployed and no routine is "
-                "scheduled until someone commits it and steward provisions the resident"
-            ),
-            **created.to_dict(),
+            "message": f"{deployed}. {uncommitted}",
+            # The four keys this endpoint has always returned, kept at the top level so
+            # the deploy flag is additive for anything already reading the response.
+            "id": body.id,
+            "directory": str(report.declare.manifest_path.parent),
+            "manifest_path": str(report.declare.manifest_path),
+            "soul_path": str(report.declare.soul_path),
+            **report.to_dict(),
         }
 
     # -- skills ----------------------------------------------------------------------
@@ -661,6 +753,13 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         cron expression in the routine's own zone, and is ``null`` for a disabled routine
         because a routine that is off has no next occurrence to promise.
 
+        A **retired** resident's routines are listed — they are still declared, and a
+        ledger that hid them could not answer what used to run here — and carry
+        ``retired: true`` with ``next_fire: null`` for the same reason a disabled routine
+        does: :func:`steward.scheduler.load_scheduled` leaves retired residents out, so
+        there is no next occurrence to promise. Run-now refuses them with ``409
+        resident_retired``, which is what the console reads to grey the button out.
+
         ``anchor`` is the scheduler's own state file, read fresh on every request because
         the daemon is a different process — and it is called an anchor rather than a last
         run because that is what it is: the moment the next occurrence is computed from,
@@ -689,12 +788,13 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
                         "schedule": routine.schedule,
                         "schedule_tz": routine.schedule_tz,
                         "enabled": routine.enabled,
+                        "retired": resident.retired,
                         "requires": list(routine.requires),
                         "timeout_s": routine.timeout_s,
                         "journal": routine.journal,
                         "anchor": anchor.isoformat() if anchor is not None else None,
                         "next_fire": item.next_fire_after(now).isoformat()
-                        if routine.enabled
+                        if routine.enabled and not resident.retired
                         else None,
                         "last_request": latest.get(item.key),
                     }
@@ -712,6 +812,7 @@ def create_app(  # noqa: C901, PLR0915 — the routes are flat; the length is th
         """Ask for one run of one routine, right now, and acknowledge only that."""
         result = validate_path(residents_dir, settings.skills_dir)
         resident = _find_resident(result, resident_id, residents_dir)
+        _refuse_if_retired(resident)
         routine = next((r for r in resident.manifest.routines if r.id == routine_id), None)
         if routine is None:
             known = ", ".join(r.id for r in resident.manifest.routines) or "none"

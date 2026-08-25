@@ -161,8 +161,8 @@ resident for the rest of that day; tomorrow's cap applies to tomorrow.
 The watchdog is the other direction. `LocalProbe` sees what steward can truthfully see
 about itself — a scheduler anchor that stopped advancing, a lease held past its expiry, a
 run that started and never came back — and `DockerSupervisor` restarts the container a
-manifest names in `deploy.container`, wired and tested against a stub docker, for real use
-when deployment (#4) lands. Every intervention emits `resident_restarted` with its reason
+manifest names in `deploy.container`, which is now a container [the nursery](#deployment)
+actually created. Every intervention emits `resident_restarted` with its reason
 and attempt number, because a silent restart is a lie by omission; attempts are bounded
 (1m, 5m, 25m, three of them) and then steward stops and asks a person instead. And a
 `routine_started` that no closing event ever answered becomes `routine_failed` with
@@ -181,19 +181,119 @@ the inbox is gated by the same pause the board is and lands on the ledger under 
 `delegated` — `steward budget show --by-origin` then answers what a fleet spent answering
 one question, however many neighbours it went through.
 
+**The nursery** (#4). Raising a resident used to be an SSH ritual: hand-write a soul,
+hand-write a compose service, tar it to the NAS, wire `BURROW_TOKEN` and the emitter env by
+hand, restart, hope. It is one command now, and three stages — **declare** the soul and
+manifest into this repo and commit them, **provision** the container on the NAS, **register**
+by checking the scheduler can actually run it and reporting when each routine next fires.
+
+Every stage converges: run it again after a failure and it picks up where it stopped rather
+than duplicating anything. The declaration is committed *before* any infrastructure is
+touched, so a failed deploy leaves exactly one commit to revert and one command to re-run.
+`--dry-run` prints the files, the compose fragment, the exact ssh commands and the next
+fires, and provably touches nothing — no commit, no ssh, no scheduler state.
+
+Nothing is emitted on the new resident's behalf, ever. A villager appears in burrow when it
+genuinely exists and emits its own first event, and `steward retire` is the counterpart: it
+marks the manifest `retired: true`, commits that, and then stops and removes the container.
+A retired resident stops firing routines, claiming board work, taking letters and answering
+run-now — and leaves the village the only honest way, by going quiet. The soul and manifest
+stay in git; retirement is a lifecycle state, not a deletion.
+
+```console
+$ steward new-resident --id note-keeper --name Quill --char Scribe \
+    --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run
+$ steward new-resident … --skills research,write-journal   # declare, commit, build, check
+$ steward retire note-keeper                               # stop it, and say so in git
+```
+
 **The management console** (#13). A browser console for the fleet, served by steward's own
 API at `/ui` — static HTML, CSS, and one JavaScript file, no framework and no build step,
 so it runs on a NAS with the internet unplugged. Residents, a new-resident form, the
 fleet-wide routine ledger, approvals, the job board, and the skills library, all of it read
 from the endpoints above and none of it invented. It is a pure client: the repo stays the
 source of truth, and there is no page here that edits a manifest, because there is no
-endpoint that would let one. Details and the shape of it are in
-[Management UI](#management-ui) below.
+endpoint that would let one. The one thing it does beyond reading is raise a resident —
+the form's **deploy** checkbox drives the nursery above through `POST /residents`, and the
+ledger then prints the plan and the pipeline's own report back, verbatim. Retired residents
+wear a badge and refuse run-now, the same `409` the API gives. Details and the shape of it
+are in [Management UI](#management-ui) below.
 
-Still roadmap, in this repo's issues: deployment (#4).
-Burrow-side rendering counterparts — the journal panel in a villager's house, the notice
-board, the letter carried across the village, the fleet-ops fuel gauges — live in burrow's
-issues.
+Nothing in this repo's build phase is roadmap any more. Burrow-side rendering
+counterparts — the journal panel in a villager's house, the notice board, the letter carried
+across the village, the fleet-ops fuel gauges — live in burrow's issues.
+
+## Deployment
+
+Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
+burrow's own server at `~/docker/burrow`. **Steward puts them there.** This section
+replaces the manual ritual in burrow's README for anything that is a resident; burrow's
+own server is still deployed by hand from that repo.
+
+```console
+$ export BURROW_URL=http://dxp2800:8737
+$ export BURROW_TOKEN=…                    # the village's shared ingest secret
+
+$ steward new-resident --id note-keeper --name Quill --char Scribe \
+    --accent '#4f7ea6' --role 'note bot' --charter charter.yaml \
+    --skills research,write-journal --dry-run     # read the plan first
+$ steward new-resident … --skills research,write-journal
+```
+
+The three stages, and what each one really does:
+
+**Declare.** `residents/<id>/manifest.yaml` and `residents/<id>/soul.md` are written, read
+back through the ordinary validator, and committed — before anything else happens, because
+the repo is the source of truth and a failed deploy should leave one commit to revert and
+one command to re-run. A dirty worktree is refused unless `--allow-dirty` says out loud
+that you want it anyway.
+
+**Provision.** The compose fragment is rendered from `steward/templates/`, the runtime
+bundle is packed into a tar **in memory**, and the whole thing is piped over
+`ssh Miha@dxp2800 tar -xf - -C ~/docker/steward-<id>` — a pipe rather than `scp`, because
+UGOS's `scp` is broken and the pipe is what has actually worked all along. Then
+`docker compose up -d` over the same ssh. Every external command goes through
+`steward.runners.run_argv`, which is the only file in steward that starts a process.
+
+The bundle is compared to what is already on the host file by file, so a second run
+uploads nothing. `up -d` is issued either way — it is the only thing here that can bring
+back a container that is *down*, and reconciling is what a second run is for.
+
+**Register.** There is no second registry. Routines are read off the manifest by the
+scheduler on every tick, so "registered" means the manifest is valid, the runner's binary
+exists, the journal location is writable, every granted skill resolves — the same
+`steward doctor` check — and here is when each routine next fires.
+
+Where a resident lands is a manifest question with documented defaults (`dxp2800`, `Miha`,
+`~/docker/steward-<id>`, `python:3.12-slim`); override any of them in
+[`deploy`](docs/manifest.md#deploy--where-this-resident-runs).
+
+**Secrets never enter this repo.** `BURROW_URL` and `BURROW_TOKEN` are read from steward's
+own environment at provision time and written into a `.env` on the host at mode `0600`.
+The compose file carries `${BURROW_TOKEN-}` — a reference, not a value. The repo's own
+credential scanners are run over everything the nursery writes into the checkout, as a
+test. Provisioning without `BURROW_URL` is refused: a container with nowhere to emit is a
+resident that would never appear in the village at all.
+
+Retiring is the counterpart, and it goes the other way round on purpose:
+
+```console
+$ steward retire note-keeper --dry-run
+$ steward retire note-keeper
+```
+
+The manifest is marked `retired: true` and committed **first**, then the container is
+stopped and removed — because the watchdog would otherwise notice the container go away
+and dutifully put it back. A retired resident fires no routines, claims nothing off the
+board, receives no letters, and answers `409 resident_retired` to run-now; it leaves the
+village by going quiet, and steward forges no `session_ended` on its behalf. The soul and
+the manifest stay in git.
+
+Burrow's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
+([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
+never commits, because the server may not own the checkout it is reading, and it says so
+in the response.
+>>>>>>> feat/nursery-deploy
 
 ## Residents
 
@@ -278,11 +378,15 @@ each explains what would have to be true for it to be full, because *nothing her
 `message` verbatim, with the whole response one click away.
 
 **It is a client, not an editor.** Skills are read-only, and so are manifests: a skill is
-added by committing a `SKILL.md` and granted by committing a manifest. `POST /residents`
-writes a declaration for review and deploys nothing, and the form says so in the answer it
-gives you. When deployment (#4) lands, `window.STEWARD_UI.deploy` in `index.html` turns on
-the checkbox for it — off until the endpoint is real, because a control that quietly does
-nothing is exactly the lie this console exists not to tell.
+added by committing a `SKILL.md` and granted by committing a manifest. The one thing it
+writes is a new resident, and the form's **deploy** checkbox — `window.STEWARD_UI.deploy`
+in `index.html`, on now that the endpoint is real — sends `deploy: true` and runs the whole
+nursery. What comes back is printed rather than paraphrased: the target, every file in the
+bundle, the `.env` key *names*, the exact commands steward ran, the compose fragment
+verbatim, and each routine's next fire. Steward still never commits from the server, and
+the answer says so. Retired residents wear a badge in the list and the detail header, and
+their run-now button is dead with `409 resident_retired` written on it — a control that can
+only fail should look like one before it is pressed.
 
 ## Development
 

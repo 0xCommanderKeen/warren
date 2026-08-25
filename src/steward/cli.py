@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 import click
+import yaml
+from pydantic import ValidationError
 
 from steward import events as ev
 from steward.api import (
@@ -47,6 +49,14 @@ from steward.manifest import (
     ValidationResult,
     manifest_json_schema,
     validate_paths,
+)
+from steward.nursery import (
+    NewResident,
+    NurseryError,
+    NurseryReport,
+    RetireReport,
+    raise_resident,
+    retire_resident,
 )
 from steward.runners import check_runner, skills_home
 from steward.scheduler import (
@@ -290,6 +300,11 @@ def doctor(residents: Path, db: Path | None) -> None:
     with _open_store(db) as store:
         guard = BudgetGuard(store)
         for resident in result.residents:
+            if resident.retired:
+                # Still valid, still in git, still readable — and doing nothing. Saying
+                # "ready" about it would be the one line of this report that is untrue.
+                click.secho(f"{resident.id}: retired — fires nothing", fg="bright_black")
+                continue
             runner = resident.manifest.runner
             complaint = check_runner(runner)
             label = f"{resident.id}: runner {runner.kind}"
@@ -1292,6 +1307,258 @@ def serve(
     if app.state.ui_dir is not None:
         click.echo(f"management console on http://{host}:{port}/ui/ (from {app.state.ui_dir})")
     run_server(app, host=host, port=port)
+
+
+# --------------------------------------------------------------------------------------
+# the nursery
+# --------------------------------------------------------------------------------------
+
+#: The charter file `--charter` reads: the same four fields the manifest declares, as
+#: YAML. A charter is prose somebody thought about, and prose belongs in a file that can
+#: be reviewed in a diff rather than in four shell arguments that cannot.
+CHARTER_EXAMPLE = """mission: One paragraph of purpose.
+duties:
+  - Standing responsibilities, one per line.
+rules:
+  - Hard constraints, e.g. "Never send email without explicit approval."
+escalation: When and how to raise needs_human instead of acting.
+"""
+
+
+def _read_charter(path: Path) -> dict[str, Any]:
+    """Load a charter file, or exit naming what a valid one looks like."""
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        click.secho(f"cannot read the charter at {path}: {exc}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if not isinstance(loaded, dict):
+        click.secho(
+            f"{path} is not a charter: it must be a YAML mapping with mission, duties, "
+            f"rules and escalation\n\n{CHARTER_EXAMPLE}",
+            fg="red",
+            err=True,
+        )
+        sys.exit(EXIT_INVALID)
+    return loaded
+
+
+def _build_spec(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    resident_id: str,
+    name: str,
+    char: str,
+    accent: str,
+    role: str,
+    charter: Path | None,
+    skills: tuple[str, ...],
+    runner: str,
+    model: str | None,
+    project: str | None,
+    summary: str | None,
+) -> NewResident:
+    """Bind the command line into the same request body the API takes. Exits on refusal."""
+    if charter is None:
+        click.secho(
+            "--charter is required: a resident without a charter is a resident whose "
+            f"sessions have nothing to be told\n\n{CHARTER_EXAMPLE}",
+            fg="red",
+            err=True,
+        )
+        sys.exit(EXIT_INVALID)
+    payload: dict[str, Any] = {
+        "id": resident_id,
+        "name": name,
+        "char": char,
+        "accent": accent,
+        "role": role,
+        "charter": _read_charter(charter),
+        "skills": list(skills),
+        "runner": {"kind": runner, "model": model},
+    }
+    if project:
+        payload["project"] = project
+    if summary:
+        payload["summary"] = summary
+    try:
+        return NewResident.model_validate(payload)
+    except ValidationError as exc:
+        for error in exc.errors():
+            where = ".".join(str(part) for part in error["loc"]) or "<root>"
+            click.secho(f"{where}: {error['msg']}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+
+
+def _report_nursery(report: NurseryReport) -> None:
+    """Print the plan or the result, and colour the one line that matters most."""
+    for line in report.render():
+        if line.startswith("warning: "):
+            click.secho(line, fg="yellow", err=True)
+        elif line.startswith(("declare", "provision", "register", "plan for", "raised")):
+            click.secho(line, fg="cyan", bold=True)
+        else:
+            click.echo(line)
+    if report.register is not None and report.register.problems:
+        click.secho(
+            "the resident is declared and deployed, but the scheduler cannot run it yet",
+            fg="yellow",
+            err=True,
+        )
+    elif report.dry_run:
+        click.secho("nothing was written, sent, or committed", fg="bright_black")
+    elif not report.changed:
+        click.secho("converged: nothing needed changing", fg="green")
+    else:
+        click.secho(f"{report.resident_id} is raised", fg="green")
+
+
+@main.command("new-resident")
+@click.option("--id", "resident_id", required=True, help="Slug; the directory under residents/.")
+@click.option("--name", required=True, help="Display name, e.g. Quill.")
+@click.option("--char", required=True, help="Burrow sprite key, e.g. Scribe.")
+@click.option("--accent", required=True, help="Hex accent colour, e.g. '#4f7ea6'.")
+@click.option("--role", required=True, help="One-line role, e.g. note bot.")
+@click.option(
+    "--charter",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="YAML file with mission, duties, rules and escalation.",
+)
+@click.option("--skills", default="", help="Comma-separated skill names to grant.")
+@click.option("--runner", default="claude", show_default=True, help="Which brain: claude, codex…")
+@click.option("--model", default=None, help="Model for that runner, e.g. claude-opus-5.")
+@click.option("--project", default=None, help="Project label, for a project-scoped soul.")
+@click.option("--summary", default=None, help="One line burrow can display.")
+@_RESIDENTS_OPTION
+@click.option(
+    "--repo",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The checkout to commit into. Defaults to the parent of the residents tree.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the whole plan and touch nothing.")
+@click.option("--allow-dirty", is_flag=True, help="Commit even though the worktree is dirty.")
+@click.option("--no-commit", is_flag=True, help="Write the declaration but do not commit it.")
+@click.option("--no-deploy", is_flag=True, help="Declare and check only; build no container.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    resident_id: str,
+    name: str,
+    char: str,
+    accent: str,
+    role: str,
+    charter: Path | None,
+    skills: str,
+    runner: str,
+    model: str | None,
+    project: str | None,
+    summary: str | None,
+    residents: Path,
+    repo: Path | None,
+    dry_run: bool,  # noqa: FBT001 — click passes flags positionally
+    allow_dirty: bool,  # noqa: FBT001
+    no_commit: bool,  # noqa: FBT001
+    no_deploy: bool,  # noqa: FBT001
+    output_format: str,
+) -> None:
+    """Raise a resident: declare it, commit it, build it, and check its schedule.
+
+    The replacement for the ssh ritual — hand-written soul, hand-written compose service,
+    tar to the NAS, wire the emitter by hand, restart, hope. One command, three stages,
+    and every one of them idempotent: run it again after a failure and it picks up where
+    it stopped rather than duplicating anything.
+
+    `--dry-run` prints the files, the compose fragment, the exact ssh commands and the
+    next fire of every routine, and provably touches nothing — no commit, no ssh, no
+    scheduler state.
+    """
+    granted = tuple(part.strip() for part in skills.split(",") if part.strip())
+    spec = _build_spec(
+        resident_id, name, char, accent, role, charter, granted, runner, model, project, summary
+    )
+    try:
+        report = raise_resident(
+            spec,
+            residents_dir=residents,
+            repo=repo,
+            provision=not no_deploy,
+            commit=not no_commit,
+            allow_dirty=allow_dirty,
+            dry_run=dry_run,
+        )
+    except NurseryError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        for diagnostic in exc.diagnostics:
+            click.secho(diagnostic.render(), fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _report_nursery(report)
+
+
+def _report_retire(report: RetireReport) -> None:
+    """Print what retiring came to, and what it deliberately did not do."""
+    for line in report.render():
+        click.echo(line)
+    if report.dry_run:
+        click.secho("nothing was stopped, marked, or committed", fg="bright_black")
+        return
+    click.secho(
+        "no event was emitted on its behalf: a retired resident leaves the village by "
+        "going quiet, which is the only honest way to leave it",
+        fg="bright_black",
+    )
+    click.secho(f"{report.resident_id} is retired", fg="green")
+
+
+@main.command("retire")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+@click.option(
+    "--repo",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The checkout to commit into. Defaults to the parent of the residents tree.",
+)
+@click.option("--dry-run", is_flag=True, help="Print what would happen and touch nothing.")
+@click.option("--allow-dirty", is_flag=True, help="Commit even though the worktree is dirty.")
+@click.option("--no-commit", is_flag=True, help="Mark the manifest but do not commit it.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    resident_id: str,
+    residents: Path,
+    repo: Path | None,
+    dry_run: bool,  # noqa: FBT001 — click passes flags positionally
+    allow_dirty: bool,  # noqa: FBT001
+    no_commit: bool,  # noqa: FBT001
+    output_format: str,
+) -> None:
+    """Retire a resident: mark it retired in git, then stop and remove its container.
+
+    Retirement is a lifecycle state, not a deletion. The manifest and the soul stay in
+    this repo and in its history, `steward validate` still reads them, and the resident
+    simply stops: no routines, no board claims, no letters, no run-now. It drops out of
+    the village the honest way — it stops emitting — and steward forges nothing on its
+    behalf on the way out.
+    """
+    try:
+        report = retire_resident(
+            resident_id,
+            residents_dir=residents,
+            repo=repo,
+            commit=not no_commit,
+            allow_dirty=allow_dirty,
+            dry_run=dry_run,
+        )
+    except NurseryError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        for diagnostic in exc.diagnostics:
+            click.secho(diagnostic.render(), fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+        return
+    _report_retire(report)
 
 
 if __name__ == "__main__":  # pragma: no cover

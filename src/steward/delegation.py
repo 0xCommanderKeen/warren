@@ -61,7 +61,7 @@ from typing import Any
 
 from steward import approvals
 from steward import events as ev
-from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match
+from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match, retired_complaint
 from steward.store import JobRecord, Store
 
 __all__ = [
@@ -386,7 +386,7 @@ class Delegator:
     @property
     def receivers(self) -> tuple[str, ...]:
         """The ids of residents that declare a route work may be delegated into."""
-        return tuple(sorted(r.id for r in self.residents if r.delegation_routes))
+        return tuple(sorted(r.id for r in self.residents if r.delegation_routes and not r.retired))
 
     # -- validation --------------------------------------------------------------------
 
@@ -401,6 +401,12 @@ class Delegator:
                 f"no valid resident {handoff.to!r} to delegate to{hint} "
                 f"(residents accepting delegated work: {known})",
             )
+        complaint = retired_complaint(receiver)
+        if complaint is not None:
+            # Reported as "no recipient", because from a sender's point of view that is
+            # exactly what a retired resident is: there is nobody at that address any
+            # more. The message says which, so nobody has to guess at a typo.
+            raise DelegationError(UNKNOWN_RECIPIENT, complaint)
         if receiver.id == sender_id:
             raise DelegationError(
                 SELF_DELEGATION,

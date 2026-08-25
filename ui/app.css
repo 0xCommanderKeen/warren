@@ -308,10 +308,12 @@ blockquote.voice {
   font-size: 10px; letter-spacing: .16em; text-transform: uppercase; color: var(--fail);
 }
 .problem .msg { margin-top: 7px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.problem details { margin-top: 11px; }
-.problem summary { color: var(--dim); cursor: pointer; font-size: 10.5px;
+/* Disclosure and verbatim text, wherever they appear: a refusal's raw response, a
+   nursery report's compose fragment. One look for "here is the thing, unabridged". */
+details { margin-top: 11px; }
+summary { color: var(--dim); cursor: pointer; font-size: 10.5px;
   letter-spacing: .14em; text-transform: uppercase; }
-.problem pre {
+pre {
   margin: 9px 0 0; padding: 11px; background: var(--void); border: 1px solid var(--rule-2);
   overflow-x: auto; font-size: 11px; color: var(--dim);
 }
