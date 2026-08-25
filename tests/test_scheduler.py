@@ -1,6 +1,7 @@
 """The scheduler: when things fire, exactly once, and what the village is told."""
 
 import json
+import os
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -182,6 +183,7 @@ def test_hourly_and_daily_schedules_agree_with_the_manifest() -> None:
         "life-agent/daily-summary",
         "life-agent/inbox-read",
         "life-agent/close-of-day",
+        "pip/heartbeat",
     }
     assert all(item.routine.schedule_tz == "Europe/Ljubljana" for item in scheduled)
 
@@ -482,6 +484,27 @@ def test_a_dry_run_leaves_no_heartbeat(write_resident: ResidentWriter, tmp_path:
     )
 
     assert not state_path.exists()
+
+
+def test_a_stamp_writes_the_heartbeat_and_nothing_else(tmp_path: Path) -> None:
+    """A heartbeat carries one fact, so an anchor somebody else saved survives it."""
+    path = tmp_path / "state.json"
+    mine = s.SchedulerState.load(path)
+    mine.set_anchor("a/hourly", datetime(2026, 8, 24, 10, 0, tzinfo=UTC))
+    mine.save()
+
+    # Another tick process anchors the 10:05 occurrence over the top of it.
+    theirs = s.SchedulerState.load(path)
+    theirs.set_anchor("a/hourly", datetime(2026, 8, 24, 10, 5, tzinfo=UTC))
+    theirs.save()
+
+    # ... and now my heartbeat lands, still holding the 10:00 snapshot in memory.
+    mine.stamp(datetime(2026, 8, 24, 10, 6, tzinfo=UTC))
+
+    written = s.SchedulerState.load(path)
+    assert written.anchor("a/hourly") == datetime(2026, 8, 24, 10, 5, tzinfo=UTC)
+    assert written.last_tick_at() == datetime(2026, 8, 24, 10, 6, tzinfo=UTC)
+    assert mine.last_tick_at() == datetime(2026, 8, 24, 10, 6, tzinfo=UTC), "and in memory too"
 
 
 # -------------------------------------------------------------------------- concurrency
@@ -1287,6 +1310,97 @@ def test_a_crash_after_saving_the_anchor_does_not_re_fire(
         workdir=tmp_path,
     )
     assert restarted.tick(datetime(2026, 8, 24, 10, 16, tzinfo=UTC)) == []
+
+
+def test_a_heartbeat_does_not_re_fire_what_another_tick_process_already_ran(
+    write_resident: ResidentWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The heartbeat must not be able to undo exactly-once (steward #76) from outside the lock.
+
+    Tick A releases the state lock before its board sweep and then spends minutes in it,
+    beating all the while off a snapshot taken before tick B existed. A stamp that wrote
+    that whole snapshot would erase the anchor B saved under the lock, and the occurrence
+    B just fired would look unfired to the next tick and run a second time.
+    """
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    seed = s.SchedulerState.load(state_path)
+    seed.set_anchor("test-agent/inbox-read", datetime(2026, 8, 24, 10, 0, tzinfo=UTC))
+    seed.save()
+
+    sweeping, release = threading.Event(), threading.Event()
+
+    class Sweeping:
+        """Board hooks that hang in the sweep, as a board of long sessions would."""
+
+        def decisions_for(self, resident_id: str) -> str | None:  # noqa: ARG002
+            return None
+
+        def harvest(self, manifest: m.ResidentManifest, output: str) -> object:  # noqa: ARG002
+            return None
+
+        def dispatch(self, now: datetime) -> object:  # noqa: ARG002
+            sweeping.set()
+            release.wait(timeout=5)
+            return None
+
+    def scheduler(hooks: s.WakeHooks | None = None) -> s.Scheduler:
+        return s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=s.SchedulerState.load(state_path),
+            workdir=tmp_path,
+            hooks=hooks,
+        )
+
+    first = scheduler(Sweeping())
+    # Nothing is due at :03, so A anchors nothing and its snapshot stays at 10:00.
+    sweeper = threading.Thread(target=lambda: first.tick(datetime(2026, 8, 24, 10, 3, tzinfo=UTC)))
+    sweeper.start()
+    try:
+        assert sweeping.wait(timeout=5), "the board sweep never started"
+        second = scheduler()
+        fired = second.tick(datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC))
+        assert [report.fired for report in fired] == [True], "B fires the 10:15 occurrence"
+        # ... and A keeps beating over the top of what B wrote.
+        assert _beat_after(state_path, datetime.now(UTC)) is not None, "A stopped beating"
+    finally:
+        release.set()
+        sweeper.join(timeout=5)
+
+    third = scheduler()
+    assert third.tick(datetime(2026, 8, 24, 10, 18, tzinfo=UTC)) == [], "10:15 already ran"
+
+
+def test_two_processes_never_write_through_one_temp_state_file(tmp_path: Path) -> None:
+    """A shared temp name is a shared half-written file: one process can rename the other's."""
+    path = tmp_path / "state.json"
+    assert s.temp_state_path(path, pid=101) != s.temp_state_path(path, pid=102)
+    assert s.temp_state_path(path) == s.temp_state_path(path, pid=os.getpid())
+
+
+def test_the_startup_sweep_leaves_another_schedulers_temp_alone(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Clearing a temp a live scheduler is mid-rename on turns its saved anchor into nothing."""
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    legacy = state_path.with_suffix(".json.tmp")  # written before temps were named per process
+    legacy.write_text("half a write from a crash", encoding="utf-8")
+    theirs = s.temp_state_path(state_path, pid=os.getpid() + 1)
+    theirs.write_text("another scheduler, mid-rename", encoding="utf-8")
+
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    engine.tick(datetime(2026, 8, 24, 10, 40, tzinfo=UTC))  # nothing due at :40
+
+    assert not legacy.exists(), "a name no live writer uses is still cleaned up"
+    assert theirs.exists(), "another process's temp is not this one's to delete"
 
 
 # --------------------------------------------------------------- nowhere to run (steward #64)

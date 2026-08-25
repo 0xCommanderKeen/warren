@@ -438,22 +438,63 @@ class SchedulerState:
             self.last_tick = moment.astimezone(UTC).isoformat()
 
     def save(self) -> None:
-        """Write the state atomically, so a kill mid-write cannot corrupt it.
+        """Write everything this process believes, atomically.
 
-        The lock is held across the write, not just the snapshot: the loop and the
-        heartbeat write the same ``.tmp`` sidecar, and two of those interleaving would
-        rename half a file over the state — the very corruption the rename exists to avoid.
+        The caller owns the anchors it is writing: :meth:`Scheduler.tick` saves inside the
+        cross-process lock, having reloaded first, so the snapshot it persists is the
+        newest one anybody has. A writer that cannot say that must use :meth:`stamp`.
+
+        The in-process lock is held across the write, not just the snapshot: the loop and
+        the heartbeat are two threads over one file, and two of their writes interleaving
+        would rename half a file over the state — the corruption the rename exists to avoid.
         """
         with self._lock:
-            payload: dict[str, Any] = {
-                "version": STATE_VERSION,
-                "routines": {key: {"anchor": value} for key, value in sorted(self.anchors.items())},
-                "last_tick": self.last_tick,
-            }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
-            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-            temporary.replace(self.path)
+            self._write(self.anchors, self.last_tick)
+
+    def stamp(self, moment: datetime) -> None:
+        """Persist the heartbeat alone, leaving the anchors on disk exactly as they are.
+
+        The heartbeat asserts one fact — a scheduler process is alive — and it is the only
+        writer that fires on a timer rather than at a point the loop chose. It must
+        therefore write *only* that fact. A heartbeat that saved this process's whole
+        in-memory snapshot would, in the overlapping-cron deployment, rewrite anchors a
+        second tick had just saved under the lock: the occurrence that tick anchored would
+        look unfired to the next one and run twice, which is the exactly-once promise of
+        steward #76 broken by the thing that was supposed to report on it.
+
+        So the anchors are read back from disk and written straight through. Anything this
+        process has anchored but not yet saved is not lost — the loop's own :meth:`save`
+        follows within the same lock, and it is the loop's to persist, not the heartbeat's.
+        """
+        with self._lock:
+            self.last_tick = moment.astimezone(UTC).isoformat()
+            self._write(type(self).load(self.path).anchors, self.last_tick)
+
+    def _write(self, anchors: dict[str, str], last_tick: str | None) -> None:
+        """Write one snapshot atomically. Callers hold ``_lock``.
+
+        The temp file is named for the writing process. Two schedulers over one state file
+        are a documented deployment (external cron, overlapping ticks), and a shared temp
+        name means one can rename the other's half-written file over the state, or delete
+        it from under a rename that is already in flight.
+        """
+        payload: dict[str, Any] = {
+            "version": STATE_VERSION,
+            "routines": {key: {"anchor": value} for key, value in sorted(anchors.items())},
+            "last_tick": last_tick,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = temp_state_path(self.path)
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(self.path)
+
+
+def temp_state_path(path: Path, pid: int | None = None) -> Path:
+    """Return the temp file a given process writes ``path`` through.
+
+    Named for the writer, so no two processes ever share one: see :meth:`SchedulerState._write`.
+    """
+    return path.with_suffix(f"{path.suffix}.{os.getpid() if pid is None else pid}.tmp")
 
 
 def scheduler_liveness(state: SchedulerState, now: datetime | None = None) -> dict[str, Any]:
@@ -602,6 +643,11 @@ class Scheduler:
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()
+        # The in-process half of the cross-process state lock: which threads of this
+        # process are inside it, and the fd carrying the flock while any of them are.
+        self._state_gate = threading.Lock()
+        self._state_holders = 0
+        self._state_fd: int | None = None
         # One lock per resident, held across allow → run → record so two due routines of
         # the same resident cannot both pass one pre-ledger budget read (steward #68).
         self._resident_locks: dict[str, threading.Lock] = {}
@@ -651,17 +697,21 @@ class Scheduler:
         warning that steward swallowed on its way to exiting 0 — a scheduler that cannot
         remember its anchor, which re-fires or re-anchors forever, pretending everything is
         fine (steward #85). It is fatal here instead: a scheduler that cannot persist state
-        must not run. A stray ``state.tmp`` from a write killed mid-flight is cleared, so a
-        crash does not leave a booby-trap behind.
+        must not run. A stray temp from a write killed mid-flight is cleared, so a crash
+        does not leave a booby-trap behind.
         """
         if self.dry_run:
             return
         path = self.state.path
-        # Clear a stray temp from a write killed mid-flight first, so a crash — including the
+        # Clear stray temps from writes killed mid-flight first, so a crash — including the
         # one a directory-shaped state itself causes — does not leave a booby-trap behind.
-        temporary = path.with_suffix(f"{path.suffix}.tmp")
-        with contextlib.suppress(OSError):
-            temporary.unlink(missing_ok=True)
+        # Only ones no live writer can own: this process's own, and the shared name steward
+        # wrote through before temps were named per process. Deleting another scheduler's
+        # temp would break the rename it is in the middle of, and swallow the anchor with it.
+        strays = (temp_state_path(path), path.with_suffix(f"{path.suffix}.tmp"))
+        for temporary in strays:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
         if path.is_dir():
             raise SchedulerError(
                 f"STEWARD_STATE names a directory, not a file: {path} — steward cannot "
@@ -676,7 +726,7 @@ class Scheduler:
             ) from exc
 
     @contextlib.contextmanager
-    def _state_lock(self) -> Iterator[None]:
+    def _state_lock(self, *, wait: bool = True) -> Iterator[bool]:
         """Hold an exclusive OS lock over the whole tick, so two ticks never both fire.
 
         The documented ``scheduler tick`` deployment runs under external cron, so two ticks
@@ -685,13 +735,50 @@ class Scheduler:
         it (steward #76). ``flock`` on a sidecar ``.lock`` file serialises them: the second
         tick blocks until the first has anchored, saved, and fired, then reloads the state
         the first one wrote and finds nothing due.
+
+        Every write to the state file goes through here, the heartbeat's included: a write
+        made outside the lock is a write that can land on top of what another process just
+        saved. That is why the lock is re-entrant *per process* rather than per thread —
+        the heartbeat stamps from its own thread while the tick thread is mid-fire inside
+        the lock, and the flock this process already holds is exactly the permission it
+        needs. Yields whether the lock is held: with ``wait=False`` a lock another process
+        owns is reported rather than queued behind, which is how the heartbeat declines to
+        block — a stamp it cannot make right now is one the process holding the lock is
+        making instead.
         """
-        lock_path = self.state.path.with_suffix(f"{self.state.path.suffix}.lock")
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        acquired = self._acquire_state_lock(wait=wait)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            yield acquired
         finally:
+            if acquired:
+                self._release_state_lock()
+
+    def _acquire_state_lock(self, *, wait: bool) -> bool:
+        """Take the flock, or note that this process already has it. See :meth:`_state_lock`."""
+        with self._state_gate:
+            if self._state_holders:
+                self._state_holders += 1
+                return True
+            lock_path = self.state.path.with_suffix(f"{self.state.path.suffix}.lock")
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                if wait:
+                    raise  # a tick that cannot lock must not fire, not fire unlocked
+                return False
+            self._state_fd = fd
+            self._state_holders = 1
+            return True
+
+    def _release_state_lock(self) -> None:
+        """Drop one hold, releasing the flock when the last one goes."""
+        with self._state_gate:
+            self._state_holders -= 1
+            if self._state_holders or self._state_fd is None:
+                return
+            fd, self._state_fd = self._state_fd, None
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
@@ -1128,9 +1215,15 @@ class Scheduler:
 
         So a small daemon thread stamps every :data:`HEARTBEAT_EVERY_S` on the wall clock —
         the wall clock, not an injected one, because the fact being asserted is "a scheduler
-        process exists right now" and other processes read it against their own now. It
-        writes nothing else: the anchors are the loop's to own, and
-        :class:`SchedulerState` serialises the two writers.
+        process exists right now" and other processes read it against their own now.
+
+        It writes nothing else, and it writes under the same cross-process lock every other
+        writer takes. Both halves matter: the anchors are the loop's to own, so the stamp
+        goes through :meth:`SchedulerState.stamp`, which leaves the ones on disk alone; and
+        a stamp is still a write of the shared file, so it waits its turn — except that it
+        does not wait, because a beat it cannot take the lock for is a beat the process
+        holding the lock is making anyway. Skipping it is free; queueing on it would park
+        the heartbeat behind another process's fifteen-minute run.
 
         What this asserts is the process, not its progress: a scheduler wedged with its
         heartbeat thread still alive reads as up. That is the right division of labour —
@@ -1149,8 +1242,9 @@ class Scheduler:
         def beat() -> None:
             while not stop.wait(HEARTBEAT_EVERY_S):
                 try:
-                    self.state.record_tick(datetime.now(UTC))
-                    self._save_state()
+                    with self._state_lock(wait=False) as held:
+                        if held:
+                            self.state.stamp(datetime.now(UTC))
                 except Exception as exc:  # noqa: BLE001 — a heartbeat must not kill the run
                     log.warning("could not stamp the scheduler heartbeat: %s", exc)
 
