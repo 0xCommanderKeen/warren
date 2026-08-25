@@ -480,18 +480,25 @@
     const abort = () => controller.abort(external && external.reason);
     if (external && external.aborted) abort();
     else if (external) external.addEventListener("abort", abort, { once: true });
-    let timer;
+    let timer, deadlineExpired = false;
     const timeout = new Promise((_, reject) => {
       timer = schedule(() => {
+        deadlineExpired = true;
         controller.abort();
-        reject(new Error("Steward request timed out"));
+        const error = new Error("Steward request timed out");
+        error.kind = "timeout"; error.timedOut = true;
+        reject(error);
       }, timeoutMs);
     });
     try { return await Promise.race([operation(controller.signal), timeout]); }
     catch (error) {
       if (external && external.aborted) {
         const cancelled = new Error("Steward request was cancelled");
-        cancelled.aborted = true; throw cancelled;
+        cancelled.aborted = true; cancelled.kind = "cancelled"; throw cancelled;
+      }
+      if (deadlineExpired && !(error && error.timedOut)) {
+        const timedOut = new Error("Steward request timed out");
+        timedOut.kind = "timeout"; timedOut.timedOut = true; throw timedOut;
       }
       throw error;
     } finally {

@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 
 const html = fs.readFileSync("viewer/index.html", "utf8");
+const nursery = fs.readFileSync("viewer/nursery.js", "utf8");
 
 assert.doesNotMatch(html, /check hooks/i,
   "the census must report missing signals without guessing at their cause");
@@ -73,5 +74,14 @@ assert.match(html, /This visitor has no resident soul or manifest/,
 assert.match(html, /data-identity-refresh/, "identity reads have a keyboard-operable refresh action");
 assert.match(html, /BurrowIdentity\.refresh\(identityState, stewardConfig/,
   "the browser reads identity directly with its memory-only Steward configuration");
+assert.match(html, /NURSERY_ID = "nursery"/, "the town hall exposes the resident nursery");
+assert.match(html, /src="\/sprites\.js"[\s\S]*src="\/projection\.js"/,
+  "the shared sprite authority loads before projection and nursery consumers");
+assert.match(html, /data-open-nursery/, "fleet operations links back to the nursery");
+assert.match(html, /data-create-resident/, "the nursery exposes its accessible declaration form");
+assert.match(nursery, /deploy: true|deploy:true/,
+  "nursery creation explicitly requests Steward deployment rather than relying on its declare-only default");
+assert.match(html, /nurseryTracker\.observe\(\{ events: view\.eventEvidence/,
+  "pending creation resolves only from runtime-published protocol evidence");
 
 console.log("viewer chrome reports truthful, accessible status");

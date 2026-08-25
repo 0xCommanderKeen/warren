@@ -14,11 +14,11 @@ const approvals = require("../viewer/approval-knocks.js");
 
 const ROOT = path.resolve(__dirname, "..");
 const SNAPSHOT_DIR = path.join(__dirname, "snapshots", "fleet-layout");
-// The production fixture deliberately runs all interaction, accessibility and
-// visual phases in one isolated Chrome. Cold GitHub runners now need more than
-// two minutes for that parent orchestration; operation-level deadlines below
-// remain strict so individual hangs still fail quickly.
-const E2E_TIMEOUT_MS = 180000;
+// CI run 32891390327 measured 32 completed phases plus the phone phase at 180s;
+// the remaining desktop phase normally costs another 3–12s there. This 240s
+// parent bound covers that measured cold-run orchestration with headroom. Every
+// server, condition and CDP operation below retains its strict 1–30s deadline.
+const E2E_TIMEOUT_MS = 240000;
 const SERVER_READY_TIMEOUT_MS = 8000;
 const SERVER_REQUEST_TIMEOUT_MS = 1000;
 const BROWSER_CONDITION_TIMEOUT_MS = 10000;
@@ -901,6 +901,426 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         status:"Posted — confirmed by the matching task_posted event."});
       fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
         .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("town hall nursery stays pending until the resident's first real event", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const opened = await eventually(send, `(() => {
+        document.querySelector('[data-panel-target="nursery"]').click();
+        const form=document.querySelector('[data-create-resident]');
+        if(!form)return false;
+        const submit=form.querySelector('[type=submit]');submit.focus();
+        const focused=document.activeElement===submit;
+        form.requestSubmit(submit);
+        return {spriteAuthority:BurrowNursery.CHARS===CHARS,
+          frozen:Object.isFrozen(BurrowNursery.CHARS),focused};
+      })()`, signal, "open production nursery");
+      assert.deepEqual(opened,{spriteAuthority:true,frozen:true,focused:true});
+      const invalid = await eventually(send, `(() => {
+        const form=document.querySelector('[data-create-resident]');
+        const expected=['name','role','mission','duties','rules','escalation'];
+        const fields=expected.map(name=>{
+          const input=form.elements[name],error=document.querySelector('#nursery-'+name+'-error');
+          return {name,invalid:input.getAttribute('aria-invalid'),
+            described:(input.getAttribute('aria-describedby')||'').split(/\\s+/).includes('nursery-'+name+'-error'),
+            live:!!error&&error.textContent.length>0};
+        });
+        return {active:document.activeElement?.name||document.activeElement?.tagName,
+          notice:document.querySelector('[role=alert]')?.textContent,fields};
+      })()`, signal, "keyboard submit exposes and focuses complete local validation");
+      assert.equal(invalid.active,"name");
+      assert.equal(invalid.fields.length,6);
+      assert.ok(invalid.fields.every(item=>item.invalid==='true'&&item.described&&item.live));
+      await eventually(send, `(() => {
+        const form=document.querySelector('[data-create-resident]');
+        const values={name:'Quill Keeper',char:'Monk',accent:'#4f7ea6',role:'note keeper',
+          mission:'Keep notes.',duties:'Tidy notes',rules:'Never delete',
+          escalation:'Ask first',skills:'research',runner:'codex'};
+        for(const [name,value] of Object.entries(values)){
+          form.elements[name].value=value;
+          form.elements[name].dispatchEvent(new Event('input',{bubbles:true}));
+        }
+        return !document.querySelector('.nursery-error') &&
+          ![...form.elements].some(field=>field.getAttribute&&field.getAttribute('aria-invalid')==='true');
+      })()`, signal, "open and populate production nursery");
+      for (const name of ["name", "role", "skills"]) {
+        const preserved = await eventually(send, `(() => {
+          const input=document.querySelector('[data-create-resident] [name="${name}"]');
+          window.__nurseryFocusNode=input;
+          input.focus(); input.setSelectionRange(1,Math.min(4,input.value.length),'forward');
+          // Runtime event and tracker callbacks converge on this exact
+          // production render seam. Keep this assertion synchronous so no
+          // fixture poll can race the focus check.
+          renderPanel(Date.now());
+          const replacement=document.querySelector('[data-create-resident] [name="${name}"]');
+          return {changed:replacement!==window.__nurseryFocusNode,active:document.activeElement===replacement,
+            start:replacement.selectionStart,end:replacement.selectionEnd,expectedEnd:Math.min(4,replacement.value.length),
+            activeName:document.activeElement?.getAttribute('name')||document.activeElement?.tagName};
+        })()`, signal, `nursery ${name} caret survives production rerender`);
+        assert.deepEqual(preserved,{changed:true,active:true,start:1,end:4,
+          expectedEnd:4,activeName:name});
+      }
+      const before = await eventually(send, `(async () => {
+        let form=document.querySelector('[data-create-resident]');
+        form.elements.mission.focus(); form.elements.mission.setSelectionRange(2,5,'forward');
+        renderPanel(Date.now());
+        form=document.querySelector('[data-create-resident]');
+        const focused=form.elements.mission;
+        window.__nurseryFocusStable=document.activeElement===focused && focused.selectionStart===2 && focused.selectionEnd===5;
+        const originalFetch=window.fetch;
+        window.__nurseryOriginalFetch=originalFetch;
+        window.fetch=async (url,options) => {
+          if(String(url)==='http://steward.test/residents') return {status:201,ok:true,
+            async json(){return {status:'accepted',request_id:'nursery-request',id:'quill-keeper',
+              changed:true,message:'accepted',declare:{written:true},register:{ok:true,problems:[]}};}};
+          return originalFetch(url,options);
+        };
+        stewardConfig={url:'http://steward.test',token:'memory-only'};
+        form.requestSubmit();
+        await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest();
+        return item && {state:item.state,agent:item.agent_id,
+          feedback:document.querySelector('.nursery-feedback')?.textContent,
+          projected:villagers.some(v=>v.id==='codex:quill-keeper'),
+          auth:document.querySelector('#steward-token').value,focusStable:window.__nurseryFocusStable};
+      })()`, signal, "nursery pending acceptance");
+      assert.deepEqual(before, {state:"pending",agent:"codex:quill-keeper",
+        feedback:"pending · Steward accepted; waiting for Quill Keeper to wake.",
+        projected:false,auth:"",focusStable:true});
+      fs.appendFileSync(events, JSON.stringify({v:0,ts:new Date(frozenNow + 1).toISOString(),
+        source:"codex",agent_id:"codex:quill-keeper",project:"notes",type:"task_started",
+        payload:{prompt:"Wake honestly"}}) + "\n");
+      const alive = await eventually(send, `(async () => {
+        window.fetch=window.__nurseryOriginalFetch;
+        await runtime.poll();
+        const item=nurseryTracker.latest();
+        return item && {state:item.state,
+          feedback:document.querySelector('.nursery-feedback')?.textContent,
+          residency:villagers.find(v=>v.id==='codex:quill-keeper')?.residency};
+      })()`, signal, "nursery first-event acknowledgement");
+      assert.deepEqual(alive, {state:"alive",
+        feedback:"alive · Quill Keeper woke — confirmed by their first real event.",
+        residency:"visitor"});
+
+      const submitPreflight = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Offline Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const prior=nurseryTracker.latest(),originalSnapshot=runtime.snapshot;
+        window.__nurseryOriginalSnapshot=originalSnapshot;
+        let residentPosts=0;
+        const originalFetch=window.fetch;
+        window.__nurseryPreflightFetch=originalFetch;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents')residentPosts++;
+          return originalFetch(url,options);
+        };
+        runtime.snapshot=()=>({...originalSnapshot(),transport:'disconnected'});
+        const submit=form.querySelector('[data-nursery-submit]');submit.focus();
+        form.requestSubmit(submit);
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const notice=document.querySelector('[data-nursery-notice]');
+        const retained=nurseryTracker.latest();
+        return {residentPosts,role:notice?.getAttribute('role'),notice:notice?.textContent,
+          sameItem:retained===prior,state:retained?.state,
+          priorFeedback:document.querySelector('.nursery-feedback')?.textContent,
+          submitFocused:document.activeElement===document.querySelector('[data-nursery-submit]'),
+          inputEnabled:!document.querySelector('[name=name]').disabled};
+      })()`, signal, "new nursery submit exposes telemetry preflight over prior history");
+      assert.deepEqual(submitPreflight,{residentPosts:0,role:"alert",
+        notice:"Nursery unavailable: telemetry is disconnected; no request was sent",
+        sameItem:true,state:"alive",
+        priorFeedback:"alive · Quill Keeper woke — confirmed by their first real event.",
+        submitFocused:true,inputEnabled:true});
+      await eventually(send, `(() => {
+        runtime.snapshot=window.__nurseryOriginalSnapshot;
+        window.fetch=window.__nurseryPreflightFetch;
+        return runtime.snapshot().transport!=='disconnected';
+      })()`, signal, "restore nursery telemetry after current submit notice");
+
+      const preparationFailure = await eventually(send, `(async () => {
+        const prior=nurseryTracker.latest(),originalBegin=nurseryTracker.begin;
+        nurseryTracker.begin=()=>{throw new Error('<img src=x onerror=alert(1)>');};
+        const submit=document.querySelector('[data-nursery-submit]');submit.focus();
+        document.querySelector('[data-create-resident]').requestSubmit(submit);
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        nurseryTracker.begin=originalBegin;
+        const notice=document.querySelector('[data-nursery-notice]');
+        return {role:notice?.getAttribute('role'),text:notice?.textContent,
+          injected:notice?.querySelectorAll('img').length,sameItem:nurseryTracker.latest()===prior,
+          state:nurseryTracker.latest()?.state,
+          submitFocused:document.activeElement===document.querySelector('[data-nursery-submit]')};
+      })()`, signal, "nursery request preparation failure remains escaped over prior history");
+      assert.deepEqual(preparationFailure,{role:"alert",
+        text:"Nursery request could not be prepared: <img src=x onerror=alert(1)>; no request was sent.",
+        injected:0,sameItem:true,state:"alive",submitFocused:true});
+
+      const cancelledCredentials = await eventually(send, `(async () => {
+        const prior=nurseryTracker.latest();stewardConfig=null;
+        const submit=document.querySelector('[data-nursery-submit]');submit.focus();
+        document.querySelector('[data-create-resident]').requestSubmit(submit);
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const dialog=document.querySelector('#steward-auth');
+        if(!dialog.open)return false;
+        dialog.querySelector('button[value=cancel]').click();
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const notice=document.querySelector('[data-nursery-notice]');
+        const result={role:notice?.getAttribute('role'),text:notice?.textContent,
+          dialogOpen:dialog.open,sameItem:nurseryTracker.latest()===prior,
+          state:nurseryTracker.latest()?.state,
+          submitFocused:document.activeElement===document.querySelector('[data-nursery-submit]')};
+        stewardConfig={url:'http://steward.test',token:'memory-only'};
+        return result;
+      })()`, signal, "cancelled nursery credentials remain visible over prior history");
+      assert.deepEqual(cancelledCredentials,{role:"alert",
+        text:"Steward credentials were not provided; no resident request was sent.",
+        dialogOpen:false,sameItem:true,state:"alive",submitFocused:true});
+
+      const ambiguous = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Retry Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        form.elements.mission.focus(); form.elements.mission.setSelectionRange(1,4,'forward');
+        window.__nurseryRetryBodies=[];
+        const original=window.fetch.bind(window); window.__nurseryBaseFetch=original;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents'){
+            window.__nurseryRetryBodies.push(JSON.parse(options.body));
+            throw new TypeError('connection disappeared after write');
+          }
+          return original(url,options);
+        };
+        form.requestSubmit(); await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest(),retry=document.querySelector('[data-nursery-retry]');
+        return item && {state:item.state,agent:item.agent_id,retry:!!retry,
+          retryFocused:document.activeElement===retry,disabled:document.querySelector('[name=name]').disabled,
+          body:window.__nurseryRetryBodies[0],projected:villagers.some(v=>v.id==='codex:retry-keeper')};
+      })()`, signal, "nursery ambiguous delivery offers immutable retry");
+      assert.equal(ambiguous.state,"unreachable");
+      assert.equal(ambiguous.agent,"codex:retry-keeper");
+      assert.equal(ambiguous.retry,true); assert.equal(ambiguous.retryFocused,true);
+      assert.equal(ambiguous.disabled,true); assert.equal(ambiguous.projected,false);
+      assert.equal(ambiguous.body.name,"Retry Keeper");
+
+      const retryPreflight = await eventually(send, `(async () => {
+        const prior=nurseryTracker.latest(),originalSnapshot=runtime.snapshot;
+        window.__nurseryRetrySnapshot=originalSnapshot;
+        const stable=originalSnapshot(),parts=stable.cursor.split(':');
+        parts[parts.length-1]=String(Number(parts[parts.length-1])+1);
+        let reads=0;
+        runtime.snapshot=()=>reads++===0?stable:{...stable,cursor:parts.join(':')};
+        const beforeBodies=window.__nurseryRetryBodies.length;
+        const retry=document.querySelector('[data-nursery-retry]');retry.focus();retry.click();
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const notice=document.querySelector('[data-nursery-notice]');
+        const retained=nurseryTracker.latest(),currentRetry=document.querySelector('[data-nursery-retry]');
+        return {requestDelta:window.__nurseryRetryBodies.length-beforeBodies,
+          role:notice?.getAttribute('role'),notice:notice?.textContent,sameItem:retained===prior,
+          state:retained?.state,priorMessage:document.querySelector('.nursery-feedback')?.textContent,
+          retryText:currentRetry?.textContent,retryDescribed:currentRetry?.getAttribute('aria-describedby'),
+          retryFocused:document.activeElement===currentRetry,fieldsDisabled:document.querySelector('[name=name]').disabled};
+      })()`, signal, "ambiguous nursery retry exposes changed-cursor preflight over prior truth");
+      assert.deepEqual(retryPreflight,{requestDelta:0,role:"alert",
+        notice:"Telemetry changed while authorizing; the original declaration was not retried.",
+        sameItem:true,state:"unreachable",
+        priorMessage:"unreachable · Steward is unreachable. The request outcome is unknown; retry is available only with the exact original declaration. check current telemetry and retry exact original declaration",
+        retryText:"check current telemetry and retry exact original declaration",
+        retryDescribed:"nursery-current-notice",retryFocused:true,fieldsDisabled:true});
+      await eventually(send, `(() => {
+        runtime.snapshot=window.__nurseryRetrySnapshot;
+        return document.querySelector('[data-nursery-retry]')?.textContent.includes('check current telemetry');
+      })()`, signal, "restore telemetry while retaining current retry notice");
+
+      const converged = await eventually(send, `(async () => {
+        const disabled=document.querySelector('[name=name]');
+        disabled.value='Edited After Ambiguity';
+        disabled.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents'){
+            window.__nurseryRetryBodies.push(JSON.parse(options.body));
+            return {status:201,ok:true,async json(){return {status:'accepted',request_id:'retry-replay',
+              id:'retry-keeper',changed:true,message:'declaration unchanged; provisioning converged',
+              declare:{written:false},register:{ok:true,problems:[]}};}};
+          }
+          return original(url,options);
+        };
+        document.querySelector('[data-nursery-retry]').click();
+        await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest();
+        if(!item||item.state!=='converged')return false;
+        return {state:item.state,bodies:window.__nurseryRetryBodies,
+          feedback:document.querySelector('.nursery-feedback')?.textContent,
+          projected:villagers.some(v=>v.id==='codex:retry-keeper'),
+          overflow:document.querySelector('#panel').scrollWidth-document.querySelector('#panel').clientWidth};
+      })()`, signal, "lost response converges on exact-body retry");
+      assert.equal(converged.state,"converged");
+      assert.deepEqual(converged.bodies[1],converged.bodies[0],"retry wire body is byte-shape immutable");
+      assert.match(converged.feedback,/no new wake is claimed/);
+      assert.equal(converged.projected,false); assert.ok(converged.overflow<=0);
+
+      const validationDetail=[{type:'extra_forbidden',loc:['body','api_key'],
+        msg:'Extra inputs are not permitted',input:'<secret>'}];
+      const rejected = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Validation Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch,detail=${JSON.stringify(validationDetail)};
+        window.fetch=async(url,options={})=>String(url)==='http://steward.test/residents'?
+          {status:422,ok:false,async json(){return {detail};}}:original(url,options);
+        form.requestSubmit(); await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest(); if(!item||item.state!=='validation')return false;
+        const feedback=document.querySelector('.nursery-feedback');
+        return {state:item.state,text:feedback.textContent,children:feedback.querySelectorAll('script').length,
+          disabled:document.querySelector('[name=name]').disabled,
+          projected:villagers.some(v=>v.id==='codex:validation-keeper')};
+      })()`, signal, "FastAPI 422 detail is safe and exact in production UI");
+      assert.equal(rejected.state,"validation");
+      assert.ok(rejected.text.includes(JSON.stringify(validationDetail)));
+      assert.equal(rejected.children,0); assert.equal(rejected.disabled,false);
+      assert.equal(rejected.projected,false);
+
+      const uncertainHttp = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Uncertain Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch;window.__nursery503Bodies=[];
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents'){
+            window.__nursery503Bodies.push(JSON.parse(options.body));
+            return {status:503,ok:false,async json(){return {detail:{
+              error:'overloaded',message:'temporary maintenance'}};}};
+          }
+          return original(url,options);
+        };
+        form.requestSubmit();await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest(),feedback=document.querySelector('.nursery-feedback');
+        if(!item||item.state!=='ambiguous')return false;
+        return {state:item.state,role:feedback.getAttribute('role'),text:feedback.textContent,
+          rejected:/Steward rejected/i.test(feedback.textContent),retry:!!feedback.querySelector('[data-nursery-retry]'),
+          disabled:document.querySelector('[name=name]').disabled,
+          projected:villagers.some(v=>v.id==='codex:uncertain-keeper'),posts:window.__nursery503Bodies.length};
+      })()`, signal, "503 creation response stays explicitly outcome-unknown in production UI");
+      assert.equal(uncertainHttp.state,"ambiguous"); assert.equal(uncertainHttp.role,"alert");
+      assert.match(uncertainHttp.text,/temporary maintenance/);
+      assert.match(uncertainHttp.text,/may have been created/);
+      assert.match(uncertainHttp.text,/outcome is unknown/);
+      assert.match(uncertainHttp.text,/exact original declaration/);
+      assert.equal(uncertainHttp.rejected,false); assert.equal(uncertainHttp.retry,true);
+      assert.equal(uncertainHttp.disabled,true); assert.equal(uncertainHttp.projected,false);
+      assert.equal(uncertainHttp.posts,1);
+      const uncertainRejected = await eventually(send, `(async () => {
+        const disabled=document.querySelector('[name=name]');
+        disabled.value='Mutated After 503';
+        disabled.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents'){
+            window.__nursery503Bodies.push(JSON.parse(options.body));
+            return {status:409,ok:false,async json(){return {detail:{
+              error:'resident_not_declared',message:'resident differs exactly'}};}};
+          }
+          return original(url,options);
+        };
+        document.querySelector('[data-nursery-retry]').click();
+        await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest();if(!item||item.state!=='rejected')return false;
+        return {state:item.state,bodies:window.__nursery503Bodies,
+          text:document.querySelector('.nursery-feedback')?.textContent,
+          enabled:!document.querySelector('[name=name]').disabled,
+          projected:villagers.some(v=>v.id==='codex:uncertain-keeper')};
+      })()`, signal, "503 retry sends only the immutable original declaration");
+      assert.equal(uncertainRejected.state,"rejected");
+      assert.deepEqual(uncertainRejected.bodies[1],uncertainRejected.bodies[0]);
+      assert.match(uncertainRejected.text,/resident differs exactly/);
+      assert.equal(uncertainRejected.enabled,true);assert.equal(uncertainRejected.projected,false);
+
+      const deployment = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Broken Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch;
+        window.fetch=async(url,options={})=>String(url)==='http://steward.test/residents'?
+          {status:201,ok:true,async json(){return {status:'accepted',request_id:'broken-request',
+            id:'broken-keeper',changed:true,declare:{written:true},
+            message:'the container is up, but the schedule check did not pass — see register.problems',
+            register:{ok:false,problems:['runner binary not found: codex']}};}}:original(url,options);
+        form.requestSubmit(); await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest(); if(!item||item.state!=='deployment-failed')return false;
+        window.fetch=original;
+        return {state:item.state,text:document.querySelector('.nursery-feedback').textContent,
+          blocked:nurseryTracker.blocks(),projected:villagers.some(v=>v.id==='codex:broken-keeper')};
+      })()`, signal, "deployment failure is immediate and non-optimistic");
+      assert.equal(deployment.state,"deployment-failed");
+      assert.match(deployment.text,/runner binary not found: codex/);
+      assert.equal(deployment.blocked,false); assert.equal(deployment.projected,false);
+
+      const resetBusy = await eventually(send, `(async () => {
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Reset Keeper';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const original=window.__nurseryBaseFetch; window.__nurseryResetOriginal=original;
+        let resolveRequest; window.__nurseryResetResponse=new Promise(resolve=>{resolveRequest=resolve;});
+        window.__resolveNurseryReset=resolveRequest;
+        window.fetch=async(url,options={})=>String(url)==='http://steward.test/residents'?
+          window.__nurseryResetResponse:original(url,options);
+        form.requestSubmit(); await new Promise(resolve=>setTimeout(resolve,0));
+        const item=nurseryTracker.latest(); if(!item||!item.httpPending)return false;
+        nurseryTracker.observe({reset:true,
+          cursor:'v1:abcdefabcdefabcdefabcdefabcdefab:9:8:7:20',events:[]},validateEvent);
+        const rendered=document.querySelector('[data-create-resident]');
+        return {state:item.state,httpPending:item.httpPending,busy:nurseryTracker.busy(),
+          ariaBusy:rendered.getAttribute('aria-busy'),disabled:rendered.elements.name.disabled};
+      })()`, signal, "reset during nursery HTTP remains accessibly busy");
+      assert.deepEqual(resetBusy,{state:"ambiguous",httpPending:true,busy:true,
+        ariaBusy:"true",disabled:true});
+      const resetSettled = await eventually(send, `(async () => {
+        window.__resolveNurseryReset({status:409,ok:false,async json(){return {detail:{
+          error:'resident_not_declared',message:'reset test refused'}};}});
+        await new Promise(resolve=>setTimeout(resolve,0));
+        window.fetch=window.__nurseryResetOriginal;
+        const item=nurseryTracker.latest();
+        return item && item.state==='rejected' && !item.httpPending && !nurseryTracker.busy();
+      })()`, signal, "reset nursery request settles definitively");
+      assert.equal(resetSettled,true);
+
+      const capacity = await eventually(send, `(async () => {
+        nurseryTracker.entries.clear();
+        const snapshot=runtime.snapshot(),created=[];
+        for(let index=0;index<BurrowNursery.MAX_TRACKED;index++){
+          const tracked=nurseryTracker.begin(snapshot.cursor,{...nurseryDraft,
+            name:'Capacity Keeper '+index});
+          if(!tracked.ok)return false;
+          tracked.item.state='silent';tracked.item.httpPending=false;
+          tracked.item.message=tracked.item.name+' is still waiting for exact wake evidence.';
+          created.push(tracked.item);
+        }
+        renderPanel(Date.now());
+        let posts=0;const original=window.__nurseryBaseFetch;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://steward.test/residents')posts++;
+          return original(url,options);
+        };
+        const form=document.querySelector('[data-create-resident]');
+        form.elements.name.value='Capacity Ninth';
+        form.elements.name.dispatchEvent(new Event('input',{bubbles:true}));
+        const submit=document.querySelector('[data-nursery-submit]');submit.focus();
+        document.querySelector('[data-create-resident]').requestSubmit(submit);
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const notice=document.querySelector('[data-nursery-notice]');
+        window.fetch=original;
+        return {posts,role:notice?.getAttribute('role'),text:notice?.textContent,
+          size:nurseryTracker.entries.size,same:created.every(item=>nurseryTracker.entries.get(item.key)===item),
+          noNinth:![...nurseryTracker.entries.values()].some(item=>item.name==='Capacity Ninth'),
+          fieldsEnabled:!document.querySelector('[name=name]').disabled,
+          submitFocused:document.activeElement===document.querySelector('[data-nursery-submit]')};
+      })()`, signal, "all-reconcilable nursery capacity refuses accessibly without a POST");
+      assert.equal(capacity.posts,0);assert.equal(capacity.role,"alert");
+      assert.match(capacity.text,/all 8 tracked declarations still await exact wake evidence/);
+      assert.match(capacity.text,/no request was sent/);
+      assert.equal(capacity.size,8);assert.equal(capacity.same,true);assert.equal(capacity.noNinth,true);
+      assert.equal(capacity.fieldsEnabled,true);assert.equal(capacity.submitFocused,true);
     });
 
     await t.test("structured approval waits for exact production closing evidence", async () => {

@@ -56,11 +56,11 @@
     let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
 
     function publishFleet(at = now(), routineBatch = [], reset = false,
-        cursor = eventCursor, taskEvidence = [], approvalEvidence = []) {
+        cursor = eventCursor, taskEvidence = [], approvalEvidence = [], eventEvidence = []) {
       onFleet({ state: fleetState, residents: residentReport.residents,
         diagnosticResidents: residentReport.diagnosticResidents,
         diagnostics: residentReport.diagnostics, routineBatch, taskEvidence, approvalEvidence,
-        jobState, approvalState, cursor, reset,
+        jobState, approvalState, cursor, reset, eventEvidence,
         directoryAvailable: residentReport.available, villagers, transport, now: at });
     }
 
@@ -99,7 +99,8 @@
       const approvalEvents = batch.filter(event => event.type === "needs_human_resolved");
       publishFleet(at, publishRoutineEvidence ?
         batch.filter(event => event.type.startsWith("routine_")) : [], reset, eventCursor,
-        publishRoutineEvidence ? taskEvents : [], publishRoutineEvidence ? approvalEvents : []);
+        publishRoutineEvidence ? taskEvents : [], publishRoutineEvidence ? approvalEvents : [],
+        publishRoutineEvidence ? batch : []);
       return batch;
     }
 
@@ -213,18 +214,22 @@
       eventStream = stream;
       const stageEligible = eventCursor !== 0;
       let stagedPublications = [];
-      let stagedEvidenceCount = 0;
+      let stagedRecordCount = 0;
       let stagingOverflowed = false;
       function clearStaging() {
         stagedPublications = [];
-        stagedEvidenceCount = 0;
+        stagedRecordCount = 0;
         stagingOverflowed = false;
       }
       function publishStaging() {
         if (!stageEligible || stagingOverflowed) return false;
         for (const staged of stagedPublications) {
-          publishFleet(now(), staged.routineEvents, false, staged.cursor, staged.taskEvents,
-            staged.approvalEvents);
+          // The validated batch is the one staging authority. Consumer slices
+          // are derived only at publication so one record consumes one slot,
+          // regardless of how many acknowledgement views need that record.
+          publishFleet(now(), staged.batch.filter(event => event.type.startsWith("routine_")),
+            false, staged.cursor, staged.batch.filter(event => jobs.TYPES.has(event.type)),
+            staged.batch.filter(event => event.type === "needs_human_resolved"), staged.batch);
         }
         return true;
       }
@@ -260,21 +265,15 @@
         if (message.lastEventId) eventCursor = message.lastEventId;
         const batch = project([message.data], false, streamReady);
         if (streamReady || !stageEligible || stagingOverflowed) return;
-        const evidence = batch.filter(event => event.type.startsWith("routine_"));
-        const taskEvidence = batch.filter(event => jobs.TYPES.has(event.type));
-        const approvalEvidence = batch.filter(event => event.type === "needs_human_resolved");
-        if (!evidence.length && !taskEvidence.length && !approvalEvidence.length) return;
-        if (stagedEvidenceCount + evidence.length + taskEvidence.length +
-            approvalEvidence.length > MAX_TRANSPORT_EVENTS) {
+        if (!batch.length) return;
+        if (stagedRecordCount + batch.length > MAX_TRANSPORT_EVENTS) {
           stagedPublications = [];
-          stagedEvidenceCount = 0;
+          stagedRecordCount = 0;
           stagingOverflowed = true;
           return;
         }
-        stagedPublications.push({ routineEvents: evidence, taskEvents: taskEvidence,
-          approvalEvents: approvalEvidence,
-          cursor: message.lastEventId || 0 });
-        stagedEvidenceCount += evidence.length + taskEvidence.length + approvalEvidence.length;
+        stagedPublications.push({ batch, cursor: message.lastEventId || 0 });
+        stagedRecordCount += batch.length;
       };
       stream.addEventListener("ready", async message => {
         if (eventStream !== stream || streamReady) return;

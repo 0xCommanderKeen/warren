@@ -15,8 +15,9 @@ const NAMES = ["Bramble","Poppy","Wren","Sorrel","Fern","Alder","Maple","Rowan",
                "Thistle","Clover","Hazel","Juniper","Moss","Reed","Tansy","Willow"];
 const ACCENTS = ["#7d5ba6","#4f7d5b","#a65b5b","#5b7da6","#a68a4f","#5ba69b",
                  "#a65b8a","#6b7da0","#8aa65b","#a6764f"];
-const CHARS = ["Villager","Villager2","Villager3","Villager4","Villager5",
-               "Woman","Boy","OldMan","Princess","Hunter","Noble","Monk"];
+const SPRITES = typeof module === "object" && module.exports ?
+  require("./sprites.js") : BurrowSprites;
+const CHARS = SPRITES.CHARS;
 const STALE_MS = 30 * 60 * 1000;
 const DROP_MS  = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;

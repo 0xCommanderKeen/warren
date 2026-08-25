@@ -1,8 +1,9 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { STALE_MS, DROP_MS, ago } = require("../viewer/projection.js");
+const { STALE_MS, DROP_MS, ago, validateEvent } = require("../viewer/projection.js");
 const { createBrowserRuntime } = require("../viewer/browser-runtime.js");
+const nursery = require("../viewer/nursery.js");
 
 const BASE = Date.parse("2026-08-25T10:00:00.000Z");
 const BOOT_ID = "0123456789abcdef0123456789abcdef";
@@ -98,6 +99,9 @@ const runtime = createBrowserRuntime({
   assert.equal(fleetViews.findLast(view => view.routineBatch.length)
     .routineBatch[0].payload.run_id, "queued",
   "normal resume evidence is published once after ready validation");
+  assert.equal(fleetViews.findLast(view => view.eventEvidence.length)
+    .eventEvidence[0].payload.run_id, "queued",
+  "all validated pre-ready events cross the same exact cursor boundary for nursery correlation");
   assert.equal(runtime.snapshot().fleetState.routineRecent.filter(entry =>
     entry.event.payload.run_id === "queued").length, 1,
   "republishing acknowledgement evidence does not fold it into the ledger twice");
@@ -165,6 +169,8 @@ const runtime = createBrowserRuntime({
   runtime.tick();
   assert.deepEqual(fleetViews.at(-1).routineBatch, [],
     "clock publications cannot replay retained routine evidence as a fresh acknowledgement");
+  assert.deepEqual(fleetViews.at(-1).eventEvidence, [],
+    "clock publications cannot replay retained ordinary events as a fresh resident wake-up");
   assert.equal(runtime.snapshot().villagers[0].state, "stale",
     "a silent healthy stream must not freeze working state");
   assert.equal(transports.at(-1), "live", "stale activity does not make transport unhealthy");
@@ -234,6 +240,39 @@ const runtime = createBrowserRuntime({
     "a mismatched readiness marker never establishes an observable boundary");
   assert.equal(invalidFetches, 2,
     "invalid readiness falls back to a grouped polling baseline");
+
+  const oldBoundary=`v1:${BOOT_ID}:1:2:3:5`;
+  const rotatedBoot="fedcba9876543210fedcba9876543210";
+  const resetTracker=nursery.createTracker({setTimeout:()=>1,clearTimeout:()=>{}});
+  const nurseryDraft={name:"Rotation Keeper",char:"Monk",accent:"#4f7ea6",role:"keeper",
+    mission:"Keep rotation truth.",duties:"Observe",rules:"Never replay",
+    escalation:"Ask",skills:"research",runner:"codex"};
+  const pending=resetTracker.begin(oldBoundary,nurseryDraft).item;
+  resetTracker.accepted(pending.key,{request_id:"rotation-request",changed:true,
+    declaration_written:true,register_ok:true,register_problems:[]});
+  const wake=JSON.stringify({v:0,ts:new Date(BASE+20_000).toISOString(),source:"codex",
+    agent_id:"codex:rotation-keeper",project:"rotation",type:"task_started",
+    payload:{prompt:"Wake after rotation"}});
+  let rotationRead=0;
+  const rotated=createBrowserRuntime({now:()=>now,EventSource:null,setTimeout(){return 1;},clearTimeout(){},
+    fetch:async url=>{
+      if(url==="/villagers")return {ok:false};
+      if(!url.startsWith("/events"))throw new Error(`unexpected rotation fetch ${url}`);
+      rotationRead+=1; const reset=rotationRead===1;
+      return {ok:true,headers:{get:name=>name==="X-Burrow-Cursor"?
+        `v1:${rotatedBoot}:4:5:6:${reset?50:51}`:name==="X-Burrow-Reset"&&reset?"1":null},
+      text:async()=>wake+"\n"};
+    },
+    onFleet:view=>resetTracker.observe({events:view.eventEvidence,cursor:view.cursor,reset:view.reset},
+      validateEvent),
+  });
+  await rotated.poll();
+  assert.equal(pending.state,"pending",
+    "grouped rotation replay is excluded while its validated ending cursor rebases pending nursery truth");
+  assert.equal(pending.boundary.namespace,`v1:${rotatedBoot}:4:5:6`);
+  await rotated.poll();
+  assert.equal(pending.state,"alive",
+    "the same exact event is accepted only when a later incremental publication crosses the reset boundary");
 
   console.log("browser clock and transport share the production runtime seam");
 })().catch(error => { console.error(error); process.exitCode = 1; });

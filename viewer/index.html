@@ -195,6 +195,12 @@
   #steward-auth label { display: grid; gap: 4px; margin: 12px 0; }
   #steward-auth input { min-width: 0; font: inherit; color: var(--ink); background: #2b2115; border: 1px solid #706149; padding: 7px; }
   #steward-auth menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
+  .nursery-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 12px; }
+  .nursery-form label { display:grid; gap:4px; color:var(--ink-dim); }
+  .nursery-form input, .nursery-form textarea, .nursery-form select { min-width:0; box-sizing:border-box; width:100%; font:inherit; color:var(--ink); background:#17130f; border:1px solid #706149; padding:7px; }
+  .nursery-form textarea { min-height:72px; resize:vertical; }
+  .nursery-form .wide, .nursery-form button, .nursery-feedback { grid-column:1 / -1; }
+  .nursery-error { color:#ffb09a; font-size:13px; }
   .resident-card { border: 2px solid #55452e; padding: 12px; margin-bottom: 12px; background: rgba(79,61,34,.16); }
   .resident-card h3 { font-weight: 400; font-size: 24px; }
   .cap-row { width: 100%; display: grid; grid-template-columns: 92px 1fr; gap: 8px; border: 0; border-top: 1px dotted #55452e; padding: 5px 0; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
@@ -234,6 +240,7 @@
     .ledger-entry { grid-template-columns: 72px 1fr; }
     .ledger-entry > :last-child { grid-column: 2; }
     .ledger-tabs { overflow-x: auto; }
+    .nursery-form { grid-template-columns:1fr; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -258,6 +265,7 @@
 </style>
 <script src="/vendor/phaser.min.js"></script>
 <script src="/presence.js"></script>
+<script src="/sprites.js"></script>
 <script src="/projection.js"></script>
 </head>
 <body>
@@ -290,7 +298,7 @@
     <label>Tailnet URL <input id="steward-url" name="url" type="url" required value="http://127.0.0.1:8801" autocomplete="off" spellcheck="false"></label>
     <label>Bearer token <input id="steward-token" name="token" type="password" required autocomplete="off" spellcheck="false"></label>
     <div id="steward-auth-error" class="routine-error" role="alert"></div>
-    <menu><button value="cancel" type="submit">cancel</button><button value="connect" type="submit">connect</button></menu>
+    <menu><button value="cancel" type="submit" formnovalidate>cancel</button><button value="connect" type="submit">connect</button></menu>
   </form>
 </dialog>
 
@@ -305,6 +313,7 @@
 <script src="/routine-ledger.js"></script>
 <script src="/job-board.js"></script>
 <script src="/approval-knocks.js"></script>
+<script src="/nursery.js"></script>
 <script src="/charter-journal.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
@@ -398,6 +407,7 @@ const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 const NOTICE_BOARD_ID = "notice-board";
 const JOB_BOARD_ID = "job-board";
 const FLEET_LEDGER_ID = "fleet-ledger";
+const NURSERY_ID = "nursery";
 
 const PLOT_DOOR_X = 24;   // centre of the door opening inside the house frame
 function plotDoor(i) {
@@ -512,6 +522,7 @@ class Village extends Phaser.Scene {
       if (obj.getData("agent")) openPanel(obj.getData("agent"));
       if (obj.getData("noticeBoard")) openPanel(NOTICE_BOARD_ID);
       if (obj.getData("jobBoard")) openPanel(JOB_BOARD_ID);
+      if (obj.getData("nursery")) openPanel(NURSERY_ID);
     });
     this.events.on("update", () => {
       for (const v of this.viz.values()) {
@@ -735,14 +746,15 @@ class Village extends Phaser.Scene {
       this.glows.push(g);
     });
     this.add.image(YOUR_HOUSE.tx * T, YOUR_HOUSE.ty * T, "houses", "yours")
-      .setOrigin(0, 0).setDepth((YOUR_HOUSE.ty + 3) * T);
+      .setOrigin(0, 0).setDepth((YOUR_HOUSE.ty + 3) * T)
+      .setInteractive({ useHandCursor: true }).setData("nursery", true);
     for (let y = YOUR_HOUSE.ty; y < YOUR_HOUSE.ty + 3; y++)
       for (let x = YOUR_HOUSE.tx; x < YOUR_HOUSE.tx + 3; x++) this.block(x, y);
     this.knockers=0;
     this.knockGlow=this.add.rectangle(yourDoor.x,yourDoor.y-8,32,24,0xff8f5e,.4)
       .setDepth(LIGHT_DEPTH).setVisible(false);
     this.chips = [];
-    this.makeChip(null, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "you")
+    this.makeChip(NURSERY_ID, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "town hall")
       .el.classList.add("you");
     this.buildNoticeBoard();
     this.buildJobBoard();
@@ -1271,7 +1283,7 @@ function renderChrome(now) {
     (knockers ? `<span class="dot"> · </span><span class="attn">${knockers} at your door</span>` : "");
   const newest = Math.max(0, ...villagers.map(v => v.lastTs));
   beatEl.textContent = newest ? "last signal " + ago(newest, now) : "";
-  if (selectedId && selectedId !== JOB_BOARD_ID) renderPanel(now);
+  if (selectedId && ![JOB_BOARD_ID, NURSERY_ID].includes(selectedId)) renderPanel(now);
 }
 
 const previewEl = document.getElementById("preview");
@@ -1344,6 +1356,36 @@ const approvalAcks = BurrowApprovals.createAcknowledgements({ onChange(item) {
 } });
 const jobDraft = { title: "", detail: "", required_skills: "" };
 let jobPostNotice = "";
+const nurseryDraft = { name: "", char: "Villager", accent: "#4f7ea6", role: "",
+  mission: "", duties: "", rules: "", escalation: "", skills: "", runner: "codex" };
+let nurseryErrors = {};
+// A preflight failure is current interaction truth, independently of the
+// bounded tracker history below it. Keeping the two models separate prevents
+// an older receipt from swallowing a newer "nothing was sent" result.
+let nurseryNotice = null;
+function setNurseryNotice(message, action, itemKey = null, kind = "preflight") {
+  nurseryNotice = { message, action, itemKey, kind };
+}
+function clearNurseryNotice(action = null) {
+  if (!action || nurseryNotice && nurseryNotice.action === action) nurseryNotice = null;
+}
+function nurseryTelemetryAvailability(snapshot, retry = false) {
+  const result = BurrowRoutines.telemetryAvailability(snapshot.transport, snapshot.cursor);
+  if (result.ok) return result;
+  const subject = retry ? "Nursery retry" : "Nursery";
+  return { ...result, message: result.reason === "transport" ?
+    `${subject} unavailable: telemetry is ${snapshot.transport || "disconnected"}; no request was sent` :
+    `${subject} unavailable: exact telemetry cursor is not available; no request was sent` };
+}
+let nurseryAbortController = null;
+const nurseryTracker = BurrowNursery.createTracker({ onChange(item) {
+  if (nurseryNotice && nurseryNotice.action === "retry" &&
+      nurseryNotice.itemKey === item.key &&
+      !["ambiguous", "timeout", "unreachable", "cancelled"].includes(item.state)) {
+    nurseryNotice = null;
+  }
+  if (selectedId === NURSERY_ID) renderPanel(Date.now());
+} });
 let stewardConfig = null; // deliberately memory-only: never localStorage, URL, server, or manifest
 let stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
 let stewardDeclarationGeneration = 0;
@@ -1354,6 +1396,8 @@ let identityLocalSignature = "";
 const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
 function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
 function forgetStewardConfig() {
+  if (nurseryAbortController) nurseryAbortController.abort();
+  nurseryAbortController = null;
   if (identityAbortController) identityAbortController.abort();
   identityAbortController = null;
   stewardConfig = null;
@@ -1535,7 +1579,7 @@ function renderDirectory() {
   const invalid = directory.invalid.length ? `<div class="ledger-state bad">Incomplete or invalid manifests:<ul>${directory.invalid.map(d => `<li>${esc(d.file)}${esc(d.path)} — ${esc(d.message)}</li>`).join("")}</ul>${statusMark("invalid")}</div>` : "";
   const visitors = villagers.filter(v => v.residency === "visitor");
   const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div>${entryLink(v.id, v.name)} · ${esc(v.project)}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
-  const identityControls = `<div class="ledger-truth">Charters and journals are read directly from Steward into this browser tab. ${stewardConfig ?
+  const identityControls = `<div class="ledger-truth"><button type="button" class="routine-run" data-open-nursery>found a resident at the town hall</button><br>Charters and journals are read directly from Steward into this browser tab. ${stewardConfig ?
     `<button type="button" class="routine-run" data-identity-refresh>refresh identity</button>` :
     `<button type="button" class="routine-run" data-identity-refresh>connect to load identity</button>`}</div>`;
   return availability + identityControls + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
@@ -1872,8 +1916,88 @@ function visitorIdentityMarkup(declaration = null) {
   return `<section class="visitor-truth" aria-label="Temporary visitor lodging"><strong>Temporary lodging.</strong>
     ${reason} It stays in the shared lodge only while its session exists; this is not an unconfigured resident.</section>`;
 }
+function nurseryFieldError(name) {
+  return nurseryErrors[name] ? `<span class="nursery-error" id="nursery-${name}-error">${esc(nurseryErrors[name])}</span>` : "";
+}
+function focusFirstNurseryError(errors) {
+  const name = Object.keys(errors || {})[0];
+  if (!name) return;
+  const focus = () => panelBody
+    .querySelector(`[data-create-resident] [name="${CSS.escape(name)}"]`)
+    ?.focus({ preventScroll: true });
+  focus();
+  // Native button activation may restore focus to the submitter after the
+  // synchronous submit event. Reassert the invalid-field target after that
+  // activation completes, but only while this same error is still current.
+  requestAnimationFrame(() => {
+    if (selectedId === NURSERY_ID && nurseryErrors[name]) focus();
+  });
+}
+function nurseryFeedback() {
+  const item = nurseryTracker.latest();
+  const notice = nurseryNotice ? `<div${item ? ` id="nursery-current-notice"` : ""} role="alert" class="nursery-error" data-nursery-notice>${esc(nurseryNotice.message)}</div>` : "";
+  if (!item) return notice;
+  const bad = ["rejected", "validation", "authentication", "ambiguous", "timeout",
+    "unreachable", "cancelled", "silent", "deployment-failed"].includes(item.state);
+  const suffix = item.truncated ? " [Steward's validation message was truncated at the viewer's 4096-character safety limit.]" : "";
+  const stewardLink = item.state === "silent" && stewardConfig ?
+    ` Check Steward at ${esc(stewardConfig.url.replace(/\/+$/, ""))}.` : "";
+  const retryNotice = nurseryNotice && nurseryNotice.action === "retry" &&
+    nurseryNotice.itemKey === item.key;
+  const retry = !item.httpPending && ["ambiguous", "timeout", "unreachable", "cancelled"].includes(item.state) ?
+    ` <button type="button" class="routine-run" data-nursery-retry="${esc(item.key)}"${retryNotice ? " aria-describedby=\"nursery-current-notice\"" : ""}>${retryNotice ? "check current telemetry and retry exact original declaration" : "retry exact original declaration"}</button>` : "";
+  return `${notice}<div class="nursery-feedback ${esc(item.state)}" role="${bad ? "alert" : "status"}"><strong>${esc(item.state)}</strong> · ${esc(item.message)}${esc(suffix)}${stewardLink}${item.code ? ` · ${esc(item.code)}` : ""}${retry}</div>`;
+}
+function renderNursery() {
+  panelEl.classList.add("ledger");
+  panelEl.setAttribute("aria-label", "Town hall resident nursery");
+  const blocked = nurseryTracker.blocks();
+  const busy = nurseryTracker.busy();
+  const charOptions = BurrowNursery.CHARS.map(char => `<option${char === nurseryDraft.char ? " selected" : ""}>${esc(char)}</option>`).join("");
+  const validity = (name, describedBy = "") => {
+    const errorId = nurseryErrors[name] ? `nursery-${name}-error` : "";
+    const ids = [describedBy, errorId].filter(Boolean).join(" ");
+    return `${nurseryErrors[name] ? ` aria-invalid="true"` : ""}${ids ? ` aria-describedby="${ids}"` : ""}`;
+  };
+  const field = (name, label, input, wide = false) => `<label class="${wide ? "wide" : ""}">${label}${input}${nurseryFieldError(name)}</label>`;
+  panelBody.innerHTML = `<h2 id="panel-title" tabindex="-1"><span style="color:#ffc86b">▪</span> Town hall nursery</h2>
+    <div class="meta">Ask Steward to declare and deploy one resident. Burrow writes nothing and never invents their house.</div>
+    <div class="ledger-truth">The request goes directly from this tab to Steward. Credentials remain in memory only. ${stewardConfig ?
+      `<button type="button" class="routine-run" data-steward-change>change credentials</button> <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+      `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+    <form class="nursery-form" data-create-resident aria-busy="${busy}" novalidate>
+      ${field("name", "Name", `<input name="name" required maxlength="120" autocomplete="off" value="${esc(nurseryDraft.name)}"${validity("name", "nursery-id-preview")}${blocked ? " disabled" : ""}><span class="ledger-small" id="nursery-id-preview">resident ID: ${esc(BurrowNursery.slug(nurseryDraft.name) || "will be derived from name")}</span>`)}
+      ${field("char", "Sprite", `<select name="char"${validity("char")}${blocked ? " disabled" : ""}>${charOptions}</select>`)}
+      ${field("accent", "Accent", `<input name="accent" type="color" value="${esc(nurseryDraft.accent)}"${validity("accent")}${blocked ? " disabled" : ""}>`)}
+      ${field("runner", "Runner", `<select name="runner"${validity("runner")}${blocked ? " disabled" : ""}><option value="codex"${nurseryDraft.runner === "codex" ? " selected" : ""}>Codex</option><option value="claude"${nurseryDraft.runner === "claude" ? " selected" : ""}>Claude</option></select>`)}
+      ${field("role", "Role", `<input name="role" required maxlength="240" value="${esc(nurseryDraft.role)}"${validity("role")}${blocked ? " disabled" : ""}>`, true)}
+      ${field("mission", "Charter mission", `<textarea name="mission" required maxlength="4000"${validity("mission")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.mission)}</textarea>`, true)}
+      ${field("duties", "Duties — one per line", `<textarea name="duties" required maxlength="4000"${validity("duties")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.duties)}</textarea>`, true)}
+      ${field("rules", "Rules — one per line", `<textarea name="rules" required maxlength="4000"${validity("rules")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.rules)}</textarea>`, true)}
+      ${field("escalation", "Escalation", `<textarea name="escalation" required maxlength="4000"${validity("escalation")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.escalation)}</textarea>`, true)}
+      ${field("skills", "Skills — comma or newline separated slugs", `<input name="skills" autocomplete="off" value="${esc(nurseryDraft.skills)}"${validity("skills")}${blocked ? " disabled" : ""}>`, true)}
+      <button type="submit" class="routine-run" data-nursery-submit${blocked ? " disabled" : ""}>ask Steward to found resident</button>
+    </form>${nurseryFeedback()}
+    <div class="ledger-small">After Steward accepts, this waits ${Math.round(BurrowNursery.DEFAULT_WAIT_MS / 60000)} minutes for the resident's own first protocol event. It performs no nursery polling. Until that event, no house, manifest, or villager is added by this form.</div>`;
+}
+async function sendNurseryRequest(item) {
+  nurseryAbortController = new AbortController();
+  try {
+    const receipt = await BurrowNursery.createResident(stewardConfig, item.body,
+      (...args) => fetch(...args), { signal: nurseryAbortController.signal });
+    nurseryTracker.accepted(item.key, receipt);
+  } catch (error) {
+    nurseryTracker.failed(item.key, error);
+    if (error && error.authRejected) {
+      nurseryAbortController = null;
+      forgetStewardConfig();
+    }
+  } finally { nurseryAbortController = null; }
+  renderPanel(Date.now());
+}
 function renderPanelContent(now) {
   if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
+  if (selectedId === NURSERY_ID) { renderNursery(); return; }
   panelEl.classList.remove("ledger");
   panelEl.setAttribute("aria-label", "Villager details");
   if (selectedId === NOTICE_BOARD_ID) {
@@ -1995,18 +2119,29 @@ function captureApprovalFocus() {
     selector = `[data-approval-edit="${CSS.escape(active.dataset.approvalEdit)}"]`;
   } else if (active.matches("[data-approval-option]")) {
     selector = `[data-approval-id="${CSS.escape(active.dataset.approvalId)}"][data-approval-index="${CSS.escape(active.dataset.approvalIndex)}"]`;
-  } else if (active.matches("[data-steward-change]")) selector = "[data-steward-change]";
-  else if (active.matches("[data-steward-clear]")) selector = "[data-steward-clear]";
-  else if (active.matches("[data-identity-refresh]")) selector = "[data-identity-refresh]";
+  } else if (active.matches("[data-create-resident] [name]")) {
+    selector = `[data-create-resident] [name="${CSS.escape(active.name)}"]`;
+  } else if (active.matches("[data-nursery-submit]")) {
+    selector = "[data-nursery-submit]";
+  } else if (active.matches("[data-nursery-retry]")) {
+    selector = "[data-nursery-retry]";
+  } else if (active.matches("[data-steward-change]")) {
+    selector = "[data-steward-change]";
+  } else if (active.matches("[data-steward-clear]")) {
+    selector = "[data-steward-clear]";
+  } else if (active.matches("[data-identity-refresh]")) {
+    selector = "[data-identity-refresh]";
+  }
   if (!selector) return approvalFocusMemory;
-  approvalFocusMemory = { selector, textarea: active.matches("textarea"),
+  approvalFocusMemory = { selector,
+    selectionCapable: Number.isInteger(active.selectionStart) && Number.isInteger(active.selectionEnd),
     start: active.selectionStart, end: active.selectionEnd,
     direction: active.selectionDirection };
   return approvalFocusMemory;
 }
 panelEl.addEventListener("pointerdown", event => {
   if (!event.target.closest(
-      "[data-approval-edit], [data-approval-option], [data-steward-change], [data-steward-clear], [data-identity-refresh]")) {
+      "[data-approval-edit], [data-approval-option], [data-create-resident] [name], [data-nursery-submit], [data-nursery-retry], [data-steward-change], [data-steward-clear], [data-identity-refresh]")) {
     approvalFocusMemory = null;
   }
 });
@@ -2019,11 +2154,11 @@ function restoreApprovalFocus(saved) {
   const usedFallback = !target || target.matches(":disabled") ||
     target.getAttribute("aria-disabled") === "true";
   if (usedFallback) target = panelBody.querySelector(
-    "[data-approval-edit]:not(:disabled), [data-approval-option]:not(:disabled)") ||
+    "[data-approval-edit]:not(:disabled), [data-approval-option]:not(:disabled), [data-nursery-retry]:not(:disabled), [data-nursery-submit]:not(:disabled), [data-create-resident] [name]:not(:disabled)") ||
     panelBody.querySelector("#panel-title");
   if (!target) return;
   target.focus({ preventScroll: true });
-  if (saved.textarea && target.matches("textarea") &&
+  if (saved.selectionCapable && typeof target.setSelectionRange === "function" &&
       Number.isInteger(saved.start) && Number.isInteger(saved.end)) {
     const limit = target.value.length;
     target.setSelectionRange(Math.min(saved.start, limit), Math.min(saved.end, limit),
@@ -2036,6 +2171,10 @@ function restoreApprovalFocus(saved) {
       target.matches("[data-approval-option]") ?
         `[data-approval-id="${CSS.escape(target.dataset.approvalId)}"][data-approval-index="${CSS.escape(target.dataset.approvalIndex)}"]` :
         target.matches("[data-steward-change]") ? "[data-steward-change]" :
+          target.matches("[data-nursery-retry]") ? "[data-nursery-retry]" :
+          target.matches("[data-nursery-submit]") ? "[data-nursery-submit]" :
+          target.matches("[data-create-resident] [name]") ?
+            `[data-create-resident] [name="${CSS.escape(target.name)}"]` :
           target.matches("[data-identity-refresh]") ? "[data-identity-refresh]" : "#panel-title";
     requestAnimationFrame(() => {
       const settled = selectedId && panelBody.querySelector(selector);
@@ -2145,11 +2284,73 @@ panelBody.addEventListener("input", event => {
     jobDraft[event.target.name] = event.target.value;
     return;
   }
+  if (selectedId === NURSERY_ID && event.target.name in nurseryDraft) {
+    nurseryDraft[event.target.name] = event.target.value;
+    const errorId = `nursery-${event.target.name}-error`;
+    delete nurseryErrors[event.target.name];
+    event.target.removeAttribute("aria-invalid");
+    const describedBy = (event.target.getAttribute("aria-describedby") || "")
+      .split(/\s+/).filter(id => id && id !== errorId);
+    if (describedBy.length) event.target.setAttribute("aria-describedby", describedBy.join(" "));
+    else event.target.removeAttribute("aria-describedby");
+    panelBody.querySelector(`#${CSS.escape(errorId)}`)?.remove();
+    if (nurseryNotice && nurseryNotice.kind === "validation" &&
+        BurrowNursery.validate(nurseryDraft).ok) {
+      nurseryNotice = null;
+      panelBody.querySelector("[data-nursery-notice]")?.remove();
+    }
+    if (event.target.name === "name") {
+      const preview = panelBody.querySelector("#nursery-id-preview");
+      if (preview) preview.textContent = `resident ID: ${BurrowNursery.slug(event.target.value) || "will be derived from name"}`;
+    }
+    return;
+  }
   if (!event.target.name || !(event.target.name in fleetFilters)) return;
   fleetFilters[event.target.name] = event.target.value;
   renderFleet(Date.now());
 });
 panelBody.addEventListener("click", async event => {
+  const nurseryLink = event.target.closest("[data-open-nursery]");
+  if (nurseryLink) { openPanel(NURSERY_ID, nurseryLink); return; }
+  const nurseryRetry = event.target.closest("[data-nursery-retry]");
+  if (nurseryRetry) {
+    const item = nurseryTracker.latest();
+    if (!item || item.key !== nurseryRetry.dataset.nurseryRetry) return;
+    const initial = runtime.snapshot();
+    const telemetry = nurseryTelemetryAvailability(initial, true);
+    if (!telemetry.ok) {
+      setNurseryNotice(telemetry.message, "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) {
+        setNurseryNotice("Steward credentials were not provided; the original declaration was not retried.",
+          "retry", item.key);
+        renderPanel(Date.now()); return;
+      }
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      setNurseryNotice("Telemetry changed while authorizing; the original declaration was not retried.",
+        "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    let retry;
+    try { retry = nurseryTracker.retry(item.key, current.cursor); }
+    catch (error) {
+      setNurseryNotice(`Nursery retry could not be prepared: ${error && error.message || "unknown error"}; no request was sent.`,
+        "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    if (!retry.ok) {
+      setNurseryNotice(retry.message, "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    clearNurseryNotice("retry"); renderPanel(Date.now());
+    await sendNurseryRequest(retry.item); return;
+  }
   const approvalOption = event.target.closest("[data-approval-option]");
   if (approvalOption) {
     const requestId = approvalOption.dataset.approvalId;
@@ -2216,7 +2417,7 @@ panelBody.addEventListener("click", async event => {
     residentDetailId(item) === selectedId);
   const inIdentityFlow = Boolean(inactiveIdentity ||
     (identityResident && identityResident.residency === "resident"));
-  if (changeCredentials && (selectedId === JOB_BOARD_ID ||
+  if (changeCredentials && (selectedId === JOB_BOARD_ID || selectedId === NURSERY_ID ||
       selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
     forgetStewardConfig();
     renderPanel(Date.now());
@@ -2229,7 +2430,7 @@ panelBody.addEventListener("click", async event => {
     return;
   }
   const clearCredentials = event.target.closest("[data-steward-clear]");
-  if (clearCredentials && (selectedId === JOB_BOARD_ID ||
+  if (clearCredentials && (selectedId === JOB_BOARD_ID || selectedId === NURSERY_ID ||
       selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
     forgetStewardConfig();
     if (selectedId === JOB_BOARD_ID) jobPostNotice = "Steward credentials cleared from browser memory.";
@@ -2327,6 +2528,55 @@ panelBody.addEventListener("click", async event => {
   renderPanel(Date.now());
 });
 panelBody.addEventListener("submit", async event => {
+  const nurseryForm = event.target.closest("[data-create-resident]");
+  if (nurseryForm) {
+    event.preventDefault();
+    if (nurseryTracker.blocks()) {
+      setNurseryNotice("A previous nursery request is unresolved; no duplicate was sent.", "submit",
+        nurseryTracker.latest() && nurseryTracker.latest().key);
+      renderPanel(Date.now()); return;
+    }
+    const validation = BurrowNursery.validate(nurseryDraft);
+    nurseryErrors = validation.errors;
+    if (!validation.ok) {
+      setNurseryNotice("Fix the highlighted fields; nothing was sent.", "submit", null, "validation");
+      renderPanel(Date.now());
+      focusFirstNurseryError(validation.errors);
+      return;
+    }
+    const initial = runtime.snapshot();
+    const telemetry = nurseryTelemetryAvailability(initial);
+    if (!telemetry.ok) {
+      setNurseryNotice(telemetry.message, "submit");
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) {
+        setNurseryNotice("Steward credentials were not provided; no resident request was sent.", "submit");
+        renderPanel(Date.now()); return;
+      }
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      setNurseryNotice("Telemetry changed while authorizing; no resident request was sent.", "submit");
+      renderPanel(Date.now()); return;
+    }
+    let tracking;
+    try { tracking = nurseryTracker.begin(current.cursor, nurseryDraft); }
+    catch (error) {
+      setNurseryNotice(`Nursery request could not be prepared: ${error && error.message || "unknown error"}; no request was sent.`,
+        "submit");
+      renderPanel(Date.now()); return;
+    }
+    if (!tracking.ok) { nurseryErrors = tracking.validation && tracking.validation.errors || {};
+      setNurseryNotice(tracking.message || "Fix the highlighted fields; nothing was sent.", "submit",
+        null, tracking.validation ? "validation" : "preflight");
+      renderPanel(Date.now()); return; }
+    clearNurseryNotice(); renderPanel(Date.now());
+    await sendNurseryRequest(tracking.item); return;
+  }
   const form = event.target.closest("[data-post-job]");
   if (!form) return;
   event.preventDefault();
@@ -2413,6 +2663,8 @@ const runtime = BurrowBrowser.createBrowserRuntime({
       validateEvent);
     approvalAcks.observe({ events: view.approvalEvidence, cursor: view.cursor,
       reset: view.reset, approvalState: view.approvalState });
+    nurseryTracker.observe({ events: view.eventEvidence, cursor: view.cursor, reset: view.reset },
+      validateEvent);
     if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
     if (selectedId === JOB_BOARD_ID) {
       refreshJobListing(view.now);
@@ -2421,6 +2673,7 @@ const runtime = BurrowBrowser.createBrowserRuntime({
         refreshJobFormState();
       }
     }
+    if (selectedId === NURSERY_ID && (view.eventEvidence.length || view.reset)) renderPanel(view.now);
     if (selectedId && selectedId !== JOB_BOARD_ID && selectedId !== FLEET_LEDGER_ID &&
         (view.approvalEvidence.length || view.reset)) renderPanel(view.now);
   },
