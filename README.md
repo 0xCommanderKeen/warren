@@ -458,15 +458,17 @@ make test      # pytest with coverage
 make check     # what CI runs: lint, test, validate
 ```
 
-A routine only ever fires while `steward scheduler run` is up. Missed schedules are not
-back-filled, an overlapping fire is skipped rather than queued, and a run killed at its
-timeout is emitted as `routine_failed` — the village must never show work that is not
-happening. The same rule governs memory: a day with no journal entry has no journal
-entry, and the next session is told nothing rather than something plausible. And the same
-rule governs the board and the door: a task nobody finished goes back to `open` loudly,
-and a request nobody answered is a `deny`, never a quiet yes. A restart is announced, a
-run that never reported back is buried out loud, and a resident that has spent its day
-stops and says which number stopped it.
+A routine only ever fires while `steward scheduler run` is up — and only one of them, per
+state file: a second daemon refuses to start and names the pid already holding the lock,
+while a cron `steward scheduler tick` beside a running daemon simply takes its turn and
+finds nothing due. Missed schedules are not back-filled, an overlapping fire is skipped
+rather than queued, and a run killed at its timeout is emitted as `routine_failed` — the
+village must never show work that is not happening. The same rule governs memory: a day
+with no journal entry has no journal entry, and the next session is told nothing rather
+than something plausible. And the same rule governs the board and the door: a task nobody
+finished goes back to `open` loudly, and a request nobody answered is a `deny`, never a
+quiet yes. A restart is announced, a run that never reported back is buried out loud, and
+a resident that has spent its day stops and says which number stopped it.
 
 ## Environment
 
