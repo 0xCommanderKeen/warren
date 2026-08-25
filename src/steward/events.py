@@ -13,9 +13,15 @@ scheduler is a long-lived process rather than a one-shot hook:
   so an unreachable village never slows a routine down. The breaker lives in memory
   rather than in a dotfile because the process that owns it outlives every event it
   sends.
-- Anything not delivered is appended to a local JSONL fallback
-  (``STEWARD_EVENTS_FALLBACK``, default ``~/.burrow/events.jsonl``) — the same file
-  burrow's emitter falls back to, so nothing is lost, only its remoteness.
+- **Every** event is also appended to a local JSONL log
+  (``STEWARD_EVENTS_FALLBACK``, default ``~/.burrow/events.jsonl``), whether or not it
+  reached burrow. That file is the watchdog's substrate: it scans the log for a
+  ``routine_started`` no closing event ever answered, and a bracket split across a
+  transient outage — started written locally because burrow was down, finished
+  delivered remotely once it came back — used to read as a run that never reported
+  back. Writing the closing event locally too keeps the local record complete, so a
+  success is never buried as a failure. Consumers that read burrow read burrow; the
+  local log is not a second delivery, only steward's own complete copy.
 
 Emitting never raises. A village that cannot be reached must not turn into a failed
 routine: that would be steward lying about its own work.
@@ -37,6 +43,7 @@ __all__ = [
     "API_AGENT_ID",
     "API_PROJECT",
     "BREAKER_SECONDS",
+    "DETAIL_MAX_CHARS",
     "ERROR_MAX_CHARS",
     "EVENT_SOURCE",
     "EVENT_TYPES",
@@ -48,6 +55,7 @@ __all__ = [
     "EventEmitter",
     "NullEmitter",
     "RunContext",
+    "bounded_detail",
     "default_fallback_path",
     "needs_human_event",
     "needs_human_resolved_event",
@@ -106,6 +114,13 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
 #: Errors travel into the village as one line of explanation, never a transcript.
 ERROR_MAX_CHARS = 500
 
+#: A ``needs_human`` knock is a notice, not a log. Its ``detail`` map is bounded so no
+#: session can print a 200KB block and have steward serialize the whole thing into a
+#: village event: each string value is capped, and a detail that still serializes past the
+#: total cap is dropped for a marker rather than emitted.
+DETAIL_FIELD_MAX_CHARS = 2_000
+DETAIL_MAX_CHARS = 8_000
+
 FALLBACK_ENV = "STEWARD_EVENTS_FALLBACK"
 URL_ENV = "BURROW_URL"
 TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — an env var name, not a credential
@@ -128,6 +143,33 @@ def truncate_error(text: str, limit: int = ERROR_MAX_CHARS) -> str:
     if len(collapsed) <= limit:
         return collapsed
     return collapsed[: limit - 1].rstrip() + "…"
+
+
+def _cap(text: str, limit: int) -> str:
+    """Shorten a string to ``limit`` characters, marking the cut, keeping its structure.
+
+    Unlike :func:`truncate_error` this does not collapse whitespace: a ``detail`` value may
+    be a block a person is meant to read, and its newlines are worth keeping.
+    """
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def bounded_detail(detail: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Trim a ``needs_human`` detail map so no single event can carry a transcript.
+
+    Every string value is capped to :data:`DETAIL_FIELD_MAX_CHARS`; if the whole map still
+    serializes past :data:`DETAIL_MAX_CHARS` — many fields, or non-string bulk — it is
+    replaced with a marker naming the size, because an unbounded ``detail`` is exactly how
+    a session's output (secrets and all) would end up POSTed to burrow in full.
+    """
+    bounded = {
+        str(key): _cap(value, DETAIL_FIELD_MAX_CHARS) if isinstance(value, str) else value
+        for key, value in dict(detail or {}).items()
+    }
+    encoded = json.dumps(bounded, ensure_ascii=False, default=str)
+    if len(encoded) > DETAIL_MAX_CHARS:
+        return {"note": f"detail omitted: {len(encoded)} chars exceeds the {DETAIL_MAX_CHARS} cap"}
+    return bounded
 
 
 def utc_now_iso(moment: datetime | None = None) -> str:
@@ -291,14 +333,22 @@ class EventEmitter:
             pass
 
     def emit(self, event: Event) -> bool:
-        """Deliver one event, falling back to the local log. Never raises."""
+        """Deliver one event and keep a local copy. Returns remote reach. Never raises.
+
+        The local log is written on *every* event, delivered or not, because it is the
+        watchdog's record of what actually ran: a closing event that reached burrow but
+        was never written locally would leave a completed run looking unbracketed. The
+        return value still reports only whether the event reached a remote target.
+        """
         line = event.to_json()
+        delivered = False
         if self.url and not self._breaker_open(self.url):
             if self._post(self.url, line.encode("utf-8")):
-                return True
-            self._trip_breaker(self.url)
+                delivered = True
+            else:
+                self._trip_breaker(self.url)
         self._append_fallback(line)
-        return False
+        return delivered
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""
@@ -573,16 +623,20 @@ def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
     renders and ntfy forwards, and everything else is additive. A consumer that only
     knows the old bare ``needs_human`` keeps working unchanged; one that knows the new
     fields can offer the buttons.
+
+    Both ``message`` and ``detail`` are bounded here rather than trusted from the caller:
+    a knock is a notice, and a session that prints a 200KB escalation must not be able to
+    turn that into a 200KB event POSTed to burrow.
     """
     return Event(
         type=NEEDS_HUMAN,
         agent_id=agent_id,
         project=project,
         payload={
-            "message": message,
+            "message": truncate_error(message),
             "request_id": request_id,
             "action": action,
-            "detail": dict(detail or {}),
+            "detail": bounded_detail(detail),
             "options": list(options),
             "expires_at": expires_at,
         },

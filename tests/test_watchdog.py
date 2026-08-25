@@ -490,6 +490,166 @@ def test_a_resident_that_comes_back_forgets_its_restart_history(
     assert store.watchdog_attempt("test-agent").attempts == 0
 
 
+def test_a_flapping_container_still_respects_the_three_attempt_cap(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """An 'I cannot tell' reading between crashes must not reset the restart budget."""
+
+    class Flapping:
+        kind = "docker"
+
+        def __init__(self) -> None:
+            self.pass_no = 0
+            self.restarts: list[str] = []
+
+        def health(self, resident: Resident, now: datetime) -> w.Health:  # noqa: ARG002
+            self.pass_no += 1
+            if self.pass_no % 2 == 1:  # crashed
+                return w.Health(
+                    resident_id=resident.id,
+                    alive=False,
+                    detail="container exited",
+                    supervisor="docker",
+                )
+            return w.Health(  # ...and a moment later docker cannot answer at all
+                resident_id=resident.id,
+                known=False,
+                detail="docker could not answer",
+                supervisor="docker",
+            )
+
+        def restart(self, resident: Resident) -> bool:
+            self.restarts.append(resident.id)
+            return True  # docker says yes; the container dies again before the next pass
+
+    supervisor = Flapping()
+    dog = build(resident, store, sink, tmp_path, supervisors=[supervisor])
+
+    # Twenty passes, each far enough apart that a down pass is always past the backoff.
+    for i in range(20):
+        dog.tick(NOW + timedelta(minutes=30 * i))
+
+    assert len(supervisor.restarts) == w.MAX_ATTEMPTS, "three attempts, not one per flap"
+    assert store.watchdog_attempt("test-agent").gave_up
+
+
+def test_a_crash_loop_knocks_once_even_when_the_reading_flaps(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """One knock per crash loop — a flap to 'unknown' must not wipe the give-up receipt."""
+
+    class FlappingDead:
+        kind = "docker"
+
+        def __init__(self) -> None:
+            self.pass_no = 0
+
+        def health(self, resident: Resident, now: datetime) -> w.Health:  # noqa: ARG002
+            self.pass_no += 1
+            if self.pass_no % 2 == 1:
+                return w.Health(
+                    resident_id=resident.id,
+                    alive=False,
+                    detail="container exited",
+                    supervisor="docker",
+                )
+            return w.Health(
+                resident_id=resident.id,
+                known=False,
+                detail="docker could not answer",
+                supervisor="docker",
+            )
+
+        def restart(self, resident: Resident) -> bool:  # noqa: ARG002
+            return False  # nothing here can bring it back
+
+    dog = build(resident, store, sink, tmp_path, supervisors=[FlappingDead()])
+    for i in range(12):
+        dog.tick(NOW + timedelta(minutes=30 * i))
+
+    knocks = [e for e in sink.events if e.type == ev.NEEDS_HUMAN]
+    assert len(knocks) == 1, "one knock per crash loop, not one per flap"
+
+
+def test_a_dead_container_is_restarted_even_when_the_local_probe_also_complains(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A LocalProbe complaint must not mask a container DockerSupervisor could restart."""
+    local = StubSupervisor(alive=False, restarts_work=False)
+    local.kind = "local"
+    docker = StubSupervisor(alive=False, restarts_work=True)
+    docker.kind = "docker"
+
+    report = build(resident, store, sink, tmp_path, supervisors=[local, docker]).tick(NOW)
+
+    assert local.restarts == ["test-agent"], "the local probe was asked first"
+    assert docker.restarts == ["test-agent"], "and docker got its chance despite that"
+    assert [h.supervisor for h in report.restarted] == ["docker"]
+    assert report.gave_up == ()
+    restarts = [e for e in sink.events if e.type == ev.RESIDENT_RESTARTED]
+    assert restarts[0].payload["supervisor"] == "docker"
+
+
+def test_a_run_whose_finish_was_delivered_remotely_is_not_buried(
+    resident: Resident, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bracket split across a transient outage is no longer read as a dead run."""
+    fallback = tmp_path / "events.jsonl"
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)  # burrow takes everything
+
+    ctx = ev.RunContext(
+        agent_id=resident.agent_id,
+        project=resident.project,
+        routine="daily-summary",
+        run_id="live",
+    )
+    assert emitter.emit(ctx.started("schedule")) is True
+    assert emitter.emit(ctx.finished(outcome="ok", artifacts=[], duration_s=1.0)) is True
+
+    # Both were delivered remotely — and both are in the local record the watchdog scans.
+    stale = w.scan_unbracketed(
+        fallback,
+        now=datetime.now(UTC) + timedelta(hours=3),
+        timeouts=w.timeouts_for([resident]),
+    )
+    assert stale == [], "a completed run is not unbracketed just because burrow got the finish"
+
+
+def test_the_watchdog_reloads_scheduler_state_each_tick(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The scheduler advances anchors on disk; a watchdog frozen at boot woke people for it."""
+    state_path = tmp_path / "state.json"
+    # As it stood when the watchdog was built, this routine had not been visited in days.
+    stale = SchedulerState(path=state_path)
+    stale.set_anchor("test-agent/daily-summary", NOW - timedelta(days=3))
+    stale.save()
+    probe = w.LocalProbe(
+        store=store, state=SchedulerState.load(state_path), fallback=tmp_path / "e.jsonl"
+    )
+    dog = w.Watchdog(
+        residents=[resident],
+        store=store,
+        emitter=sink,
+        supervisors=[probe],
+        state=SchedulerState.load(state_path),
+        fallback=tmp_path / "e.jsonl",
+    )
+
+    # The scheduler process advances the anchor on disk before the watchdog's next pass.
+    advanced = SchedulerState(path=state_path)
+    advanced.set_anchor("test-agent/daily-summary", NOW)
+    advanced.save()
+
+    report = dog.tick(NOW)
+
+    assert not any(reading.down for reading in report.health), "the fresh on-disk anchor is seen"
+    assert [e for e in sink.events if e.type == ev.NEEDS_HUMAN] == [], (
+        "no human woken for a fine fleet"
+    )
+
+
 def test_a_supervisor_that_cannot_see_a_resident_triggers_nothing(
     resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:

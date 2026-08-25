@@ -101,6 +101,36 @@ def test_task_posted_carries_the_board_payload() -> None:
     }
 
 
+def test_a_needs_human_knock_is_bounded_so_it_can_never_be_a_transcript() -> None:
+    """A session that prints a huge escalation must not become a 200KB village event."""
+    event = ev.needs_human_event(
+        message="x " * 5000,
+        request_id="r1",
+        action="approve_transfer",
+        agent_id="claude-code:life-agent",
+        project="household",
+        detail={f"field_{i}": "A" * 50_000 for i in range(10)},
+    )
+    assert ev.validate_event(event.to_dict()) == ()
+    payload = event.payload
+    assert len(payload["message"]) <= ev.ERROR_MAX_CHARS
+    # A detail that still serializes past the cap even after per-field trimming is dropped
+    # for a marker, not emitted whole.
+    encoded = json.dumps(payload["detail"])
+    assert len(encoded) <= ev.DETAIL_MAX_CHARS
+    assert set(payload["detail"]) == {"note"}
+    assert "omitted" in payload["detail"]["note"]
+    assert "A" * 1000 not in encoded
+
+
+def test_a_needs_human_detail_that_fits_is_kept_but_each_field_is_capped() -> None:
+    """A reasonable detail survives; only an oversized single field is trimmed."""
+    detail = ev.bounded_detail({"resident": "life-agent", "reason": "y" * 10_000})
+    assert detail["resident"] == "life-agent"
+    assert len(detail["reason"]) <= ev.DETAIL_FIELD_MAX_CHARS
+    assert detail["reason"].endswith("…")
+
+
 def test_needs_human_resolved_is_emitted_as_the_villager_who_knocked() -> None:
     event = ev.needs_human_resolved_event(
         request_id="r1",
@@ -117,6 +147,50 @@ def test_needs_human_resolved_is_emitted_as_the_villager_who_knocked() -> None:
         "decided_by": "api",
         "action": "send_email",
     }
+
+
+def test_a_claim_names_its_parent_only_when_it_was_delegated() -> None:
+    """A delegated item carries its parent through the whole claim/done/failed bracket."""
+    plain = ev.task_claimed_event(
+        task_id="t1", title="Research X", claimant="claude-code:hob", project="hob"
+    )
+    assert ev.validate_event(plain.to_dict()) == ()
+    assert "parent_task_id" not in plain.payload
+
+    delegated = ev.task_claimed_event(
+        task_id="t2",
+        title="Research Y",
+        claimant="claude-code:hob",
+        project="hob",
+        parent_task_id="t1",
+    )
+    assert delegated.payload["parent_task_id"] == "t1"
+
+
+def test_done_and_failed_carry_the_parent_when_delegated() -> None:
+    """The receiver closes a delegated item still naming where the work came from."""
+    done = ev.task_done_event(
+        task_id="t2", title="Y", claimant="claude-code:hob", project="hob", parent_task_id="t1"
+    )
+    assert done.payload["parent_task_id"] == "t1"
+    plain_done = ev.task_done_event(
+        task_id="t9", title="Z", claimant="claude-code:hob", project="hob"
+    )
+    assert "parent_task_id" not in plain_done.payload
+
+    failed = ev.task_failed_event(
+        task_id="t2",
+        title="Y",
+        claimant="claude-code:hob",
+        project="hob",
+        reason="lease_expired",
+        parent_task_id="t1",
+    )
+    assert failed.payload["parent_task_id"] == "t1"
+    plain_failed = ev.task_failed_event(
+        task_id="t9", title="Z", claimant="claude-code:hob", project="hob", reason="boom"
+    )
+    assert "parent_task_id" not in plain_failed.payload
 
 
 def test_an_error_is_truncated_to_one_line() -> None:
@@ -228,7 +302,47 @@ def test_a_reachable_burrow_gets_the_event_with_the_bearer_token(tmp_path: Path)
     (authorization, body) = seen[0]
     assert authorization == "Bearer s3cret"
     assert ev.validate_event(body) == ()
-    assert not fallback.exists(), "a delivered event is not also written locally"
+    # A delivered event is *also* kept locally: the fallback log is the watchdog's own
+    # complete record, so a bracket is never split across a transient outage.
+    assert fallback.exists(), "a delivered event is still written to the local record"
+    assert len(fallback.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_every_delivered_event_is_also_kept_in_the_complete_local_record(tmp_path: Path) -> None:
+    """A whole bracket lands locally even when burrow takes every event.
+
+    A finish delivered remotely must never leave the start looking unanswered, so the
+    watchdog scanning the local log sees both ends of the run.
+    """
+    seen: list[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            seen.append(json.loads(self.rfile.read(length)))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Quiet."""
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    fallback = tmp_path / "events.jsonl"
+    try:
+        emitter = ev.EventEmitter(url=f"http://127.0.0.1:{server.server_port}", fallback=fallback)
+        started = emitter.emit(context().started("schedule"))
+        finished = emitter.emit(context().finished(outcome="ok", artifacts=[], duration_s=1.0))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert started is True, "the start reached burrow"
+    assert finished is True, "and so did the finish"
+    assert len(seen) == 2, "and burrow got both, once each"
+    types = [json.loads(line)["type"] for line in fallback.read_text().splitlines()]
+    assert types == ["routine_started", "routine_finished"], "the local record is complete"
 
 
 def test_no_url_means_straight_to_the_local_log(tmp_path: Path) -> None:

@@ -129,6 +129,11 @@ class RunResult:
     cost_usd: float | None = None
     artifacts: tuple[str, ...] = ()
     error: str | None = None
+    #: Whether :attr:`error` is the child's own stdout/stderr rather than steward's own
+    #: diagnostic. When it is, :meth:`summary` refuses to return it: a session's output can
+    #: carry a secret it printed, and only steward's own words (a timeout, a launch that
+    #: failed, a pre-flight refusal) are safe to serialize into a village event.
+    error_is_child: bool = False
 
     @property
     def ok(self) -> bool:
@@ -136,12 +141,23 @@ class RunResult:
         return self.outcome is Outcome.OK
 
     def summary(self) -> str:
-        """Describe this result in one line, for logs and ``routine_failed`` payloads."""
-        if self.error:
+        """Return a classified one-line reason, safe to serialize into a village event.
+
+        Steward's own diagnostics — a timeout, a launch that failed, a pre-flight refusal a
+        caller built into ``error`` — are surfaced, because they are steward's words and
+        they are the useful ones. But the child's own stdout or stderr never is: that text
+        can carry a secret the session printed (an ``sk-ant-…`` key, a ``BURROW_TOKEN=``),
+        so when :attr:`error_is_child` is set the summary falls back to the *class* of the
+        failure — an exit status, or ``"runner error"`` — and the raw text stays in the
+        local log only, reachable through :attr:`error`.
+        """
+        if self.error and not self.error_is_child:
             return self.error
         if self.outcome is Outcome.TIMEOUT:
-            return f"killed after {self.duration_s:.0f}s"
-        return f"exit status {self.exit_status}"
+            return f"killed after {self.duration_s:.0f}s (timeout)"
+        if self.exit_status is not None:
+            return f"exit status {self.exit_status}"
+        return "runner error"
 
 
 class Runner(ABC):
@@ -203,6 +219,21 @@ def _terminate(process: subprocess.Popen[bytes]) -> None:
         process.wait(timeout=KILL_GRACE_S)
 
 
+def _drain(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
+    """Read whatever a killed process already wrote, so a timeout keeps partial output.
+
+    The first :meth:`~subprocess.Popen.communicate` raised its ``TimeoutExpired`` before
+    it could bind stdout, which is how a timed-out session used to report an empty
+    ``output`` and drop an escalation printed a moment before it hung. Now that the
+    process is dead its pipes are at EOF, and a second call returns the bytes buffered
+    before the kill. Never raises: draining a corpse is best effort.
+    """
+    try:
+        return process.communicate(timeout=KILL_GRACE_S)
+    except subprocess.TimeoutExpired, ValueError, OSError:
+        return b"", b""
+
+
 class _ProcessRunner(Runner):
     """Shared body for every runner that launches a real process."""
 
@@ -255,8 +286,13 @@ class _ProcessRunner(Runner):
         except subprocess.TimeoutExpired:
             _terminate(process)
             duration = time.monotonic() - started
+            # Drain the partial stdout the killed session already produced: an escalation
+            # it printed just before hanging is honest output, and losing it would let a
+            # question that was actually asked go unanswered.
+            raw_out, _raw_err = _drain(process)
             return RunResult(
                 outcome=Outcome.TIMEOUT,
+                output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
                 exit_status=process.returncode,
                 duration_s=duration,
                 error=f"exceeded its {request.timeout_s}s timeout and was killed",
@@ -272,6 +308,9 @@ class _ProcessRunner(Runner):
             exit_status=process.returncode,
             duration_s=duration,
             error=None if outcome is Outcome.OK else (stderr.strip() or stdout.strip())[:1000],
+            # The failure reason above is the child's own stderr/stdout: keep it for the
+            # local log, but never let summary() serialize it into a village event.
+            error_is_child=outcome is not Outcome.OK,
         )
         return self.parse(result, stdout)
 
@@ -312,6 +351,9 @@ class ClaudeRunner(_ProcessRunner):
             output_tokens=_as_int(usage.get("output_tokens")),
             cost_usd=_as_float(payload.get("total_cost_usd")),
             error=(str(text)[:1000] if is_error and isinstance(text, str) else result.error),
+            # A model that reports its own error writes that text itself, so it is child
+            # output too: kept for the local log, kept out of any event.
+            error_is_child=(True if is_error and isinstance(text, str) else result.error_is_child),
         )
 
 
@@ -415,11 +457,18 @@ class CommandOutcome:
         return self.exit_status == 0
 
     def summary(self) -> str:
-        """Describe the outcome in one line, for an event payload or a log."""
+        """Return a classified one-line reason, safe to serialize into a village event.
+
+        Like :meth:`RunResult.summary`, this never carries the command's own output. The
+        watchdog turns a command's summary into a ``resident_restarted`` reason and a
+        ``needs_human`` detail, both of which reach the village, so ``stdout``/``stderr``
+        stay on the outcome for a local log and only the *class* of the result crosses the
+        wire. ``error`` is steward's own diagnostic (a missing binary, a hang), not the
+        command's, so it is safe to keep.
+        """
         if self.error:
             return self.error
-        detail = (self.stderr.strip() or self.stdout.strip()).splitlines()
-        return f"exit status {self.exit_status}" + (f": {detail[0]}" if detail else "")
+        return f"exit status {self.exit_status}"
 
 
 #: How the watchdog reaches a command. Injectable so its tests never need a real docker.

@@ -150,8 +150,10 @@ def test_a_nonzero_exit_is_failed_with_stderr(stub_bin: StubWriter, tmp_path: Pa
     result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
     assert result.outcome is r.Outcome.FAILED
     assert result.exit_status == 3
-    assert result.error == "the model is unavailable"
-    assert "exit status 3" not in result.summary()  # the error itself is the summary
+    assert result.error == "the model is unavailable"  # the raw child text — local log only
+    # ...but the summary that reaches a village event is classified, never the child text.
+    assert result.summary() == "exit status 3"
+    assert "the model is unavailable" not in result.summary()
 
 
 @pytest.mark.usefixtures("empty_path")
@@ -159,6 +161,27 @@ def test_a_binary_that_is_not_there_is_a_failed_run_not_an_exception(tmp_path: P
     result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
     assert result.outcome is r.Outcome.FAILED
     assert "cannot launch 'claude'" in (result.error or "")
+    # A launch failure is steward's own diagnostic, not child output, so it is safe to
+    # surface in the summary an event serializes.
+    assert "cannot launch 'claude'" in result.summary()
+    assert result.error_is_child is False
+
+
+def test_a_failure_never_leaks_child_output_into_the_summary(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """The summary that reaches a village event is classified: never the child's own text."""
+    secret_key = "sk-ant-api03-DEADBEEFsecretkeymaterial"
+    stub_bin("claude", f'echo "{secret_key}" >&2; echo "BURROW_TOKEN=hunter2" >&2; exit 1')
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert result.outcome is r.Outcome.FAILED
+    # What an event builder serializes — nothing the child chose to print.
+    assert result.summary() == "exit status 1"
+    assert secret_key not in result.summary()
+    assert "BURROW_TOKEN" not in result.summary()
+    # The raw child text is still kept, but only for the local log.
+    assert secret_key in (result.error or "")
 
 
 # -------------------------------------------------------------------------- codex runner
@@ -240,6 +263,21 @@ def test_a_timeout_kills_the_whole_process_group(stub_bin: StubWriter, tmp_path:
     result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path, timeout_s=1))
     assert result.outcome is r.Outcome.TIMEOUT
     assert not marker.exists(), "a killed session must not leave children running"
+
+
+def test_a_timeout_keeps_the_partial_stdout_it_already_produced(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """A session that escalates then hangs must not lose the question it already asked."""
+    block = "<needs-human>approve the wire transfer?</needs-human>"
+    stub_bin("claude", f"printf '%s\\n' '{block}'; sleep 30")
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path, timeout_s=1))
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert block in result.output, "the escalation printed before the hang is kept"
+    # The timeout reason is steward's own, so it is safe in a summary — and it is never the
+    # child's block, which stays in output for a harvester to read.
+    assert "timeout" in result.summary()
+    assert block not in result.summary()
 
 
 # ------------------------------------------------------------------------------ mock
