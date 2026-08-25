@@ -1,0 +1,208 @@
+# Vendored from burrow. DO NOT EDIT HERE — edit hooks/emit.py in burrow and
+# re-run `make vendor-emitter BURROW=/path/to/burrow` in steward.
+#
+# origin: https://github.com/0xCommanderKeen/burrow  hooks/emit.py
+# commit: d71552e3e19f646ef708a72b0ece5fe947baa59a (2026-08-24)
+# sha256: c8815f4032b8a5a0d0e0692c2d550b8f27ad070bccb8de810a41e7971d4d06e9 (of every byte below the marker line)
+#
+# A copy rather than a submodule so this image builds with one repo checked
+# out. tests/test_resident_image.py re-hashes the copy against
+# docker/resident/burrow-emit.sha256 on every CI run, so drift is a failed
+# test rather than a resident that emits a protocol nobody supports.
+# --- upstream copy begins below; every byte after this line is burrow's, verbatim ---
+#!/usr/bin/env python3
+"""burrow v0 emitter: adapts a Claude Code hook callback (JSON on stdin) to one
+burrow protocol event. See docs/protocol.md.
+
+Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; if no
+target takes it, fall back to appending to ~/.burrow/events.jsonl locally. A
+failed POST trips a per-target circuit breaker so an unreachable server never
+slows hooks down. If BURROW_TOKEN is set it is sent as `Authorization: Bearer
+<token>`; a server that rejects it (401) is just another failed POST — the event
+still lands in the local log, so a wrong or missing token loses no events, only
+remoteness.
+
+The same event is also POSTed to every BURROW_MIRROR target (default
+http://127.0.0.1:8737, the local dev server). A mirror is how you work on burrow
+against your own live fleet without deploying: run `python3 serve.py` and your
+real sessions show up locally *and* in the shared village. Nothing is listening
+most of the time, and a refused loopback connection costs nothing, so this is on
+by default; set BURROW_MIRROR= (empty) to turn it off. Mirrors get
+BURROW_MIRROR_TOKEN, not BURROW_TOKEN — a dev server runs with ingest open, and
+the shared secret has no business being handed to whatever holds port 8737.
+
+Resident agents (services that outlive any one Claude session, like a Telegram
+bot running claude -p per message) set BURROW_AGENT_ID (stable villager
+identity, e.g. "life-agent") and optionally BURROW_PROJECT (label). For a
+resident, SessionEnd maps to `idle` rather than `session_ended`: the session's
+process is gone but the agent-as-service is still home, resting.
+
+Must never break the hosting agent: swallow everything, always exit 0."""
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import sys
+import time
+import urllib.request
+
+LOG_DIR = os.path.expanduser("~/.burrow")
+LOG = os.path.join(LOG_DIR, "events.jsonl")
+BREAKER = os.path.join(LOG_DIR, ".post-failed")
+BREAKER_SECONDS = 60
+# A loopback failure is an instant refused connection, not a timeout, so holding
+# the breaker for a full minute would only mean "the dev server you just started
+# stays invisible for another 50s".
+LOOPBACK_BREAKER_SECONDS = 5
+DEFAULT_MIRROR = "http://127.0.0.1:8737"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
+ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
+def tool_detail(tool_input):
+    for key in ("file_path", "notebook_path", "path", "pattern", "description",
+                "command", "url", "query", "skill"):
+        val = tool_input.get(key)
+        if val:
+            return str(val)[:120]
+    return ""
+
+
+def to_event(hook):
+    name = hook.get("hook_event_name", "")
+    if name == "UserPromptSubmit":
+        prompt = " ".join(str(hook.get("prompt") or "").split())
+        return "task_started", {"prompt": prompt[:140]}
+    if name == "PreToolUse":
+        payload = {"tool": hook.get("tool_name") or "?"}
+        detail = tool_detail(hook.get("tool_input") or {})
+        if detail:
+            payload["detail"] = detail
+        return "tool_called", payload
+    if name == "PostToolUse":
+        # A tool finished. Write-like tools produced something; every other tool
+        # only proves the agent is still alive and working -> heartbeat.
+        tool = hook.get("tool_name") or "?"
+        artifact = (hook.get("tool_input") or {}).get("file_path")
+        if artifact and tool in ARTIFACT_TOOLS:
+            return "artifact_produced", {"artifact": str(artifact)[:200]}
+        return "heartbeat", {"tool": tool}
+    if name == "Notification":
+        return "needs_human", {"message": str(hook.get("message") or "")[:200]}
+    if name == "Stop":
+        return "idle", {}
+    if name == "SessionEnd":
+        return "session_ended", {}
+    return None, None
+
+
+def is_loopback(url):
+    host = url.split("//", 1)[-1].split("/")[0].rsplit(":", 1)[0]
+    return host in LOOPBACK_HOSTS
+
+
+def breaker_path(url):
+    """One breaker per target: a village that is down must not silence the dev
+    server running next to it (that pair is exactly the off-tailnet case)."""
+    return BREAKER + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+
+
+def targets():
+    """Where this event goes, in order, as (url, token) — BURROW_URL first, then
+    the mirrors. Both vars take a comma-separated list; duplicates collapse so a
+    URL named twice never doubles the event."""
+    out = []
+    seen = set()
+    mirror = os.environ.get("BURROW_MIRROR")
+    groups = ((os.environ.get("BURROW_URL"), os.environ.get("BURROW_TOKEN")),
+              (DEFAULT_MIRROR if mirror is None else mirror,
+               os.environ.get("BURROW_MIRROR_TOKEN")))
+    for raw, token in groups:
+        for url in (u.strip().rstrip("/") for u in (raw or "").split(",")):
+            if url and url not in seen:
+                seen.add(url)
+                out.append((url, (token or "").strip()))
+    return out
+
+
+def post_event(url, event, token=""):
+    breaker = breaker_path(url)
+    window = LOOPBACK_BREAKER_SECONDS if is_loopback(url) else BREAKER_SECONDS
+    try:
+        if os.path.exists(breaker) and time.time() - os.path.getmtime(breaker) < window:
+            return False
+    except OSError:
+        pass
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        req = urllib.request.Request(
+            url.rstrip("/") + "/events",
+            data=json.dumps(event, ensure_ascii=False).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+        return True
+    except Exception:
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(breaker, "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            pass
+        return False
+
+
+def main():
+    hook = json.loads(sys.stdin.read())
+    etype, payload = to_event(hook)
+    if not etype:
+        return
+    resident_id = os.environ.get("BURROW_AGENT_ID")
+    if resident_id and etype == "session_ended":
+        etype, payload = "idle", {}
+    if resident_id:
+        agent_id = resident_id if ":" in resident_id else "claude-code:" + resident_id
+    else:
+        agent_id = "claude-code:" + (hook.get("session_id") or "unknown")
+    cwd = hook.get("cwd") or ""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    event = {
+        "v": 0,
+        "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "source": "claude-code",
+        "agent_id": agent_id,
+        "project": os.environ.get("BURROW_PROJECT")
+                   or os.path.basename(cwd.rstrip("/")) or "unknown",
+        "cwd": cwd,
+        "type": etype,
+        "payload": payload,
+    }
+    delivered = False
+    for url, token in targets():
+        # No short-circuit: a mirror exists to see the same stream the village
+        # sees, so every target gets the event, not just the first one that answers.
+        delivered = post_event(url, event, token) or delivered
+    if delivered:
+        return
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(LOG, "a", encoding="utf-8") as f:
+        # Coordinate with server-side in-place rotation. Locking the log itself
+        # also works for descriptors opened before rotation because its inode
+        # is deliberately retained.
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
+    sys.exit(0)

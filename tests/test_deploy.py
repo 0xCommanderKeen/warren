@@ -51,7 +51,7 @@ def test_a_manifest_with_no_deploy_block_still_has_an_address(write_resident) ->
     assert target.user == DEFAULT_USER
     assert target.container == "steward-test-agent"
     assert target.path == "~/docker/steward-test-agent"
-    assert target.image == "python:3.12-slim"
+    assert target.image == "steward-resident:latest"
     assert target.command == ("sleep", "infinity")
 
 
@@ -80,7 +80,7 @@ def test_the_manifest_wins_over_every_default(write_resident) -> None:
         ("host", "dxp2800; rm -rf /"),
         ("user", "Miha && curl evil"),
         ("path", "~/docker/$(whoami)"),
-        ("image", "python:3.12-slim `id`"),
+        ("image", "steward-resident `id`"),
     ],
 )
 def test_a_deploy_field_that_would_reach_a_remote_shell_fails_validation(
@@ -103,7 +103,7 @@ def test_the_compose_fragment_is_valid_yaml_naming_this_resident(write_resident)
 
     service = rendered["services"]["test-agent"]
     assert service["container_name"] == "steward-test-agent"
-    assert service["image"] == "python:3.12-slim"
+    assert service["image"] == "steward-resident:latest"
     assert service["environment"]["BURROW_AGENT_ID"] == "claude-code:test-agent"
     assert service["environment"]["BURROW_PROJECT"] == "test-agent"
     assert service["command"] == ["sleep", "infinity"]

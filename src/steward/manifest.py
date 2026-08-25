@@ -674,7 +674,7 @@ class Deploy(_Model):
     image: str | None = Field(
         default=None,
         pattern=IMAGE_PATTERN,
-        description="Container image. Default: python:3.12-slim.",
+        description="Container image. Default: steward-resident:latest.",
     )
     command: list[str] = Field(
         default_factory=list,
@@ -1085,7 +1085,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "deploy.host": "host: dxp2800  (a hostname, no spaces: it reaches a remote shell)",
     "deploy.user": "user: Miha  (the ssh user on that host)",
     "deploy.path": "path: ~/docker/steward-life-agent  (the compose directory on the host)",
-    "deploy.image": "image: python:3.12-slim",
+    "deploy.image": "image: steward-resident:latest",
     "deploy.command": "command: [sleep, infinity]",
     "retired": "retired: false  (true retires the resident; the files stay in git)",
 }

@@ -37,6 +37,10 @@ dev = [
 line-length = 100
 target-version = "py314"
 src = ["src", "tests"]
+# A vendored copy of burrow's hooks/emit.py, byte-identical to its upstream by design and
+# by test. Formatting or "fixing" it here would break that identity and would edit code
+# this repo does not own — the file says so in its own header.
+extend-exclude = ["docker/resident/burrow-emit.py"]
 
 [tool.ruff.lint]
 select = ["ALL"]

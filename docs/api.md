@@ -265,7 +265,7 @@ terminal is the path that commits.
  "declare": {"written": true, "commit": null, "note": "declared and validated"},
  "provision": {"target": {"host": "dxp2800", "user": "Miha",
                           "path": "~/docker/steward-note-keeper",
-                          "container": "steward-note-keeper", "image": "python:3.12-slim"},
+                          "container": "steward-note-keeper", "image": "steward-resident:latest"},
                "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
                "compose": "services:\n  note-keeper:\n…",
                "compose_changed": true, "env_keys": ["BURROW_TOKEN", "BURROW_URL"],

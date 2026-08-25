@@ -1,0 +1,4 @@
+# Where docker/resident/burrow-emit.py came from, and what it hashed to.
+# Written by `make vendor-emitter`; read by tests/test_resident_image.py.
+commit: d71552e3e19f646ef708a72b0ece5fe947baa59a
+sha256: c8815f4032b8a5a0d0e0692c2d550b8f27ad070bccb8de810a41e7971d4d06e9

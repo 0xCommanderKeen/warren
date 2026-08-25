@@ -35,6 +35,11 @@ jobs:
       - name: Types
         run: uv run ty check src/ tests/
 
+      # This never builds docker/resident/. There is no docker here and a build would
+      # prove less than the tests do: tests/test_resident_image.py re-hashes the vendored
+      # copy of burrow's hooks/emit.py against docker/resident/burrow-emit.sha256, so a
+      # copy that drifted from upstream fails here rather than on the NAS. Refresh it with
+      # `make vendor-emitter BURROW=/path/to/burrow`; build with `make image`.
       - name: Tests
         run: uv run pytest
 
