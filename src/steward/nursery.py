@@ -58,6 +58,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from steward.deploy import (
     BUNDLE_NAMES,
+    BURROW_URL_ENV,
     COMPOSE_FILENAME,
     DeployTarget,
     Transport,
@@ -66,12 +67,14 @@ from steward.deploy import (
     bundle_for,
     burrow_env,
     compose_argv,
+    planned_env,
     render_argv,
     render_compose,
     target_for,
     transport_for,
 )
 from steward.manifest import (
+    DEFAULT_JOURNAL_DIR,
     MANIFEST_FILENAME,
     AppGrant,
     Charter,
@@ -187,7 +190,9 @@ class NewResident(BaseModel):
         if self.memory is not None:
             return self.memory
         return Memory(
-            kind="directory", path=f"{DEFAULT_MEMORY_ROOT}/{self.id}/memory", journal="journal.md"
+            kind="directory",
+            path=f"{DEFAULT_MEMORY_ROOT}/{self.id}/memory",
+            journal=DEFAULT_JOURNAL_DIR,
         )
 
 
@@ -269,6 +274,12 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
 
     manifest = _manifest_model(spec)
     payload = manifest.model_dump(mode="json", exclude_none=True)
+    # An ordinary resident declares no `deploy` block at all — docs/manifest.md says so, and
+    # the dxp2800 defaults (image, `command: [sleep, infinity]`) fill it in. The bare model
+    # default dumps as `deploy: {command: []}`, which reads as "this container runs nothing",
+    # the opposite of the documented default. Drop it so the skeleton says what it means.
+    if payload.get("deploy") == {"command": []}:
+        del payload["deploy"]
 
     directory.mkdir(parents=True)
     manifest_path = directory / MANIFEST_FILENAME
@@ -593,11 +604,18 @@ class RetireReport:
         }
 
     def render(self) -> list[str]:
-        """Render the retirement as lines a human reads top to bottom."""
+        """Render the retirement as lines a human reads top to bottom.
+
+        The manifest mark comes first and the ``docker compose down`` after it, because
+        that is the order retirement actually happens in — ``retired: true`` is what takes
+        the resident out of the watchdog, so it has to land before the container goes away,
+        or the watchdog would notice the container die and put it straight back. The plan a
+        ``--dry-run`` prints reads in that same order (docs/manifest.md).
+        """
         head = "plan to retire" if self.dry_run else "retired"
         lines = [f"{head} {self.resident_id}"]
-        lines += [f"  $ {render_argv(argv)}" for argv in self.commands]
         lines.append(f"  {self.manifest_path}: retired: true")
+        lines += [f"  $ {render_argv(argv)}" for argv in self.commands]
         if self.commit:
             lines.append(f"  committed {self.commit[:12]}")
         if self.note:
@@ -767,7 +785,11 @@ def _provision(
     nothing.
     """
     target = target_for(resident.manifest)
-    values = burrow_env(env)
+    # A rehearsal reaches no host, so it must not require the emitter environment a real
+    # deploy does: `planned_env` names whatever village variables are set and refuses
+    # nothing, where `burrow_env` refuses without BURROW_URL (#84). The real run below still
+    # goes through `burrow_env`, so a deploy with nowhere to emit is still stopped.
+    values = planned_env(env) if dry_run else burrow_env(env)
     compose = render_compose(resident, target)
     conveyance = transport if transport is not None else transport_for(target)
     up = compose_argv(target, "up", "-d")
@@ -899,6 +921,14 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
         elif complaint:
             warnings.append(complaint)
 
+    if provision and dry_run and not (source.get(BURROW_URL_ENV) or "").strip():
+        # The rehearsal still prints the whole plan (#84); it just says out loud that the
+        # real run would refuse until the village address is exported.
+        warnings.append(
+            f"{BURROW_URL_ENV} is unset, so a real run would refuse to deploy a resident "
+            f"with nowhere to emit; export {BURROW_URL_ENV} before running this for real"
+        )
+
     stage, resident = _declare(
         spec,
         residents_dir=root,
@@ -924,6 +954,34 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
     )
 
 
+def _stop_retired_container(
+    resident_id: str, conveyance: Transport, target: DeployTarget, down: Sequence[str]
+) -> tuple[bool, str]:
+    """Bring a retired resident's container down, once the manifest already says retired.
+
+    Split out of :func:`retire_resident` so the mark-then-stop order reads at a glance:
+    by the time this runs the decision is committed, so every failure here says so and
+    tells the operator to re-run once the host answers, rather than unwinding the mark.
+    """
+    try:
+        if conveyance.read(target.compose_path) is None:
+            return False, f"nothing at {target.path} on {target.host} to stop"
+        outcome = conveyance.run(down)
+        if not outcome.ok:
+            raise NurseryError(
+                f"the manifest now says {resident_id} is retired, and that is committed, but "
+                f"docker compose down failed on {target.host}: {outcome.summary()}; re-run "
+                f"`steward retire {resident_id}` once the host answers"
+            )
+    except TransportError as exc:
+        raise NurseryError(
+            f"the manifest now says {resident_id} is retired, and that is committed, but "
+            f"{target.user}@{target.host} could not be reached: {exc}; re-run "
+            f"`steward retire {resident_id}` once the host is back"
+        ) from exc
+    return True, ""
+
+
 def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and independently useful
     resident_id: str,
     *,
@@ -932,6 +990,7 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     transport: Transport | None = None,
     skills_dir: Path | str | None = None,
     commit: bool = True,
+    deploy: bool = True,
     allow_dirty: bool = False,
     dry_run: bool = False,
     git: PipedRun = run_argv,
@@ -943,6 +1002,11 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     run-now — and out of the watchdog, which would otherwise notice the container going
     away and dutifully restart it. Stopping first and marking second leaves a window in
     which steward is fighting itself.
+
+    ``deploy=False`` marks and commits the manifest but reaches no host — the counterpart
+    to ``new-resident``'s ``--no-deploy``, for the resident whose host is already gone (or
+    was never steward's to stop). The container, if there is one, is left exactly as it is;
+    the resident stops taking work the moment the mark is committed either way.
 
     Nothing is emitted. A retired resident leaves the village the honest way: it stops
     emitting, and burrow's existing projection rules do the rest. Forging a
@@ -962,9 +1026,15 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     target = target_for(resident.manifest)
     conveyance = transport if transport is not None else transport_for(target)
     down = compose_argv(target, "down", "--remove-orphans")
-    plan = (conveyance.plan(down),)
+    plan = (conveyance.plan(down),) if deploy else ()
 
     if dry_run:
+        if not deploy:
+            note = "a dry run stops nothing and commits nothing; --no-deploy reaches no host"
+        elif resident.retired:
+            note = "already retired; a real run would only reconcile the container"
+        else:
+            note = "a dry run stops nothing and commits nothing"
         return RetireReport(
             resident_id=resident_id,
             manifest_path=manifest_path,
@@ -972,11 +1042,7 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
             stopped=False,
             commands=plan,
             dry_run=True,
-            note=(
-                "already retired; a real run would only reconcile the container"
-                if resident.retired
-                else "a dry run stops nothing and commits nothing"
-            ),
+            note=note,
         )
 
     if commit:
@@ -1005,26 +1071,13 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
         else None
     )
 
-    note = ""
-    stopped = False
-    try:
-        if conveyance.read(target.compose_path) is None:
-            note = f"nothing at {target.path} on {target.host} to stop"
-        else:
-            outcome = conveyance.run(down)
-            if not outcome.ok:
-                raise NurseryError(
-                    f"the manifest now says {resident_id} is retired, and that is committed, "
-                    f"but docker compose down failed on {target.host}: {outcome.summary()}; "
-                    f"re-run `steward retire {resident_id}` once the host answers"
-                )
-            stopped = True
-    except TransportError as exc:
-        raise NurseryError(
-            f"the manifest now says {resident_id} is retired, and that is committed, but "
-            f"{target.user}@{target.host} could not be reached: {exc}; re-run "
-            f"`steward retire {resident_id}` once the host is back"
-        ) from exc
+    if deploy:
+        stopped, note = _stop_retired_container(resident_id, conveyance, target, down)
+    else:
+        stopped, note = (
+            False,
+            "deploy skipped: the manifest is marked and the host was left untouched",
+        )
 
     return RetireReport(
         resident_id=resident_id,

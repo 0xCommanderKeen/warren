@@ -3,6 +3,7 @@
 import io
 import tarfile
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,7 @@ from steward.deploy import (
     target_for,
     transport_for,
 )
-from steward.manifest import Resident, load_manifest, validate_manifest
+from steward.manifest import Memory, Resident, load_manifest, validate_manifest
 from steward.runners import CommandOutcome
 
 VILLAGE = {BURROW_URL_ENV: "http://dxp2800:8737", BURROW_TOKEN_ENV: "s3cret-village-token"}
@@ -121,6 +122,39 @@ def test_the_compose_fragment_references_the_secrets_instead_of_carrying_them(
     assert "${BURROW_TOKEN-}" in text
     assert "${BURROW_URL:?" in text
     assert VILLAGE[BURROW_TOKEN_ENV] not in text
+
+
+def test_a_smuggled_memory_path_stays_data_and_makes_no_new_compose_keys(write_resident) -> None:
+    """#61, the second line of defence: even a value that got past validation is a scalar.
+
+    The manifest patterns already reject a ``memory.path`` carrying a newline, but the
+    render must not *depend* on them: it builds a dict and lets ``yaml.safe_dump`` quote
+    every value, so a smuggled ``privileged: true`` lands as part of one string and never
+    becomes a key of its own.
+    """
+    one = resident(write_resident)
+    smuggled = "/data/memory\n    privileged: true\n    volumes:\n    - /:/host"
+    evil = Memory.model_construct(
+        kind="directory", path=smuggled, journal="journal", journal_keep=30
+    )
+    bad = replace(one, manifest=one.manifest.model_copy(update={"memory": evil}))
+
+    service = yaml.safe_load(render_compose(bad, target_for(bad.manifest)))["services"][
+        "test-agent"
+    ]
+
+    assert set(service) == {
+        "image",
+        "container_name",
+        "restart",
+        "working_dir",
+        "environment",
+        "volumes",
+        "command",
+    }
+    assert "privileged" not in service
+    assert service["working_dir"] == smuggled  # preserved verbatim, as one quoted scalar
+    assert len(service["volumes"]) == 2
 
 
 def test_rendering_the_same_resident_twice_gives_the_same_bytes(write_resident) -> None:

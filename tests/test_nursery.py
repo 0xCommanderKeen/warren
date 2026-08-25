@@ -78,6 +78,26 @@ def test_the_declaration_deploys_nothing_and_schedules_nothing(tmp_path: Path) -
     assert sorted(path.name for path in created.directory.iterdir()) == ["manifest.yaml", "soul.md"]
 
 
+def test_the_skeleton_declares_a_journal_directory_and_no_empty_deploy_block(
+    tmp_path: Path,
+) -> None:
+    """The skeleton matches docs/manifest.md: a journal directory and no deploy block.
+
+    docs/manifest.md says the journal is a directory and an ordinary resident declares no
+    deploy block — so the skeleton must not write `journal.md` or an empty `deploy` that
+    reads as "this container runs nothing" (#90).
+    """
+    created = declare_resident(spec(), tmp_path)
+    manifest = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["memory"]["journal"] == "journal"
+    assert "deploy" not in manifest
+    # …and with no deploy block the resolved command is the documented default, not nothing.
+    from steward.deploy import target_for  # noqa: PLC0415
+
+    assert target_for(created.resident.manifest).command == ("sleep", "infinity")
+
+
 def test_identity_is_derived_from_the_runner_when_nobody_says(tmp_path: Path) -> None:
     claude = declare_resident(spec(), tmp_path)
     codex = declare_resident(
@@ -484,6 +504,29 @@ def test_a_dry_run_prints_the_whole_plan(scratch_repo: ScratchRepo, host: LocalT
     assert VILLAGE_TOKEN not in plan
 
 
+def test_a_dry_run_needs_no_village_address(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """#84: a rehearsal reaches no host, so BURROW_URL being unset is a warning, not a crash."""
+    report = raise_resident(
+        spec(),
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        env={},  # no BURROW_URL, no BURROW_TOKEN
+        dry_run=True,
+    )
+
+    assert report.dry_run
+    assert not report.changed
+    assert not host.touched
+    assert not (scratch_repo.residents / "note-keeper").exists()
+    assert any("BURROW_URL" in warning for warning in report.warnings)
+    assert report.provision is not None
+    assert report.provision.env_keys == ()
+    assert "services:" in "\n".join(report.render())
+
+
 def test_a_dry_run_never_writes_scheduler_state(
     scratch_repo: ScratchRepo, host: LocalTransport, tmp_path: Path, monkeypatch
 ) -> None:
@@ -673,6 +716,51 @@ def test_a_dry_run_retirement_stops_and_commits_nothing(
     assert scratch_repo.head() == before
     assert not validate_tree(scratch_repo.residents).residents[0].retired
     assert "down --remove-orphans" in "\n".join(report.render())
+
+
+def test_retiring_without_deploy_marks_but_reaches_no_host(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The `--no-deploy` counterpart: mark and commit, but leave the host alone (#90)."""
+    raise_into(scratch_repo, host)
+    host.calls.clear()
+    host.sent.clear()
+
+    report = retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        deploy=False,
+    )
+
+    assert report.marked
+    assert not report.stopped
+    assert report.commands == ()
+    assert host.calls == []  # no ssh, no `docker compose down`
+    assert report.commit == scratch_repo.head()
+    assert validate_tree(scratch_repo.residents).residents[0].retired
+    assert "deploy skipped" in report.note
+
+
+def test_a_retire_dry_run_plans_the_mark_before_the_stop(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """docs/manifest.md order: `retired: true` lands before the container is stopped (#90)."""
+    raise_into(scratch_repo, host)
+
+    report = retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        dry_run=True,
+    )
+
+    lines = report.render()
+    mark = next(index for index, line in enumerate(lines) if "retired: true" in line)
+    stop = next(index for index, line in enumerate(lines) if "down --remove-orphans" in line)
+    assert mark < stop
 
 
 def test_retirement_emits_nothing_on_the_residents_behalf(

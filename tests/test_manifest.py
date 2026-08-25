@@ -233,6 +233,69 @@ def test_ordinary_paths_and_urls_survive_the_blob_check() -> None:
         assert not m._looks_like_opaque_blob(reference)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "/data/memory\n    privileged: true",
+        "/data/memory\n    volumes:\n    - /:/host",
+        "/data/memory $(touch pwned)",
+        "/data/memory; rm -rf /",
+        "/data/memory\twith-a-tab",
+    ],
+)
+def test_a_directory_memory_path_that_would_inject_the_compose_fails(
+    write_resident: ResidentWriter, payload: str
+) -> None:
+    """#61: a value that would reopen the compose document is refused at validation."""
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": payload, "journal": "journal"}
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert any(d.field_path == "memory.path" for d in result.errors), field_paths(result)
+
+
+def test_a_project_that_would_inject_the_compose_fails(write_resident: ResidentWriter) -> None:
+    """#61: project becomes BURROW_PROJECT in the compose env, so it is data, not markup."""
+    data = valid_manifest() | {"project": "burrow\n    privileged: true"}
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert any(d.field_path == "project" for d in result.errors), field_paths(result)
+
+
+def test_two_residents_that_share_a_journal_directory_are_warned(
+    write_resident: ResidentWriter,
+) -> None:
+    """#77 (manifest side): a shared journal dir cross-feeds, so validation warns on both."""
+    root = write_resident().parent.parent  # the residents/ tree test-agent landed in
+    second = valid_manifest() | {
+        "id": "second-agent",
+        "agent_id": "claude-code:second-agent",
+        "memory": {
+            "kind": "directory",
+            "path": "/data/residents/test-agent/memory",  # the same dir test-agent uses
+            "journal": "journal",
+        },
+    }
+    write_resident(second, soul=VALID_SOUL.replace("test-agent", "second-agent"))
+
+    result = m.validate_tree(root)
+
+    assert result.ok  # a warning, never an error
+    shared = [d for d in result.warnings if "journal directory" in d.problem]
+    assert len(shared) == 2
+    assert any("second-agent" in d.problem for d in shared)
+    assert any("test-agent" in d.problem for d in shared)
+
+
+def test_a_lone_resident_is_never_warned_about_a_shared_journal(
+    write_resident: ResidentWriter,
+) -> None:
+    result = m.validate_tree(write_resident().parent.parent)
+    assert [d for d in result.warnings if "journal directory" in d.problem] == []
+
+
 def test_secret_in_the_soul_body_is_rejected(write_resident: ResidentWriter) -> None:
     soul = VALID_SOUL + "\nMy key is ghp_abcdefghijklmnopqrstuvwxyz0123456789.\n"
     result = m.validate_manifest(write_resident(soul=soul))
