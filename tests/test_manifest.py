@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from conftest import VALID_SOUL, ResidentWriter, valid_manifest
+from conftest import SECOND_RESIDENT_UID, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import manifest as m
 
 
@@ -99,6 +99,16 @@ def test_missing_capability_dimension_fails(write_resident: ResidentWriter, dime
     assert not result.ok
     assert problem_for(result, dimension) == "required field is missing"
     assert dimension.split("_", maxsplit=1)[0] in result.diagnostics[0].example
+
+
+def test_missing_uid_fails(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    del data["uid"]
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert problem_for(result, "uid") == "required field is missing"
+    assert result.diagnostics[0].example.startswith("uid: ")
 
 
 @pytest.mark.parametrize("charter_field", ["mission", "duties", "rules", "escalation"])
@@ -270,6 +280,7 @@ def test_two_residents_that_share_a_journal_directory_are_warned(
     """#77 (manifest side): a shared journal dir cross-feeds, so validation warns on both."""
     root = write_resident().parent.parent  # the residents/ tree test-agent landed in
     second = valid_manifest() | {
+        "uid": SECOND_RESIDENT_UID,
         "id": "second-agent",
         "agent_id": "claude-code:second-agent",
         "memory": {
@@ -599,6 +610,7 @@ def test_validate_tree_reports_every_resident(
 ) -> None:
     write_resident()
     second = valid_manifest()
+    second["uid"] = SECOND_RESIDENT_UID
     second["id"] = "other-agent"
     second["agent_id"] = "claude-code:other-agent"
     soul = VALID_SOUL.replace("test-agent", "other-agent")
@@ -606,6 +618,26 @@ def test_validate_tree_reports_every_resident(
     result = m.validate_tree(tmp_path / "residents")
     assert result.ok
     assert {resident.id for resident in result.residents} == {"test-agent", "other-agent"}
+
+
+def test_validate_tree_rejects_duplicate_resident_uids(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    write_resident()
+    second = valid_manifest()
+    second["id"] = "other-agent"
+    second["agent_id"] = "claude-code:other-agent"
+    soul = VALID_SOUL.replace("test-agent", "other-agent")
+    write_resident(second, soul=soul)
+
+    result = m.validate_tree(tmp_path / "residents")
+
+    assert not result.ok
+    assert "also belongs to" in problem_for(result, "uid")
+    uid_diagnostic = next(
+        diagnostic for diagnostic in result.diagnostics if diagnostic.field_path == "uid"
+    )
+    assert uid_diagnostic.example.startswith("uid: ")
 
 
 def test_validate_tree_collects_failures(write_resident: ResidentWriter, tmp_path: Path) -> None:
@@ -710,9 +742,26 @@ def test_json_schema_covers_every_dimension() -> None:
     schema = m.manifest_json_schema()
     assert schema["title"] == "steward resident manifest v0"
     assert "$id" in schema
-    for dimension in ("soul", "charter", "skills", "memory", "routes", "app_grants", "runner"):
+    for dimension in (
+        "uid",
+        "soul",
+        "charter",
+        "skills",
+        "memory",
+        "routes",
+        "app_grants",
+        "runner",
+    ):
         assert dimension in schema["properties"]
-    assert set(schema["required"]) >= {"id", "soul", "charter", "skills", "memory", "routes"}
+    assert set(schema["required"]) >= {
+        "uid",
+        "id",
+        "soul",
+        "charter",
+        "skills",
+        "memory",
+        "routes",
+    }
 
 
 def test_scan_for_credentials_walks_lists(tmp_path: Path) -> None:

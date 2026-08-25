@@ -355,6 +355,7 @@ in the response.
 residents/
   life-agent/       manifest.yaml + soul.md   Hob, the household spirit
   burrow-builder/   manifest.yaml + soul.md   Maren, who builds the village
+  pip/              manifest.yaml + soul.md   Pip, the pipeline canary
 skills/
   <name>/SKILL.md                             the shared library both draw on
 ```
@@ -378,7 +379,7 @@ that makes it. Regenerate with `make schema-write` and read the diff.
 
 ```console
 $ steward validate                         # the whole residents/ tree
-ok: 2 valid resident(s), 0 error(s), 0 warning(s) in residents
+ok: 3 valid resident(s), 0 error(s), 0 warning(s) in residents
 
 $ steward validate residents/life-agent    # or one resident, or one file
 ```

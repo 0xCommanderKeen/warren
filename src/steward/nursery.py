@@ -52,6 +52,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -210,6 +211,7 @@ class CreatedResident:
         """Return the JSON view: the paths a human should go and review."""
         return {
             "id": self.id,
+            "uid": str(self.resident.manifest.uid),
             "directory": str(self.directory),
             "manifest_path": str(self.manifest_path),
             "soul_path": str(self.soul_path),
@@ -241,6 +243,7 @@ def _manifest_model(spec: NewResident) -> ResidentManifest:
     """Bind the request into a manifest model, so an invalid one never reaches disk."""
     try:
         return ResidentManifest(
+            uid=uuid4(),
             id=spec.id,
             agent_id=spec.resolved_agent_id(),
             project=spec.project,

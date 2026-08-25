@@ -21,6 +21,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | field | required | meaning |
 |---|---|---|
 | `version` | yes (defaults to `0`) | Manifest schema version. Only `0` exists. |
+| `uid` | yes | Random UUID minted once by the nursery; durable identity that survives renaming. |
 | `id` | yes | Slug; must equal the directory name under `residents/`. |
 | `agent_id` | one of these two | Exact burrow identity, `<source>:<name>` (e.g. `claude-code:life-agent`). |
 | `project` | one of these two | Project label for a project-scoped soul (e.g. `burrow`). |
@@ -38,6 +39,11 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
 | `deploy` | no | Where this resident runs: the nursery deploys there, the watchdog probes it. |
 | `retired` | no | Lifecycle state. `true` stops the resident; the files stay in git. |
+
+`uid` is the durable key for links, storage, and external references; display the resident's
+name rather than the UUID. It is deliberately random so it can also safely contribute to an
+unguessable public topic name. The nursery writes it at creation and never derives it from
+`id`, `agent_id`, or any other renameable value.
 
 `agent_id` matches before `project`, mirroring burrow's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest

@@ -10,6 +10,8 @@ from click.testing import CliRunner
 
 from conftest import (
     REPO_ROOT,
+    SECOND_RESIDENT_UID,
+    VALID_RESIDENT_UID,
     ResidentWriter,
     ScratchRepo,
     SkillWriter,
@@ -79,6 +81,7 @@ def test_validate_json_lists_valid_residents(
     result = runner.invoke(main, ["validate", "--format", "json", str(manifest_path)])
     assert result.exit_code == 0
     payload = json.loads(result.output)
+    assert payload["residents"][0]["uid"] == VALID_RESIDENT_UID
     assert payload["residents"][0]["agent_id"] == "claude-code:test-agent"
 
 
@@ -1573,6 +1576,7 @@ def delegation_fleet(write_resident: ResidentWriter) -> Path:
     residents_dir = write_resident(sender).parent.parent
 
     receiver = valid_manifest()
+    receiver["uid"] = SECOND_RESIDENT_UID
     receiver["id"] = "receiver-agent"
     receiver["agent_id"] = "claude-code:receiver-agent"
     receiver["soul"]["name"] = "Recy"

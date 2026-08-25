@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self
 import yaml
 from croniter import croniter
 from pydantic import (
+    UUID4,
     BaseModel,
     ConfigDict,
     Field,
@@ -880,11 +881,12 @@ class ResidentManifest(_Model):
     """The versioned declaration that makes a villager a resident."""
 
     version: Literal[0] = Field(default=SCHEMA_VERSION, description="Manifest schema version.")
+    uid: UUID4 = Field(description="Durable random identity, minted once and never renamed.")
     id: str = Field(pattern=SLUG_PATTERN, description="Directory name under residents/.")
     agent_id: str | None = Field(
         default=None,
         pattern=AGENT_ID_PATTERN,
-        description="Stable burrow identity, <source>:<name>. Matched before project.",
+        description="Burrow event join key, <source>:<name>. Matched before project.",
     )
     project: str | None = Field(
         default=None,
@@ -1136,6 +1138,7 @@ def active_residents(residents: Iterable[Resident]) -> list[Resident]:
 
 FIELD_EXAMPLES: Mapping[str, str] = {
     "version": "version: 0",
+    "uid": "uid: 7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9",
     "id": "id: life-agent  (lowercase, dashes)",
     "agent_id": "agent_id: claude-code:life-agent",
     "project": "project: burrow",
@@ -1607,6 +1610,33 @@ def _check_shared_journal_dirs(residents: Sequence[Resident]) -> list[Diagnostic
     return diagnostics
 
 
+def _check_unique_uids(residents: Sequence[Resident]) -> list[Diagnostic]:
+    """Reject a durable identity declared by more than one resident."""
+    by_uid: dict[str, list[Resident]] = {}
+    for resident in residents:
+        by_uid.setdefault(str(resident.manifest.uid), []).append(resident)
+
+    diagnostics: list[Diagnostic] = []
+    for uid, group in by_uid.items():
+        if len(group) <= 1:
+            continue
+        ids = sorted(resident.id for resident in group)
+        for resident in group:
+            others = [resident_id for resident_id in ids if resident_id != resident.id]
+            diagnostics.append(
+                Diagnostic(
+                    file=resident.path,
+                    field_path="uid",
+                    problem=(
+                        f"uid {uid} also belongs to {others}; a durable identity must name "
+                        "exactly one resident"
+                    ),
+                    example="uid: 3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+                )
+            )
+    return diagnostics
+
+
 def _check_directory_name(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     directory = source.parent.name
     if directory and manifest.id != directory:
@@ -1808,6 +1838,9 @@ def validate_tree(
         found = True
         result = result.merged_with(_validate_manifest(manifest_path, library))
 
+    result = result.merged_with(
+        ValidationResult(diagnostics=tuple(_check_unique_uids(result.residents)))
+    )
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_shared_journal_dirs(result.residents)))
     )

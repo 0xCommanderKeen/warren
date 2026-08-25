@@ -318,11 +318,12 @@ it out now.
 
 ### `GET /residents` · `GET /residents/{id}`
 
-Read-only JSON views of validated manifests, including `runner.kind` and
-`runner.model`, so "which brain is Hob on" is answerable over HTTP. Manifests that did
-not validate are named in `errors` rather than quietly omitted. There is nothing to
-redact: a manifest holding a credential-shaped key or an inline secret would have
-failed validation and never become a resident at all.
+Read-only JSON views of validated manifests, including the durable `uid` plus
+`runner.kind` and `runner.model`, so both "which record is Hob?" and "which brain is Hob
+on?" are answerable over HTTP. Manifests that did not validate are named in `errors`
+rather than quietly omitted. There is nothing to redact: a manifest holding a
+credential-shaped key or an inline secret would have failed validation and never become
+a resident at all.
 
 A **retired** resident is listed, with `"retired": true`. Hiding it would leave a fleet
 view unable to answer what used to run here, and retirement is a lifecycle state rather

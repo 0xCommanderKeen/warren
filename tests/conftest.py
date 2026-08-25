@@ -14,6 +14,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESIDENTS_DIR = REPO_ROOT / "residents"
+VALID_RESIDENT_UID = "7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9"
+SECOND_RESIDENT_UID = "3a78217a-df03-4f3b-a46a-4c75b4ad929f"
 
 VALID_SOUL = """---
 agent_id: claude-code:test-agent
@@ -34,6 +36,7 @@ def valid_manifest() -> dict[str, Any]:
     """Build a minimal manifest that declares all five capability dimensions."""
     return {
         "version": 0,
+        "uid": VALID_RESIDENT_UID,
         "id": "test-agent",
         "agent_id": "claude-code:test-agent",
         "summary": "A resident that exists only inside a test.",

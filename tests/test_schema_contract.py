@@ -61,5 +61,5 @@ def test_the_committed_schema_is_the_shape_burrow_reads() -> None:
     schema = json.loads(SCHEMA_FILE.read_text(encoding="utf-8"))
 
     assert schema["title"] == "steward resident manifest v0"
-    for dimension in ("skills", "memory", "routes", "app_grants", "soul"):
+    for dimension in ("uid", "skills", "memory", "routes", "app_grants", "soul"):
         assert dimension in schema["properties"], f"burrow renders {dimension}; it must be here"

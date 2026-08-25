@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 import yaml
@@ -68,6 +69,16 @@ def test_a_declared_resident_passes_the_validator(tmp_path: Path) -> None:
     result = validate_tree(tmp_path)
     assert result.ok, [d.render() for d in result.errors]
     assert [resident.id for resident in result.residents] == ["note-keeper"]
+
+
+def test_the_nursery_mints_a_random_uid_into_the_manifest(tmp_path: Path) -> None:
+    """The durable identity is persisted at birth, not derived from a renameable name."""
+    created = declare_resident(spec(), tmp_path)
+    payload = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+
+    uid = UUID(payload["uid"])
+    assert uid.version == 4
+    assert created.resident.manifest.uid == uid
 
 
 def test_the_declaration_deploys_nothing_and_schedules_nothing(tmp_path: Path) -> None:
@@ -137,6 +148,7 @@ def test_the_declared_paths_are_reported_for_review(tmp_path: Path) -> None:
     payload = created.to_dict()
 
     assert payload["id"] == "note-keeper"
+    assert UUID(payload["uid"]) == created.resident.manifest.uid
     assert payload["manifest_path"].endswith("note-keeper/manifest.yaml")
     assert payload["soul_path"].endswith("note-keeper/soul.md")
     assert payload["agent_id"] == "claude-code:note-keeper"
@@ -318,6 +330,8 @@ def test_running_it_twice_is_a_no_op_the_second_time(
 ) -> None:
     """Converged: no second commit, no second upload, and still exit-zero."""
     raise_into(scratch_repo, host)
+    manifest_path = scratch_repo.residents / "note-keeper" / "manifest.yaml"
+    original_uid = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["uid"]
     commits = scratch_repo.log()
     sent = list(host.sent)
 
@@ -331,6 +345,7 @@ def test_running_it_twice_is_a_no_op_the_second_time(
     assert second.provision.compose_changed is False
     assert scratch_repo.log() == commits
     assert host.sent == sent
+    assert yaml.safe_load(manifest_path.read_text(encoding="utf-8"))["uid"] == original_uid
 
 
 def test_a_converged_run_still_reconciles_the_container(

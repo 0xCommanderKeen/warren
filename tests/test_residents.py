@@ -14,6 +14,7 @@ def test_the_residents_tree_validates() -> None:
         "burrow-builder",
         "pip",
     }
+    assert len({resident.manifest.uid for resident in result.residents}) == len(result.residents)
 
 
 def test_hob_is_the_life_agent() -> None:

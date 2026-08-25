@@ -1,4 +1,5 @@
 version: 0
+uid: ecac48b1-a2c2-4d78-8158-fa204764a8ce
 id: pip
 agent_id: steward:pip
 summary: The fleet's canary — proves the pipeline is alive and is first to break.

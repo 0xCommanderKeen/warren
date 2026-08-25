@@ -681,6 +681,12 @@
       "title": "Version",
       "type": "integer"
     },
+    "uid": {
+      "description": "Durable random identity, minted once and never renamed.",
+      "format": "uuid4",
+      "title": "Uid",
+      "type": "string"
+    },
     "id": {
       "description": "Directory name under residents/.",
       "pattern": "^[a-z0-9][a-z0-9-]*$",
@@ -698,7 +704,7 @@
         }
       ],
       "default": null,
-      "description": "Stable burrow identity, <source>:<name>. Matched before project.",
+      "description": "Burrow event join key, <source>:<name>. Matched before project.",
       "title": "Agent Id"
     },
     "project": {
@@ -795,6 +801,7 @@
     }
   },
   "required": [
+    "uid",
     "id",
     "soul",
     "charter",

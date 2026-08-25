@@ -19,7 +19,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import ResidentWriter, SkillWriter, valid_manifest
+from conftest import (
+    SECOND_RESIDENT_UID,
+    VALID_RESIDENT_UID,
+    ResidentWriter,
+    SkillWriter,
+    valid_manifest,
+)
 from steward import events as ev
 from steward import journal
 from steward.api import ApiConfig, ApiError, create_app
@@ -647,6 +653,7 @@ def test_one_resident_is_served_whole(api: ApiFactory) -> None:
     harness = api()
     body = harness.client.get("/residents/test-agent").json()
 
+    assert body["uid"] == VALID_RESIDENT_UID
     assert body["agent_id"] == "claude-code:test-agent"
     assert body["soul"]["name"] == "Testy"
     assert body["charter"]["mission"]
@@ -1161,6 +1168,7 @@ A villager that exists only inside a test.
 def receiver_manifest(*, status: str = "active") -> dict[str, Any]:
     """Build a resident that accepts delegated work through one named route."""
     data = copy.deepcopy(valid_manifest())
+    data["uid"] = SECOND_RESIDENT_UID
     data["id"] = "receiver-agent"
     data["agent_id"] = "claude-code:receiver-agent"
     data["soul"]["name"] = "Recy"
