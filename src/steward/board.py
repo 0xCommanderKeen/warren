@@ -172,6 +172,57 @@ class _RegistryClosingRunner(Runner):
         return result
 
 
+class _RegistryClosingGuard:
+    """Preserve board registry ordering when a session fails before a runner exists."""
+
+    def __init__(
+        self,
+        guard: RunGuard | None,
+        store: Store,
+        registry_run: ContextVar[_RegistryRun | None],
+    ) -> None:
+        self.guard = guard
+        self.store = store
+        self.registry_run = registry_run
+
+    def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+        """Delegate admission policy when the dispatcher has one."""
+        return None if self.guard is None else self.guard.allow(manifest, now)
+
+    def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+        """Delegate timeout policy without changing the unguarded default."""
+        if self.guard is None:
+            return declared_s
+        return self.guard.timeout_for(manifest, declared_s)
+
+    def record(  # noqa: PLR0913 - mirrors the established RunGuard contract
+        self,
+        manifest: ResidentManifest,
+        *,
+        result: RunResult,
+        kind: str,
+        run_id: str,
+        ref: str,
+        origin: str,
+        now: datetime | None = None,
+    ) -> object:
+        """Close any pre-run failure before handing accounting to the real guard."""
+        registry_run = self.registry_run.get()
+        if registry_run is not None:
+            _close_registry(self.store, registry_run, now or registry_run.started_at)
+        if self.guard is None:
+            return None
+        return self.guard.record(
+            manifest,
+            result=result,
+            kind=kind,
+            run_id=run_id,
+            ref=ref,
+            origin=origin,
+            now=now,
+        )
+
+
 def claimable_skills(manifest: ResidentManifest, library: SkillLibrary) -> frozenset[str]:
     """Return the skills this resident actually holds, for matching against a task.
 
@@ -423,7 +474,7 @@ class Dispatcher:
             workdir=self.workdir,
             runner_factory=self._registry_runner,
             library=self.library,
-            guard=self.guard,
+            guard=_RegistryClosingGuard(self.guard, self.store, self._registry_run),
             hooks=self,
             residents=self.residents,
         )

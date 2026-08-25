@@ -164,17 +164,33 @@ def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(
     def explode(_spec: object) -> Runner:
         raise RuntimeError("no brain here")
 
+    class Guard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            assert store.open_runs() == []
+            return None
+
     dispatcher = b.Dispatcher(
         residents=[load_manifest(write_resident(board_manifest()))],
         store=store,
         emitter=sink,
         workdir=tmp_path,
         runner_factory=explode,
+        guard=Guard(),
     )
     (report,) = dispatcher.dispatch(NOW).reports
     assert not report.done
     assert report.reason is not None
     assert "no brain here" in report.reason
+    assert store.open_runs() == []
 
 
 def test_artifacts_a_run_names_are_recorded_against_the_task(
