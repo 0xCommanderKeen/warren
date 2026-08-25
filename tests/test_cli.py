@@ -8,7 +8,14 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from conftest import REPO_ROOT, ResidentWriter, ScratchRepo, StubWriter, valid_manifest
+from conftest import (
+    REPO_ROOT,
+    ResidentWriter,
+    ScratchRepo,
+    SkillWriter,
+    StubWriter,
+    valid_manifest,
+)
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
@@ -96,6 +103,22 @@ def test_schema_command_emits_json_schema(runner: CliRunner) -> None:
     assert result.exit_code == 0
     schema = json.loads(result.output)
     assert schema["title"] == "steward resident manifest v0"
+
+
+def test_schema_output_writes_exactly_what_stdout_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """`make schema-write` regenerates the committed artifact through this flag.
+
+    Byte-identical to stdout, or the committed copy and the printed one would be two
+    different contracts and tests/test_schema_contract.py would fail for no real reason.
+    """
+    target = tmp_path / "nested" / "resident-manifest-v0.json"
+    printed = runner.invoke(main, ["schema"])
+    written = runner.invoke(main, ["schema", "--output", str(target)])
+
+    assert written.exit_code == 0, written.output
+    assert not written.output, "--output writes the file; it does not also print it"
+    assert target.read_text(encoding="utf-8") == printed.output
+    assert printed.output.endswith("}\n")
 
 
 def test_help_lists_the_commands(runner: CliRunner) -> None:
@@ -192,6 +215,143 @@ def test_doctor_complains_about_a_memory_that_cannot_hold_a_journal(
     result = runner.invoke(main, ["doctor", str(path.parent)])
     assert result.exit_code == 1
     assert "journal — memory.kind is 'file'" in result.output
+
+
+def test_doctor_preflights_a_board_only_claimant(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+) -> None:
+    """A claimant with no routine is invisible to the scheduler's check — doctor is it (#37).
+
+    The refusal itself is steward #64's: a resident whose memory directory is not one on
+    this host would run — and materialize skills into, and delete files from — whatever
+    directory steward happened to be launched in. The scheduler refuses that for every
+    resident it schedules; nothing asked it of a resident that only claims. A warning, not
+    a failure: the missing path may be a container path this host was never meant to have.
+    """
+    stub_bin("claude", "exit 0")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the memory directory should be", encoding="utf-8")
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(blocker / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+    write_skill("research", defaults=True)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "board — " in result.output
+    assert "current working directory" in result.output
+
+
+def test_doctor_says_a_board_claimant_is_ready_to_claim(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """The green line: a claimant with a working directory of its own is ready to claim."""
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: board — claimant" in result.output
+
+
+def test_doctor_names_a_board_claimants_missing_skill(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """Issue #37's headline scenario: a claimant granted a skill the library does not hold.
+
+    Doctor exits non-zero and names the grant — and it is *validation* that says so, not the
+    board pre-flight below it. ``validate_paths`` resolves the same library the pre-flight
+    would and turns a grant that names nothing into an error for every resident, claimant or
+    not, so doctor stops before it prints any resident's line at all. The third assertion is
+    the point of this test: the pre-flight was written believing doctor validated without a
+    library and that its own missing-skill leg was the only thing that could catch this. It
+    is the reverse. Pinning the real order here keeps that belief from coming back as a
+    rewrite of the check that actually works.
+    """
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = ["surgery"]
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 1, result.output
+    assert "surgery" in result.output
+    assert "board — " not in result.output, "validation had already stopped doctor"
+
+
+def test_doctor_will_not_call_a_claimant_ready_because_it_looked_at_no_library(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+) -> None:
+    """The pre-flight must read the library beside the *tree*, however the target is named.
+
+    ``steward doctor residents/<id>`` is a shape validation accepts, and the library is at
+    ``residents/../skills`` in every shape. Resolving it from the target instead found
+    ``residents/<id>/skills``, got an unconfigured library back — and an unconfigured
+    library makes :func:`steward.scheduler.workdir_refusal` return ``None``, because a run
+    that materializes no skills deletes nothing. The claimant was then called ready on the
+    grounds that nothing had been checked.
+    """
+    stub_bin("claude", "exit 0")
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "absent" / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    resident_dir = write_resident(data).parent
+
+    result = runner.invoke(main, ["doctor", str(resident_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "current working directory" in result.output
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_doctor_tells_a_claimant_with_no_binary_it_must_not_keep_claiming(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """The pre-flight's red line, said in the claimant's own terms and counted as a problem.
+
+    The runner line above it already fails doctor over the same missing binary — this is the
+    second half of the sentence, not a second verdict: "this resident cannot run, *so it
+    must not be left claiming*". The board line has to be red for the claimant whose only
+    wake-up is a claim, or the fleet reads as one broken routine rather than a resident
+    that will take a task off the board and drop it.
+    """
+    write_skill("research", defaults=True)
+    (tmp_path / "memory").mkdir()
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 1, result.output
+    assert "test-agent: board — " in result.output
+    assert result.output.count("not on PATH") == 2, "once as a runner, once as a claimant"
 
 
 # ------------------------------------------------------------------------------ journal
@@ -973,6 +1133,7 @@ def ledger_a_run(db: Path, cost: float, *, resident: str = "test-agent") -> None
             kind="routine",
             run_id="already-ran",
             ref="daily-summary",
+            origin=f"resident:{resident}",
             cost_usd=cost,
             input_tokens=50,
             output_tokens=50,
@@ -1035,19 +1196,13 @@ def test_budget_show_by_origin_rolls_a_chain_up_to_the_question_that_started_it(
     residents_dir = write_resident(budgeted_manifest(daily_cost_usd=50.0)).parent.parent
     db = tmp_path / "steward.db"
     with Store(db) as store:
-        letter = store.delegate_job(
-            title="Check the errand list",
-            assignee="test-agent",
-            delegated_by="somebody",
-            route="inbox",
-            origin="task:root",
-        )
         store.record_run(
             resident="test-agent",
             agent_id="claude-code:test-agent",
             kind="delegated",
-            run_id=letter.task_id,
-            ref=letter.task_id,
+            run_id="a-letter",
+            ref="a-letter",
+            origin="task:root",
             cost_usd=3.25,
             input_tokens=40,
             output_tokens=60,
@@ -1099,9 +1254,15 @@ def test_budget_show_by_origin_wraps_the_json_only_when_it_is_asked_for(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["residents"][0]["resident"] == "test-agent"
-    # A routine came off no task, so it is named unattributed rather than dropped.
+    # A routine came off no task, so it rolls up under the resident whose day it was.
     assert payload["by_origin"] == [
-        {"origin": "unattributed", "runs": 1, "cost_usd": 1.0, "tokens": 100, "duration_s": 0.0}
+        {
+            "origin": "resident:test-agent",
+            "runs": 1,
+            "cost_usd": 1.0,
+            "tokens": 100,
+            "duration_s": 0.0,
+        }
     ]
 
 
@@ -1351,6 +1512,79 @@ def test_doctor_says_whether_a_scheduler_is_up(
     # A stopped daemon is still not doctor's exit code: doctor runs on laptops too.
     assert stopped.exit_code == 0, stopped.output
     assert "so nothing is firing the routines below" in stopped.output
+
+
+def receiving_manifest(*, status: str = "active") -> dict[str, Any]:
+    """Build a resident that declares one delegation route, open or shut."""
+    data = budgeted_manifest()
+    data["routes"] = [
+        *data["routes"],
+        {"id": "handoff", "kind": "delegation", "address": "steward:delegation", "status": status},
+    ]
+    return data
+
+
+def deliver_a_letter(db: Path, *, assignee: str = "test-agent") -> None:
+    """Put one open item in a resident's inbox, as a handoff would."""
+    with Store(db) as store:
+        store.delegate_job(
+            title="Read the background",
+            assignee=assignee,
+            delegated_by="sender-agent",
+            route="handoff",
+        )
+
+
+def test_doctor_counts_the_inbox_behind_an_open_route(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(receiving_manifest()).parent.parent
+    db = tmp_path / "steward.db"
+    deliver_a_letter(db)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox 1 open via handoff" in result.output
+
+
+def test_doctor_fails_on_letters_stacked_behind_a_closed_route(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The blind spot steward #46 names: pickup stopped, the pile kept growing."""
+    residents_dir = write_resident(receiving_manifest(status="disabled")).parent.parent
+    db = tmp_path / "steward.db"
+    deliver_a_letter(db)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 1
+    assert "1 open letter(s) behind a closed route: handoff (disabled)" in result.output
+    assert "nothing will pick them up" in result.output
+
+
+def test_doctor_says_a_closed_route_with_no_post_is_only_closed(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    # Worth saying out loud, not worth failing on: a route somebody is still wiring up is
+    # a door that is shut, and nothing is waiting behind it.
+    residents_dir = write_resident(receiving_manifest(status="pending")).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox 0 open — route closed: handoff (pending)" in result.output
+
+
+def test_doctor_says_so_when_a_resident_takes_no_letters(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox — takes no letters" in result.output
 
 
 # --------------------------------------------------------------------------------------

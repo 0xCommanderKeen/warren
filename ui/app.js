@@ -641,8 +641,7 @@ async function viewResidents() {
           : frag(
               resident.board && resident.board.claim ? badge("board", "on") : null,
               resident.delegation && resident.delegation.send ? badge("delegates", "on") : null,
-              (resident.routes || []).some((route) => route.kind === "delegation")
-                ? badge("inbox", "on") : null,
+              inboxBadge(resident.routes),
               !(resident.board && resident.board.claim) &&
               !(resident.delegation && resident.delegation.send)
                 ? el("span", { class: "faint" }, "routines only") : null))
@@ -651,6 +650,18 @@ async function viewResidents() {
 
   add(out, [rise(rows, 1)]);
   return out;
+}
+
+/** The inbox badge, read off route *status* — a shut door must not read as an open one.
+ *
+ * A delegation route flipped to `pending` or `disabled` still stops pickup, so badging it
+ * "inbox on" would say a resident takes post that nothing will ever collect. */
+function inboxBadge(routes) {
+  const doors = (routes || []).filter((route) => route.kind === "delegation");
+  if (!doors.length) return null;
+  return doors.some((route) => route.status === "active")
+    ? badge("inbox", "on")
+    : badge("inbox closed", "fail");
 }
 
 function gauge(budget) {
@@ -953,14 +964,30 @@ function journalPanel(settled) {
   return panel;
 }
 
+/** One line naming which doors are open and how much post is sitting behind them.
+ *
+ * A closed route is named as closed rather than omitted: letters delivered before somebody
+ * shut it stay open and nothing picks them up, and a panel listing only accepting routes
+ * would show no route at all and leave the pile unexplained. */
+function routeLine(routes, pending) {
+  if (!routes.length) {
+    return "This resident declares no delegation route, so nothing can be handed to it.";
+  }
+  const open = routes.filter((route) => route.accepts).map((route) => route.id);
+  if (open.length) return `Open routes: ${open.join(", ")}. ${pending} waiting.`;
+  const shut = routes.map((route) => `${route.id} (${route.status})`).join(", ");
+  return pending
+    ? `Every declared route is closed — ${shut}. ${pending} waiting behind it, ` +
+      "and nothing will pick them up."
+    : `Every declared route is closed — ${shut}. Nothing can be handed to this resident.`;
+}
+
 function inboxPanel(settled) {
   const panel = el("div", { class: "panel" }, el("h3", {}, "Inbox — delegated and waiting"));
   if (settled.status === "rejected") { add(panel, [problem(settled.reason)]); return panel; }
   const items = settled.value.inbox || [];
   add(panel, [el("p", { class: "dim", style: { marginTop: 0 } },
-    (settled.value.routes || []).length
-      ? `Declared routes: ${settled.value.routes.join(", ")}.`
-      : "This resident declares no delegation route, so nothing can be handed to it.")]);
+    routeLine(settled.value.routes || [], settled.value.pending || 0))]);
   if (!items.length) {
     add(panel, [empty("Empty inbox.",
       "Nothing is waiting. Work handed to this resident lands here and is picked up on its " +

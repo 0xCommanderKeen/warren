@@ -731,6 +731,19 @@ def test_the_console_badges_a_retired_resident_in_both_places() -> None:
     assert 'badge("retired", "fail")' in detail, "so must the detail header"
 
 
+def test_the_console_reads_a_closed_inbox_as_closed() -> None:
+    # A delegation route flipped to pending or disabled stops pickup, so a console that
+    # badged it "inbox on" would show an open door with the post piling up behind it
+    # (steward #46). Both places that render an inbox go off the route's *status*.
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    badge_fn = source.split("function inboxBadge(")[1].split("\n}")[0]
+    assert 'route.status === "active"' in badge_fn
+    assert 'badge("inbox closed", "fail")' in badge_fn
+    line = source.split("function routeLine(")[1].split("\n}")[0]
+    assert "route.accepts" in line, "the panel must say which doors actually take letters"
+    assert "nothing will pick them up" in line
+
+
 def test_the_console_puts_text_in_as_text() -> None:
     # No innerHTML anywhere: a resident's name or an API message cannot become script.
     source = (UI_DIR / "app.js").read_text(encoding="utf-8")

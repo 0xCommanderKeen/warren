@@ -1,5 +1,6 @@
 """The scheduler: when things fire, exactly once, and what the village is told."""
 
+import fcntl
 import json
 import os
 import threading
@@ -1227,7 +1228,7 @@ def test_a_scheduler_without_a_library_injects_and_writes_nothing(build, tmp_pat
     assert not (tmp_path / ".claude").exists()
 
 
-# --------------------------------------------------------------- state safety (steward #76, #85)
+# ----------------------------------------------------------- state safety (steward #76, #85, #25)
 
 
 def test_a_directory_shaped_state_is_fatal_and_cleans_the_stray_tmp(
@@ -1275,6 +1276,69 @@ def test_two_ticks_over_one_state_file_fire_an_occurrence_exactly_once(
     first, second = daemon(), daemon()
     reports = [*first.tick(due_at), *second.tick(due_at)]
     assert sum(1 for report in reports if report.fired) == 1
+
+
+@pytest.mark.parametrize("first_to_wake", ["daemon", "cron"])
+def test_a_daemon_and_a_cron_tick_fire_an_occurrence_exactly_once(
+    write_resident: ResidentWriter, tmp_path: Path, first_to_wake: str
+) -> None:
+    """The daemon loop takes the same state lock a cron tick does (steward #25)."""
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    anchor = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)  # 12:00 local
+    due_at = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)  # 12:15:30 local
+
+    seed = s.SchedulerState.load(state_path)
+    seed.set_anchor("test-agent/inbox-read", anchor)
+    seed.save()
+
+    def scheduler() -> s.Scheduler:
+        return s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+            state=s.SchedulerState.load(state_path),
+            workdir=tmp_path,
+        )
+
+    daemon, cron = scheduler(), scheduler()
+
+    def fire_daemon() -> list[s.FireReport]:
+        return daemon.run(max_ticks=1, sleep=lambda _seconds: None, now_fn=lambda: due_at)
+
+    def fire_cron() -> list[s.FireReport]:
+        return cron.tick(due_at)
+
+    order = [fire_daemon, fire_cron] if first_to_wake == "daemon" else [fire_cron, fire_daemon]
+    reports = [report for fire in order for report in fire()]
+    assert sum(1 for report in reports if report.fired) == 1
+
+
+def test_a_second_daemon_refuses_to_start_and_names_the_first(build, tmp_path: Path) -> None:
+    """Two daemons over one state file double every session, so the second exits red."""
+    first, second = build(HOURLY), build(HOURLY)
+    lock_path = tmp_path / "state.json.daemon.lock"
+    with first._daemon_lock():
+        with pytest.raises(s.SchedulerError, match="another scheduler daemon is already running"):
+            second.run(max_ticks=1, sleep=lambda _seconds: None)
+        assert lock_path.read_text(encoding="utf-8").strip() == str(os.getpid()), (
+            "the refusal can name the pid holding the lock"
+        )
+    # The lock is the daemon's lifetime, not forever: the next daemon starts fine.
+    assert second.run(max_ticks=1, sleep=lambda _seconds: None) == []
+
+
+def test_a_dry_run_daemon_takes_no_locks(write_resident: ResidentWriter, tmp_path: Path) -> None:
+    """A rehearsal leaves no sidecar behind and never refuses beside a real daemon."""
+    path = write_resident(manifest_with(HOURLY))
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        dry_run=True,
+    )
+    engine.run(max_ticks=1, sleep=lambda _seconds: None, now_fn=lambda: datetime.now(UTC))
+    assert not list(tmp_path.glob("state.json*"))
 
 
 def test_a_crash_after_saving_the_anchor_does_not_re_fire(
@@ -1371,6 +1435,49 @@ def test_a_heartbeat_does_not_re_fire_what_another_tick_process_already_ran(
 
     third = scheduler()
     assert third.tick(datetime(2026, 8, 24, 10, 18, tzinfo=UTC)) == [], "10:15 already ran"
+
+
+def test_a_beat_declines_a_wake_up_that_is_already_queued_behind_another_process(
+    build, tmp_path: Path
+) -> None:
+    """A beat waits for nobody — not for the flock, and not for a thread waiting on it.
+
+    The daemon takes the state lock once per wake-up (steward #25), and that wait is as
+    long as whatever the other process is holding it for: a cron ``tick`` fires inside the
+    lock, so a 15-minute routine is a 15-minute wait. The heartbeat runs on its own thread
+    precisely so it keeps landing through stretches like that, and the process holding the
+    lock is stamping the file anyway — so a beat it cannot make immediately is one it must
+    drop, however the queue it would join is spelled.
+    """
+    engine = build(HOURLY)
+    lock_path = (tmp_path / "state.json").with_suffix(".json.lock")
+
+    # Stand in for the cron tick holding the state lock across a long fire: a second open
+    # file description conflicts with the scheduler's own exactly as another process would.
+    other = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(other, fcntl.LOCK_EX)
+    # ... and lets go eventually, so a beat that *did* queue finishes late instead of hanging.
+    threading.Timer(2.0, lambda: fcntl.flock(other, fcntl.LOCK_UN)).start()
+
+    waiting = threading.Event()
+
+    def wake_up() -> None:
+        waiting.set()
+        with engine._state_lock():
+            pass
+
+    loop = threading.Thread(target=wake_up, daemon=True)
+    loop.start()
+    try:
+        assert waiting.wait(timeout=5), "the wake-up never started"
+        time.sleep(0.2)  # long enough to be inside the blocking flock, holding the gate
+        started = time.monotonic()
+        with engine._state_lock(wait=False) as held:
+            assert not held, "the lock another process holds is not this beat's to take"
+        assert time.monotonic() - started < 1.0, "the beat queued behind the wake-up"
+    finally:
+        loop.join(timeout=5)
+        os.close(other)
 
 
 def test_two_processes_never_write_through_one_temp_state_file(tmp_path: Path) -> None:
