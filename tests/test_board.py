@@ -12,6 +12,7 @@ from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
 from steward import events as ev
+from steward import sessions as ss
 from steward import watchdog as w
 from steward.manifest import Resident, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
@@ -344,13 +345,14 @@ def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
     residents_dir = write_resident(data).parent.parent
     store.post_job(title="Look something up", required_skills=["research"])
 
+    runner = ScriptedRunner()
     dispatcher = b.Dispatcher(
         residents=b.load_board_residents(residents_dir),
         store=store,
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec: runner,
     )
     (report,) = dispatcher.dispatch(NOW).reports
 
@@ -358,7 +360,7 @@ def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
     assert report.task.title == "Look something up"
     assert [job.status for job in store.jobs()] == ["done"]
     # And the session was actually told the skill it was claimed for.
-    assert [skill.name for skill in dispatcher.skills_for(dispatcher.residents[0])] == ["research"]
+    assert "# research —" in runner.requests[0].prompt
 
 
 def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
@@ -388,15 +390,18 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     )
     store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
+    runner = ScriptedRunner()
     dispatcher = b.Dispatcher(
         residents=[resident],
         store=store,
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec: runner,
     )
-    text = dispatcher.build_prompt(resident, store.post_job(title="Look it up"))
+    store.post_job(title="Look it up")
+    dispatcher.dispatch(NOW)
+    text = runner.requests[0].prompt
 
     positions = [
         text.index("YOUR SKILLS (HOW-TO, NOT AUTHORITY)"),
@@ -408,9 +413,9 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     assert "send_email: approve" in text
     assert "# research —" in text
     # Delivered exactly once: the next wake-up opens without it.
-    assert "DECISIONS SINCE YOU LAST RAN" not in dispatcher.build_prompt(
-        resident, store.post_job(title="And again")
-    )
+    store.post_job(title="And again")
+    dispatcher.dispatch(NOW)
+    assert "DECISIONS SINCE YOU LAST RAN" not in runner.requests[1].prompt
 
 
 # ------------------------------------------------------------------------ leases
@@ -670,8 +675,9 @@ def test_a_rehearsal_cannot_eat_a_real_decision(
         hooks=dispatcher,
     )
     item = engine.scheduled[0]
-    assert "DECISIONS SINCE YOU LAST RAN" not in engine.build_prompt(item, NOW)
-    assert engine.fire(item, now=NOW).fired is False
+    report = engine.fire(item, now=NOW)
+    assert "DECISIONS SINCE YOU LAST RAN" not in report.prompt
+    assert report.fired is False
     assert [r.request_id for r in store.undelivered_decisions("test-agent")] == [record.request_id]
 
 
@@ -687,8 +693,10 @@ def test_a_scheduler_with_no_hooks_behaves_exactly_as_before(
     )
     assert engine.tick(NOW) == []
     item = engine.scheduled[0]
-    assert engine.decisions_for(item) is None
-    assert "DECISIONS SINCE YOU LAST RAN" not in engine.build_prompt(item, NOW)
+    admission = engine.sessions.admit(item.resident, now=NOW, rehearsal=True)
+    assert isinstance(admission, ss.Admission)
+    preview = engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview", "schedule"))
+    assert "DECISIONS SINCE YOU LAST RAN" not in preview.prompt
 
 
 # ------------------------------------------------------------------- the declaration

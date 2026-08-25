@@ -388,8 +388,8 @@ def effective_timeout_s(manifest: ResidentManifest, declared_s: int) -> int:
 class BudgetGuard:
     """Reads the ledger before a run, writes to it after, and pauses when a cap trips.
 
-    Structural, not inherited: the scheduler and the board hold this through their own
-    :class:`steward.scheduler.RunGuard` protocol, so a steward built without budgets fires
+    Structural, not inherited: the resident session lifecycle holds this through its
+    :class:`steward.sessions.RunGuard` protocol, so a steward built without budgets fires
     routines exactly as it did before this module existed. Every method is safe to call on
     a manifest that declares no budgets at all — :meth:`allow` returns ``None``,
     :meth:`timeout_for` returns what it was given, and :meth:`record` still ledgers, so

@@ -51,39 +51,42 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
-from steward import journal as journal_module
 from steward.manifest import (
     DEFAULT_BOARD_LEASE_S,
     DEFAULT_BOARD_TIMEOUT_S,
-    ManifestError,
     Resident,
     ResidentManifest,
     active_residents,
     validate_path,
 )
-from steward.prompt import assemble_delegated_prompt, assemble_task_prompt
 from steward.runners import (
     Outcome,
-    RunRequest,
     RunResult,
     build_runner,
     check_runner,
-    skills_home,
 )
-from steward.scheduler import RunGuard, RunnerFactory, workdir_refusal
+from steward.sessions import (
+    Admission,
+    DelegatedWake,
+    Refusal,
+    ResidentSessions,
+    RunGuard,
+    RunnerFactory,
+    SessionHarvest,
+    TaskWake,
+    Wake,
+    workdir_refusal,
+)
 from steward.skills import (
-    Skill,
-    SkillError,
     SkillLibrary,
     describe_missing,
     effective_names,
-    effective_skills,
     library_for,
-    materialize,
     missing_skills,
 )
 from steward.store import (
@@ -210,9 +213,9 @@ def board_preflight(
     for the other kind of wake-up, and this exists beside it because that one cannot see
     these residents: it iterates the *scheduled* fleet, so a board-only claimant —
     ``board: {claim: true}`` with ``routines: []`` — is never pre-flighted at all. Its
-    missing binary or unresolvable grant is then discovered at claim time, by
-    :meth:`Dispatcher.provision`, as a task the village watched a villager pick up and
-    close failed a second later (steward #37). Asked here it is a complaint at a
+    missing binary or unresolvable grant is then discovered at claim time, by the resident
+    session lifecycle's provision stage, as a task the village watched a villager pick up
+    and close failed a second later (steward #37). Asked here it is a complaint at a
     reasonable hour instead.
 
     All three questions are asked of every claimant, even though a caller that reached here
@@ -331,7 +334,7 @@ class Dispatcher:
     #: way :class:`steward.scheduler.Scheduler` threads it. An unconfigured library means
     #: no defaults, so matching falls back to exactly what each manifest grants.
     library: SkillLibrary = field(default_factory=SkillLibrary)
-    #: The budget seam (:class:`steward.scheduler.RunGuard`). A paused resident is skipped
+    #: The budget seam (:class:`steward.sessions.RunGuard`). A paused resident is skipped
     #: *before* it claims anything, not after: a claim it cannot work would hold a real
     #: task hostage for a full lease while the resident sat stopped.
     guard: RunGuard | None = None
@@ -361,6 +364,19 @@ class Dispatcher:
     #: the same honest defaults the board ships with.
     delegation_lease_s: int = DEFAULT_BOARD_LEASE_S
     delegation_timeout_s: int = DEFAULT_BOARD_TIMEOUT_S
+    sessions: ResidentSessions = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Build the shared lifecycle from the dispatcher's existing dependencies."""
+        self.sessions = ResidentSessions(
+            workdir=self.workdir,
+            runner_factory=self.runner_factory,
+            library=self.library,
+            guard=self.guard,
+            hooks=self,
+            completion=self,
+            residents=self.residents,
+        )
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -493,6 +509,19 @@ class Dispatcher:
         self.hand_over(manifest, output)
         return raised
 
+    def harvest_session(
+        self,
+        manifest: ResidentManifest,
+        output: str,
+        *,
+        parent_task_id: str | None = None,
+        now: datetime | None = None,
+    ) -> SessionHarvest:
+        """Safely persist everything one completed session handed back."""
+        raised = tuple(self._harvest_approvals(manifest, output, now))
+        handed = self.hand_over(manifest, output, parent_task_id=parent_task_id, now=now)
+        return SessionHarvest(raised, handed)
+
     def hand_over(
         self,
         manifest: ResidentManifest,
@@ -582,89 +611,6 @@ class Dispatcher:
 
     # -- working ----------------------------------------------------------------------
 
-    def build_prompt(self, resident: Resident, job: JobRecord) -> str:
-        """Assemble a session's prompt for this task, through the one prompt module.
-
-        Both kinds of task go through the same preamble and differ only in their last
-        section: a notice off the board says so, and a letter names who sent it and which
-        route it arrived through.
-        """
-        journal_entry = self._journal_for(resident)
-        skills = self.skills_for(resident)
-        decisions = self.decisions_for(resident.id)
-        if job.delegated:
-            return assemble_delegated_prompt(
-                resident.manifest,
-                task_id=job.task_id,
-                title=job.title,
-                detail=job.detail,
-                sender=self._sender_label(job.delegated_by),
-                route=job.route or "delegation",
-                parent_task_id=job.parent_task_id,
-                soul_text=resident.soul.body,
-                journal_entry=journal_entry,
-                skills=skills,
-                decisions=decisions,
-            )
-        return assemble_task_prompt(
-            resident.manifest,
-            task_id=job.task_id,
-            title=job.title,
-            detail=job.detail,
-            required_skills=job.required_skills,
-            soul_text=resident.soul.body,
-            journal_entry=journal_entry,
-            skills=skills,
-            decisions=decisions,
-        )
-
-    def _sender_label(self, sender_id: str | None) -> str:
-        """Name the sender the way the receiving session will read it."""
-        if not sender_id:
-            return "another resident"
-        for resident in self.residents:
-            if resident.id == sender_id:
-                return f"{resident.manifest.soul.name} ({resident.id})"
-        return sender_id
-
-    def skills_for(self, resident: Resident) -> tuple[Skill, ...]:
-        """Resolve this resident's effective skill set, exactly as the scheduler does.
-
-        The same library, the same resolution: a resident is told the same skills whether
-        it woke up for a routine of its own or claimed a notice off the board.
-        """
-        return effective_skills(resident.manifest, self.library)
-
-    def provision(self, resident: Resident, workdir: Path) -> None:
-        """Put this resident's skills where a board session can reach them, or refuse.
-
-        The scheduler's :meth:`steward.scheduler.Scheduler.provision` for the other kind
-        of wake-up, and it refuses on the same terms: a granted skill the library does not
-        have raises :class:`steward.skills.SkillError` before the session starts, which
-        the caller records as a failed task rather than a session that believes it has a
-        capability nobody gave it.
-        """
-        missing = missing_skills(resident.manifest, self.library)
-        if missing:
-            raise SkillError(describe_missing(resident.id, missing, self.library))
-        subdir = skills_home(resident.manifest.runner)
-        if subdir is None or not self.library.configured:
-            return
-        result = materialize(self.skills_for(resident), workdir, subdir)
-        log.debug("%s: skills %s", resident.id, result.summary())
-
-    def _journal_for(self, resident: Resident) -> str | None:
-        try:
-            return journal_module.latest_entry(resident.manifest, source=resident.path)
-        except ManifestError as exc:
-            log.warning("%s: no journal — %s", resident.id, exc)
-        except Exception as exc:  # noqa: BLE001 — a bad byte in a journal is not a failed task
-            # Widened past OSError: a session-written journal with one undecodable byte
-            # raises UnicodeDecodeError, and a board session must not be bricked by it any
-            # more than a routine session is (steward #75).
-            log.warning("%s: could not reach the journal: %s", resident.id, exc)
-        return None
-
     def _harvest_approvals(
         self, manifest: ResidentManifest, output: str, now: datetime | None
     ) -> list[ApprovalRecord]:
@@ -685,49 +631,66 @@ class Dispatcher:
             log.warning("%s: could not record an approval from this session: %s", manifest.id, exc)
             return []
 
-    def work(self, resident: Resident, job: JobRecord, now: datetime | None = None) -> BoardReport:
+    def work(
+        self,
+        resident: Resident,
+        job: JobRecord,
+        now: datetime | None = None,
+        *,
+        admission: Admission | None = None,
+    ) -> BoardReport:
         """Run one claimed task to a conclusion and record it. Never raises."""
         moment = now or datetime.now(UTC)
-        workdir = resident.workdir(self.workdir)
         # A letter and a notice declare their own timeouts, and the budget caps whichever
         # one applies: ``max_run_seconds`` is a ceiling on any session, however it woke up.
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
-        # The deadline this session actually gets, read once: the run registry is judged
-        # against it, and the runner is given it.
-        timeout_s = self._timeout_for(resident, declared_s)
+        admitted = admission or self.sessions.admit(resident, now=moment)
+        if isinstance(admitted, Refusal):
+            result = RunResult(outcome=Outcome.FAILED, error=admitted.reason)
+            return self._record(
+                resident,
+                job,
+                result,
+                moment,
+                (),
+                run_id=new_id(),
+            )
         # This session's own id, and not the task's: a task claimed, dropped on a dead
         # lease and claimed again is *two* sessions, and the registry has to be able to
         # hold both of them open at once (steward #39).
         run_id = new_id()
+        if job.delegated:
+            wake = DelegatedWake(
+                task_id=job.task_id,
+                title=job.title,
+                detail=job.detail,
+                timeout_s=declared_s,
+                origin=job.origin or f"task:{job.task_id}",
+                delegated_by=job.delegated_by,
+                route=job.route or "delegation",
+                parent_task_id=job.parent_task_id,
+                registry_run_id=run_id,
+            )
+        else:
+            wake = TaskWake(
+                task_id=job.task_id,
+                title=job.title,
+                detail=job.detail,
+                required_skills=job.required_skills,
+                timeout_s=declared_s,
+                origin=job.origin or f"task:{job.task_id}",
+                parent_task_id=job.parent_task_id,
+                registry_run_id=run_id,
+            )
+        # The deadline this session actually gets, read once: the run registry is judged
+        # against it, and the runner is given it.
+        timeout_s = admitted.timeout_for(declared_s)
         self._open_run(resident, job, run_id, timeout_s, moment)
 
-        prompt = ""
-        try:
-            # Provision *before* the prompt is assembled: assembling it delivers the
-            # resident's pending decisions, and a session refused for a missing skill must
-            # not consume an answer the next real session still needs — a provision failure
-            # used to close the task failed with the decision already gone (steward #74).
-            self.provision(resident, workdir)
-            prompt = self.build_prompt(resident, job)
-            runner = self.runner_factory(resident.manifest.runner)
-            result = runner.run(
-                RunRequest(
-                    prompt=prompt,
-                    workdir=workdir,
-                    timeout_s=timeout_s,
-                    model=resident.manifest.runner.model,
-                    env=self._session_env(resident, job),
-                )
-            )
-        except SkillError as exc:
-            # steward refused to start, so the claim is closed as failed rather than left
-            # to rot until its lease expires: this task never had a chance of being done.
-            log.error("%s: %s", resident.id, exc)  # noqa: TRY400 — a refusal is not a traceback
-            result = RunResult(outcome=Outcome.FAILED, error=str(exc))
-        except Exception as exc:  # noqa: BLE001 — a broken runner is a failed task, not a crash
-            result = RunResult(outcome=Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
+        session = self.sessions.run(admitted, wake)
+        result = session.require_result()
 
         # The session is over the moment the runner returns, so the row is answered here
         # rather than after the bookkeeping below. The other order left a window — die
@@ -736,51 +699,15 @@ class Dispatcher:
         # scheduler closes its row the other way round on purpose: nobody but the watchdog
         # would ever emit a routine's missing ``routine_failed``, while a task whose close
         # never got written is the lease sweep's to reopen and to mourn.
-        self._close_run(run_id, job, moment + timedelta(seconds=result.duration_s))
-        # Stamp the ledger at completion, so a task that crossed midnight bills the day it
-        # finished in rather than an already-closed window (steward #68).
-        self._ledger(resident, job, result, moment + timedelta(seconds=result.duration_s))
-        raised = self._harvest_approvals(resident.manifest, result.output, moment)
-        # This task is the parent of anything the session handed on, which is what makes
-        # the chain — and the budget it rolls up to — traceable past the first hop.
-        handed = self.hand_over(
-            resident.manifest, result.output, parent_task_id=job.task_id, now=moment
+        return self._record(
+            resident,
+            job,
+            result,
+            moment,
+            cast("tuple[ApprovalRecord, ...]", session.raised),
+            handed=cast("tuple[dg.Delivery, ...]", session.handed_over),
+            run_id=run_id,
         )
-        return self._record(resident, job, result, moment, raised, handed=handed, run_id=run_id)
-
-    # -- the budget seam ---------------------------------------------------------------
-
-    def budget_refusal(self, resident: Resident, now: datetime | None = None) -> str | None:
-        """Return why this resident may not pick anything up right now, or ``None``.
-
-        A board session is a session: it spends the same money out of the same daily cap
-        as a routine does, so a resident paused by its budget does not claim, exactly as
-        it does not fire. A *delegated* session is a session too — the neighbour who sent
-        the letter does not get to spend money this resident no longer has — so the inbox
-        is gated by this same question.
-
-        Asked **once per resident per dispatch**, from the single pass
-        :meth:`_claim_refusals` makes ahead of every work source, so a resident that both
-        receives letters and claims notices is knocked at once rather than twice for one
-        exhausted budget. The pause is still a conditional insert, which dedupes across
-        processes and against the post-run check (:mod:`steward.budgets`) — it is just no
-        longer the only thing holding the single-knock guarantee inside a dispatch.
-        """
-        if self.guard is None:
-            return None
-        try:
-            return self.guard.allow(resident.manifest, now)
-        except Exception as exc:  # noqa: BLE001 — an unreadable budget claims nothing
-            log.warning(
-                "%s: could not read the budget, so nothing is claimed: %s", resident.id, exc
-            )
-            return f"budget unreadable: {type(exc).__name__}: {exc}"
-
-    def _timeout_for(self, resident: Resident, declared_s: int) -> int:
-        """Return the board session's effective timeout, capped by the manifest's budget."""
-        if self.guard is None:
-            return declared_s
-        return self.guard.timeout_for(resident.manifest, declared_s)
 
     # -- the run registry ---------------------------------------------------------------
 
@@ -829,41 +756,18 @@ class Dispatcher:
                 job.task_id,
             )
 
-    def _close_run(self, run_id: str, job: JobRecord, moment: datetime) -> None:
+    def runner_returned(self, wake: Wake, completed_at: datetime) -> None:
+        """Close a board-owned registry row at the lifecycle's runner-return boundary."""
+        if not isinstance(wake, (DelegatedWake, TaskWake)) or wake.registry_run_id is None:
+            return
+        self._close_run(wake.registry_run_id, wake.task_id, completed_at)
+
+    def _close_run(self, run_id: str, task_id: str, moment: datetime) -> None:
         """Answer this session's registry row. Never raises, and never emits: ``_record`` does."""
         try:
             self.store.close_run(run_id, now=ev.utc_now_iso(moment))
         except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
-            log.warning("could not record that task %s reported back: %s", job.task_id, exc)
-
-    def _ledger(
-        self, resident: Resident, job: JobRecord, result: RunResult, moment: datetime
-    ) -> None:
-        """Record what a claimed task cost. Never raises: the task still happened.
-
-        A letter is ledgered as ``delegated`` and a notice as ``task``, against the
-        resident that *did* the work rather than the one that asked for it. Somebody
-        else's request still spends your day, and the cap that stops you is yours.
-
-        The origin travels onto the row with it — the item's own if it inherited one,
-        else the item itself, the same expression :func:`steward.delegation.origin_for`
-        uses — so the bill stays with the question rather than with a join.
-        """
-        if self.guard is None:
-            return
-        kind = RUN_DELEGATED if job.delegated else RUN_TASK
-        try:
-            self.guard.record(
-                resident.manifest,
-                result=result,
-                kind=kind,
-                run_id=job.task_id,
-                ref=job.task_id,
-                origin=job.origin or f"task:{job.task_id}",
-                now=moment,
-            )
-        except Exception as exc:  # noqa: BLE001 — the ledger must not take the board down
-            log.warning("%s: could not record what task %s cost: %s", resident.id, job.task_id, exc)
+            log.warning("could not record that task %s reported back: %s", task_id, exc)
 
     def _record(  # noqa: PLR0913 — one parameter per fact the report is built from
         self,
@@ -950,18 +854,6 @@ class Dispatcher:
             handed_over=tuple(handed),
         )
 
-    def _session_env(self, resident: Resident, job: JobRecord) -> dict[str, str]:
-        """Build the env a board session inherits, so its own emitter reports truthfully."""
-        env = {
-            "BURROW_AGENT_ID": resident.agent_id,
-            "BURROW_PROJECT": resident.project,
-            "STEWARD_TASK_ID": job.task_id,
-        }
-        if job.parent_task_id:
-            # So a session that emits for itself can name the chain it is part of.
-            env["STEWARD_PARENT_TASK_ID"] = job.parent_task_id
-        return env
-
     # -- the entry point ---------------------------------------------------------------
 
     def dispatch(self, now: datetime | None = None) -> DispatchRun:
@@ -979,7 +871,7 @@ class Dispatcher:
         declared in ``routes``, not in ``board`` — and only while that route is open.
 
         Who may work at all is settled *before* either loop, in one pass over every
-        resident a source could reach (:meth:`_claim_refusals`). A resident out of money is
+        resident a source could reach (:meth:`_claim_admissions`). A resident out of money is
         out of money for every way work can reach it, and a letter is not a loophole: the
         item stays in the inbox, addressed and unread, for whoever unpauses the resident
         tomorrow. Asking once rather than once per source is what keeps one exhausted
@@ -993,11 +885,12 @@ class Dispatcher:
 
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
-        refusals = self._claim_refusals(moment)
+        admissions, refusals = self._claim_admissions(moment)
         reports = self._drain(
             delegation_residents(self.residents),
             moment,
             refusals,
+            admissions,
             pick=self.take_delivery,
             count_for=lambda _r: self.max_delegations_per_wake,
         )
@@ -1005,6 +898,7 @@ class Dispatcher:
             board_residents(self.residents),
             moment,
             refusals,
+            admissions,
             pick=self.claim,
             count_for=lambda r: r.manifest.board.max_claims_per_wake,
         )
@@ -1014,18 +908,19 @@ class Dispatcher:
             reports=tuple(reports),
         )
 
-    def _drain(
+    def _drain(  # noqa: PLR0913 - the two work-source strategies are explicit callables
         self,
         residents: Sequence[Resident],
         moment: datetime,
         refusals: Mapping[str, str],
+        admissions: Mapping[str, Admission],
         *,
         pick: Callable[[Resident, datetime], JobRecord | None],
         count_for: Callable[[Resident], int],
     ) -> list[BoardReport]:
         """Let each un-refused resident claim and work up to its cap. Never raises.
 
-        ``refusals`` is the map :meth:`_claim_refusals` already built for this dispatch;
+        ``refusals`` is the map :meth:`_claim_admissions` already built for this dispatch;
         a resident named in it has been asked, told, and logged once, so the drain only
         has to skip it rather than ask again.
 
@@ -1041,7 +936,7 @@ class Dispatcher:
                 job = pick(resident, self.clock())
                 if job is None:
                     break
-                reports.append(self.work(resident, job, moment))
+                reports.append(self.work(resident, job, moment, admission=admissions[resident.id]))
         return reports
 
     def _claimants(self) -> list[Resident]:
@@ -1060,35 +955,18 @@ class Dispatcher:
             claimants.append(resident)
         return claimants
 
-    def _claim_refusals(self, moment: datetime) -> dict[str, str]:
-        """Ask every claimant once, before any work source, and map id → why not.
-
-        One pass, one ask, one knock. Asking per source instead left the single-knock
-        guarantee to two call sites agreeing plus the store's conditional insert, which
-        held only because there were exactly two of them; a third work source would have
-        made it three. ``moment`` is the dispatch's own fixed clock — the answer to "may
-        this resident work" is one answer for the whole dispatch, even though each claim
-        still takes a fresh reading for its lease.
-        """
+    def _claim_admissions(self, moment: datetime) -> tuple[dict[str, Admission], dict[str, str]]:
+        """Admit each possible claimant once, before either work source claims."""
+        admissions: dict[str, Admission] = {}
         refusals: dict[str, str] = {}
         for resident in self._claimants():
-            refusal = self._claim_refusal(resident, moment)
-            if refusal is not None:
-                log.warning("%s: not working — %s", resident.id, refusal)
-                refusals[resident.id] = refusal
-        return refusals
-
-    def _claim_refusal(self, resident: Resident, moment: datetime) -> str | None:
-        """Return why this resident may not pick anything up right now, or ``None``.
-
-        Two reasons, both of which stop a claim before it happens: the budget is exhausted,
-        or the resident has nowhere safe to run. The second is why the board never claims a
-        task it would only work against the current working directory, wiping skills it does
-        not own (steward #64) — the notice stays open for a resident that *can* work it.
-        """
-        return self.budget_refusal(resident, moment) or workdir_refusal(
-            resident, self.workdir, self.library
-        )
+            admission = self.sessions.admit(resident, now=moment)
+            if isinstance(admission, Refusal):
+                log.warning("%s: not working — %s", resident.id, admission.reason)
+                refusals[resident.id] = admission.reason
+            else:
+                admissions[resident.id] = admission
+        return admissions, refusals
 
     def _rehearse(self, moment: datetime) -> DispatchRun:
         """Resolve what a real dispatch *would* do, writing nothing (steward #88).
@@ -1169,7 +1047,7 @@ class Dispatcher:
         return planned
 
     def _rehearsal_refusals(self) -> dict[str, str]:
-        """Map id → why not for every claimant, the read-only twin of :meth:`_claim_refusals`.
+        """Map id → why not for every claimant, the read-only twin of real admission.
 
         One pass over the same union, so a rehearsal answers "who may work" exactly once
         per resident too — and reports the same resident as idle for both of its sources.

@@ -40,15 +40,14 @@ flags ``journal: close_of_day`` gets the instruction to write the next one. Afte
 writes an entry itself only from an explicit ``<journal>`` block in the session's output,
 and never over a file the session wrote for itself.
 
-**Everything else that happens around a wake-up hangs off one hook.** The job board,
-structured approvals, and delegation reach the scheduler through the structural
-:class:`WakeHooks` protocol and nothing else: decisions in before a prompt is assembled,
-escalations and handoffs out after a session ends, dispatch after the due routines have
-fired. Budgets reach it the same way, through :class:`RunGuard`. A steward with no hooks
-and no guard fires routines exactly as it did before any of them existed — unbounded,
-which is what it was — and a rehearsal touches no database: a dry run that consumed a
-real decision would silence the session that needed it, and a dry run that materialized
-skills would write into a real workdir.
+**Every real fire crosses the resident session lifecycle.** The scheduler owns occurrence
+selection, overlap, durable anchors, and routine protocol events.  The shared
+:mod:`steward.sessions` module owns admission, provision, context, prompt assembly, runner
+invocation, completion-time accounting, and safe harvest.  The board still reaches the
+scheduler through :class:`WakeHooks` only to dispatch after due routines have fired; its
+decision and harvest implementation is passed through to the resident-session module.
+A rehearsal touches no database, consumes no decision, materializes no skill, and launches
+no runner.
 """
 
 import contextlib
@@ -61,7 +60,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
@@ -72,32 +71,28 @@ from croniter import croniter
 from steward import events as ev
 from steward import journal
 from steward.manifest import (
-    ManifestError,
     Resident,
     ResidentManifest,
     Routine,
     active_residents,
     validate_path,
 )
-from steward.manifest import Runner as RunnerSpec
-from steward.prompt import assemble_routine_prompt
 from steward.runners import (
-    Outcome,
-    Runner,
-    RunRequest,
     RunResult,
     build_runner,
     check_runner,
-    skills_home,
+)
+from steward.sessions import (
+    Refusal,
+    ResidentSessions,
+    RoutineWake,
+    RunGuard,
+    RunnerFactory,
+    workdir_refusal,
 )
 from steward.skills import (
-    Materialization,
-    Skill,
-    SkillError,
     SkillLibrary,
     describe_missing,
-    effective_skills,
-    materialize,
     missing_skills,
 )
 
@@ -153,8 +148,6 @@ STALE_TICK_AFTER_S = HEARTBEAT_EVERY_S + DEFAULT_CATCHUP_S
 TRIGGER_SCHEDULE = "schedule"
 TRIGGER_MANUAL = "manual"
 
-#: How a manifest's runner declaration becomes a runner. Injectable for tests.
-type RunnerFactory = Callable[[RunnerSpec], Runner]
 STATE_VERSION = 0
 
 
@@ -182,54 +175,11 @@ class WakeHooks(Protocol):
         ...
 
     def harvest(self, manifest: ResidentManifest, output: str) -> object:
-        """Turn what a finished session wrote into requests and handoffs.
-
-        Approvals it raised (:mod:`steward.approvals`) and work it handed to another
-        resident (:mod:`steward.delegation`) both leave a session the same way — as a
-        block in its final output — so both are read here rather than through a second
-        question the scheduler would have to learn to ask.
-        """
+        """Turn what a finished session wrote into requests and handoffs."""
         ...
 
     def dispatch(self, now: datetime) -> object:
         """Sweep deadlines and let board-enabled residents claim work."""
-        ...
-
-
-class RunGuard(Protocol):
-    """Whether a resident may run at all, how long it gets, and what the run cost.
-
-    The budget seam (steward #8), and a structural protocol for the same reason
-    :class:`WakeHooks` is one: :class:`steward.budgets.BudgetGuard` needs the scheduler's
-    types, so the dependency runs the other way and the scheduler never imports it. A
-    steward with no guard fires routines exactly as it did before budgets existed —
-    unbounded, which is what it was.
-
-    Three moments, and the order matters. :meth:`allow` is asked *before* the prompt is
-    assembled, because assembling one delivers a resident's pending decisions and a
-    refused fire must not eat an answer the next real session needs to hear.
-    """
-
-    def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
-        """Return why this resident may not run at ``now``, or ``None`` when it may."""
-        ...
-
-    def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
-        """Return the timeout this run actually gets, capped by the manifest's budget."""
-        ...
-
-    def record(  # noqa: PLR0913 — the run, named by its kind, its id, and what it cost
-        self,
-        manifest: ResidentManifest,
-        *,
-        result: RunResult,
-        kind: str,
-        run_id: str,
-        ref: str,
-        origin: str,
-        now: datetime | None = None,
-    ) -> object:
-        """Append what one finished session cost to the durable ledger."""
         ...
 
 
@@ -578,49 +528,6 @@ def _lock_holder(path: Path) -> str:
 # --------------------------------------------------------------------------------------
 
 
-def workdir_refusal(resident: Resident, fallback: Path, library: SkillLibrary) -> str | None:
-    """Return why this resident has nowhere safe to run, or ``None`` when it does.
-
-    A resident whose ``memory: {kind: directory}`` names a path that is not a directory on
-    this host has *no* declared working directory: :meth:`Resident.workdir` falls back to
-    the caller's. The destructive case steward #64 is about is precise, and this refuses
-    exactly it — nothing wider, so a legitimately-chosen workdir keeps working:
-
-    - the memory directory is **absent**, so the run would fall back; **and**
-    - the fallback is the process's **own current working directory** — "NEVER a cwd
-      fallback"; an explicitly chosen workdir is the operator's decision, not a silent
-      default; **and**
-    - the session would **materialize skills** into it — a skills-loading runner
-      (:func:`steward.runners.skills_home`) plus a configured library — which is what makes
-      :meth:`Scheduler.provision` / :meth:`Dispatcher.provision` prune everything under
-      ``<cwd>/.claude/skills`` the resident was not granted, wiping a checkout's own skills.
-
-    A runner that writes no skills, or an unconfigured library, deletes nothing, so it is
-    left to run; ``file`` and ``repo`` memories declare no working directory and are left
-    alone too.
-    """
-    memory = resident.manifest.memory
-    if memory.kind != "directory":
-        return None
-    if Path(memory.path).expanduser().is_dir():
-        return None
-    if skills_home(resident.manifest.runner) is None or not library.configured:
-        return None
-    try:
-        effective = resident.workdir(fallback).resolve()
-        cwd = Path.cwd().resolve()
-    except OSError:  # pragma: no cover — an unresolvable cwd is its own refusal
-        effective = cwd = Path()
-    if effective != cwd:
-        return None
-    return (
-        f"memory.path {memory.path!r} is not a directory on this host, so this resident "
-        "would run in the current working directory — steward refuses that fallback rather "
-        "than materialize skills into, and delete files from, a directory its charter never "
-        "named"
-    )
-
-
 def load_scheduled(
     residents_dir: Path | str, skills_dir: Path | str | None = None
 ) -> list[ScheduledRoutine]:
@@ -691,6 +598,13 @@ class Scheduler:
         # A rehearsal must not be able to reach a real brain, whatever the manifest says.
         self._runner_factory = (
             (lambda spec: build_runner(spec, force_mock=True)) if dry_run else runner_factory
+        )
+        self.sessions = ResidentSessions(
+            workdir=self.workdir,
+            runner_factory=self._runner_factory,
+            library=self.library,
+            guard=guard,
+            hooks=hooks,
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()
@@ -965,121 +879,6 @@ class Scheduler:
         with self._lock:
             self._running.discard(key)
 
-    def build_prompt(self, item: ScheduledRoutine, now: datetime | None = None) -> str:
-        """Assemble the full prompt for one routine, through the one prompt module."""
-        return assemble_routine_prompt(
-            item.resident.manifest,
-            item.routine.prompt,
-            soul_text=item.resident.soul.body,
-            journal_entry=self.journal_for(item),
-            skills=self.skills_for(item),
-            decisions=self.decisions_for(item),
-            closing=self.closing_for(item, now or datetime.now(UTC)),
-        )
-
-    def skills_for(self, item: ScheduledRoutine) -> tuple[Skill, ...]:
-        """Resolve this resident's effective skill set: defaults plus its own grants.
-
-        Resolved at fire time from the library on disk, so improving a skill improves
-        the next session of every resident that holds it, and a skill removed from a
-        manifest is simply absent from the next run.
-        """
-        return effective_skills(item.resident.manifest, self.library)
-
-    def provision(self, item: ScheduledRoutine, workdir: Path) -> Materialization | None:
-        """Put this resident's skills where the session can reach them. Or refuse.
-
-        Two things happen here, and which ones apply is the runner's business:
-
-        - **Every** runner kind gets the skills in its prompt, assembled above. That is
-          the copy steward can honestly say the session was told.
-        - A runner that loads skills off disk (``claude``) also gets them written into
-          ``<workdir>/<skills_dir>``, write-if-changed, with anything no longer granted
-          removed. Steward owns that directory.
-
-        A granted skill the library does not have is a refusal, not a shrug: the run
-        fails before it starts rather than launching a session that believes it has a
-        capability nobody gave it.
-        """
-        missing = missing_skills(item.resident.manifest, self.library)
-        if missing:
-            raise SkillError(describe_missing(item.resident.id, missing, self.library))
-        subdir = skills_home(item.resident.manifest.runner)
-        if subdir is None or not self.library.configured:
-            return None
-        result = materialize(self.skills_for(item), workdir, subdir)
-        log.debug("%s: skills %s", item.key, result.summary())
-        return result
-
-    def decisions_for(self, item: ScheduledRoutine) -> str | None:
-        """Return the answers this resident has not been told about yet, or ``None``.
-
-        This is the resident-inbox half of steward #10: a session that parked on an
-        approval finishes its turn, and the decision reaches it here, at the top of its
-        next wake-up. With no hooks wired there is nothing to deliver and the preamble is
-        byte-identical to one assembled before approvals existed.
-
-        A dry run gets nothing, and the reason matters: delivery is a *write*. A rehearsal
-        that consumed a real decision would mean the resident's next real session never
-        heard the answer — a rehearsal is not work, and it must not be able to eat one.
-
-        A hook that raises degrades to no decisions and a log line rather than taking the
-        whole fire down with zero events, exactly as the harvest hook already does
-        (steward #80): a session that opens without a decision it was owed is a bug to fix,
-        but a routine that never runs — and never brackets — because delivery threw is worse.
-        """
-        if self.hooks is None or self.dry_run:
-            return None
-        try:
-            return self.hooks.decisions_for(item.resident.id)
-        except Exception as exc:  # noqa: BLE001 — a broken hook is a missing decision, not a crash
-            log.warning("%s: could not read pending decisions: %s", item.key, exc)
-            return None
-
-    def journal_for(self, item: ScheduledRoutine) -> str | None:
-        """Return the resident's latest surviving journal entry, or ``None``.
-
-        Read through :mod:`steward.journal`, so the location comes from this resident's
-        own manifest and from nowhere else. A resident that has never journaled, or
-        whose last session died before it wrote, gets the previous surviving entry or
-        nothing — steward never synthesizes one.
-
-        A journal that cannot be read *right now* degrades to no journal and a log line
-        rather than a failed routine. The declaration itself is checked in
-        :meth:`check`, which is where a broken one is supposed to be loud.
-        """
-        return self._journal_call(item, lambda: journal.latest_entry(item.resident.manifest))
-
-    def closing_for(self, item: ScheduledRoutine, now: datetime) -> str | None:
-        """Return the close-of-day instruction, on the flagged routine and nowhere else.
-
-        The contract is the explicit ``journal: close_of_day`` flag in the manifest, not
-        an inference about which routine happens to fire last today. The day the entry
-        belongs to is read in this routine's own ``schedule_tz``.
-        """
-        if item.routine.journal != journal.CLOSE_OF_DAY:
-            return None
-        day = journal.local_day(item.routine, now)
-        return self._journal_call(
-            item,
-            lambda: journal.close_of_day_instruction(
-                item.resident.manifest, day, item.routine.id, source=item.resident.path
-            ),
-        )
-
-    def _journal_call[T](self, item: ScheduledRoutine, read: Callable[[], T]) -> T | None:
-        try:
-            return read()
-        except ManifestError as exc:
-            log.warning("%s: no journal — %s", item.key, exc)
-        except Exception as exc:  # noqa: BLE001 — a bad byte in a journal is not a failed routine
-            # Widened past OSError on purpose: a session-written journal with one undecodable
-            # byte raises UnicodeDecodeError (a ValueError), and letting that escape used to
-            # brick the resident or leave a dangling routine_started (steward #75). The
-            # declaration itself is checked in check(), where a broken one is meant to be loud.
-            log.warning("%s: could not reach the journal: %s", item.key, exc)
-        return None
-
     def fire(
         self,
         item: ScheduledRoutine,
@@ -1117,30 +916,24 @@ class Scheduler:
     def _fire_body(
         self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
     ) -> FireReport:
-        refusal = self._budget_refusal(item, moment)
-        if refusal is not None:
-            return FireReport(scheduled=item, run_id=run_id, fired=False, skipped_reason=refusal)
-
-        # Refuse before the prompt is assembled — assembling delivers pending decisions —
-        # so a resident with nowhere to run never has an answer consumed by a fire that was
-        # never going to happen, and steward never falls back to the cwd (steward #64).
-        if not self.dry_run:
-            nowhere = workdir_refusal(item.resident, self.workdir, self.library)
-            if nowhere is not None:
-                log.error("%s: %s", item.key, nowhere)
-                return FireReport(
-                    scheduled=item, run_id=run_id, fired=False, skipped_reason=nowhere
-                )
-
-        workdir = item.workdir(self.workdir)
-        cwd = str(workdir)
-
-        if self.dry_run:
+        admission = self.sessions.admit(item.resident, now=moment, rehearsal=self.dry_run)
+        if isinstance(admission, Refusal):
+            log.warning("%s: %s", item.key, admission.reason)
             return FireReport(
                 scheduled=item,
                 run_id=run_id,
                 fired=False,
-                prompt=self.build_prompt(item, moment),
+                skipped_reason=admission.reason,
+            )
+
+        wake = RoutineWake(item.routine, run_id, trigger)
+        if self.dry_run:
+            session = self.sessions.run(admission, wake)
+            return FireReport(
+                scheduled=item,
+                run_id=run_id,
+                fired=False,
+                prompt=session.prompt,
                 skipped_reason="dry run",
             )
 
@@ -1149,11 +942,11 @@ class Scheduler:
             project=item.project,
             routine=item.routine.id,
             run_id=run_id,
-            cwd=cwd,
+            cwd=str(admission.workdir),
         )
         # The deadline the session actually gets, read once: the registry is judged
         # against it, and the runner is given it.
-        timeout_s = self._timeout_for(item)
+        timeout_s = admission.timeout_for(item.routine.timeout_s)
         # The event first, then the row. A crash between the two leaves a run steward
         # cannot find, which is where this stood before the registry existed; the other
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
@@ -1161,54 +954,9 @@ class Scheduler:
         self.emitter.emit(context.started(trigger))
         self._open_run(item, run_id, timeout_s, moment)
 
-        started = time.monotonic()
-        prompt = ""
-        try:
-            # Provision *before* the prompt is assembled: assembling it delivers the
-            # resident's pending decisions, and a session refused for a missing skill must
-            # not eat an answer the next real session still needs to hear (steward #74).
-            self.provision(item, workdir)
-            prompt = self.build_prompt(item, moment)
-            runner: Runner = self._runner_factory(item.resident.manifest.runner)
-            result = runner.run(
-                RunRequest(
-                    prompt=prompt,
-                    workdir=workdir,
-                    timeout_s=timeout_s,
-                    model=item.resident.manifest.runner.model,
-                    env=self._session_env(item, run_id),
-                )
-            )
-        except SkillError as exc:
-            # A session that cannot be given what its manifest grants does not run. The
-            # bracket still closes: routine_started, then routine_failed saying why.
-
-            # steward refused to start is noise in the log.
-            log.error("%s: %s", item.key, exc)  # noqa: TRY400
-            result = RunResult(
-                outcome=Outcome.FAILED, duration_s=time.monotonic() - started, error=str(exc)
-            )
-        except Exception as exc:  # noqa: BLE001 — a broken runner is a failed routine, not a crash
-            duration = time.monotonic() - started
-            result = RunResult(
-                outcome=Outcome.FAILED, duration_s=duration, error=f"{type(exc).__name__}: {exc}"
-            )
-
-        # Stamp the ledger at *completion*, not at fire time: a run that started at 23:50
-        # and crossed midnight belongs to the day it finished in, or a once-daily routine's
-        # spend lands in a window its own next fire never re-reads and the cap never trips
-        # (steward #68).
-        self._ledger(item, run_id, result, moment + timedelta(seconds=result.duration_s))
-        self._harvest(item, result.output)
-
-        journal_path: Path | None = None
+        session = self.sessions.run(admission, wake)
+        result = session.require_result()
         if result.ok:
-            closed = self.close_the_day(item, moment, result.output)
-            journal_path = closed.path
-            if closed.persisted and journal_path is not None:
-                # Steward wrote this file, so steward can name it. Everything else in
-                # artifacts is the session's own claim, reported by its own emitter.
-                result = replace(result, artifacts=(*result.artifacts, str(journal_path)))
             self.emitter.emit(
                 context.finished(
                     outcome=str(result.outcome),
@@ -1226,66 +974,15 @@ class Scheduler:
         # The bracket is closed in the village and in steward's own registry, in that
         # order: the event is the thing burrow renders, and the row only has to be right
         # before the next watchdog pass reads it.
-        self._close_run(run_id, moment + timedelta(seconds=result.duration_s))
+        self._close_run(run_id, session.completed_at or moment)
         return FireReport(
             scheduled=item,
             run_id=run_id,
             fired=True,
             result=result,
-            prompt=prompt,
-            journal_path=journal_path,
+            prompt=session.prompt,
+            journal_path=session.journal_path,
         )
-
-    def close_the_day(
-        self, item: ScheduledRoutine, moment: datetime, output: str
-    ) -> journal.CloseOfDay:
-        """Keep whatever entry the closing routine produced, then rotate. Never raises.
-
-        The session's own file wins; a ``<journal>`` block in its output is the fallback
-        for a run that had nowhere to write. Only an ``ok`` run closes a day — a session
-        killed at its timeout did not finish its day, and dating a half-written note
-        would make tomorrow believe a day happened that did not.
-        """
-        if item.routine.journal != journal.CLOSE_OF_DAY:
-            return journal.CloseOfDay()
-        day = journal.local_day(item.routine, moment)
-        closed = self._journal_call(
-            item,
-            lambda: journal.persist_close_of_day(
-                item.resident.manifest,
-                day,
-                item.routine.id,
-                output,
-                source=item.resident.path,
-            ),
-        )
-        return closed if closed is not None else journal.CloseOfDay()
-
-    def _budget_refusal(self, item: ScheduledRoutine, moment: datetime) -> str | None:
-        """Ask the budget whether this resident may run at all, before anything is spent.
-
-        Asked before the prompt is assembled, because assembling one *delivers* the
-        resident's pending approval decisions, and a fire refused after that would have
-        eaten an answer the next real session needed to hear. A guard that raises is a
-        guard steward refuses to trust into silence: an unreadable budget stops the run
-        rather than waving it through.
-        """
-        if self.guard is None:
-            return None
-        try:
-            refusal = self.guard.allow(item.resident.manifest, moment)
-        except Exception as exc:  # noqa: BLE001 — an unreadable budget is a refusal, not a crash
-            log.warning("%s: could not read the budget, so nothing fires: %s", item.key, exc)
-            return f"budget unreadable: {type(exc).__name__}: {exc}"
-        if refusal is not None:
-            log.warning("%s: %s", item.key, refusal)
-        return refusal
-
-    def _timeout_for(self, item: ScheduledRoutine) -> int:
-        """Return this run's effective timeout: the declared one, capped by the budget."""
-        if self.guard is None:
-            return item.routine.timeout_s
-        return self.guard.timeout_for(item.resident.manifest, item.routine.timeout_s)
 
     def _open_run(
         self, item: ScheduledRoutine, run_id: str, timeout_s: int, moment: datetime
@@ -1321,54 +1018,6 @@ class Scheduler:
             self.registry.close_run(run_id, now=ev.utc_now_iso(moment))
         except Exception as exc:  # noqa: BLE001 — the registry must not take a routine down
             log.warning("could not record that run %s reported back: %s", run_id, exc)
-
-    def _ledger(
-        self, item: ScheduledRoutine, run_id: str, result: RunResult, moment: datetime
-    ) -> None:
-        """Record what this run cost. Never raises: a lost row is not a failed routine.
-
-        A routine descends from nobody but the resident whose day it is, so that is the
-        origin it carries — the same ``resident:<id>`` a resident's own initiative gets
-        in :func:`steward.delegation.origin_for`. Routines used to roll up as
-        unattributed; they are attributable, and now they say so.
-        """
-        if self.guard is None:
-            return
-        try:
-            self.guard.record(
-                item.resident.manifest,
-                result=result,
-                kind="routine",
-                run_id=run_id,
-                ref=item.routine.id,
-                origin=f"resident:{item.resident.id}",
-                now=moment,
-            )
-        except Exception as exc:  # noqa: BLE001 — the ledger must not take a routine down
-            log.warning("%s: could not record what this run cost: %s", item.key, exc)
-
-    def _harvest(self, item: ScheduledRoutine, output: str) -> None:
-        """Turn anything the session asked for into a real approval request.
-
-        A run that timed out is harvested too: a session killed halfway through may still
-        have written its escalation, and throwing that away would leave a resident having
-        asked a question nobody was told about.
-        """
-        if self.hooks is None or not output:
-            return
-        try:
-            self.hooks.harvest(item.resident.manifest, output)
-        except Exception as exc:  # noqa: BLE001 — a failed escalation is not a failed routine
-            log.warning("%s: could not record an approval from this session: %s", item.key, exc)
-
-    def _session_env(self, item: ScheduledRoutine, run_id: str) -> dict[str, str]:
-        """Build the env a session inherits, so its own emitter reports as this resident."""
-        return {
-            "BURROW_AGENT_ID": item.agent_id,
-            "BURROW_PROJECT": item.project,
-            "STEWARD_ROUTINE": item.routine.id,
-            "STEWARD_RUN_ID": run_id,
-        }
 
     # -- liveness ----------------------------------------------------------------------
 

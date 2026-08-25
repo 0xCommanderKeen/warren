@@ -43,7 +43,7 @@ optimistic state the fleet hasn't confirmed.
 
 ## Status
 
-Nine pieces exist.
+Ten pieces exist.
 
 **Resident manifests and charters** (#1). Souls and manifests are versioned here and
 validated in CI.
@@ -53,6 +53,13 @@ a declared time zone, through one runner abstraction (`claude` / `codex` / a com
 template / a mock), with the charter, voice, and journal assembled in one place, and every
 run bracketed by real burrow events. Nothing fires unless `steward scheduler run` is up:
 an enabled routine is a declaration, not an animation.
+
+**The resident session lifecycle** (#118). Every real wake-up — scheduled routine,
+manual fire, claimed board task, or delegated letter — crosses one `admit` → `run` seam.
+It owns the safety-critical provision → context → prompt → runner → completion accounting
+→ harvest order. The scheduler still owns occurrences and routine events; the board still
+owns claims, leases, and task events; production and mock runners remain interchangeable
+at the runner seam.
 
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
 markdown entry into the location its own manifest declares, and the next session opens
@@ -87,7 +94,7 @@ $ steward serve --allow-open         # local dev, with the missing token said ou
 written as instructions. A documented default set (`write-journal`, `daily-summary`,
 `research`, `escalate`) is held by every resident; everything else is granted by name in
 a manifest, and a name the library does not have fails validation with the closest match
-named. At fire time the scheduler resolves the effective set, injects it into the prompt
+named. At run time the resident session lifecycle resolves the effective set, injects it into the prompt
 under a frame saying a skill is how-to and never authority, and — for runners that load
 skills off disk — writes it into the session's working directory, removing what is no
 longer granted. The library is shared, so improving a skill improves every resident that

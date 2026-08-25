@@ -62,13 +62,13 @@ from steward.runners import build_runner
 from steward.scheduler import (
     TRIGGER_MANUAL,
     FireReport,
-    RunnerFactory,
     ScheduledRoutine,
     Scheduler,
     SchedulerState,
     default_state_path,
     scheduler_liveness,
 )
+from steward.sessions import RunnerFactory
 from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
     JOB_STATUSES,
