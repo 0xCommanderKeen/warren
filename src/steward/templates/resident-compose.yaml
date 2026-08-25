@@ -8,6 +8,10 @@
 # environment and which no repository has ever seen.
 services:
   $service:
+    # steward-resident:latest unless the manifest names another: this repo's own image
+    # (docker/resident/Dockerfile), carrying the claude CLI and burrow's hook emitter.
+    # It is a local tag — there is no registry in this fleet — so it has to have been
+    # built and shipped to this host first: `make image && make image-ship`.
     image: $image
     container_name: $container
     restart: unless-stopped
@@ -23,6 +27,9 @@ services:
       # a journal written inside the container is a journal on the NAS.
       - ./memory:$memory_path
       # The claude config the burrow emitter is installed into, exactly as life-agent's
-      # claude-config volume carries burrow-emit.py today.
+      # claude-config volume carries burrow-emit.py today. The image's entrypoint seeds
+      # this directory at start — burrow-emit.py every time, settings.json only when it
+      # is not already there — so the volume also keeps the credentials a `docker exec
+      # <container> claude` login writes, across restarts and image rebuilds.
       - ./claude:/root/.claude
     command: $command

@@ -265,8 +265,30 @@ exists, the journal location is writable, every granted skill resolves — the s
 `steward doctor` check — and here is when each routine next fires.
 
 Where a resident lands is a manifest question with documented defaults (`dxp2800`, `Miha`,
-`~/docker/steward-<id>`, `python:3.12-slim`); override any of them in
+`~/docker/steward-<id>`, `steward-resident:latest`); override any of them in
 [`deploy`](docs/manifest.md#deploy--where-this-resident-runs).
+
+**What a resident's container actually is.** `steward-resident` is built from
+[`docker/resident/Dockerfile`](docker/resident/Dockerfile): `node:22-slim`, the `claude`
+CLI pinned by build arg, python3, and a vendored copy of burrow's `hooks/emit.py` wired
+into the same six claude hooks the Mac uses. There is no registry here, so the image
+travels like everything else does — a pipe over ssh:
+
+```console
+$ make image                                          # linux/amd64, for the NAS
+$ make image-ship                                     # docker save | ssh dxp2800 docker load
+$ ssh Miha@dxp2800 docker exec steward-<id> steward-smoke
+smoke: ok   claude 2.1.243 (Claude Code)
+smoke: ok   POST http://dxp2800:8737/events -> 204
+smoke: PASS this container can reach the village
+```
+
+`steward-smoke` runs inside the container and is [issue
+#51](https://github.com/0xCommanderKeen/steward/issues/51)'s acceptance criterion made
+executable. The container still runs `sleep infinity`: **the scheduler runs sessions
+locally**, in the process running `steward scheduler run`, and nothing in steward execs
+into a resident's container yet. The image is what makes that step possible, not the step
+itself.
 
 **Secrets never enter this repo.** `BURROW_URL` and `BURROW_TOKEN` are read from steward's
 own environment at provision time and written into a `.env` on the host at mode `0600`.
@@ -293,7 +315,6 @@ Burrow's viewer reaches the same pipeline through `POST /residents` with `deploy
 ([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
 never commits, because the server may not own the checkout it is reading, and it says so
 in the response.
->>>>>>> feat/nursery-deploy
 
 ## Residents
 

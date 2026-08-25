@@ -37,9 +37,15 @@ nothing in this module ever launches anything itself.
 
 A manifest that declares no ``deploy`` block still deploys, to the place everything else
 in this fleet is: host ``dxp2800``, user ``Miha``, compose directory
-``~/docker/steward-<id>``, image ``python:3.12-slim``. Those are defaults, not
+``~/docker/steward-<id>``, image ``steward-resident:latest``. Those are defaults, not
 assumptions — every one of them is a field a manifest can override, and
 ``steward new-resident --dry-run`` prints the resolved values before anything moves.
+
+The image is this repo's own: ``docker/resident/Dockerfile``, built by ``make image``,
+carrying the ``claude`` CLI and a vendored copy of burrow's hook emitter. Steward does not
+build it during a deploy and does not check the host has it — provisioning ships a compose
+file, and the host's docker is what says whether the image exists. ``make image-ship`` is
+how it gets there.
 """
 
 import io
@@ -94,7 +100,14 @@ DEFAULT_ROOT = "~/docker"
 #: been reading out of ``deploy.container`` since #8.
 CONTAINER_PREFIX = "steward-"
 
-DEFAULT_IMAGE = "python:3.12-slim"
+#: The image a resident runs when its manifest names none: the one this repo builds, from
+#: ``docker/resident/Dockerfile``, carrying the ``claude`` CLI and burrow's hook emitter.
+#: It is a *local* tag, because this fleet has no registry — ``make image`` builds it and
+#: ``make image-ship`` pipes it to the NAS over ssh, the same way everything else here
+#: travels. A host that has never been shipped the image fails at ``docker compose up``
+#: with "image not found", which is a loud, fixable failure; the alternative default — a
+#: bare ``python:3.12-slim`` that starts happily and cannot run a session — was a quiet one.
+DEFAULT_IMAGE = "steward-resident:latest"
 
 #: What the container runs when the manifest names nothing. A resident's container is a
 #: *place for sessions to happen* — steward drives the brain from outside — so the honest

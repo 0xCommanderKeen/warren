@@ -443,7 +443,7 @@ deploy:
   user: Miha                          # the ssh user steward reaches it as
   path: ~/docker/steward-life-agent   # the compose directory on that host
   container: steward-life-agent       # the docker container name
-  image: python:3.12-slim             # what the container runs
+  image: steward-resident:latest      # what the container runs
   command: [sleep, infinity]          # argv inside it
 ```
 
@@ -457,7 +457,7 @@ beside it:
 | `user` | `Miha` |
 | `path` | `~/docker/<container>` |
 | `container` | `steward-<id>` |
-| `image` | `python:3.12-slim` |
+| `image` | `steward-resident:latest` |
 | `command` | `["sleep", "infinity"]` |
 
 So an ordinary resident declares no `deploy` block at all and still deploys. The block is
@@ -471,6 +471,55 @@ create, and a resident nobody has provisioned has no container under it.
 The default `command` is honest about what a resident's container is: a place for sessions
 to happen, not a process that does work on its own. Steward drives the brain from outside,
 so the container's job is to be there.
+
+### The image
+
+`steward-resident:latest` is built from [`docker/resident/Dockerfile`](../docker/resident/Dockerfile)
+in this repo. It is `node:22-slim` plus four things a resident cannot work without:
+
+- the **claude CLI** (`@anthropic-ai/claude-code`), pinned by the `CLAUDE_VERSION` build
+  arg so a rebuild never silently changes which brain a resident has;
+- **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
+  the whole install;
+- a **vendored copy of burrow's `hooks/emit.py`**, with the commit it came from written in
+  its header and its checksum recorded in `docker/resident/burrow-emit.sha256`. Refresh it
+  with `make vendor-emitter BURROW=/path/to/burrow`; `tests/test_resident_image.py` fails
+  when the copy drifts, and CI runs that test (CI never builds the image — there is no
+  docker in it);
+- a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,
+  `PostToolUse`, `Notification`, `Stop` and `SessionEnd` — the same six hooks the Mac
+  config uses, reading `BURROW_URL` / `BURROW_TOKEN` from the container's environment
+  instead of hardcoding them, because the compose `.env` already carries them.
+
+```console
+$ make image                    # steward-resident:<version> and :latest, linux/amd64
+$ make image-ship               # docker save | ssh Miha@dxp2800 docker load
+$ ssh Miha@dxp2800 docker exec steward-<id> steward-smoke
+```
+
+`steward-smoke` runs **inside** the container and is issue #51's acceptance criterion made
+executable: claude answers `--version`, the emitter is where `settings.json` says it is,
+and a test event POSTed to `$BURROW_URL/events` comes back **204**. When the village does
+not answer it prints the line the emitter wrote to the local fallback instead, so "the NAS
+is away" and "the emitter is broken" never look alike. Both events it posts are
+`heartbeat`s under a `steward-smoke:<host>` agent id, never the resident's own: a probe may
+prove the pipe works, and may not conjure a villager who has done no work.
+
+There is no registry in this fleet, so the tag is local and the image travels by
+`docker save | ssh … docker load`. A host that has never been shipped it fails at
+`docker compose up` with *image not found* — loud, and one command from fixed.
+
+**The entrypoint seeds the claude volume.** `/root/.claude` is a bind mount, and a bind
+mount hides whatever the image baked at that path, so the canonical copies live at
+`/opt/steward` and are copied in at start: `burrow-emit.py` every time (the image owns it),
+`settings.json` only when absent (a resident may have grown a permissions block worth
+keeping). The credentials a `docker exec <container> claude` login writes stay in the
+volume across restarts and rebuilds.
+
+**What is not true yet.** Steward's scheduler runs sessions **locally** — in the process
+running `steward scheduler run`, via `subprocess.Popen` in `steward/runners.py`. Nothing in
+steward execs into a resident's container. This image is what makes that possible; wiring
+`docker exec` into the runner seam is a separate, deliberate step.
 
 **Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
 up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A

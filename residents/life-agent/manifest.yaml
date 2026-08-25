@@ -111,6 +111,38 @@ runner:
   kind: claude
   model: claude-opus-5
 
+# Where Hob actually runs today — read off the running container, not aspirational
+# (steward #52). This block exists so the watchdog can supervise the resident that has
+# been up longest: without `deploy.container` it reports Hob as *unsupervised*, which was
+# true of steward and false of the world.
+#
+#   $ docker inspect life-agent --format '{{.Config.Image}}'   -> node:22
+#   $ ls ~/docker/life-agent                                   -> compose.yaml, bot.py, …
+#
+# Two things this block does NOT say, and both matter:
+#
+# 1. `command` is omitted because Hob's container does not run `sleep infinity`. It runs a
+#    ~40-line bash bootstrap out of ~/docker/life-agent/compose.yaml that apt-gets git and
+#    python3, npm-installs the claude CLI into a mounted volume, builds a venv, and then
+#    execs the Telegram/Discord bot. That file is hand-written, lives on the host, and
+#    steward does not own it — so steward declares nothing about it rather than declaring
+#    something tidier than the truth. The default this resolves to (`[sleep, infinity]`)
+#    is what a *re-provisioned* Hob would run, not what today's Hob runs.
+#
+# 2. This is not a migration. `steward new-resident life-agent` against this block would
+#    render a second compose file (docker-compose.yaml) into ~/docker/life-agent beside
+#    the existing compose.yaml and bring a bare container up in place of the bot. Do not
+#    run it here. Re-provisioning Hob under the nursery naming — steward-life-agent,
+#    ~/docker/steward-life-agent, steward-resident:latest, the bot rewritten as something
+#    steward drives — is a real migration with a real cutover, and it is the pilot's
+#    decision, not a side effect of declaring where the container already is.
+deploy:
+  host: dxp2800
+  user: Miha
+  path: ~/docker/life-agent
+  container: life-agent
+  image: node:22
+
 # Hob takes work off the job board. One task per wake-up, so a busy board never turns
 # the household spirit into a queue worker who never gets to the inbox. The lease is
 # twice the session timeout: if a run dies without finishing, the task is back on the

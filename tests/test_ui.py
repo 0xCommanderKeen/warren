@@ -464,7 +464,7 @@ def canned_pipeline(*, problems: tuple[str, ...] = ()) -> Any:  # noqa: ANN401 â
             user="Miha",
             path=f"~/docker/steward-{spec.id}",
             container=f"steward-{spec.id}",
-            image="python:3.12-slim",
+            image="steward-resident:latest",
             command=("sleep", "infinity"),
         )
         return NurseryReport(
