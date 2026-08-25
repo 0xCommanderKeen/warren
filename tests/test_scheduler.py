@@ -1,8 +1,10 @@
 """The scheduler: when things fire, exactly once, and what the village is told."""
 
+import fcntl
 import json
 import os
 import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -298,6 +300,213 @@ def test_state_round_trips(tmp_path: Path) -> None:
     state.set_anchor("a/b", moment)
     state.save()
     assert s.SchedulerState.load(state.path).anchor("a/b") == moment
+
+
+# --------------------------------------------------------------------------- heartbeat
+
+
+def test_the_heartbeat_round_trips(tmp_path: Path) -> None:
+    state = s.SchedulerState(path=tmp_path / "state.json")
+    assert state.last_tick_at() is None, "a state nobody has ticked has never ticked"
+
+    moment = datetime(2026, 8, 24, 7, 0, tzinfo=LJUBLJANA)
+    state.record_tick(moment)
+    state.save()
+    assert s.SchedulerState.load(state.path).last_tick_at() == moment
+
+
+def test_a_state_file_written_before_the_heartbeat_reads_as_never_ticked(tmp_path: Path) -> None:
+    # Old files must stay readable, and the safe reading of a file with no heartbeat in it
+    # is that nothing has ticked — never that something is up.
+    path = tmp_path / "old.json"
+    path.write_text('{"routines": {"a/b": {"anchor": "2026-08-24T07:00:00+00:00"}}}', "utf-8")
+    state = s.SchedulerState.load(path)
+    assert state.anchor("a/b") is not None
+    assert state.last_tick_at() is None
+
+
+def test_an_unreadable_heartbeat_is_no_heartbeat(tmp_path: Path) -> None:
+    junk = tmp_path / "junk.json"
+    junk.write_text('{"routines": {}, "last_tick": "whenever"}', encoding="utf-8")
+    assert s.SchedulerState.load(junk).last_tick_at() is None
+
+    wrong_type = tmp_path / "wrong.json"
+    wrong_type.write_text('{"routines": {}, "last_tick": 17}', encoding="utf-8")
+    assert s.SchedulerState.load(wrong_type).last_tick_at() is None
+
+    # A heartbeat survives a routines block that does not parse: they are separate facts.
+    partial = tmp_path / "partial.json"
+    partial.write_text('{"routines": [1, 2], "last_tick": "2026-08-24T07:00:00+00:00"}', "utf-8")
+    assert s.SchedulerState.load(partial).last_tick_at() is not None
+
+
+def test_liveness_tells_never_ticked_apart_from_stopped(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+    state = s.SchedulerState(path=tmp_path / "state.json")
+
+    fresh = s.scheduler_liveness(state, now)
+    assert fresh["alive"] is None, "never ticked is its own answer, not a dead daemon"
+    assert fresh["last_tick"] is None
+    assert fresh["stale_after_s"] == s.STALE_TICK_AFTER_S
+
+    state.record_tick(now - timedelta(seconds=s.STALE_TICK_AFTER_S - 1))
+    assert s.scheduler_liveness(state, now)["alive"] is True
+
+    state.record_tick(now - timedelta(seconds=s.STALE_TICK_AFTER_S + 1))
+    assert s.scheduler_liveness(state, now)["alive"] is False
+
+
+def test_a_tick_stamps_the_heartbeat_even_with_nothing_due(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    quiet = datetime(2026, 8, 24, 10, 40, tzinfo=UTC)  # nothing is due at :40
+    assert engine.tick(quiet) == []
+
+    assert s.SchedulerState.load(state_path).last_tick_at() == quiet
+
+
+def test_the_daemon_stamps_the_heartbeat_every_iteration(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    # An idle daemon is still a live one, and the loop is the only place that can say so.
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    moments = iter(
+        [datetime(2026, 8, 24, 10, 40, tzinfo=UTC) + timedelta(minutes=i) for i in range(3)]
+    )
+    engine.run(max_ticks=2, sleep=lambda _s: None, now_fn=lambda: next(moments))
+
+    assert s.SchedulerState.load(state_path).last_tick_at() == datetime(
+        2026, 8, 24, 10, 41, tzinfo=UTC
+    )
+
+
+def _blocking_runner() -> tuple[threading.Event, threading.Event, s.RunnerFactory]:
+    """Build a runner that announces it started and then hangs, as a long session would."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(_request: r.RunRequest) -> r.RunResult:
+        started.set()
+        release.wait(timeout=5)
+        return r.RunResult(outcome=r.Outcome.OK, exit_status=0)
+
+    return started, release, lambda _spec: r.MockRunner(behavior=slow)
+
+
+def _beat_after(path: Path, after: datetime) -> datetime | None:
+    """Poll the state file for a heartbeat stamped at or after ``after``."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        beat = s.SchedulerState.load(path).last_tick_at()
+        if beat is not None and beat >= after:
+            return beat
+        time.sleep(0.01)
+    return None
+
+
+def test_the_heartbeat_keeps_stamping_while_a_fire_blocks_the_daemon(
+    build, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bug this exists to prevent: the loop cannot come round while it is inside a
+    # 15-minute routine, so a heartbeat that only lands between wake-ups goes stale exactly
+    # when a run is in flight — and every reader calls the daemon running it dead.
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    started, release, factory = _blocking_runner()
+    engine = build(HOURLY, runner_factory=factory)
+    moment = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)
+    engine.state.set_anchor(engine.scheduled[0].key, moment - timedelta(hours=1))
+    watching_since = datetime.now(UTC)
+
+    daemon = threading.Thread(
+        target=lambda: engine.run(max_ticks=1, sleep=lambda _s: None, now_fn=lambda: moment)
+    )
+    daemon.start()
+    try:
+        assert started.wait(timeout=5), "the routine never fired"
+        beat = _beat_after(tmp_path / "state.json", watching_since)
+    finally:
+        release.set()
+        daemon.join(timeout=5)
+
+    assert beat is not None, "the heartbeat went quiet while the daemon was mid-run"
+
+
+def test_a_cron_tick_keeps_stamping_while_it_fires(
+    build, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other deployment: `steward scheduler tick` fires inside its lock, with no loop to
+    # come round at all, so the heartbeat is the only thing that can say it is still here.
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    started, release, factory = _blocking_runner()
+    engine = build(HOURLY, runner_factory=factory)
+    moment = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)
+    engine.state.set_anchor(engine.scheduled[0].key, moment - timedelta(hours=1))
+    engine.state.save()
+    watching_since = datetime.now(UTC)
+
+    cron = threading.Thread(target=lambda: engine.tick(moment))
+    cron.start()
+    try:
+        assert started.wait(timeout=5), "the routine never fired"
+        beat = _beat_after(tmp_path / "state.json", watching_since)
+    finally:
+        release.set()
+        cron.join(timeout=5)
+
+    assert beat is not None, "the heartbeat went quiet while the tick was mid-run"
+
+
+def test_a_dry_run_leaves_no_heartbeat(write_resident: ResidentWriter, tmp_path: Path) -> None:
+    # A rehearsal must not make the fleet look attended: nothing is firing on its account.
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+        dry_run=True,
+    )
+    engine.run(
+        max_ticks=1, sleep=lambda _s: None, now_fn=lambda: datetime(2026, 8, 24, 10, 40, tzinfo=UTC)
+    )
+
+    assert not state_path.exists()
+
+
+def test_a_stamp_writes_the_heartbeat_and_nothing_else(tmp_path: Path) -> None:
+    """A heartbeat carries one fact, so an anchor somebody else saved survives it."""
+    path = tmp_path / "state.json"
+    mine = s.SchedulerState.load(path)
+    mine.set_anchor("a/hourly", datetime(2026, 8, 24, 10, 0, tzinfo=UTC))
+    mine.save()
+
+    # Another tick process anchors the 10:05 occurrence over the top of it.
+    theirs = s.SchedulerState.load(path)
+    theirs.set_anchor("a/hourly", datetime(2026, 8, 24, 10, 5, tzinfo=UTC))
+    theirs.save()
+
+    # ... and now my heartbeat lands, still holding the 10:00 snapshot in memory.
+    mine.stamp(datetime(2026, 8, 24, 10, 6, tzinfo=UTC))
+
+    written = s.SchedulerState.load(path)
+    assert written.anchor("a/hourly") == datetime(2026, 8, 24, 10, 5, tzinfo=UTC)
+    assert written.last_tick_at() == datetime(2026, 8, 24, 10, 6, tzinfo=UTC)
+    assert mine.last_tick_at() == datetime(2026, 8, 24, 10, 6, tzinfo=UTC), "and in memory too"
 
 
 # -------------------------------------------------------------------------- concurrency
@@ -1166,6 +1375,140 @@ def test_a_crash_after_saving_the_anchor_does_not_re_fire(
         workdir=tmp_path,
     )
     assert restarted.tick(datetime(2026, 8, 24, 10, 16, tzinfo=UTC)) == []
+
+
+def test_a_heartbeat_does_not_re_fire_what_another_tick_process_already_ran(
+    write_resident: ResidentWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The heartbeat must not be able to undo exactly-once (steward #76) from outside the lock.
+
+    Tick A releases the state lock before its board sweep and then spends minutes in it,
+    beating all the while off a snapshot taken before tick B existed. A stamp that wrote
+    that whole snapshot would erase the anchor B saved under the lock, and the occurrence
+    B just fired would look unfired to the next tick and run a second time.
+    """
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    seed = s.SchedulerState.load(state_path)
+    seed.set_anchor("test-agent/inbox-read", datetime(2026, 8, 24, 10, 0, tzinfo=UTC))
+    seed.save()
+
+    sweeping, release = threading.Event(), threading.Event()
+
+    class Sweeping:
+        """Board hooks that hang in the sweep, as a board of long sessions would."""
+
+        def decisions_for(self, resident_id: str) -> str | None:  # noqa: ARG002
+            return None
+
+        def harvest(self, manifest: m.ResidentManifest, output: str) -> object:  # noqa: ARG002
+            return None
+
+        def dispatch(self, now: datetime) -> object:  # noqa: ARG002
+            sweeping.set()
+            release.wait(timeout=5)
+            return None
+
+    def scheduler(hooks: s.WakeHooks | None = None) -> s.Scheduler:
+        return s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=s.SchedulerState.load(state_path),
+            workdir=tmp_path,
+            hooks=hooks,
+        )
+
+    first = scheduler(Sweeping())
+    # Nothing is due at :03, so A anchors nothing and its snapshot stays at 10:00.
+    sweeper = threading.Thread(target=lambda: first.tick(datetime(2026, 8, 24, 10, 3, tzinfo=UTC)))
+    sweeper.start()
+    try:
+        assert sweeping.wait(timeout=5), "the board sweep never started"
+        second = scheduler()
+        fired = second.tick(datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC))
+        assert [report.fired for report in fired] == [True], "B fires the 10:15 occurrence"
+        # ... and A keeps beating over the top of what B wrote.
+        assert _beat_after(state_path, datetime.now(UTC)) is not None, "A stopped beating"
+    finally:
+        release.set()
+        sweeper.join(timeout=5)
+
+    third = scheduler()
+    assert third.tick(datetime(2026, 8, 24, 10, 18, tzinfo=UTC)) == [], "10:15 already ran"
+
+
+def test_a_beat_declines_a_wake_up_that_is_already_queued_behind_another_process(
+    build, tmp_path: Path
+) -> None:
+    """A beat waits for nobody — not for the flock, and not for a thread waiting on it.
+
+    The daemon takes the state lock once per wake-up (steward #25), and that wait is as
+    long as whatever the other process is holding it for: a cron ``tick`` fires inside the
+    lock, so a 15-minute routine is a 15-minute wait. The heartbeat runs on its own thread
+    precisely so it keeps landing through stretches like that, and the process holding the
+    lock is stamping the file anyway — so a beat it cannot make immediately is one it must
+    drop, however the queue it would join is spelled.
+    """
+    engine = build(HOURLY)
+    lock_path = (tmp_path / "state.json").with_suffix(".json.lock")
+
+    # Stand in for the cron tick holding the state lock across a long fire: a second open
+    # file description conflicts with the scheduler's own exactly as another process would.
+    other = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(other, fcntl.LOCK_EX)
+    # ... and lets go eventually, so a beat that *did* queue finishes late instead of hanging.
+    threading.Timer(2.0, lambda: fcntl.flock(other, fcntl.LOCK_UN)).start()
+
+    waiting = threading.Event()
+
+    def wake_up() -> None:
+        waiting.set()
+        with engine._state_lock():
+            pass
+
+    loop = threading.Thread(target=wake_up, daemon=True)
+    loop.start()
+    try:
+        assert waiting.wait(timeout=5), "the wake-up never started"
+        time.sleep(0.2)  # long enough to be inside the blocking flock, holding the gate
+        started = time.monotonic()
+        with engine._state_lock(wait=False) as held:
+            assert not held, "the lock another process holds is not this beat's to take"
+        assert time.monotonic() - started < 1.0, "the beat queued behind the wake-up"
+    finally:
+        loop.join(timeout=5)
+        os.close(other)
+
+
+def test_two_processes_never_write_through_one_temp_state_file(tmp_path: Path) -> None:
+    """A shared temp name is a shared half-written file: one process can rename the other's."""
+    path = tmp_path / "state.json"
+    assert s.temp_state_path(path, pid=101) != s.temp_state_path(path, pid=102)
+    assert s.temp_state_path(path) == s.temp_state_path(path, pid=os.getpid())
+
+
+def test_the_startup_sweep_leaves_another_schedulers_temp_alone(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Clearing a temp a live scheduler is mid-rename on turns its saved anchor into nothing."""
+    path = write_resident(manifest_with(HOURLY))
+    state_path = tmp_path / "state.json"
+    legacy = state_path.with_suffix(".json.tmp")  # written before temps were named per process
+    legacy.write_text("half a write from a crash", encoding="utf-8")
+    theirs = s.temp_state_path(state_path, pid=os.getpid() + 1)
+    theirs.write_text("another scheduler, mid-rename", encoding="utf-8")
+
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=state_path),
+        workdir=tmp_path,
+    )
+    engine.tick(datetime(2026, 8, 24, 10, 40, tzinfo=UTC))  # nothing due at :40
+
+    assert not legacy.exists(), "a name no live writer uses is still cleaned up"
+    assert theirs.exists(), "another process's temp is not this one's to delete"
 
 
 # --------------------------------------------------------------- nowhere to run (steward #64)
