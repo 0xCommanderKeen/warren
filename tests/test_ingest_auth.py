@@ -24,6 +24,12 @@ EVENT = {
 failures = []
 
 
+class FakeServer:
+    """Minimal server surface required by the in-memory Handler harness."""
+
+    boot_id = "0" * 32
+
+
 def check(label, got, want):
     ok = got == want
     print(f"  {'ok  ' if ok else 'FAIL'} {label}: {got!r}" + ("" if ok else f" (want {want!r})"))
@@ -69,7 +75,8 @@ def request(serve, raw):
             pass
 
     handler = Fake.__new__(Fake)
-    handler.request = handler.client_address = handler.server = None
+    handler.request = handler.client_address = None
+    handler.server = FakeServer()
     handler.setup()
     handler.handle_one_request()
     out = handler.wfile.getvalue()

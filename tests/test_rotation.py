@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import serve
+from tests.http_test_support import RunningServer
 
 
 def ts(minutes_ago=0):
@@ -322,14 +323,11 @@ class ServerRotationTest(unittest.TestCase):
         serve.MAX_LOG_BYTES = 8192
         serve.ARCHIVE_DIR = ""
         serve._rotate_floor = 0
-        self.server = serve.http.server.ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        self.running_server = RunningServer(serve)
+        self.server = self.running_server.server
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join()
+        self.running_server.stop()
         serve.EVENTS, serve.MAX_LOG_BYTES, serve.ARCHIVE_DIR = self.previous
         serve._rotate_floor = 0
         self.tmp.cleanup()

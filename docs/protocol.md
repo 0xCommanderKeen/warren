@@ -121,10 +121,31 @@ Rotating the secret runs the same loop in reverse: unset on the server, re-issue
 emitters, set again.
 The viewer bootstraps and falls back through `GET /events?since=<cursor>`. The
 response body contains only complete JSONL lines after that position, and
-`X-Burrow-Cursor` supplies the cursor for the next request. Omit `since` (or use `0`)
-for a full bootstrap. If a log is truncated or rotated, the server starts again at
-byte zero and includes `X-Burrow-Reset: 1`; consumers must discard their reduced
-state before folding in that response.
+`X-Burrow-Cursor` supplies the cursor for the next request. Omit `since` for an
+initial full bootstrap. An explicit cursor, including legacy numeric `0`, is a
+client resume request. If it cannot prove that it belongs to the current log, or if
+the log is truncated or rotated, the server starts again at byte zero and includes
+`X-Burrow-Reset: 1`; consumers must discard their reduced state before folding in
+that response.
+
+Server-issued cursors are opaque, versioned values with four explicit identity layers:
+`v1:<boot-id>:<device>:<inode>:<generation>:<offset>`. The random boot ID changes
+for every constructed HTTP server instance; device and inode identify the open live
+file; generation increments when that instance rewrites the inode in place during
+rotation; offset is the next complete JSONL byte. Offset zero is still formatted
+with the full identity, including for an empty or not-yet-created log. Any identity
+mismatch produces a reset and complete replay of the current live log. Thus a cursor
+from before a restart cannot alias the new server even if the inode and generation
+repeat. Legacy numeric and pre-v1 structured cursors are accepted where syntactically
+valid, but are reset-only because they cannot prove boot identity. Malformed,
+negative, or oversized cursors receive HTTP 400.
+
+Boot identity belongs to the HTTP server lifecycle, not module import state. Multiple
+server instances in one process have distinct IDs; one instance retains its ID across
+in-process log rotation. If a server socket is constructed before a process fork,
+the parent retains its namespace while every child refreshes to a distinct,
+process-bound boot ID before serving. That child ID then remains stable across its
+requests and in-process log rotations.
 
 Live updates use `GET /events/stream?since=<cursor>` with `text/event-stream`. Each
 JSON event is one SSE `data` message and its `id` is the cursor immediately after
@@ -134,6 +155,10 @@ SSE and polling neither duplicates nor skips an event. A rotation emits an SSE
 `reset` event before replaying the new live log. The stream sends keepalive comments
 and `X-Accel-Buffering: no` so the NAS reverse proxy does not hold events in a
 buffer.
+
+Closing a browser tab, navigating away, or a proxy closing an SSE socket is an
+expected lifecycle event: broken-pipe, connection-reset, and connection-aborted
+errors end that handler quietly. Other I/O errors remain visible as server faults.
 
 `GET /transport/status` returns counters for ingest deduplication and notification
 delivery pressure. Before returning 204, accepted knocks enter a separate fsynced
@@ -305,6 +330,9 @@ All three paths take the same process lock, and file appends and rotation also
 take an advisory lock on the log shared with the bundled emitter. Rotation
 archives a snapshot and rewrites the live file in place, retaining its inode so
 even an already-open append descriptor continues writing to the live log.
+The process-local cursor generation increments only after that rewrite is durable;
+connected polling and SSE clients then receive one reset followed by the complete
+carry-forward tail, without gaps or duplicate delivery across transport handoff.
 
 ## Where the work happens (places)
 

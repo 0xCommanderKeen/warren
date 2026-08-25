@@ -18,8 +18,10 @@ GET /transport/status exposes bounded ingest-deduplication and knock-forwarding
 pressure for the browser's live transport status.
 """
 import collections
+import dataclasses
 import datetime
 import email.header
+import errno
 import fcntl
 import glob
 import hmac
@@ -28,11 +30,13 @@ import json
 import os
 import queue
 import re
+import secrets
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
+import weakref
 
 from hooks import durable
 import notification_persistence
@@ -63,7 +67,6 @@ DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 LOG_LOCK = threading.Lock()
 _rotate_floor = 0                    # don't re-check until the log grows past this
 _log_generation = 0                 # changes when rotation rewrites the live inode
-
 NOTIFY_URL = (os.environ.get("BURROW_NOTIFY_URL") or "").strip()
 NOTIFY_TOKEN = (os.environ.get("BURROW_NOTIFY_TOKEN") or "").strip()
 try:
@@ -588,11 +591,70 @@ def ensure_knock_workers():
         _recover_knocks()
 
 
+class BurrowHTTPServer(http.server.ThreadingHTTPServer):
+    """A process-bound server lifecycle, including its cursor namespace.
+
+    Construction establishes the parent's namespace.  If the listening server
+    is inherited across fork, the child hook replaces both the identity and its
+    lock before child code or handler threads can use either.  PID checks at
+    serving and cursor boundaries are a defensive fallback; serving refreshes
+    before ThreadingHTTPServer is allowed to create child handler threads.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self._boot_id_lock = threading.Lock()
+        self._boot_id_pid = os.getpid()
+        self._boot_id = secrets.token_hex(16)
+        super().__init__(*args, **kwargs)
+        if hasattr(os, "register_at_fork"):
+            server_ref = weakref.ref(self)
+
+            def refresh_in_child():
+                server = server_ref()
+                if server is not None:
+                    server._refresh_process_identity()
+
+            # register_at_fork has no unregister API.  Its registry retains only
+            # this closure and the closure retains the server weakly.
+            self._refresh_in_child = refresh_in_child
+            os.register_at_fork(after_in_child=refresh_in_child)
+
+    def _refresh_process_identity(self):
+        # Never acquire a lock copied from a multi-threaded parent: its owner no
+        # longer exists in the child.  Publish the replacement lock before the
+        # new identity.
+        self._boot_id_lock = threading.Lock()
+        with self._boot_id_lock:
+            self._boot_id = secrets.token_hex(16)
+            self._boot_id_pid = os.getpid()
+
+    def _ensure_process_identity(self):
+        if self._boot_id_pid != os.getpid():
+            # On fork-capable Python the child hook runs synchronously while the
+            # child still has one thread.  This fallback is also reached before
+            # serve_forever/handle_request can create handler threads.
+            self._refresh_process_identity()
+
+    @property
+    def boot_id(self):
+        self._ensure_process_identity()
+        with self._boot_id_lock:
+            return self._boot_id
+
+    def serve_forever(self, *args, **kwargs):
+        self._ensure_process_identity()
+        return super().serve_forever(*args, **kwargs)
+
+    def handle_request(self):
+        self._ensure_process_identity()
+        return super().handle_request()
+
+
 def serve_forever():
     """Start background delivery before accepting requests, then serve."""
     if NOTIFY_URL:
         ensure_knock_workers()
-    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    BurrowHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
 def transport_status():
@@ -821,8 +883,101 @@ def _reject_json_constant(value):
     raise json.JSONDecodeError("non-standard JSON constant", value, 0)
 
 
+@dataclasses.dataclass(frozen=True)
+class EventCursor:
+    """Validated event-log position with explicit resume policy."""
+
+    boot_id: str | None = None
+    device: int = 0
+    inode: int = 0
+    generation: int = 0
+    offset: int = 0
+    reset_only: bool = False
+
+    MAX_ENCODED_BYTES = 160
+    MAX_INTEGER = (1 << 64) - 1
+
+    @classmethod
+    def initial(cls):
+        return cls()
+
+    @classmethod
+    def parse(cls, raw):
+        if not isinstance(raw, str) or not raw or len(raw) > cls.MAX_ENCODED_BYTES:
+            raise ValueError
+        parts = raw.split(":")
+        if len(parts) == 6 and parts[0] == "v1":
+            boot_id = parts[1]
+            if not re.fullmatch(r"[0-9a-f]{32}", boot_id):
+                raise ValueError
+            values = cls._parse_integers(parts[2:])
+            return cls(boot_id, *values)
+        if len(parts) in (3, 4):
+            values = cls._parse_integers(parts)
+            return cls(offset=values[-1], reset_only=True)
+        if len(parts) == 1:
+            return cls(offset=cls._parse_integers(parts)[0], reset_only=True)
+        raise ValueError
+
+    @classmethod
+    def _parse_integers(cls, fields):
+        values = []
+        for field in fields:
+            if not field or len(field) > 20 or not field.isascii() or not field.isdigit():
+                raise ValueError
+            value = int(field)
+            if value > cls.MAX_INTEGER:
+                raise ValueError
+            values.append(value)
+        return values
+
+    @classmethod
+    def issued(cls, boot_id, stat, generation, offset):
+        device, inode = (stat.st_dev, stat.st_ino) if stat is not None else (0, 0)
+        return cls(boot_id, device, inode, generation, offset)
+
+    def resume(self, current, size):
+        """Return (offset, reset) against the current issued cursor identity."""
+        if self.boot_id is None and not self.reset_only:
+            return 0, False
+        identity_matches = (
+            self.boot_id == current.boot_id
+            and self.device == current.device
+            and self.inode == current.inode
+            and self.generation == current.generation
+        )
+        if self.reset_only or not identity_matches or self.offset > size:
+            return 0, True
+        return self.offset, False
+
+    def format(self):
+        if self.boot_id is None:
+            raise ValueError("only server-issued cursors can be formatted")
+        return ":".join(str(part) for part in (
+            "v1", self.boot_id, self.device, self.inode, self.generation,
+            self.offset,
+        ))
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+
+    @staticmethod
+    def _expected_disconnect(error):
+        """Browser/proxy departure is normal; unrelated I/O failures are not."""
+        return isinstance(error, (BrokenPipeError, ConnectionResetError,
+                                  ConnectionAbortedError)) or getattr(
+            error, "errno", None) in {errno.EPIPE, errno.ECONNRESET,
+                                      errno.ECONNABORTED}
+
+    def handle(self):
+        # Disconnects can surface while BaseHTTPRequestHandler parses the next
+        # keep-alive request, outside the SSE write loop.
+        try:
+            super().handle()
+        except OSError as error:
+            if not self._expected_disconnect(error):
+                raise
 
     def _authorized(self):
         if not TOKEN:
@@ -850,18 +1005,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/events":
             params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            raw_since = params.get("since", ["0"])[0]
             try:
-                cursor_identity, since = self._parse_cursor(raw_since)
+                cursor = (EventCursor.parse(params["since"][0])
+                          if "since" in params else EventCursor.initial())
             except (TypeError, ValueError):
                 self._send(400, b"invalid since cursor", "text/plain")
                 return
 
-            records, identity, cursor, reset = self._read_event_records(
-                cursor_identity, since)
+            records, cursor, reset = self._read_event_records(cursor)
             data = b"".join(line for _, line in records)
 
-            headers = {"X-Burrow-Cursor": self._format_cursor(identity, cursor)}
+            headers = {"X-Burrow-Cursor": cursor.format()}
             if reset:
                 headers["X-Burrow-Reset"] = "1"
             self._send(200, data, "application/x-ndjson", headers)
@@ -967,30 +1121,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except OSError:
             self._send(404, b"missing: " + path.encode(), "text/plain")
 
-    @staticmethod
-    def _parse_cursor(raw):
-        parts = raw.split(":")
-        if len(parts) == 4:
-            identity = (int(parts[0]), int(parts[1]), int(parts[2]))
-            offset = int(parts[3])
-        elif len(parts) == 3:  # cursor issued before rotation generations existed
-            identity, offset = (int(parts[0]), int(parts[1])), int(parts[2])
-        elif len(parts) == 1:
-            identity, offset = None, int(raw)
-        else:
-            raise ValueError
-        if offset < 0:
-            raise ValueError
-        return identity, offset
-
-    @staticmethod
-    def _format_cursor(identity, offset):
-        if not identity or not offset:
-            return "0"
-        return ":".join(str(part) for part in (*identity, offset))
-
-    @staticmethod
-    def _read_event_records(cursor_identity, offset):
+    def _read_event_records(self, cursor):
         """Read complete records once for both polling and SSE transports."""
         records, reset = [], False
         with LOG_LOCK:
@@ -998,19 +1129,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 with open(EVENTS, "rb") as stream:
                     stat = os.fstat(stream.fileno())
-                    identity = (stat.st_dev, stat.st_ino, _log_generation)
-                    if offset > stat.st_size or (
-                            cursor_identity is not None and cursor_identity != identity):
-                        offset, reset = 0, True
+                    current = EventCursor.issued(
+                        self.server.boot_id, stat, _log_generation, 0)
+                    offset, reset = cursor.resume(current, stat.st_size)
                     stream.seek(offset)
                     chunk = stream.read()
                     end = chunk.rfind(b"\n") + 1
                     for line in chunk[:end].splitlines(keepends=True):
                         offset += len(line)
                         records.append((offset, line))
-                    return records, identity, offset, reset
+                    return records, dataclasses.replace(current, offset=offset), reset
             except FileNotFoundError:
-                return records, None, 0, offset > 0
+                current = EventCursor.issued(
+                    self.server.boot_id, None, _log_generation, 0)
+                _, reset = cursor.resume(current, 0)
+                return records, current, reset
 
     def _stream_events(self, parsed):
         """Tail complete JSONL records as SSE messages.
@@ -1019,10 +1152,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         That makes Last-Event-ID and the polling fallback interchangeable.
         """
         params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        raw_cursor = (self.headers.get("Last-Event-ID")
-                      or params.get("since", ["0"])[0])
         try:
-            identity, offset = self._parse_cursor(raw_cursor)
+            if self.headers.get("Last-Event-ID"):
+                cursor = EventCursor.parse(self.headers["Last-Event-ID"])
+            elif "since" in params:
+                cursor = EventCursor.parse(params["since"][0])
+            else:
+                cursor = EventCursor.initial()
         except (TypeError, ValueError):
             self._send(400, b"invalid event cursor", "text/plain")
             return
@@ -1038,11 +1174,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_keepalive = time.monotonic()
         try:
             while True:
-                records, identity, offset, reset = self._read_event_records(identity, offset)
+                records, cursor, reset = self._read_event_records(cursor)
                 if reset:
                     self.wfile.write(b"event: reset\ndata: {}\n\n")
                 for record_offset, line in records:
-                    event_id = self._format_cursor(identity, record_offset)
+                    event_id = dataclasses.replace(cursor, offset=record_offset).format()
                     self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
                     self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
                 now = time.monotonic()
@@ -1052,8 +1188,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.flush()
                     last_keepalive = now
                 time.sleep(0.1)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            return
+        except OSError as error:
+            if self._expected_disconnect(error):
+                return
+            raise
 
     def _send(self, code, data, ctype, headers=None):
         self.send_response(code)

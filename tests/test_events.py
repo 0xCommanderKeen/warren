@@ -1,5 +1,7 @@
-import http.client
+import concurrent.futures
+import errno
 import glob
+import http.client
 import json
 import multiprocessing
 import os
@@ -11,6 +13,7 @@ import socket
 from unittest import mock
 
 import serve
+from tests.http_test_support import RunningServer
 
 
 def _race_knock(events, observed, event, gate):
@@ -34,26 +37,82 @@ def _terminalize_knock(events, event, kind, gate):
     serve._commit_knock_terminal(event, kind)
 
 
+@unittest.skipUnless(hasattr(os, "fork"), "requires os.fork")
+class APreforkServerIdentityTest(unittest.TestCase):
+    def test_inherited_listener_issues_one_new_process_identity(self):
+        previous_events = serve.EVENTS
+        with tempfile.TemporaryDirectory() as tmp:
+            serve.EVENTS = os.path.join(tmp, "events.jsonl")
+            server = serve.BurrowHTTPServer(("127.0.0.1", 0), serve.Handler)
+            parent_boot_id = server.boot_id
+            ready_read, ready_write = os.pipe()
+            stop_read, stop_write = os.pipe()
+            child_pid = os.fork()
+            if child_pid == 0:
+                os.close(ready_read)
+                os.close(stop_write)
+                try:
+                    thread = threading.Thread(
+                        target=server.serve_forever, daemon=True)
+                    thread.start()
+                    os.write(ready_write, b"1")
+                    os.read(stop_read, 1)
+                    server.shutdown()
+                    thread.join()
+                    server.server_close()
+                    os._exit(0)
+                except BaseException:
+                    os._exit(1)
+
+            os.close(ready_write)
+            os.close(stop_read)
+            try:
+                self.assertEqual(os.read(ready_read, 1), b"1")
+
+                def fetch_cursor(_):
+                    conn = http.client.HTTPConnection(
+                        *server.server_address, timeout=2)
+                    conn.request("GET", "/events")
+                    response = conn.getresponse()
+                    response.read()
+                    cursor = response.headers["X-Burrow-Cursor"]
+                    conn.close()
+                    return cursor
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                    cursors = list(pool.map(fetch_cursor, range(8)))
+                child_boot_ids = {cursor.split(":", 2)[1] for cursor in cursors}
+                self.assertEqual(len(child_boot_ids), 1)
+                self.assertNotEqual(child_boot_ids, {parent_boot_id})
+                self.assertEqual(server.boot_id, parent_boot_id)
+            finally:
+                os.write(stop_write, b"1")
+                os.close(stop_write)
+                os.close(ready_read)
+                _, status = os.waitpid(child_pid, 0)
+                server.server_close()
+                serve.EVENTS = previous_events
+            self.assertEqual(status, 0)
+
+
 class EventsEndpointTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.events = os.path.join(self.tmp.name, "events.jsonl")
         self.previous_events = serve.EVENTS
         serve.EVENTS = self.events
-        self.server = serve.http.server.ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        self.running_server = RunningServer(serve)
+        self.server = self.running_server.server
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join()
+        self.running_server.stop()
         serve.EVENTS = self.previous_events
         self.tmp.cleanup()
 
-    def get_events(self, since=0):
+    def get_events(self, since=None):
         conn = http.client.HTTPConnection(*self.server.server_address)
-        conn.request("GET", f"/events?since={since}")
+        path = "/events" if since is None else f"/events?since={since}"
+        conn.request("GET", path)
         response = conn.getresponse()
         body = response.read()
         headers = dict(response.getheaders())
@@ -64,6 +123,10 @@ class EventsEndpointTest(unittest.TestCase):
         with open(self.events, "ab") as stream:
             for event in events:
                 stream.write(json.dumps(event).encode() + b"\n")
+
+    def restart_server(self):
+        self.running_server.restart()
+        self.server = self.running_server.server
 
     @staticmethod
     def valid_event(**changes):
@@ -642,6 +705,60 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertEqual([second], [json.loads(line) for line in body.splitlines()])
         self.assertNotEqual(headers["X-Burrow-Cursor"], cursor)
 
+    def test_two_server_instances_have_distinct_boot_identities(self):
+        other = serve.BurrowHTTPServer(("127.0.0.1", 0), serve.Handler)
+        self.addCleanup(other.server_close)
+        self.assertRegex(self.server.boot_id, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(self.server.boot_id, other.boot_id)
+
+    def test_pre_restart_cursor_resets_and_replays_changed_live_log(self):
+        old = {"type": "idle", "agent_id": "old-content"}
+        replacement = {"type": "idle", "agent_id": "new-content-is-longer"}
+        self.append(old)
+        _, headers, _ = self.get_events()
+        old_cursor = headers["X-Burrow-Cursor"]
+
+        # A fresh process gets a new boot identity while the path, inode, and
+        # process-local generation can all be unchanged.
+        with open(self.events, "wb") as stream:
+            stream.write(json.dumps(replacement).encode() + b"\n")
+        old_boot_id = self.server.boot_id
+        self.restart_server()
+        _, headers, body = self.get_events(old_cursor)
+
+        self.assertEqual(headers["X-Burrow-Reset"], "1")
+        self.assertEqual([replacement], [json.loads(line) for line in body.splitlines()])
+        self.assertNotEqual(self.server.boot_id, old_boot_id)
+        self.assertTrue(headers["X-Burrow-Cursor"].startswith(
+            "v1:" + self.server.boot_id + ":"))
+
+    def test_positive_numeric_cursor_resets_instead_of_reading_mid_record(self):
+        event = {"type": "idle", "agent_id": "complete-replay-is-long-enough"}
+        self.append(event)
+        _, headers, body = self.get_events(7)
+        self.assertEqual(headers["X-Burrow-Reset"], "1")
+        self.assertEqual([event], [json.loads(line) for line in body.splitlines()])
+
+    def test_explicit_numeric_zero_resets_but_absent_initial_cursor_does_not(self):
+        event = {"type": "idle", "agent_id": "initial"}
+        self.append(event)
+        _, initial_headers, initial_body = self.get_events(None)
+        _, explicit_headers, explicit_body = self.get_events(0)
+        self.assertNotIn("X-Burrow-Reset", initial_headers)
+        self.assertEqual(initial_body, explicit_body)
+        self.assertEqual(explicit_headers["X-Burrow-Reset"], "1")
+
+    def test_legacy_structured_cursors_reset_truthfully(self):
+        event = {"type": "idle", "agent_id": "legacy-replay"}
+        self.append(event)
+        stat = os.stat(self.events)
+        for cursor in (f"{stat.st_dev}:{stat.st_ino}:1",
+                       f"{stat.st_dev}:{stat.st_ino}:0:1"):
+            with self.subTest(cursor=cursor):
+                _, headers, body = self.get_events(cursor)
+                self.assertEqual(headers["X-Burrow-Reset"], "1")
+                self.assertEqual([event], [json.loads(line) for line in body.splitlines()])
+
     def test_cursor_beyond_rotated_log_resets(self):
         self.append({"type": "idle", "agent_id": "old"})
         _, headers, _ = self.get_events()
@@ -692,11 +809,102 @@ class EventsEndpointTest(unittest.TestCase):
             stream.write(b'{"type":"idle"')
         _, headers, body = self.get_events()
         self.assertEqual(body, b"")
-        self.assertEqual(headers["X-Burrow-Cursor"], "0")
+        self.assertRegex(headers["X-Burrow-Cursor"],
+                         r"^v1:[0-9a-f]{32}:\d+:\d+:\d+:0$")
+
+    def test_empty_log_cursor_restarts_with_reset_and_complete_polling_replay(self):
+        _, headers, body = self.get_events(None)
+        empty_cursor = headers["X-Burrow-Cursor"]
+        self.assertEqual(body, b"")
+        self.assertTrue(empty_cursor.endswith(":0"))
+        replacement = {"type": "idle", "agent_id": "after-empty-restart"}
+        self.append(replacement)
+        self.restart_server()
+        _, headers, body = self.get_events(empty_cursor)
+        self.assertEqual(headers["X-Burrow-Reset"], "1")
+        self.assertEqual([replacement], [json.loads(line) for line in body.splitlines()])
 
     def test_invalid_cursor_is_rejected(self):
-        status, _, _ = self.get_events(-1)
-        self.assertEqual(status, 400)
+        for cursor in (-1, "v1:short:1:2:3:4", "v2:" + "a" * 32 + ":1:2:3:4",
+                       "v1:" + "a" * 32 + ":1:2:-3:4", "1:2:3:4:5",
+                       "v1:" + "a" * 32 + ":" + "1" * 21 + ":2:3:4",
+                       "v1:" + "a" * 32 + ":1:2:3:4" + "0" * 161):
+            with self.subTest(cursor=cursor):
+                status, _, _ = self.get_events(cursor)
+                self.assertEqual(status, 400)
+
+    def test_expected_disconnects_are_quiet_but_other_io_faults_escape(self):
+        handler = object.__new__(serve.Handler)
+        with mock.patch.object(serve.http.server.BaseHTTPRequestHandler, "handle",
+                               side_effect=BrokenPipeError()):
+            handler.handle()
+        with mock.patch.object(serve.http.server.BaseHTTPRequestHandler, "handle",
+                               side_effect=OSError(errno.EIO, "disk failure")):
+            with self.assertRaisesRegex(OSError, "disk failure"):
+                handler.handle()
+
+    def test_polling_cursor_resumes_sse_and_sse_cursor_resumes_polling(self):
+        first = {"type": "idle", "agent_id": "one"}
+        second = {"type": "tool_called", "agent_id": "two"}
+        third = {"type": "idle", "agent_id": "three"}
+        self.append(first)
+        _, headers, _ = self.get_events()
+        poll_cursor = headers["X-Burrow-Cursor"]
+        self.append(second)
+
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream", headers={"Last-Event-ID": poll_cursor})
+        response = conn.getresponse()
+        sse_cursor = response.readline().decode().removeprefix("id: ").strip()
+        self.assertEqual(json.loads(response.readline().decode().removeprefix("data: ")),
+                         second)
+        response.readline()
+        conn.close()
+
+        self.append(third)
+        _, headers, body = self.get_events(sse_cursor)
+        self.assertNotIn("X-Burrow-Reset", headers)
+        self.assertEqual([third], [json.loads(line) for line in body.splitlines()])
+
+    def test_pre_restart_sse_cursor_resets_before_complete_replay(self):
+        old = {"type": "idle", "agent_id": "old"}
+        replacement = {"type": "idle", "agent_id": "replacement"}
+        self.append(old)
+        _, headers, _ = self.get_events()
+        old_cursor = headers["X-Burrow-Cursor"]
+        with open(self.events, "wb") as stream:
+            stream.write(json.dumps(replacement).encode() + b"\n")
+
+        self.restart_server()
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream",
+                     headers={"Last-Event-ID": old_cursor})
+        response = conn.getresponse()
+        self.assertEqual(response.readline(), b"event: reset\n")
+        self.assertEqual(response.readline(), b"data: {}\n")
+        self.assertEqual(response.readline(), b"\n")
+        replay_cursor = response.readline().decode().removeprefix("id: ").strip()
+        self.assertEqual(json.loads(
+            response.readline().decode().removeprefix("data: ")), replacement)
+        self.assertTrue(replay_cursor.startswith("v1:" + self.server.boot_id + ":"))
+        conn.close()
+
+    def test_empty_log_cursor_restarts_with_reset_and_complete_sse_replay(self):
+        _, headers, _ = self.get_events(None)
+        empty_cursor = headers["X-Burrow-Cursor"]
+        replacement = {"type": "idle", "agent_id": "sse-after-empty-restart"}
+        self.append(replacement)
+        self.restart_server()
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        conn.request("GET", "/events/stream", headers={"Last-Event-ID": empty_cursor})
+        response = conn.getresponse()
+        self.assertEqual(response.readline(), b"event: reset\n")
+        self.assertEqual(response.readline(), b"data: {}\n")
+        self.assertEqual(response.readline(), b"\n")
+        self.assertTrue(response.readline().decode().startswith("id: v1:"))
+        self.assertEqual(json.loads(
+            response.readline().decode().removeprefix("data: ")), replacement)
+        conn.close()
 
     def test_sse_pushes_new_events_and_resumes_from_last_event_id(self):
         first = {"type": "idle", "agent_id": "one"}

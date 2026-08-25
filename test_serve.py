@@ -390,7 +390,7 @@ class NotificationTests(unittest.TestCase):
         self.assertTrue(serve.persist_knock(event))
         fake_server = mock.MagicMock()
         with mock.patch.object(serve, "ensure_knock_workers") as ensure, \
-                mock.patch.object(serve.http.server, "ThreadingHTTPServer",
+                mock.patch.object(serve, "BurrowHTTPServer",
                                   return_value=fake_server):
             serve.serve_forever()
         ensure.assert_called_once_with()

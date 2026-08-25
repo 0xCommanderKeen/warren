@@ -46,6 +46,9 @@ map of everything the fleet does.
   responses unbuffered and give them an idle timeout longer than the 15-second
   keepalive interval. Polling automatically carries the same cursor while a stream
   is unavailable and retries SSE every two seconds.
+  Cursors are restart-safe: each HTTP server instance has a new identity (including
+  its empty-log offset-zero cursor), so clients holding an older cursor receive an
+  explicit reset and replay instead of resuming into unrelated live-log bytes.
 - **Mac emitter** — the installed `burrow-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
   `~/.claude/settings.json` hooks
