@@ -1220,6 +1220,7 @@ censusEl.addEventListener("click", event => {
 
 let souls = [];
 let artifacts = [];
+let deliverySuffix = "";
 const runtime = BurrowBrowser.createBrowserRuntime({
   now: () => Date.now(), fetch: (...args) => fetch(...args),
   EventSource: typeof EventSource === "undefined" ? null : EventSource,
@@ -1235,7 +1236,17 @@ const runtime = BurrowBrowser.createBrowserRuntime({
   },
   onTransport(state) {
     transportEl.dataset.state = state;
-    transportEl.textContent = "telemetry " + state;
+    transportEl.textContent = "telemetry " + state + deliverySuffix;
+  },
+  onTransportStatus(status) {
+    const notifications = status.notifications || {};
+    const pressure = Number(notifications.queued || 0);
+    const dropped = Number(notifications.dropped || 0);
+    transportEl.dataset.deliveryPressure = pressure || dropped ? "1" : "0";
+    if (dropped) deliverySuffix = ` · ${dropped} knock${dropped === 1 ? "" : "s"} dropped`;
+    else if (pressure) deliverySuffix = ` · ${pressure} knock${pressure === 1 ? "" : "s"} queued`;
+    else deliverySuffix = "";
+    transportEl.textContent = "telemetry " + runtime.snapshot().transport + deliverySuffix;
   },
 });
 
@@ -1264,6 +1275,8 @@ const runtime = BurrowBrowser.createBrowserRuntime({
       // Manifests are a separate projection input: refresh even while SSE keeps
       // event polling idle, so adding one promotes a visitor on the next fold.
       setInterval(runtime.refreshResidents, 2000);
+      runtime.refreshTransportStatus();
+      setInterval(runtime.refreshTransportStatus, 2000);
       // Wall-clock projection is independent of both transports: a quiet live
       // stream still ages activity, relative times, and the 12-hour census.
       setInterval(runtime.tick, 1000);

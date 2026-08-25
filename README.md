@@ -34,12 +34,11 @@ map of everything the fleet does.
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
   `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
-  updates with a tar-over-ssh pipe (UGOS scp is broken): `tar -cf - serve.py viewer |
-  ssh Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart
-  burrow`.
-  `BURROW_EVENTS=/data/events.jsonl`. Deploy code *and souls* with a tar-over-ssh
-  pipe (UGOS scp is broken): `tar -cf - serve.py viewer villagers | ssh Miha@dxp2800
-  'tar -xf - -C ~/docker/burrow/app'`, then `docker compose restart burrow`. Manifests
+  and all runtime support, resident manifests, and legacy souls with the
+  authoritative tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py
+  notification_persistence.py protocol.py residents.py hooks viewer villagers | ssh
+  Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
+  `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying.
   The viewer's live feed is SSE at `/events/stream`; the response disables nginx
@@ -47,20 +46,25 @@ map of everything the fleet does.
   responses unbuffered and give them an idle timeout longer than the 15-second
   keepalive interval. Polling automatically carries the same cursor while a stream
   is unavailable and retries SSE every two seconds.
-- **Mac emitter** — `hooks/emit.py` wired into `~/.claude/settings.json` hooks
+- **Mac emitter** — the installed `burrow-emit` bundle described in the
+  [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
+  `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
   `SubagentStart`, `SubagentStop`, `SessionEnd`) with
   `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
-  secret>`. Off the tailnet it falls back to `~/.burrow/events.jsonl` locally.
+  secret>`. Off the tailnet it records the privacy-filtered event in the bounded
+  durable primary outbox and `~/.burrow/events.jsonl`; later hooks replay
+  oldest-first after connectivity returns.
   Sessions pick hooks up on start, so already-running sessions won't appear.
   Every event is also mirrored to a local dev server if one is running — see
   [Working on burrow locally](#working-on-burrow-locally).
-- **Codex emitter** — the same script invoked with `--runner codex` from
+- **Codex emitter** — the same installed command invoked with `--runner codex` from
   user-level Codex hooks. It uses a distinct `codex:` identity without changing
   the default Claude adapter. Copyable configuration, trust review, and a smoke
   check are in [the protocol guide](docs/protocol.md#user-level-codex-setup).
-- **Life Agent emitter** — same script at `/root/.claude/burrow-emit.py` inside the
-  `life-agent` container (via the `claude-config` volume), with
+- **Life Agent emitter** — the same bundle installed at
+  `/root/.claude/burrow/` inside the `life-agent` container (via the
+  `claude-config` volume), invoked as `/root/.claude/burrow/burrow-emit`, with
   `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
   `BURROW_TOKEN` pair, so it appears as one resident villager that rests between
   turns instead of leaving.
@@ -85,14 +89,33 @@ connection costs nothing, and the event still reaches the NAS. Turn it off with
 (comma-separated for several), and give it a token with `BURROW_MIRROR_TOKEN` — the
 village's `BURROW_TOKEN` is deliberately never sent to a mirror.
 
+A mirror success never acknowledges the shared village. Primary failures remain in
+`~/.burrow/primary-outbox.jsonl` until a later hook replays them. Delivery attempts
+to independent targets run concurrently and rotate fairly through a durable queue.
+The complete transport path runs in a killable helper under a documented one-second
+host-hook budget; stalled persistence, diagnostics, or fallback cannot hold up the
+hosting agent. A helper killed before its first durable commit can still lose that
+current event—the exact durability/deadline tradeoff is documented in the protocol.
+One stable outbox transaction lock orders main and journal authorities by a
+pre-lock enqueue ID and enforces their aggregate caps. Lock contention and capped
+targets are durably deferred and diagnosed. Serialized bounded payload-free
+counters and recent failures are inspectable in
+`~/.burrow/transport-diagnostics.json`.
+Local-log rotation contention uses the same crash-safe pattern: a stable-lock
+deferred journal, atomic handoff, and idempotent replay IDs. Active plus replay
+deferred authority retains the newest 1,024 records within 5 MiB; capacity drops
+are counted in the transport diagnostics before victims are retired. A crash-time
+pending publication makes the physical ceiling three capped generations (15 MiB),
+plus at most 8 non-authoritative torn-tail files within 256 KiB.
+
 Two caveats worth knowing:
 
 - The local server's log defaults to `~/.burrow/events.jsonl`, which is also the
   emitter's offline fallback. Use `BURROW_EVENTS=/tmp/burrow-dev.jsonl python3 serve.py`
   to keep a dev run's history separate.
 - Hook *env* is read when a session starts, so changing `BURROW_MIRROR` only affects
-  sessions started afterwards. Changing `hooks/emit.py` itself applies immediately —
-  the script is re-read on every hook.
+  sessions started afterwards. Updating the installed emitter bundle applies
+  immediately — its files are re-read on every hook.
 
 No live fleet handy (or testing a projection rule that needs a specific sequence)?
 Replay a fixture instead: see [fixtures/README.md](fixtures/README.md). Run the whole
@@ -113,17 +136,33 @@ unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restar
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   viewer over the local log.
 - **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
-  `needs_human` event is also pushed there once, with the villager's name, project
+  `needs_human` event is also pushed there with a stable receiver dedupe ID, the villager's name, project
   and message (`https://ntfy.sh/<your-topic>` works out of the box;
   `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
-  dead notification service can never block or lose an event.
+  dead notification service can never block or lose an event. Forwarding uses two
+  workers and a 64-knock memory queue backed by a pre-acknowledgement fsynced journal. Restart and
+  startup/saturation recovery use stable-lock atomic journal handoff. A fixed
+  shard lock spans durable terminal recheck, external notification, and outcome.
+  The knock journal and each delivered/drop ledger are independently capped at
+  1,024 records/5 MiB. Disjoint active/replay journal authority plus a pending
+  publication can occupy 15 MiB; live plus pending copies of both fixed-size
+  hashed-ASCII terminal ledgers add 20 MiB (35 MiB total at defaults). Recovery converges before another handoff, with capacity victims
+  durably terminal-dropped first. `GET /transport/status` reports `delivered` and
+  `dropped` as the current bounded counts in their authoritative durable ledgers;
+  these survive restart but can decrease when older keys leave the retention window.
+  Retry, failure, and saturation counters describe only the current server process.
+  The live viewer consumes this report.
 - **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
   `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
   `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the
   village still needs, so nothing on screen changes. Archives are plain JSONL and
   keep the full history; set `BURROW_ARCHIVE` to put them elsewhere (on the NAS,
   they land next to the log in the mounted volume). `BURROW_MAX_LOG=0` turns
-  rotation off.
+  rotation off. The delivery-ID acceleration ledger is separately bounded to
+  1,024 records/5 MiB plus one atomic-copy allowance (10 MiB physical at
+  defaults); retained live/archive events remain the dedupe authority after
+  ledger eviction. This is exactly-once replay within retained event authority,
+  not a global-forever guarantee.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 

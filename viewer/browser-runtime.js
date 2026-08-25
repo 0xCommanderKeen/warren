@@ -18,6 +18,7 @@
     const clearTimeout = options.clearTimeout;
     const onProjection = options.onProjection || (() => {});
     const onTransport = options.onTransport || (() => {});
+    const onTransportStatus = options.onTransportStatus || (() => {});
     const warn = options.warn || (() => {});
 
     let souls = [];
@@ -33,6 +34,8 @@
     let streamReady = false;
     let reconnectTimer = null;
     let transport = "disconnected";
+    let transportStatus = null;
+    let transportStatusPromise = null;
     let reportedResidentDiagnostics = new Set();
 
     function setTransport(next) {
@@ -78,6 +81,21 @@
         } catch {}
       })().finally(() => { residentPromise = null; });
       return residentPromise;
+    }
+
+    function refreshTransportStatus() {
+      if (transportStatusPromise) return transportStatusPromise;
+      transportStatusPromise = (async () => {
+        try {
+          const response = await fetch("/transport/status", { cache: "no-store" });
+          if (!response.ok) return;
+          const report = await response.json();
+          if (!report || typeof report !== "object") return;
+          transportStatus = report;
+          onTransportStatus(report);
+        } catch {}
+      })().finally(() => { transportStatusPromise = null; });
+      return transportStatusPromise;
     }
 
     function poll() {
@@ -164,11 +182,13 @@
     }
 
     function snapshot() {
-      return { villagers, artifacts, souls, cursor: eventCursor, transport };
+      return { villagers, artifacts, souls, cursor: eventCursor, transport,
+        transportStatus };
     }
 
     onTransport(transport);
-    return { poll, connectStream, refreshResidents, tick, snapshot };
+    return { poll, connectStream, refreshResidents, refreshTransportStatus,
+      tick, snapshot };
   }
 
   return { createBrowserRuntime };

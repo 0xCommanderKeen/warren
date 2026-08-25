@@ -26,6 +26,7 @@ let now = BASE;
 let fetchEvents = 0;
 const projections = [];
 const transports = [];
+const deliveryStatuses = [];
 const resident = name => ({
   file: `${name}.resident.json`, valid: true, manifest_version: 1, home: 0,
   match: { agent_id: "agent-1" }, meta: { name, char: "Monk", accent: "#fff" },
@@ -48,12 +49,19 @@ const runtime = createBrowserRuntime({
     if (url === "/residents") {
       return { ok: true, json: async () => ({ residents: [currentResident], diagnostics: [] }) };
     }
+    if (url === "/transport/status") return {
+      ok: true, json: async () => ({
+        ingest: { duplicates: 2, dedupe_window: 4096 },
+        notifications: { queued: 3, queue_capacity: 64, dropped: 1 },
+      }),
+    };
     throw new Error(`unexpected fetch ${url}`);
   },
   setTimeout: fn => { runtime.retry = fn; return 1; },
   clearTimeout() {},
   onProjection: view => projections.push(view),
   onTransport: state => transports.push(state),
+  onTransportStatus: status => deliveryStatuses.push(status),
   warn() {},
 });
 
@@ -79,6 +87,10 @@ const runtime = createBrowserRuntime({
   await runtime.refreshResidents();
   assert.equal(runtime.snapshot().villagers[0].name, "New Name",
     "resident data refreshes while the event stream is silent");
+  await runtime.refreshTransportStatus();
+  assert.equal(deliveryStatuses.at(-1).notifications.dropped, 1);
+  assert.equal(runtime.snapshot().transportStatus.notifications.queued, 3,
+    "server delivery pressure is consumable through the live runtime seam");
 
   now = BASE + DROP_MS + 1;
   runtime.tick();

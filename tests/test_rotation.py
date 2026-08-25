@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -229,6 +230,26 @@ class RotationTest(unittest.TestCase):
             archived = f.read().splitlines()
         self.assertEqual(archived,
                          [json.dumps(e, ensure_ascii=False) for e in original])
+
+    def test_archive_directory_is_durable_before_live_log_is_modified(self):
+        original = self.noisy_history()
+        self.write(original)
+        checkpoints = []
+
+        def inspect_live(path):
+            with open(self.events, "rb") as stream:
+                checkpoints.append((path, stream.read()))
+
+        with mock.patch.object(serve, "_fsync_parent", side_effect=inspect_live):
+            with serve.LOG_LOCK:
+                serve.maybe_rotate()
+
+        self.assertEqual(len(checkpoints), 1)
+        self.assertTrue(checkpoints[0][0].startswith(serve.archive_dir()))
+        self.assertTrue(os.path.exists(checkpoints[0][0]))
+        self.assertEqual(checkpoints[0][1],
+                         "".join(json.dumps(item, ensure_ascii=False) + "\n"
+                                 for item in original).encode())
 
     def test_already_open_append_descriptor_stays_on_live_log(self):
         self.write(self.noisy_history())

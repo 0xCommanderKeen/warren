@@ -13,21 +13,29 @@ Env:
     BURROW_NOTIFY_URL    POST target for needs_human knocks (unset = no notifications)
     BURROW_NOTIFY_TOKEN  optional bearer token for that target (e.g. a private ntfy topic)
     BURROW_NOTIFY_TIMEOUT  seconds to wait on the webhook (default 5)
+
+GET /transport/status exposes bounded ingest-deduplication and knock-forwarding
+pressure for the browser's live transport status.
 """
 import collections
 import datetime
 import email.header
 import fcntl
+import glob
 import hmac
 import http.server
 import json
 import os
+import queue
+import re
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
 
+from hooks import durable
+import notification_persistence
 from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES, validate_event
 
 import residents as resident_manifests
@@ -63,6 +71,18 @@ try:
 except ValueError:
     NOTIFY_TIMEOUT = 5.0
 NOTIFY_MEMORY = 512      # how many knocks we remember, to not knock twice
+NOTIFY_WORKERS = 2
+NOTIFY_QUEUE = 64
+KNOCK_RECORDS = int(os.environ.get("BURROW_KNOCK_RECORDS") or 1024)
+KNOCK_BYTES = int(os.environ.get("BURROW_KNOCK_BYTES") or 5 * 1024 * 1024)
+LEDGER_RECORDS = KNOCK_RECORDS
+LEDGER_BYTES = KNOCK_BYTES
+KNOCK_LOCK_SHARDS = 32
+LEDGER_DELIVERY_IDS = notification_persistence.DELIVERY_IDS
+LEDGER_KNOCKS = notification_persistence.KNOCKS
+LEDGER_NOTIFIED = notification_persistence.NOTIFIED
+LEDGER_NOTIFY_DROPPED = notification_persistence.DROPPED
+LEDGER_KINDS = notification_persistence.KINDS
 DROP_SECONDS = 12 * 60 * 60
 VIEWER_EVENT_TYPES = {"task_started", "tool_called", "tool_failed",
                       "artifact_produced", "needs_human", "idle",
@@ -118,6 +138,27 @@ NAMES = ["Bramble", "Poppy", "Wren", "Sorrel", "Fern", "Alder", "Maple", "Rowan"
 _notified = collections.OrderedDict()
 _notifying = set()
 _notified_lock = threading.Lock()
+_knock_queue = queue.Queue(maxsize=NOTIFY_QUEUE)
+_knock_workers_started = False
+_knock_workers_lock = threading.Lock()
+_transport_lock = threading.Lock()
+_transport_counters = {
+    "ingest_duplicates": 0, "notify_delivered": 0,
+    "notify_failed": 0, "notify_retried": 0, "notify_saturated": 0,
+    "notify_dropped": 0,
+}
+_notification_store = notification_persistence.NotificationPersistence(
+    lambda: EVENTS, lambda: (KNOCK_RECORDS, KNOCK_BYTES), KNOCK_LOCK_SHARDS,
+    ledger_limits=lambda: (LEDGER_RECORDS, LEDGER_BYTES))
+_delivery_ids_by_log = _notification_store.caches[LEDGER_DELIVERY_IDS]
+_notified_by_log = _notification_store.caches[LEDGER_NOTIFIED]
+_dropped_by_log = _notification_store.caches[LEDGER_NOTIFY_DROPPED]
+_knocks_by_log = _notification_store.caches[LEDGER_KNOCKS]
+_knock_journal_lock = _notification_store.journal_lock
+_ledger_lock = _notification_store.ledger_lock
+_knock_attempts = _notification_store.attempts
+_knock_attempts_lock = _notification_store.attempts_lock
+_delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
 def js_hash(s):
@@ -250,18 +291,110 @@ def villager_name(event):
 
 
 def knock_key(event):
-    payload = event.get("payload") or {}
-    return "\x00".join(str(x) for x in (
-        event.get("agent_id"), event.get("ts"),
-        payload.get("message") if isinstance(payload, dict) else ""))
+    return notification_persistence.knock_key(event)
+
+
+def terminal_knock_key(event):
+    """Fixed-size non-sensitive key for every durable terminal boundary."""
+    return notification_persistence.terminal_key(event)
+
+
+def _ledger_path(kind):
+    return _notification_store.ledger_path(kind)
+
+
+def _notification_lock_path(shard):
+    return _notification_store.notification_lock_path(shard)
+
+
+def _load_ledger(kind, cache):
+    return _notification_store.load_ledger(kind, cache)
+
+
+def _remember_durable_batch(kind, cache, keys, preserve_existing=()):
+    """Atomically retain a bounded ordered batch under a stable process lock.
+
+    A successful batch may evict the oldest prior entries, matching single-key
+    ledger retention.  The complete requested batch and any named keys that
+    already exist must remain represented; otherwise the authoritative file
+    and cache are left unchanged.
+    """
+    return _notification_store.remember_batch(
+        kind, keys, preserve_existing=preserve_existing, cache=cache)
+
+
+def _remember_durable(kind, cache, key):
+    """Atomically retain one key in a bounded ordered durable ledger."""
+    _notification_store.remember(kind, key, cache)
+
+
+def _ledger_contains(kind, key):
+    """Read terminal authority afresh; process caches are never authoritative."""
+    return _notification_store.contains(kind, key)
+
+
+def _knock_delivery_lock(key):
+    return _notification_store.delivery_lock_path(key)
+
+
+def receiver_delivery_id(event):
+    """Stable non-sensitive ASCII projection of the internal knock identity."""
+    return terminal_knock_key(event)
+
+
+def _fsync_parent(path):
+    durable.fsync_parent(path)
+
+
+def _knock_journal_paths(path):
+    return _notification_store.journal_paths(path)
+
+
+def _read_knock_keys(path):
+    return _notification_store.read_journal_keys(path)
+
+
+def _compact_knocks_locked(path, addition=None):
+    """Publish one bounded latest-state generation while ``path.lock`` is held.
+
+    Capacity victims receive a durable terminal-drop entry before the compacted
+    authority is published, so a crash or restart cannot make them eligible.
+    """
+    return _notification_store.compact_locked(path, addition)
+
+
+def _publish_knock_compaction(path, lines):
+    """Durably replace journal authority while its stable lock is held."""
+    return _notification_store.publish_compaction(path, lines)
+
+
+def _commit_knock_terminal(event, kind):
+    """Commit terminal outcome while preserving every retained source."""
+    return _notification_store.commit_terminal(event, kind)
+
+
+def persist_knock(event):
+    """Durably journal notification work before the ingest acknowledges it."""
+    if not NOTIFY_URL or event.get("type") != "needs_human":
+        return True
+    return _notification_store.journal(event)
+
+
+def _persist_knock_attempt(event, attempts):
+    """Append a durable retry-state transition to the knock journal."""
+    return _notification_store.record_attempt(event, attempts)
 
 
 def claim_knock(event):
     """Claim a knock unless it is in flight or has already been delivered."""
     if not NOTIFY_URL or event.get("type") != "needs_human":
         return False
-    key = knock_key(event)
+    key = terminal_knock_key(event)
     with _notified_lock:
+        delivered = _load_ledger(LEDGER_NOTIFIED, _notified_by_log)
+        dropped = _load_ledger(LEDGER_NOTIFY_DROPPED, _dropped_by_log)
+        if key in delivered or key in dropped:
+            return False
         if key in _notified or key in _notifying:
             if key in _notified:
                 _notified.move_to_end(key)
@@ -272,14 +405,20 @@ def claim_knock(event):
 
 def finish_knock(event, delivered):
     """Release an attempt, remembering only successful deliveries."""
-    key = knock_key(event)
+    key = terminal_knock_key(event)
     with _notified_lock:
         _notifying.discard(key)
         if delivered:
+            if not _commit_knock_terminal(event, LEDGER_NOTIFIED):
+                # Without a durable acknowledgement the event remains eligible
+                # for recovery; never pretend volatile success is final.
+                return False
             _notified[key] = True
             _notified.move_to_end(key)
             while len(_notified) > NOTIFY_MEMORY:
                 _notified.popitem(last=False)
+            return True
+    return not delivered
 
 
 def notify(event):
@@ -295,11 +434,14 @@ def notify(event):
         if not title.isascii():
             title = email.header.Header(
                 title, charset="utf-8", maxlinelen=0).encode()
+        # Internal knock identity is deliberately unchanged (legacy keys use
+        # NUL separators). Receiver IDs are a separate, HTTP-safe projection.
         headers = {
             "Content-Type": "text/plain; charset=utf-8",
             "Title": title,
             "Tags": "door",
             "Priority": "high",
+            "X-Burrow-Delivery-ID": receiver_delivery_id(event),
         }
         if NOTIFY_TOKEN:
             headers["Authorization"] = "Bearer " + NOTIFY_TOKEN
@@ -313,11 +455,165 @@ def notify(event):
 
 
 def deliver_knock(event):
-    finish_knock(event, notify(event))
+    """Attempt under a bounded cross-process claim and commit its outcome.
+
+    The stable shard is held across terminal-ledger recheck, external POST, and
+    durable outcome. The shard suppresses concurrent duplicates; a receiver
+    acceptance followed by a process crash can still cause a later retry.
+    """
+    key = terminal_knock_key(event)
+    path = _knock_delivery_lock(key)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (_ledger_contains(LEDGER_NOTIFIED, key)
+                or _ledger_contains(LEDGER_NOTIFY_DROPPED, key)):
+            finish_knock(event, False)
+            return True
+        delivered = notify(event)
+        if delivered:
+            if not _commit_knock_terminal(event, LEDGER_NOTIFIED):
+                delivered = False
+        if not delivered:
+            with _knock_attempts_lock:
+                next_attempt = _knock_attempts.get(key, 0) + 1
+            _persist_knock_attempt(event, next_attempt)
+        finish_knock(event, False)
+    with _transport_lock:
+        key = "notify_delivered" if delivered else "notify_failed"
+        _transport_counters[key] += 1
+    return delivered
 
 
 def notify_async(event):
-    threading.Thread(target=deliver_knock, args=(event,), daemon=True).start()
+    ensure_knock_workers()
+    try:
+        _knock_queue.put_nowait(event)
+        return True
+    except queue.Full:
+        finish_knock(event, False)
+        with _transport_lock:
+            _transport_counters["notify_saturated"] += 1
+        return False
+
+
+def _process_knock(event):
+    key = terminal_knock_key(event)
+    with _knock_attempts_lock:
+        prior_attempts = _knock_attempts.get(key, 0)
+    if prior_attempts >= 3:
+        if not _commit_knock_terminal(event, LEDGER_NOTIFY_DROPPED):
+            finish_knock(event, False)
+            return
+        finish_knock(event, False)
+        with _knock_attempts_lock:
+            _knock_attempts.pop(key, None)
+        _recover_knocks()
+        return
+
+    delivered = deliver_knock(event)
+    if delivered:
+        with _knock_attempts_lock:
+            _knock_attempts.pop(key, None)
+    else:
+        with _knock_attempts_lock:
+            attempts = _knock_attempts.get(key, 0) + 1
+            _knock_attempts[key] = attempts
+        durable_attempt = _persist_knock_attempt(event, attempts)
+        if attempts < 3 and durable_attempt and claim_knock(event):
+            try:
+                _knock_queue.put_nowait(event)
+                with _transport_lock:
+                    _transport_counters["notify_retried"] += 1
+            except queue.Full:
+                finish_knock(event, False)
+                with _transport_lock:
+                    _transport_counters["notify_saturated"] += 1
+        elif attempts >= 3 and durable_attempt:
+            if not _commit_knock_terminal(event, LEDGER_NOTIFY_DROPPED):
+                return
+            with _knock_attempts_lock:
+                _knock_attempts.pop(key, None)
+        elif not durable_attempt:
+            return
+    _recover_knocks()
+
+
+def _knock_worker():
+    while True:
+        event = _knock_queue.get()
+        try:
+            _process_knock(event)
+        finally:
+            _knock_queue.task_done()
+
+
+def _recover_knocks():
+    """Atomically hand off new work and replay immutable generations.
+
+    Replay files remain until their keys have durable delivered/drop outcomes.
+    Re-reading them after a crash is safe because ``claim_knock`` consults those
+    durable ledgers and the in-flight set before queueing.
+    """
+    for generation, complete, events in _notification_store.recover():
+        for event in events:
+            if not claim_knock(event):
+                continue
+            try:
+                _knock_queue.put_nowait(event)
+            except queue.Full:
+                finish_knock(event, False)
+                with _transport_lock:
+                    _transport_counters["notify_saturated"] += 1
+                return
+        try:
+            _notification_store.retire_replay_if_terminal(
+                generation, complete, events)
+        except OSError:
+            # Retirement failure leaves replay authority for the next recovery.
+            pass
+
+
+def ensure_knock_workers():
+    global _knock_workers_started
+    if _knock_workers_started:
+        return
+    with _knock_workers_lock:
+        if _knock_workers_started:
+            return
+        for index in range(NOTIFY_WORKERS):
+            threading.Thread(target=_knock_worker,
+                             name=f"burrow-knock-{index}", daemon=True).start()
+        _knock_workers_started = True
+        _recover_knocks()
+
+
+def serve_forever():
+    """Start background delivery before accepting requests, then serve."""
+    if NOTIFY_URL:
+        ensure_knock_workers()
+    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+
+
+def transport_status():
+    """Bounded machine-readable diagnostics for the browser live-status module."""
+    with _transport_lock:
+        counters = dict(_transport_counters)
+    delivered, dropped = _notification_store.terminal_counts()
+    return {
+        "ingest": {"duplicates": counters["ingest_duplicates"],
+                   "dedupe_window": None, "durable": True},
+        "notifications": {
+            "configured": bool(NOTIFY_URL),
+            "queued": _knock_queue.qsize(), "queue_capacity": NOTIFY_QUEUE,
+            "workers": NOTIFY_WORKERS,
+            "delivered": delivered,
+            "failed": counters["notify_failed"],
+            "retried": counters["notify_retried"],
+            "saturated": counters["notify_saturated"],
+            "dropped": dropped,
+        },
+    }
 def event_ms(event):
     """Event timestamp as epoch ms; 0 when missing or unparseable — the viewer's
     `Date.parse(ts) || 0`, which puts the villager outside the drop window."""
@@ -424,6 +720,7 @@ def rotate(size):
             archived.write(original)
             archived.flush()
             os.fsync(archived.fileno())
+        _fsync_parent(archive)
         live.seek(0)
         live.write(data)
         live.truncate()
@@ -469,11 +766,55 @@ def append_event(event):
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with LOG_LOCK:
         os.makedirs(os.path.dirname(os.path.abspath(EVENTS)), exist_ok=True)
-        with open(EVENTS, "a", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            f.write(line)
-            f.flush()
-        maybe_rotate()
+        with open(durable.lock_path(os.path.abspath(EVENTS)), "a+") as process_lock:
+            fcntl.flock(process_lock, fcntl.LOCK_EX)
+            delivery_id = event.get("delivery_id")
+            remembered = _load_ledger(LEDGER_DELIVERY_IDS, _delivery_ids_by_log)
+            if delivery_id and delivery_id in remembered:
+                with _transport_lock:
+                    _transport_counters["ingest_duplicates"] += 1
+                return False
+            if delivery_id and _event_log_has_delivery_id(delivery_id):
+                # The event log is the canonical commit record. Repair a missing
+                # acceleration ledger left by a crash after the event fsync.
+                try:
+                    _remember_durable(LEDGER_DELIVERY_IDS, _delivery_ids_by_log,
+                                      delivery_id)
+                except OSError:
+                    pass
+                with _transport_lock:
+                    _transport_counters["ingest_duplicates"] += 1
+                return False
+            with open(EVENTS, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+            _fsync_parent(EVENTS)
+            if delivery_id:
+                _remember_durable(LEDGER_DELIVERY_IDS, _delivery_ids_by_log,
+                                  delivery_id)
+            maybe_rotate()
+            return True
+
+
+def _event_log_has_delivery_id(delivery_id):
+    paths = [EVENTS]
+    base, ext = os.path.splitext(os.path.basename(EVENTS))
+    paths.extend(sorted(glob.glob(os.path.join(archive_dir(), base + "-*" + ext))))
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(event, dict)
+                            and event.get("delivery_id") == delivery_id):
+                        return True
+        except OSError:
+            continue
+    return False
 
 
 def _reject_json_constant(value):
@@ -501,6 +842,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path == "/residents":
             self._send(200, json.dumps(read_residents()).encode("utf-8"),
+                       "application/json")
+            return
+        if path == "/transport/status":
+            self._send(200, json.dumps(transport_status()).encode("utf-8"),
                        "application/json")
             return
         if path == "/events":
@@ -562,7 +907,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if error:
             self._send(400, error.encode("ascii"), "text/plain")
             return
+        # Delivery identity is transport metadata owned by this adapter. Ignore
+        # any same-named body extension so only the authenticated header can
+        # participate in deduplication.
+        event = dict(event)
+        event.pop("delivery_id", None)
+        delivery_id = (self.headers.get("X-Burrow-Delivery-ID") or "").strip()
+        if delivery_id:
+            if not _delivery_id_pattern.fullmatch(delivery_id):
+                self._send(400, b"invalid delivery id", "text/plain")
+                return
+            event["delivery_id"] = delivery_id
         append_event(event)
+        if not persist_knock(event):
+            self._send(503, b"notification queue unavailable", "text/plain")
+            return
         if claim_knock(event):
             notify_async(event)
         self._send(204, b"", "text/plain")
@@ -717,4 +1076,4 @@ if __name__ == "__main__":
         print(f"knocks will be pushed to {NOTIFY_URL}")
     if MAX_LOG_BYTES > 0:
         print(f"rotating past {MAX_LOG_BYTES} bytes into {archive_dir()}")
-    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    serve_forever()

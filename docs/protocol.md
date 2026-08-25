@@ -4,22 +4,79 @@ Everything in burrow consumes this. Agents (or adapters wrapping them) append on
 object per line to the event log. The projection layer never reads agent internals —
 only this log.
 
-## Transport (v0.5)
+## Transport (v0.6)
 
 Two transports; the event shape is the contract, not the pipe:
 
 - **HTTP ingest** (preferred): `POST <BURROW_URL>/events` with one JSON event as the
   body → 204. The server appends it to its own log. Emitters set `BURROW_URL`; a
-  failed POST trips a 60 s circuit breaker (5 s for loopback, where failure is an
-  instant refusal rather than a timeout) and falls back to the local file, so an
-  unreachable server never slows an agent down. The breaker is per target.
+  failed POST trips a per-target circuit breaker, appends the privacy-filtered
+  event to `~/.burrow/primary-outbox.jsonl`, and leaves it in the local log.
+  Later hooks replay at most 16 pending events per primary, oldest first, before
+  their new event. The outbox is capped at 1,024 records and 5 MiB. Rewrites use
+  a stable sidecar lock, an fsynced replacement, atomic rename, and directory
+  fsync. The live outbox remains the only authority until atomic rename; any
+  orphan staging file is discarded, even when it is empty or valid JSONL,
+  because syntax cannot prove that the intended generation was complete.
+  Every record receives a stable total enqueue order before lock acquisition;
+  replay and compaction sort by it (legacy records use event timestamp,
+  delivery ID, and target). Lock-contention journals share those aggregate
+  caps. One stable transaction lock protects every authority snapshot,
+  publication, and retirement. Lock order is thread lock, transaction lock,
+  then the nonblocking main lock; auxiliary commits never take the main lock.
+  Replacements are fsynced and renamed before superseded journals are removed.
+  Torn suffix quarantine retains the newest 8 files within 256 KiB,
+  deleting and directory-fsyncing older evidence deterministically.
+  The server's delivery-ID acceleration ledger is independently capped at 1,024
+  records/5 MiB and uses one same-size atomic replacement (10 MiB physical
+  crash-copy ceiling at defaults). Eviction does not weaken replay deduplication:
+  the retained live log and archives remain canonical and are scanned on a ledger
+  miss. Exactly-once ingest therefore applies only while that event/archive
+  authority is retained, not globally forever.
 - **Mirrors**: the same event is POSTed to every `BURROW_MIRROR` target as well
-  (default `http://127.0.0.1:8737`, i.e. a local dev server). Delivery to *any*
-  target means no local fallback write — the event exists exactly once per log.
-  Mirrors carry `BURROW_MIRROR_TOKEN`, never `BURROW_TOKEN`.
+  (default `http://127.0.0.1:8737`, i.e. a local dev server). A mirror never
+  acknowledges or drains a primary's outbox. Mirrors carry
+  `BURROW_MIRROR_TOKEN`, never `BURROW_TOKEN`.
 - **Local JSONL file**: append one event per line to `~/.burrow/events.jsonl`
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
-  `BURROW_URL` is unset, or as the fallback above.
+  `BURROW_URL` is unset, or as the fallback above. If rotation owns the live
+  log lock, the hook appends to a fsynced deferred journal behind a stable
+  sidecar lock. Recovery atomically hands that journal to an immutable replay
+  generation; per-record replay IDs in the live log make a crash after replay
+  fsync but before generation cleanup idempotent. Active and replay generations
+  share a newest-first retention ceiling of 1,024 records and 5 MiB encoded.
+  Oldest victims are durably diagnosed before bounded atomic replacement removes
+  them. A crash can leave disjoint active and replay authority while the next
+  compaction writes one same-size pending copy: three capped generations, or
+  15 MiB at defaults. Torn suffixes are non-authoritative and deterministically
+  retain only the newest 8 files within 256 KiB, for a 15.25 MiB total ceiling
+  excluding small stable lock files. Retained deferred records
+  replay once while their IDs remain in the live log. This is not global
+  exactly-once retention: capacity victims are intentionally dropped, and an ID
+  aged out by log rotation no longer suppresses a surviving replay copy.
+
+Independent primary and mirror targets are contacted concurrently, with at most
+eight target workers. Each primary's separate durable queue carries its last
+attempt generation, so successive hook processes fairly reach every configured
+primary instead of repeatedly selecting the first eight. Each POST has a 750 ms
+timeout. The actual hook runs all transport work—including persistence,
+diagnostics, and local fallback—in a helper process; the host reserves bounded
+time inside that same deadline to kill it and poll nonblocking for reaping
+at the shared 1 second deadline. This bounds host-hook waiting even when a
+filesystem syscall does not return. Work committed before termination remains
+durable, and atomic files remain on their previous authoritative generation, but
+the event currently being handled can be absent if the helper is terminated
+before its first durable commit. No finite synchronous deadline can also promise
+completion of a stalled durable write. Configured primaries beyond the worker cap
+are durably queued; excess best-effort mirrors are explicitly reported rather
+than silently omitted. Every error is swallowed and the hook exits zero. Bounded
+payload-free diagnostics serialize cross-process updates, keep exact counters,
+and retain only the 20 newest records in
+`~/.burrow/transport-diagnostics.json`.
+
+Primary requests carry a random `X-Burrow-Delivery-ID`. A retry retains that ID;
+the server records accepted IDs in a fsynced sidecar ledger and returns 204
+without appending a duplicate. The ledger survives restart and live-log rotation.
 
 HTTP ingest requires one decimal `Content-Length` from 1 through the configured
 event limit. Missing, duplicate, non-decimal, non-positive, or oversized lengths
@@ -37,7 +94,7 @@ event is a lie with extra steps. Ingest is protected by one shared secret:
   empty/whitespace-only value counts as unset.
 - **When unset**, ingest is open — exactly today's behavior, which is what local-only
   mode (`python3 serve.py` with no `BURROW_URL`) relies on.
-- **GET is never gated.** `/`, `/events`, `/villagers`, and the static viewer stay open;
+- **GET is never gated.** `/`, `/events`, `/villagers`, `/transport/status`, and the static viewer stay open;
   the token guards writes, not reads. The event log is still a map of everything the
   fleet does, so the server stays off the public internet either way.
 
@@ -77,6 +134,46 @@ SSE and polling neither duplicates nor skips an event. A rotation emits an SSE
 `reset` event before replaying the new live log. The stream sends keepalive comments
 and `X-Accel-Buffering: no` so the NAS reverse proxy does not hold events in a
 buffer.
+
+`GET /transport/status` returns counters for ingest deduplication and notification
+delivery pressure. Before returning 204, accepted knocks enter a separate fsynced
+journal; a journal failure returns 503 so the emitter retains the delivery. Workers
+recover undelivered knocks from it at server startup, after restart, and after
+in-memory queue saturation. Append and recovery coordinate on a stable sidecar
+lock. Recovery atomically renames the active journal to an immutable replay
+generation and fsyncs the directory before releasing appenders; a concurrent
+append therefore lands in a new active generation. Replay generations survive
+crashes and are safe to scan repeatedly because durable delivered/drop ledgers
+make claims idempotent. Before external delivery, a knock takes one of 32 stable
+shard locks, rechecks both terminal ledgers, performs the POST, and durably
+records its outcome before release. Every POST carries a stable, hashed ASCII
+`X-Burrow-Delivery-ID` derived from the knock identity so capable receivers can
+deduplicate retries. The shard suppresses concurrent sends, but receiver acceptance
+before the local delivered ledger fsync is at-least-once across process crash.
+Issue #38's exactly-once contract concerns primary event replay, not knock forwarding.
+A durable delivered-key ledger prevents a duplicate delivery ID from knocking
+again while that key remains in the retained knock authority. Forwarding uses two
+workers, a 64-item memory queue, and at most three attempts. The journal,
+delivered ledger, and terminal-drop ledger each retain at most 1,024 keys/records
+and 5 MiB (configurable with `BURROW_KNOCK_RECORDS` and `BURROW_KNOCK_BYTES`).
+Auxiliary knock state therefore has a 3,072-record/15 MiB logical ceiling. Each
+journal can have disjoint active and replay authority plus one pending
+publication (15 MiB); each terminal ledger can have its live file plus one
+pending replacement (10 MiB each). The truthful aggregate crash-copy ceiling
+is therefore 35 MiB at defaults, excluding small stable lock files. Recovery
+collapses a surviving journal copy before publishing another replay generation.
+Terminal ledgers contain only fixed-size hashed ASCII projections of knock
+identities. Terminal publication and journal retirement share one stable
+transaction order: already-terminal sources are compacted before another ledger
+insertion can evict their suppression, then the new outcome is published, then
+its source is retired. A crash after outcome publication can leave both copies;
+recovery converges them without exposing the source for another POST. A capacity
+victim is fsynced to the terminal-drop ledger before atomic compaction removes
+it, so restart cannot resurrect it. Status `delivered` and `dropped` are the
+current retained counts read from those authoritative ledgers, not lifetime
+totals; they survive restart and can decrease at bounded-retention eviction.
+Retries, failures, and saturation are current-process counters. The browser
+runtime polls this report through its live status interface.
 
 ## Event shape
 
@@ -322,6 +419,24 @@ README.md") would be a lie; it is a heartbeat.
 
 The emitter must never break the agent: it swallows all errors and always exits 0.
 
+### Installed emitter bundle
+
+`emit.py` depends on its sibling `durable.py`; supported deployments install both
+with the fail-open `burrow-emit` launcher. From the repository root:
+
+```sh
+install_root="$HOME/.local/lib/burrow-emitter"
+install -d -m 700 "$install_root"
+install -m 600 hooks/emit.py hooks/durable.py "$install_root/"
+install -m 700 hooks/burrow-emit "$install_root/burrow-emit"
+```
+
+Use the stable command `$HOME/.local/lib/burrow-emitter/burrow-emit` in hooks.
+The launcher locates its sibling files independently of the caller's working
+directory and returns zero even if the bundle is incomplete or the emitter hits
+an unexpected runtime failure. Transport failures remain handled by `emit.py` and
+fall back to its bounded durable local storage.
+
 Env vars: `BURROW_URL` (POST target, see Transport), `BURROW_TOKEN` (ingest secret,
 see Ingest auth — sent as a bearer header, omitted when unset), `BURROW_MIRROR` /
 `BURROW_MIRROR_TOKEN` (extra POST targets, see Transport; empty disables). **Resident agents** — services
@@ -403,27 +518,23 @@ malformed Codex setup from being mislabeled as Claude.
 ### User-level Codex setup
 
 Follow the [official Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
-Copy the emitter somewhere stable, then put the configuration below in
+Install the [emitter bundle](#installed-emitter-bundle), then put the configuration below in
 `~/.codex/hooks.json`. Replace the URL and token in the command, or omit them for
 local-only fallback logging. Use one user-level representation (`hooks.json` or
 inline hooks in `config.toml`), not both.
-
-```sh
-install -m 700 hooks/emit.py "$HOME/.codex/burrow-emit.py"
-```
 
 ```json
 {
   "description": "Send truthful Codex lifecycle events to Burrow.",
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "PermissionRequest": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= python3 \"$HOME/.codex/burrow-emit.py\" --runner codex", "timeout": 3}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}]
   }
 }
 ```
@@ -453,7 +564,7 @@ This exercises the real adapter and local fallback without contacting a server:
 ```sh
 smoke_home=$(mktemp -d)
 printf '%s\n' '{"session_id":"smoke-1","cwd":"/tmp/burrow-smoke","hook_event_name":"UserPromptSubmit","prompt":"smoke check"}' |
-  HOME="$smoke_home" BURROW_MIRROR= python3 hooks/emit.py --runner codex
+  HOME="$smoke_home" BURROW_MIRROR= "$HOME/.local/lib/burrow-emitter/burrow-emit" --runner codex
 python3 -m json.tool "$smoke_home/.burrow/events.jsonl"
 ```
 
