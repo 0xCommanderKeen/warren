@@ -531,6 +531,29 @@ class Materialization:
         )
 
 
+def _require_owned_dir(base: Path, root: Path) -> None:
+    """Refuse a skills directory steward cannot safely own and prune (#64).
+
+    Steward *rmtree*s anything it does not recognise inside this directory, so the
+    directory itself must be real and genuinely inside the workdir. A symlink — or a path
+    reaching its target through one, resolving outside the workdir — would turn the prune
+    into a deletion through the link into a tree steward was never given. Refusing loudly
+    is the only honest move; a missing directory is fine and is created on write.
+    """
+    if root.is_symlink():
+        raise SkillError(
+            f"steward's skills directory {root} is a symlink; steward owns and prunes "
+            f"this directory and will not follow a link out of the workdir to do it"
+        )
+    if root.exists():
+        resolved = root.resolve()
+        if resolved != root or not resolved.is_relative_to(base):
+            raise SkillError(
+                f"steward's skills directory {root} resolves to {resolved}, outside the "
+                f"workdir {base}; steward will not prune a directory it does not own"
+            )
+
+
 def materialize(skills: Sequence[Skill], workdir: Path | str, subdir: str) -> Materialization:
     """Write a session's skills into ``<workdir>/<subdir>``, and own that directory.
 
@@ -540,11 +563,14 @@ def materialize(skills: Sequence[Skill], workdir: Path | str, subdir: str) -> Ma
     surviving on disk as a capability nobody granted. Steward owns this directory; put
     nothing else in it.
     """
-    root = Path(workdir) / subdir
+    base = Path(workdir).resolve()
+    root = base / subdir
     granted = {skill.name: skill for skill in skills}
     written: list[str] = []
     unchanged: list[str] = []
     removed: list[str] = []
+
+    _require_owned_dir(base, root)
 
     try:
         existing = sorted(root.iterdir()) if root.is_dir() else []
@@ -552,6 +578,18 @@ def materialize(skills: Sequence[Skill], workdir: Path | str, subdir: str) -> Ma
         raise SkillError(f"cannot read the skills directory {root}: {exc}") from exc
 
     for entry in existing:
+        # A symlinked child is pruned by removing the *link*, never by rmtree'ing through
+        # it: a link is not a file steward wrote, so it never belongs here, and unlink
+        # touches only the link and not whatever it points at (#64).
+        if entry.is_symlink():
+            try:
+                entry.unlink()
+            except OSError as exc:
+                raise SkillError(
+                    f"cannot remove {entry} from steward's skills directory: {exc}"
+                ) from exc
+            removed.append(entry.name)
+            continue
         if entry.name in granted and entry.is_dir():
             continue
         try:

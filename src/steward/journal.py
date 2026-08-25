@@ -174,21 +174,26 @@ def entry_path(manifest: ResidentManifest, day: dt.date, *, source: Path | None 
 class JournalEntry:
     """One day's entry: when, who wrote it, and what it says.
 
-    ``routine`` is whatever the entry's own header claims, so it is ``None`` for an
-    entry written without one. Steward reports what the file says rather than filling
-    the gap in.
+    ``routine`` and ``resident`` are whatever the entry's own header claims, so each is
+    ``None`` for an entry written without one. Steward reports what the file says rather
+    than filling the gap in.
     """
 
     date: dt.date
     routine: str | None
     text: str
     path: Path
+    #: The ``resident:`` header the entry declares, or ``None`` on a legacy/headerless
+    #: entry. It is how a shared journal directory is kept from cross-feeding two
+    #: residents (:func:`read_entries`), so it is reported as plainly as the routine is.
+    resident: str | None = None
 
     def as_dict(self) -> dict[str, str | None]:
         """Render the entry as plain JSON-able data, for the API and the CLI."""
         return {
             "date": self.date.isoformat(),
             "routine": self.routine,
+            "resident": self.resident,
             "text": self.text,
             "path": str(self.path),
         }
@@ -208,24 +213,49 @@ def entry_header(manifest: ResidentManifest, day: dt.date, routine_id: str) -> s
 
 
 def _parse_entry(path: Path, day: dt.date) -> JournalEntry | None:
-    """Read one entry file. A header is parsed if present and never required."""
+    """Read one entry file. A header is parsed if present and never required.
+
+    The journal is text a *model* wrote, so a byte in it that is not valid UTF-8 is a
+    self-inflicted wound and must degrade to "unreadable, skipped" rather than bricking
+    the resident. The read replaces undecodable bytes instead of raising, and the guard
+    is deliberately broad — any failure to read one entry is one skipped entry, never a
+    dangling ``routine_started`` upstream (#75).
+    """
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 — a bad entry is skipped, never a raise that bricks a read (#75)
         return None
     routine: str | None = None
+    resident: str | None = None
     body = raw
     match = _HEADER.match(raw)
     if match is not None:
         body = match.group("body")
         for line in match.group("header").splitlines():
             fields = _HEADER_LINE.match(line.strip())
-            if fields is not None and fields.group("key") == "routine":
+            if fields is None:
+                continue
+            if fields.group("key") == "routine":
                 routine = fields.group("value").strip() or None
+            elif fields.group("key") == "resident":
+                resident = fields.group("value").strip() or None
     body = body.strip()
     if not body:
         return None
-    return JournalEntry(date=day, routine=routine, text=body, path=path)
+    return JournalEntry(date=day, routine=routine, text=body, path=path, resident=resident)
+
+
+def _belongs(entry: JournalEntry, manifest: ResidentManifest) -> bool:
+    """Report whether this entry is this resident's to read or rotate.
+
+    Ownership is lenient by design (#77): an entry whose header names a *different*
+    resident is somebody else's — two manifests sharing a ``memory.path`` must never
+    cross-feed — but an entry with no ``resident:`` header is legacy or hand-written and
+    is treated as this resident's, because refusing every headerless entry would silently
+    drop the very entries steward has always read (see ``test_an_entry_written_without_a_
+    header_still_reads``).
+    """
+    return entry.resident is None or entry.resident == manifest.id
 
 
 def _entry_files(directory: Path) -> list[tuple[dt.date, Path]]:
@@ -270,8 +300,9 @@ def read_entries(
     entries: list[JournalEntry] = []
     for day, path in _entry_files(directory):
         entry = _parse_entry(path, day)
-        if entry is not None:
-            entries.append(entry)
+        if entry is None or not _belongs(entry, manifest):
+            continue
+        entries.append(entry)
         if len(entries) >= limit:
             break
     return entries
@@ -339,8 +370,21 @@ def rotate(
     """
     limit = keep if keep is not None else manifest.memory.journal_keep
     directory = resolve_journal_dir(manifest, source=source)
+
+    # Rotate over entries that actually parse and belong to this resident (#78). A file a
+    # died session left empty or garbage is not an entry, so it must not count toward the
+    # bound and evict a real one — and, being unreadable, it is left in place rather than
+    # deleted, mirroring "steward only ever removes what it can read". An entry another
+    # resident wrote into a shared directory is likewise never this resident's to rotate.
+    mine: list[Path] = []
+    for day, path in _entry_files(directory):
+        entry = _parse_entry(path, day)
+        if entry is None or not _belongs(entry, manifest):
+            continue
+        mine.append(path)
+
     removed: list[Path] = []
-    for _day, path in _entry_files(directory)[limit:]:
+    for path in mine[limit:]:
         try:
             path.unlink()
         except OSError:  # pragma: no cover — a read-only journal dir is not a run failure
@@ -447,8 +491,12 @@ def persist_close_of_day(
     path = entry_path(manifest, day, source=source)
     persisted = False
     try:
-        written_by_session = path.is_file() and bool(path.read_text(encoding="utf-8").strip())
-    except OSError:
+        written_by_session = path.is_file() and bool(
+            path.read_text(encoding="utf-8", errors="replace").strip()
+        )
+    except Exception:  # noqa: BLE001 — closing the day must never raise past this (#75)
+        # A file we cannot even read is not one the session usefully wrote: fall through
+        # to the block fallback rather than letting a dangling routine_started stand.
         written_by_session = False
 
     if written_by_session:

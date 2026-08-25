@@ -251,6 +251,68 @@ def test_an_unreadable_journal_directory_is_simply_empty(resident) -> None:
     assert j.read_entries(hob.manifest) == []
 
 
+# ------------------------------------------------------ a bad entry never bricks a read
+
+
+def test_an_entry_with_invalid_utf8_is_read_not_raised(resident) -> None:
+    """The journal is text a model wrote; a bad byte degrades to replaced, never a raise."""
+    hob = resident()
+    directory = j.resolve_journal_dir(hob.manifest)
+    directory.mkdir(parents=True)
+    (directory / "2026-08-24.md").write_bytes(
+        b"---\nresident: test-agent\nroutine: close-of-day\n---\n\nbad \xff\xfe bytes\n"
+    )
+
+    entries = j.read_entries(hob.manifest)  # must not raise
+    assert len(entries) == 1
+    assert "bad" in entries[0].text
+    latest = j.latest_entry(hob.manifest)  # must not raise
+    assert latest is not None
+    assert "bad" in latest
+
+
+def test_a_garbage_file_does_not_stop_the_read_of_the_real_ones(resident) -> None:
+    hob = resident()
+    write(hob.manifest, "2026-08-23", "a real entry")
+    directory = j.resolve_journal_dir(hob.manifest)
+    # A garbage file dated newer than the real entry: read must survive it, not raise.
+    (directory / "2026-08-24.md").write_bytes(b"\x80\x81\x82\xff\xfe")
+
+    entries = j.read_entries(hob.manifest)
+    assert [e.date.isoformat() for e in entries] == ["2026-08-24", "2026-08-23"]
+    latest = j.latest_entry(hob.manifest)
+    assert latest is not None
+
+
+# --------------------------------------------------- a shared journal dir does not leak
+
+
+def test_a_shared_journal_dir_does_not_cross_feed_between_residents(resident) -> None:
+    """Two manifests pointing at the same dir must not read each other's entries (#77)."""
+    alice = resident()  # id test-agent, via valid_manifest
+    write(alice.manifest, "2026-08-23", "alice was here")
+    directory = j.resolve_journal_dir(alice.manifest)
+    (directory / "2026-08-24.md").write_text(
+        "---\nresident: bob\ndate: 2026-08-24\nroutine: close-of-day\n---\n\nbob's private note\n",
+        encoding="utf-8",
+    )
+
+    latest = j.latest_entry(alice.manifest)
+    assert latest is not None
+    assert "alice was here" in latest
+    assert "bob" not in latest
+    assert [e.date.isoformat() for e in j.read_entries(alice.manifest)] == ["2026-08-23"]
+
+
+def test_a_legacy_headerless_entry_is_still_read_as_this_residents(resident) -> None:
+    """Ownership is lenient: an entry with no resident header counts as this resident's."""
+    hob = resident()
+    directory = j.resolve_journal_dir(hob.manifest)
+    directory.mkdir(parents=True)
+    (directory / "2026-08-24.md").write_text("just prose, no header\n", encoding="utf-8")
+    assert j.latest_entry(hob.manifest) is not None
+
+
 # ------------------------------------------------------------------------- the cap
 
 
@@ -318,6 +380,38 @@ def test_rotation_under_the_bound_removes_nothing(resident) -> None:
 
 def test_rotating_an_empty_journal_is_harmless(resident) -> None:
     assert j.rotate(resident().manifest) == ()
+
+
+def test_an_empty_file_left_by_a_died_session_does_not_evict_a_real_entry(resident) -> None:
+    """journal_keep=1 with one empty + one real file keeps the real one (#78)."""
+    hob = resident(journal_keep=1)
+    write(hob.manifest, "2026-08-23", "the real entry")
+    directory = j.resolve_journal_dir(hob.manifest)
+    # A session that created today's file then died before writing a body.
+    (directory / "2026-08-24.md").write_text("\n  \n", encoding="utf-8")
+
+    removed = j.rotate(hob.manifest)
+    surviving = [e.date.isoformat() for e in j.read_entries(hob.manifest, 100)]
+    assert surviving == ["2026-08-23"], "the empty file must not count toward retention"
+    # The real entry is untouched; the unreadable file steward leaves in place.
+    assert (directory / "2026-08-23.md").is_file()
+    assert (directory / "2026-08-24.md") not in removed
+
+
+def test_rotation_never_deletes_another_residents_entry_in_a_shared_dir(resident) -> None:
+    hob = resident(journal_keep=1)
+    write(hob.manifest, "2026-08-22", "hob, two days ago")
+    write(hob.manifest, "2026-08-23", "hob, yesterday")
+    directory = j.resolve_journal_dir(hob.manifest)
+    (directory / "2026-08-24.md").write_text(
+        "---\nresident: someone-else\ndate: 2026-08-24\n---\n\nnot hob's to rotate\n",
+        encoding="utf-8",
+    )
+
+    j.rotate(hob.manifest)
+    assert (directory / "2026-08-24.md").is_file(), "another resident's entry is never rotated"
+    assert (directory / "2026-08-23.md").is_file(), "hob keeps his newest"
+    assert not (directory / "2026-08-22.md").exists(), "hob's older entry rotates out"
 
 
 # --------------------------------------------------------- cross-resident isolation
