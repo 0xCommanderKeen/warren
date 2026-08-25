@@ -638,6 +638,8 @@ def test_a_run_killed_by_the_cap_is_a_routine_failed_and_is_still_ledgered(
     assert len(entries) == 1
     assert entries[0].duration_s == pytest.approx(60.0)
     assert entries[0].outcome == "timeout"
+    # A routine descends from nobody but the resident whose day it is (#45).
+    assert entries[0].origin == f"resident:{resident.id}"
 
 
 # --------------------------------------------------------------------------------------
@@ -795,7 +797,7 @@ def test_a_board_task_lands_in_the_ledger(
     """Claimed work is recorded under its own kind, so the board's cost is answerable."""
     resident = load_manifest(write_resident(board_manifest()))
     guard = bg.BudgetGuard(store, ev.NullEmitter())
-    store.post_job(title="tidy the notes")
+    task = store.post_job(title="tidy the notes")
 
     Dispatcher(
         residents=[resident],
@@ -809,6 +811,8 @@ def test_a_board_task_lands_in_the_ledger(
     entries = store.ledger(resident.id)
     assert [entry.kind for entry in entries] == ["task"]
     assert entries[0].cost_usd == pytest.approx(0.25)
+    # The row says what it descends from (#45), rather than leaving a join to work it out.
+    assert entries[0].origin == f"task:{task.task_id}"
 
 
 def test_a_board_session_is_capped_by_max_run_seconds(

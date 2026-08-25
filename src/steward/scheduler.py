@@ -211,6 +211,7 @@ class RunGuard(Protocol):
         kind: str,
         run_id: str,
         ref: str,
+        origin: str,
         now: datetime | None = None,
     ) -> object:
         """Append what one finished session cost to the durable ledger."""
@@ -1052,7 +1053,13 @@ class Scheduler:
     def _ledger(
         self, item: ScheduledRoutine, run_id: str, result: RunResult, moment: datetime
     ) -> None:
-        """Record what this run cost. Never raises: a lost row is not a failed routine."""
+        """Record what this run cost. Never raises: a lost row is not a failed routine.
+
+        A routine descends from nobody but the resident whose day it is, so that is the
+        origin it carries — the same ``resident:<id>`` a resident's own initiative gets
+        in :func:`steward.delegation.origin_for`. Routines used to roll up as
+        unattributed; they are attributable, and now they say so.
+        """
         if self.guard is None:
             return
         try:
@@ -1062,6 +1069,7 @@ class Scheduler:
                 kind="routine",
                 run_id=run_id,
                 ref=item.routine.id,
+                origin=f"resident:{item.resident.id}",
                 now=moment,
             )
         except Exception as exc:  # noqa: BLE001 — the ledger must not take a routine down

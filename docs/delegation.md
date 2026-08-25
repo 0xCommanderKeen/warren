@@ -247,12 +247,19 @@ $ steward budget show --by-origin
 …
 by origin (2026-08-25..2026-08-25, all residents shown)
   task:2c9a…: $1.8400, 24310 token(s), 3 run(s)
-  unattributed: $0.9100, 8800 token(s), 2 run(s)
+  resident:life-agent: $0.9100, 8800 token(s), 2 run(s)
 ```
 
-`unattributed` is a run that came off no task at all — an ordinary scheduled routine. It
-is named rather than dropped: money steward cannot attribute is still money somebody
-spent.
+Each run **records its own origin** on the ledger row when it is ledgered. It used to be
+inferred afterwards, by joining the row's `ref` to a task id — which is only a task id for
+board and delegated runs, so a routine whose id collided with somebody's task inherited
+that task's bill. The row is self-describing now, and the join survives only for rows
+written before the column existed.
+
+A scheduled routine came off no task, so it carries `resident:<id>` — the resident whose
+day it was. `unattributed` is what a row with no origin at all reports as, which after the
+migration means a run ledgered before steward recorded one. It is named rather than
+dropped: money steward cannot attribute is still money somebody spent.
 
 ## Over HTTP
 

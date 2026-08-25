@@ -988,6 +988,7 @@ def ledger_a_run(db: Path, cost: float, *, resident: str = "test-agent") -> None
             kind="routine",
             run_id="already-ran",
             ref="daily-summary",
+            origin=f"resident:{resident}",
             cost_usd=cost,
             input_tokens=50,
             output_tokens=50,
@@ -1050,19 +1051,13 @@ def test_budget_show_by_origin_rolls_a_chain_up_to_the_question_that_started_it(
     residents_dir = write_resident(budgeted_manifest(daily_cost_usd=50.0)).parent.parent
     db = tmp_path / "steward.db"
     with Store(db) as store:
-        letter = store.delegate_job(
-            title="Check the errand list",
-            assignee="test-agent",
-            delegated_by="somebody",
-            route="inbox",
-            origin="task:root",
-        )
         store.record_run(
             resident="test-agent",
             agent_id="claude-code:test-agent",
             kind="delegated",
-            run_id=letter.task_id,
-            ref=letter.task_id,
+            run_id="a-letter",
+            ref="a-letter",
+            origin="task:root",
             cost_usd=3.25,
             input_tokens=40,
             output_tokens=60,
@@ -1114,9 +1109,15 @@ def test_budget_show_by_origin_wraps_the_json_only_when_it_is_asked_for(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["residents"][0]["resident"] == "test-agent"
-    # A routine came off no task, so it is named unattributed rather than dropped.
+    # A routine came off no task, so it rolls up under the resident whose day it was.
     assert payload["by_origin"] == [
-        {"origin": "unattributed", "runs": 1, "cost_usd": 1.0, "tokens": 100, "duration_s": 0.0}
+        {
+            "origin": "resident:test-agent",
+            "runs": 1,
+            "cost_usd": 1.0,
+            "tokens": 100,
+            "duration_s": 0.0,
+        }
     ]
 
 

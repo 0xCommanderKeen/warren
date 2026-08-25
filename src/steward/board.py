@@ -715,6 +715,10 @@ class Dispatcher:
         A letter is ledgered as ``delegated`` and a notice as ``task``, against the
         resident that *did* the work rather than the one that asked for it. Somebody
         else's request still spends your day, and the cap that stops you is yours.
+
+        The origin travels onto the row with it — the item's own if it inherited one,
+        else the item itself, the same expression :func:`steward.delegation.origin_for`
+        uses — so the bill stays with the question rather than with a join.
         """
         if self.guard is None:
             return
@@ -726,6 +730,7 @@ class Dispatcher:
                 kind=kind,
                 run_id=job.task_id,
                 ref=job.task_id,
+                origin=job.origin or f"task:{job.task_id}",
                 now=moment,
             )
         except Exception as exc:  # noqa: BLE001 — the ledger must not take the board down
