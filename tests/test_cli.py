@@ -104,6 +104,22 @@ def test_schema_command_emits_json_schema(runner: CliRunner) -> None:
     assert schema["title"] == "steward resident manifest v0"
 
 
+def test_schema_output_writes_exactly_what_stdout_prints(runner: CliRunner, tmp_path: Path) -> None:
+    """`make schema-write` regenerates the committed artifact through this flag.
+
+    Byte-identical to stdout, or the committed copy and the printed one would be two
+    different contracts and tests/test_schema_contract.py would fail for no real reason.
+    """
+    target = tmp_path / "nested" / "resident-manifest-v0.json"
+    printed = runner.invoke(main, ["schema"])
+    written = runner.invoke(main, ["schema", "--output", str(target)])
+
+    assert written.exit_code == 0, written.output
+    assert not written.output, "--output writes the file; it does not also print it"
+    assert target.read_text(encoding="utf-8") == printed.output
+    assert printed.output.endswith("}\n")
+
+
 def test_help_lists_the_commands(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
@@ -1116,6 +1132,7 @@ def ledger_a_run(db: Path, cost: float, *, resident: str = "test-agent") -> None
             kind="routine",
             run_id="already-ran",
             ref="daily-summary",
+            origin=f"resident:{resident}",
             cost_usd=cost,
             input_tokens=50,
             output_tokens=50,
@@ -1178,19 +1195,13 @@ def test_budget_show_by_origin_rolls_a_chain_up_to_the_question_that_started_it(
     residents_dir = write_resident(budgeted_manifest(daily_cost_usd=50.0)).parent.parent
     db = tmp_path / "steward.db"
     with Store(db) as store:
-        letter = store.delegate_job(
-            title="Check the errand list",
-            assignee="test-agent",
-            delegated_by="somebody",
-            route="inbox",
-            origin="task:root",
-        )
         store.record_run(
             resident="test-agent",
             agent_id="claude-code:test-agent",
             kind="delegated",
-            run_id=letter.task_id,
-            ref=letter.task_id,
+            run_id="a-letter",
+            ref="a-letter",
+            origin="task:root",
             cost_usd=3.25,
             input_tokens=40,
             output_tokens=60,
@@ -1242,9 +1253,15 @@ def test_budget_show_by_origin_wraps_the_json_only_when_it_is_asked_for(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["residents"][0]["resident"] == "test-agent"
-    # A routine came off no task, so it is named unattributed rather than dropped.
+    # A routine came off no task, so it rolls up under the resident whose day it was.
     assert payload["by_origin"] == [
-        {"origin": "unattributed", "runs": 1, "cost_usd": 1.0, "tokens": 100, "duration_s": 0.0}
+        {
+            "origin": "resident:test-agent",
+            "runs": 1,
+            "cost_usd": 1.0,
+            "tokens": 100,
+            "duration_s": 0.0,
+        }
     ]
 
 
@@ -1459,6 +1476,79 @@ def test_doctor_names_the_last_watchdog_pass(
     assert result.exit_code == 0, result.output
     assert "watchdog: last pass 2026-08-24T12:00:00.000Z" in result.output
     assert "2 intervention(s)" in result.output
+
+
+def receiving_manifest(*, status: str = "active") -> dict[str, Any]:
+    """Build a resident that declares one delegation route, open or shut."""
+    data = budgeted_manifest()
+    data["routes"] = [
+        *data["routes"],
+        {"id": "handoff", "kind": "delegation", "address": "steward:delegation", "status": status},
+    ]
+    return data
+
+
+def deliver_a_letter(db: Path, *, assignee: str = "test-agent") -> None:
+    """Put one open item in a resident's inbox, as a handoff would."""
+    with Store(db) as store:
+        store.delegate_job(
+            title="Read the background",
+            assignee=assignee,
+            delegated_by="sender-agent",
+            route="handoff",
+        )
+
+
+def test_doctor_counts_the_inbox_behind_an_open_route(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(receiving_manifest()).parent.parent
+    db = tmp_path / "steward.db"
+    deliver_a_letter(db)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox 1 open via handoff" in result.output
+
+
+def test_doctor_fails_on_letters_stacked_behind_a_closed_route(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The blind spot steward #46 names: pickup stopped, the pile kept growing."""
+    residents_dir = write_resident(receiving_manifest(status="disabled")).parent.parent
+    db = tmp_path / "steward.db"
+    deliver_a_letter(db)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 1
+    assert "1 open letter(s) behind a closed route: handoff (disabled)" in result.output
+    assert "nothing will pick them up" in result.output
+
+
+def test_doctor_says_a_closed_route_with_no_post_is_only_closed(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    # Worth saying out loud, not worth failing on: a route somebody is still wiring up is
+    # a door that is shut, and nothing is waiting behind it.
+    residents_dir = write_resident(receiving_manifest(status="pending")).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox 0 open — route closed: handoff (pending)" in result.output
+
+
+def test_doctor_says_so_when_a_resident_takes_no_letters(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: inbox — takes no letters" in result.output
 
 
 # --------------------------------------------------------------------------------------

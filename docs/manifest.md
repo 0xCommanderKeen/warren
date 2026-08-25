@@ -199,6 +199,7 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 $ steward doctor
 life-agent: runner claude (claude-opus-5) — ready
 life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
   life-agent/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana
@@ -956,4 +957,8 @@ Burrow reads the same files for display (burrow #35). The contract:
 - The five capability dimensions are the panel burrow renders; `app_grants[].status`
   is the only truth about whether access exists.
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
-  this package.
+  this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
+  the schema's `$id` says they are, so burrow can fetch a file rather than run a command.
+  `tests/test_schema_contract.py` fails when the committed copy drifts from the models —
+  changing a field means regenerating with `make schema-write` and reading the diff for
+  what it does to burrow's reader.

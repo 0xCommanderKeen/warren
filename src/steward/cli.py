@@ -43,12 +43,13 @@ from steward.journal import (
     resolve_journal_dir,
 )
 from steward.manifest import (
+    SCHEMA_ARTIFACT,
     Diagnostic,
     ManifestError,
     Resident,
     Severity,
     ValidationResult,
-    manifest_json_schema,
+    manifest_schema_json,
     residents_root,
     validate_paths,
 )
@@ -191,9 +192,26 @@ def validate(paths: tuple[Path, ...], output_format: str, skills_dir: Path | Non
 
 
 @main.command()
-def schema() -> None:
-    """Print the resident manifest JSON Schema (burrow reads manifests from this)."""
-    click.echo(json.dumps(manifest_json_schema(), indent=2))
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the schema here instead of stdout. `make schema-write` points it at "
+    f"{SCHEMA_ARTIFACT}, the copy this repo commits.",
+)
+def schema(output: Path | None) -> None:
+    """Print the resident manifest JSON Schema (burrow reads manifests from this).
+
+    The generated schema is also committed, at the path its own `$id` promises, so a
+    manifest change that would break burrow's reader shows up as a diff in the pull
+    request that makes it. Regenerate it with `make schema-write`.
+    """
+    text = manifest_schema_json()
+    if output is None:
+        click.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
 
 
 # --------------------------------------------------------------------------------------
@@ -295,12 +313,13 @@ def doctor(residents: Path, db: Path | None) -> None:
     """Check that what the manifests declare can actually run, here, now.
 
     Names the brain each resident runs on, whether its binary exists, what it has spent
-    today, and when each enabled routine fires next — then says when the watchdog last
-    made a pass. A missing binary is an error at a reasonable hour rather than a routine
-    that silently never happens at 7am, and a resident paused by its budget is a resident
-    that will not fire tonight however green everything else looks. Board claimants are
-    pre-flighted here too — a resident that claims work and schedules none is a resident
-    nothing else checks.
+    today, how much post is waiting and whether a door is open to take it, and when each
+    enabled routine fires next — then says when the watchdog last made a pass. A missing
+    binary is an error at a reasonable hour rather than a routine that silently never
+    happens at 7am, a resident paused by its budget is a resident that will not fire
+    tonight however green everything else looks, and letters stacked behind a closed route
+    are work nobody will ever pick up. Board claimants are pre-flighted here too — a
+    resident that claims work and schedules none is a resident nothing else checks.
     """
     result = validate_paths([residents])
     if not result.ok:
@@ -337,6 +356,7 @@ def doctor(residents: Path, db: Path | None) -> None:
             problems += _report_claimant(resident, library)
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
+            problems += _report_inbox(resident, store)
         problems += _report_watchdog(store.last_watchdog_pass())
 
     scheduled = _load_or_exit(residents)
@@ -464,6 +484,38 @@ def _report_budget(status: BudgetStatus) -> int:
         return 1
     colour = "green" if status.declared else "bright_black"
     click.secho(f"{status.resident}: budget {status.summary()}", fg=colour)
+    return 0
+
+
+def _report_inbox(resident: Resident, store: Store) -> int:
+    """Print how much post is waiting and whether a door is open to take it.
+
+    Read from the *raw* declared routes rather than ``delegation_routes``, because the
+    failure this exists to catch is a delegation route flipped to ``pending`` or
+    ``disabled`` while letters keep arriving (#46): the accepting-only view shows no route
+    at all, so the report would say nothing about the pile behind the shut door. Nothing
+    claims the inbox in that state — not the dispatcher, not a routine — so it is a
+    problem, and doctor exits non-zero on it.
+    """
+    routes = resident.inbound_routes
+    if not routes:
+        click.secho(f"{resident.id}: inbox — takes no letters", fg="bright_black")
+        return 0
+    pending = store.inbox_count(resident.id)
+    accepting = [route.id for route in routes if route.accepts_delegation]
+    if accepting:
+        click.secho(f"{resident.id}: inbox {pending} open via {', '.join(accepting)}", fg="green")
+        return 0
+    shut = ", ".join(f"{route.id} ({route.status})" for route in routes)
+    if pending:
+        click.secho(
+            f"{resident.id}: inbox — {pending} open letter(s) behind a closed route: {shut}; "
+            "nothing will pick them up",
+            fg="red",
+            err=True,
+        )
+        return 1
+    click.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
     return 0
 
 

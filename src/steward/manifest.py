@@ -16,6 +16,7 @@ than being stored.
 """
 
 import difflib
+import json
 import posixpath
 import re
 import zoneinfo
@@ -1077,6 +1078,17 @@ class Resident:
         """The ids of the routes work may be delegated into, in declared order."""
         return tuple(route.id for route in self.manifest.routes if route.accepts_delegation)
 
+    @property
+    def inbound_routes(self) -> tuple[Route, ...]:
+        """Every declared route of kind ``delegation``, open or shut, in declared order.
+
+        ``delegation_routes`` answers "where may steward deliver today"; this answers "what
+        doors does this resident claim to have at all". A report built on the first cannot
+        see a route somebody flipped to ``pending`` or ``disabled`` — it shows no route,
+        says nothing, and the letters already delivered pile up behind it (#46).
+        """
+        return tuple(r for r in self.manifest.routes if r.kind == DELEGATION_ROUTE_KIND)
+
     def workdir(self, fallback: Path) -> Path:
         """Where a session for this resident runs.
 
@@ -1855,9 +1867,25 @@ def validate_paths(
     return result
 
 
+#: Where the generated schema is committed, relative to the repo root — the path the
+#: ``$id`` below promises. ``make schema-write`` writes it; tests/test_schema_contract.py
+#: fails when the committed copy drifts from what this module generates.
+SCHEMA_ARTIFACT = "schema/resident-manifest-v0.json"
+
+
 def manifest_json_schema() -> dict[str, Any]:
     """Return the manifest JSON Schema, so burrow can read manifests without translation."""
     schema = ResidentManifest.model_json_schema()
-    schema["$id"] = "https://github.com/0xCommanderKeen/steward/schema/resident-manifest-v0.json"
+    schema["$id"] = f"https://github.com/0xCommanderKeen/steward/{SCHEMA_ARTIFACT}"
     schema["title"] = "steward resident manifest v0"
     return schema
+
+
+def manifest_schema_json() -> str:
+    """Render the schema exactly as the committed artifact holds it: indent 2, one newline.
+
+    One function so the CLI, the make target and the drift test cannot disagree about
+    whitespace — a contract test that failed over a missing trailing newline would teach
+    everyone to stop reading it.
+    """
+    return json.dumps(manifest_json_schema(), indent=2) + "\n"
