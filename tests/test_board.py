@@ -687,3 +687,284 @@ def test_hob_is_the_pilot_and_declares_the_board_honestly() -> None:
     assert any(
         route.kind == "job-board" and route.status == "active" for route in resident.manifest.routes
     )
+
+
+# ---------------------------------------------------------------------- leases (steward #73)
+
+
+class LeaseSnooping(Runner):
+    """Records the live lease of each task it is asked to work, before the claim is closed."""
+
+    def __init__(self, store: Store) -> None:
+        """Hold the store to read the claimed row from mid-session."""
+        super().__init__()
+        self.store = store
+        self.leases: list[str | None] = []
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Snapshot this task's lease and finish cleanly."""
+        job = self.store.job(request.env["STEWARD_TASK_ID"])
+        assert job is not None
+        self.leases.append(job.lease_expires_at)
+        return RunResult(outcome=Outcome.OK, output="done", exit_status=0)
+
+
+def test_the_second_claim_in_a_slow_dispatch_gets_a_full_lease(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Each lease is measured from when its claim happens, not from the top of the dispatch."""
+    store.post_job(title="First")
+    store.post_job(title="Second")
+    data = board_manifest(
+        board={"claim": True, "max_claims_per_wake": 2, "lease_s": 1800, "timeout_s": 900}
+    )
+    resident = load_manifest(write_resident(data))
+    runner = LeaseSnooping(store)
+    early = NOW
+    late = NOW + timedelta(minutes=5)
+    ticks = iter([early, late])
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        clock=lambda: next(ticks),
+    )
+    dispatcher.dispatch(NOW)
+
+    lease_one, lease_two = runner.leases
+    assert lease_one is not None
+    assert lease_two is not None
+    assert lease_two > lease_one
+    assert lease_two == ev.utc_now_iso(late + timedelta(seconds=1800))
+
+
+def test_a_stale_handle_cannot_close_a_re_claim_of_the_same_task(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """The dead handle's lease token no longer matches the live re-claim, so its close fails."""
+    store.post_job(title="Handed back and forth")
+    dispatcher = make_dispatcher()
+    resident = dispatcher.residents[0]
+
+    stale = dispatcher.claim(resident, NOW)
+    assert stale is not None
+    store.expire_leases(ev.utc_now_iso(NOW + timedelta(hours=2)))
+    live = dispatcher.claim(resident, NOW + timedelta(hours=3))
+    assert live is not None
+    assert stale.claimed_at != live.claimed_at
+
+    stale_report = dispatcher.work(resident, stale, NOW)
+    assert not stale_report.done, "the dead handle cannot close the live claim"
+    still_claimed = store.job(stale.task_id)
+    assert still_claimed is not None
+    assert still_claimed.status == "claimed"
+    live_report = dispatcher.work(resident, live, NOW + timedelta(hours=3))
+    assert live_report.done
+
+
+# ------------------------------------------------------------ order & guards (steward #74, #80)
+
+
+def test_a_provision_failure_does_not_consume_the_decision(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+) -> None:
+    """A session refused before it runs must not eat the answer the next real one needs."""
+    data = board_manifest()
+    data["skills"] = ["surgery"]  # not in the library → provision refuses before the prompt
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    write_skill("research", defaults=True)
+    store.post_job(title="Needs a skill the library lost")
+    decision = store.create_approval_request(
+        agent_id=resident.agent_id,
+        project="p",
+        action="send_email",
+        message="…",
+        resident=resident.id,
+    )
+    store.decide(decision.request_id, "approve", decided_by="api")
+
+    (report,) = (
+        b.Dispatcher(
+            residents=[resident],
+            store=store,
+            emitter=sink,
+            workdir=tmp_path,
+            library=library_for(tmp_path / "residents"),
+            runner_factory=lambda _spec: ScriptedRunner(),
+        )
+        .dispatch(NOW)
+        .reports
+    )
+    assert not report.done
+    assert [r.request_id for r in store.undelivered_decisions(resident.id)] == [
+        decision.request_id
+    ], "the decision is still waiting for the next real session"
+
+
+def test_a_harvest_that_raises_still_closes_the_task(
+    make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook that throws while reading escalations must not leave a claim hanging open."""
+    store.post_job(title="Ends with a question")
+    runner = ScriptedRunner(
+        RunResult(
+            outcome=Outcome.OK,
+            exit_status=0,
+            output='done\n<needs-human action="send_email">\n{"to": "a"}\n</needs-human>',
+        )
+    )
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("the approvals store is on fire")
+
+    monkeypatch.setattr(approvals, "harvest", boom)
+    (report,) = make_dispatcher(runner=runner).dispatch(NOW).reports
+    assert report.done, "the task is still closed despite the raising hook"
+    assert types(sink) == ["task_claimed", "task_done"]
+    assert [job.status for job in store.jobs()] == ["done"]
+
+
+# --------------------------------------------------- delegated lineage & dry-run (#W4, #W20)
+
+
+def test_a_delegated_claim_and_close_carry_the_parent_task_id(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Burrow can attribute a delegated claim and completion to its chain from the stream."""
+    data = board_manifest()
+    data["routes"].append(
+        {"id": "handoff", "kind": "delegation", "address": "steward:handoff", "status": "active"}
+    )
+    resident = load_manifest(write_resident(data))
+    store.delegate_job(
+        title="Check the errand list",
+        assignee=resident.id,
+        delegated_by="burrow-builder",
+        route="handoff",
+        parent_task_id="root-task-42",
+        origin="task:root-task-42",
+    )
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(),
+    )
+    (report,) = dispatcher.dispatch(NOW).reports
+    assert report.delegated
+    claimed = next(e for e in sink.events if e.type == "task_claimed")
+    done = next(e for e in sink.events if e.type == "task_done")
+    assert claimed.payload["parent_task_id"] == "root-task-42"
+    assert done.payload["parent_task_id"] == "root-task-42"
+
+
+def test_a_dry_run_dispatch_reports_what_it_would_claim_without_writing(
+    make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter
+) -> None:
+    """The board's honest rehearsal: no claim, no ledger, no events (steward #88)."""
+    posted = store.post_job(title="Would be claimed")
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+
+    run = dispatcher.dispatch(NOW)
+    assert run.reports == ()
+    assert [plan.task.title for plan in run.planned] == ["Would be claimed"]
+    assert run.planned[0].source == "board"
+    assert run.planned[0].claimant == "claude-code:test-agent"
+    # Nothing was written: the task is still open and the stream is silent.
+    assert [job.task_id for job in store.jobs(status="open")] == [posted.task_id]
+    assert types(sink) == []
+
+
+def test_the_board_refuses_a_resident_that_would_run_in_cwd(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A skills-loading claim whose memory dir is missing must not materialize into cwd."""
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: tmp_path))
+    write_skill("research", defaults=True)
+    data = board_manifest()  # claude runner, memory stays the absent /data/... path
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Would wipe the cwd", required_skills=["research"])
+
+    sink = ev.NullEmitter()
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,  # equals the (patched) cwd: the dangerous fallback
+        library=library_for(tmp_path / "residents"),
+        runner_factory=lambda _spec: ScriptedRunner(),
+    )
+    run = dispatcher.dispatch(NOW)
+    assert run.reports == ()
+    assert [job.status for job in store.jobs()] == ["open"], "the notice stays open, unclaimed"
+    assert types(sink) == []
+
+
+def test_a_dry_run_dispatch_does_not_deliver_a_decision(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A rehearsal is not a wake-up; it must not consume a pending answer."""
+    store.post_job(title="Would be claimed")
+    record = store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="p",
+        action="send_email",
+        message="…",
+        resident="test-agent",
+    )
+    store.decide(record.request_id, "approve", decided_by="api")
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+
+    dispatcher.dispatch(NOW)
+    assert [r.request_id for r in store.undelivered_decisions("test-agent")] == [record.request_id]
+
+
+def test_a_dry_run_plans_delegated_letters_and_skips_a_paused_resident(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The rehearsal plans a waiting letter, and reports nothing for a resident it cannot run."""
+    data = board_manifest()
+    data["routes"].append(
+        {"id": "handoff", "kind": "delegation", "address": "steward:handoff", "status": "active"}
+    )
+    resident = load_manifest(write_resident(data))
+    store.delegate_job(
+        title="A letter",
+        assignee=resident.id,
+        delegated_by="burrow-builder",
+        route="handoff",
+        parent_task_id="root",
+    )
+    dispatcher = b.Dispatcher(
+        residents=[resident], store=store, emitter=sink, workdir=tmp_path, dry_run=True
+    )
+    run = dispatcher.dispatch(NOW)
+    assert [plan.source for plan in run.planned] == ["delegated"]
+    assert run.planned[0].to_dict()["source"] == "delegated"
+    assert types(sink) == []
+
+    # A paused resident claims nothing, even in rehearsal — and no pause is written.
+    store.pause_resident(
+        resident=resident.id,
+        agent_id=resident.agent_id,
+        budget="daily_cost_usd",
+        spent=9.0,
+        cap=1.0,
+    )
+    assert dispatcher.dispatch(NOW).planned == ()

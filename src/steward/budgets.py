@@ -183,10 +183,14 @@ def day_window(tz: str, now: datetime | None = None) -> Window:
     """
     zone = ZoneInfo(tz)
     local = (now or datetime.now(UTC)).astimezone(zone)
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return Window(
-        tz=tz, start=start.astimezone(UTC), end=(start + timedelta(days=1)).astimezone(UTC)
-    )
+    # ``fold=0`` pins the *earlier* of a repeated wall-clock reading. On an autumn
+    # fall-back day the local midnight (and the next one) is otherwise ambiguous, and
+    # letting the fold ride in from ``now`` can convert the boundary against the wrong UTC
+    # offset — shrinking the day to 24 hours and dropping the repeated hour's spend, so a
+    # resident that overran during it reads as under its cap (steward #68).
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0, fold=0)
+    end = (start + timedelta(days=1)).replace(fold=0)
+    return Window(tz=tz, start=start.astimezone(UTC), end=end.astimezone(UTC))
 
 
 # --------------------------------------------------------------------------------------
@@ -342,7 +346,11 @@ class BudgetStatus:
             return "no limit"
         gauges = "; ".join(gauge.describe() for gauge in self.gauges if not gauge.unlimited)
         if self.tripped is not None and self.allowance is not None:
-            return f"{gauges} — over, and allowed to carry on until {self.allowance.until:%H:%M}"
+            # The window's own zone, not UTC: a Ljubljana resident whose day ends at local
+            # midnight should read "until 00:00", not the "22:00" its UTC instant would
+            # print in summer (steward #82).
+            local_until = self.allowance.until.astimezone(ZoneInfo(self.window.tz))
+            return f"{gauges} — over, and allowed to carry on until {local_until:%H:%M}"
         return gauges
 
     def to_dict(self) -> dict[str, Any]:
@@ -452,7 +460,7 @@ class BudgetGuard:
         """
         pause = self.store.budget_pause(manifest.id)
         if pause is not None:
-            return refusal(pause)
+            return refusal(pause, request_open=self._request_open(pause))
         status = self.status(manifest, now)
         tripped = status.tripped
         if tripped is None:
@@ -469,6 +477,20 @@ class BudgetGuard:
             )
             return None
         return refusal(self._pause(manifest, status, tripped, now))
+
+    def _request_open(self, pause: PauseRecord) -> bool:
+        """Report whether the pause's approval request can still be approved.
+
+        A denied ``budget_unpause`` is resolved, so re-approving it does nothing
+        (``recorded=False``). Telling a human to "approve request <id>" when that can never
+        work again is a dead end (steward #82); this is what lets the refusal drop that
+        advice and point at ``steward budget unpause``, which lifts the pause regardless of
+        how the request was answered.
+        """
+        if not pause.request_id:
+            return False
+        record = self.store.approval(pause.request_id)
+        return record is not None and record.pending
 
     def _pause(
         self,
@@ -623,14 +645,22 @@ class BudgetGuard:
 # --------------------------------------------------------------------------------------
 
 
-def refusal(pause: PauseRecord) -> str:
-    """Render the one refusal a paused resident gets, wherever it is refused."""
+def refusal(pause: PauseRecord, *, request_open: bool = True) -> str:
+    """Render the one refusal a paused resident gets, wherever it is refused.
+
+    ``request_open`` says whether approving the pause's request would still lift it. Once
+    it has been *denied* the request is resolved and re-approving it changes nothing, so
+    the refusal drops the "approve request <id>" path and names only the one action that
+    still works — ``steward budget unpause`` — rather than sending a human down a dead end
+    (steward #82).
+    """
     cap = f" of {_number(pause.cap)}" if pause.cap else ""
-    tail = (
-        f"; approve request {pause.request_id} or run `steward budget unpause {pause.resident}`"
-        if pause.request_id
-        else f"; run `steward budget unpause {pause.resident}`"
-    )
+    if pause.request_id and request_open:
+        tail = (
+            f"; approve request {pause.request_id} or run `steward budget unpause {pause.resident}`"
+        )
+    else:
+        tail = f"; run `steward budget unpause {pause.resident}`"
     return f"{PAUSED_MESSAGE} ({pause.budget}: {_number(pause.spent)}{cap} spent){tail}"
 
 

@@ -51,6 +51,8 @@ real decision would silence the session that needed it, and a dry run that mater
 skills would write into a real workdir.
 """
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -115,6 +117,7 @@ __all__ = [
     "latest_fire_at_or_before",
     "load_scheduled",
     "next_fire_after",
+    "workdir_refusal",
 ]
 
 log = logging.getLogger("steward.scheduler")
@@ -353,6 +356,17 @@ class SchedulerState:
             },
         )
 
+    def reload(self) -> None:
+        """Re-read the anchors from disk, picking up what another process just wrote.
+
+        The other half of "fires exactly once across two tick processes" (steward #76):
+        holding the lock keeps two ticks from writing at once, but a tick that computed
+        *due* against a stale in-memory anchor would still re-fire what the other one
+        already ran. Reloading under the lock, before ``due`` is computed, is what makes
+        the second tick see the first one's anchor and find nothing due.
+        """
+        self.anchors.update(type(self).load(self.path).anchors)
+
     def anchor(self, key: str) -> datetime | None:
         """Return the moment this routine's next occurrence is computed from, if known."""
         raw = self.anchors.get(key)
@@ -390,6 +404,49 @@ def default_state_path(env: dict[str, str] | None = None) -> Path:
 # --------------------------------------------------------------------------------------
 # the scheduler
 # --------------------------------------------------------------------------------------
+
+
+def workdir_refusal(resident: Resident, fallback: Path, library: SkillLibrary) -> str | None:
+    """Return why this resident has nowhere safe to run, or ``None`` when it does.
+
+    A resident whose ``memory: {kind: directory}`` names a path that is not a directory on
+    this host has *no* declared working directory: :meth:`Resident.workdir` falls back to
+    the caller's. The destructive case steward #64 is about is precise, and this refuses
+    exactly it — nothing wider, so a legitimately-chosen workdir keeps working:
+
+    - the memory directory is **absent**, so the run would fall back; **and**
+    - the fallback is the process's **own current working directory** — "NEVER a cwd
+      fallback"; an explicitly chosen workdir is the operator's decision, not a silent
+      default; **and**
+    - the session would **materialize skills** into it — a skills-loading runner
+      (:func:`steward.runners.skills_home`) plus a configured library — which is what makes
+      :meth:`Scheduler.provision` / :meth:`Dispatcher.provision` prune everything under
+      ``<cwd>/.claude/skills`` the resident was not granted, wiping a checkout's own skills.
+
+    A runner that writes no skills, or an unconfigured library, deletes nothing, so it is
+    left to run; ``file`` and ``repo`` memories declare no working directory and are left
+    alone too.
+    """
+    memory = resident.manifest.memory
+    if memory.kind != "directory":
+        return None
+    if Path(memory.path).expanduser().is_dir():
+        return None
+    if skills_home(resident.manifest.runner) is None or not library.configured:
+        return None
+    try:
+        effective = resident.workdir(fallback).resolve()
+        cwd = Path.cwd().resolve()
+    except OSError:  # pragma: no cover — an unresolvable cwd is its own refusal
+        effective = cwd = Path()
+    if effective != cwd:
+        return None
+    return (
+        f"memory.path {memory.path!r} is not a directory on this host, so this resident "
+        "would run in the current working directory — steward refuses that fallback rather "
+        "than materialize skills into, and delete files from, a directory its charter never "
+        "named"
+    )
 
 
 def load_scheduled(
@@ -461,6 +518,9 @@ class Scheduler:
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()
+        # One lock per resident, held across allow → run → record so two due routines of
+        # the same resident cannot both pass one pre-ledger budget read (steward #68).
+        self._resident_locks: dict[str, threading.Lock] = {}
 
     # -- startup validation ----------------------------------------------------------
 
@@ -486,6 +546,7 @@ class Scheduler:
                 check_runner(item.resident.manifest.runner),
                 journal.journal_complaint(item.resident.manifest),
                 describe_missing(item.resident.id, missing, self.library) if missing else None,
+                workdir_refusal(item.resident, self.workdir, self.library),
             )
             problems.extend(f"{item.resident.path}: {c}" for c in complaints if c)
         return problems
@@ -494,9 +555,70 @@ class Scheduler:
         """Raise :class:`SchedulerError` unless every declared runner can run."""
         if self.dry_run:
             return
+        self._ensure_state_ready()
         problems = self.check()
         if problems:
             raise SchedulerError("\n".join(problems))
+
+    def _ensure_state_ready(self) -> None:
+        """Make the state file persistable, loudly, before anything relies on it.
+
+        A ``STEWARD_STATE`` that names a directory (or is otherwise unwritable) used to be a
+        warning that steward swallowed on its way to exiting 0 — a scheduler that cannot
+        remember its anchor, which re-fires or re-anchors forever, pretending everything is
+        fine (steward #85). It is fatal here instead: a scheduler that cannot persist state
+        must not run. A stray ``state.tmp`` from a write killed mid-flight is cleared, so a
+        crash does not leave a booby-trap behind.
+        """
+        if self.dry_run:
+            return
+        path = self.state.path
+        # Clear a stray temp from a write killed mid-flight first, so a crash — including the
+        # one a directory-shaped state itself causes — does not leave a booby-trap behind.
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        if path.is_dir():
+            raise SchedulerError(
+                f"STEWARD_STATE names a directory, not a file: {path} — steward cannot "
+                "persist its scheduler anchors there, and a scheduler that cannot remember "
+                "what it already fired re-fires forever. Point STEWARD_STATE at a file."
+            )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SchedulerError(
+                f"cannot create the directory for STEWARD_STATE {path}: {exc}"
+            ) from exc
+
+    @contextlib.contextmanager
+    def _state_lock(self) -> Iterator[None]:
+        """Hold an exclusive OS lock over the whole tick, so two ticks never both fire.
+
+        The documented ``scheduler tick`` deployment runs under external cron, so two ticks
+        really can overlap — a slow run, a cron that fires while the last one is still
+        going. Without a cross-process lock both see the same occurrence due and both fire
+        it (steward #76). ``flock`` on a sidecar ``.lock`` file serialises them: the second
+        tick blocks until the first has anchored, saved, and fired, then reloads the state
+        the first one wrote and finds nothing due.
+        """
+        lock_path = self.state.path.with_suffix(f"{self.state.path.suffix}.lock")
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def _resident_lock(self, resident_id: str) -> threading.Lock:
+        """Return the lock held across one resident's allow → run → record."""
+        with self._lock:
+            lock = self._resident_locks.get(resident_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._resident_locks[resident_id] = lock
+            return lock
 
     # -- due calculation -------------------------------------------------------------
 
@@ -611,10 +733,19 @@ class Scheduler:
         A dry run gets nothing, and the reason matters: delivery is a *write*. A rehearsal
         that consumed a real decision would mean the resident's next real session never
         heard the answer — a rehearsal is not work, and it must not be able to eat one.
+
+        A hook that raises degrades to no decisions and a log line rather than taking the
+        whole fire down with zero events, exactly as the harvest hook already does
+        (steward #80): a session that opens without a decision it was owed is a bug to fix,
+        but a routine that never runs — and never brackets — because delivery threw is worse.
         """
         if self.hooks is None or self.dry_run:
             return None
-        return self.hooks.decisions_for(item.resident.id)
+        try:
+            return self.hooks.decisions_for(item.resident.id)
+        except Exception as exc:  # noqa: BLE001 — a broken hook is a missing decision, not a crash
+            log.warning("%s: could not read pending decisions: %s", item.key, exc)
+            return None
 
     def journal_for(self, item: ScheduledRoutine) -> str | None:
         """Return the resident's latest surviving journal entry, or ``None``.
@@ -652,7 +783,11 @@ class Scheduler:
             return read()
         except ManifestError as exc:
             log.warning("%s: no journal — %s", item.key, exc)
-        except OSError as exc:
+        except Exception as exc:  # noqa: BLE001 — a bad byte in a journal is not a failed routine
+            # Widened past OSError on purpose: a session-written journal with one undecodable
+            # byte raises UnicodeDecodeError (a ValueError), and letting that escape used to
+            # brick the resident or leave a dangling routine_started (steward #75). The
+            # declaration itself is checked in check(), where a broken one is meant to be loud.
             log.warning("%s: could not reach the journal: %s", item.key, exc)
         return None
 
@@ -682,17 +817,42 @@ class Scheduler:
     def _fire_claimed(
         self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
     ) -> FireReport:
+        # Hold the resident's lock across allow → run → record, so two of its due routines
+        # firing at once cannot both read the budget before either has ledgered and both
+        # sail past an exhausted cap (steward #68). No guard means no ledger and nothing
+        # to serialise, and the run stays as concurrent as it ever was.
+        guard_lock = self._resident_lock(item.resident.id) if self.guard is not None else None
+        with guard_lock or contextlib.nullcontext():
+            return self._fire_body(item, run_id, trigger, moment)
+
+    def _fire_body(
+        self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
+    ) -> FireReport:
         refusal = self._budget_refusal(item, moment)
         if refusal is not None:
             return FireReport(scheduled=item, run_id=run_id, fired=False, skipped_reason=refusal)
 
-        prompt = self.build_prompt(item, moment)
+        # Refuse before the prompt is assembled — assembling delivers pending decisions —
+        # so a resident with nowhere to run never has an answer consumed by a fire that was
+        # never going to happen, and steward never falls back to the cwd (steward #64).
+        if not self.dry_run:
+            nowhere = workdir_refusal(item.resident, self.workdir, self.library)
+            if nowhere is not None:
+                log.error("%s: %s", item.key, nowhere)
+                return FireReport(
+                    scheduled=item, run_id=run_id, fired=False, skipped_reason=nowhere
+                )
+
         workdir = item.workdir(self.workdir)
         cwd = str(workdir)
 
         if self.dry_run:
             return FireReport(
-                scheduled=item, run_id=run_id, fired=False, prompt=prompt, skipped_reason="dry run"
+                scheduled=item,
+                run_id=run_id,
+                fired=False,
+                prompt=self.build_prompt(item, moment),
+                skipped_reason="dry run",
             )
 
         context = ev.RunContext(
@@ -705,8 +865,13 @@ class Scheduler:
         self.emitter.emit(context.started(trigger))
 
         started = time.monotonic()
+        prompt = ""
         try:
+            # Provision *before* the prompt is assembled: assembling it delivers the
+            # resident's pending decisions, and a session refused for a missing skill must
+            # not eat an answer the next real session still needs to hear (steward #74).
             self.provision(item, workdir)
+            prompt = self.build_prompt(item, moment)
             runner: Runner = self._runner_factory(item.resident.manifest.runner)
             result = runner.run(
                 RunRequest(
@@ -732,7 +897,11 @@ class Scheduler:
                 outcome=Outcome.FAILED, duration_s=duration, error=f"{type(exc).__name__}: {exc}"
             )
 
-        self._ledger(item, run_id, result, moment)
+        # Stamp the ledger at *completion*, not at fire time: a run that started at 23:50
+        # and crossed midnight belongs to the day it finished in, or a once-daily routine's
+        # spend lands in a window its own next fire never re-reads and the cap never trips
+        # (steward #68).
+        self._ledger(item, run_id, result, moment + timedelta(seconds=result.duration_s))
         self._harvest(item, result.output)
 
         journal_path: Path | None = None
@@ -861,13 +1030,37 @@ class Scheduler:
     # -- the two entry points --------------------------------------------------------
 
     def tick(self, now: datetime | None = None) -> list[FireReport]:
-        """Fire everything due right now, then sweep the board. Useful under external cron."""
+        """Fire everything due right now, then sweep the board. Useful under external cron.
+
+        The whole "fire this occurrence exactly once" promise is held here, across both a
+        crash and a second concurrent tick (steward #76, #85):
+
+        - an unpersistable ``STEWARD_STATE`` is fatal *before* anything fires, not a warning
+          on the way to a silent exit 0;
+        - the tick takes an exclusive OS lock for its whole duration, reloads the anchors
+          another process may have just written, then anchors and **saves** the due set
+          *before* firing any of it. A crash mid-run therefore does not re-fire on restart
+          (the anchor is already on disk), and a second tick that was waiting on the lock
+          reloads that saved state and finds nothing due.
+
+        The board sweep runs after the lock is released: its claims are atomic in their own
+        right and do not need the scheduler's state lock, and holding it across board
+        sessions would serialise dispatch across processes for no gain.
+        """
         moment = now or datetime.now(UTC)
-        reports: list[FireReport] = []
-        for item in self.due(moment):
-            self.state.set_anchor(item.key, moment)
-            reports.append(self.fire(item, now=moment))
-        self._save_state()
+        if self.dry_run:
+            # A rehearsal locks nothing and persists nothing; it just reports what would go.
+            reports = [self.fire(item, now=moment) for item in self.due(moment)]
+            self._dispatch(moment)
+            return reports
+        self._ensure_state_ready()
+        with self._state_lock():
+            self.state.reload()
+            due = self.due(moment)
+            for item in due:
+                self.state.set_anchor(item.key, moment)
+            self._save_state()
+            reports = [self.fire(item, now=moment) for item in due]
         self._dispatch(moment)
         return reports
 
