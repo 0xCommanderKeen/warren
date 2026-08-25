@@ -25,7 +25,7 @@ from steward.budgets import BudgetGuard
 from steward.manifest import Resident, load_manifest, validate_tree
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.skills import library_for
-from steward.store import ORIGIN_UNATTRIBUTED, JobRecord, Store
+from steward.store import JobRecord, Store
 
 NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
@@ -1185,8 +1185,9 @@ def test_spend_rolls_up_to_the_origin_the_chain_descends_from(
 
     The question ``origin`` was recorded for. A human posts one task, the holder hands a
     piece of it to a neighbour, and the neighbour's spend rolls up to the original task
-    rather than stopping at whichever resident was last in the line. A routine that came
-    off no task at all is reported as unattributed rather than dropped.
+    rather than stopping at whichever resident was last in the line. A routine belongs to
+    no chain, so it rolls up under the resident whose day it was (#45) — its own line,
+    never folded into somebody else's question.
     """
     residents = fleet(sender_manifest(), receiver_manifest())
     dispatcher = guarded_dispatcher(residents, store, sink, guard, tmp_path, costly_runner(1.5))
@@ -1194,23 +1195,24 @@ def test_spend_rolls_up_to_the_origin_the_chain_descends_from(
     dispatcher.delegator.delegate(
         sender=residents[0], handoff=handoff(), parent_task_id=root.task_id
     )
-    # A routine of the sender's own, which belongs to no chain.
+    # A routine of the sender's own, ledgered the way the scheduler ledgers one.
     guard.record(
         residents[0].manifest,
         result=RunResult(outcome=Outcome.OK, cost_usd=0.75),
         ref="daily-summary",
+        origin=f"resident:{residents[0].id}",
         now=NOW,
     )
 
     dispatcher.dispatch(NOW)
 
     rollup = {spend.origin: spend for spend in store.spend_by_origin()}
-    assert set(rollup) == {f"task:{root.task_id}", ORIGIN_UNATTRIBUTED}
+    assert set(rollup) == {f"task:{root.task_id}", f"resident:{residents[0].id}"}
     chained = rollup[f"task:{root.task_id}"]
     assert chained.cost_usd == pytest.approx(1.5)
     assert chained.tokens == 1000
     assert chained.runs == 1
-    assert rollup[ORIGIN_UNATTRIBUTED].cost_usd == pytest.approx(0.75)
+    assert rollup[f"resident:{residents[0].id}"].cost_usd == pytest.approx(0.75)
 
 
 def test_the_rollup_honours_the_window_it_is_asked_about(

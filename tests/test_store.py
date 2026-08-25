@@ -290,6 +290,47 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         assert migrated.last_watchdog_pass() is None
 
 
+def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) -> None:
+    """``run_ledger.origin`` (#45) is the same ALTER TABLE: an old ledger loses nothing.
+
+    The rollup falls back to the task the row's ``ref`` names, which is the answer the old
+    database already gave. New rows say it for themselves; old ones keep what they had.
+    """
+    path = tmp_path / "legacy-ledger.db"
+    legacy = sqlite3.connect(path)
+    with legacy:
+        legacy.execute(
+            "CREATE TABLE run_ledger (entry_id TEXT PRIMARY KEY, resident TEXT NOT NULL, "
+            "agent_id TEXT NOT NULL, kind TEXT NOT NULL, run_id TEXT NOT NULL, "
+            "ref TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '', "
+            "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, "
+            "cost_usd REAL NOT NULL DEFAULT 0.0, duration_s REAL NOT NULL DEFAULT 0.0, "
+            "usage_known INTEGER NOT NULL DEFAULT 1, recorded_at TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, cost_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("e-1", "hob", "a:hob", "delegated", "old-task", "old-task", 2.5, EARLY),
+        )
+    legacy.close()
+
+    with Store(path) as migrated:
+        (entry,) = migrated.ledger("hob")
+        assert (entry.kind, entry.cost_usd, entry.origin) == ("delegated", 2.5, "")
+        migrated.delegate_job(
+            title="the chain the old row came off",
+            assignee="hob",
+            delegated_by="maren",
+            route="inbox",
+            origin="task:root",
+            task_id="old-task",
+        )
+
+        (rolled,) = migrated.spend_by_origin()
+
+        assert (rolled.origin, rolled.cost_usd) == ("task:root", pytest.approx(2.5))
+
+
 # ------------------------------------------------------------------------ approvals
 
 
@@ -531,19 +572,14 @@ def test_the_database_lives_beside_the_scheduler_state(
 
 def test_spend_rolls_up_by_the_origin_a_task_carries(store: Store) -> None:
     """Two hops of one chain are one bill, because both rows carry the same origin."""
-    first = store.delegate_job(
-        title="first hop", assignee="hob", delegated_by="maren", route="inbox", origin="task:root"
-    )
-    second = store.delegate_job(
-        title="second hop", assignee="pip", delegated_by="hob", route="inbox", origin="task:root"
-    )
-    for resident, task in (("hob", first), ("pip", second)):
+    for resident in ("hob", "pip"):
         store.record_run(
             resident=resident,
             agent_id=f"a:{resident}",
             kind="delegated",
-            run_id=task.task_id,
-            ref=task.task_id,
+            run_id=f"{resident}-hop",
+            ref=f"{resident}-hop",
+            origin="task:root",
             cost_usd=1.5,
             input_tokens=10,
             output_tokens=5,
@@ -557,8 +593,8 @@ def test_spend_rolls_up_by_the_origin_a_task_carries(store: Store) -> None:
     assert rolled.tokens == 30
 
 
-def test_a_run_behind_no_task_is_named_rather_than_dropped(store: Store) -> None:
-    """A routine has no chain above it, and money steward cannot attribute is still money."""
+def test_a_run_recorded_without_an_origin_is_named_rather_than_dropped(store: Store) -> None:
+    """Nothing said where it came from, and money steward cannot attribute is still money."""
     store.record_run(
         resident="hob",
         agent_id="a:hob",
@@ -574,18 +610,65 @@ def test_a_run_behind_no_task_is_named_rather_than_dropped(store: Store) -> None
     assert rolled.cost_usd == pytest.approx(2.0)
 
 
+def test_a_ref_that_collides_with_a_task_id_does_not_inherit_that_task(store: Store) -> None:
+    """The regression the denormalized column exists for (#45).
+
+    A routine is ledgered under its own id, and nothing stops a resident naming a routine
+    what some task's id happens to be. Rolling spend up by joining ``ref`` to
+    ``jobs.task_id`` handed that routine somebody else's bill; the row now says what it
+    descends from, so the join has nothing left to guess at.
+    """
+    task = store.delegate_job(
+        title="the real chain", assignee="hob", delegated_by="maren", route="inbox", origin="task:x"
+    )
+    store.record_run(
+        resident="hob",
+        agent_id="a:hob",
+        kind="routine",
+        run_id="r",
+        ref=task.task_id,  # a routine whose id collides with a real task's
+        origin="resident:hob",
+        cost_usd=2.0,
+    )
+
+    rollup = {spend.origin: spend.cost_usd for spend in store.spend_by_origin()}
+
+    assert rollup == {"resident:hob": pytest.approx(2.0)}
+
+
+def test_a_row_written_before_the_column_existed_still_rolls_up_by_its_task(store: Store) -> None:
+    """The fallback the migration leaves behind: an old row keeps the answer it had."""
+    task = store.delegate_job(
+        title="claimed before #45",
+        assignee="hob",
+        delegated_by="maren",
+        route="inbox",
+        origin="task:root",
+    )
+    store.record_run(
+        resident="hob",
+        agent_id="a:hob",
+        kind="delegated",
+        run_id=task.task_id,
+        ref=task.task_id,
+        cost_usd=4.0,
+    )  # no origin — exactly the shape ALTER TABLE left every pre-migration row in
+
+    (rolled,) = store.spend_by_origin()
+
+    assert (rolled.origin, rolled.cost_usd) == ("task:root", pytest.approx(4.0))
+
+
 def test_the_rollup_is_ordered_by_what_each_origin_cost(store: Store) -> None:
     """Whoever is spending the most is the first line somebody reads."""
     for origin, cost in (("task:cheap", 1.0), ("task:dear", 9.0)):
-        task = store.delegate_job(
-            title=origin, assignee="hob", delegated_by="maren", route="inbox", origin=origin
-        )
         store.record_run(
             resident="hob",
             agent_id="a:hob",
             kind="delegated",
-            run_id=task.task_id,
-            ref=task.task_id,
+            run_id=origin,
+            ref=origin,
+            origin=origin,
             cost_usd=cost,
         )
 

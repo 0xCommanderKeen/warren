@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     kind          TEXT NOT NULL,
     run_id        TEXT NOT NULL,
     ref           TEXT NOT NULL DEFAULT '',
+    origin        TEXT NOT NULL DEFAULT '',
     outcome       TEXT NOT NULL DEFAULT '',
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -218,6 +219,13 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
+    },
+    "run_ledger": {
+        # Denormalized from the task the run came off (steward #45). Rolling spend up by
+        # joining ``ref`` to ``jobs.task_id`` guessed: a routine whose ref happens to
+        # equal some task's id would have inherited that task's bill. The row says what
+        # it descends from, so the ledger is self-describing and a join cannot misread it.
+        "origin": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
@@ -437,6 +445,10 @@ class LedgerEntry:
     run_id: str
     recorded_at: str
     ref: str = ""
+    #: What this run descends from, in delegation's vocabulary (``task:``/``resident:``/
+    #: ``human:``). Written at record time rather than inferred later — see
+    #: :meth:`Store.spend_by_origin`. Empty only on rows written before the column existed.
+    origin: str = ""
     outcome: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
@@ -460,6 +472,7 @@ class LedgerEntry:
             run_id=row["run_id"],
             recorded_at=row["recorded_at"],
             ref=row["ref"],
+            origin=row["origin"],
             outcome=row["outcome"],
             input_tokens=row["input_tokens"],
             output_tokens=row["output_tokens"],
@@ -477,6 +490,7 @@ class LedgerEntry:
             "kind": self.kind,
             "run_id": self.run_id,
             "ref": self.ref,
+            "origin": self.origin,
             "outcome": self.outcome,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -1283,6 +1297,7 @@ class Store:
         kind: str,
         run_id: str,
         ref: str = "",
+        origin: str = "",
         outcome: str = "",
         input_tokens: int = 0,
         output_tokens: int = 0,
@@ -1297,6 +1312,10 @@ class Store:
         timeout: a session that burned four minutes and produced nothing still burned
         four minutes, and a budget that only counted successes would be a budget that
         rewards crashing.
+
+        ``origin`` is what the run descends from, recorded here rather than reconstructed
+        later: a caller that knows the chain says so, and the row stops depending on a
+        join that can only guess.
         """
         entry = LedgerEntry(
             entry_id=new_id(),
@@ -1305,6 +1324,7 @@ class Store:
             kind=kind,
             run_id=run_id,
             ref=ref,
+            origin=origin,
             outcome=outcome,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1316,8 +1336,8 @@ class Store:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
-                "outcome, input_tokens, output_tokens, cost_usd, duration_s, usage_known, "
-                "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
+                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
@@ -1325,6 +1345,7 @@ class Store:
                     entry.kind,
                     entry.run_id,
                     entry.ref,
+                    entry.origin,
                     entry.outcome,
                     entry.input_tokens,
                     entry.output_tokens,
@@ -1383,10 +1404,15 @@ class Store:
         an answer stays with the answer rather than scattering across whichever residents
         happened to be in the line.
 
-        The join is ``run_ledger.ref = jobs.task_id``, because the board ledgers a task
-        under its own id. A run with no task behind it — a scheduled routine — has no
-        origin to roll up to and is reported under :data:`ORIGIN_UNATTRIBUTED` rather than
-        dropped: money steward cannot attribute is still money somebody spent.
+        The origin is read off the ledger row itself, written there by whoever recorded
+        the run. It used to be inferred by joining ``run_ledger.ref`` to ``jobs.task_id``,
+        which is only a task id for board and delegated runs — a routine whose ref
+        collided with a task's id inherited that task's bill. The join survives for rows
+        written before the column existed, and nothing else.
+
+        A run that descends from nobody — one recorded without an origin, on an old
+        database — is reported under :data:`ORIGIN_UNATTRIBUTED` rather than dropped:
+        money steward cannot attribute is still money somebody spent.
         """
         clauses: list[str] = []
         params: list[str] = []
@@ -1399,12 +1425,15 @@ class Store:
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT COALESCE(NULLIF(j.origin, ''), ?) AS origin, COUNT(*) AS runs, "  # noqa: S608
+                "SELECT COALESCE(NULLIF(l.origin, ''), NULLIF(j.origin, ''), ?) AS origin, "  # noqa: S608
+                "COUNT(*) AS runs, "
                 "SUM(l.cost_usd) AS cost_usd, "
                 "SUM(l.input_tokens + l.output_tokens) AS tokens, "
                 "SUM(l.duration_s) AS duration_s "
                 "FROM run_ledger l LEFT JOIN jobs j ON j.task_id = l.ref"
-                f"{where} GROUP BY origin ORDER BY cost_usd DESC, origin",
+                # Grouped by ordinal, not by name: both joined tables have an ``origin``
+                # column now, so ``GROUP BY origin`` is ambiguous rather than the alias.
+                f"{where} GROUP BY 1 ORDER BY cost_usd DESC, 1",
                 (ORIGIN_UNATTRIBUTED, *params),
             ).fetchall()
         return [

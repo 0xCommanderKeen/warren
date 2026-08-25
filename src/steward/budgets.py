@@ -564,6 +564,7 @@ class BudgetGuard:
         kind: str = RUN_ROUTINE,
         run_id: str = "",
         ref: str = "",
+        origin: str = "",
         now: datetime | None = None,
     ) -> LedgerEntry:
         """Append what one finished session cost. Called once per run, whatever happened.
@@ -571,6 +572,9 @@ class BudgetGuard:
         Usage that the brain did not report is written as zero and flagged, never guessed:
         a ``codex`` run has no cost to give, and a ledger that invented one would make the
         fuel gauge a decoration.
+
+        ``origin`` is what the run descends from; the caller knows the chain, so it says
+        so here rather than leaving the rollup to reconstruct it from a join.
         """
         known = (
             result.cost_usd is not None
@@ -583,6 +587,7 @@ class BudgetGuard:
             kind=kind,
             run_id=run_id,
             ref=ref,
+            origin=origin,
             outcome=str(result.outcome),
             input_tokens=result.input_tokens or 0,
             output_tokens=result.output_tokens or 0,
