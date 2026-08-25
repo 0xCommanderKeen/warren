@@ -348,6 +348,57 @@ def test_an_unwritable_skills_directory_raises_a_skill_error(tmp_path: Path) -> 
         sk.materialize(granted("research"), tmp_path, ".claude/skills")
 
 
+def test_a_symlinked_skills_directory_is_refused_and_the_victim_is_untouched(
+    tmp_path: Path,
+) -> None:
+    """A symlinked skills dir pointing at a victim must never be pruned through (#64)."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("do not delete me", encoding="utf-8")
+
+    workdir = tmp_path / "workdir"
+    (workdir / ".claude").mkdir(parents=True)
+    (workdir / ".claude" / "skills").symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(sk.SkillError, match="symlink"):
+        sk.materialize(granted("research"), workdir, ".claude/skills")
+
+    assert (victim / "precious.txt").read_text(encoding="utf-8") == "do not delete me"
+
+
+def test_a_skills_dir_reached_through_a_symlinked_parent_is_refused(tmp_path: Path) -> None:
+    """Even when the *parent* is the symlink, the resolved dir escapes and is refused."""
+    victim = tmp_path / "victim"
+    (victim / "skills").mkdir(parents=True)
+    (victim / "skills" / "precious.txt").write_text("keep me", encoding="utf-8")
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    (workdir / ".claude").symlink_to(victim, target_is_directory=True)
+
+    with pytest.raises(sk.SkillError, match="outside the workdir"):
+        sk.materialize(granted("research"), workdir, ".claude/skills")
+
+    assert (victim / "skills" / "precious.txt").read_text(encoding="utf-8") == "keep me"
+
+
+def test_a_symlink_inside_the_skills_directory_is_unlinked_not_followed(tmp_path: Path) -> None:
+    """A symlinked child is pruned by removing the link, never rmtree'd through (#64)."""
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.txt").write_text("keep me", encoding="utf-8")
+
+    root = tmp_path / ".claude" / "skills"
+    root.mkdir(parents=True)
+    (root / "sneaky").symlink_to(victim, target_is_directory=True)
+
+    result = sk.materialize(granted("research"), tmp_path, ".claude/skills")
+
+    assert "sneaky" in result.removed
+    assert not (root / "sneaky").exists(), "the link is gone"
+    assert (victim / "precious.txt").read_text(encoding="utf-8") == "keep me", "the target is not"
+
+
 def test_a_materialized_skill_round_trips_through_the_parser(tmp_path: Path) -> None:
     """What lands on disk is what steward parsed: one representation, two readers."""
     original = sk.Skill(name="research", description="Cite things.", body="Read it.", default=True)
