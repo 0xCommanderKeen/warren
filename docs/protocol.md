@@ -156,6 +156,26 @@ SSE and polling neither duplicates nor skips an event. A rotation emits an SSE
 and `X-Accel-Buffering: no` so the NAS reverse proxy does not hold events in a
 buffer.
 
+Opening the HTTP stream is not a live-data boundary: an `EventSource` may still have
+queued catch-up messages to deliver. After writing the complete backlog, the server
+emits an ordered `ready` control event whose `id` and JSON `cursor` are the same exact
+current v1 cursor. The server captures the final catch-up records and cursor under the
+event-log lock, then releases it before any socket write or flush. An append is either
+included in that snapshot before the marker or tailed from its cursor after the marker;
+a slow stream cannot block ingestion, polling, or rotation. The viewer projects
+pre-marker records but keeps transport `recovering`. During a normal cursor resume it
+stages at most the same 4,000-record transport window of routine evidence and publishes
+that evidence once, with its original order and cursors, after validating `ready`.
+Bootstrap/reset evidence and overflowed staging are conservatively suppressed and only
+rebase the acknowledgement boundary; malformed readiness, errors, and reconnects clear
+staging. Only a valid marker in the
+current cursor namespace makes the transport `live`; a missing marker remains
+non-observable, while a malformed or mismatched marker closes the stream and enters
+the conservative polling/reconnect path. `ready` is transport control only and is
+never appended to or interpreted as a protocol-log event. A `reset` closes the
+ambiguous stream, obtains one grouped polling baseline, and requires a fresh `ready`
+marker on the following connection.
+
 Closing a browser tab, navigating away, or a proxy closing an SSE socket is an
 expected lifecycle event: broken-pipe, connection-reset, and connection-aborted
 errors end that handler quietly. Other I/O errors remain visible as server faults.
@@ -267,6 +287,61 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
+| `routine_started`   | Steward began a declared routine           | `routine`, `run_id`, `trigger` |
+| `routine_finished`  | that run ended successfully                 | `routine`, `run_id`, `outcome`, `artifacts`, `duration_s` |
+| `routine_failed`    | that run ended unsuccessfully                | `routine`, `run_id`, `error`; optional `duration_s` |
+
+Routine events are projected into a separate bounded ledger keyed by agent, routine,
+and run id. They do not by themselves rewrite ordinary tool/activity history. A start
+without a matching close becomes stale after 30 minutes; malformed routine payloads
+are diagnosed and skipped instead of partially rendered.
+Only events whose source is exactly `steward` are routine lifecycle evidence. This is
+Steward's `EVENT_SOURCE` contract; a `routine_*` event from any other producer is
+diagnosed and ignored, including for run-now acknowledgement.
+`duration_s` is deliberately optional on failures: Steward's watchdog closes vanished
+runs without inventing a duration it cannot know, and Burrow renders that absence as
+`duration unknown`. When present, durations must be finite, non-negative numbers in
+both protocol adapters.
+
+The browser uses monotonic ingestion order only to decide recency under bounded ledger
+capacity. Close-only events live in a separate 200-run staging area, selected by the
+same terminal comparator and ingestion recency. They do not consume or displace the
+200 renderable routine keys. A later exact matching start atomically promotes both
+events into the renderable ledger, including when events arrive in separate SSE
+publications at saturation. Staging overflow is reported as capacity pressure, not as
+malformed telemetry.
+The browser reports a poll as `recovering` from the moment it starts until a successful
+`/events` response has been projected with its ending cursor. Only then is the transport
+`polling`. A cached cursor never makes an in-flight or failed recovery observable, so Run
+Now stays disabled without requesting credentials, declarations, or execution while the
+transport is `recovering`, `reconnecting`, or `disconnected`.
+Within one agent/routine/run lifecycle, the terminal with the greatest valid
+event timestamp is authoritative, so a delayed older replay cannot replace newer truth.
+Equal-time conflicts use a stable field-order tie-break that conservatively prefers
+`routine_failed`. A run-now request boundary selects one fresh
+manual start using the resident manifest's match contract: exact-agent manifests require
+that agent, while project manifests accept the distinct Steward runner for that project.
+Once that exact agent/routine/run identity is confirmed, its exact terminal event may close
+the acknowledgement after a cursor-generation reset; unrelated starts and terminals remain
+ineligible. For an unconfirmed request, the first reset/bootstrap publication is never
+acknowledgement evidence: Burrow advances the request boundary to that publication's ending
+cursor, rejects all snapshot-contained lifecycle records, and considers only later records in
+the same new cursor generation. This makes a reset recoverable without attributing replay.
+The UI may navigate to the project's currently active owner without narrowing
+this manifest-based correlation. If no matching start arrives within 15 seconds, the
+request remains an active, explicitly unacknowledged uncertainty and Run Now stays
+disabled. Steward lifecycle events do not include the POST request id, so retry cannot
+be attributed safely while that outcome is uncertain. The same page permits no retry
+for that correlation until an exact fresh start and its real terminal evidence resolve
+the original request; late exact lifecycle evidence remains eligible indefinitely.
+The acknowledgement table holds at most 200 correlations. If all slots contain unresolved
+requests, Run Now refuses before opening credential UI or sending a request, restores its
+enabled control, and announces the capacity refusal as an alert. Unresolved correlations are
+never evicted to make room. Each unresolved correlation also remembers at most 20 close-only
+run identities. Eviction advances a per-correlation terminal-evidence-loss watermark. A later
+matching start at or before that watermark, without retained exact terminal evidence, becomes
+`indeterminate` rather than falsely `running`; Run Now remains disabled. Exact terminal
+evidence retained or received later still resolves the state to completed or failed.
 
 The village notice board is a bounded cross-agent view of this stream. It keeps
 the 30 most recent valid `artifact_produced` events from the viewer's live log

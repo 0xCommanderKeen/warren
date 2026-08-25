@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 
@@ -49,6 +50,106 @@ class ResidentManifestTest(unittest.TestCase):
                          [{"id": "gmail", "status_ref": "life/config#gmail"}])
         self.assertEqual(resident["meta"]["agent_id"], "claude-code:resident")
         self.assertEqual(resident["body"], "Keeps the household moving.")
+
+    def test_routines_publish_only_safe_schedule_metadata(self):
+        report = self.load({"hob.resident.json": valid_manifest(routines=[{
+            "id": "daily-summary", "schedule": "0 7 * * *",
+            "schedule_tz": "Europe/Ljubljana", "enabled": True,
+            "steward_resident": "life-agent",
+        }])})
+        self.assertEqual(report["diagnostics"], [])
+        self.assertEqual(report["residents"][0]["routines"][0]["id"], "daily-summary")
+        self.assertNotIn("prompt", json.dumps(report))
+
+    def test_routine_identifiers_and_boolean_match_the_schema_exactly(self):
+        base = {"id": "daily-summary", "schedule": "0 7 * * *",
+                "schedule_tz": "Europe/Ljubljana", "enabled": True,
+                "steward_resident": "life-agent"}
+        for field, value, path in (("steward_resident", "not valid", "steward_resident"),
+                                   ("enabled", 1, "enabled"), ("enabled", 0, "enabled")):
+            with self.subTest(field=field, value=value):
+                routine = {**base, field: value}
+                report = self.load({"hob.resident.json": valid_manifest(routines=[routine])})
+                self.assertEqual(report["residents"], [])
+                self.assertTrue(any(path in item["path"] for item in report["diagnostics"]))
+
+    def test_routine_cron_and_timezone_match_steward_constraints_and_schema(self):
+        base = {"id": "daily-summary", "schedule": "0 7 * * *",
+                "schedule_tz": "Europe/Ljubljana", "enabled": True,
+                "steward_resident": "life-agent"}
+        # Cross-checked against Steward's pinned croniter 6.2.4 contract. Burrow
+        # transports these declarations but leaves scheduling authority there.
+        for schedule in ("0 7 * * *", "*/15 * * * 1-5", "15,45 8-18 * * *",
+                         "10-5 7 * * *", "0 23-2 * * *", "0 7 * * 7-0",
+                         "0 7 * * MON", "0 7 * JAN *", "0 0 L * *",
+                         "*/15 8-18 * JAN,MAR MON-FRI", "0 0 ? * MON",
+                         "0 0 * * 5#3"):
+            with self.subTest(valid_schedule=schedule):
+                report = self.load({"hob.resident.json": valid_manifest(
+                    routines=[{**base, "schedule": schedule}])})
+                self.assertEqual(report["diagnostics"], [])
+        for schedule in ("every morning", "0 7 * *", "0 7 * * * *", "@daily",
+                         "0 7 * * $", " 0 7 * * *", "0 7 * * *\n"):
+            with self.subTest(invalid_schedule=schedule):
+                report = self.load({"hob.resident.json": valid_manifest(
+                    routines=[{**base, "schedule": schedule}])})
+                self.assertEqual(report["residents"], [])
+                self.assertTrue(any(item["path"].endswith(".schedule")
+                                    for item in report["diagnostics"]))
+        for timezone in ("UTC", "Europe/Ljubljana", "America/New_York",
+                         "GMT", "CET", "Zulu", "Factory"):
+            with self.subTest(valid_timezone=timezone):
+                self.assertEqual(self.load({"hob.resident.json": valid_manifest(
+                    routines=[{**base, "schedule_tz": timezone}])})["diagnostics"], [])
+        for timezone in ("Europe/Atlantis", "CEST", "+02:00", ""):
+            with self.subTest(invalid_timezone=timezone):
+                report = self.load({"hob.resident.json": valid_manifest(
+                    routines=[{**base, "schedule_tz": timezone}])})
+                self.assertEqual(report["residents"], [])
+                self.assertTrue(any(item["path"].endswith(".schedule_tz")
+                                    for item in report["diagnostics"]))
+
+        schema = json.loads((pathlib.Path(__file__).parents[1] /
+                             "docs/resident-manifest.schema.json").read_text())
+        routine = schema["$defs"]["routine"]["properties"]
+        def schema_patterns_accept(property_name, value):
+            contract = routine[property_name]
+            if "anyOf" in contract:
+                return any(("enum" in item and value in item["enum"]) or
+                           ("pattern" in item and re.search(item["pattern"], value) is not None)
+                           for item in contract["anyOf"])
+            patterns = [contract["pattern"]] + [item["pattern"] for item in contract.get("allOf", [])]
+            return all(re.search(pattern, value) is not None for pattern in patterns)
+        for schedule in ("0 7 * * *", "*/15 * * * 1-5", "10-5 7 * * *",
+                         "0 23-2 * * *", "0 7 * * 7-0", "0 7 * * MON",
+                         "0 7 * JAN *", "0 0 L * *", "0 0 ? * MON",
+                         "0 0 * * 5#3"):
+            self.assertTrue(schema_patterns_accept("schedule", schedule))
+        for schedule in ("@daily", "0 7 * *", "0 7 * * * *", "0 7 * * $"):
+            self.assertFalse(schema_patterns_accept("schedule", schedule))
+        for timezone in ("UTC", "Europe/Ljubljana", "America/New_York",
+                         "GMT", "CET", "Zulu", "Factory"):
+            self.assertTrue(schema_patterns_accept("schedule_tz", timezone))
+        for timezone in ("CEST", "+02:00", ""):
+            self.assertFalse(schema_patterns_accept("schedule_tz", timezone))
+
+    def test_routine_keys_match_steward_lowercase_slug_contract_in_runtime_and_schema(self):
+        base = {"id": "daily-summary", "schedule": "0 7 * * *",
+                "schedule_tz": "UTC", "enabled": True,
+                "steward_resident": "life-agent"}
+        schema = json.loads((pathlib.Path(__file__).parents[1] /
+                             "docs/resident-manifest.schema.json").read_text())
+        slug = re.compile(schema["$defs"]["steward_slug"]["pattern"])
+        for field, value in (("id", "Daily-Summary"), ("id", "daily_summary"),
+                             ("steward_resident", "Life-Agent"),
+                             ("steward_resident", "life.agent")):
+            with self.subTest(field=field, value=value):
+                report = self.load({"hob.resident.json": valid_manifest(
+                    routines=[{**base, field: value}])})
+                self.assertEqual(report["residents"], [])
+                self.assertFalse(slug.fullmatch(value))
+        for value in ("a", "life-agent", "resident-42"):
+            self.assertTrue(slug.fullmatch(value))
 
     def test_manifest_version_requires_exact_integer_one(self):
         for version in (True, False, 1.0):

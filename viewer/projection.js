@@ -97,7 +97,8 @@ function doingLabel(ev) {
 }
 const EVENT_TYPES = new Set(["task_started","tool_called","tool_failed",
                              "artifact_produced","heartbeat","needs_human",
-                             "idle","session_ended"]);
+                             "idle","session_ended","routine_started",
+                             "routine_finished","routine_failed"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 const TIMESTAMP_V0 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const REQUIRED_PAYLOAD_TEXT = {
@@ -133,6 +134,37 @@ function validateEvent(ev) {
       return "invalid payload." + field;
     }
   }
+  if (ev.type.startsWith("routine_")) {
+    for (const field of ["routine", "run_id"]) {
+      if (typeof ev.payload[field] !== "string" || !ev.payload[field].trim()) {
+        return "invalid payload." + field;
+      }
+    }
+    if (ev.type === "routine_started" && !["manual", "schedule"].includes(ev.payload.trigger)) {
+      return "invalid payload.trigger";
+    }
+    if (ev.type === "routine_finished") {
+      if (typeof ev.payload.outcome !== "string" || !ev.payload.outcome.trim()) return "invalid payload.outcome";
+      const artifacts = ev.payload.artifacts;
+      if (!Array.isArray(artifacts) || !artifacts.every(item => typeof item === "string" && item.trim())) {
+        return "invalid payload.artifacts";
+      }
+      if (typeof ev.payload.duration_s !== "number" || !Number.isFinite(ev.payload.duration_s) || ev.payload.duration_s < 0) {
+        return "invalid payload.duration_s";
+      }
+    }
+    if (ev.type === "routine_failed") {
+      if (typeof ev.payload.error !== "string" || !ev.payload.error.trim()) return "invalid payload.error";
+      if (Object.hasOwn(ev.payload, "duration_s") &&
+          (typeof ev.payload.duration_s !== "number" || !Number.isFinite(ev.payload.duration_s) || ev.payload.duration_s < 0)) {
+        return "invalid payload.duration_s";
+      }
+    }
+    // Steward is the authoritative producer of routine lifecycle facts. Other
+    // emitters may use the protocol transport, but cannot manufacture routine
+    // history or acknowledge a run-now request.
+    if (ev.source !== "steward") return "routine events require source steward";
+  }
   for (const field of OPTIONAL_PAYLOAD_TEXT) {
     if (Object.hasOwn(ev.payload, field) && typeof ev.payload[field] !== "string") {
       return "invalid payload." + field;
@@ -147,23 +179,38 @@ function validateEvent(ev) {
 
 /* One parse and validation pass per batch for village and notice board. */
 const VALIDATED_BATCH = Symbol("burrow validated event batch");
+const REJECTIONS = Symbol("burrow rejected event diagnostics");
 function parseEvents(batch) {
   if (batch && batch[VALIDATED_BATCH]) return batch;
-  const events = [];
+  const events = [], rejections = [];
   for (const item of batch) {
     let ev = item;
     if (typeof ev === "string") {
       try { ev = JSON.parse(ev); } catch { continue; }
     }
-    if (validateEvent(ev)) continue;
+    const reason = validateEvent(ev);
+    if (reason) {
+      if (ev && typeof ev.type === "string" && ev.type.startsWith("routine_")) {
+        rejections.push({ type: ev.type, reason });
+      }
+      continue;
+    }
     events.push(ev);
   }
   Object.defineProperty(events, VALIDATED_BATCH, { value: true });
+  Object.defineProperty(events, REJECTIONS, { value: rejections });
   return events;
+}
+function routineRejections(batch) {
+  const parsed = parseEvents(batch);
+  return parsed[REJECTIONS] || [];
 }
 
 function foldEvents(agents, batch) {
   for (const ev of parseEvents(batch)) {
+    // Routines have their own run ledger. They neither create an ordinary
+    // villager nor refresh/change one whose last interactive state is known.
+    if (ev.type.startsWith("routine_")) continue;
     let a = agents.get(ev.agent_id);
     if (!a) {
       a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
@@ -312,6 +359,6 @@ if (typeof module === "object" && module.exports) {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
-    validateEvent, parseEvents, foldEvents, foldArtifacts, nameArtifacts, reduce,
+    validateEvent, parseEvents, routineRejections, foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

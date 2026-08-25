@@ -1123,27 +1123,39 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _read_event_records(self, cursor):
         """Read complete records once for both polling and SSE transports."""
-        records, reset = [], False
         with LOG_LOCK:
-            maybe_rotate()
-            try:
-                with open(EVENTS, "rb") as stream:
-                    stat = os.fstat(stream.fileno())
-                    current = EventCursor.issued(
-                        self.server.boot_id, stat, _log_generation, 0)
-                    offset, reset = cursor.resume(current, stat.st_size)
-                    stream.seek(offset)
-                    chunk = stream.read()
-                    end = chunk.rfind(b"\n") + 1
-                    for line in chunk[:end].splitlines(keepends=True):
-                        offset += len(line)
-                        records.append((offset, line))
-                    return records, dataclasses.replace(current, offset=offset), reset
-            except FileNotFoundError:
+            return self._read_event_records_locked(cursor)
+
+    def _read_event_records_locked(self, cursor):
+        """Read a log snapshot while the caller owns LOG_LOCK."""
+        records, reset = [], False
+        maybe_rotate()
+        try:
+            with open(EVENTS, "rb") as stream:
+                stat = os.fstat(stream.fileno())
                 current = EventCursor.issued(
-                    self.server.boot_id, None, _log_generation, 0)
-                _, reset = cursor.resume(current, 0)
-                return records, current, reset
+                    self.server.boot_id, stat, _log_generation, 0)
+                offset, reset = cursor.resume(current, stat.st_size)
+                stream.seek(offset)
+                chunk = stream.read()
+                end = chunk.rfind(b"\n") + 1
+                for line in chunk[:end].splitlines(keepends=True):
+                    offset += len(line)
+                    records.append((offset, line))
+                return records, dataclasses.replace(current, offset=offset), reset
+        except FileNotFoundError:
+            current = EventCursor.issued(
+                self.server.boot_id, None, _log_generation, 0)
+            _, reset = cursor.resume(current, 0)
+            return records, current, reset
+
+    def _write_sse_records(self, records, cursor, reset):
+        if reset:
+            self.wfile.write(b"event: reset\ndata: {}\n\n")
+        for record_offset, line in records:
+            event_id = dataclasses.replace(cursor, offset=record_offset).format()
+            self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
+            self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
 
     def _stream_events(self, parsed):
         """Tail complete JSONL records as SSE messages.
@@ -1172,15 +1184,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         last_keepalive = time.monotonic()
+        recovering = True
         try:
             while True:
-                records, cursor, reset = self._read_event_records(cursor)
-                if reset:
-                    self.wfile.write(b"event: reset\ndata: {}\n\n")
-                for record_offset, line in records:
-                    event_id = dataclasses.replace(cursor, offset=record_offset).format()
-                    self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
-                    self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
+                if recovering:
+                    # Snapshot one exact readiness boundary while appenders are
+                    # excluded, then release the log lock before touching the
+                    # socket. Appends after this snapshot are tailed from its
+                    # cursor after `ready`; a backpressured client can never
+                    # stall ingestion, polling, or rotation globally.
+                    with LOG_LOCK:
+                        records, cursor, reset = self._read_event_records_locked(cursor)
+                else:
+                    records, cursor, reset = self._read_event_records(cursor)
+                self._write_sse_records(records, cursor, reset)
+                if recovering:
+                    encoded = cursor.format().encode("ascii")
+                    self.wfile.write(b"event: ready\n")
+                    self.wfile.write(b"id: " + encoded + b"\n")
+                    self.wfile.write(b"data: {\"cursor\":\"" + encoded + b"\"}\n\n")
+                    self.wfile.flush()
+                    recovering = False
                 now = time.monotonic()
                 if records or reset or now - last_keepalive >= 15:
                     if not records and not reset:

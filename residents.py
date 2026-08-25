@@ -9,12 +9,14 @@ import json
 import os
 import pathlib
 import re
+import zoneinfo
 
 
 CHARACTERS = {"Villager", "Villager2", "Villager3", "Villager4", "Villager5",
               "Woman", "Boy", "OldMan", "Princess", "Hunter", "Noble", "Monk"}
 TOP_LEVEL = {"manifest_version", "match", "home", "soul", "skills", "memory",
-             "routes", "app_grants"}
+             "routes", "app_grants", "routines"}
+ROUTINE_FIELDS = {"id", "schedule", "schedule_tz", "enabled", "steward_resident"}
 SOUL_FIELDS = {"name", "char", "accent", "role", "description"}
 REFERENCE_FIELDS = {"id", "status_ref"}
 MEMORY_FIELDS = {"ref", "status_ref"}
@@ -31,7 +33,9 @@ OPAQUE_VALUE = re.compile(r"(?=[A-Za-z0-9_-]{32,})(?=[A-Za-z0-9_-]*[A-Za-z])"
 RECOGNIZED_CREDENTIAL = re.compile(
     r"\b(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}\b")
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+STEWARD_SLUG = re.compile(r"[a-z0-9][a-z0-9-]*")
 REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}")
+_CRON_DECLARATION_FIELD = re.compile(r"[A-Za-z0-9*?,/#._%+\-]+")
 
 
 def _diagnostic(filename, path, message):
@@ -57,6 +61,8 @@ def _child_fields(field):
         return MEMORY_FIELDS
     if field in {"skills", "routes", "app_grants"}:
         return REFERENCE_FIELDS
+    if field == "routines":
+        return ROUTINE_FIELDS
     return None
 
 
@@ -125,6 +131,33 @@ def _validate_reference_list(value, filename, path, diagnostics):
                                   diagnostics, IDENTIFIER if field == "id" else REFERENCE)
 
 
+def _valid_cron(schedule):
+    """Validate a safe five-field declaration, not croniter semantics.
+
+    Steward's authenticated ``GET /routines`` response is authoritative.  Burrow
+    deliberately has no scheduler dependency, so this check only prevents
+    control characters, macros, and ambiguous field counts while preserving
+    croniter features such as names, ``L``, ``?``, lists, ranges, and steps.
+    """
+    if not isinstance(schedule, str):
+        return False
+    if schedule != schedule.strip() or len(schedule) > 255:
+        return False
+    fields = schedule.split()
+    return (len(fields) == 5 and " ".join(fields) == schedule and
+            all(_CRON_DECLARATION_FIELD.fullmatch(field) for field in fields))
+
+
+def _valid_iana_timezone(value):
+    if not isinstance(value, str) or value != value.strip() or not value:
+        return False
+    try:
+        zoneinfo.ZoneInfo(value)
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError, ModuleNotFoundError):
+        return False
+    return True
+
+
 def validate_manifest(value, filename="<manifest>"):
     diagnostics = []
     if not isinstance(value, dict):
@@ -140,7 +173,7 @@ def validate_manifest(value, filename="<manifest>"):
     extra = set(value) - TOP_LEVEL
     if extra:
         diagnostics.append(_diagnostic(filename, "$." + UNKNOWN_PATH_SEGMENT, "unknown field"))
-    for field in TOP_LEVEL:
+    for field in TOP_LEVEL - {"routines"}:
         if field not in value:
             diagnostics.append(_diagnostic(filename, "$." + field, "is required"))
     manifest_version = value.get("manifest_version")
@@ -188,6 +221,35 @@ def validate_manifest(value, filename="<manifest>"):
     _validate_reference_list(value.get("skills"), filename, "$.skills", diagnostics)
     _validate_reference_list(value.get("routes"), filename, "$.routes", diagnostics)
     _validate_reference_list(value.get("app_grants"), filename, "$.app_grants", diagnostics)
+    routines = value.get("routines", [])
+    if not isinstance(routines, list):
+        diagnostics.append(_diagnostic(filename, "$.routines", "must be an array"))
+    else:
+        seen = set()
+        for index, routine in enumerate(routines):
+            at = f"$.routines[{index}]"
+            if not isinstance(routine, dict):
+                diagnostics.append(_diagnostic(filename, at, "must be an object")); continue
+            if set(routine) - ROUTINE_FIELDS:
+                diagnostics.append(_diagnostic(filename, at + "." + UNKNOWN_PATH_SEGMENT, "unknown field"))
+            for field in ("id", "schedule", "schedule_tz", "steward_resident"):
+                if not _nonempty_string(routine.get(field)):
+                    diagnostics.append(_diagnostic(filename, at + "." + field, "is required and must be a non-empty string"))
+            if _nonempty_string(routine.get("id")) and not STEWARD_SLUG.fullmatch(routine["id"]):
+                diagnostics.append(_diagnostic(filename, at + ".id", "must be a lowercase Steward slug"))
+            if _nonempty_string(routine.get("steward_resident")) and not STEWARD_SLUG.fullmatch(routine["steward_resident"]):
+                diagnostics.append(_diagnostic(filename, at + ".steward_resident", "must be a lowercase Steward slug"))
+            if _nonempty_string(routine.get("schedule")) and not _valid_cron(routine["schedule"]):
+                diagnostics.append(_diagnostic(filename, at + ".schedule",
+                                               "must be a safe five-field cron declaration; Steward validates scheduling semantics"))
+            if _nonempty_string(routine.get("schedule_tz")) and not _valid_iana_timezone(routine["schedule_tz"]):
+                diagnostics.append(_diagnostic(filename, at + ".schedule_tz",
+                                               "must be an installed IANA time zone such as UTC or Europe/Ljubljana"))
+            if type(routine.get("enabled", True)) is not bool:
+                diagnostics.append(_diagnostic(filename, at + ".enabled", "must be a boolean"))
+            if routine.get("id") in seen:
+                diagnostics.append(_diagnostic(filename, at + ".id", "must be unique per resident"))
+            seen.add(routine.get("id"))
     memory = value.get("memory")
     if not isinstance(memory, dict):
         diagnostics.append(_diagnostic(filename, "$.memory", "must be an object"))
@@ -229,6 +291,8 @@ def _resident(filename, manifest):
             "routes": public_references(manifest["routes"]),
             "app_grants": public_references(manifest["app_grants"]),
         },
+        "routines": [{field: routine[field] for field in ROUTINE_FIELDS if field in routine}
+                     for routine in manifest.get("routines", [])],
     }
 
 

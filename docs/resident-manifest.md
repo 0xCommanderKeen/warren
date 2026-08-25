@@ -36,3 +36,30 @@ Never put tokens, passwords, API keys, private keys, OAuth material, cookies, or
 Identifiers and status references use a deliberately narrow, whitespace-free character set. The runtime also rejects bearer values, assignment-shaped material, and opaque high-entropy strings anywhere in a manifest, including free-text soul fields, without echoing the rejected value in diagnostics.
 
 The unauthenticated `GET /residents` and `GET /villagers` responses are an explicit public projection, not a serialized manifest. They expose only the manifest filename, validation/version marker, match, home, display metadata/body, and these allow-listed capability fields: all five soul display fields; `id` and `status_ref` for each skill, route, and app grant; and `ref` plus `status_ref` for memory. The server copies those fields into new records after validation, so an unrecognized manifest field can never become public merely because validation changes. Recognized credential formats, including AWS access-key IDs, are rejected without echoing their values.
+
+## Routine declarations
+
+The optional `routines` array mirrors Steward's public schedule fields: `id`, five-field
+`schedule`, `schedule_tz`, and `enabled`. `steward_resident` names the URL path segment
+used by Steward's run-now endpoint. Prompts, skill grants, internals, and credentials are
+not copied into Burrow. Schedules are rendered as “declared, not observed”; observed
+outcomes come only from `routine_*` events. The Steward token is entered into the viewer
+and retained in memory only, then sent directly to Steward—never to Burrow's server.
+The manifest validator accepts a safe five-field declaration envelope, including
+croniter names and operators such as `MON`, `JAN`, `L`, `?`, ranges, lists, and steps.
+It deliberately does not reimplement croniter: authenticated `GET /routines` is the
+authority for whether Steward loaded the schedule and for its computed next fire. This
+keeps local declarations display-only and prevents a second, drifting scheduler parser.
+The validator rejects macros, extra/missing fields, controls, and non-cron punctuation,
+and requires an installed `ZoneInfo` name such as `UTC` or `Europe/Ljubljana`. The schema
+also includes the installed single-segment aliases Steward accepts (`GMT`, `CET`,
+`Zulu`, `Factory`, and their peers); a slash is not required for a real zone name.
+
+Burrow also reads Steward's authenticated `GET /routines` directly from the browser to
+show its computed `next_fire`; it never computes that promise from the local cron text.
+Configure Steward with Burrow's exact viewer origin, for example
+`STEWARD_CORS_ORIGINS=http://village.local:8080`. When it is unset or does not match,
+the browser blocks both the schedule read and run-now request as cross-origin failures.
+Do not work around that by exposing Steward publicly: its documented deployment remains
+tailnet-only. The connection dialog holds the URL and masked token only in the current
+page's JavaScript memory and clears the password field as soon as it closes.

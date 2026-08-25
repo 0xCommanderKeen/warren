@@ -40,11 +40,13 @@
       "properties": { "ref": { "$ref": "#/$defs/status_reference" }, "status_ref": { "$ref": "#/$defs/status_reference" } }
     },
     "routes": { "$ref": "#/$defs/references" },
-    "app_grants": { "$ref": "#/$defs/references" }
+    "app_grants": { "$ref": "#/$defs/references" },
+    "routines": { "type": "array", "items": { "$ref": "#/$defs/routine" } }
   },
   "$defs": {
     "text": { "type": "string", "minLength": 1, "pattern": ".*\\S.*" },
     "identifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$" },
+    "steward_slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
     "status_reference": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,255}$" },
     "reference": {
       "type": "object",
@@ -52,6 +54,27 @@
       "required": ["id", "status_ref"],
       "properties": { "id": { "$ref": "#/$defs/identifier" }, "status_ref": { "$ref": "#/$defs/status_reference" } }
     },
-    "references": { "type": "array", "items": { "$ref": "#/$defs/reference" } }
+    "references": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
+    "routine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "schedule", "schedule_tz", "steward_resident"],
+      "properties": {
+        "id": { "$ref": "#/$defs/steward_slug" },
+        "schedule": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(?!.*[\\r\\n])[A-Za-z0-9*?,/#._%+\\-]+(?: [A-Za-z0-9*?,/#._%+\\-]+){4}$"
+        },
+        "schedule_tz": {
+          "type": "string",
+          "anyOf": [
+            { "pattern": "^[A-Za-z][A-Za-z0-9._+-]*(?:/[A-Za-z][A-Za-z0-9._+-]*)+$" },
+            { "enum": ["CET", "CST6CDT", "Cuba", "EET", "EST", "EST5EDT", "Egypt", "Eire", "Factory", "GB", "GB-Eire", "GMT", "GMT+0", "GMT-0", "GMT0", "Greenwich", "HST", "Hongkong", "Iceland", "Iran", "Israel", "Jamaica", "Japan", "Kwajalein", "Libya", "MET", "MST", "MST7MDT", "NZ", "NZ-CHAT", "Navajo", "PRC", "PST8PDT", "Poland", "Portugal", "ROC", "ROK", "Singapore", "Turkey", "UCT", "UTC", "Universal", "W-SU", "WET", "Zulu"] }
+          ]
+        },
+        "steward_resident": { "$ref": "#/$defs/steward_slug" },
+        "enabled": { "type": "boolean", "default": true }
+      }
+    }
   }
 }

@@ -18,6 +18,12 @@ test("the shared timestamp range excludes ISO year zero in both adapters", () =>
   assert.equal(validateEvent(fixture.event), fixture.error);
 });
 
+test("routine durations must be finite across both adapters", () => {
+  for (const fixture of cases.filter(f => f.name.includes("infinite duration"))) {
+    assert.equal(validateEvent(fixture.event), fixture.error, fixture.name);
+  }
+});
+
 test("projection ignores every invalid contract fixture", () => {
   const invalid = cases.filter(f => !f.valid).map(f => f.event);
   assert.deepEqual(reduce(invalid, Date.parse("2026-08-24T12:00:01.000Z"), []), []);

@@ -934,6 +934,92 @@ class EventsEndpointTest(unittest.TestCase):
                          second)
         conn.close()
 
+    def test_sse_ready_snapshot_has_no_gap_before_live_events(self):
+        first = self.valid_event(agent_id="backlog")
+        between = self.valid_event(agent_id="between-backlog-and-ready")
+        after = self.valid_event(agent_id="immediately-after-ready")
+        self.assertEqual(self.post_event(first)[0], 204)
+
+        original = serve.Handler._write_sse_records
+        writes = 0
+
+        def append_between(handler, records, cursor, reset):
+            nonlocal writes
+            original(handler, records, cursor, reset)
+            writes += 1
+            if writes == 1:
+                # This append lands after the stable readiness snapshot. It
+                # must be tailed after `ready`, without a gap or duplicate.
+                self.assertTrue(serve.append_event(between))
+
+        with mock.patch.object(serve.Handler, "_write_sse_records", append_between):
+            conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+            conn.request("GET", "/events/stream")
+            response = conn.getresponse()
+
+            first_id = response.readline().decode().removeprefix("id: ").strip()
+            self.assertEqual(json.loads(
+                response.readline().decode().removeprefix("data: ")), first)
+            self.assertEqual(response.readline(), b"\n")
+            self.assertEqual(response.readline(), b"event: ready\n")
+            ready_id = response.readline().decode().removeprefix("id: ").strip()
+            ready_data = json.loads(
+                response.readline().decode().removeprefix("data: "))
+            self.assertEqual(response.readline(), b"\n")
+            self.assertEqual(ready_id, first_id)
+            self.assertEqual(ready_data, {"cursor": ready_id})
+
+            between_id = response.readline().decode().removeprefix("id: ").strip()
+            self.assertNotEqual(between_id, ready_id)
+            self.assertEqual(json.loads(
+                response.readline().decode().removeprefix("data: ")), between)
+            self.assertEqual(response.readline(), b"\n")
+
+            self.assertEqual(self.post_event(after)[0], 204)
+            after_id = response.readline().decode().removeprefix("id: ").strip()
+            self.assertNotEqual(after_id, ready_id)
+            self.assertEqual(json.loads(
+                response.readline().decode().removeprefix("data: ")), after)
+            conn.close()
+
+    def test_stalled_sse_writer_does_not_hold_the_event_log_lock(self):
+        first = self.valid_event(agent_id="stalled-reader")
+        second = self.valid_event(agent_id="concurrent-append")
+        self.assertEqual(self.post_event(first)[0], 204)
+        blocked = threading.Event()
+        release = threading.Event()
+        original = serve.Handler._write_sse_records
+
+        def stalled_write(handler, records, cursor, reset):
+            blocked.set()
+            if not release.wait(2):
+                raise AssertionError("test did not release stalled SSE writer")
+            original(handler, records, cursor, reset)
+
+        conn = http.client.HTTPConnection(*self.server.server_address, timeout=2)
+        try:
+            with mock.patch.object(serve.Handler, "_write_sse_records", stalled_write):
+                conn.request("GET", "/events/stream")
+                response = conn.getresponse()
+                self.assertTrue(blocked.wait(1), "SSE writer did not reach backpressure gate")
+
+                def rotate_while_stalled():
+                    with serve.LOG_LOCK:
+                        return serve.rotate(os.path.getsize(self.events))
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                    append = pool.submit(self.post_event, second)
+                    read = pool.submit(self.get_events)
+                    rotation = pool.submit(rotate_while_stalled)
+                    self.assertEqual(append.result(timeout=1)[0], 204)
+                    self.assertEqual(read.result(timeout=1)[0], 200)
+                    rotation.result(timeout=1)
+                release.set()
+                self.assertEqual(response.readline().decode().split(":", 1)[0], "id")
+        finally:
+            release.set()
+            conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

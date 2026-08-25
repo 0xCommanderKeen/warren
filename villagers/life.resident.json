@@ -21,5 +21,10 @@
   "app_grants": [
     { "id": "gmail", "status_ref": "life-agent:grant-status/gmail" },
     { "id": "google-calendar", "status_ref": "life-agent:grant-status/google-calendar" }
+  ],
+  "routines": [
+    { "id": "daily-summary", "schedule": "0 7 * * *", "schedule_tz": "Europe/Ljubljana", "enabled": true, "steward_resident": "life-agent" },
+    { "id": "inbox-read", "schedule": "15 * * * *", "schedule_tz": "Europe/Ljubljana", "enabled": true, "steward_resident": "life-agent" },
+    { "id": "close-of-day", "schedule": "30 22 * * *", "schedule_tz": "Europe/Ljubljana", "enabled": true, "steward_resident": "life-agent" }
   ]
 }

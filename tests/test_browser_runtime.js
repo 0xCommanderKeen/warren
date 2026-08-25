@@ -5,6 +5,7 @@ const { STALE_MS, DROP_MS, ago } = require("../viewer/projection.js");
 const { createBrowserRuntime } = require("../viewer/browser-runtime.js");
 
 const BASE = Date.parse("2026-08-25T10:00:00.000Z");
+const BOOT_ID = "0123456789abcdef0123456789abcdef";
 const event = JSON.stringify({
   v: 0, ts: new Date(BASE).toISOString(), source: "test", agent_id: "agent-1",
   project: "burrow", cwd: "/private/project", type: "tool_called",
@@ -27,6 +28,7 @@ let fetchEvents = 0;
 const projections = [];
 const transports = [];
 const deliveryStatuses = [];
+const fleetViews = [];
 const resident = name => ({
   file: `${name}.resident.json`, valid: true, manifest_version: 1, home: 0,
   match: { agent_id: "agent-1" }, meta: { name, char: "Monk", accent: "#fff" },
@@ -42,7 +44,7 @@ const runtime = createBrowserRuntime({
       fetchEvents += 1;
       return {
         ok: true,
-        headers: { get: name => name === "X-Burrow-Cursor" ? "cursor-1" : null },
+        headers: { get: name => name === "X-Burrow-Cursor" ? `v1:${BOOT_ID}:1:2:3:100` : null },
         text: async () => fetchEvents === 1 ? event + "\n" : "",
       };
     }
@@ -63,6 +65,7 @@ const runtime = createBrowserRuntime({
   setTimeout: fn => { runtime.retry = fn; return 1; },
   clearTimeout() {},
   onProjection: view => projections.push(view),
+  onFleet: view => fleetViews.push(view),
   onTransport: state => transports.push(state),
   onTransportStatus: status => deliveryStatuses.push(status),
   warn() {},
@@ -70,17 +73,98 @@ const runtime = createBrowserRuntime({
 
 (async () => {
   assert.equal(transports.at(-1), "disconnected");
-  await runtime.poll();
+  const startup = runtime.poll();
+  assert.equal(transports.at(-1), "recovering",
+    "startup remains non-observable until its first event projection succeeds");
+  await startup;
   assert.equal(runtime.snapshot().villagers[0].state, "working");
   assert.equal(transports.at(-1), "polling");
 
   runtime.connectStream();
   const stream = FakeEventSource.instances[0];
   stream.onopen();
+  assert.equal(transports.at(-1), "recovering",
+    "HTTP open cannot expose queued SSE backlog as live evidence");
+  stream.onmessage({ lastEventId:`v1:${BOOT_ID}:1:2:3:150`, data: JSON.stringify({
+    v:0, ts:new Date(BASE + 1).toISOString(), source:"steward", agent_id:"agent-1",
+    project:"burrow", type:"routine_started",
+    payload:{routine:"summary",run_id:"queued",trigger:"manual"},
+  }) });
+  assert.deepEqual(fleetViews.at(-1).routineBatch, [],
+    "pre-ready backlog is not published before the readiness boundary");
+  stream.listeners.ready({lastEventId:`v1:${BOOT_ID}:1:2:3:150`,
+    data:JSON.stringify({cursor:`v1:${BOOT_ID}:1:2:3:150`})});
   assert.equal(transports.at(-1), "live");
+  assert.equal(fleetViews.findLast(view => view.routineBatch.length)
+    .routineBatch[0].payload.run_id, "queued",
+  "normal resume evidence is published once after ready validation");
+  assert.equal(runtime.snapshot().fleetState.routineRecent.filter(entry =>
+    entry.event.payload.run_id === "queued").length, 1,
+  "republishing acknowledgement evidence does not fold it into the ledger twice");
+
+  stream.onmessage({ data: JSON.stringify({
+    v:0, ts:new Date(BASE + 1).toISOString(), source:"steward", agent_id:"agent-1",
+    project:"burrow", type:"routine_started", payload:{routine:"summary",trigger:"manual"},
+  }) });
+  assert.equal(runtime.snapshot().fleetState.routineMalformed, 1,
+    "malformed routine evidence survives the production parse/runtime seam");
+  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE,
+    "a rejected routine does not refresh ordinary activity");
+  stream.onmessage({ data: JSON.stringify({
+    v:0, ts:new Date(BASE + 2).toISOString(), source:"steward", agent_id:"agent-1",
+    project:"burrow", type:"routine_finished",
+    payload:{routine:"summary",run_id:"run-1",outcome:"ok",artifacts:[],duration_s:2},
+  }) });
+  assert.equal(runtime.snapshot().villagers[0].state, "working");
+  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE,
+    "a valid routine terminal event remains isolated from ordinary activity");
+  stream.onmessage({ lastEventId:`v1:${BOOT_ID}:1:2:3:200`, data: JSON.stringify({
+    v:0, ts:new Date(BASE + 3).toISOString(), source:"steward", agent_id:"agent-1",
+    project:"burrow", type:"routine_started",
+    payload:{routine:"summary",run_id:"run-2",trigger:"manual"},
+  }) });
+  assert.equal(fleetViews.at(-1).cursor, `v1:${BOOT_ID}:1:2:3:200`);
+  assert.equal(fleetViews.at(-1).routineBatch[0].payload.run_id, "run-2",
+    "acknowledgements receive only the newly ingested cursor batch");
+
+  // Production SSE publishes one message/fold at a time. Saturate renderable
+  // keys, then prove a terminal survives its own publication without stealing
+  // a key and is promoted atomically when the exact start arrives later.
+  for (let i = 0; i < 200; i++) {
+    const common = {v:0,source:"steward",agent_id:`saturated-${i}`,
+      project:"burrow",payload:{routine:`routine-${i}`,run_id:`run-${i}`}};
+    stream.onmessage({data:JSON.stringify({...common,
+      ts:new Date(BASE + 10 + i * 2).toISOString(),type:"routine_started",
+      payload:{...common.payload,trigger:"schedule"}})});
+    stream.onmessage({data:JSON.stringify({...common,
+      ts:new Date(BASE + 11 + i * 2).toISOString(),type:"routine_finished",
+      payload:{...common.payload,outcome:"ok",artifacts:[],duration_s:1}})});
+  }
+  const stagedClose = {v:0,source:"steward",agent_id:"late-agent",project:"burrow",
+    ts:new Date(BASE + 10_001).toISOString(),type:"routine_finished",
+    payload:{routine:"late-routine",run_id:"late-run",outcome:"ok",artifacts:[],duration_s:1}};
+  stream.onmessage({data:JSON.stringify(stagedClose)});
+  assert.equal(runtime.snapshot().fleetState.routineKeys.length, 200);
+  assert.equal(runtime.snapshot().fleetState.routineOrphans.some(entry =>
+    entry.event.payload.run_id === "late-run"), true,
+  "separate SSE terminal publication remains in bounded non-renderable staging");
+  assert.equal(runtime.snapshot().fleetState.routineRecent.some(entry =>
+    entry.event.payload.run_id === "late-run"), false);
+  stream.onmessage({data:JSON.stringify({...stagedClose,
+    ts:new Date(BASE + 10_000).toISOString(),type:"routine_started",
+    payload:{routine:"late-routine",run_id:"late-run",trigger:"schedule"}})});
+  assert.deepEqual(runtime.snapshot().fleetState.routineRecent.filter(entry =>
+    entry.event.payload.run_id === "late-run").map(entry => entry.event.type).sort(),
+  ["routine_finished", "routine_started"]);
+  assert.equal(runtime.snapshot().fleetState.routineOrphans.some(entry =>
+    entry.event.payload.run_id === "late-run"), false);
+  assert.equal(runtime.snapshot().fleetState.routineMalformed, 1,
+    "valid orphan staging and promotion do not add malformed diagnostics");
 
   now = BASE + STALE_MS + 1;
   runtime.tick();
+  assert.deepEqual(fleetViews.at(-1).routineBatch, [],
+    "clock publications cannot replay retained routine evidence as a fresh acknowledgement");
   assert.equal(runtime.snapshot().villagers[0].state, "stale",
     "a silent healthy stream must not freeze working state");
   assert.equal(transports.at(-1), "live", "stale activity does not make transport unhealthy");
@@ -123,7 +207,33 @@ const runtime = createBrowserRuntime({
     onTransport: state => offlineStates.push(state),
   });
   await offline.poll();
-  assert.deepEqual(offlineStates, ["disconnected", "polling", "disconnected"]);
+  assert.deepEqual(offlineStates, ["disconnected", "recovering", "disconnected"]);
+
+  const invalidStates = [];
+  let invalidFetches = 0;
+  const invalid = createBrowserRuntime({
+    now: () => now, EventSource: FakeEventSource,
+    setTimeout() { return 1; }, clearTimeout() {},
+    fetch: async url => {
+      if (url === "/villagers") return { ok: false };
+      invalidFetches += 1;
+      return { ok: true, headers: { get: name =>
+        name === "X-Burrow-Cursor" ? `v1:${BOOT_ID}:1:2:3:300` : null },
+      text: async () => "" };
+    },
+    onTransport: state => invalidStates.push(state),
+  });
+  await invalid.poll();
+  invalid.connectStream();
+  const invalidStream = FakeEventSource.instances.at(-1);
+  invalidStream.onopen();
+  await invalidStream.listeners.ready({lastEventId:`v1:${BOOT_ID}:1:2:3:301`,
+    data:JSON.stringify({cursor:`v1:${BOOT_ID}:1:2:3:999`})});
+  assert.equal(invalidStream.closed, true);
+  assert.equal(invalidStates.includes("live"), false,
+    "a mismatched readiness marker never establishes an observable boundary");
+  assert.equal(invalidFetches, 2,
+    "invalid readiness falls back to a grouped polling baseline");
 
   console.log("browser clock and transport share the production runtime seam");
 })().catch(error => { console.error(error); process.exitCode = 1; });

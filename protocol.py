@@ -5,12 +5,14 @@ This module is the server-side adapter for the contract documented in
 ``validateEvent`` and both adapters are exercised by one fixture matrix.
 """
 import datetime
+import math
 import re
 
 
 EVENT_TYPES = frozenset({
     "task_started", "tool_called", "tool_failed", "artifact_produced",
     "heartbeat", "needs_human", "idle", "session_ended",
+    "routine_started", "routine_finished", "routine_failed",
 })
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _REQUIRED_TEXT = {
@@ -24,6 +26,38 @@ _OPTIONAL_TEXT = frozenset({
     "prompt", "tool", "artifact", "message", "detail", "error", "phase",
     "turn_id", "agent_type", "parent_agent_id",
 })
+
+
+def _nonempty_text(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_routine_payload(event_type, payload):
+    for field in ("routine", "run_id"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    if event_type == "routine_started":
+        if payload.get("trigger") not in ("manual", "schedule"):
+            return "invalid payload.trigger"
+    elif event_type == "routine_finished":
+        if not _nonempty_text(payload.get("outcome")):
+            return "invalid payload.outcome"
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list) or not all(_nonempty_text(item) for item in artifacts):
+            return "invalid payload.artifacts"
+        duration = payload.get("duration_s")
+        if (type(duration) not in (int, float) or not math.isfinite(duration)
+                or duration < 0):
+            return "invalid payload.duration_s"
+    elif event_type == "routine_failed":
+        if not _nonempty_text(payload.get("error")):
+            return "invalid payload.error"
+        if "duration_s" in payload:
+            duration = payload["duration_s"]
+            if (type(duration) not in (int, float) or not math.isfinite(duration)
+                    or duration < 0):
+                return "invalid payload.duration_s"
+    return None
 
 
 def _plain_object(value):
@@ -57,6 +91,12 @@ def validate_event(event):
     for field in _REQUIRED_TEXT.get(event_type, ()):
         if not isinstance(payload.get(field), str) or not payload[field].strip():
             return f"invalid payload.{field}"
+    if event_type.startswith("routine_"):
+        error = _validate_routine_payload(event_type, payload)
+        if error:
+            return error
+        if event["source"] != "steward":
+            return "routine events require source steward"
     for field in _OPTIONAL_TEXT:
         if field in payload and not isinstance(payload[field], str):
             return f"invalid payload.{field}"

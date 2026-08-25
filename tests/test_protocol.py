@@ -19,6 +19,22 @@ class ProtocolContractTest(unittest.TestCase):
         case = next(case for case in cases if case["name"] == "year zero timestamp")
         self.assertEqual(validate_event(case["event"]), case["error"])
 
+    def test_routine_durations_must_be_finite_across_both_adapters(self):
+        cases = json.loads(FIXTURES.read_text())
+        for case in (case for case in cases if "infinite duration" in case["name"]):
+            with self.subTest(case["name"]):
+                self.assertEqual(validate_event(case["event"]), case["error"])
+
+    def test_finished_routine_requires_explicit_artifact_evidence(self):
+        cases = json.loads(FIXTURES.read_text())
+        case = next(case for case in cases if case["name"] == "routine finish missing artifacts")
+        self.assertEqual(validate_event(case["event"]), "invalid payload.artifacts")
+
+    def test_only_steward_is_authoritative_for_routine_events(self):
+        cases = json.loads(FIXTURES.read_text())
+        case = next(case for case in cases if case["name"] == "routine start from non-Steward source")
+        self.assertEqual(validate_event(case["event"]), case["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

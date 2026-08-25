@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
-  MAX_ARTIFACTS, parseEvents, foldEvents, foldArtifacts, nameArtifacts,
+  MAX_ARTIFACTS, parseEvents, routineRejections, foldEvents, foldArtifacts, nameArtifacts,
   describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
 
@@ -135,6 +135,26 @@ describe("notice board artifacts", () => {
     assert.deepEqual(artifactsFromLines, artifacts);
   });
 
+  it("retains malformed routine diagnostics on the shared production batch", () => {
+    const batch = parseEvents([protocolLine({ ts:"2026-08-24T11:59:00.000Z",
+      agent_id:"routine-agent", type:"routine_started",
+      payload:{ routine:"summary", trigger:"manual" } })]);
+    assert.equal(batch.length, 0);
+    assert.deepEqual(routineRejections(batch), [
+      { type:"routine_started", reason:"invalid payload.run_id" },
+    ]);
+  });
+
+  it("diagnoses routine lifecycle claims from non-Steward producers", () => {
+    const batch = parseEvents([protocolLine({ ts:"2026-08-24T11:59:00.000Z",
+      source:"codex", agent_id:"routine-agent", type:"routine_started",
+      payload:{ routine:"summary", run_id:"forged", trigger:"manual" } })]);
+    assert.equal(batch.length, 0);
+    assert.deepEqual(routineRejections(batch), [
+      { type:"routine_started", reason:"routine events require source steward" },
+    ]);
+  });
+
   it("uses the visible villager name with a stable fallback", () => {
     const input = [{ artifact: "x", agent_id: "known", project: "p", ts: NOW },
                    { artifact: "y", agent_id: "gone", project: "p", ts: NOW - 1 }];
@@ -209,6 +229,21 @@ describe("state mapping (docs/protocol.md, projection rules v0)", () => {
     // the cap drops the oldest, never the newest
     assert.equal(long.events.at(-1).payload.detail, "file" + (MAX_EVENTS + 19));
     assert.equal(long.events[0].payload.detail, "file20");
+  });
+});
+
+describe("routine isolation", () => {
+  it("terminal routine events do not create or refresh ordinary villagers", () => {
+    const idle = protocolLine({ts:"2026-08-24T11:50:00.000Z",agent_id:"resident",
+      project:"life",type:"idle",payload:{}});
+    const terminal = protocolLine({ts:"2026-08-24T11:59:00.000Z",agent_id:"resident",
+      project:"life",source:"steward",type:"routine_finished",
+      payload:{routine:"summary",run_id:"run-1",outcome:"ok",artifacts:[],duration_s:2}});
+    const [resident] = reduce([idle, terminal], NOW, []);
+    assert.equal(resident.state, "resting");
+    assert.equal(resident.lastTs, Date.parse("2026-08-24T11:50:00.000Z"));
+    assert.deepEqual(resident.events.map(event => event.type), ["idle"]);
+    assert.deepEqual(reduce([terminal], NOW, []), []);
   });
 });
 

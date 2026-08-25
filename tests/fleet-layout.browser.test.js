@@ -268,6 +268,14 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     skills: [{ id: "summary", status_ref: "config:summary", access_token: "browser-secret" }],
     memory: { ref: "file:///memory.md", status_ref: "config:memory" }, routes: [], app_grants: [],
   }));
+  fs.writeFileSync(path.join(villagers, "routine.resident.json"), JSON.stringify({
+    manifest_version: 1, match: { project: "quiet-project" }, home: 5,
+    soul: { name: "Routine Keeper", char: "Monk", accent: "#a68a4f", role: "keeper",
+      description: "Keeps declared standing work visible while away." },
+    skills: [], memory: { ref: "config:memory", status_ref: "config:memory" },
+    routes: [], app_grants: [], routines: [{ id: "daily-summary", schedule: "0 7 * * *",
+      schedule_tz: "Europe/Ljubljana", enabled: true, steward_resident: "life-agent" }],
+  }));
   const port = await freePort();
   const server = spawn(process.env.PYTHON || "python3", ["serve.py", String(port)], {
     cwd: ROOT, env: { ...process.env, BURROW_EVENTS: events, BURROW_VILLAGERS: villagers },
@@ -320,6 +328,11 @@ test("production fleet browser fixture runs isolated interaction and visual phas
       await eventually(send, "document.readyState === 'complete' && !!window.BurrowFleetController",
         signal, `reset production page at ${width}x${height}`);
     };
+    const waitForTelemetry = () => eventually(send, `(() => {
+      if (typeof runtime === 'undefined') return false;
+      const snapshot = runtime.snapshot();
+      return BurrowRoutines.telemetryAvailability(snapshot.transport, snapshot.cursor).ok;
+    })()`, signal, "production telemetry readiness");
 
     await t.test("production map routing validates promised capacity without all-pairs A*", async () => {
       await resetPage();
@@ -573,6 +586,570 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     assert.match(announcements.initial, /^Activity: \d+ items?\.$/);
     });
 
+    await t.test("inactive routine detail and transient masked Steward credentials are production UI", async () => {
+      const routineStarted = { v:0, ts:new Date(frozenNow - 60_000).toISOString(),
+        source:"steward", agent_id:"layout-routine", project:"quiet-project",
+        type:"routine_started", payload:{routine:"daily-summary",run_id:"watchdog",trigger:"schedule"} };
+      const routineFailed = { ...routineStarted, ts:new Date(frozenNow - 30_000).toISOString(),
+        type:"routine_failed", payload:{routine:"daily-summary",run_id:"watchdog",
+          error:"run never reported back"} };
+      const olderStarted = { ...routineStarted, ts:new Date(frozenNow - 120_000).toISOString(),
+        payload:{routine:"daily-summary",run_id:"older",trigger:"schedule"} };
+      const olderFailed = { ...routineFailed, ts:new Date(frozenNow - 90_000).toISOString(),
+        payload:{routine:"daily-summary",run_id:"older",error:"<img src=x onerror=window.__unsafe=1>"} };
+      fs.appendFileSync(events, [olderStarted, olderFailed, routineStarted, routineFailed]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+      await resetPage();
+      const evidence = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const row = [...document.querySelectorAll('.ledger-entry')].find(item => item.textContent.includes('daily-summary'));
+        if (!row) return false;
+        row.querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const inactive = document.querySelector('#panel-body').textContent.includes('inactive · no current signal');
+        const linkedObservedOwner = document.querySelector('#panel-body').textContent.includes('layout-routine');
+        const routineVisible = document.querySelector('#panel-body').textContent.includes('Routine ledger');
+        // Opening the panel and the SSE/poll publication are independent. Keep
+        // this whole scenario behind the production DOM's eventual owner fact
+        // so slower Linux runners cannot capture an intermediate resident link.
+        if (!inactive || !linkedObservedOwner || !routineVisible) return false;
+        let promptCalls = 0; window.prompt = () => { promptCalls++; return null; };
+        const firstCredentialRequest = requestStewardConfig();
+        const secondCredentialRequest = requestStewardConfig();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const dialog = document.querySelector('#steward-auth'), token = document.querySelector('#steward-token');
+        const result = { inactive, linkedObservedOwner, routineVisible, open: dialog.open, type: token.type,
+          autocomplete: token.autocomplete, promptCalls,
+          singleFlight: firstCredentialRequest === secondCredentialRequest,
+          secretInPanel: document.querySelector('#panel-body').textContent.includes('browser-secret') };
+        token.value = 'ephemeral-secret';
+        document.querySelector('#steward-auth button[value="cancel"]').click();
+        result.cancelledTogether = (await Promise.all([firstCredentialRequest, secondCredentialRequest]))
+          .every(value => value === null);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        result.closed = !dialog.open; result.cleared = token.value === '';
+        window.fetch = async (url, options) => {
+          window.__stewardFetch = { url: String(url), authorization: options.headers.Authorization,
+            credentials: options.credentials };
+          return { status: 200, json: async () => ({ routines: [{ resident: 'life-agent',
+            routine: 'daily-summary', next_fire: '2026-08-26T07:00:00+02:00',
+            enabled: true, retired: false }] }) };
+        };
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        document.querySelector('[data-steward-connect]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        token.value = 'fetch-only-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        result.directFetch = window.__stewardFetch;
+        result.nextFireLoaded = document.querySelector('#panel-body').textContent.includes('declared by Steward, not observed');
+        result.fetchTokenCleared = token.value === '';
+        result.fetchTokenNotRendered = !document.documentElement.innerHTML.includes('fetch-only-secret');
+        const routineRow = [...document.querySelectorAll('.ledger-entry')]
+          .find(item => item.textContent.includes('daily-summary'));
+        routineRow.querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        result.enabledRun = !document.querySelector('[data-run-routine]').disabled;
+        result.unknownDuration = document.querySelector('#panel-body').textContent.includes('duration unknown');
+        result.inspectableFailures = [...document.querySelectorAll('.routine-card summary')]
+          .filter(summary => summary.textContent.startsWith('Inspect failure for ')).map(summary => summary.textContent);
+        result.failureErrors = [...document.querySelectorAll('.routine-card .routine-error')].map(error => error.textContent);
+        result.failureMarkupEscaped = !document.querySelector('.routine-card .routine-error img') && !window.__unsafe;
+        window.fetch = async () => ({ status: 200, json: async () => ({ routines: [{
+          resident: 'life-agent', routine: 'daily-summary', next_fire: null,
+          enabled: false, retired: false }] }) });
+        await refreshStewardDeclarations();
+        result.disabledRun = document.querySelector('[data-run-routine]').disabled;
+        window.fetch = async () => ({ status: 200, json: async () => ({ routines: [{
+          resident: 'life-agent', routine: 'daily-summary', next_fire: null,
+          enabled: true, retired: true }] }) });
+        await refreshStewardDeclarations();
+        result.retiredRun = document.querySelector('[data-run-routine]').disabled;
+        let resolveOlder, resolveNewer, declarationCalls = 0;
+        const olderResponse = new Promise(resolve => { resolveOlder = resolve; });
+        const newerResponse = new Promise(resolve => { resolveNewer = resolve; });
+        window.fetch = async () => (++declarationCalls === 1 ? olderResponse : newerResponse);
+        const olderRefresh = refreshStewardDeclarations();
+        const newerRefresh = refreshStewardDeclarations();
+        resolveNewer({status:200,json:async()=>({routines:[{resident:'life-agent',
+          routine:'daily-summary',next_fire:'2026-08-28T07:00:00Z',enabled:true,retired:false}]})});
+        await newerRefresh;
+        resolveOlder({status:200,json:async()=>({routines:[{resident:'life-agent',
+          routine:'daily-summary',next_fire:null,enabled:false,retired:false}]})});
+        await olderRefresh;
+        result.latestDeclarationWins = stewardDeclarations.state === 'loaded' &&
+          stewardDeclarations.byRoutine.get('life-agent\\0daily-summary').enabled === true &&
+          stewardDeclarations.byRoutine.get('life-agent\\0daily-summary').next_fire ===
+            '2026-08-28T07:00:00Z' &&
+          !document.querySelector('[data-run-routine]').disabled;
+        return result;
+      })()`, signal, "inactive routine and Steward credential dialog");
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+      assert.deepEqual(evidence, { inactive: true, linkedObservedOwner: true, routineVisible: true, open: true,
+        type: "password", autocomplete: "off", promptCalls: 0, singleFlight: true,
+        secretInPanel: false, cancelledTogether: true, closed: true, cleared: true,
+        directFetch: { url: "http://127.0.0.1:8801/routines", authorization: "Bearer fetch-only-secret",
+          credentials: "omit" }, nextFireLoaded: true, fetchTokenCleared: true,
+        fetchTokenNotRendered: true, enabledRun: true, unknownDuration: true,
+        inspectableFailures: ["Inspect failure for watchdog", "Inspect failure for older"],
+        failureErrors: ["run never reported back", "<img src=x onerror=window.__unsafe=1>"],
+        failureMarkupEscaped: true,
+        disabledRun: true, retiredRun: true, latestDeclarationWins: true });
+    });
+
+    await t.test("Run Now refusal stays retryable without corrupting next-run truth", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'ephemeral'};
+        stewardDeclarations = {state:'loaded',error:null,byRoutine:new Map([[
+          'life-agent\\0daily-summary', {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
+        ]])};
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')].find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options) => String(url).startsWith('http://127.0.0.1:8801/') ?
+          ({status:503,json:async()=>({error:'busy'})}) : originalFetch(url, options);
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const text = document.querySelector('#panel-body').textContent;
+        return {failure:text.includes('request failed — Steward refused the request (503) — retry available'),
+          nextRun:text.includes('declared by Steward, not observed'),
+          retryEnabled:!document.querySelector('[data-run-routine]').disabled,
+          declarationState:stewardDeclarations.state};
+      })()`, signal, "retryable Run Now refusal");
+      assert.deepEqual(evidence, {failure:true,nextRun:true,retryEnabled:true,declarationState:'loaded'});
+    });
+
+    await t.test("Run Now capacity refusal is accessible and has no connection side effect", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')].find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        for (let i = 0; i < BurrowRoutines.MAX_ACKNOWLEDGEMENTS; i++)
+          routineAcks.requested({agent_id:'capacity-' + i}, 'routine-' + i, Date.now());
+        window.__capacityRunPosts = 0;
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options = {}) => {
+          const target = new URL(String(url), location.href);
+          if (options.method === 'POST' && target.pathname.startsWith('/residents/') &&
+              target.pathname.includes('/routines/') && target.pathname.endsWith('/run'))
+            window.__capacityRunPosts++;
+          return originalFetch(url, options);
+        };
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const button = document.querySelector('[data-run-routine]');
+        const alert = button.parentElement.querySelector('[role="alert"]');
+        return {enabled:!button.disabled,alert:alert && alert.textContent,
+          runPosts:window.__capacityRunPosts,authOpen:document.querySelector('#steward-auth').open,
+          tracked:routineAcks.size()};
+      })()`, signal, "explicit Run Now capacity refusal");
+      assert.deepEqual(evidence, {enabled:true,
+        alert:"run-request tracking is full of unresolved requests; no request was sent",
+        runPosts:0,authOpen:false,tracked:200});
+    });
+
+    await t.test("project Run Now keeps active navigation but accepts a distinct Steward runner", async () => {
+      const activeOwner = { ...currentEvent, source:"codex", agent_id:"codex:project-owner",
+        project:"quiet-project", payload:{tool:"Read",detail:"project owner"} };
+      fs.appendFileSync(events, JSON.stringify(activeOwner) + "\n");
+      await resetPage();
+      await waitForTelemetry();
+      const projectedOwner = await eventually(send, `(async () => {
+        await runtime.poll();
+        const owner = villagers.find(villager => villager.id === 'codex:project-owner');
+        return owner && {id:owner.id,project:owner.project};
+      })()`, signal, "production projection observes the active project owner");
+      const pending = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        stewardConfig = {url:'http://127.0.0.1:8801',token:'ephemeral'};
+        stewardDeclarations = {state:'loaded',error:null,byRoutine:new Map([[
+          'life-agent\\0daily-summary', {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
+        ]])};
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options) => String(url).startsWith('http://127.0.0.1:8801/') ?
+          ({status:202,json:async()=>({status:'accepted',request_id:'mixed-request'})}) :
+          originalFetch(url, options);
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const row = [...document.querySelectorAll('.ledger-entry')]
+          .find(item => item.textContent.includes('daily-summary'));
+        const link = row && row.querySelector('[data-agent]');
+        if (!link) return false;
+        const navigationOwner = link.dataset.agent;
+        link.click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const button = document.querySelector('[data-run-routine]');
+        const correlation = {agent:button.dataset.runAgent,project:button.dataset.runProject};
+        const pendingStatus = new Promise((resolve, reject) => {
+          const current = () => document.querySelector('#panel-body [role="status"]')
+            ?.textContent.includes('pending acknowledgement');
+          if (current()) { resolve(); return; }
+          const observer = new MutationObserver(() => {
+            if (!current()) return;
+            observer.disconnect(); clearTimeout(timer); resolve();
+          });
+          observer.observe(document.querySelector('#panel-body'), {childList:true,subtree:true});
+          const timer = setTimeout(() => { observer.disconnect();
+            reject(new Error('pending acknowledgement was not rendered')); }, 1000);
+        });
+        button.click();
+        await pendingStatus;
+        const ack = routineAcks.get({project:'quiet-project'},'daily-summary');
+        return {navigationOwner,correlation,state:ack && ack.state,
+          openOwner:document.querySelector('#panel-body').textContent.includes('codex:project-owner')};
+      })()`, signal, "project Run Now pending state");
+
+      const runnerStart = { v:0, ts:new Date(frozenNow + 1).toISOString(), source:"steward",
+        agent_id:"steward:ephemeral-runner", project:"quiet-project", type:"routine_started",
+        payload:{routine:"daily-summary",run_id:"mixed-run",trigger:"manual"} };
+      fs.appendFileSync(events, JSON.stringify(runnerStart) + "\n");
+      const running = await eventually(send, `(async () => {
+        await runtime.poll(); renderPanel(Date.now());
+        const ack = routineAcks.get({project:'quiet-project'},'daily-summary');
+        return ack && {state:ack.state,agent_id:ack.agent_id,run_id:ack.run_id,
+          visible:document.querySelector('#panel-body [role="status"]')?.textContent};
+      })()`, signal, "project Run Now running state");
+
+      const runnerFinish = { ...runnerStart, ts:new Date(frozenNow + 2).toISOString(),
+        type:"routine_finished", payload:{routine:"daily-summary",run_id:"mixed-run",
+          outcome:"ok",artifacts:[],duration_s:1} };
+      fs.appendFileSync(events, JSON.stringify(runnerFinish) + "\n");
+      const completed = await eventually(send, `(async () => {
+        await runtime.poll(); renderPanel(Date.now());
+        const ack = routineAcks.get({project:'quiet-project'},'daily-summary');
+        return ack && {state:ack.state,
+          visible:document.querySelector('#panel-body [role="status"]')?.textContent};
+      })()`, signal, "project Run Now terminal state");
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+
+      assert.deepEqual(projectedOwner,
+        {id:"codex:project-owner",project:"quiet-project"});
+      assert.deepEqual(pending, {navigationOwner:"codex:project-owner",
+        correlation:{agent:"",project:"quiet-project"},state:"pending",openOwner:true});
+      assert.deepEqual(running, {state:"running",agent_id:"steward:ephemeral-runner",
+        run_id:"mixed-run",visible:"running — confirmed by matching real event"});
+      assert.deepEqual(completed,
+        {state:"completed",visible:"completed — confirmed by matching real event"});
+    });
+
+    await t.test("Run Now refuses unavailable telemetry before credentials or network", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const result = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')].find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        let fetchCalls = 0;
+        window.fetch = async () => { fetchCalls++; throw new Error('must not fetch'); };
+        const originalSnapshot = runtime.snapshot;
+        runtime.snapshot = () => ({...originalSnapshot(),transport:'disconnected'});
+        fleetView = {...fleetView,transport:'disconnected'};
+        renderPanel(Date.now());
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const button = document.querySelector('[data-run-routine]');
+        return {fetchCalls,dialogOpen:document.querySelector('#steward-auth').open,
+          disabled:button.disabled,
+          status:button.parentElement.querySelector('[role="status"]').textContent};
+      })()`, signal, "unavailable telemetry Run Now gate");
+      assert.deepEqual(result, {fetchCalls:0,dialogOpen:false,disabled:true,
+        status:"Run Now unavailable: telemetry is disconnected; no request was sent"});
+    });
+
+    await t.test("Run Now waits for a cached-cursor recovery to publish successfully", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const result = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')]
+          .find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+
+        const cachedCursor = runtime.snapshot().cursor;
+        let eventCall = 0, finishPending, failPending;
+        const response = () => ({ok:true,
+          headers:{get:name => name === 'X-Burrow-Cursor' ? cachedCursor : null},
+          text:async()=>''});
+        const gateRuntime = BurrowBrowser.createBrowserRuntime({
+          now:()=>Date.now(), EventSource:null, setTimeout(){}, clearTimeout(){},
+          fetch(url) {
+            if (url === '/villagers') return Promise.resolve({ok:false});
+            eventCall++;
+            if (eventCall === 1) return Promise.resolve(response());
+            if (eventCall === 2) return new Promise(resolve => { finishPending = resolve; });
+            return new Promise((resolve, reject) => { failPending = reject; });
+          },
+        });
+        await gateRuntime.poll();
+        const originalSnapshot = runtime.snapshot;
+        runtime.snapshot = () => gateRuntime.snapshot();
+        let stewardCalls = 0;
+        window.fetch = async () => { stewardCalls++; throw new Error('must not fetch'); };
+
+        const setGateView = () => {
+          const snapshot = gateRuntime.snapshot();
+          fleetView = {...fleetView,transport:snapshot.transport,cursor:snapshot.cursor};
+          renderPanel(Date.now());
+        };
+        const pendingPoll = gateRuntime.poll();
+        setGateView();
+        let button = document.querySelector('[data-run-routine]');
+        const pending = {transport:gateRuntime.snapshot().transport,disabled:button.disabled,
+          reason:button.parentElement.querySelector('[role="status"]')?.textContent};
+        button.click();
+
+        finishPending(response());
+        await pendingPoll;
+        setGateView();
+        button = document.querySelector('[data-run-routine]');
+        const successful = {transport:gateRuntime.snapshot().transport,disabled:button.disabled};
+
+        const failedPoll = gateRuntime.poll();
+        setGateView();
+        button = document.querySelector('[data-run-routine]');
+        const failing = {transport:gateRuntime.snapshot().transport,disabled:button.disabled,
+          reason:button.parentElement.querySelector('[role="status"]')?.textContent};
+        button.click();
+        failPending(new Error('offline'));
+        await failedPoll;
+        setGateView();
+        button = document.querySelector('[data-run-routine]');
+        const failed = {transport:gateRuntime.snapshot().transport,disabled:button.disabled,
+          reason:button.parentElement.querySelector('[role="status"]')?.textContent};
+        runtime.snapshot = originalSnapshot;
+        return {pending,successful,failing,failed,stewardCalls,
+          dialogOpen:document.querySelector('#steward-auth').open};
+      })()`, signal, "pending polling recovery Run Now gate");
+      assert.deepEqual(result, {
+        pending:{transport:"recovering",disabled:true,
+          reason:"Run Now unavailable: telemetry is recovering; no request was sent"},
+        successful:{transport:"polling",disabled:false},
+        failing:{transport:"recovering",disabled:true,
+          reason:"Run Now unavailable: telemetry is recovering; no request was sent"},
+        failed:{transport:"disconnected",disabled:true,
+          reason:"Run Now unavailable: telemetry is disconnected; no request was sent"},
+        stewardCalls:0,dialogOpen:false,
+      });
+    });
+
+    await t.test("Run Now aborts if telemetry resets while credentials are open", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const result = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')]
+          .find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        let gets = 0, posts = 0;
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options = {}) => {
+          if (!String(url).startsWith('http://127.0.0.1:8801/')) return originalFetch(url, options);
+          if (options.method === 'POST') { posts++; throw new Error('must not POST'); }
+          gets++;
+          return {status:200,json:async()=>({routines:[{resident:'life-agent',
+            routine:'daily-summary',next_fire:null,enabled:true,retired:false}]})};
+        };
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const originalSnapshot = runtime.snapshot;
+        const resetCursor = originalSnapshot().cursor.split(':');
+        resetCursor[4] = String(BigInt(resetCursor[4]) + 1n);
+        runtime.snapshot = () => ({...originalSnapshot(),cursor:resetCursor.join(':')});
+        document.querySelector('#steward-token').value = 'reset-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        let alert;
+        for (let frame = 0; frame < 60 && !alert; frame++) {
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          alert = document.querySelector('[data-run-routine]')?.parentElement
+            .querySelector('[role="alert"]')?.textContent;
+        }
+        return {gets,posts,authOpen:document.querySelector('#steward-auth').open,alert};
+      })()`, signal, "dialog telemetry reset gate");
+      assert.deepEqual(result, {gets:1,posts:0,authOpen:false,
+        alert:"Run Now unavailable: telemetry changed while authorizing; no request was sent"});
+    });
+
+    await t.test("Run Now aborts if telemetry resets while declarations are pending", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const result = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')]
+          .find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        let gets = 0, posts = 0, resolveGet, signalGet;
+        const getStarted = new Promise(resolve => { signalGet = resolve; });
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options = {}) => {
+          if (!String(url).startsWith('http://127.0.0.1:8801/')) return originalFetch(url, options);
+          if (options.method === 'POST') { posts++; throw new Error('must not POST'); }
+          gets++; signalGet();
+          return new Promise(resolve => { resolveGet = () => resolve({status:200,
+            json:async()=>({routines:[{resident:'life-agent',routine:'daily-summary',
+              next_fire:null,enabled:true,retired:false}]})}); });
+        };
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        document.querySelector('#steward-token').value = 'pending-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        await getStarted;
+        const originalSnapshot = runtime.snapshot;
+        const resetCursor = originalSnapshot().cursor.split(':');
+        resetCursor[4] = String(BigInt(resetCursor[4]) + 1n);
+        runtime.snapshot = () => ({...originalSnapshot(),cursor:resetCursor.join(':')});
+        resolveGet();
+        let alert;
+        for (let frame = 0; frame < 60 && !alert; frame++) {
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          alert = document.querySelector('[data-run-routine]')?.parentElement
+            .querySelector('[role="alert"]')?.textContent;
+        }
+        return {gets,posts,alert};
+      })()`, signal, "pending declaration telemetry reset gate");
+      assert.deepEqual(result, {gets:1,posts:0,
+        alert:"Run Now unavailable: telemetry changed while authorizing; no request was sent"});
+    });
+
+    await t.test("first Run Now click rechecks authoritative declarations and a second click cannot overlap", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const evidence = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        const openRoutine = async () => {
+          document.querySelector('#fleet-open').click();
+          document.querySelector('[data-fleet-tab="routines"]').click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          const row = [...document.querySelectorAll('.ledger-entry')]
+            .find(item => item.textContent.includes('daily-summary'));
+          row.querySelector('[data-agent]').click();
+          await new Promise(resolve => requestAnimationFrame(resolve));
+        };
+        await openRoutine();
+        window.__stewardCalls = [];
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+          if (!String(url).startsWith('http://127.0.0.1:8801/')) return originalFetch(url, options);
+          window.__stewardCalls.push({ url:String(url), method:options.method });
+          if (String(url).endsWith('/routines')) return {status:200,json:async()=>({routines:[{
+            resident:'life-agent',routine:'daily-summary',next_fire:null,enabled:false,retired:false
+          }]})};
+          return {status:202,json:async()=>({status:'accepted',request_id:'must-not-run'})};
+        };
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        document.querySelector('#steward-token').value = 'disabled-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const disabledFirstClick = {
+          calls: window.__stewardCalls.map(call => call.method),
+          disabled: document.querySelector('[data-run-routine]').disabled
+        };
+
+        return disabledFirstClick;
+      })()`, signal, "disabled first-click authoritative gate");
+      assert.deepEqual(evidence, {calls:["GET"],disabled:true});
+      await resetPage();
+      await waitForTelemetry();
+      const result = await eventually(send, `(async () => {
+        await runtime.refreshResidents();
+        document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="routines"]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        [...document.querySelectorAll('.ledger-entry')].find(item => item.textContent.includes('daily-summary'))
+          .querySelector('[data-agent]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        window.__postCalls = 0; let resolvePost;
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+          if (!String(url).startsWith('http://127.0.0.1:8801/')) return originalFetch(url, options);
+          if (String(url).endsWith('/routines')) return {status:200,json:async()=>({routines:[{
+            resident:'life-agent',routine:'daily-summary',next_fire:'2026-08-26T07:00:00Z',
+            enabled:true,retired:false
+          }]})};
+          window.__postCalls++;
+          return new Promise(resolve => { resolvePost = () => resolve({status:202,
+            json:async()=>({status:'accepted',request_id:'q-one'})}); });
+        };
+        document.querySelector('[data-run-routine]').click();
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        document.querySelector('#steward-token').value = 'enabled-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        while (window.__postCalls !== 1) await new Promise(resolve => setTimeout(resolve, 5));
+        const duringPost = document.querySelector('[data-run-routine]');
+        const disabledWhileRequesting = duringPost.disabled;
+        duringPost.click();
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const callsAfterSecondClick = window.__postCalls;
+        resolvePost();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const pendingButton = document.querySelector('[data-run-routine]');
+        const disabledWhilePending = pendingButton.disabled;
+        pendingButton.click();
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const timeoutAt = Date.now() + BurrowRoutines.DEFAULT_ACK_MS;
+        routineAcks.observe({events:[],cursor:runtime.snapshot().cursor}, timeoutAt, validateEvent);
+        renderPanel(timeoutAt);
+        const unacknowledgedButton = document.querySelector('[data-run-routine]');
+        const disabledWhileUnacknowledged = unacknowledgedButton.disabled;
+        const unacknowledgedMessage = unacknowledgedButton.parentElement
+          .querySelector('[role="status"]').textContent;
+        unacknowledgedButton.click();
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const distantFuture = timeoutAt + 365 * 24 * 60 * 60 * 1000;
+        routineAcks.observe({events:[],cursor:runtime.snapshot().cursor}, distantFuture, validateEvent);
+        renderPanel(distantFuture);
+        const uncertainButton = document.querySelector('[data-run-routine]');
+        return { disabledWhileRequesting, callsAfterSecondClick,
+          disabledWhilePending, disabledWhileUnacknowledged, unacknowledgedMessage,
+          callsAfterUnacknowledgedClick:window.__postCalls,
+          disabledInDistantFuture:uncertainButton.disabled,
+          uncertainMessage:uncertainButton.parentElement.querySelector('[role="status"]').textContent,
+          finalPostCalls:window.__postCalls };
+      })()`, signal, "enabled first-click and second-click overlap gate");
+      assert.deepEqual(result, { disabledWhileRequesting:true,callsAfterSecondClick:1,
+        disabledWhilePending:true,disabledWhileUnacknowledged:true,
+        unacknowledgedMessage:"steward acknowledged nothing — outcome remains uncertain; retry unavailable until exact lifecycle evidence arrives",
+        callsAfterUnacknowledgedClick:1,disabledInDistantFuture:true,
+        uncertainMessage:"steward acknowledged nothing — outcome remains uncertain; retry unavailable until exact lifecycle evidence arrives",
+        finalPostCalls:1 });
+    });
+
     await t.test("dialog transition races and native Tab trapping remain bounded", async () => {
       await resetPage();
       await eventually(send, "document.querySelector('#fleet-open').click(); " +
@@ -699,7 +1276,7 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     assert.equal(accessibility.ledgerRestored, true);
     assert.ok(accessibility.villagerButtons >= 1);
     assert.equal(accessibility.boardRole, "BUTTON");
-    assert.deepEqual(accessibility.tabRoles, ["tab", "tab", "tab"]);
+    assert.deepEqual(accessibility.tabRoles, ["tab", "tab", "tab", "tab"]);
     assert.equal(accessibility.backgroundExposed, false, "background is restored after close");
     });
 

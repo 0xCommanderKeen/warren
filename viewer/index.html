@@ -69,7 +69,7 @@
   #census .census-action:hover, #census .census-action:focus-visible { text-decoration: underline; }
   #lastbeat { font-size: 16px; color: var(--ink-dim); }
   #transport { font-size: 16px; color: #9bb7a0; }
-  #transport[data-state="reconnecting"], #transport[data-state="polling"] { color: var(--busy); }
+  #transport[data-state="recovering"], #transport[data-state="reconnecting"], #transport[data-state="polling"] { color: var(--busy); }
   #transport[data-state="disconnected"] { color: var(--alert); }
   #fleet-open {
     pointer-events: auto; margin-top: 10px; padding: 4px 10px 5px;
@@ -160,6 +160,16 @@
   .status-mark { display: inline-block; border: 1px solid #706149; padding: 0 5px; color: #d3c6aa; }
   .status-mark.missing { color: #d8ad68; }
   .status-mark.invalid, .status-mark.externally-unavailable { color: #f08a69; border-color: #a65b4a; }
+  .routine-card { border: 2px solid #55452e; padding: 10px; margin: 12px 0; }
+  .routine-card.failed, .routine-card.stale { border-color: var(--alert); }
+  .routine-card .declared { color: #d2a15c; border-left: 3px solid #d2a15c; padding-left: 8px; }
+  .routine-run { font: inherit; margin-top: 8px; padding: 5px 9px; color: var(--ink); background: #2b2115; border: 1px solid #d2a15c; cursor: pointer; }
+  .routine-error { white-space: pre-wrap; overflow-wrap: anywhere; color: #f2a17d; }
+  #steward-auth { max-width: min(430px, calc(100vw - 24px)); color: var(--ink); background: #17130f; border: 2px solid #d2a15c; }
+  #steward-auth::backdrop { background: rgba(7, 9, 6, .82); }
+  #steward-auth label { display: grid; gap: 4px; margin: 12px 0; }
+  #steward-auth input { min-width: 0; font: inherit; color: var(--ink); background: #2b2115; border: 1px solid #706149; padding: 7px; }
+  #steward-auth menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
   .resident-card { border: 2px solid #55452e; padding: 12px; margin-bottom: 12px; background: rgba(79,61,34,.16); }
   .resident-card h3 { font-weight: 400; font-size: 24px; }
   .cap-row { width: 100%; display: grid; grid-template-columns: 92px 1fr; gap: 8px; border: 0; border-top: 1px dotted #55452e; padding: 5px 0; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
@@ -234,14 +244,26 @@
   <div id="panel-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="panel-body"></div>
 </aside>
+<dialog id="steward-auth" aria-labelledby="steward-auth-title">
+  <form method="dialog" id="steward-auth-form">
+    <h2 id="steward-auth-title">Connect to Steward</h2>
+    <p>Used only by this browser tab. The token is never saved, logged, shown, or sent to Burrow.</p>
+    <label>Tailnet URL <input id="steward-url" name="url" type="url" required value="http://127.0.0.1:8801" autocomplete="off" spellcheck="false"></label>
+    <label>Bearer token <input id="steward-token" name="token" type="password" required autocomplete="off" spellcheck="false"></label>
+    <div id="steward-auth-error" class="routine-error" role="alert"></div>
+    <menu><button value="cancel" type="submit">cancel</button><button value="connect" type="submit">connect</button></menu>
+  </form>
+</dialog>
 
 <footer>burrow v0.5 · a projection, never a simulation · art: Ninja Adventure (CC0)</footer>
 <div id="preview" hidden></div>
 
 <script src="/routes.js"></script>
 <script src="/destinations.js"></script>
+<script src="/routine-lifecycle.js"></script>
 <script src="/fleet-operations.js"></script>
 <script src="/fleet-controller.js"></script>
+<script src="/routine-ledger.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -1092,6 +1114,52 @@ const transportEl = document.getElementById("transport");
 const emptyEl   = document.getElementById("empty");
 const panelEl   = document.getElementById("panel");
 const panelBody = document.getElementById("panel-body");
+const stewardDialog = document.getElementById("steward-auth");
+const stewardForm = document.getElementById("steward-auth-form");
+const stewardTokenInput = document.getElementById("steward-token");
+let stewardDialogResolve = null;
+let stewardDialogPromise = null;
+
+function finishStewardDialog(value) {
+  stewardTokenInput.value = "";
+  if (stewardDialog.open) stewardDialog.close();
+  const resolve = stewardDialogResolve; stewardDialogResolve = null;
+  stewardDialogPromise = null;
+  if (resolve) resolve(value);
+}
+stewardForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (event.submitter && event.submitter.value === "cancel") { finishStewardDialog(null); return; }
+  if (!stewardForm.reportValidity()) return;
+  const config = { url: document.getElementById("steward-url").value,
+    token: stewardTokenInput.value };
+  finishStewardDialog(config);
+});
+stewardDialog.addEventListener("cancel", event => { event.preventDefault(); finishStewardDialog(null); });
+function requestStewardConfig() {
+  if (stewardConfig) return Promise.resolve(stewardConfig);
+  if (stewardDialogPromise) return stewardDialogPromise;
+  document.getElementById("steward-auth-error").textContent = "";
+  stewardDialogPromise = new Promise(resolve => { stewardDialogResolve = resolve; });
+  stewardDialog.showModal(); stewardTokenInput.focus();
+  return stewardDialogPromise;
+}
+async function refreshStewardDeclarations() {
+  const generation = ++stewardDeclarationGeneration;
+  const config = stewardConfig;
+  stewardDeclarations = { state: "loading", byRoutine: new Map(), error: null };
+  renderPanel(Date.now());
+  try {
+    const byRoutine = await BurrowRoutines.fetchDeclarations(config);
+    if (generation !== stewardDeclarationGeneration) return;
+    stewardDeclarations = { state: "loaded", byRoutine, error: null };
+  } catch (error) {
+    if (generation !== stewardDeclarationGeneration) return;
+    stewardDeclarations = { state: "error", byRoutine: new Map(),
+      error: error && error.message || "connection failed" };
+  }
+  renderPanel(Date.now());
+}
 
 let villagers = [];
 let selectedId = null;
@@ -1147,8 +1215,16 @@ function placeLabel(v) {
 let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
   directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now() };
 let fleetTab = "activity";
+const routineAcks = BurrowRoutines.createAcknowledgements();
+const routineRunNotices = new Map();
+let stewardConfig = null; // deliberately memory-only: never localStorage, URL, server, or manifest
+let stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
+let stewardDeclarationGeneration = 0;
 const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
 function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
+function routineNoticeKey(correlation, routine) {
+  return `${correlation.agent_id ? `agent:${correlation.agent_id}` : `project:${correlation.project}`}\0${routine}`;
+}
 function villagerName(agentId) {
   const current = villagerFor(agentId);
   return current ? current.name : NAMES[hashCode(agentId) % NAMES.length];
@@ -1192,7 +1268,7 @@ function renderActivity(now) {
     <select name="villager" data-fleet-focus="filter:villager" aria-label="Filter by villager">${selectOptions(opts("agent_id"), fleetFilters.villager, "all villagers")}</select>
   </div>
   ${state.malformed ? `<div class="ledger-state bad">${state.malformed} malformed record${state.malformed === 1 ? " was" : "s were"} ignored; invalid data never enters the village.</div>` : ""}
-  ${fleetView.transport === "disconnected" ? `<div class="ledger-state bad">Telemetry disconnected. This ledger may be stale.</div>` : ""}
+  ${!new Set(["live", "polling"]).has(fleetView.transport) ? `<div class="ledger-state bad">Telemetry ${esc(fleetView.transport || "disconnected")}. This ledger may be stale.</div>` : ""}
   ${villagers.some(v => v.state === "stale") ? `<div class="ledger-state bad">Some activity is stale: its villager has had no signal for over 30 minutes.</div>` : ""}
   ${recent.length ? `<ol class="ledger-list">${recent.map(entry => `<li class="ledger-entry">
     <div>${ago(entry.ts, now)}<div class="ledger-small">${esc(entry.state)}</div></div>
@@ -1240,18 +1316,87 @@ function renderDirectory() {
   const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div>${entryLink(v.id, v.name)} · ${esc(v.project)}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
   return availability + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
 }
+function routineRows(now) {
+  const events = fleetView.state.routineRecent.slice().reverse().map(entry => entry.event);
+  return BurrowRoutines.declared(fleetView.residents,
+    BurrowRoutines.project(events, now, { validateEvent }));
+}
+function stewardDeclaration(routine) {
+  return stewardDeclarations.byRoutine.get(`${routine.steward_resident}\0${routine.id}`) || null;
+}
+function nextFireText(routine) {
+  const declaration = stewardDeclaration(routine);
+  if (declaration) return declaration.next_fire ?
+    `next run ${new Date(declaration.next_fire).toLocaleString()} · declared by Steward, not observed` :
+    "no next run declared by Steward (disabled or retired) · not observed";
+  if (stewardDeclarations.state === "loading") return "loading next run from Steward…";
+  if (stewardDeclarations.state === "error") return `next run unavailable: ${stewardDeclarations.error}`;
+  return "next run not loaded from Steward";
+}
+function renderRoutines(now) {
+  const rows = routineRows(now);
+  const diagnostics = fleetView.state.routineMalformed || 0;
+  return `${diagnostics ? `<div class="ledger-state bad">${diagnostics} malformed routine event${diagnostics === 1 ? " was" : "s were"} skipped; no partial run was rendered.</div>` : ""}
+    ${fleetView.state.routineCapacityDropped ? `<div class="ledger-state bad">${fleetView.state.routineCapacityDropped} valid routine lifecycle${fleetView.state.routineCapacityDropped === 1 ? " was" : "s were"} dropped from the bounded ledger by capacity; this is retention pressure, not malformed telemetry.</div>` : ""}
+    <div class="ledger-truth">Actual next runs come directly from Steward's authenticated declaration. ${stewardConfig ?
+      `<button class="routine-run" type="button" data-steward-connect>refresh Steward schedules</button>` :
+      `<button class="routine-run" type="button" data-steward-connect>connect to load next runs</button>`}</div>
+    ${rows.length ? `<ol class="ledger-list">${rows.map(row => {
+      const active = activeForResident(row.resident);
+      return `<li class="ledger-entry">
+      <div>${row.latest ? ago(row.latest.started_at, now) : "never"}</div>
+      <div>${entryLink(active ? active.id : row.agent_id || (row.resident.match || {}).agent_id || residentDetailId(row.resident), row.resident.meta.name)}
+        <div>${esc(row.routine.id)}</div><div class="ledger-small">${esc(row.routine.schedule)} · ${esc(row.routine.schedule_tz)} · local declaration</div>
+        <div class="ledger-small">${esc(nextFireText(row.routine))}</div></div>
+      <div>${statusMark(row.state)}${row.latest && row.latest.outcome ? `<div class="ledger-small">outcome: ${esc(row.latest.outcome)}</div>` : ""}</div></li>`;
+    }).join("")}</ol>` : `<div class="ledger-state">No residents declare routines. Visitors have no routine ledger; routines belong to residents.</div>`}`;
+}
+function renderResidentRoutines(resident, now) {
+  if (!resident || resident.valid !== true) return `<div class="ledger-state">Routines belong to residents; visitors have no ledger.</div>`;
+  const rows = BurrowRoutines.declared([resident], BurrowRoutines.project(
+    fleetView.state.routineRecent.slice().reverse().map(entry => entry.event), now, { validateEvent }));
+  if (!rows.length) return `<div class="ledger-state">This resident declares no routines (empty history).</div>`;
+  return `<section aria-label="Routine ledger"><h3>Routine ledger</h3>${rows.map(row => {
+    // Navigation follows the currently active owner, but Run Now belongs to
+    // the declaration. A project declaration may be executed by a distinct
+    // Steward runner, so narrowing it to the open villager would make its real
+    // lifecycle acknowledgement impossible to observe.
+    const correlation = resident.match || {};
+    const latest = row.latest, ack = routineAcks.get(correlation, row.routine.id);
+    const notice = routineRunNotices.get(routineNoticeKey(correlation, row.routine.id));
+    const duration = latest && latest.duration_s !== null ? ` · ${latest.duration_s}s` :
+      latest && latest.state === "failed" ? " · duration unknown" : "";
+    const observed = !latest ? "never observed running" : `${latest.state} · started ${ago(latest.started_at, now)}` +
+      (latest.outcome ? ` · outcome: ${esc(latest.outcome)}` : "") +
+      duration +
+      (latest.artifacts.length ? ` · artifacts: ${latest.artifacts.map(esc).join(", ")}` : "");
+    const declaration = stewardDeclaration(row.routine);
+    const telemetry = BurrowRoutines.telemetryAvailability(fleetView.transport, fleetView.cursor);
+    const runDisabled = BurrowRoutines.runDisabled(
+      row.routine, declaration, stewardDeclarations.state, ack, row.history, telemetry);
+    return `<article class="routine-card ${esc(row.state)}"><h4>${esc(row.routine.id)} ${statusMark(row.state)}</h4>
+      <div class="declared">schedule: ${esc(row.routine.schedule)} (${esc(row.routine.schedule_tz)}) · local declaration<br>${esc(nextFireText(row.routine))}</div>
+      <div>${observed}</div>
+      ${latest && row.history.length ? `<details><summary>Recent history (${row.history.length})</summary>${row.history.map(run => `<div class="evt">${ago(run.started_at, now)} · ${esc(run.state)}${run.outcome ? ` · outcome: ${esc(run.outcome)}` : ""} · ${esc(run.run_id)}${run.error ? `<details><summary>Inspect failure for ${esc(run.run_id)}</summary><div class="routine-error">${esc(run.error)}</div></details>` : ""}</div>`).join("")}</details>` : ""}
+      <button class="routine-run" type="button" data-run-resident="${esc(row.routine.steward_resident)}" data-run-agent="${esc(correlation.agent_id || "")}" data-run-project="${esc(correlation.project || "")}" data-run-routine="${esc(row.routine.id)}" data-run-enabled="${row.routine.enabled !== false}"${runDisabled ? " disabled" : ""}>run now</button>
+      ${notice ? `<div role="alert">${esc(notice)}</div>` : ""}
+      ${!telemetry.ok && !notice ? `<div role="status">${esc(telemetry.message)}</div>` : ""}
+      ${ack ? `<div role="status">${ack.state === "requesting" ? "asking steward…" : ack.state === "pending" ? "asked steward — pending acknowledgement" : ack.state === "unacknowledged" ? "steward acknowledged nothing — outcome remains uncertain; retry unavailable until exact lifecycle evidence arrives" : ack.state === "uncertain" ? `Steward may have accepted the request — ${esc(ack.error)}; retry unavailable until exact lifecycle evidence arrives` : ack.state === "indeterminate" ? "run observed, but bounded terminal evidence was lost — outcome is indeterminate and retry remains unavailable" : ack.state === "running" ? "running — confirmed by matching real event" : ack.state === "completed" ? "completed — confirmed by matching real event" : ack.state === "failed" ? "failed — confirmed by matching real event" : `request failed — ${esc(ack.error)} — retry available`}</div>` : ""}
+    </article>`;
+  }).join("")}</section>`;
+}
 function replaceFleet(now) {
   panelEl.classList.add("ledger");
   panelEl.setAttribute("aria-label", "Fleet operations ledger");
-  const body = fleetTab === "activity" ? renderActivity(now) : fleetTab === "attention" ? renderAttention(now) : renderDirectory();
+  const body = fleetTab === "activity" ? renderActivity(now) : fleetTab === "attention" ? renderAttention(now) : fleetTab === "routines" ? renderRoutines(now) : renderDirectory();
   panelBody.innerHTML = `<div class="ledger-kicker">the steward's field ledger</div><h2 id="panel-title" tabindex="-1">Fleet operations</h2>
     <div class="ledger-truth">Configured means a complete, safe public declaration exists. Missing means none is declared. Invalid comes only from public diagnostics or an incomplete public record. Externally unavailable means the resident feed is unavailable. A status reference is only an opaque locator; Burrow never interprets it as live health or tests secret-backed access.</div>
-    <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
+    <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"],["routines","Routines"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
     <section>${body}</section>`;
   const counts = fleetTab === "activity" ? BurrowFleet.filterRecent(fleetView.state, fleetFilters).length :
-    fleetTab === "attention" ? BurrowFleet.outstandingNeeds(fleetView.state).length :
+    fleetTab === "attention" ? BurrowFleet.outstandingNeeds(fleetView.state).length : fleetTab === "routines" ? routineRows(now).length :
     fleetView.residents.length + (fleetView.diagnosticResidents || []).length;
-  const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
+  const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : fleetTab === "routines" ? "Routines" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
   const live = document.getElementById("panel-status");
   if (live.textContent !== status) live.textContent = status;
 }
@@ -1324,13 +1469,16 @@ function renderPanel(now) {
       return match.agent_id ? entry.agent_id === match.agent_id :
         match.project ? entry.project === match.project : false;
     }) : fleetView.state.recent.find(entry => entry.agent_id === selectedId);
+    const routineOwner = residentFile ? null :
+      fleetView.state.routineRecent.find(entry => entry.agent_id === selectedId);
+    const ownerEvidence = latest || routineOwner;
     if (!resident) resident = candidates.find(item =>
       (item.match || {}).agent_id === selectedId ||
-      (latest && (item.match || {}).project === latest.project));
-    if (!resident && !latest) { closePanel(); return; }
+      (ownerEvidence && (item.match || {}).project === ownerEvidence.project));
+    if (!resident && !ownerEvidence) { closePanel(); return; }
     const meta = resident && resident.meta || {};
-    const name = meta.name || (latest ? villagerName(latest.agent_id) : resident.file);
-    const identity = latest ? latest.agent_id : (resident.match || {}).agent_id ||
+    const name = meta.name || (ownerEvidence ? villagerName(ownerEvidence.agent_id) : resident.file);
+    const identity = ownerEvidence ? ownerEvidence.agent_id : (resident.match || {}).agent_id ||
       (resident.match || {}).project || resident.file;
     const residency = resident && resident.valid === true ?
       `resident · home ${resident.home + 1}` : resident && resident.diagnostic ?
@@ -1341,7 +1489,9 @@ function renderPanel(now) {
       ${meta.role ? `<div class="meta role">${esc(meta.role)}</div>` : ""}
       <div class="meta">${esc(identity)}</div>
       <div class="state-line">inactive · no current signal</div>
+      ${routineOwner && !latest ? `<div class="meta">Routine ownership observed from Steward; routine events do not manufacture interactive activity.</div>` : ""}
       ${resident && resident.body ? `<div class="soul">${esc(resident.body)}</div>` : ""}
+      ${renderResidentRoutines(resident, now)}
       ${latest ? `<div class="evt t-${esc(latest.event.type)}">
         <div class="when">latest retained event · ${ago(latest.ts, now)} · ${esc(latest.event.type)}</div>
         <div class="what">${esc(describe(latest.event))}</div>
@@ -1369,6 +1519,7 @@ function renderPanel(now) {
         <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
       </div>` : ""}
     ${v.soul && v.soul.body ? `<div class="soul">${esc(v.soul.body)}</div>` : ""}
+    ${renderResidentRoutines(v.soul, now)}
     ${v.events.slice().reverse().map(ev => `
       <div class="evt t-${esc(ev.type)}">
         <div class="when">${ago(Date.parse(ev.ts) || 0, now)} · ${esc(ev.type)}</div>
@@ -1463,6 +1614,87 @@ panelBody.addEventListener("input", event => {
   fleetFilters[event.target.name] = event.target.value;
   renderFleet(Date.now());
 });
+panelBody.addEventListener("click", async event => {
+  const connect = event.target.closest("[data-steward-connect]");
+  if (connect) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+    await refreshStewardDeclarations();
+    return;
+  }
+  const button = event.target.closest("[data-run-routine]");
+  if (!button) return;
+  const request = { resident: button.dataset.runResident, routine: button.dataset.runRoutine,
+    local: { enabled: button.dataset.runEnabled === "true" },
+    correlation: button.dataset.runAgent ? { agent_id: button.dataset.runAgent } :
+      { project: button.dataset.runProject } };
+  const noticeKey = routineNoticeKey(request.correlation, request.routine);
+  const preflight = routineAcks.availability(request.correlation, request.routine);
+  if (!preflight.ok) {
+    routineRunNotices.set(noticeKey, preflight.message);
+    renderPanel(Date.now());
+    return;
+  }
+  const initialTelemetry = runtime.snapshot();
+  const telemetryPreflight = BurrowRoutines.telemetryAvailability(
+    initialTelemetry.transport, initialTelemetry.cursor);
+  if (!telemetryPreflight.ok) {
+    routineRunNotices.set(noticeKey, telemetryPreflight.message);
+    renderPanel(Date.now());
+    return;
+  }
+  if (!stewardConfig) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+    await refreshStewardDeclarations();
+  }
+  const declaration = stewardDeclarations.byRoutine.get(`${request.resident}\0${request.routine}`);
+  if (!BurrowRoutines.canRunAuthoritatively(
+      request.local, declaration, stewardDeclarations.state)) return;
+  // Credentials and declaration reads may leave a cached cursor behind after
+  // disconnect or reset. Only the exact still-current observable boundary may
+  // precede a run request; otherwise the eventual lifecycle cannot be
+  // correlated truthfully.
+  const currentTelemetry = runtime.snapshot();
+  const currentAvailability = BurrowRoutines.telemetryAvailability(
+    currentTelemetry.transport, currentTelemetry.cursor);
+  if (!currentAvailability.ok || currentTelemetry.transport !== initialTelemetry.transport ||
+      currentTelemetry.cursor !== initialTelemetry.cursor) {
+    const message = currentAvailability.ok ?
+      "Run Now unavailable: telemetry changed while authorizing; no request was sent" :
+      currentAvailability.message;
+    routineRunNotices.set(noticeKey, message);
+    renderPanel(Date.now());
+    return;
+  }
+  const correlation = request.correlation;
+  const requestedAt = Date.now();
+  const boundary = { events: fleetView.state.routineRecent.map(entry => entry.event),
+    cursor: currentTelemetry.cursor };
+  const tracking = routineAcks.request(
+    correlation, request.routine, requestedAt, boundary, validateEvent);
+  if (!tracking.ok) {
+    routineRunNotices.set(noticeKey, tracking.message);
+    renderPanel(requestedAt);
+    return;
+  }
+  routineRunNotices.delete(noticeKey);
+  renderPanel(requestedAt);
+  try {
+    const accepted = await BurrowRoutines.runNow(stewardConfig, request.resident, request.routine);
+    routineAcks.accepted(correlation, request.routine, accepted.request_id);
+  } catch (error) {
+    const message = error && error.message || "run request failed";
+    if (error && error.definitive === true) {
+      routineAcks.failed(correlation, request.routine, message);
+    } else {
+      routineAcks.uncertain(correlation, request.routine, message);
+    }
+  }
+  renderPanel(Date.now());
+});
 
 let souls = [];
 let artifacts = [];
@@ -1482,6 +1714,8 @@ const runtime = BurrowBrowser.createBrowserRuntime({
   },
   onFleet(view) {
     fleetView = view;
+    routineAcks.observe({ events: view.routineBatch, cursor: view.cursor, reset: view.reset },
+      view.now, validateEvent);
     if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
   },
   onTransport(state) {
