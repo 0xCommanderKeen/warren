@@ -16,18 +16,27 @@ than being stored.
 """
 
 import difflib
+import posixpath
 import re
 import zoneinfo
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import yaml
 from croniter import croniter
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 __all__ = [
     "CLOSE_OF_DAY",
@@ -141,6 +150,27 @@ HOST_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.-]*$"
 SSH_USER_PATTERN = r"^[A-Za-z_][A-Za-z0-9._-]*$"
 REMOTE_PATH_PATTERN = r"^[A-Za-z0-9~/][A-Za-z0-9_./-]*$"
 IMAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$"
+
+#: ``project`` becomes ``BURROW_PROJECT`` in the resident's compose environment, so like
+#: every value that lands in generated YAML it has to be data and not markup: a slug-ish
+#: label with no whitespace, no ``:`` and no newline. Without this a project string could
+#: reopen the compose document from inside a value (#61).
+PROJECT_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+#: A directory ``memory.path`` is mounted into the container and written into its compose
+#: file twice — as ``working_dir`` and as the source of a ``./memory:<path>`` volume — so a
+#: value carrying whitespace, a quote, ``$(…)``, a brace, or (the #61 exploit) a newline is
+#: a value trying to be markup rather than a reference. This is the same "the value is data,
+#: never markup" boundary the deploy patterns draw, one step earlier: it forbids that whole
+#: class of character while still allowing an ordinary POSIX path or a scheme reference
+#: (``s3://…``) — the latter is a *directory* the schema accepts and :mod:`steward.journal`
+#: refuses at schedule time, not something this pattern's job is to judge.
+MEMORY_PATH_PATTERN = r"""^[^\s'"`$;|&<>(){}\[\]!*?\\]+$"""
+
+#: Control characters — and the line breaks among them — never belong in a single-line
+#: reference or label. A newline that survived validation is exactly how a value became a
+#: second YAML key, so it is refused before a model is ever bound.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 # --------------------------------------------------------------------------------------
@@ -476,6 +506,34 @@ class Memory(_Model):
         description="How many entries survive rotation, newest first.",
     )
 
+    @field_validator("path")
+    @classmethod
+    def _path_is_a_reference_not_markup(cls, value: str, info: ValidationInfo) -> str:
+        """Reject a memory path that is markup rather than a single-line reference.
+
+        Two boundaries, both drawn here rather than discovered when the compose file is
+        rendered (#61): no path of any kind may carry a control character or a line break,
+        because a newline that survives validation becomes a second key in the generated
+        YAML; and a *directory* path — the one kind that is mounted into the container and
+        written into its compose file — must be a plain absolute or ``~``-rooted POSIX path,
+        so a value can never reach that file as anything but a quoted scalar.
+        """
+        if _CONTROL_CHARS.search(value):
+            raise ValueError(
+                "path contains a control character or line break; a memory path is a "
+                "single-line reference, and a newline here would become an extra key in "
+                "the generated compose file"
+            )
+        if info.data.get("kind", "directory") == "directory" and not re.match(
+            MEMORY_PATH_PATTERN, value
+        ):
+            raise ValueError(
+                "a directory memory.path must carry no whitespace, quotes, or shell/YAML "
+                "metacharacters ($ ; | & < > ( ) { } [ ] ! * ? \\), because it is mounted "
+                "into the container and written into its compose file as data"
+            )
+        return value
+
 
 class Route(_Model):
     """A declared inbound channel through which work can reach a resident.
@@ -774,7 +832,11 @@ class ResidentManifest(_Model):
         pattern=AGENT_ID_PATTERN,
         description="Stable burrow identity, <source>:<name>. Matched before project.",
     )
-    project: str | None = Field(default=None, description="Project label for scoped residents.")
+    project: str | None = Field(
+        default=None,
+        pattern=PROJECT_PATTERN,
+        description="Project label for scoped residents.",
+    )
     summary: str | None = Field(default=None, description="One line burrow can display.")
     retired: bool = Field(
         default=False,
@@ -1432,6 +1494,54 @@ def _check_soul_agreement(
     return diagnostics
 
 
+def _resolved_journal_dir(memory: Memory) -> str:
+    """Return where a resident's entries land: ``memory.path`` joined with ``memory.journal``.
+
+    Normalised so ``/a/b`` and ``/a//b/`` are one place, which is what "the same journal
+    directory" has to mean for two manifests to be caught sharing one.
+    """
+    return posixpath.normpath(str(PurePosixPath(memory.path) / memory.journal))
+
+
+def _check_shared_journal_dirs(residents: Sequence[Resident]) -> list[Diagnostic]:
+    """Warn when two residents resolve to one journal directory (#77, the manifest side).
+
+    A shared ``<memory.path>/<memory.journal>`` means one resident's close-of-day entry
+    lands where another reads its own from, so the two cross-feed: alice would wake up to
+    bob's private note. It is a **warning**, not an error — a tree can be arranged this way
+    on purpose in a test or a migration — but it is never what a production village wants,
+    and validation is the one moment anybody reads the two paths side by side. The
+    read-time filtering that keeps entries apart even so lives in :mod:`steward.journal`.
+    """
+    by_dir: dict[str, list[Resident]] = {}
+    for resident in residents:
+        memory = resident.manifest.memory
+        if memory.kind != "directory":
+            continue
+        by_dir.setdefault(_resolved_journal_dir(memory), []).append(resident)
+    diagnostics: list[Diagnostic] = []
+    for journal_dir, group in by_dir.items():
+        if len(group) <= 1:
+            continue
+        ids = sorted(resident.id for resident in group)
+        for resident in group:
+            others = [rid for rid in ids if rid != resident.id]
+            diagnostics.append(
+                Diagnostic(
+                    file=resident.path,
+                    field_path="memory.path",
+                    problem=(
+                        f"resident {resident.id!r} resolves its journal directory to "
+                        f"{journal_dir}, which {others} also use; a shared journal lets one "
+                        f"resident read another's entries"
+                    ),
+                    example="give each resident its own memory.path",
+                    severity=Severity.WARNING,
+                )
+            )
+    return diagnostics
+
+
 def _check_directory_name(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     directory = source.parent.name
     if directory and manifest.id != directory:
@@ -1632,6 +1742,10 @@ def validate_tree(
             continue
         found = True
         result = result.merged_with(_validate_manifest(manifest_path, library))
+
+    result = result.merged_with(
+        ValidationResult(diagnostics=tuple(_check_shared_journal_dirs(result.residents)))
+    )
 
     if not found and not result.diagnostics:
         result = ValidationResult(

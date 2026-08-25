@@ -49,13 +49,13 @@ how it gets there.
 """
 
 import io
-import json
 import tarfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from string import Template
 from typing import Any, Protocol
+
+import yaml
 
 from steward.manifest import MANIFEST_FILENAME, Resident, ResidentManifest
 from steward.runners import TRANSFER_TIMEOUT_S, CommandOutcome, PipedRun, run_argv
@@ -80,6 +80,7 @@ __all__ = [
     "compose_argv",
     "memory_path_for",
     "pack",
+    "planned_env",
     "render_argv",
     "render_compose",
     "render_env",
@@ -119,7 +120,12 @@ COMPOSE_FILENAME = "docker-compose.yaml"
 ENV_FILENAME = ".env"
 SOUL_FILENAME = "soul.md"
 
-TEMPLATE_PATH = Path(__file__).parent / "templates" / "resident-compose.yaml"
+#: The comment header every rendered compose file opens with — "do not edit this on the
+#: host", "the secrets are in .env, not here". Read once, then prepended to the dict body
+#: :func:`render_compose` serialises, because ``yaml.safe_dump`` cannot carry a comment.
+COMPOSE_HEADER = (Path(__file__).parent / "templates" / "resident-compose.yaml").read_text(
+    encoding="utf-8"
+)
 
 #: Where a resident's memory is mounted when its manifest declares a memory kind that is
 #: not a directory. Nothing is lost: the volume still persists on the host, it simply is
@@ -220,28 +226,45 @@ def memory_path_for(manifest: ResidentManifest) -> str:
 
 
 def render_compose(resident: Resident, target: DeployTarget) -> str:
-    """Render the resident's compose fragment from the template. Deterministic.
+    """Render the resident's compose fragment as data, never as markup. Deterministic.
+
+    The fragment is built as a Python dict and serialised with ``yaml.safe_dump``, so any
+    value a manifest carries — ``memory.path``, the container command, the project label —
+    is emitted as one quoted scalar rather than as text spliced into a template. A value
+    holding a newline, a ``:`` or a ``privileged: true`` of its own can no longer reopen
+    the document from inside itself: the manifest patterns (#61) are the first line of that
+    defence and this rendering is the second, so a value that somehow slipped past the
+    patterns still cannot become a compose key.
 
     Deterministic matters more than it sounds: the provision stage decides whether to
     write anything by comparing this string to what is already on the host, so a render
-    that varied by run — a timestamp, a dict iteration order — would make every deploy
-    look like a change and every "converged" claim a lie.
+    that varied by run — a timestamp, a dict iteration order — would make every deploy look
+    like a change and every "converged" claim a lie. ``sort_keys=True`` and a header with
+    no clock in it keep it stable.
 
-    ``$$`` in the template survives as ``$``, which is how ``${BURROW_TOKEN-}`` reaches
-    the host as a compose interpolation rather than as something steward substituted.
+    ``${BURROW_URL:?…}`` and ``${BURROW_TOKEN-}`` are literal string *values* here: docker
+    compose interpolates them from the ``.env`` beside the file, and steward never
+    substitutes them itself.
     """
-    template = Template(TEMPLATE_PATH.read_text(encoding="utf-8"))
-    return template.substitute(
-        resident_id=resident.id,
-        service=target.service,
-        image=target.image,
-        container=target.container,
-        agent_id=resident.agent_id,
-        project=resident.project,
-        memory_path=memory_path_for(resident.manifest),
-        # JSON is valid YAML, so a command with a space in it stays one argv element.
-        command=json.dumps(list(target.command)),
-    )
+    memory_path = memory_path_for(resident.manifest)
+    service: dict[str, Any] = {
+        "image": target.image,
+        "container_name": target.container,
+        "restart": "unless-stopped",
+        "working_dir": memory_path,
+        "environment": {
+            "BURROW_AGENT_ID": resident.agent_id,
+            "BURROW_PROJECT": resident.project,
+            "BURROW_URL": "${BURROW_URL:?steward writes this into .env at provision time}",
+            "BURROW_TOKEN": "${BURROW_TOKEN-}",
+            "STEWARD_RESIDENT": resident.id,
+        },
+        "volumes": [f"./memory:{memory_path}", "./claude:/root/.claude"],
+        "command": list(target.command),
+    }
+    document = {"services": {target.service: service}}
+    body = yaml.safe_dump(document, default_flow_style=False, sort_keys=True)
+    return COMPOSE_HEADER + body
 
 
 def render_env(values: Mapping[str, str]) -> str:
@@ -283,6 +306,23 @@ def burrow_env(source: Mapping[str, str]) -> dict[str, str]:
     token = (source.get(BURROW_TOKEN_ENV) or "").strip()
     if token:
         values[BURROW_TOKEN_ENV] = token
+    return values
+
+
+def planned_env(source: Mapping[str, str]) -> dict[str, str]:
+    """Read the village variables a run *would* carry, refusing nothing.
+
+    :func:`burrow_env` refuses when :data:`BURROW_URL_ENV` is unset, because a real deploy
+    with nowhere to emit is a resident that never appears in the village. A **rehearsal**
+    reaches no host, so it cannot deploy anything wrong — it must be able to assemble and
+    print the plan whatever the emitter environment says (#84). This is the lenient reader
+    the dry-run path uses: whatever is set, named; nothing raised.
+    """
+    values: dict[str, str] = {}
+    for key in (BURROW_URL_ENV, BURROW_TOKEN_ENV):
+        value = (source.get(key) or "").strip()
+        if value:
+            values[key] = value
     return values
 
 
