@@ -291,10 +291,12 @@ def doctor(residents: Path, db: Path | None) -> None:
     """Check that what the manifests declare can actually run, here, now.
 
     Names the brain each resident runs on, whether its binary exists, what it has spent
-    today, and when each enabled routine fires next — then says when the watchdog last
-    made a pass. A missing binary is an error at a reasonable hour rather than a routine
-    that silently never happens at 7am, and a resident paused by its budget is a resident
-    that will not fire tonight however green everything else looks.
+    today, how much post is waiting and whether a door is open to take it, and when each
+    enabled routine fires next — then says when the watchdog last made a pass. A missing
+    binary is an error at a reasonable hour rather than a routine that silently never
+    happens at 7am, a resident paused by its budget is a resident that will not fire
+    tonight however green everything else looks, and letters stacked behind a closed route
+    are work nobody will ever pick up.
     """
     result = validate_paths([residents])
     if not result.ok:
@@ -322,6 +324,7 @@ def doctor(residents: Path, db: Path | None) -> None:
                 click.secho(f"{label} — ready", fg="green")
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
+            problems += _report_inbox(resident, store)
         problems += _report_watchdog(store.last_watchdog_pass())
 
     scheduled = _load_or_exit(residents)
@@ -399,6 +402,38 @@ def _report_budget(status: BudgetStatus) -> int:
         return 1
     colour = "green" if status.declared else "bright_black"
     click.secho(f"{status.resident}: budget {status.summary()}", fg=colour)
+    return 0
+
+
+def _report_inbox(resident: Resident, store: Store) -> int:
+    """Print how much post is waiting and whether a door is open to take it.
+
+    Read from the *raw* declared routes rather than ``delegation_routes``, because the
+    failure this exists to catch is a delegation route flipped to ``pending`` or
+    ``disabled`` while letters keep arriving (#46): the accepting-only view shows no route
+    at all, so the report would say nothing about the pile behind the shut door. Nothing
+    claims the inbox in that state — not the dispatcher, not a routine — so it is a
+    problem, and doctor exits non-zero on it.
+    """
+    routes = resident.inbound_routes
+    if not routes:
+        click.secho(f"{resident.id}: inbox — takes no letters", fg="bright_black")
+        return 0
+    pending = store.inbox_count(resident.id)
+    accepting = [route.id for route in routes if route.accepts_delegation]
+    if accepting:
+        click.secho(f"{resident.id}: inbox {pending} open via {', '.join(accepting)}", fg="green")
+        return 0
+    shut = ", ".join(f"{route.id} ({route.status})" for route in routes)
+    if pending:
+        click.secho(
+            f"{resident.id}: inbox — {pending} open letter(s) behind a closed route: {shut}; "
+            "nothing will pick them up",
+            fg="red",
+            err=True,
+        )
+        return 1
+    click.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
     return 0
 
 

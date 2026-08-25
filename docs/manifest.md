@@ -199,6 +199,7 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 $ steward doctor
 life-agent: runner claude (claude-opus-5) — ready
 life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
   life-agent/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana

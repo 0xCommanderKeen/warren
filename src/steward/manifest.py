@@ -1076,6 +1076,17 @@ class Resident:
         """The ids of the routes work may be delegated into, in declared order."""
         return tuple(route.id for route in self.manifest.routes if route.accepts_delegation)
 
+    @property
+    def inbound_routes(self) -> tuple[Route, ...]:
+        """Every declared route of kind ``delegation``, open or shut, in declared order.
+
+        ``delegation_routes`` answers "where may steward deliver today"; this answers "what
+        doors does this resident claim to have at all". A report built on the first cannot
+        see a route somebody flipped to ``pending`` or ``disabled`` — it shows no route,
+        says nothing, and the letters already delivered pile up behind it (#46).
+        """
+        return tuple(r for r in self.manifest.routes if r.kind == DELEGATION_ROUTE_KIND)
+
     def workdir(self, fallback: Path) -> Path:
         """Where a session for this resident runs.
 

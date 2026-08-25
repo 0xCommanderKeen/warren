@@ -526,6 +526,26 @@ def test_the_database_lives_beside_the_scheduler_state(
     assert default_db_path() == tmp_path / "state" / "steward.db"
 
 
+# -------------------------------------------------------------------------- the inbox
+
+
+def test_the_inbox_can_be_counted_without_being_read(store: Store) -> None:
+    """``doctor`` prints one number, so it asks for one number."""
+    store.delegate_job(
+        title="Read the background", assignee="hob", delegated_by="maren", route="inbox"
+    )
+    store.delegate_job(title="And this", assignee="hob", delegated_by="maren", route="inbox")
+    store.delegate_job(title="Not yours", assignee="pip", delegated_by="maren", route="inbox")
+
+    assert store.inbox_count("hob") == 2
+    assert store.inbox_count("nobody") == 0
+
+    store.claim_next_delegated(assignee="hob", claimant="claude-code:hob", lease_expires_at=LATER)
+
+    assert store.inbox_count("hob") == 1, "a claimed letter has left the pending pile"
+    assert store.inbox_count("hob", None) == 2, "…but it is still somebody's post"
+
+
 # -------------------------------------------------------------- the ledger, by origin
 
 

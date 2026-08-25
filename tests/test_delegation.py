@@ -356,6 +356,27 @@ def test_a_route_that_is_not_open_yet_takes_no_letters(
     assert sink.events == []
 
 
+def test_a_shut_route_is_still_a_declared_door(fleet: Fleet) -> None:
+    """``inbound_routes`` sees what ``delegation_routes`` hides: the door somebody closed.
+
+    Which is the whole of steward #46 — a report built on accepting routes alone shows no
+    route at all, and cannot say why the letters behind it are not moving.
+    """
+    (receiver,) = fleet(
+        resident_manifest(
+            RECEIVER,
+            name="Receiver",
+            routes=[inbox_route(status="disabled"), inbox_route("research")],
+        )
+    )
+
+    assert receiver.delegation_routes == ("research",)
+    assert [(route.id, route.status) for route in receiver.inbound_routes] == [
+        ("inbox", "disabled"),
+        ("research", "active"),
+    ]
+
+
 def test_a_recipient_nobody_has_heard_of_refuses_with_the_near_miss(
     make_delegator: MakeDelegator, sink: ev.NullEmitter
 ) -> None:
