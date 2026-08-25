@@ -453,16 +453,48 @@ function confirmApproval(requestId) {
   };
 }
 
-/** Confirm a declaration by seeing the new manifest come back through the validator. */
-function confirmDeclared(residentId) {
+/** Confirm a declaration by seeing the new manifest come back through the validator.
+ *
+ * `answer` is the 201 body, which carries the nursery's own report of what it did. The
+ * confirmation itself is still a read — the resident has to come back through
+ * `GET /residents` — and everything said about the host afterwards is quoted off that
+ * report rather than assumed from the status code.
+ */
+function confirmDeclared(answer) {
   return async () => {
     const listing = await call("residents");
-    const found = (listing.residents || []).some((item) => item.id === residentId);
+    const found = (listing.residents || []).some((item) => item.id === answer.id);
     if (!found) return null;
+
+    const provision = answer.provision;
+    if (!provision) {
+      return {
+        state: "confirmed",
+        why: "the manifest validates and steward can read it. Nothing is deployed and no " +
+             "routine is scheduled: commit the files and deploy from the CLI.",
+      };
+    }
+
+    const host = provision.target ? provision.target.container : answer.id;
+    const did = provision.sent
+      ? `the bundle went to ${host} and steward ran ${provision.commands.length} command` +
+        `${provision.commands.length === 1 ? "" : "s"} there`
+      : `nothing was uploaded to ${host}: the host already had this bundle, which is what ` +
+        `a converged re-run looks like`;
+    const register = answer.register;
+    if (register && register.ok === false) {
+      return {
+        state: "failed",
+        why: `${did}, but the schedule check did not pass: ${register.problems.join("; ")}`,
+      };
+    }
+    const fires = (register && register.next_fires) || [];
     return {
       state: "confirmed",
-      why: "the manifest validates and steward can read it. Nothing is deployed and no " +
-           "routine is scheduled: commit the files and deploy from the CLI.",
+      why: `the manifest validates and steward can read it; ${did}. ` + (fires.length
+        ? `Next fires: ${fires.map((fire) => `${fire.routine} at ${fire.at}`).join(", ")}.`
+        : "No enabled routine, so this resident fires nothing on a schedule.") +
+        " It appears in burrow when it emits its own first event, and never before.",
     };
   };
 }
@@ -523,6 +555,8 @@ async function viewResidents() {
           el("span", { class: "nm" }, resident.soul.name),
           " ",
           el("span", { class: "idd" }, resident.id),
+          resident.retired ? " " : null,
+          resident.retired ? badge("retired", "fail") : null,
           el("span", { class: "role" }, resident.soul.role))),
       el("span", { class: "stack" },
         resident.runner.kind,
@@ -536,13 +570,19 @@ async function viewResidents() {
           upcoming ? frag("next ", clock(upcoming.next_fire, "until")) : "nothing scheduled")),
       gauge(budget),
       el("span", { class: "badges" },
-        resident.board && resident.board.claim ? badge("board", "on") : null,
-        resident.delegation && resident.delegation.send ? badge("delegates", "on") : null,
-        (resident.routes || []).some((route) => route.kind === "delegation")
-          ? badge("inbox", "on") : null,
-        !(resident.board && resident.board.claim) &&
-        !(resident.delegation && resident.delegation.send)
-          ? el("span", { class: "faint" }, "routines only") : null)
+        // A retired resident's board and delegation blocks still say what they said; they
+        // simply no longer decide anything, so rendering them "on" would be a lie the
+        // manifest is technically telling. Retirement outranks every one of them.
+        resident.retired
+          ? el("span", { class: "faint", title: RETIRED_REFUSAL }, "nothing — retired")
+          : frag(
+              resident.board && resident.board.claim ? badge("board", "on") : null,
+              resident.delegation && resident.delegation.send ? badge("delegates", "on") : null,
+              (resident.routes || []).some((route) => route.kind === "delegation")
+                ? badge("inbox", "on") : null,
+              !(resident.board && resident.board.claim) &&
+              !(resident.delegation && resident.delegation.send)
+                ? el("span", { class: "faint" }, "routines only") : null))
     )]);
   });
 
@@ -598,17 +638,19 @@ async function viewResident(route) {
     ? (ledgerRows.value.routines || []).filter((row) => row.resident === it.id)
     : (it.routines || []).map((row) => ({
         ...row, key: `${it.id}/${row.id}`, resident: it.id, routine: row.id,
-        next_fire: null, anchor: null, last_request: null,
+        retired: it.retired, next_fire: null, anchor: null, last_request: null,
       }));
 
   const out = frag(
     rise(el("div", { class: "detailhead", style: { "--accent": soul.accent } },
       el("a", { class: "back", href: "#/residents" }, "← all residents"),
-      el("h1", {}, soul.name),
+      el("h1", {}, soul.name, it.retired ? " " : null,
+        it.retired ? badge("retired", "fail") : null),
       el("div", { class: "under" },
         `${soul.role} · ${it.id}`,
         it.agent_id ? ` · ${it.agent_id}` : null,
-        it.project ? ` · project ${it.project}` : null)), 0),
+        it.project ? ` · project ${it.project}` : null,
+        it.retired ? " · retired: takes no routines, no board work, no letters" : null)), 0),
 
     rise(el("div", { class: "grid2" }, soulPanel(it), charterPanel(it.charter)), 1),
     rise(skillsPanel(it), 2),
@@ -717,7 +759,9 @@ function routineRow(row) {
     el("span", { class: "stack" }, mono(row.schedule),
       el("span", { class: "sub" }, row.schedule_tz)),
     el("span", { class: "stack" },
-      row.enabled ? clock(row.next_fire, "until") : el("span", { class: "faint" }, "—"),
+      row.retired
+        ? el("span", { class: "faint" }, "never")
+        : row.enabled ? clock(row.next_fire, "until") : el("span", { class: "faint" }, "—"),
       el("span", { class: "sub" },
         row.anchor ? frag("anchored ", clock(row.anchor, "ago")) : "never fired")),
     lastRun(row.last_request),
@@ -734,6 +778,14 @@ function lastRun(request) {
     badge(outcome, kind),
     el("span", { class: "sub" }, clock(request.received_at, "ago")));
 }
+
+/* What steward answers a run-now for a retired resident: 409 resident_retired. The button
+ * says it here rather than sending the request and rendering the refusal, because a
+ * control that can only ever fail should look like one before it is pressed. */
+const RETIRED_REFUSAL =
+  "This resident is retired — its manifest declares retired: true — so steward answers " +
+  "409 resident_retired to a run-now, fires no routine and claims no board work. Set " +
+  "retired: false and commit that decision to bring it back.";
 
 function runButton(row) {
   const button = el("button", { class: "ghost tiny", type: "button" }, "run now");
@@ -761,11 +813,14 @@ function runButton(row) {
         });
       }
     } finally {
-      button.disabled = !row.enabled;
+      button.disabled = !row.enabled || Boolean(row.retired);
       button.textContent = "run now";
     }
   });
-  if (!row.enabled) {
+  if (row.retired) {
+    button.disabled = true;
+    button.title = RETIRED_REFUSAL;
+  } else if (!row.enabled) {
     button.disabled = true;
     button.title = "This routine is disabled in the manifest. Enable it there rather than " +
       "firing something the declaration says is off.";
@@ -866,6 +921,11 @@ function inboxPanel(settled) {
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const ACCENT_PATTERN = /^#[0-9a-fA-F]{6}$/;
 
+/** True when this install lets the form ask for a deploy. See index.html. */
+function deployOffered() {
+  return Boolean(window.STEWARD_UI && window.STEWARD_UI.deploy);
+}
+
 async function viewNew() {
   const library = await call("skills");
   const skills = library.skills || [];
@@ -949,12 +1009,16 @@ async function viewNew() {
       "shown but cannot be unticked: every resident holds them."),
     skillChecks(skills),
 
-    window.STEWARD_UI && window.STEWARD_UI.deploy
-      ? el("label", { class: "check", style: { marginTop: "18px" } },
-          el("input", { type: "checkbox", name: "deploy" }),
-          el("span", {}, el("span", { class: "nm" }, "deploy after declaring"),
-            el("span", { class: "ds" },
-              "Provision and register this resident as well as writing its files.")))
+    deployOffered()
+      ? frag(
+          el("h3", { style: { marginTop: "26px" } }, "Deploy"),
+          el("label", { class: "check", style: { marginTop: "4px" } },
+            el("input", { type: "checkbox", name: "deploy" }),
+            el("span", {}, el("span", { class: "nm" }, "deploy after declaring"),
+              el("span", { class: "ds" },
+                "Runs the whole nursery: writes the files, packs a compose bundle, pipes it " +
+                "over ssh to the host this manifest addresses, brings the container up, and " +
+                "checks the schedule. Left unticked, this form declares and stops."))))
       : null,
 
     el("hr", { class: "rule" }),
@@ -962,7 +1026,10 @@ async function viewNew() {
     el("div", { class: "actions" },
       el("button", { class: "primary", type: "submit" }, "Declare resident"),
       el("span", { class: "note" },
-        "Writes two files for review. Deploys nothing, schedules nothing, emits nothing."))
+        deployOffered()
+          ? "Writes two files for review. Deploys only if you tick the box above — and " +
+            "never commits: that is still yours."
+          : "Writes two files for review. Deploys nothing, schedules nothing, emits nothing."))
   );
 
   form.addEventListener("submit", async (event) => {
@@ -981,10 +1048,10 @@ async function viewNew() {
     try {
       const answer = await call("residents", { method: "POST", body });
       ticket({
-        what: `declare ${answer.id}`,
+        what: `${body.deploy ? "raise" : "declare"} ${answer.id}`,
         requestId: answer.request_id,
         why: answer.message,
-        confirm: confirmDeclared(answer.id),
+        confirm: confirmDeclared(answer),
       });
       add(result, [declared(answer)]);
       form.reset();
@@ -999,8 +1066,10 @@ async function viewNew() {
     head("New resident",
       "This writes ", el("strong", {}, "residents/<id>/manifest.yaml"), " and ",
       el("strong", {}, "soul.md"), ", reads them straight back through the ordinary validator, " +
-      "and stops. Nothing is deployed, no routine is scheduled, and no event is emitted on the " +
-      "new resident's behalf — a villager appears in burrow when it genuinely exists and emits."),
+      "and stops", deployOffered() ? " — unless you tick deploy, which hands the same " +
+        "declaration to the nursery and provisions it on the host the manifest names" : "",
+      ". Steward commits neither way, and no event is emitted on the new resident's behalf — " +
+      "a villager appears in burrow when it genuinely exists and emits."),
     rise(result, 1),
     rise(form, 1)
   );
@@ -1085,25 +1154,93 @@ function readForm(form, fields, skills) {
   if (value("soul_body")) body.soul_body = value("soul_body");
   if (value("voice")) body.voice = value("voice");
   if (granted.length) body.skills = granted;
+  // Sent as a boolean whenever the switch put a checkbox on the form, ticked or not:
+  // `deploy: false` is something this console means to say. With the switch off there is
+  // no checkbox and no key, and the endpoint's own default — declare, deploy nothing —
+  // is what stands. Asking a machine to start a container is never a field left out.
+  if (form.elements.deploy) body.deploy = form.elements.deploy.checked;
   return body;
 }
 
+/* The answer to a POST /residents, rendered. Every line below is a field steward sent
+ * back — the nursery reports its own stages, and this panel prints them rather than
+ * describing what a deploy usually does. */
 function declared(answer) {
-  return el("div", { class: "panel", style: { borderLeft: "3px solid var(--ember)" } },
-    el("h3", {}, "Declared — and that is all"),
+  const panel = el("div", { class: "panel", style: { borderLeft: "3px solid var(--ember)" } },
+    el("h3", {}, answer.provision ? "Raised" : "Declared — and that is all"),
     facts([
       ["id", answer.id],
-      ["agent_id", answer.agent_id || "none derived"],
       ["manifest", mono(answer.manifest_path)],
       ["soul", mono(answer.soul_path)],
       ["request", mono(answer.request_id)],
+      ["declare", answer.declare
+        ? `${answer.declare.written ? "written" : "already there"} · ${answer.declare.note}`
+        : null],
+      ["committed", answer.declare
+        ? (answer.declare.commit || "no — the server does not commit; that is still yours")
+        : null],
+    ]));
+
+  add(panel, (answer.warnings || []).map((line) =>
+    el("div", { class: "problem" },
+      el("div", { class: "code" }, "warning"),
+      el("div", { class: "msg" }, line))));
+
+  if (answer.provision) add(panel, [provisionBlock(answer.provision)]);
+  if (answer.register) add(panel, [registerBlock(answer.register)]);
+
+  add(panel, [el("p", { style: { marginBottom: 0, lineHeight: 1.75 } },
+    "Both files were read back through ", el("strong", {}, "steward validate"),
+    " before this answer, so what is on disk is something steward accepts. ",
+    answer.provision
+      ? "Commit the two files — the server did not — and the resident appears in burrow " +
+        "when it emits its own first event, not because anything here says it exists."
+      : "It is not a resident yet. Commit the two files, edit the soul body into somebody " +
+        "real, then tick deploy here or run steward new-resident on a terminal.")]);
+  return panel;
+}
+
+function provisionBlock(provision) {
+  const target = provision.target || {};
+  return frag(
+    el("div", { class: "label", style: { marginTop: "18px" } }, "provision"),
+    facts([
+      ["host", `${target.user}@${target.host}:${target.path}`],
+      ["container", target.container],
+      ["image", target.image],
+      ["sent", provision.sent
+        ? "yes — the bundle was uploaded"
+        : "no — the host already matched, byte for byte"],
+      ["compose", provision.compose_changed === null
+        ? "not compared: a dry run does not reach the host"
+        : provision.compose_changed ? "re-rendered" : "unchanged"],
+      ["files", (provision.files || []).join(", ")],
+      [".env carries", (provision.env_keys || []).join(", ") + " (names only, never values)"],
     ]),
-    el("p", { style: { marginBottom: 0, lineHeight: 1.75 } },
-      "Both files were read back through ", el("strong", {}, "steward validate"),
-      " before this answer, so what is on disk is something steward accepts. It is not a " +
-      "resident yet. Commit the two files, edit the soul body into somebody real, then " +
-      "provision and register it from the CLI — that is the deploy stage, and it does not " +
-      "live behind this button."));
+    el("div", { class: "label", style: { marginTop: "12px" } }, "commands steward ran"),
+    el("ul", { class: "list" }, (provision.commands || []).map((line) => el("li", {}, mono(line)))),
+    el("details", { style: { marginTop: "10px" } },
+      el("summary", {}, "the compose fragment, verbatim"),
+      el("pre", {}, provision.compose || ""))
+  );
+}
+
+function registerBlock(register) {
+  const fires = register.next_fires || [];
+  return frag(
+    el("div", { class: "label", style: { marginTop: "18px" } }, "register"),
+    register.ok
+      ? null
+      : el("div", { class: "problem" },
+          el("div", { class: "code" }, "the schedule check did not pass"),
+          el("div", { class: "msg" }, (register.problems || []).join("; "))),
+    fires.length
+      ? el("ul", { class: "list" }, fires.map((fire) =>
+          el("li", {}, `${fire.routine} fires next at `, mono(fire.at))))
+      : el("p", { class: "faint", style: { margin: "6px 0 0" } },
+          "No enabled routine, so this resident fires nothing on a schedule. There is no " +
+          "second registry: a routine is scheduled because a manifest declares it.")
+  );
 }
 
 /* ------------------------------------------------------------------------------------
@@ -1119,7 +1256,9 @@ async function viewRoutines() {
       "Every routine every valid resident declares, fleet-wide. ",
       el("strong", {}, "Nothing here fires unless steward's scheduler is up"),
       " — an enabled routine is a declaration, not a heartbeat. The anchor is the moment the " +
-      "next occurrence is computed from: the last fire, or when steward first saw the routine."),
+      "next occurrence is computed from: the last fire, or when steward first saw the routine. " +
+      "A retired resident's routines are still listed and never fire: they are what used to " +
+      "run here, which is a question a ledger should be able to answer."),
     (data.errors || []).map((line) =>
       el("div", { class: "problem" },
         el("div", { class: "code" }, "manifest does not validate"),
@@ -1151,10 +1290,16 @@ async function viewRoutines() {
           el("span", { class: "role" }, row.resident))),
       el("span", { class: "stack" }, row.routine,
         el("span", { class: "sub" },
-          row.enabled ? badge("enabled", "on") : badge("disabled", "fail"))),
+          row.enabled ? badge("enabled", "on") : badge("disabled", "fail"),
+          row.retired ? " " : null,
+          row.retired ? badge("retired", "fail") : null)),
       el("span", { class: "stack" }, mono(row.schedule),
         el("span", { class: "sub" }, row.schedule_tz)),
-      row.enabled ? clock(row.next_fire, "until") : el("span", { class: "faint" }, "no next fire"),
+      row.retired
+        ? el("span", { class: "faint", title: RETIRED_REFUSAL }, "retired — never fires")
+        : row.enabled
+          ? clock(row.next_fire, "until")
+          : el("span", { class: "faint" }, "no next fire"),
       row.anchor ? clock(row.anchor, "ago") : el("span", { class: "faint" }, "never fired"),
       lastRun(row.last_request),
       runButton(row))]);

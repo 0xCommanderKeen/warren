@@ -36,7 +36,16 @@ from steward.api import (
     default_ui_dir,
     latest_run_requests,
 )
+from steward.deploy import DeployTarget
+from steward.nursery import (
+    DeclareStage,
+    NurseryReport,
+    ProvisionStage,
+    RegisterStage,
+    raise_resident,
+)
 from steward.runners import MockRunner
+from steward.scheduler import load_scheduled
 from steward.store import RequestRecord, Store
 
 TOKEN = "a-shared-secret"
@@ -72,6 +81,7 @@ def console(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ConsoleF
         manifest: dict[str, Any] | None = None,
         ui_dir: Path | None = UI_DIR,
         residents: bool = True,
+        nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
     ) -> Console:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -88,6 +98,7 @@ def console(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ConsoleF
             store=store,
             emitter=ev.EventEmitter(url=None, fallback=tmp_path / "events.jsonl"),
             runner_factory=MockRunner,
+            nursery=nursery,
         )
         console = Console(
             client=TestClient(app, headers=dict(AUTH)),
@@ -251,6 +262,56 @@ def test_the_ledger_needs_the_token(console: ConsoleFactory) -> None:
     assert anonymous(console()).get("/routines").status_code == 401
 
 
+def test_a_retired_residents_routines_are_listed_but_never_firable(
+    console: ConsoleFactory,
+) -> None:
+    """The cross-check between the nursery and the console.
+
+    ``load_scheduled`` leaves retired residents out, so the scheduler will never fire
+    these — and a ledger that promised a ``next_fire`` for one would be promising
+    something no process anywhere intends to do. They stay *listed*, because "what used
+    to run here" is a question this view exists to answer.
+    """
+    data = copy.deepcopy(valid_manifest())
+    data["retired"] = True
+    built = console(manifest=data)
+
+    rows = built.client.get("/routines").json()["routines"]
+    assert [row["key"] for row in rows] == ["test-agent/daily-summary"]
+    assert rows[0]["retired"] is True
+    assert rows[0]["enabled"] is True, "the routine's own switch is untouched by retirement"
+    assert rows[0]["next_fire"] is None
+
+    # And the refusal the console greys the button out with is the real one.
+    refused = built.client.post("/residents/test-agent/routines/daily-summary/run")
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["error"] == "resident_retired"
+
+
+def test_a_living_residents_routines_say_they_are_not_retired(console: ConsoleFactory) -> None:
+    # The other half: the flag is on every row, so the console never has to infer absence.
+    row = console().client.get("/routines").json()["routines"][0]
+    assert row["retired"] is False
+    assert row["next_fire"] is not None
+
+
+def test_the_scheduler_and_the_ledger_agree_about_a_retired_resident(
+    console: ConsoleFactory,
+) -> None:
+    # One fact, two readers: whatever load_scheduled would hand the scheduler is exactly
+    # what the ledger promises a next fire for.
+    data = copy.deepcopy(valid_manifest())
+    data["retired"] = True
+    built = console(manifest=data)
+
+    scheduled = {item.key for item in load_scheduled(built.residents_dir)}
+    promised = {
+        row["key"] for row in built.client.get("/routines").json()["routines"] if row["next_fire"]
+    }
+    assert scheduled == set()
+    assert promised == scheduled
+
+
 # --------------------------------------------------------------------------------------
 # the request log: how a 202 is ever confirmed
 # --------------------------------------------------------------------------------------
@@ -371,6 +432,146 @@ def test_a_resident_carries_its_delegation_flags(console: ConsoleFactory) -> Non
 
 
 # --------------------------------------------------------------------------------------
+# the deploy path, as the pending ledger sees it
+#
+# The console renders a deploy from two things and invents neither: the 201 body's own
+# report, and the request log it then polls. Both are checked here.
+# --------------------------------------------------------------------------------------
+
+NEW_RESIDENT: dict[str, Any] = {
+    "id": "note-keeper",
+    "name": "Quill",
+    "char": "Scribe",
+    "accent": "#4f7ea6",
+    "role": "note bot",
+    "charter": {
+        "mission": "Keep the village's notes in order.",
+        "duties": ["Tidy the notes each evening."],
+        "rules": ["Never delete a note without asking."],
+        "escalation": "Raise needs_human before anything irreversible.",
+    },
+}
+
+
+def canned_pipeline(*, problems: tuple[str, ...] = ()) -> Any:  # noqa: ANN401 — a seam
+    """Return a nursery that reaches no host, so a UI test can look at the answer's shape."""
+
+    def pipeline(spec: Any, **kwargs: Any) -> NurseryReport:  # noqa: ANN401
+        directory = Path("/srv/steward/residents") / spec.id
+        target = DeployTarget(
+            resident_id=spec.id,
+            host="dxp2800",
+            user="Miha",
+            path=f"~/docker/steward-{spec.id}",
+            container=f"steward-{spec.id}",
+            image="python:3.12-slim",
+            command=("sleep", "infinity"),
+        )
+        return NurseryReport(
+            resident_id=spec.id,
+            declare=DeclareStage(
+                resident_id=spec.id,
+                manifest_path=directory / "manifest.yaml",
+                soul_path=directory / "soul.md",
+                written=True,
+                note="declared and validated",
+            ),
+            # Honoured rather than ignored: a stub that provisioned whatever it was asked
+            # would let a declare-only request come back describing a container.
+            provision=ProvisionStage(
+                target=target,
+                files=("docker-compose.yaml", ".env"),
+                compose="services:\n  note-keeper: {}\n",
+                compose_changed=True,
+                env_keys=("BURROW_TOKEN", "BURROW_URL"),
+                commands=(("ssh", "Miha@dxp2800", "docker compose up -d"),),
+                sent=True,
+            )
+            if kwargs.get("provision")
+            else None,
+            register=RegisterStage(
+                problems=problems,
+                fires=() if problems else (("tidy-notes", "2026-08-26T20:00:00+02:00"),),
+            ),
+        )
+
+    return pipeline
+
+
+def test_a_deploy_leaves_a_request_the_ledger_can_poll(console: ConsoleFactory) -> None:
+    built = console(nursery=canned_pipeline())
+
+    accepted = built.client.post("/residents", json=NEW_RESIDENT | {"deploy": True}).json()
+    record = built.client.get(f"/requests/{accepted['request_id']}").json()
+
+    assert record["path"] == "/residents"
+    assert record["outcome"] == "deployed"
+    assert record["detail"] == {"resident": "note-keeper"}
+
+
+def test_declaring_without_deploying_says_declared_in_the_same_log(
+    console: ConsoleFactory,
+) -> None:
+    # The two paths are told apart in the log, so a person reading it afterwards can see
+    # which requests reached a machine and which only wrote a file.
+    built = console(nursery=canned_pipeline())
+
+    accepted = built.client.post("/residents", json=NEW_RESIDENT).json()
+
+    assert built.client.get(f"/requests/{accepted['request_id']}").json()["outcome"] == "declared"
+
+
+def test_the_answer_carries_the_whole_report_for_the_panel_to_print(
+    console: ConsoleFactory,
+) -> None:
+    body = (
+        console(nursery=canned_pipeline())
+        .client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+        .json()
+    )
+
+    # Everything ui/app.js's declared() panel reads, in one place, so a rename on either
+    # side fails here rather than rendering a column of "undefined".
+    assert body["provision"]["target"]["container"] == "steward-note-keeper"
+    assert body["provision"]["commands"] == ["ssh Miha@dxp2800 docker compose up -d"]
+    assert body["provision"]["env_keys"] == ["BURROW_TOKEN", "BURROW_URL"]
+    assert body["provision"]["compose"].startswith("services:")
+    assert body["register"]["next_fires"] == [
+        {"routine": "tidy-notes", "at": "2026-08-26T20:00:00+02:00"}
+    ]
+    assert body["declare"]["commit"] is None
+
+
+def test_a_deploy_whose_schedule_check_failed_does_not_read_as_a_success(
+    console: ConsoleFactory,
+) -> None:
+    """The container went up and the check did not pass. The message must say both."""
+    built = console(nursery=canned_pipeline(problems=("runner binary not found: claude",)))
+
+    body = built.client.post("/residents", json=NEW_RESIDENT | {"deploy": True}).json()
+
+    assert body["register"]["ok"] is False
+    assert "did not pass" in body["message"]
+    assert "register.problems" in body["message"]
+
+
+def test_raising_a_retired_resident_is_refused_by_its_own_code(console: ConsoleFactory) -> None:
+    # A code rather than prose, because the form has to tell this refusal apart from
+    # "that name is taken by a different declaration" without matching on a sentence.
+    data = copy.deepcopy(valid_manifest())
+    data["retired"] = True
+    built = console(manifest=data)
+
+    response = built.client.post(
+        "/residents", json=NEW_RESIDENT | {"id": "test-agent", "deploy": True}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_retired"
+    assert "retired: false" in response.json()["detail"]["message"]
+
+
+# --------------------------------------------------------------------------------------
 # the contract between ui/app.js and the API
 # --------------------------------------------------------------------------------------
 
@@ -442,11 +643,58 @@ def test_the_console_never_claims_an_effect_the_api_did_not_confirm() -> None:
         assert "await call(" in body, f"{name} must read an outcome back from steward"
 
 
-def test_the_deploy_switch_is_off_by_default() -> None:
-    # POST /residents deploys nothing. A checkbox that quietly did nothing would be the
-    # exact lie this console exists not to tell.
+def test_the_deploy_switch_is_on_now_that_the_endpoint_is_real() -> None:
+    # It was off while POST /residents deployed nothing, because a checkbox that quietly
+    # did nothing would be the exact lie this console exists not to tell. The endpoint
+    # takes the flag now and runs the nursery behind it, so the control is honest.
     shell = (UI_DIR / "index.html").read_text(encoding="utf-8")
-    assert "window.STEWARD_UI = { deploy: false };" in shell
+    assert "window.STEWARD_UI = { deploy: true };" in shell
+
+
+def test_the_form_actually_sends_the_checkbox(console: ConsoleFactory) -> None:
+    # The switch is only worth flipping if the box is wired to the body. A checkbox that
+    # rendered and was then dropped on the way out would be the same lie in a new place.
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    assert "body.deploy = form.elements.deploy.checked" in source
+    # And `deploy` is a field the API genuinely accepts, not one it forbids as extra.
+    built = console(nursery=canned_pipeline())
+    assert built.client.post("/residents", json=NEW_RESIDENT | {"deploy": False}).status_code == 201
+
+
+def test_the_declared_panel_prints_the_pipelines_own_report() -> None:
+    """No invention: every line about the host is a field steward sent back."""
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    provision = source.split("function provisionBlock(")[1].split("\n}")[0]
+    for field in (
+        "provision.files",
+        "provision.env_keys",
+        "provision.commands",
+        "provision.compose",
+        "provision.sent",
+        "provision.compose_changed",
+    ):
+        assert field in provision, f"the provision panel does not print {field}"
+    register = source.split("function registerBlock(")[1].split("\n}")[0]
+    assert "register.problems" in register
+    assert "register.next_fires" in register
+
+
+def test_the_console_greys_out_run_now_for_a_retired_resident() -> None:
+    # A control that can only ever fail should look like one before it is pressed — and
+    # it must say the same thing the API would have said.
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    assert "409 resident_retired" in source, "the button must name the refusal it would get"
+    button = source.split("function runButton(")[1].split("\n}\n")[0]
+    assert "row.retired" in button
+    assert "RETIRED_REFUSAL" in button
+
+
+def test_the_console_badges_a_retired_resident_in_both_places() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    listing = source.split("async function viewResidents(")[1].split("\nfunction gauge(")[0]
+    detail = source.split("async function viewResident(")[1].split("\nfunction soulPanel(")[0]
+    assert 'badge("retired", "fail")' in listing, "the residents list must badge a retired one"
+    assert 'badge("retired", "fail")' in detail, "so must the detail header"
 
 
 def test_the_console_puts_text_in_as_text() -> None:

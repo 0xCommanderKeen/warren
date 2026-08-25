@@ -23,8 +23,10 @@ from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import events as ev
 from steward import journal
 from steward.api import ApiConfig, ApiError, create_app
+from steward.deploy import LocalTransport
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
+from steward.nursery import raise_resident
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.scheduler import FireReport, ScheduledRoutine
 from steward.store import Store
@@ -90,6 +92,8 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         behavior: Callable[[RunRequest], RunResult] | None = None,
         db_path: Path | None = None,
         residents: bool = True,
+        nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
+        transport: LocalTransport | None = None,
     ) -> Harness:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -108,6 +112,8 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             store=store,
             emitter=ev.EventEmitter(url=None, fallback=events_path),
             runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
+            nursery=nursery,
+            transport=transport,
         )
         harness = Harness(
             client=TestClient(app, headers=dict(AUTH) if token else {}),
@@ -592,13 +598,27 @@ def test_creating_a_resident_writes_a_tree_the_validator_accepts(api: ApiFactory
     assert {resident["id"] for resident in listed} == {"test-agent", "note-keeper"}
 
 
-def test_creating_a_resident_that_exists_is_409(api: ApiFactory) -> None:
+def test_creating_the_same_resident_twice_converges(api: ApiFactory) -> None:
+    """The same body twice is one resident, not an error and not a second write."""
     harness = api()
     harness.client.post("/residents", json=NEW_RESIDENT)
     response = harness.client.post("/residents", json=NEW_RESIDENT)
 
+    assert response.status_code == 201
+    assert response.json()["declare"]["written"] is False
+    assert response.json()["changed"] is False
+
+
+def test_creating_a_resident_that_exists_differently_is_409(api: ApiFactory) -> None:
+    """A collision is a *different* declaration under a name somebody already used."""
+    harness = api()
+    harness.client.post("/residents", json=NEW_RESIDENT)
+    response = harness.client.post("/residents", json=NEW_RESIDENT | {"role": "something else"})
+
     assert response.status_code == 409
-    assert response.json()["detail"]["error"] == "resident_not_declared"
+    detail = response.json()["detail"]
+    assert detail["error"] == "resident_not_declared"
+    assert "soul" in detail["message"]
 
 
 def test_a_resident_that_cannot_be_declared_is_400(api: ApiFactory) -> None:
@@ -1216,3 +1236,130 @@ def test_delegation_needs_the_token_like_everything_else(api: ApiFactory) -> Non
     assert anonymous.post("/delegate", json=HANDOFF).status_code == 401
     assert anonymous.get("/residents/test-agent/inbox").status_code == 401
     assert harness.store.jobs() == []
+
+
+# --------------------------------------------------------------------------------------
+# POST /residents with deploy: true — the same pipeline the CLI runs
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture
+def village(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Give the API's environment a village to point new containers at."""
+    monkeypatch.setenv("BURROW_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("BURROW_TOKEN", "api-village-token")
+    return "api-village-token"
+
+
+@pytest.mark.usefixtures("village")
+def test_declaring_without_the_flag_still_deploys_nothing(
+    api: ApiFactory,
+    tmp_path: Path,
+    village: str,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    """The default is the endpoint's old behaviour, exactly."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT)
+
+    assert response.status_code == 201
+    assert response.json()["provision"] is None
+    assert not host.touched
+    assert "nothing is deployed" in response.json()["message"]
+
+
+@pytest.mark.usefixtures("village")
+def test_deploy_true_runs_the_whole_pipeline(api: ApiFactory, tmp_path: Path) -> None:
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["provision"]["target"]["container"] == "steward-note-keeper"
+    assert body["provision"]["sent"] is True
+    assert body["register"]["ok"] is True
+    assert (host.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+    assert host.read("~/docker/steward-note-keeper/.env") is not None
+
+
+@pytest.mark.usefixtures("village")
+def test_the_api_calls_the_same_pipeline_the_cli_does(
+    api: ApiFactory,
+    tmp_path: Path,
+    village: str,  # noqa: ARG001 — the fixture is the setup
+) -> None:
+    """Verified by injection, not by convention: the route is handed the pipeline."""
+    seen: list[dict[str, Any]] = []
+
+    def recorder(spec: Any, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+        seen.append({"spec": spec, **kwargs})
+        return raise_resident(spec, **kwargs)
+
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(nursery=recorder, transport=host)
+
+    harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert len(seen) == 1
+    assert seen[0]["spec"].id == "note-keeper"
+    assert seen[0]["provision"] is True
+    assert seen[0]["transport"] is host
+    # And the one setting the API always makes for itself, whatever the body says.
+    assert seen[0]["commit"] is False
+
+
+@pytest.mark.usefixtures("village")
+def test_the_api_never_commits_and_says_so(api: ApiFactory, tmp_path: Path) -> None:
+    """The server may not own this checkout, so a commit here would surprise somebody."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert response.json()["declare"]["commit"] is None
+    assert "NOT committed" in response.json()["message"]
+
+
+def test_a_deploy_leaks_no_secret_into_the_response(
+    api: ApiFactory, tmp_path: Path, village: str
+) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert village not in response.text
+    assert response.json()["provision"]["env_keys"] == ["BURROW_TOKEN", "BURROW_URL"]
+
+
+def test_a_retired_resident_is_listed_and_refuses_a_run_now(api: ApiFactory) -> None:
+    """Listed, because a fleet view that hid it could not say what used to run here."""
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["retired"] = True
+    harness = api(manifest=manifest)
+
+    listing = harness.client.get("/residents").json()["residents"]
+    assert [resident["id"] for resident in listing] == ["test-agent"]
+    assert listing[0]["retired"] is True
+
+    response = harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_retired"
+
+
+def test_a_retired_resident_takes_no_letters(api: ApiFactory) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["retired"] = True
+    manifest["routes"].append(
+        {"id": "handoff", "kind": "delegation", "address": "steward:delegation"}
+    )
+    harness = api(manifest=manifest)
+
+    response = harness.client.post(
+        "/delegate", json={"to": "test-agent", "route": "handoff", "title": "Something"}
+    )
+
+    assert response.status_code == 404
+    assert "is retired" in response.json()["detail"]["message"]

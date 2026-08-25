@@ -10,11 +10,13 @@
 <link rel="stylesheet" href="app.css">
 <script>
   /* Integration switches. No build step, so this is the config file.
-     `deploy` grows the new-resident form a "deploy after declaring" checkbox. It is off
-     because POST /residents declares and deploys nothing — it writes two files for
-     review. Flip it only once the API genuinely takes a deploy flag; a checkbox that
-     quietly does nothing is exactly the lie this console exists not to tell. */
-  window.STEWARD_UI = { deploy: false };
+     `deploy` grows the new-resident form a "deploy after declaring" checkbox, and sends
+     `deploy: true` in the POST body when it is ticked. It is ON because POST /residents
+     genuinely takes that flag now and genuinely runs the nursery pipeline behind it —
+     the same one `steward new-resident` runs. Turn it off for a steward that has no
+     business reaching a host over ssh: the form then declares and nothing more, which is
+     what the endpoint does when the flag is absent. */
+  window.STEWARD_UI = { deploy: true };
 </script>
 </head>
 <body>

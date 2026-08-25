@@ -1,0 +1,544 @@
+"""Where a resident actually lives, and the one seam steward reaches it through.
+
+The nursery's provision stage (:mod:`steward.nursery`) needs to do four things to a
+machine that is not this one: put files on it, run ``docker compose`` on it, read back
+what is already there, and be completely absent during a rehearsal. This module is those
+four things and nothing else — the pipeline, the git commits, and the scheduler check
+live next door.
+
+## The transport seam
+
+:class:`Transport` is a protocol with four methods, and every one of them is something a
+deploy genuinely does:
+
+:class:`SshTransport`
+    The real one. ``ssh <user>@<host> …`` for commands, and a **tar-over-ssh pipe** for
+    files, because UGOS's ``scp`` is broken on the NAS and a pipe is what actually works
+    (burrow's README has been deploying this way by hand for months). The archive is
+    built in memory and fed to ``tar -xf -`` on stdin, so nothing is staged on disk here
+    and nothing is staged on disk there.
+:class:`LocalTransport`
+    A directory that plays the part of a host. It extracts the *same tar bytes* the ssh
+    transport would pipe, records every command it was asked to run, and never starts a
+    process. The whole pipeline is tested against it, which is why the test suite has no
+    network in it and no ``docker`` on PATH.
+
+Both are constructed by the caller and injected, so the API, the CLI, and the tests all
+drive one implementation of provisioning.
+
+## Everything external goes through runners
+
+``ssh`` and ``tar`` are processes, and steward starts processes in exactly one file
+(:mod:`steward.runners`) — a rule ``tests/test_runners.py`` enforces by reading the source
+tree. So :class:`SshTransport` holds a :data:`steward.runners.PipedRun` and calls it, and
+nothing in this module ever launches anything itself.
+
+## The defaults are the dxp2800 layout, written down
+
+A manifest that declares no ``deploy`` block still deploys, to the place everything else
+in this fleet is: host ``dxp2800``, user ``Miha``, compose directory
+``~/docker/steward-<id>``, image ``python:3.12-slim``. Those are defaults, not
+assumptions — every one of them is a field a manifest can override, and
+``steward new-resident --dry-run`` prints the resolved values before anything moves.
+"""
+
+import io
+import json
+import tarfile
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from pathlib import Path, PurePosixPath
+from string import Template
+from typing import Any, Protocol
+
+from steward.manifest import MANIFEST_FILENAME, Resident, ResidentManifest
+from steward.runners import TRANSFER_TIMEOUT_S, CommandOutcome, PipedRun, run_argv
+
+__all__ = [
+    "BUNDLE_NAMES",
+    "COMPOSE_FILENAME",
+    "DEFAULT_COMMAND",
+    "DEFAULT_HOST",
+    "DEFAULT_IMAGE",
+    "DEFAULT_ROOT",
+    "DEFAULT_USER",
+    "ENV_FILENAME",
+    "DeployTarget",
+    "LocalTransport",
+    "SshTransport",
+    "Transport",
+    "TransportError",
+    "bundle_changes",
+    "bundle_for",
+    "burrow_env",
+    "compose_argv",
+    "memory_path_for",
+    "pack",
+    "render_argv",
+    "render_compose",
+    "render_env",
+    "target_for",
+    "transport_for",
+]
+
+#: The NAS this fleet runs on, and the user steward reaches it as. Burrow's server, the
+#: village's event log, and life-agent are all already here; a new resident that landed
+#: somewhere else by default would be a resident nobody could find.
+DEFAULT_HOST = "dxp2800"
+DEFAULT_USER = "Miha"
+
+#: Where compose projects live on that host, matching ``~/docker/burrow`` next door.
+DEFAULT_ROOT = "~/docker"
+
+#: What a resident's container name is when nobody says: the same prefix the watchdog has
+#: been reading out of ``deploy.container`` since #8.
+CONTAINER_PREFIX = "steward-"
+
+DEFAULT_IMAGE = "python:3.12-slim"
+
+#: What the container runs when the manifest names nothing. A resident's container is a
+#: *place for sessions to happen* — steward drives the brain from outside — so the honest
+#: default is a process that stays up and does nothing, rather than a busy loop
+#: pretending to be work.
+DEFAULT_COMMAND: tuple[str, ...] = ("sleep", "infinity")
+
+COMPOSE_FILENAME = "docker-compose.yaml"
+ENV_FILENAME = ".env"
+SOUL_FILENAME = "soul.md"
+
+TEMPLATE_PATH = Path(__file__).parent / "templates" / "resident-compose.yaml"
+
+#: Where a resident's memory is mounted when its manifest declares a memory kind that is
+#: not a directory. Nothing is lost: the volume still persists on the host, it simply is
+#: not the location the manifest talks about.
+FALLBACK_MEMORY_PATH = "/data/memory"
+
+#: The two variables that carry the village's address and its shared secret into the
+#: container. Read from steward's own environment at provision time and written into the
+#: remote ``.env``; never into the compose file, never into a manifest, never into git.
+BURROW_URL_ENV = "BURROW_URL"
+BURROW_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
+
+
+class TransportError(Exception):
+    """Raised when a transport cannot reach the host at all.
+
+    Distinct from a command that ran and failed: that comes back as a
+    :class:`~steward.runners.CommandOutcome` with a non-zero status, because "docker said
+    no" is an answer. This is for "there was nobody to ask".
+    """
+
+
+# --------------------------------------------------------------------------------------
+# the target
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class DeployTarget:
+    """The resolved address of one resident's container: manifest first, defaults after."""
+
+    resident_id: str
+    host: str
+    user: str
+    path: str
+    container: str
+    image: str
+    command: tuple[str, ...]
+
+    @property
+    def service(self) -> str:
+        """The compose service name — the resident id, which is already a slug."""
+        return self.resident_id
+
+    @property
+    def compose_path(self) -> str:
+        """Where the rendered compose file lands on the host."""
+        return str(PurePosixPath(self.path) / COMPOSE_FILENAME)
+
+    @property
+    def env_path(self) -> str:
+        """Where the secrets land on the host, and the only place they land."""
+        return str(PurePosixPath(self.path) / ENV_FILENAME)
+
+    def describe(self) -> str:
+        """One line naming where this resident runs, for a plan or a log."""
+        return f"{self.container} on {self.user}@{self.host}:{self.path} ({self.image})"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view. No secret has ever been in here."""
+        return {
+            "resident": self.resident_id,
+            "host": self.host,
+            "user": self.user,
+            "path": self.path,
+            "container": self.container,
+            "image": self.image,
+            "command": list(self.command),
+        }
+
+
+def target_for(manifest: ResidentManifest) -> DeployTarget:
+    """Resolve where a resident runs from its manifest, filling in the dxp2800 defaults."""
+    deploy = manifest.deploy
+    container = deploy.container or f"{CONTAINER_PREFIX}{manifest.id}"
+    return DeployTarget(
+        resident_id=manifest.id,
+        host=deploy.host or DEFAULT_HOST,
+        user=deploy.user or DEFAULT_USER,
+        path=deploy.path or f"{DEFAULT_ROOT}/{container}",
+        container=container,
+        image=deploy.image or DEFAULT_IMAGE,
+        command=tuple(deploy.command) or DEFAULT_COMMAND,
+    )
+
+
+def memory_path_for(manifest: ResidentManifest) -> str:
+    """Return the in-container path the resident's memory volume is mounted at."""
+    memory = manifest.memory
+    if memory.kind == "directory" and memory.path:
+        return memory.path
+    return FALLBACK_MEMORY_PATH
+
+
+# --------------------------------------------------------------------------------------
+# rendering
+# --------------------------------------------------------------------------------------
+
+
+def render_compose(resident: Resident, target: DeployTarget) -> str:
+    """Render the resident's compose fragment from the template. Deterministic.
+
+    Deterministic matters more than it sounds: the provision stage decides whether to
+    write anything by comparing this string to what is already on the host, so a render
+    that varied by run — a timestamp, a dict iteration order — would make every deploy
+    look like a change and every "converged" claim a lie.
+
+    ``$$`` in the template survives as ``$``, which is how ``${BURROW_TOKEN-}`` reaches
+    the host as a compose interpolation rather than as something steward substituted.
+    """
+    template = Template(TEMPLATE_PATH.read_text(encoding="utf-8"))
+    return template.substitute(
+        resident_id=resident.id,
+        service=target.service,
+        image=target.image,
+        container=target.container,
+        agent_id=resident.agent_id,
+        project=resident.project,
+        memory_path=memory_path_for(resident.manifest),
+        # JSON is valid YAML, so a command with a space in it stays one argv element.
+        command=json.dumps(list(target.command)),
+    )
+
+
+def render_env(values: Mapping[str, str]) -> str:
+    """Render the remote ``.env``: one ``KEY=value`` per line, sorted, nothing else.
+
+    Sorted so the file is comparable across runs, and refusing a value with a newline in
+    it because a ``.env`` has no escaping — a secret that smuggled a second line in would
+    silently become a second variable.
+    """
+    lines = []
+    for key in sorted(values):
+        value = values[key]
+        if "\n" in value or "\r" in value:
+            raise TransportError(
+                f"the value of {key} contains a line break, and a .env file has no way to "
+                f"quote one; fix the variable in steward's environment"
+            )
+        lines.append(f"{key}={value}")
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def burrow_env(source: Mapping[str, str]) -> dict[str, str]:
+    """Read the village's address and secret out of steward's own environment.
+
+    Refuses without :data:`BURROW_URL_ENV`, and the refusal is the point: a container with
+    no village to post to is a resident that will never appear in burrow however healthy
+    it is, and finding that out three days later from an empty house is worse than finding
+    it out here. A missing :data:`BURROW_TOKEN_ENV` is *not* a refusal — burrow's ingest is
+    open when its own token is unset — but the plan says so out loud.
+    """
+    url = (source.get(BURROW_URL_ENV) or "").strip()
+    if not url:
+        raise TransportError(
+            f"{BURROW_URL_ENV} is unset in steward's environment, so the resident would be "
+            f"deployed with nowhere to emit and would never appear in the village; export "
+            f"{BURROW_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
+        )
+    values = {BURROW_URL_ENV: url}
+    token = (source.get(BURROW_TOKEN_ENV) or "").strip()
+    if token:
+        values[BURROW_TOKEN_ENV] = token
+    return values
+
+
+def bundle_for(
+    resident: Resident, target: DeployTarget, env: Mapping[str, str]
+) -> dict[str, bytes]:
+    """Build the resident's whole runtime bundle, as ``{name: bytes}``, in memory.
+
+    Everything the container needs and nothing it does not: the compose fragment, the
+    ``.env`` steward writes from its own environment, the manifest and soul so the machine
+    carries the same declaration git does, and two empty directories for the volumes so
+    docker does not create them as root.
+    """
+    files: dict[str, bytes] = {
+        COMPOSE_FILENAME: render_compose(resident, target).encode("utf-8"),
+        ENV_FILENAME: render_env(env).encode("utf-8"),
+        MANIFEST_FILENAME: resident.path.read_bytes(),
+        "memory/.keep": b"",
+        "claude/.keep": b"",
+    }
+    soul_path = resident.directory / resident.manifest.soul.file
+    if soul_path.is_file():
+        files[SOUL_FILENAME] = soul_path.read_bytes()
+    return files
+
+
+#: Every file a resident's bundle has, in the order a plan lists them. Named as a constant
+#: so ``--dry-run`` can print the list without reading a manifest off disk that a rehearsal
+#: has deliberately not written.
+BUNDLE_NAMES: tuple[str, ...] = (
+    COMPOSE_FILENAME,
+    ENV_FILENAME,
+    MANIFEST_FILENAME,
+    SOUL_FILENAME,
+    "memory/.keep",
+    "claude/.keep",
+)
+
+
+def bundle_changes(transport: Transport, files: Mapping[str, bytes], path: str) -> tuple[str, ...]:
+    """Return the bundle files the host does not already have, byte for byte.
+
+    This is what makes a second deploy a no-op rather than a re-upload: an empty tuple
+    means the host is already exactly what the repo says it should be, and steward writes
+    nothing. The two placeholder files are skipped — they exist to create directories, and
+    an empty file is either there or it is not.
+    """
+    changed: list[str] = []
+    for name in sorted(files):
+        if name.endswith("/.keep"):
+            continue
+        remote = transport.read(str(PurePosixPath(path) / name))
+        if remote is None or remote.encode("utf-8") != files[name]:
+            changed.append(name)
+    return tuple(changed)
+
+
+def pack(files: Mapping[str, bytes]) -> bytes:
+    """Pack a bundle into a deterministic uncompressed tar archive.
+
+    Deterministic in every field a tar has an opinion about — sorted names, a fixed
+    mtime, uid and gid zero — because the archive is a *fact about the bundle* and two
+    identical bundles that produced two different archives would leave the nursery unable
+    to say whether anything had changed.
+
+    ``.env`` goes in at ``0600``. Everything else is ``0644``.
+    """
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        for name in sorted(files):
+            payload = files[name]
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mode = 0o600 if name == ENV_FILENAME else 0o644
+            archive.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+def compose_argv(target: DeployTarget, *args: str) -> tuple[str, ...]:
+    """Build a ``docker compose`` argv for this target, addressed by absolute path.
+
+    Explicit ``-f`` and ``--project-directory`` rather than a ``cd``: there is no shell
+    here to ``cd`` in, and naming both means the command works the same whatever
+    directory the far side happens to drop into.
+    """
+    return (
+        "docker",
+        "compose",
+        "-f",
+        target.compose_path,
+        "--project-directory",
+        target.path,
+        "-p",
+        target.resident_id,
+        *args,
+    )
+
+
+# --------------------------------------------------------------------------------------
+# the seam
+# --------------------------------------------------------------------------------------
+
+
+class Transport(Protocol):
+    """Something that can put files on a host and run commands there.
+
+    Four methods, and :meth:`plan` is one of them on purpose: ``--dry-run`` has to print
+    the exact argv a real run would use, and a plan that was assembled by a *different*
+    piece of code from the one that runs it would be a plan that could quietly drift out
+    of agreement with reality.
+    """
+
+    kind: str
+
+    def describe(self) -> str:
+        """One line naming where this transport goes."""
+        ...
+
+    def plan(self, argv: Sequence[str]) -> tuple[str, ...]:
+        """Return the exact argv this transport would run for a remote command."""
+        ...
+
+    def run(self, argv: Sequence[str]) -> CommandOutcome:
+        """Run one command on the host and report what happened."""
+        ...
+
+    def send(self, files: Mapping[str, bytes], path: str) -> CommandOutcome:
+        """Materialize a bundle under ``path`` on the host."""
+        ...
+
+    def read(self, path: str) -> str | None:
+        """Return the contents of a file on the host, or ``None`` when there is none."""
+        ...
+
+
+@dataclass
+class SshTransport:
+    """The real transport: ssh for commands, a tar pipe for files.
+
+    Everything external goes through :data:`steward.runners.run_argv`, which is injectable
+    as ``command`` so this class can be exercised against a fake without an ssh anywhere.
+    """
+
+    host: str = DEFAULT_HOST
+    user: str = DEFAULT_USER
+    ssh: str = "ssh"
+    command: PipedRun = run_argv
+    kind: str = "ssh"
+
+    @property
+    def target(self) -> str:
+        """The ``user@host`` ssh is given."""
+        return f"{self.user}@{self.host}"
+
+    def describe(self) -> str:
+        """Name the machine this transport reaches."""
+        return f"ssh {self.target}"
+
+    def plan(self, argv: Sequence[str]) -> tuple[str, ...]:
+        """Return the ssh argv for a remote command, exactly as :meth:`run` would use it."""
+        return (self.ssh, self.target, *(str(part) for part in argv))
+
+    def run(self, argv: Sequence[str]) -> CommandOutcome:
+        """Run one command over ssh."""
+        return self.command(self.plan(argv))
+
+    def send(self, files: Mapping[str, bytes], path: str) -> CommandOutcome:
+        """Create ``path`` and unpack the bundle into it, through one tar-over-ssh pipe.
+
+        Two commands, not one, because ``tar -xf -`` into a directory that does not exist
+        fails with a message about tar rather than about the directory. The ``mkdir``
+        failing is reported as itself.
+        """
+        made = self.run(["mkdir", "-p", path])
+        if not made.ok:
+            return made
+        return self.command(
+            self.plan(["tar", "-xf", "-", "-C", path]),
+            TRANSFER_TIMEOUT_S,
+            stdin=pack(files),
+        )
+
+    def read(self, path: str) -> str | None:
+        """Read a file on the host, or return ``None`` when it is not there."""
+        outcome = self.run(["cat", path])
+        return outcome.stdout if outcome.ok else None
+
+
+@dataclass
+class LocalTransport:
+    """A directory that plays a host, for tests and rehearsals. Starts no processes.
+
+    ``root`` stands in for ``/``: a remote path of ``~/docker/steward-quill`` lands at
+    ``root/docker/steward-quill``, which keeps the fake host's shape recognisable when a
+    test prints it. Files arrive by unpacking the same tar bytes :class:`SshTransport`
+    would have piped, so the archive is genuinely exercised.
+
+    Every command is recorded rather than run, which is what makes "a dry run touched
+    nothing" an assertion instead of a promise. ``unreachable`` makes every operation
+    raise, which is how the unreachable-NAS test happens without a NAS.
+    """
+
+    root: Path
+    kind: str = "local"
+    calls: list[tuple[str, ...]] = field(default_factory=list)
+    sent: list[str] = field(default_factory=list)
+    unreachable: bool = False
+    #: Commands whose argv contains this string fail with a non-zero status, so a test can
+    #: make ``docker compose up`` refuse without making the whole host disappear.
+    fail_on: str | None = None
+
+    @property
+    def touched(self) -> bool:
+        """True when this transport has been asked to do anything at all."""
+        return bool(self.calls or self.sent)
+
+    def describe(self) -> str:
+        """Name the directory standing in for a host."""
+        return f"local {self.root}"
+
+    def plan(self, argv: Sequence[str]) -> tuple[str, ...]:
+        """Return the argv a real transport would run — the same shape, unprefixed."""
+        return tuple(str(part) for part in argv)
+
+    def resolve(self, path: str) -> Path:
+        """Map a remote path onto the fake host's tree."""
+        stripped = path.removeprefix("~/").removeprefix("/")
+        return self.root / stripped
+
+    def _reachable(self) -> None:
+        if self.unreachable:
+            raise TransportError(f"no route to {self.root}")
+
+    def run(self, argv: Sequence[str]) -> CommandOutcome:
+        """Record a command and answer as though it succeeded."""
+        self._reachable()
+        parts = self.plan(argv)
+        self.calls.append(parts)
+        if self.fail_on is not None and any(self.fail_on in part for part in parts):
+            return CommandOutcome(argv=parts, exit_status=1, stderr=f"{self.fail_on} refused")
+        return CommandOutcome(argv=parts, exit_status=0)
+
+    def send(self, files: Mapping[str, bytes], path: str) -> CommandOutcome:
+        """Unpack the bundle's tar into the fake host, exactly as the far side would."""
+        self._reachable()
+        destination = self.resolve(path)
+        destination.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(fileobj=io.BytesIO(pack(files)), mode="r") as archive:
+            archive.extractall(destination, filter="data")
+        self.sent.append(path)
+        return CommandOutcome(argv=("tar", "-xf", "-", "-C", path), exit_status=0)
+
+    def read(self, path: str) -> str | None:
+        """Read a file out of the fake host."""
+        self._reachable()
+        target = self.resolve(path)
+        return target.read_text(encoding="utf-8") if target.is_file() else None
+
+
+def transport_for(target: DeployTarget) -> Transport:
+    """Build the real transport for a resolved target. The default everywhere."""
+    return SshTransport(host=target.host, user=target.user)
+
+
+def render_argv(argv: Iterable[str]) -> str:
+    """Render an argv for a human reading a plan. Never re-parsed, never executed."""
+    return " ".join(str(part) for part in argv)
