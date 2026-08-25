@@ -315,6 +315,16 @@ Two things are checked at validation time rather than discovered at midnight:
   running hands the same task to somebody else, which is the one thing claiming exists to
   prevent.
 
+A third thing is checked before the first claim rather than at it. `steward doctor` asks
+of every claimant what the scheduler asks of every scheduled resident — is the runner's
+binary here, does every granted skill resolve, is there a working directory to run in that
+is not merely the one steward was launched from. A resident that claims board work and
+declares no routine is in no scheduler's startup check at all, so without this the first
+thing to notice would be a task the village saw claimed and closed *failed* in the same
+breath. A missing working directory is a warning rather than an error here, for the same
+reason the journal probe's is: it may be a container path this host was never meant to
+have.
+
 Dispatch is pull-based. On every scheduler tick — and on `steward board dispatch` —
 steward first reopens tasks whose leases ran out (emitting `task_failed` with
 `reason: "lease_expired"`), then lets each board-enabled resident atomically claim the

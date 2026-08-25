@@ -66,7 +66,14 @@ from steward.manifest import (
     validate_path,
 )
 from steward.prompt import assemble_delegated_prompt, assemble_task_prompt
-from steward.runners import Outcome, RunRequest, RunResult, build_runner, skills_home
+from steward.runners import (
+    Outcome,
+    RunRequest,
+    RunResult,
+    build_runner,
+    check_runner,
+    skills_home,
+)
 from steward.scheduler import RunGuard, RunnerFactory, workdir_refusal
 from steward.skills import (
     Skill,
@@ -96,6 +103,7 @@ __all__ = [
     "DispatchRun",
     "Dispatcher",
     "PlannedClaim",
+    "board_preflight",
     "board_residents",
     "claimable_skills",
     "delegation_residents",
@@ -183,6 +191,44 @@ def load_residents(
     :func:`board_residents` and :func:`delegation_residents`.
     """
     return list(validate_path(residents_dir, skills_dir).residents)
+
+
+# --------------------------------------------------------------------------------------
+# before the first claim
+# --------------------------------------------------------------------------------------
+
+
+def board_preflight(
+    residents: Sequence[Resident],
+    library: SkillLibrary,
+    workdir: Path | str | None = None,
+) -> list[str]:
+    """Return why these claimants could not work a notice. Empty means ready to claim.
+
+    :meth:`steward.scheduler.Scheduler.check` asks the same questions of the same builders
+    for the other kind of wake-up, and this exists beside it because that one cannot see
+    these residents: it iterates the *scheduled* fleet, so a board-only claimant —
+    ``board: {claim: true}`` with ``routines: []`` — is never pre-flighted at all. Its
+    missing binary or unresolvable grant is then discovered at claim time, by
+    :meth:`Dispatcher.provision`, as a task the village watched a villager pick up and
+    close failed a second later (steward #37). Asked here it is a complaint at a
+    reasonable hour instead.
+
+    The journal is deliberately not asked about: a board session reads one when there is
+    one and works the task without complaint when there is not, so an unjournalable memory
+    is the scheduler's refusal to make, not this one's.
+    """
+    fallback = Path(workdir) if workdir is not None else Path.cwd()
+    problems: list[str] = []
+    for resident in board_residents(residents):
+        missing = missing_skills(resident.manifest, library)
+        complaints = (
+            check_runner(resident.manifest.runner),
+            describe_missing(resident.id, missing, library) if missing else None,
+            workdir_refusal(resident, fallback, library),
+        )
+        problems.extend(f"{resident.id}: board — {c}" for c in complaints if c)
+    return problems
 
 
 # --------------------------------------------------------------------------------------

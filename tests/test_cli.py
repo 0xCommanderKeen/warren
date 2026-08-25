@@ -8,7 +8,14 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from conftest import REPO_ROOT, ResidentWriter, ScratchRepo, StubWriter, valid_manifest
+from conftest import (
+    REPO_ROOT,
+    ResidentWriter,
+    ScratchRepo,
+    SkillWriter,
+    StubWriter,
+    valid_manifest,
+)
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
@@ -191,6 +198,56 @@ def test_doctor_complains_about_a_memory_that_cannot_hold_a_journal(
     result = runner.invoke(main, ["doctor", str(path.parent)])
     assert result.exit_code == 1
     assert "journal — memory.kind is 'file'" in result.output
+
+
+def test_doctor_preflights_a_board_only_claimant(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    stub_bin: StubWriter,
+    tmp_path: Path,
+) -> None:
+    """A claimant with no routine is invisible to the scheduler's check — doctor is it (#37).
+
+    The refusal itself is steward #64's: a resident whose memory directory is not one on
+    this host would run — and materialize skills into, and delete files from — whatever
+    directory steward happened to be launched in. The scheduler refuses that for every
+    resident it schedules; nothing asked it of a resident that only claims. A warning, not
+    a failure: the missing path may be a container path this host was never meant to have.
+    """
+    stub_bin("claude", "exit 0")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the memory directory should be", encoding="utf-8")
+    data = board_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["memory"] = {"kind": "directory", "path": str(blocker / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+    write_skill("research", defaults=True)
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "board — " in result.output
+    assert "current working directory" in result.output
+
+
+def test_doctor_says_a_board_claimant_is_ready_to_claim(
+    runner: CliRunner, write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """The green line: a claimant with a working directory of its own is ready to claim."""
+    write_skill("research", defaults=True)
+    data = board_manifest()
+    data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory")}
+    data["skills"] = []
+    data["routines"] = []
+    residents_dir = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: board — claimant" in result.output
 
 
 # ------------------------------------------------------------------------------ journal

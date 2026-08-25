@@ -32,7 +32,7 @@ from steward.approvals import (
     parse_options,
     raise_request,
 )
-from steward.board import BoardReport, Dispatcher, claimable_skills
+from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError
@@ -69,6 +69,7 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
     load_scheduled,
+    workdir_refusal,
 )
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 from steward.store import (
@@ -294,7 +295,9 @@ def doctor(residents: Path, db: Path | None) -> None:
     today, and when each enabled routine fires next — then says when the watchdog last
     made a pass. A missing binary is an error at a reasonable hour rather than a routine
     that silently never happens at 7am, and a resident paused by its budget is a resident
-    that will not fire tonight however green everything else looks.
+    that will not fire tonight however green everything else looks. Board claimants are
+    pre-flighted here too — a resident that claims work and schedules none is a resident
+    nothing else checks.
     """
     result = validate_paths([residents])
     if not result.ok:
@@ -302,6 +305,10 @@ def doctor(residents: Path, db: Path | None) -> None:
         sys.exit(EXIT_INVALID)
 
     problems = 0
+    # Resolved once, above the loop, because doctor's own validate_paths above was given no
+    # skills dir — grant diagnostics are not applied there, so the board pre-flight has to
+    # look the library up itself to know a grant names nothing.
+    library = library_for(residents)
     with _open_store(db) as store:
         guard = BudgetGuard(store)
         for resident in result.residents:
@@ -320,6 +327,10 @@ def doctor(residents: Path, db: Path | None) -> None:
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
                 click.secho(f"{label} — ready", fg="green")
+            # Before the journal line, which probes by creating the directory it names: a
+            # claimant with no working directory must be reported as doctor found it, not
+            # as doctor left it.
+            problems += _report_claimant(resident, library)
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
         problems += _report_watchdog(store.last_watchdog_pass())
@@ -329,7 +340,7 @@ def doctor(residents: Path, db: Path | None) -> None:
         engine = Scheduler(
             scheduled,
             state=SchedulerState(path=default_state_path()),
-            library=library_for(residents),
+            library=library,
         )
         for item, moment in engine.upcoming(datetime.now(UTC)):
             local = moment.strftime("%Y-%m-%d %H:%M")
@@ -390,6 +401,43 @@ def _report_journal(resident: Resident) -> int:
         return 0
     click.secho(f"{resident.id}: journal {directory} — writable, {ends_with}", fg="green")
     return 0
+
+
+def _report_claimant(resident: Resident, library: SkillLibrary) -> int:
+    """Pre-flight a board claimant, so a notice is not claimed and dropped. Returns problems.
+
+    The per-resident loop is the right hook: a resident that claims board work and declares
+    no routine is invisible to the scheduler block below, which is exactly the resident
+    whose broken runner or unresolvable grant would otherwise first be heard as a task the
+    village saw claimed and failed in the same breath (#37). A resident that does not claim
+    says nothing here — the board is a declaration, and so is this line.
+
+    The working-directory refusal is a warning rather than a failure, for the same reason
+    the journal probe's is: a shipped resident's ``memory.path`` is a container path that
+    is missing on the laptop running doctor and present where it actually runs. Doctor says
+    it out loud — a dispatch *from this host* really would refuse to claim — and does not
+    go red over a path that is not this host's to have.
+    """
+    if not resident.manifest.board.claim:
+        return 0
+    cwd = Path.cwd()
+    complaints = board_preflight([resident], library, cwd)
+    if not complaints:
+        click.secho(f"{resident.id}: board — claimant, runner and skills resolve", fg="green")
+        return 0
+    refusal = workdir_refusal(resident, cwd, library)
+    off_host = f"{resident.id}: board — {refusal}" if refusal else None
+    problems = 0
+    for complaint in complaints:
+        if complaint == off_host:
+            click.secho(f"{complaint} (a directory it has on its own host?)", fg="yellow", err=True)
+            continue
+        # A missing binary is said twice, once as the runner line above and once here. Both
+        # are true and neither is redundant to a reader: the first is "this resident cannot
+        # run", the second is "so it must not be left claiming".
+        click.secho(complaint, fg="red", err=True)
+        problems += 1
+    return problems
 
 
 def _report_budget(status: BudgetStatus) -> int:
