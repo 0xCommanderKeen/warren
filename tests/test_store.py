@@ -290,6 +290,47 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         assert migrated.last_watchdog_pass() is None
 
 
+def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) -> None:
+    """``run_ledger.origin`` (#45) is the same ALTER TABLE: an old ledger loses nothing.
+
+    The rollup falls back to the task the row's ``ref`` names, which is the answer the old
+    database already gave. New rows say it for themselves; old ones keep what they had.
+    """
+    path = tmp_path / "legacy-ledger.db"
+    legacy = sqlite3.connect(path)
+    with legacy:
+        legacy.execute(
+            "CREATE TABLE run_ledger (entry_id TEXT PRIMARY KEY, resident TEXT NOT NULL, "
+            "agent_id TEXT NOT NULL, kind TEXT NOT NULL, run_id TEXT NOT NULL, "
+            "ref TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '', "
+            "input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0, "
+            "cost_usd REAL NOT NULL DEFAULT 0.0, duration_s REAL NOT NULL DEFAULT 0.0, "
+            "usage_known INTEGER NOT NULL DEFAULT 1, recorded_at TEXT NOT NULL)"
+        )
+        legacy.execute(
+            "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, cost_usd, "
+            "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("e-1", "hob", "a:hob", "delegated", "old-task", "old-task", 2.5, EARLY),
+        )
+    legacy.close()
+
+    with Store(path) as migrated:
+        (entry,) = migrated.ledger("hob")
+        assert (entry.kind, entry.cost_usd, entry.origin) == ("delegated", 2.5, "")
+        migrated.delegate_job(
+            title="the chain the old row came off",
+            assignee="hob",
+            delegated_by="maren",
+            route="inbox",
+            origin="task:root",
+            task_id="old-task",
+        )
+
+        (rolled,) = migrated.spend_by_origin()
+
+        assert (rolled.origin, rolled.cost_usd) == ("task:root", pytest.approx(2.5))
+
+
 # ------------------------------------------------------------------------ approvals
 
 
@@ -472,6 +513,71 @@ def test_the_audit_view_holds_the_request_and_its_decision(store: Store) -> None
     assert [r.request_id for r in store.approvals("resolved")] == [record.request_id]
 
 
+def _ask(store: Store, action: str = "send_email", resident: str = "life-agent") -> ApprovalRecord:
+    return store.create_approval_request(
+        agent_id="a:b", project="p", action=action, message="…", resident=resident
+    )
+
+
+def test_recent_denials_counts_every_way_a_resident_was_told_no(store: Store) -> None:
+    """A human's deny and expiry's deny-by-default are the same answer to the resident."""
+    store.decide(_ask(store).request_id, "deny", decided_by="api", now=LATER)
+    store.create_approval_request(
+        agent_id="a:b",
+        project="p",
+        action="send_email",
+        message="…",
+        resident="life-agent",
+        expires_at=EARLY,
+    )
+    store.expire_approvals(LATER)
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 2
+
+
+def test_recent_denials_ignores_everything_that_is_not_this_residents_no(store: Store) -> None:
+    store.decide(_ask(store).request_id, "approve", decided_by="api", now=LATER)
+    store.decide(_ask(store, action="spend").request_id, "deny", decided_by="api", now=LATER)
+    store.decide(_ask(store, resident="burrow-builder").request_id, "deny", now=LATER)
+    _ask(store)  # Still pending: nobody has answered it either way.
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+
+
+def test_recent_denials_starts_counting_at_since(store: Store) -> None:
+    store.decide(_ask(store).request_id, "deny", decided_by="api", now=EARLY)
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 1
+    assert store.recent_denials("life-agent", "send_email", LATER) == 0
+
+
+def test_an_auto_denied_request_is_filed_resolved_and_not_counted_as_a_no(store: Store) -> None:
+    """Steward's own repeat deny is on the record, but it must not renew its own window."""
+    record = store.create_approval_request(
+        agent_id="a:b",
+        project="p",
+        action="send_email",
+        message="…",
+        resident="life-agent",
+        denied_by="repeat",
+    )
+    assert not record.pending
+    assert record.decision == "deny"
+    assert record.decided_at == record.created_at
+    assert store.pending_approvals() == []
+    assert store.recent_denials("life-agent", "send_email", EARLY) == 0
+    # It is a decision like any other, so the resident is told about it on its next run.
+    assert [r.request_id for r in store.undelivered_decisions("life-agent")] == [record.request_id]
+
+
+def test_the_denials_lookup_has_an_index_to_read(store: Store) -> None:
+    """The approvals table grows one row per ask; the guard runs on every knock."""
+    indexes = {
+        row["name"]
+        for row in store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'approvals'"
+        ).fetchall()
+    }
+    assert "approvals_denials" in indexes
+
+
 def test_a_decision_and_its_delivery_survive_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "steward.db"
     with Store(path) as first:
@@ -526,24 +632,39 @@ def test_the_database_lives_beside_the_scheduler_state(
     assert default_db_path() == tmp_path / "state" / "steward.db"
 
 
+# -------------------------------------------------------------------------- the inbox
+
+
+def test_the_inbox_can_be_counted_without_being_read(store: Store) -> None:
+    """``doctor`` prints one number, so it asks for one number."""
+    store.delegate_job(
+        title="Read the background", assignee="hob", delegated_by="maren", route="inbox"
+    )
+    store.delegate_job(title="And this", assignee="hob", delegated_by="maren", route="inbox")
+    store.delegate_job(title="Not yours", assignee="pip", delegated_by="maren", route="inbox")
+
+    assert store.inbox_count("hob") == 2
+    assert store.inbox_count("nobody") == 0
+
+    store.claim_next_delegated(assignee="hob", claimant="claude-code:hob", lease_expires_at=LATER)
+
+    assert store.inbox_count("hob") == 1, "a claimed letter has left the pending pile"
+    assert store.inbox_count("hob", None) == 2, "…but it is still somebody's post"
+
+
 # -------------------------------------------------------------- the ledger, by origin
 
 
 def test_spend_rolls_up_by_the_origin_a_task_carries(store: Store) -> None:
     """Two hops of one chain are one bill, because both rows carry the same origin."""
-    first = store.delegate_job(
-        title="first hop", assignee="hob", delegated_by="maren", route="inbox", origin="task:root"
-    )
-    second = store.delegate_job(
-        title="second hop", assignee="pip", delegated_by="hob", route="inbox", origin="task:root"
-    )
-    for resident, task in (("hob", first), ("pip", second)):
+    for resident in ("hob", "pip"):
         store.record_run(
             resident=resident,
             agent_id=f"a:{resident}",
             kind="delegated",
-            run_id=task.task_id,
-            ref=task.task_id,
+            run_id=f"{resident}-hop",
+            ref=f"{resident}-hop",
+            origin="task:root",
             cost_usd=1.5,
             input_tokens=10,
             output_tokens=5,
@@ -557,8 +678,8 @@ def test_spend_rolls_up_by_the_origin_a_task_carries(store: Store) -> None:
     assert rolled.tokens == 30
 
 
-def test_a_run_behind_no_task_is_named_rather_than_dropped(store: Store) -> None:
-    """A routine has no chain above it, and money steward cannot attribute is still money."""
+def test_a_run_recorded_without_an_origin_is_named_rather_than_dropped(store: Store) -> None:
+    """Nothing said where it came from, and money steward cannot attribute is still money."""
     store.record_run(
         resident="hob",
         agent_id="a:hob",
@@ -574,18 +695,65 @@ def test_a_run_behind_no_task_is_named_rather_than_dropped(store: Store) -> None
     assert rolled.cost_usd == pytest.approx(2.0)
 
 
+def test_a_ref_that_collides_with_a_task_id_does_not_inherit_that_task(store: Store) -> None:
+    """The regression the denormalized column exists for (#45).
+
+    A routine is ledgered under its own id, and nothing stops a resident naming a routine
+    what some task's id happens to be. Rolling spend up by joining ``ref`` to
+    ``jobs.task_id`` handed that routine somebody else's bill; the row now says what it
+    descends from, so the join has nothing left to guess at.
+    """
+    task = store.delegate_job(
+        title="the real chain", assignee="hob", delegated_by="maren", route="inbox", origin="task:x"
+    )
+    store.record_run(
+        resident="hob",
+        agent_id="a:hob",
+        kind="routine",
+        run_id="r",
+        ref=task.task_id,  # a routine whose id collides with a real task's
+        origin="resident:hob",
+        cost_usd=2.0,
+    )
+
+    rollup = {spend.origin: spend.cost_usd for spend in store.spend_by_origin()}
+
+    assert rollup == {"resident:hob": pytest.approx(2.0)}
+
+
+def test_a_row_written_before_the_column_existed_still_rolls_up_by_its_task(store: Store) -> None:
+    """The fallback the migration leaves behind: an old row keeps the answer it had."""
+    task = store.delegate_job(
+        title="claimed before #45",
+        assignee="hob",
+        delegated_by="maren",
+        route="inbox",
+        origin="task:root",
+    )
+    store.record_run(
+        resident="hob",
+        agent_id="a:hob",
+        kind="delegated",
+        run_id=task.task_id,
+        ref=task.task_id,
+        cost_usd=4.0,
+    )  # no origin — exactly the shape ALTER TABLE left every pre-migration row in
+
+    (rolled,) = store.spend_by_origin()
+
+    assert (rolled.origin, rolled.cost_usd) == ("task:root", pytest.approx(4.0))
+
+
 def test_the_rollup_is_ordered_by_what_each_origin_cost(store: Store) -> None:
     """Whoever is spending the most is the first line somebody reads."""
     for origin, cost in (("task:cheap", 1.0), ("task:dear", 9.0)):
-        task = store.delegate_job(
-            title=origin, assignee="hob", delegated_by="maren", route="inbox", origin=origin
-        )
         store.record_run(
             resident="hob",
             agent_id="a:hob",
             kind="delegated",
-            run_id=task.task_id,
-            ref=task.task_id,
+            run_id=origin,
+            ref=origin,
+            origin=origin,
             cost_usd=cost,
         )
 

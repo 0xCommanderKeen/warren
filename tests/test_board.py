@@ -284,6 +284,42 @@ def test_a_grant_the_library_does_not_have_fails_the_task_before_it_runs(
     assert posted.task_id == report.task.task_id
 
 
+@pytest.mark.usefixtures("empty_path")
+def test_preflight_names_the_grant_before_a_task_is_ever_claimed(
+    write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """The same complaint as the test above, heard before the village sees a claim (#37).
+
+    The resident declares no routine, so the scheduler's own ``check()`` has nothing to
+    look at: this is the only pre-flight a board-only claimant gets.
+    """
+    data = board_manifest()
+    data["runner"] = {"kind": "mock"}
+    data["skills"] = ["surgery"]
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    write_skill("research", defaults=True)
+    library = library_for(tmp_path / "residents")
+
+    (complaint,) = b.board_preflight([resident], library, tmp_path)
+
+    assert complaint.startswith(f"{resident.id}: board — ")
+    assert "surgery" in complaint
+    assert Scheduler([], library=library).check() == [], "no routine, so check() sees nothing"
+
+
+def test_preflight_says_nothing_about_a_resident_that_does_not_claim(
+    write_resident: ResidentWriter, write_skill: SkillWriter, tmp_path: Path
+) -> None:
+    """Not claiming is a declaration too: an unprovisionable non-claimant fails no task."""
+    data = valid_manifest()
+    data["skills"] = [*data["skills"], "surgery"]
+    resident = load_manifest(write_resident(data))
+    write_skill("research", defaults=True)
+
+    assert b.board_preflight([resident], library_for(tmp_path / "residents"), tmp_path) == []
+
+
 def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
     write_resident: ResidentWriter,
     write_skill: SkillWriter,
@@ -346,7 +382,7 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     record = approvals.raise_request(
         store, sink, manifest=resident.manifest, request=parsed, now=NOW
     )
-    store.decide(record.request_id, "approve", decided_by="api")
+    store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
     dispatcher = b.Dispatcher(
         residents=[resident],

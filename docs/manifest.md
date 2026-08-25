@@ -199,6 +199,7 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 $ steward doctor
 life-agent: runner claude (claude-opus-5) — ready
 life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
   life-agent/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana
@@ -314,6 +315,18 @@ Two things are checked at validation time rather than discovered at midnight:
 - **`lease_s` must outlive `timeout_s`.** A lease that expires while the session is still
   running hands the same task to somebody else, which is the one thing claiming exists to
   prevent.
+
+A third thing is checked before the first claim rather than at it. `steward doctor` asks
+of every claimant what the scheduler asks of every scheduled resident — is the runner's
+binary here, is there a working directory to run in that is not merely the one steward was
+launched from. A resident that claims board work and declares no routine is in no
+scheduler's startup check at all, so without this the first thing to notice would be a task
+the village saw claimed and closed *failed* in the same breath. (The third question that
+pre-flight asks — does every granted skill resolve — doctor has already answered by then:
+a grant naming nothing in the library is a validation error for every resident, claimant or
+not, and doctor stops on it before it reaches any resident's line.) A missing working
+directory is a warning rather than an error here, for the same reason the journal probe's
+is: it may be a container path this host was never meant to have.
 
 Dispatch is pull-based. On every scheduler tick — and on `steward board dispatch` —
 steward first reopens tasks whose leases ran out (emitting `task_failed` with
@@ -944,4 +957,8 @@ Burrow reads the same files for display (burrow #35). The contract:
 - The five capability dimensions are the panel burrow renders; `app_grants[].status`
   is the only truth about whether access exists.
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
-  this package.
+  this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
+  the schema's `$id` says they are, so burrow can fetch a file rather than run a command.
+  `tests/test_schema_contract.py` fails when the committed copy drifts from the models —
+  changing a field means regenerating with `make schema-write` and reading the diff for
+  what it does to burrow's reader.

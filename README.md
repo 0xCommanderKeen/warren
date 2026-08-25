@@ -63,7 +63,7 @@ what Hob writes reads like Hob. Personality is expressed only through real work 
 a voice adds no event, no movement, no ambient liveliness to the village.
 
 ```console
-$ steward doctor                     # which brain, where the journal lives, what fires next
+$ steward doctor                     # which brain, the journal, the post, what fires next
 $ steward scheduler run              # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
@@ -147,6 +147,11 @@ $ steward delegate burrow-builder --to life-agent --route handoff --title "…"
 $ steward inbox life-agent            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
+
+Closing a route stops delivery but not the pile already behind it, and nothing claims a
+letter while the door is shut — so `steward doctor` counts every resident's post and fails
+on the one case nobody would otherwise notice: open letters behind a `pending` or
+`disabled` delegation route.
 
 **The watchdog and budgets** (#8). An agent nobody is watching can fail in two directions,
 and steward now answers both. A manifest declares `budgets: {daily_cost_usd, daily_tokens,
@@ -366,7 +371,11 @@ an inline secret, in a manifest or in a `SKILL.md`, fails validation and is neve
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
 `steward schema` emits it as JSON Schema so burrow can read manifests without
-translation.
+translation. The generated copy is committed at
+[schema/resident-manifest-v0.json](schema/resident-manifest-v0.json) — the path the
+schema's own `$id` promises — and a test fails when it drifts from the models, so a
+manifest change that would break burrow's reader shows up as a diff in the pull request
+that makes it. Regenerate with `make schema-write` and read the diff.
 
 ```console
 $ steward validate                         # the whole residents/ tree
@@ -450,15 +459,17 @@ make test      # pytest with coverage
 make check     # what CI runs: lint, test, validate
 ```
 
-A routine only ever fires while `steward scheduler run` is up. Missed schedules are not
-back-filled, an overlapping fire is skipped rather than queued, and a run killed at its
-timeout is emitted as `routine_failed` — the village must never show work that is not
-happening. The same rule governs memory: a day with no journal entry has no journal
-entry, and the next session is told nothing rather than something plausible. And the same
-rule governs the board and the door: a task nobody finished goes back to `open` loudly,
-and a request nobody answered is a `deny`, never a quiet yes. A restart is announced, a
-run that never reported back is buried out loud, and a resident that has spent its day
-stops and says which number stopped it.
+A routine only ever fires while `steward scheduler run` is up — and only one of them, per
+state file: a second daemon refuses to start and names the pid already holding the lock,
+while a cron `steward scheduler tick` beside a running daemon simply takes its turn and
+finds nothing due. Missed schedules are not back-filled, an overlapping fire is skipped
+rather than queued, and a run killed at its timeout is emitted as `routine_failed` — the
+village must never show work that is not happening. The same rule governs memory: a day
+with no journal entry has no journal entry, and the next session is told nothing rather
+than something plausible. And the same rule governs the board and the door: a task nobody
+finished goes back to `open` loudly, and a request nobody answered is a `deny`, never a
+quiet yes. A restart is announced, a run that never reported back is buried out loud, and
+a resident that has spent its day stops and says which number stopped it.
 
 ## Environment
 

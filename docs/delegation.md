@@ -134,7 +134,9 @@ The grammar, exactly:
 is nobody left to answer: the refusal becomes an approval request under
 `rejected_delegation` (or `unreadable_delegation` when steward could not read the block at
 all), carrying the reason and the raw block. A resident that tried to hand work over and
-failed must never look like a resident that had nothing to hand over.
+failed must never look like a resident that had nothing to hand over. Both of those are
+catch-all actions covering every refusal alike, so the knock is exempt from the
+[repeat-deny guard](approvals.md): a deny on one refusal never answers for the next.
 
 ### 2. `steward delegate`
 
@@ -210,6 +212,20 @@ origin task:2c9a…
 `GET /tasks/{id}/lineage` for the same thing over HTTP. Inboxes are durable: a steward
 restart loses nothing, and a letter delivered last night is still waiting this morning.
 
+Which is why `steward doctor` prints a line per resident about the post as well:
+
+```console
+$ steward doctor
+life-agent: inbox 2 open via handoff
+burrow-builder: inbox — takes no letters
+some-agent: inbox — 3 open letter(s) behind a closed route: handoff (disabled); nothing will pick them up
+```
+
+That last line is an error and doctor exits non-zero on it. Closing a route stops delivery
+but not the letters already in the pile, and nothing claims them while the door is shut —
+so a route flipped to `pending` or `disabled` with work behind it is a resident quietly not
+doing work somebody was told it had accepted.
+
 ## Delegated work is budgeted work
 
 A letter is a session, so it costs somebody a day — and the somebody is the **receiver**,
@@ -233,12 +249,19 @@ $ steward budget show --by-origin
 …
 by origin (2026-08-25..2026-08-25, all residents shown)
   task:2c9a…: $1.8400, 24310 token(s), 3 run(s)
-  unattributed: $0.9100, 8800 token(s), 2 run(s)
+  resident:life-agent: $0.9100, 8800 token(s), 2 run(s)
 ```
 
-`unattributed` is a run that came off no task at all — an ordinary scheduled routine. It
-is named rather than dropped: money steward cannot attribute is still money somebody
-spent.
+Each run **records its own origin** on the ledger row when it is ledgered. It used to be
+inferred afterwards, by joining the row's `ref` to a task id — which is only a task id for
+board and delegated runs, so a routine whose id collided with somebody's task inherited
+that task's bill. The row is self-describing now, and the join survives only for rows
+written before the column existed.
+
+A scheduled routine came off no task, so it carries `resident:<id>` — the resident whose
+day it was. `unattributed` is what a row with no origin at all reports as, which after the
+migration means a run ledgered before steward recorded one. It is named rather than
+dropped: money steward cannot attribute is still money somebody spent.
 
 ## Over HTTP
 

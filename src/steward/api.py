@@ -932,6 +932,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         Pending means *open*: handed over and not yet picked up. ``?status=`` narrows to
         any board status, and ``all`` is everything ever addressed to this resident, which
         is the audit view — who sent it, through which route, and what became of it.
+
+        ``routes`` names every declared delegation route *with its status*, not only the
+        ones open today, and ``pending`` is the open count whatever ``?status=`` asked
+        for: a caller has to be able to see letters stacked behind a route somebody shut
+        (#46), which a list of accepting routes alone cannot show.
         """
         wanted = status or STATUS_OPEN
         if wanted not in (*JOB_STATUSES, APPROVAL_STATUS_ALL):
@@ -947,7 +952,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "resident": resident.id,
             "status": wanted,
-            "routes": list(resident.delegation_routes),
+            "routes": [
+                {"id": route.id, "status": route.status, "accepts": route.accepts_delegation}
+                for route in resident.inbound_routes
+            ],
+            "pending": db.inbox_count(resident.id),
             "inbox": [item.to_dict() for item in items],
         }
 
