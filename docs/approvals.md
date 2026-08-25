@@ -223,9 +223,18 @@ two asks that differ only in a timestamp would read as different questions and t
 would catch nothing. The window is 12 hours, overridable fleet-wide with
 `STEWARD_REPEAT_DENY_WINDOW_H` (whole hours; `0` turns the guard off). It is measured from
 a *real* decision — a human's deny or an `expiry` one — never from another `repeat`, so one
-no cannot renew itself into a permanent ban. Steward's own two knocks, the budget pause and
-the crash loop, are exempt: they are one-per-condition already, and the deny they carry
-answers a different question.
+no cannot renew itself into a permanent ban.
+
+The guard only answers for actions a *session chose*, and two kinds of knock are exempt:
+
+- **Steward's own knocks** — the budget pause, the crash loop, a refused delegation. They
+  are one-per-condition already, they are about the resident rather than for it, and the
+  deny they carry answers a different question.
+- **The catch-all actions steward assigns** — `unreadable_escalation`, and delegation's
+  `rejected_delegation` / `unreadable_delegation`. One name covers every ask that lands
+  under it, so "already denied" would not mean "already asked": a deny of one unreadable
+  block would swallow the next one, which was about something else entirely. A malformed
+  escalation and a refused handoff reach a person *every* time.
 
 ## The event payloads
 

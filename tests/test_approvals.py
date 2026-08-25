@@ -329,6 +329,26 @@ def test_the_resident_hears_that_its_ask_was_auto_denied(
     assert "send_email: deny (decided by repeat" in preamble
 
 
+def test_a_second_unreadable_escalation_still_reaches_a_person(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """The catch-all action is one name over many questions, so no deny answers for it."""
+    ap.harvest(store, sink, manifest=manifest, output=block('expires-in="4h"'), now=NOW)
+    ap.expire(store, sink, NOW + timedelta(hours=5))
+    sink.events.clear()
+
+    (again,) = ap.harvest(
+        store,
+        sink,
+        manifest=manifest,
+        output=block('action="spend_money" expires-in="4h"', '{"to": '),
+        now=NOW + timedelta(hours=6),
+    )
+    assert again.action == ap.UNREADABLE_ACTION
+    assert again.pending, "a different malformed ask is a different question"
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
 def test_the_window_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     hour_s = 3600
     assert ap.repeat_deny_window_s({}) == ap.DEFAULT_REPEAT_DENY_WINDOW_H * hour_s

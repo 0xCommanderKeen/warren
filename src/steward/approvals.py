@@ -35,15 +35,18 @@ sleep must never be the reason something irreversible happened.
 "do not ask again this session"; :func:`raise_request` is the enforcement. When the same
 resident raises the same action again within :data:`DEFAULT_REPEAT_DENY_WINDOW_H` hours of
 being told no, the ask is recorded as an auto-deny (``decided_by: "repeat"``) and nobody's
-phone buzzes. A looping resident cannot knock on every wake-up. Steward's own knocks —
-a budget pause, a watchdog give-up — pass ``repeat_guard=False``: they are one-per-condition
-by construction, and the deny they carry is the thing that lifts them.
+phone buzzes. A looping resident cannot knock on every wake-up. The guard answers only for
+actions a *session chose*: steward's own knocks — a budget pause, a watchdog give-up —
+pass ``repeat_guard=False``, and the slugs steward assigns itself
+(:data:`REPEAT_GUARD_EXEMPT_ACTIONS`) are never swallowed, because one deny of a catch-all
+would stand in for every future ask that lands under it.
 
 **A malformed block still knocks.** An escalation steward cannot parse is not dropped
 and is not silently ignored: it becomes a request with the action
 :data:`UNREADABLE_ACTION`, carrying the raw block and the complaint, so a person hears
-about it. A session that tried to ask and failed is a session that must not be mistaken
-for a session that had nothing to ask.
+about it — every time, including the second one, because that action is exempt from the
+repeat guard. A session that tried to ask and failed is a session that must not be
+mistaken for a session that had nothing to ask.
 """
 
 import json
@@ -68,6 +71,7 @@ __all__ = [
     "DETAIL_MAX_CHARS",
     "MAX_EXPIRES_IN_S",
     "REPEAT_DENY_WINDOW_ENV",
+    "REPEAT_GUARD_EXEMPT_ACTIONS",
     "UNREADABLE_ACTION",
     "ApprovalError",
     "NeedsHuman",
@@ -113,6 +117,16 @@ UNREADABLE_ACTION = "unreadable_escalation"
 #: belongs. ``0`` turns the guard off and every repeat knocks again.
 DEFAULT_REPEAT_DENY_WINDOW_H = 12
 REPEAT_DENY_WINDOW_ENV = "STEWARD_REPEAT_DENY_WINDOW_H"
+
+#: Actions the repeat guard never answers for. The guard's fingerprint is
+#: ``(resident, action)``, which only means "the same question asked twice" when the
+#: action is one a *session chose*. :data:`UNREADABLE_ACTION` is not: steward assigns it
+#: to every escalation it could not read, so a deny of one malformed block would stand in
+#: for the next malformed block too — a different intended action, swallowed unheard, in
+#: exactly the case this module promises never to swallow. :mod:`steward.delegation` has
+#: two catch-alls of its own and keeps them out of the guard the other way, by passing
+#: ``repeat_guard=False``, because approvals cannot import it.
+REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION})
 
 ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _BLOCK = re.compile(
@@ -360,7 +374,14 @@ def _denied_recently(store: Store, resident: str, action: str, moment: datetime)
     ``send_email`` to one address cannot ask about a *different* address for the rest of
     the window either — the trade steward makes on purpose, because the failure it exists
     to stop is a resident knocking on every wake-up.
+
+    That trade is only payable when the action names what the resident asked for. For the
+    slugs in :data:`REPEAT_GUARD_EXEMPT_ACTIONS` it does not: they are catch-alls steward
+    assigns, and every ask that lands under one is a *different* question wearing the same
+    name. Those are never answered by an earlier deny.
     """
+    if action in REPEAT_GUARD_EXEMPT_ACTIONS:
+        return False
     window_s = repeat_deny_window_s()
     if window_s <= 0:
         return False
@@ -399,7 +420,10 @@ def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all 
     (:mod:`steward.budgets`) and a watchdog give-up (:mod:`steward.watchdog`) are
     one-per-condition by their own conditional insert, they never expire, and the deny a
     human gives them is the answer to a *different* question — turning that deny into a
-    reason to swallow the next pause would hide the thing steward most needs to say.
+    reason to swallow the next pause would hide the thing steward most needs to say. The
+    same reasoning exempts the catch-all actions steward assigns rather than a session
+    choosing them (:data:`REPEAT_GUARD_EXEMPT_ACTIONS`), whichever way ``repeat_guard`` is
+    set.
     """
     moment = now or datetime.now(UTC)
     agent_id = manifest.agent_id or f"steward:{manifest.id}"
