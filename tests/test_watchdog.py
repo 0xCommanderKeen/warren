@@ -185,6 +185,123 @@ def test_a_missing_log_is_no_stale_runs(tmp_path: Path) -> None:
     assert w.scan_unbracketed(tmp_path / "never-written.jsonl", now=NOW) == []
 
 
+def test_a_run_only_the_registry_knows_about_is_still_found(store: Store, tmp_path: Path) -> None:
+    """The case the log could never answer: every event reached burrow, the session did not."""
+    store.open_run(
+        run_id="delivered",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+
+    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["delivered"]
+    assert stale[0].routine == "daily-summary"
+
+
+def test_a_registry_run_is_judged_against_the_timeout_it_was_given(
+    store: Store, tmp_path: Path
+) -> None:
+    """The row carries the deadline the session actually got, budget cap included."""
+    store.open_run(
+        run_id="capped",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        timeout_s=60.0,
+        now=ev.utc_now_iso(NOW - timedelta(seconds=150)),
+    )
+    log = tmp_path / "nothing.jsonl"
+    # The manifest declares 900s; the registry says this run was only ever given 60, and
+    # the registry is what a run past 60 + 120 seconds of grace is judged against.
+    timeouts = {"claude-code:test-agent/daily-summary": 900.0}
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store, timeouts=timeouts) == []
+    later = NOW + timedelta(seconds=60)
+    stale = w.scan_unbracketed(log, now=later, registry=store, timeouts=timeouts)
+    assert [run.run_id for run in stale] == ["capped"]
+
+
+def test_a_closed_registry_row_is_not_a_stale_run(store: Store, tmp_path: Path) -> None:
+    """A session that reported back closed its own row, and the scan never sees it."""
+    store.open_run(
+        run_id="done",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    store.close_run("done", now=ev.utc_now_iso(NOW - timedelta(hours=1)))
+
+    assert w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store) == []
+
+
+def test_a_closing_event_in_the_log_answers_an_open_registry_row(
+    store: Store, tmp_path: Path
+) -> None:
+    """Steward died between emitting the finish and writing the row. The finish wins."""
+    store.open_run(
+        run_id="fine",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", finished("fine", ts=NOW - timedelta(hours=1)))
+
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The board's lease sweep owns a task's death; the watchdog only answers the row."""
+    store.open_run(
+        run_id="task-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+
+    report = build(resident, store, sink, tmp_path).tick(NOW)
+
+    assert [run.run_id for run in report.buried] == ["task-1"]
+    assert store.open_runs() == [], "the registry row is answered"
+    assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
+
+
+def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """One death, one event, and a row that is not read as a fresh outage a minute later."""
+    store.open_run(
+        run_id="gone",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    dog = build(resident, store, sink, tmp_path)
+
+    first = dog.tick(NOW)
+    second = dog.tick(NOW + timedelta(minutes=1))
+
+    assert [run.run_id for run in first.buried] == ["gone"]
+    assert second.buried == ()
+    assert store.open_runs() == []
+    failures = [e for e in sink.events if e.type == ev.ROUTINE_FAILED]
+    assert [e.payload["run_id"] for e in failures] == ["gone"]
+
+
 def test_an_unbracketed_run_is_closed_as_routine_failed_exactly_once(
     resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:

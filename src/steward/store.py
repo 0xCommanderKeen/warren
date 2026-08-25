@@ -28,6 +28,10 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
 - ``watchdog_attempts`` / ``watchdog_passes`` / ``unbracketed_runs`` — what the watchdog
   has already done, so a restart budget and a "run never reported back" complaint are
   each spent exactly once however often the watchdog ticks.
+- ``open_runs`` — one row per session steward has started and not yet closed. The
+  watchdog reads this to find runs that never reported back, instead of reading the
+  undelivered-event log, which can only answer for the host that fired them and only
+  while burrow was unreachable (steward #39).
 """
 
 import json
@@ -52,6 +56,7 @@ __all__ = [
     "ApprovalRecord",
     "JobRecord",
     "LedgerEntry",
+    "OpenRun",
     "OriginSpend",
     "PauseRecord",
     "RequestRecord",
@@ -191,6 +196,20 @@ CREATE TABLE IF NOT EXISTS unbracketed_runs (
     started_at TEXT NOT NULL,
     closed_at  TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS open_runs (
+    run_id     TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL DEFAULT 'routine',
+    agent_id   TEXT NOT NULL,
+    project    TEXT NOT NULL DEFAULT '',
+    ref        TEXT NOT NULL DEFAULT '',
+    timeout_s  REAL NOT NULL DEFAULT 0.0,
+    started_at TEXT NOT NULL,
+    closed_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS open_runs_still_open
+    ON open_runs (closed_at, started_at);
 """
 
 #: Columns added after the first database was written. Applied with ``ALTER TABLE`` at
@@ -597,6 +616,64 @@ class WatchdogAttempt:
             "last_attempt_at": self.last_attempt_at,
             "next_attempt_at": self.next_attempt_at,
             "gave_up_at": self.gave_up_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OpenRun:
+    """One session steward opened, and — once it closed — when.
+
+    Steward's own record that a run exists, written where the opening event is emitted
+    and closed where the closing one is. It is what the watchdog reads to find a run
+    that never reported back, because the alternative it used to read — the
+    undelivered-event log — is only written while burrow is unreachable and only on the
+    host that fired the run (steward #39).
+
+    ``timeout_s`` is the run's *effective* deadline, budget cap included, so the
+    watchdog judges a run against the timeout the session was actually given rather
+    than against the one its manifest declares.
+    """
+
+    run_id: str
+    kind: str
+    agent_id: str
+    started_at: str
+    project: str = ""
+    #: What the run was: a routine id, or the task id a board session claimed.
+    ref: str = ""
+    timeout_s: float = 0.0
+    closed_at: str | None = None
+
+    @property
+    def open(self) -> bool:
+        """True while steward has heard nothing back about this run."""
+        return self.closed_at is None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> OpenRun:
+        """Rebuild one run record from its database row."""
+        return cls(
+            run_id=row["run_id"],
+            kind=row["kind"],
+            agent_id=row["agent_id"],
+            started_at=row["started_at"],
+            project=row["project"],
+            ref=row["ref"],
+            timeout_s=row["timeout_s"],
+            closed_at=row["closed_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view of one open run."""
+        return {
+            "run_id": self.run_id,
+            "kind": self.kind,
+            "agent_id": self.agent_id,
+            "project": self.project,
+            "ref": self.ref,
+            "timeout_s": self.timeout_s,
+            "started_at": self.started_at,
+            "closed_at": self.closed_at,
         }
 
 
@@ -1616,6 +1693,56 @@ class Store:
         with self._lock:
             rows = self._conn.execute("SELECT run_id FROM unbracketed_runs").fetchall()
         return {row["run_id"] for row in rows}
+
+    # -- the run registry ----------------------------------------------------------------
+
+    def open_run(  # noqa: PLR0913 — one parameter per fact about the session that opened
+        self,
+        *,
+        run_id: str,
+        kind: str,
+        agent_id: str,
+        project: str = "",
+        ref: str = "",
+        timeout_s: float = 0.0,
+        now: str | None = None,
+    ) -> bool:
+        """Record that a session has started. Returns whether this call opened the row.
+
+        Written where the opening event is emitted, so steward's own knowledge that a run
+        exists does not depend on where that event ended up. Conditional on the primary
+        key like its neighbours: a run id is one run, and a second open of the same id is
+        a repeat rather than a second session.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
+                "started_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+                (run_id, kind, agent_id, project, ref, float(timeout_s), now or utc_now_iso()),
+            )
+            return cursor.rowcount == 1
+
+    def close_run(self, run_id: str, *, now: str | None = None) -> bool:
+        """Record that a session reported back. Returns whether this call closed the row.
+
+        Conditional on ``closed_at IS NULL``, so the answer is about *this* call: a run
+        the watchdog already buried does not get closed a second time by a session that
+        turned up late, and the row keeps the earlier moment it was answered.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET closed_at = ? WHERE run_id = ? AND closed_at IS NULL",
+                (now or utc_now_iso(), run_id),
+            )
+            return cursor.rowcount == 1
+
+    def open_runs(self) -> list[OpenRun]:
+        """Return every run steward started and has heard nothing back about, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM open_runs WHERE closed_at IS NULL ORDER BY started_at, rowid"
+            ).fetchall()
+        return [OpenRun.from_row(row) for row in rows]
 
     def record_watchdog_pass(self, *, interventions: int = 0, now: str | None = None) -> str:
         """Record that the watchdog made a pass, and return when. ``doctor`` reads this."""

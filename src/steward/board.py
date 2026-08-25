@@ -635,6 +635,10 @@ class Dispatcher:
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
+        # The deadline this session actually gets, read once: the run registry is judged
+        # against it, and the runner is given it.
+        timeout_s = self._timeout_for(resident, declared_s)
+        self._open_run(resident, job, timeout_s, moment)
 
         prompt = ""
         try:
@@ -649,7 +653,7 @@ class Dispatcher:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=self._timeout_for(resident, declared_s),
+                    timeout_s=timeout_s,
                     model=resident.manifest.runner.model,
                     env=self._session_env(resident, job),
                 )
@@ -671,7 +675,9 @@ class Dispatcher:
         handed = self.hand_over(
             resident.manifest, result.output, parent_task_id=job.task_id, now=moment
         )
-        return self._record(resident, job, result, moment, raised, handed=handed)
+        report = self._record(resident, job, result, moment, raised, handed=handed)
+        self._close_run(job, moment + timedelta(seconds=result.duration_s))
+        return report
 
     # -- the budget seam ---------------------------------------------------------------
 
@@ -704,6 +710,43 @@ class Dispatcher:
         if self.guard is None:
             return declared_s
         return self.guard.timeout_for(resident.manifest, declared_s)
+
+    # -- the run registry ---------------------------------------------------------------
+
+    def _open_run(
+        self, resident: Resident, job: JobRecord, timeout_s: int, moment: datetime
+    ) -> None:
+        """Write this session into steward's run registry. Never raises.
+
+        The scheduler's :meth:`steward.scheduler.Scheduler._open_run` for the other kind
+        of wake-up, and the registry does not care which it was: a claimed task is a
+        session, so it belongs in the one place that knows which sessions are open
+        (steward #39). What happens to a stale row differs — a routine that vanished is
+        buried with the ``routine_failed`` its session never sent, while a task that
+        vanished is the lease sweep's to reopen — but "steward started this and heard
+        nothing back" is one fact with one home.
+        """
+        try:
+            self.store.open_run(
+                run_id=job.task_id,
+                kind=RUN_DELEGATED if job.delegated else RUN_TASK,
+                agent_id=resident.agent_id,
+                project=resident.project,
+                ref=job.task_id,
+                timeout_s=float(timeout_s),
+                now=ev.utc_now_iso(moment),
+            )
+        except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed task
+            log.warning(
+                "%s: could not record that task %s started: %s", resident.id, job.task_id, exc
+            )
+
+    def _close_run(self, job: JobRecord, moment: datetime) -> None:
+        """Answer this session's registry row. Never raises, and never emits: ``_record`` did."""
+        try:
+            self.store.close_run(job.task_id, now=ev.utc_now_iso(moment))
+        except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
+            log.warning("could not record that task %s reported back: %s", job.task_id, exc)
 
     def _ledger(
         self, resident: Resident, job: JobRecord, result: RunResult, moment: datetime

@@ -60,7 +60,7 @@ from steward.budgets import BudgetGuard
 from steward.manifest import Resident, active_residents, validate_path
 from steward.runners import CommandRun, run_argv
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
-from steward.store import ApprovalRecord, JobRecord, Store
+from steward.store import RUN_ROUTINE, ApprovalRecord, JobRecord, OpenRun, Store
 
 __all__ = [
     "BACKOFF_S",
@@ -172,13 +172,19 @@ class ProcessSupervisor(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class StaleRun:
-    """A ``routine_started`` in the local log that no closing event ever answered."""
+    """A run steward started and that nothing ever answered — past its own deadline."""
 
     run_id: str
     agent_id: str
     project: str
     routine: str
     started_at: datetime
+    #: What kind of session this was, from :data:`steward.store.RUN_KINDS`. A run found
+    #: only in the event log is always a routine: nothing else emits ``routine_started``.
+    kind: str = RUN_ROUTINE
+    #: The deadline this run was actually given, when steward wrote it down. ``0`` means
+    #: it did not, and the scan falls back to the declared timeout.
+    timeout_s: float = 0.0
 
     def age_s(self, now: datetime) -> float:
         """How long this run has been unaccounted for, in seconds."""
@@ -195,28 +201,55 @@ def _parse_ts(raw: object) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def scan_unbracketed(
+def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and independently useful
     path: Path,
     *,
     now: datetime,
+    registry: Store | None = None,
     timeouts: Mapping[str, float] | None = None,
     grace_s: float = DEFAULT_GRACE_S,
     default_timeout_s: float = 900.0,
 ) -> list[StaleRun]:
-    """Return runs the local event log shows starting and never finishing.
+    """Return runs that started, are past their own deadline, and never reported back.
 
-    Read from the fallback JSONL steward already writes when burrow cannot be reached
-    (:func:`steward.events.default_fallback_path`), which is the only run history steward
-    holds locally. That bounds what this can see, and the bound is worth stating plainly:
-    a run whose ``routine_started`` was delivered to burrow and whose ``routine_finished``
-    was too never appears here at all, and needs no burying. What lands here is precisely
-    the interesting case — a village that was unreachable, or a steward that died with
-    events still in its own file.
+    Two sources, and the first one is the source of truth. ``registry`` is steward's own
+    :class:`steward.store.Store`, which holds a row per session opened where the opening
+    event is emitted and closed where the closing one is (steward #39). That row exists
+    whatever happened to the events, which is the whole point: a run whose whole bracket
+    reached burrow used to be invisible here, so a session that died *after* its
+    ``routine_started`` was delivered was never buried at all.
+
+    ``path`` is the fallback JSONL steward writes when burrow cannot be reached, and it
+    stays in the scan as a complement rather than as the answer. It still catches the one
+    thing the registry cannot: a run opened by a steward that never wrote to this
+    database — an older deployment, a different state directory — whose events reached
+    nowhere. Where both know a run, the registry wins, because it knows the deadline the
+    session was actually given.
 
     ``timeouts`` maps ``<agent_id>/<routine>`` to that routine's declared timeout, so each
     run is judged against its own deadline plus the grace window. A run steward has no
     manifest for gets ``default_timeout_s``, because "I do not know your timeout" must not
-    mean "you may hang forever".
+    mean "you may hang forever". A registry row that carries its own timeout is judged
+    against that instead: it is the deadline the session was actually given.
+    """
+    started = {run.run_id: run for run in _from_registry(registry)}
+    logged, closed = _from_log(path)
+    # The registry wins where both know a run; a closing event in the log wins over both,
+    # because a run whose finish steward actually emitted did report back, however the
+    # row it should have answered ended up.
+    started.update({run_id: run for run_id, run in logged.items() if run_id not in started})
+
+    deadlines = dict(timeouts or {})
+    return [
+        run
+        for run_id, run in started.items()
+        if run_id not in closed
+        and run.age_s(now) > _deadline_s(run, deadlines, default_timeout_s) + grace_s
+    ]
+
+
+def _from_log(path: Path) -> tuple[dict[str, StaleRun], set[str]]:
+    """Return what the fallback log says started, and every run id it says closed.
 
     A malformed line is skipped, not raised on: this file is append-only from several
     processes, and a half-written last line is an ordinary thing to find.
@@ -226,16 +259,10 @@ def scan_unbracketed(
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
-        return []
+        return started, closed
     for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            event = json.loads(stripped)
-        except ValueError:
-            continue
-        if not isinstance(event, Mapping):
+        event = _parse_line(line)
+        if event is None:
             continue
         payload = event.get("payload")
         payload = payload if isinstance(payload, Mapping) else {}
@@ -245,10 +272,9 @@ def scan_unbracketed(
         kind = event.get("type")
         if kind in _CLOSING_TYPES:
             closed.add(run_id)
-        elif kind == ev.ROUTINE_STARTED:
-            moment = _parse_ts(event.get("ts"))
-            if moment is None:
-                continue
+            continue
+        moment = _parse_ts(event.get("ts"))
+        if kind == ev.ROUTINE_STARTED and moment is not None:
             started[run_id] = StaleRun(
                 run_id=run_id,
                 agent_id=str(event.get("agent_id") or ""),
@@ -256,15 +282,58 @@ def scan_unbracketed(
                 routine=str(payload.get("routine") or ""),
                 started_at=moment,
             )
+    return started, closed
 
-    deadlines = dict(timeouts or {})
-    return [
-        run
-        for run_id, run in started.items()
-        if run_id not in closed
-        and run.age_s(now)
-        > deadlines.get(f"{run.agent_id}/{run.routine}", default_timeout_s) + grace_s
-    ]
+
+def _parse_line(line: str) -> Mapping[str, Any] | None:
+    """Return one event off the fallback log, or ``None`` for anything unreadable."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        event = json.loads(stripped)
+    except ValueError:
+        return None
+    return event if isinstance(event, Mapping) else None
+
+
+def _deadline_s(run: StaleRun, timeouts: Mapping[str, float], default_s: float) -> float:
+    """Return the timeout this run is judged against, best knowledge first.
+
+    The registry's own number wins where there is one: it is the timeout the session was
+    actually given, budget cap included, where the manifest only says what was declared.
+    """
+    if run.timeout_s > 0:
+        return run.timeout_s
+    return timeouts.get(f"{run.agent_id}/{run.routine}", default_s)
+
+
+def _from_registry(registry: Store | None) -> list[StaleRun]:
+    """Return every run steward's own store still has open. A broken store is no runs."""
+    if registry is None:
+        return []
+    try:
+        rows: list[OpenRun] = registry.open_runs()
+    except Exception as exc:  # noqa: BLE001 — an unreadable registry is not a dead pass
+        log.warning("could not read the run registry: %s", exc)
+        return []
+    runs = []
+    for row in rows:
+        moment = _parse_ts(row.started_at)
+        if moment is None:  # pragma: no cover — only a hand-edited database gets here
+            continue
+        runs.append(
+            StaleRun(
+                run_id=row.run_id,
+                agent_id=row.agent_id,
+                project=row.project,
+                routine=row.ref,
+                started_at=moment,
+                kind=row.kind,
+                timeout_s=row.timeout_s,
+            )
+        )
+    return runs
 
 
 @dataclass
@@ -365,7 +434,11 @@ class LocalProbe:
             f"run {run.run_id} of {run.routine!r} started {run.age_s(now):.0f}s ago and never "
             f"reported back"
             for run in scan_unbracketed(
-                self.fallback, now=now, timeouts=timeouts_for([resident]), grace_s=self.grace_s
+                self.fallback,
+                now=now,
+                registry=self.store,
+                timeouts=timeouts_for([resident]),
+                grace_s=self.grace_s,
             )
             if run.agent_id == resident.agent_id and run.run_id not in buried
         ]
@@ -754,11 +827,17 @@ class Watchdog:
         vanished is buried on the first pass that notices, and every pass after that reads
         the row and stays silent. The village must never show eternal work, and it must
         never show one death twice either.
+
+        A *task* that vanished is closed in the registry and announced by nobody here. The
+        board already owns that death: its lease sweep — which this same pass runs — puts
+        the task back on the board and says ``task_failed`` with ``lease_expired``, and a
+        second closing event from the watchdog would be the same task dying twice.
         """
         buried: list[StaleRun] = []
         for run in scan_unbracketed(
             self.fallback,
             now=now,
+            registry=self.store,
             timeouts=timeouts_for(self.residents),
             grace_s=self.grace_s,
         ):
@@ -770,6 +849,9 @@ class Watchdog:
                 now=ev.utc_now_iso(now),
             ):
                 continue
+            # The registry row is answered too, or the next pass reads the same run as a
+            # fresh outage and the resident it belongs to never looks up again.
+            self.store.close_run(run.run_id, now=ev.utc_now_iso(now))
             log.warning(
                 "%s: run %s of %r started %.0fs ago and never reported back — closing it",
                 run.agent_id,
@@ -777,15 +859,16 @@ class Watchdog:
                 run.routine,
                 run.age_s(now),
             )
-            self.emitter.emit(
-                ev.routine_failed_event(
-                    agent_id=run.agent_id,
-                    project=run.project or run.agent_id,
-                    routine=run.routine,
-                    run_id=run.run_id,
-                    error=NEVER_REPORTED_BACK,
+            if run.kind == RUN_ROUTINE:
+                self.emitter.emit(
+                    ev.routine_failed_event(
+                        agent_id=run.agent_id,
+                        project=run.project or run.agent_id,
+                        routine=run.routine,
+                        run_id=run.run_id,
+                        error=NEVER_REPORTED_BACK,
+                    )
                 )
-            )
             buried.append(run)
         return buried
 

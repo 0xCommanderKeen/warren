@@ -972,3 +972,40 @@ def test_a_dry_run_plans_delegated_letters_and_skips_a_paused_resident(
         cap=1.0,
     )
     assert dispatcher.dispatch(NOW).planned == ()
+
+
+# ---------------------------------------------------- the run registry (steward #39)
+
+
+def test_a_claimed_task_opens_and_closes_a_registry_row(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A board session is a session, so it belongs in the one place open runs are known."""
+    store.post_job(title="Read the mail")
+
+    run = make_dispatcher().dispatch(NOW)
+
+    assert len(run.reports) == 1
+    assert store.open_runs() == [], "the task reported back, so its row is answered"
+
+
+def test_a_task_whose_session_vanishes_leaves_its_row_open(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A row the watchdog can read, whatever happened to the events."""
+
+    class Vanishing(Runner):
+        def run(self, request: RunRequest) -> RunResult:  # noqa: ARG002 — it never returns
+            raise KeyboardInterrupt("the machine went away")
+
+    posted = store.post_job(title="Read the mail")
+    with pytest.raises(KeyboardInterrupt):
+        make_dispatcher(runner=Vanishing()).dispatch(NOW)
+
+    (open_run,) = store.open_runs()
+    assert (open_run.run_id, open_run.kind, open_run.ref) == (
+        posted.task_id,
+        "task",
+        posted.task_id,
+    )
+    assert open_run.timeout_s == pytest.approx(900.0)
