@@ -82,7 +82,13 @@ def finished(run_id: str, *, ts: datetime, agent: str = "claude-code:test-agent"
     )
 
 
-def task_closed(task_id: str, *, ts: datetime, agent: str = "claude-code:test-agent") -> str:
+def task_closed(
+    task_id: str,
+    *,
+    ts: datetime,
+    agent: str = "claude-code:test-agent",
+    type: str = "task_done",  # noqa: A002 — the event's own field name
+) -> str:
     """Render the closing event a board session writes. It names the task, not the run."""
     return json.dumps(
         {
@@ -91,7 +97,7 @@ def task_closed(task_id: str, *, ts: datetime, agent: str = "claude-code:test-ag
             "source": "steward",
             "agent_id": agent,
             "project": "test-agent",
-            "type": "task_done",
+            "type": type,
             "payload": {"task_id": task_id, "title": "Read the mail", "claimant": agent},
         }
     )
@@ -344,6 +350,90 @@ def test_a_second_attempt_at_one_task_is_watched_like_the_first(
     stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
 
     assert [run.run_id for run in stale] == ["session-2"]
+
+
+def test_the_close_of_a_dead_first_attempt_does_not_answer_the_retry(
+    store: Store, tmp_path: Path
+) -> None:
+    """The retry flow again, with the log the first attempt's death actually leaves behind.
+
+    Claim, die, expire the lease, re-claim: the sweep's ``task_failed`` for the first
+    attempt is appended to this log and stays there for ever. It names the *task*, which
+    the retry shares, so matching on the id alone let one old line silence every later
+    attempt — the retry ran unwatched, which is exactly what the registry is for.
+    """
+    store.open_run(
+        run_id="session-2",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=3), type="task_failed"),
+    )
+
+    stale = w.scan_unbracketed(log, now=NOW, registry=store)
+
+    assert [run.run_id for run in stale] == ["session-2"]
+    # And the retry's own close, once it lands, does answer it.
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=3), type="task_failed"),
+        task_closed("task-1", ts=NOW - timedelta(hours=1)),
+    )
+    assert w.scan_unbracketed(log, now=NOW, registry=store) == []
+
+
+def test_a_row_the_log_has_answered_is_closed_rather_than_left_open(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Nobody else ever comes back for it: the scan filters it out before burial can.
+
+    Steward died between emitting the finish and writing the close. The finish means this
+    is no death to mourn — and the row still has to go, or ``open_runs`` keeps a session
+    that ended hours ago and every pass from here to forever re-reads it.
+    """
+    store.open_run(
+        run_id="fine",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", finished("fine", ts=NOW - timedelta(hours=1)))
+
+    report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
+
+    assert report.buried == (), "a run the log answered is not a death"
+    assert store.open_runs() == [], "and not an open row either"
+    assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == []
+
+
+def test_a_task_row_the_log_has_answered_is_closed_too(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The same for the events that name a task: answered, closed, and nothing announced."""
+    store.open_run(
+        run_id="session-1",
+        kind="task",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="task-1",
+        timeout_s=900.0,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    log = write_log(tmp_path / "events.jsonl", task_closed("task-1", ts=NOW - timedelta(hours=1)))
+
+    report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
+
+    assert report.buried == ()
+    assert store.open_runs() == []
 
 
 def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(

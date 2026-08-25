@@ -84,6 +84,7 @@ __all__ = [
     "StaleRun",
     "Watchdog",
     "WatchdogPass",
+    "answered_runs",
     "scan_unbracketed",
 ]
 
@@ -246,9 +247,12 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     nowhere. Where both know a run, the registry wins, because it knows the deadline the
     session was actually given.
 
-    A *closing* event in the log wins over both, for either kind of session: steward that
-    emitted a finish and then died before answering the row did hear back, and burying
-    that run would be inventing a death the log itself disproves.
+    A *closing* event from the run's own lifetime wins over both, for either kind of
+    session: steward that emitted a finish and then died before answering the row did hear
+    back, and burying that run would be inventing a death the log itself disproves. It has
+    to be from the run's own lifetime because this log is append-only and a task id outlives
+    its attempts — see :class:`_LogScan`. A run the log answers is not returned here and is
+    not left open either: :func:`answered_runs` is where its row gets closed.
 
     ``timeouts`` maps ``<agent_id>/<routine>`` to that routine's declared timeout, so each
     run is judged against its own deadline plus the grace window. A run steward has no
@@ -273,28 +277,56 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     ]
 
 
+def answered_runs(path: Path, registry: Store | None = None) -> list[StaleRun]:
+    """Return the open registry rows the fallback log already holds a closing event for.
+
+    The other half of :func:`scan_unbracketed`'s answer, and a separate question because
+    it has nothing to do with deadlines: a row whose finish is in the log reported back,
+    whether it is a minute or a week old. Steward died between emitting that finish and
+    writing the close — or the write threw — and nobody else will ever come back for the
+    row: the scan filters it out before the burial path can reach it, so left alone it is
+    re-read and re-filtered on every pass for ever, and ``open_runs`` — the watchdog's new
+    source of truth — slowly fills with sessions that are long over.
+    """
+    logged = _from_log(path)
+    return [run for run in _from_registry(registry) if logged.answers(run)]
+
+
 @dataclass(frozen=True, slots=True)
 class _LogScan:
     """What the fallback log says started, and what it says has already reported back.
 
-    Two sets of answers rather than one, because the two kinds of session are named
+    Two kinds of answer rather than one, because the two kinds of session are named
     differently by the events that close them: a routine's bracket is joined by
     ``run_id``, while a task's ``task_done`` / ``task_failed`` names the *task*, which is
     a registry row's ``ref`` and not its id. Matching only on ``run_id`` left every task
     row unanswerable by this log — a completed task whose row was never closed stayed
     "stale" for ever, and the watchdog reported a healthy resident as down over work the
     same log plainly showed finished.
+
+    A ``run_id`` is a session and answers itself, so a bare set is enough for those. A task
+    id is *not* a session — the board's ordinary flow is claim, die, expire the lease,
+    re-claim, and every attempt carries the same id — so a task's closes are kept with
+    *when* they happened, and only a close at or after a row's ``started_at`` answers that
+    row. Without the window, the ``task_failed`` the lease sweep wrote for a dead first
+    attempt sat in this append-only log for ever and silently answered every retry after
+    it: the retry then ran unwatched, which is the exact death the registry exists to
+    catch (steward #39).
     """
 
     started: dict[str, StaleRun]
     closed_runs: set[str]
-    closed_tasks: set[str]
+    #: Task id → the last moment the log saw that task closed.
+    closed_tasks: dict[str, datetime]
 
     def answers(self, run: StaleRun) -> bool:
-        """Say whether the log holds a closing event for this run."""
+        """Say whether the log holds a closing event for *this session*."""
         if run.run_id in self.closed_runs:
             return True
-        return run.kind in _TASK_KINDS and run.routine in self.closed_tasks
+        if run.kind not in _TASK_KINDS:
+            return False
+        closed_at = self.closed_tasks.get(run.routine)
+        return closed_at is not None and closed_at >= run.started_at
 
 
 def _from_log(path: Path) -> _LogScan:
@@ -303,7 +335,7 @@ def _from_log(path: Path) -> _LogScan:
     A malformed line is skipped, not raised on: this file is append-only from several
     processes, and a half-written last line is an ordinary thing to find.
     """
-    scan = _LogScan(started={}, closed_runs=set(), closed_tasks=set())
+    scan = _LogScan(started={}, closed_runs=set(), closed_tasks={})
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
@@ -315,16 +347,16 @@ def _from_log(path: Path) -> _LogScan:
         payload = event.get("payload")
         payload = payload if isinstance(payload, Mapping) else {}
         kind = event.get("type")
+        moment = _parse_ts(event.get("ts"))
         if kind in _CLOSING_TYPES:
             _add(scan.closed_runs, payload.get("run_id"))
             continue
         if kind in _TASK_CLOSING_TYPES:
-            _add(scan.closed_tasks, payload.get("task_id"))
+            _note_close(scan.closed_tasks, payload.get("task_id"), moment)
             continue
         if kind != ev.ROUTINE_STARTED:
             continue
         run_id = payload.get("run_id")
-        moment = _parse_ts(event.get("ts"))
         if moment is not None and isinstance(run_id, str) and run_id:
             scan.started[run_id] = StaleRun(
                 run_id=run_id,
@@ -340,6 +372,23 @@ def _add(ids: set[str], value: object) -> None:
     """Note one id an event named, ignoring an event that named nothing readable."""
     if isinstance(value, str) and value:
         ids.add(value)
+
+
+def _note_close(closes: dict[str, datetime], task_id: object, moment: datetime | None) -> None:
+    """Note when a task was last seen closed, keeping the latest close of several.
+
+    An event with no readable ``ts`` is dropped rather than trusted, because a task id is
+    shared by every attempt at that task: a close that cannot be placed in time cannot be
+    attributed to an attempt, and attributing it to the wrong one hides a live session
+    from the watchdog for good. Silence about a finished task costs one row closed by the
+    burial path instead; silence about a running one costs the outage this file exists to
+    find.
+    """
+    if not isinstance(task_id, str) or not task_id or moment is None:
+        return
+    previous = closes.get(task_id)
+    if previous is None or moment > previous:
+        closes[task_id] = moment
 
 
 def _parse_line(line: str) -> Mapping[str, Any] | None:
@@ -889,7 +938,12 @@ class Watchdog:
         board already owns that death: its lease sweep — which this same pass runs — puts
         the task back on the board and says ``task_failed`` with ``lease_expired``, and a
         second closing event from the watchdog would be the same task dying twice.
+
+        Every row this pass reaches ends up closed, mourned or not: a run the log has
+        already answered is not a death, but leaving its row open would keep it in
+        ``open_runs`` for ever, so it is closed quietly instead.
         """
+        self._close_answered(now)
         buried: list[StaleRun] = []
         for run in scan_unbracketed(
             self.fallback,
@@ -928,6 +982,23 @@ class Watchdog:
                 )
             buried.append(run)
         return buried
+
+    def _close_answered(self, now: datetime) -> None:
+        """Close the rows the fallback log has already answered. Nothing is emitted.
+
+        The finish these sessions reported is in the log, so it either reached burrow or
+        will on the next flush; the only thing missing is the row, and this writes it.
+        Quietly on purpose — a village event here would announce a run that ended
+        normally, hours after it did.
+        """
+        for run in answered_runs(self.fallback, self.store):
+            if self.store.close_run(run.run_id, now=ev.utc_now_iso(now)):
+                log.info(
+                    "%s: run %s of %r was answered by the event log — closing its row",
+                    run.agent_id,
+                    run.run_id,
+                    run.routine,
+                )
 
     # -- budgets -----------------------------------------------------------------------
 
