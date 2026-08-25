@@ -580,20 +580,41 @@ class Watchdog:
 
     # -- probing -----------------------------------------------------------------------
 
-    def probe(self, resident: Resident, now: datetime) -> Health:
-        """Ask every supervisor about this resident and return the worst real answer.
+    def _reload_state(self) -> None:
+        """Re-read scheduler state from disk before probing, so a live fleet looks live.
+
+        ``run`` loops ``tick`` forever while the scheduler — a *different* process —
+        advances anchors on disk. Loading the state once at construction froze that view,
+        so after ``grace_s`` every routine looked un-visited and the :class:`LocalProbe`
+        called a healthy fleet stuck, waking a person about nothing. Reloading here keeps
+        the probe reading the same anchors the scheduler is actually writing.
+
+        The anchors are refreshed in place so every :class:`LocalProbe` already holding
+        this state object — including the one the watchdog wires by default — sees the
+        fresh view without being rebuilt.
+        """
+        for target in (self.state, *(getattr(s, "state", None) for s in self.supervisors)):
+            if isinstance(target, SchedulerState):
+                target.anchors = SchedulerState.load(target.path).anchors
+
+    def _read_all(self, resident: Resident, now: datetime) -> list[Health]:
+        """Ask every supervisor about this resident. A broken one is skipped, not fatal."""
+        readings: list[Health] = []
+        for supervisor in self.supervisors:
+            try:
+                readings.append(supervisor.health(resident, now))
+            except Exception as exc:  # noqa: BLE001 — a broken supervisor is not an outage
+                log.warning("%s: supervisor %s failed: %s", resident.id, supervisor.kind, exc)
+        return readings
+
+    def _representative(self, resident: Resident, readings: Sequence[Health]) -> Health:
+        """Reduce several readings to the worst real answer, for reporting and give-up.
 
         "Worst real answer" is the whole rule: the first supervisor that *can* see the
         resident and says it is down wins, because one supervisor seeing a dead container
         is not cancelled out by another seeing a live scheduler anchor. When nobody can
         see it, the reading says so and no intervention follows.
         """
-        readings = []
-        for supervisor in self.supervisors:
-            try:
-                readings.append(supervisor.health(resident, now))
-            except Exception as exc:  # noqa: BLE001 — a broken supervisor is not an outage
-                log.warning("%s: supervisor %s failed: %s", resident.id, supervisor.kind, exc)
         down = next((reading for reading in readings if reading.down), None)
         if down is not None:
             return down
@@ -603,16 +624,28 @@ class Watchdog:
         detail = "; ".join(reading.detail for reading in readings if reading.detail)
         return Health(resident_id=resident.id, known=False, detail=detail or "nothing can see it")
 
+    def probe(self, resident: Resident, now: datetime) -> Health:
+        """Ask every supervisor about this resident and return the worst real answer."""
+        return self._representative(resident, self._read_all(resident, now))
+
     def _supervisor_for(self, health: Health) -> ProcessSupervisor | None:
         """Return the supervisor whose reading this is — the only one that may act on it."""
         return next((s for s in self.supervisors if s.kind == health.supervisor), None)
 
-    def intervene(self, resident: Resident, health: Health, now: datetime) -> str:
+    def intervene(
+        self, resident: Resident, down: Sequence[Health], now: datetime
+    ) -> tuple[str, Health | None]:
         """Restart, wait out a backoff, or give up and knock. Returns what happened.
 
         The backoff is read from the store rather than from memory, so it survives a
         watchdog that is itself restarted: three attempts means three, not three per
         process.
+
+        ``down`` is every reading that reported this resident down, worst first. *Each* of
+        the supervisors behind those readings is given a chance to restart before steward
+        gives up, because a :class:`LocalProbe` complaint must not mask a dead container a
+        :class:`DockerSupervisor` could actually put back: the first supervisor to succeed
+        is the one credited, and only if none can do steward reach for a human.
 
         Each entry of :data:`BACKOFF_S` is the wait *after* an attempt, including the last
         one. So a resident that keeps dying is restarted immediately, again a minute
@@ -621,28 +654,29 @@ class Watchdog:
         wakes somebody. Restarting is cheap; waking a person at 2am is not, and the order
         of those two costs is what the schedule encodes.
         """
+        worst = down[0]
         record = self.store.watchdog_attempt(resident.id)
         if record.gave_up:
-            return "already asked for a human"
+            return "already asked for a human", None
         if record.next_attempt_at and ev.utc_now_iso(now) < record.next_attempt_at:
-            return f"waiting until {record.next_attempt_at}"
+            return f"waiting until {record.next_attempt_at}", None
         if record.attempts >= len(self.backoff_s):
-            self._give_up(resident, health, now, attempts=record.attempts)
-            return "gave up"
+            self._give_up(resident, worst, now, attempts=record.attempts)
+            return "gave up", None
 
         attempt = record.attempts + 1
-        supervisor = self._supervisor_for(health)
-        restarted = supervisor is not None and supervisor.restart(resident)
-        if not restarted:
+        acted = self._restart_any(resident, down)
+        if acted is None:
             # Nothing here can put this resident back — a local probe has no process to
-            # own, or docker refused. Counting failed attempts against the same budget
-            # would be a slow way of saying "ask a human", so it is said now.
-            self._give_up(resident, health, now, attempts=record.attempts)
-            return "gave up"
+            # own, and docker refused or has nothing to restart. Counting failed attempts
+            # against the same budget would be a slow way of saying "ask a human", so it is
+            # said now.
+            self._give_up(resident, worst, now, attempts=record.attempts)
+            return "gave up", None
 
         self.store.record_watchdog_attempt(
             resident.id,
-            reason=health.detail,
+            reason=acted.detail,
             next_attempt_at=ev.utc_now_iso(
                 now + timedelta(seconds=self.backoff_s[min(attempt, len(self.backoff_s)) - 1])
             ),
@@ -653,18 +687,26 @@ class Watchdog:
             resident.id,
             attempt,
             len(self.backoff_s),
-            health.detail,
+            acted.detail,
         )
         self.emitter.emit(
             ev.resident_restarted_event(
                 agent_id=resident.agent_id,
                 project=resident.project,
-                reason=health.detail or "resident was not running",
+                reason=acted.detail or "resident was not running",
                 attempt=attempt,
-                supervisor=health.supervisor,
+                supervisor=acted.supervisor,
             )
         )
-        return f"restarted (attempt {attempt})"
+        return f"restarted (attempt {attempt})", acted
+
+    def _restart_any(self, resident: Resident, down: Sequence[Health]) -> Health | None:
+        """Let each down-reporting supervisor try, and return the reading that succeeded."""
+        for reading in down:
+            supervisor = self._supervisor_for(reading)
+            if supervisor is not None and supervisor.restart(resident):
+                return reading
+        return None
 
     def _give_up(self, resident: Resident, health: Health, now: datetime, *, attempts: int) -> None:
         """Stop restarting and knock at the door, once, with the failure summary."""
@@ -774,19 +816,28 @@ class Watchdog:
     def tick(self, now: datetime | None = None) -> WatchdogPass:
         """Make one pass: probe, sweep deadlines, bury stale runs, check budgets."""
         moment = now or datetime.now(UTC)
+        self._reload_state()
         readings: list[Health] = []
         restarted: list[Health] = []
         gave_up: list[Health] = []
 
         for resident in self.residents:
-            health = self.probe(resident, moment)
+            all_readings = self._read_all(resident, moment)
+            health = self._representative(resident, all_readings)
             readings.append(health)
-            if not health.down:
+            if health.known and health.alive:
+                # Genuinely recovered — and only genuinely recovered — forgets the restart
+                # history, including the give-up receipt. An "I cannot tell" reading is not
+                # a recovery: clearing on it would reset the budget every flap and wipe the
+                # receipt, so a crash loop would never hit the cap and would knock again on
+                # every pass. So an unknown reading clears nothing.
                 self.store.clear_watchdog_attempts(resident.id)
                 continue
-            outcome = self.intervene(resident, health, moment)
-            if outcome.startswith("restarted"):
-                restarted.append(health)
+            if not health.down:
+                continue  # Nobody can see it. Say nothing, change nothing.
+            outcome, acted = self.intervene(resident, [r for r in all_readings if r.down], moment)
+            if outcome.startswith("restarted") and acted is not None:
+                restarted.append(acted)
             elif outcome == "gave up":
                 gave_up.append(health)
 
