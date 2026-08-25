@@ -8,12 +8,21 @@ from typing import Any
 import pytest
 from click.testing import CliRunner
 
-from conftest import REPO_ROOT, ResidentWriter, ScratchRepo, StubWriter, valid_manifest
+from conftest import (
+    REPO_ROOT,
+    ResidentWriter,
+    ScratchRepo,
+    SkillWriter,
+    StubWriter,
+    valid_manifest,
+)
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
-from steward.journal import write_entry
+from steward.journal import latest_entry, write_entry
 from steward.manifest import load_manifest
+from steward.prompt import assemble_preamble
+from steward.skills import effective_skills, library_for
 from steward.store import Store
 
 
@@ -100,7 +109,7 @@ def test_schema_command_emits_json_schema(runner: CliRunner) -> None:
 def test_help_lists_the_commands(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    for command in ("validate", "schema", "doctor", "scheduler"):
+    for command in ("validate", "schema", "doctor", "scheduler", "show"):
         assert command in result.output
 
 
@@ -276,6 +285,104 @@ def test_journal_refuses_a_memory_it_cannot_read_a_journal_out_of(
     result = runner.invoke(main, ["journal", "test-agent", "--residents", str(path.parent.parent)])
     assert result.exit_code == 1
     assert "nowhere to keep one entry per day" in result.output
+
+
+# --------------------------------------------------------------------------------- show
+
+
+def show_args(path: Path, tmp_path: Path) -> list[str]:
+    """Point at the resident tree and at a throwaway database, never the real one."""
+    return ["--residents", str(path.parent.parent), "--db", str(tmp_path / "show.db")]
+
+
+def test_show_prints_exactly_the_assembled_preamble(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    tmp_path: Path,
+) -> None:
+    """One assembly, not a second renderer: what is printed is what a session is told.
+
+    The sections themselves are :mod:`tests.test_prompt`'s contract; this asserts only
+    that the command adds nothing to and takes nothing from it.
+    """
+    path = write_resident(journaling_resident(tmp_path))
+    write_skill("write-journal", defaults=True)
+    write_skill("daily-summary")
+    resident = load_manifest(path)
+    write_entry(resident.manifest, date(2026, 8, 24), "close-of-day", "Two drafts still waiting.")
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+    assert result.exit_code == 0, result.output
+    expected = assemble_preamble(
+        resident.manifest,
+        resident.soul.body,
+        latest_entry(resident.manifest, source=resident.path),
+        effective_skills(resident.manifest, library_for(path.parent.parent)),
+    )
+    assert result.output == expected + "\n"
+
+
+def test_show_reports_json_for_machines(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident(journaling_resident(tmp_path))
+    args = [*show_args(path, tmp_path), "--format", "json"]
+    result = runner.invoke(main, ["show", "test-agent", *args])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["resident"] == "test-agent"
+    assert payload["journal"] is False
+    assert payload["decisions"] == 0
+    assert "YOUR CHARTER (AUTHORITATIVE, LAST WORD)" in payload["preamble"]
+
+
+def test_show_does_not_consume_a_pending_decision(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A preview must not eat the answer the resident's next real session is owed (#74)."""
+    path = write_resident(journaling_resident(tmp_path))
+    resident = load_manifest(path)
+    db = tmp_path / "show.db"
+    with Store(db) as store:
+        request = store.create_approval_request(
+            agent_id=resident.agent_id,
+            project="p",
+            action="send_email",
+            message="…",
+            resident=resident.id,
+        )
+        store.decide(request.request_id, "approve", decided_by="api")
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "send_email: approve" in result.output
+    with Store(db) as after:
+        still_waiting = after.undelivered_decisions(resident.id)
+    assert [record.request_id for record in still_waiting] == [request.request_id]
+
+
+def test_show_redacts_a_secret_the_resident_journaled(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The journal is the one section no validator scanned: a model wrote it at runtime."""
+    path = write_resident(journaling_resident(tmp_path))
+    manifest = load_manifest(path).manifest
+    write_entry(manifest, date(2026, 8, 24), "close-of-day", "reused sk-ant-abcdef0123456789ghij")
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+    assert result.exit_code == 0, result.output
+    assert "sk-ant-" not in result.output
+    assert "[redacted:secret]" in result.output
+
+
+def test_show_names_the_residents_it_knows_about(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident()
+    result = runner.invoke(main, ["show", "nobody", *show_args(path, tmp_path)])
+    assert result.exit_code == 1
+    assert "no valid resident 'nobody'" in result.output
 
 
 # ---------------------------------------------------------------------------- scheduler

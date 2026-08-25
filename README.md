@@ -68,6 +68,7 @@ $ steward scheduler run              # the daemon: sleep to the next due routine
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
 $ steward journal life-agent         # what Hob has actually written, newest first
+$ steward show life-agent            # the exact preamble Hob's next session opens with
 ```
 
 **The HTTP API** (#3). The token-gated write path burrow's viewer calls directly, so
