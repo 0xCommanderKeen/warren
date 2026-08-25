@@ -260,7 +260,10 @@ in `viewer/projection.js`. Both adapters run the same fixture matrix in
   `needs_human.message`. Job events require non-empty `task_id` and `title`;
   claims and completions also require `claimant`, exactly equal to the top-level
   `agent_id` that Steward emits them under. Optional `parent_task_id`, when present on
-  any job event, is a non-empty string. Known optional detail fields are strings;
+  any job event, is a non-empty string. Known optional detail fields are strings,
+  except that `needs_human.detail` is admitted as an extension value so a malformed
+  structured attempt can still degrade to its plain message. The approval projection
+  requires that value to be an object or null before it offers controls;
   `stop_hook_active`, when present, is boolean.
 - `task_posted.required_skills` follows Steward's exact `list[str]` contract. The
   list may be empty and individual strings may be blank or whitespace-only; Burrow
@@ -297,6 +300,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `artifact_produced` | the agent writes/edits a file or output    | `artifact` (path)          |
 | `heartbeat`         | the agent is known to be working            | bounded tool/phase detail  |
 | `needs_human`       | the agent is blocked on the human          | `message`                  |
+| `needs_human_resolved` | Steward recorded the human's decision   | `request_id`, `decision`, `decided_by`, `action` |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
 | `routine_started`   | Steward began a declared routine           | `routine`, `run_id`, `trigger` |
@@ -439,6 +443,109 @@ can correct it without reloading; credentials never enter storage, rendered mark
 | `202` with valid acceptance | accepted; await exact `task_posted` | blocked until exact evidence |
 | other HTTP status, invalid response, timeout, or network failure | may have mutated | blocked; reconcile only an identified exact event |
 
+### Structured approval knocks
+
+`needs_human` remains backwards compatible. A payload with only `message` is the
+same plain-text knock as before. If any of `action`, `detail`, `options`, or
+`request_id` is present, the approval projection requires the complete Steward
+shape:
+
+```json
+{
+  "message": "May I send the note?",
+  "request_id": "…",
+  "action": "send_email",
+  "detail": {"to": "anna@example.com", "subject": "Thursday"},
+  "options": ["approve", "deny", "edit"],
+  "expires_at": "2026-08-26T10:00:00.000Z"
+}
+```
+
+`action` is Steward's lowercase action slug, `detail` is a required key whose value
+is an object or explicit null, and
+`options` is a non-empty ordered list of `approve`, `deny`, and `edit`. Steward
+preserves repeated entries, and Burrow renders one accessible button per entry in
+the same order with index-keyed focus identity.
+Detection is by payload shape, never by `source`, so Codex, Claude, or another
+emitter can raise the same real request. A partial or malformed structured attempt
+is still a valid legacy `needs_human`: Burrow shows its `message`, emits a bounded
+diagnostic, and offers no buttons.
+
+Valid requests are bounded to 40 identities and queue per villager newest first.
+The immutable lifecycle identity is the exact `(request_id, resident agent_id,
+project, action, detail, options, message, expires_at-presence/value)` request:
+objects compare independent of key order and JSON numbers compare in the shared
+browser-consumer number domain (`1` equals `1.0`), while array/option order remains
+meaningful. Wire identity strings are never trimmed during correlation.
+Steward owns `request_id` as a global primary key, any protocol producer may emit
+the request, and only `source: "steward"` may emit its close. If a corrupt or combined
+log reuses one request ID with any incompatible immutable field, Burrow keeps
+bounded diagnostic evidence but quarantines the ID-only controls; neither identity
+can rewrite the question/options, inherit its close, or be submitted ambiguously.
+A pending request owns the doorstep even if later activity arrives and even after
+the ordinary 12-hour activity window. Once that exact pending lifecycle is known,
+the first subsequently appended valid `needs_human_resolved` with the same
+`request_id`, resident `agent_id`, project, and action releases it. Producer
+timestamps are descriptive and never reorder this authority. Resolution events must
+come from `source: "steward"` and their decision is exactly `approve`, `deny`, or
+`edit`. A close appended before its request is unknown at that point: it is ignored
+with a bounded diagnostic and cannot later bind when a matching request appears.
+Likewise, request duplicates never replace the first appended immutable request.
+Exact close replays and all later conflicts are ignored with bounded, deduplicated
+diagnostics, so neither an earlier timestamp nor an equal timestamp can replace the
+rendered decision. The shared parity fixture
+`tests/fixtures/approval-lifecycle.json` and `approval-identity.json` drive both the
+JavaScript projection and Python rotation tests so these rules cannot drift.
+
+The panel keeps at most five newest confirmed request cards (action, detail and
+decision) alongside any newer pending queue. Closing one card therefore does not erase
+the decision while another remains actionable, and keyed rerenders move keyboard focus
+to the next enabled approval control. A resident whose ordinary latest event is
+`session_ended` remains terminal after its parked approval closes; the close cannot
+resurrect it as resting. Rotation retains that terminal evidence with the approval so
+live delivery and reset replay agree.
+
+An option calls Steward directly; Burrow's server remains read-only:
+
+```http
+POST <steward>/approvals/<url-encoded-request_id>
+Authorization: Bearer <STEWARD_TOKEN>
+Content-Type: application/json
+
+{"decision":"approve"}
+```
+
+`edit` sends the deliberately small free-text bridge
+`{"decision":"edit","edit":{"note":"…"}}`; building a field-aware editor is out
+of scope. Credentials live only in browser memory. Steward records the decision
+durably, emits `needs_human_resolved`, and only then returns the first-write `202`
+receipt with `status: "recorded"`. That receipt is not resolution evidence. Burrow
+starts a 15-second acknowledgement deadline at click time. Within one telemetry
+generation it stages bounded exact post-cursor close evidence, but acknowledges only
+the first close selected by the authoritative approval projection for the exact
+immutable request identity. The HTTP
+request is pending, a definitive
+refusal is retryable, and a timeout, telemetry reset, network error, proxy/server
+error, or malformed receipt is ambiguous and blocks retry to prevent a duplicate.
+`401`, `404`, and `422` are contractually pre-decision and therefore definitive. A
+`409` is definitive only when its parsed body is exactly Steward's trusted
+`{"detail":{"error":"approval_expired","message":"…"}}` envelope; invalid JSON,
+proxy bodies, other codes, or extra envelope fields remain ambiguous and block unsafe
+retry. A `200` means a replay of an already-recorded answer; Steward
+emits no new event for it, so Burrow calls it indeterminate and waits for retained
+exact log evidence rather than resolving optimistically.
+
+Closing-event evidence uses the same SSE readiness staging as run and job
+acknowledgements. Pre-ready evidence is published only at a valid exact `ready`
+cursor (or before recovery polling advances past it). Reset, namespace change, and
+the shared 4,000-record staging overflow conservatively invalidate correlation. A
+reset clears all staged generation evidence and revalidates every possibly-delivered
+attempt against the replayed exact lifecycle and resolution fingerprint. An
+acknowledged attempt remains acknowledged only if the identical close survives;
+missing, pending, collided, or different replay authority becomes explicitly
+indeterminate/ambiguous and remains retry-blocked. Only observing that exact
+authoritative close again after the reset can recover acknowledgement.
+
 ## Projection rules (v0)
 
 The villager's state is decided by its **latest** event:
@@ -456,7 +563,8 @@ The villager's state is decided by its **latest** event:
 - `session_ended` → removed from the village
 - no event for 30 minutes while "working" → shown as **stale** (faded), because a
   villager frozen mid-swing would be a lie
-- no event for 12 hours → dropped from the village entirely, whatever the state
+- no event for 12 hours → dropped from ordinary village activity. A valid structured
+  approval is the exception: its villager remains at the door until its exact close.
 
 These rules have exactly one implementation: `reduce()` in `viewer/projection.js`,
 loaded by the viewer and exercised by `tests/projection.test.js` (`node --test`,
@@ -489,6 +597,17 @@ same per-event capacity and constant-space equal-time order. An already-evicted 
 reconstructed merely because a transition for that task appears later in the retained input.
 Task-ID retention crosses agent groups: a central `steward:api` post remains paired with
 claim/done/failed/lease-expiry evidence after the claimant session ends.
+Structured approvals are independently retained by lifecycle: at most 40 bounded
+request records (including one representative incompatible collision). Rotation
+preserves the first request and first subsequent matching close by original log index;
+later replays/conflicts and unknown closes are isolated from ordinary retention and
+discarded, so rotation cannot let an orphan bind to a future knock. Pending requests survive the
+ordinary activity drop window;
+resolved pairs stay paired, capacity removes whole pairs, and resolution-only evidence
+never becomes villager liveness. A retained approval also carries a later ordinary
+`session_ended` record so its eventual close cannot manufacture liveness after reset.
+Rotation therefore cannot create a ghost knock or resurrect a parked session by keeping
+only one part of the authoritative projection.
 
 That tail is exactly the input the rules above consume, so the village and job board render
 identically across a rotation/reset: same states, same panel history and no resurrected
@@ -581,15 +700,29 @@ at, so the server can forward it. When it ingests a `needs_human` event and
 
 Two properties matter more than the format:
 
-- **A delivered knock is claimed once.** Identity is `(agent_id, ts, message)`, not
-  arrival, so an emitter retry or replay does not duplicate a successful delivery.
-  A failed delivery remains eligible for a later replay.
+- **A delivered knock is claimed once.** A producer `delivery_id` is authoritative.
+  The plain legacy fallback is `(agent_id, ts, message)`. Without a producer ID, a
+  structured request uses a versioned SHA-256 identity over exact agent, project,
+  request, action, message and event strings plus JSON-semantically normalized detail,
+  ordered options (including repeats), expiry presence/value, timestamp, source and
+  protocol version. Terminal ledgers therefore retain no detail or other secret.
+  Pre-v3 structured terminal hashes cannot prove which immutable shape they represented,
+  so they are intentionally not aliases: the safe upgrade tradeoff is at most one
+  re-notification of an old structured event rather than false suppression by a plain
+  or differently shaped event. Plain legacy keys and producer delivery IDs remain
+  compatible. Identity is never arrival, so an emitter retry or
+  replay does not duplicate a successful delivery. A failed delivery remains eligible.
 - **Notifying never blocks ingest.** The POST runs on a daemon thread and swallows
   every error; a down notification service must not slow an agent down or lose an
   event. Unset `BURROW_NOTIFY_URL` and nothing is sent at all.
 
 This is a transport for something that already happened. It never invents a knock —
 one `needs_human` event, one notification.
+For a valid structured approval the push title is its `action` and the UTF-8 body is
+its JSON `detail`, so the decision is legible without opening Burrow. A malformed
+structured attempt uses the unchanged legacy villager/project/message notification.
+The durable claim, delivery ID, retry, and one-event/one-notification semantics are
+identical for both shapes.
 
 ## The one rule, restated for implementers
 

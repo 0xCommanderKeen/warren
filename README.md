@@ -45,6 +45,19 @@ Steward's HTTP response is still in flight. A late valid response retains its sa
 but remains visibly timed out until an exact post-boundary event proves the job; a malformed
 acceptance with a valid task identity follows the same evidence-only reconciliation rule.
 
+A structured `needs_human` opens an approval queue on that villager with the action,
+detail, and Steward-defined approve/deny/edit options. The browser POSTs directly to
+Steward with memory-only credentials, but the villager leaves the door only after the
+exact `needs_human_resolved` event reaches Burrow. Refusals, timeouts, ambiguous
+delivery, credential correction, and duplicate prevention stay explicit. Plain and
+malformed structured knocks retain the legacy text-only behavior. Structured phone
+notifications use the action as title and detail as body while preserving the same
+durable one-event/one-notification claim. The immutable question (including semantic
+detail/options, message, and expiry) is quarantined if one request ID is reused
+incompatibly; equal-time decisions use append order. Recent confirmed cards remain
+beside a newer pending queue, while a parked session stays ended after its approval
+closes. Only Steward's exact parsed `approval_expired` 409 envelope permits safe retry.
+
 The **fleet ledger** beside the census is the compact operational view. It keeps
 the newest 200 validated events from the shared parsed stream and filters them by
 search text, project, runner/source, event-derived state, and villager. Its
@@ -194,8 +207,9 @@ unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restar
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   viewer over the local log.
 - **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
-  `needs_human` event is also pushed there with a stable receiver dedupe ID, the villager's name, project
-  and message (`https://ntfy.sh/<your-topic>` works out of the box;
+  `needs_human` event is also pushed there with a stable receiver dedupe ID. Plain knocks carry the
+  villager's name, project, and message; structured approvals carry action and detail
+  (`https://ntfy.sh/<your-topic>` works out of the box;
   `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
   dead notification service can never block or lose an event. Forwarding uses two
   workers and a 64-knock memory queue backed by a pre-acknowledgement fsynced journal. Restart and

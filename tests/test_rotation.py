@@ -59,6 +59,238 @@ def village(lines, now_ms=None):
 
 
 class CarryForwardTest(unittest.TestCase):
+    @staticmethod
+    def approval(request_id, agent="approver", minutes_ago=0):
+        return event(agent, "needs_human", minutes_ago, message="May I?",
+                     request_id=request_id, action="send_email",
+                     detail={"to": "a@example.com"},
+                     options=["approve", "deny", "edit"])
+
+    @staticmethod
+    def resolution(request_id, agent="approver", minutes_ago=0, decision="approve"):
+        resolved = event(agent, "needs_human_resolved", minutes_ago,
+                         request_id=request_id, decision=decision,
+                         decided_by="api", action="send_email")
+        resolved["source"] = "steward"
+        return resolved
+
+    def test_unresolved_structured_knock_survives_the_ordinary_drop_window(self):
+        pending = json.dumps(self.approval("old-pending", minutes_ago=13 * 60))
+        tail = serve.carry_forward([pending], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(tail, [pending])
+
+    def test_resolution_is_retained_only_with_its_request_and_never_as_liveness(self):
+        knock = json.dumps(self.approval("paired", minutes_ago=5))
+        close = json.dumps(self.resolution("paired", minutes_ago=4))
+        orphan = json.dumps(self.resolution("orphan", agent="nobody", minutes_ago=3))
+        ended = json.dumps(event("nobody", "session_ended", 2))
+        tail = serve.carry_forward([knock, close, orphan, ended], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertIn(knock, tail)
+        self.assertIn(close, tail)
+        self.assertNotIn(orphan, tail,
+                         "an orphan close is ignored and cannot survive rotation to bind later")
+        self.assertNotIn(ended, tail)
+        script = """
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const lines=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const cursor='v1:0123456789abcdef0123456789abcdef:1:2:3:99';
+const runtime=createBrowserRuntime({now:()=>Date.now(),EventSource:null,
+ setTimeout:()=>1,clearTimeout(){},fetch:async url=>url==='/villagers'?{ok:false}:
+ ({ok:true,headers:{get:n=>n==='X-Burrow-Cursor'?cursor:null},text:async()=>lines.join('\\n')})});
+runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().villagers.map(v=>v.id))));
+"""
+        projected = subprocess.run(["node", "-e", script], input=json.dumps(tail), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        self.assertEqual(json.loads(projected.stdout), ["approver"],
+                         "orphan close does not create or refresh nobody")
+
+    def test_approval_rotation_capacity_drops_whole_pairs_without_ghost_knocks(self):
+        events = []
+        for index in range(serve.KEEP_APPROVALS + 3):
+            events.extend([self.approval(f"r-{index}", minutes_ago=10 - index / 10),
+                           self.resolution(f"r-{index}", minutes_ago=9 - index / 10)])
+        keep, isolated = serve._approval_keep_indexes(list(enumerate(events)))
+        retained = [events[index] for index in keep]
+        request_ids = {}
+        for item in retained:
+            request_ids.setdefault(item["payload"]["request_id"], set()).add(item["type"])
+        self.assertLessEqual(len(request_ids), serve.KEEP_APPROVALS)
+        self.assertTrue(all(types == {"needs_human", "needs_human_resolved"}
+                            for types in request_ids.values()))
+        self.assertEqual(isolated, set(range(len(events))))
+
+    def test_rotation_quarantines_incompatible_reuse_and_keeps_first_matching_close(self):
+        request_a = self.approval("reused", agent="agent-a", minutes_ago=5)
+        early = self.resolution("reused", agent="agent-a", minutes_ago=4,
+                                decision="deny")
+        late = self.resolution("reused", agent="agent-a", minutes_ago=3,
+                               decision="approve")
+        request_b = self.approval("reused", agent="agent-b", minutes_ago=2)
+        request_b["payload"]["action"] = "publish_note"
+        ordered = [request_a, early, late, request_b]
+        keep, isolated = serve._approval_keep_indexes(list(enumerate(ordered)))
+        retained = [ordered[index] for index in sorted(keep)]
+        self.assertEqual({item["agent_id"] for item in retained
+                          if item["type"] == "needs_human"},
+                         {"agent-a", "agent-b"})
+        closes = [item for item in retained if item["type"] == "needs_human_resolved"]
+        self.assertEqual([item["payload"]["decision"] for item in closes], ["deny"])
+        self.assertEqual(isolated, set(range(len(ordered))))
+
+        collided_first = [request_a, request_b, early]
+        keep, _ = serve._approval_keep_indexes(list(enumerate(collided_first)))
+        retained = [collided_first[index] for index in sorted(keep)]
+        self.assertFalse(any(item["type"] == "needs_human_resolved"
+                             for item in retained),
+                         "a quarantined lifecycle cannot acquire a resolution")
+
+    def test_shared_approval_lifecycle_fixture_matches_viewer_selection(self):
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures",
+                               "approval-lifecycle.json")
+        with open(fixture, encoding="utf-8") as stream:
+            cases = json.load(stream)
+        for case in cases:
+            events = case["events"]
+            keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+            retained = [events[index] for index in sorted(keep)]
+            requests = [item for item in retained if item["type"] == "needs_human"]
+            closes = [item for item in retained
+                      if item["type"] == "needs_human_resolved"]
+            with self.subTest(case["name"]):
+                self.assertEqual([item["ts"] for item in requests],
+                                 [case["expected_request_ts"]])
+                expected = ([] if case["expected_decision"] is None
+                            else [case["expected_decision"]])
+                self.assertEqual([item["payload"]["decision"] for item in closes], expected)
+
+    def test_shared_immutable_request_fixture_uses_json_semantic_equality(self):
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures",
+                               "approval-identity.json")
+        with open(fixture, encoding="utf-8") as stream:
+            cases = json.load(stream)
+        for case in cases:
+            left = self.approval(case["left"]["request_id"])
+            left["payload"].update(case["left"])
+            right = self.approval(case["right"]["request_id"])
+            right["payload"].update(case["right"])
+            with self.subTest(case["name"]):
+                self.assertEqual(
+                    serve._approval_lifecycle_identity(left) ==
+                    serve._approval_lifecycle_identity(right),
+                    case["compatible"],
+                )
+
+    def test_rotation_preserves_exact_whitespace_identity_and_append_order(self):
+        request = self.approval(" request ", agent=" agent ")
+        request["project"] = " life "
+        request["ts"] = "2026-08-25T10:00:00.000Z"
+        first = self.resolution(" request ", agent=" agent ", decision="approve")
+        first["project"] = " life "
+        second = self.resolution(" request ", agent=" agent ", decision="deny")
+        second["project"] = " life "
+        first["ts"] = second["ts"] = "2026-08-25T10:01:00.000Z"
+        wrong = self.resolution("request", agent="agent", decision="deny")
+        wrong["project"] = "life"
+        events = [request, first, second, wrong]
+        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        retained = [events[index] for index in sorted(keep)]
+        closes = [item for item in retained if item["type"] == "needs_human_resolved"]
+        self.assertEqual([item["payload"]["decision"] for item in closes],
+                         ["approve"],
+                         "only the first exact close survives; conflicts and orphans do not")
+
+    def test_approval_rotation_keeps_session_terminal_for_close_replay(self):
+        knock = self.approval("parked", agent="parked-agent")
+        activity = event("parked-agent", "tool_called", tool="Read")
+        ended = event("parked-agent", "session_ended")
+        close = self.resolution("parked", agent="parked-agent", decision="approve")
+        lines = [json.dumps(item) for item in [knock, activity, ended, close]]
+        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        retained = [json.loads(line) for line in tail]
+        self.assertEqual([item["type"] for item in retained],
+                         ["needs_human", "session_ended", "needs_human_resolved"])
+        self.assertEqual(retained[-1]["payload"]["decision"], "approve",
+                         "rotation preserves the exact globally presentable decision")
+
+    def test_rotation_keeps_first_close_by_append_index_not_timestamp(self):
+        request = self.approval("bounded")
+        request["ts"] = "2026-08-25T10:10:00.000Z"
+        closes = []
+        for minute in range(10):
+            close = self.resolution("bounded", decision="deny")
+            close["ts"] = f"2026-08-25T10:{minute:02d}:00.000Z"
+            closes.append(close)
+        valid = self.resolution("bounded", decision="approve")
+        valid["ts"] = "2026-08-25T10:11:00.000Z"
+        events = [request, valid, *closes]
+        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        retained = [events[index] for index in sorted(keep)]
+        retained_closes = [item for item in retained
+                           if item["type"] == "needs_human_resolved"]
+        self.assertEqual(retained_closes, [valid])
+
+    def test_approval_rotation_keeps_first_equal_timestamp_append(self):
+        request = self.approval("cutoff-order")
+        request["ts"] = "2026-08-25T10:10:00.000Z"
+        first = self.resolution("cutoff-order", decision="approve")
+        second = self.resolution("cutoff-order", decision="deny")
+        first["ts"] = second["ts"] = "2026-08-25T10:08:00.000Z"
+        closer = []
+        for index in range(7):
+            item = self.resolution("cutoff-order", decision="edit")
+            item["ts"] = f"2026-08-25T10:09:0{index}.000Z"
+            item["payload"]["extension"] = {"index": index}
+            closer.append(item)
+        events = [request, first, second, *closer]
+        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        retained = [events[index] for index in sorted(keep)]
+        closes = [item for item in retained if item["type"] == "needs_human_resolved"]
+        self.assertEqual([item["payload"]["decision"] for item in closes], ["approve"])
+
+    def test_rotation_reconstructs_append_authority_and_independent_knocks(self):
+        request = self.approval("projection")
+        request["ts"] = "2026-08-25T10:00:00.000Z"
+        future_activity = event("approver", "tool_called", tool="Read")
+        future_activity["ts"] = "2026-08-25T23:00:00.000Z"
+        close = self.resolution("projection")
+        close["ts"] = "2026-08-25T09:00:00.000Z"
+        plain = event("approver", "needs_human", message="Independent later knock")
+        plain["ts"] = "2026-08-25T08:00:00.000Z"
+        cases = [
+            [request, future_activity, close],
+            [request, future_activity, close, plain],
+            [request, plain, close],
+        ]
+        script = """
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const lines=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const cursor='v1:0123456789abcdef0123456789abcdef:1:2:3:99';
+const runtime=createBrowserRuntime({now:()=>Date.parse('2026-08-25T10:02:00.000Z'),EventSource:null,
+ setTimeout:()=>1,clearTimeout(){},fetch:async url=>url==='/villagers'?{ok:false}:
+ ({ok:true,headers:{get:n=>n==='X-Burrow-Cursor'?cursor:null},text:async()=>lines.join('\\n')})});
+runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().villagers.map(v=>({
+ id:v.id,state:v.state,lastLine:v.lastLine,knock:v.knock&&v.knock.message,
+ confirmations:v.approvals.map(item=>item.request_id)})))));
+"""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        now_ms = int(datetime.datetime(2026, 8, 25, 10, 2,
+                                       tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        for events in cases:
+            original = [json.dumps(item) for item in events]
+            rotated = serve.carry_forward(original, now_ms)
+            with self.subTest(types=[item["type"] for item in events]):
+                projections = []
+                for lines in (original, rotated):
+                    completed = subprocess.run(
+                        ["node", "-e", script], input=json.dumps(lines), text=True,
+                        cwd=root, check=True, capture_output=True)
+                    projections.append(json.loads(completed.stdout))
+                self.assertEqual(projections[1], projections[0])
+
     def test_task_tie_projection_is_constant_space_under_ten_thousand_events(self):
         timestamp = "2026-08-25T10:01:00.000Z"
         post = {"v": 0, "ts": "2026-08-25T10:00:00.000Z", "source": "steward",

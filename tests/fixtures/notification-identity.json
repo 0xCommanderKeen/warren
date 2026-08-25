@@ -1,0 +1,19 @@
+{
+  "expected_key": "structured-v3-sha256-aab4791770b74d6c4bd8ffb37e7f5d04354ee21c6917b856e2a201d629779822",
+  "event": {
+    "v": 0,
+    "ts": "2026-08-25T10:00:00.000Z",
+    "source": "codex",
+    "agent_id": " codex:keeper ",
+    "project": " life ",
+    "type": "needs_human",
+    "payload": {
+      "message": "Send 🚀?",
+      "request_id": " request ",
+      "action": "send_email",
+      "detail": {"z": [1, true, null], "a": {"é": 1.0}},
+      "options": ["approve", "approve", "deny"],
+      "expires_at": null
+    }
+  }
+}

@@ -21,6 +21,8 @@ const STALE_MS = 30 * 60 * 1000;
 const DROP_MS  = 12 * 60 * 60 * 1000;
 const MAX_EVENTS = 80;
 const MAX_ARTIFACTS = 30;
+const APPROVAL_ORDINALS = typeof module === "object" && module.exports ?
+  require("./approval-knocks.js") : null;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -99,7 +101,8 @@ const EVENT_TYPES = new Set(["task_started","tool_called","tool_failed",
                              "artifact_produced","heartbeat","needs_human",
                              "idle","session_ended","routine_started",
                              "routine_finished","routine_failed","task_posted",
-                             "task_claimed","task_done","task_failed"]);
+                             "task_claimed","task_done","task_failed",
+                             "needs_human_resolved"]);
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 const TIMESTAMP_V0 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const REQUIRED_PAYLOAD_TEXT = {
@@ -202,8 +205,23 @@ function validateEvent(ev) {
     }
     if (ev.source !== "steward") return "task events require source steward";
   }
+  if (ev.type === "needs_human_resolved") {
+    for (const field of ["request_id", "decided_by", "action"]) {
+      if (typeof ev.payload[field] !== "string" || !ev.payload[field].trim()) {
+        return "invalid payload." + field;
+      }
+    }
+    if (!["approve", "deny", "edit"].includes(ev.payload.decision)) {
+      return "invalid payload.decision";
+    }
+    if (ev.source !== "steward") return "approval resolutions require source steward";
+  }
   for (const field of OPTIONAL_PAYLOAD_TEXT) {
-    if (Object.hasOwn(ev.payload, field) && typeof ev.payload[field] !== "string") {
+    // Any attempted structured detail remains ingestible so its message can
+    // degrade to a plain knock; approval-knocks.js owns the stricter shape.
+    const structuredDetail = ev.type === "needs_human" && field === "detail";
+    if (Object.hasOwn(ev.payload, field) && typeof ev.payload[field] !== "string" &&
+        !structuredDetail) {
       return "invalid payload." + field;
     }
   }
@@ -228,7 +246,8 @@ function parseEvents(batch) {
     const reason = validateEvent(ev);
     if (reason) {
       if (ev && typeof ev.type === "string" &&
-          (ev.type.startsWith("routine_") || ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type))) {
+          (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
+            ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type))) {
         rejections.push({ type: ev.type, reason });
       }
       continue;
@@ -247,6 +266,10 @@ function taskRejections(batch) {
   const parsed = parseEvents(batch);
   return (parsed[REJECTIONS] || []).filter(item => item.type.startsWith("task_"));
 }
+function approvalRejections(batch) {
+  const parsed = parseEvents(batch);
+  return (parsed[REJECTIONS] || []).filter(item => item.type === "needs_human_resolved");
+}
 function isValidatedBatch(batch) {
   return Boolean(batch && batch[VALIDATED_BATCH]);
 }
@@ -255,7 +278,8 @@ function foldEvents(agents, batch) {
   for (const ev of parseEvents(batch)) {
     // Routines have their own run ledger. They neither create an ordinary
     // villager nor refresh/change one whose last interactive state is known.
-    if (ev.type.startsWith("routine_") || ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) continue;
+    if (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
+        ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) continue;
     let a = agents.get(ev.agent_id);
     if (!a) {
       a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
@@ -301,7 +325,7 @@ function nameArtifacts(artifacts, villagers, souls) {
       soulByProject.get(a.project) || NAMES[hashCode(a.agent_id) % NAMES.length],
   }));
 }
-function reduce(input, now, souls) {
+function reduce(input, now, souls, approvalState = null) {
   const soulByAgent = new Map(), soulByProject = new Map();
   const isResident = soul => Boolean(soul && soul.valid === true &&
     soul.manifest_version === 1 && Number.isInteger(soul.home));
@@ -318,12 +342,62 @@ function reduce(input, now, souls) {
   }
   const agents = input instanceof Map ? input : new Map();
   if (!(input instanceof Map)) foldEvents(agents, input);
+  const approvalRecordFor = event => {
+    if (!approvalState || !(approvalState.requests instanceof Map) ||
+        typeof approvalState.classify !== "function" || !event) return { shape: null, record: null };
+    const shape = approvalState.classify(event);
+    return { shape, record: shape.kind === "structured" &&
+      typeof approvalState.recordForEvent === "function" ?
+      approvalState.recordForEvent(event) : shape.kind === "structured" ?
+      approvalState.requests.get(shape.request_id) || null : null };
+  };
+  const ordinalFor = event => approvalState &&
+    typeof approvalState.ordinalForEvent === "function" ?
+    approvalState.ordinalForEvent(event) : null;
+  const ordinalApi = APPROVAL_ORDINALS || globalThis.BurrowApprovals;
+  if (!ordinalApi || typeof ordinalApi.compareOrdinal !== "function" ||
+      typeof ordinalApi.recentConfirmations !== "function") {
+    throw new Error("approval append-ordinal authority is unavailable");
+  }
+  const compareOrdinal = ordinalApi.compareOrdinal;
+  const closingLifecycleAfter = (agentId, ordinaryEvent) => {
+    if (!approvalState || !(approvalState.requests instanceof Map)) return null;
+    const boundary = ordinalFor(ordinaryEvent);
+    if (typeof boundary !== "string") return null;
+    let selected = null;
+    for (const record of approvalState.requests.values()) {
+      if (!record || !record.resolution || record.collided || !record.knock ||
+          record.knock.agent_id !== agentId) continue;
+      // Only a lifecycle already open at this ordinary append may close across
+      // it. This prevents an agent-wide resolution from rewriting unrelated
+      // evidence while preserving request -> activity -> exact-close order.
+      if (compareOrdinal(record.knockOrdinal, boundary) <= 0 &&
+          compareOrdinal(record.resolutionOrdinal, boundary) > 0 &&
+          (!selected || compareOrdinal(record.resolutionOrdinal,
+            selected.resolutionOrdinal) > 0)) {
+        selected = record;
+      }
+    }
+    return selected;
+  };
   const out = [];
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
   const visible = sorted.filter(a => {
     const last = a.lastAny || a.events[a.events.length - 1];
-    return last && last.type !== "session_ended" && now - (Date.parse(last.ts) || 0) <= DROP_MS;
+    const tracked = approvalRecordFor(last);
+    if (tracked.shape && tracked.shape.kind === "structured" && !tracked.record) return false;
+    const hasPendingApproval = approvalState && approvalState.requests instanceof Map &&
+      [...approvalState.requests.values()].some(record => record && !record.resolution && !record.collided &&
+        record.knock && record.knock.agent_id === a.id);
+    if (!hasPendingApproval && last && last.type === "session_ended") return false;
+    const independentKnock = last && last.type === "needs_human" &&
+      (!tracked.shape || tracked.shape.kind !== "structured");
+    const closingLifecycle = independentKnock ? null : closingLifecycleAfter(a.id, last);
+    const effective = closingLifecycle ? closingLifecycle.resolution :
+      tracked.record && tracked.record.resolution || last;
+    return effective && (hasPendingApproval ||
+      (effective.type !== "session_ended" && now - (Date.parse(effective.ts) || 0) <= DROP_MS));
   });
   // Reserve exact identities in a separate pass. A project fallback must never
   // consume the declaration belonging to an exact agent that sorts later.
@@ -348,12 +422,42 @@ function reduce(input, now, souls) {
     }
   }
   for (const a of sorted) {
-    const last = a.lastAny || a.events[a.events.length - 1];
+    const ordinaryLast = a.lastAny || a.events[a.events.length - 1];
+    const trackedOrdinary = approvalRecordFor(ordinaryLast);
+    if (trackedOrdinary.shape && trackedOrdinary.shape.kind === "structured" &&
+        !trackedOrdinary.record) continue;
+    const approvalRecords = approvalState && approvalState.requests instanceof Map ?
+      [...approvalState.requests.values()].filter(record =>
+        record && record.knock && record.knock.agent_id === a.id) : [];
+    const pendingApprovals = approvalRecords.filter(record => !record.resolution && !record.collided)
+      .sort((x, y) => compareOrdinal(y.knockOrdinal, x.knockOrdinal));
+    const pendingApproval = pendingApprovals[0] || null;
+    const recentApprovals = ordinalApi.recentConfirmations(approvalState, a.id);
+    const ordinaryRecord = trackedOrdinary.record;
+    const ordinaryResolution = ordinaryRecord && ordinaryRecord.resolution;
+    if (ordinaryRecord && ordinaryRecord.collided && !ordinaryResolution &&
+        ordinaryLast.type === "needs_human") continue;
+    // A pending structured knock owns the doorstep even if the resident emits
+    // later activity. Conversely, only its exact closing event can release it.
+    // A plain/malformed knock is an independent lifecycle, so no structured
+    // close for this agent can suppress it.
+    const independentKnock = ordinaryLast.type === "needs_human" &&
+      (!trackedOrdinary.shape || trackedOrdinary.shape.kind !== "structured");
+    const resolvedAfterOrdinary = independentKnock ? null :
+      closingLifecycleAfter(a.id, ordinaryLast);
+    if (!pendingApproval && ordinaryLast.type === "session_ended") continue;
+    const plainAfterPending = independentKnock && pendingApproval &&
+      compareOrdinal(ordinalFor(ordinaryLast), pendingApproval.knockOrdinal) > 0;
+    const lastRecord = !pendingApproval && resolvedAfterOrdinary ? resolvedAfterOrdinary :
+      !pendingApproval && ordinaryResolution ? ordinaryRecord : null;
+    const last = plainAfterPending ? ordinaryLast : pendingApproval ? pendingApproval.knock :
+      lastRecord ? lastRecord.resolution : ordinaryLast;
     const lastTs = Date.parse(last.ts) || 0;
-    if (last.type === "session_ended") continue;
-    if (now - lastTs > DROP_MS) continue;
+    if (!pendingApproval && last.type === "session_ended") continue;
+    if (!pendingApproval && now - lastTs > DROP_MS) continue;
     let state =
-      last.type === "needs_human" ? "knocking" :
+      pendingApproval || last.type === "needs_human" ? "knocking" :
+      last.type === "needs_human_resolved" ? "resting" :
       last.type === "idle"        ? "resting"  : "working";
     if (last.type === "tool_failed") state = "failed";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
@@ -391,8 +495,14 @@ function reduce(input, now, souls) {
       doing: state === "working" ? doingLabel(shown) : "",
       lastLine: describe(shown),
       knock: state === "knocking"
-        ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs }
+        ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs,
+          structured: last === (pendingApproval && pendingApproval.knock) ? pendingApproval.shape : null,
+          request_id: last === (pendingApproval && pendingApproval.knock) ? pendingApproval.id : null,
+          queue: pendingApprovals }
         : null,
+      approval: lastRecord ?
+        { request_id: lastRecord.id, resolution: lastRecord.resolution } : null,
+      approvals: recentApprovals,
     });
   }
   return out;
@@ -405,6 +515,7 @@ if (typeof module === "object" && module.exports) {
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
     validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
+    approvalRejections,
     foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

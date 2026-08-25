@@ -52,5 +52,11 @@ assert.match(html, /refreshJobListing\(view\.now\)/,
   "quiet clock ticks refresh the job list without replacing the post form");
 assert.doesNotMatch(html, /(?:localStorage|sessionStorage)\s*\./,
   "Steward credentials are never persisted by the page");
+assert.match(html, /data-approval-option/, "structured knocks expose contract options as buttons");
+assert.match(html, /approvalAcks\.observe\(\{ events: view\.approvalEvidence/,
+  "approval acknowledgement consumes only runtime-published closing evidence");
+assert.match(html, /only the closing event releases the villager/,
+  "the approval panel states its non-optimistic truth");
+assert.match(html, /data-approval-edit/, "Steward's edit option has an accessible free-text bridge");
 
 console.log("viewer chrome reports truthful, accessible status");

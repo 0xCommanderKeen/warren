@@ -1,0 +1,15 @@
+[
+  {"name":"legacy with no structured fields","kind":"plain","payload":{"message":"Help"}},
+  {"name":"complete object detail","kind":"structured","payload":{"message":"Help","request_id":"r-object","action":"send_email","detail":{"to":"a@example.com"},"options":["approve","deny","edit"]}},
+  {"name":"complete explicit null detail","kind":"structured","payload":{"message":"Help","request_id":"r-null","action":"restart_service","detail":null,"options":["approve","deny"]}},
+  {"name":"missing detail","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"send_email","options":["approve"]}},
+  {"name":"missing request id","kind":"malformed","payload":{"message":"Help","action":"send_email","detail":{},"options":["approve"]}},
+  {"name":"missing action","kind":"malformed","payload":{"message":"Help","request_id":"r","detail":{},"options":["approve"]}},
+  {"name":"missing options","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"send_email","detail":{}}},
+  {"name":"array detail","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"send_email","detail":[],"options":["approve"]}},
+  {"name":"empty options","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"send_email","detail":{},"options":[]}},
+  {"name":"repeated known options","kind":"structured","payload":{"message":"Help","request_id":"r","action":"send_email","detail":{"subject":"Repeat"},"options":["approve","approve"]}},
+  {"name":"unknown option","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"send_email","detail":{},"options":["later"]}},
+  {"name":"invalid action slug","kind":"malformed","payload":{"message":"Help","request_id":"r","action":"Send Email","detail":{},"options":["approve"]}},
+  {"name":"blank request id","kind":"malformed","payload":{"message":"Help","request_id":"  ","action":"send_email","detail":{},"options":["approve"]}}
+]

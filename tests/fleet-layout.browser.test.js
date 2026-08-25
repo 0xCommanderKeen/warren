@@ -10,10 +10,15 @@ const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
 const { abortError, cdp, delay, stop } = require("./browser-process");
+const approvals = require("../viewer/approval-knocks.js");
 
 const ROOT = path.resolve(__dirname, "..");
 const SNAPSHOT_DIR = path.join(__dirname, "snapshots", "fleet-layout");
-const E2E_TIMEOUT_MS = 120000;
+// The production fixture deliberately runs all interaction, accessibility and
+// visual phases in one isolated Chrome. Cold GitHub runners now need more than
+// two minutes for that parent orchestration; operation-level deadlines below
+// remain strict so individual hangs still fail quickly.
+const E2E_TIMEOUT_MS = 180000;
 const SERVER_READY_TIMEOUT_MS = 8000;
 const SERVER_REQUEST_TIMEOUT_MS = 1000;
 const BROWSER_CONDITION_TIMEOUT_MS = 10000;
@@ -763,6 +768,457 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         status:"Posted — confirmed by the matching task_posted event."});
       fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
         .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
+    await t.test("structured approval waits for exact production closing evidence", async () => {
+      const approval = {v:0,ts:new Date(frozenNow).toISOString(),source:"codex",
+        agent_id:"codex:approval",project:"life",type:"needs_human",payload:{
+          message:"May I send the note?",request_id:"approval-1",action:"send_email",
+          detail:{to:"anna@example.com",subject:"Thursday"},
+          options:["approve","approve"]}};
+      const intervening={...approval,ts:new Date(frozenNow+1).toISOString(),
+        type:"tool_called",payload:{tool:"Read"}};
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,approval,intervening]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();
+      await waitForTelemetry();
+      const pending = await eventually(send, `(async()=>{
+        stewardConfig={url:'http://127.0.0.1:8801',token:'approval-only-secret'};
+        const originalFetch=window.fetch.bind(window);window.__approvalPost=null;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://127.0.0.1:8801/approvals/approval-1'){
+            window.__approvalPost={url:String(url),authorization:options.headers.Authorization,
+              credentials:options.credentials,body:JSON.parse(options.body)};
+            return {status:202,json:async()=>({request_id:'approval-1',status:'recorded',decision:'approve'})};
+          }
+          return originalFetch(url,options);
+        };
+        openPanel('codex:approval');await new Promise(resolve=>requestAnimationFrame(resolve));
+        const before={title:document.querySelector('.approval-card h3')?.textContent,
+          detail:document.querySelector('.approval-detail')?.textContent,
+          options:[...document.querySelectorAll('[data-approval-option]')].map(item=>item.textContent),
+          indexes:[...document.querySelectorAll('[data-approval-option]')].map(item=>item.dataset.approvalIndex),
+          diagnostics:document.querySelectorAll('.approval-diagnostic').length,
+          state:villagers.find(v=>v.id==='codex:approval')?.state};
+        const repeated=[...document.querySelectorAll('[data-approval-option="approve"]')];
+        repeated[1].focus();renderChrome(${frozenNow+1000});
+        const focusedIndex=document.activeElement?.dataset?.approvalIndex;
+        document.activeElement.click();
+        while(!window.__approvalPost)await new Promise(resolve=>setTimeout(resolve,5));
+        await new Promise(resolve=>setTimeout(resolve,20));
+        return {before,focusedIndex,post:window.__approvalPost,state:approvalAcks.get('approval-1').state,
+          stillKnocking:villagers.find(v=>v.id==='codex:approval')?.state,
+          disabled:[...document.querySelectorAll('[data-approval-option]')].every(item=>item.disabled),
+          pendingText:document.querySelector('.approval-feedback')?.textContent,
+          tokenInput:document.querySelector('#steward-token').value,
+          tokenRendered:document.querySelector('#panel-body').textContent.includes('approval-only-secret')};
+      })()`,signal,"production structured approval pending");
+      assert.deepEqual(pending,{before:{title:"send_email",
+        detail:'{\n  "to": "anna@example.com",\n  "subject": "Thursday"\n}',
+        options:["approve","approve"],indexes:["0","1"],diagnostics:0,state:"knocking"},
+        focusedIndex:"1",
+        post:{url:"http://127.0.0.1:8801/approvals/approval-1",
+          authorization:"Bearer approval-only-secret",credentials:"omit",body:{decision:"approve"}},
+        state:"pending",stillKnocking:"knocking",disabled:true,
+        pendingText:"Steward recorded the decision; waiting for the exact closing event…",
+        tokenInput:"",tokenRendered:false});
+
+      const orphan={...approval,ts:new Date(frozenNow+2).toISOString(),source:"steward",
+        agent_id:"codex:nobody",type:"needs_human_resolved",payload:{request_id:"other",
+          decision:"deny",decided_by:"api",action:"send_email"}};
+      fs.appendFileSync(events,JSON.stringify(orphan)+"\n");
+      const unrelated=await eventually(send,`(async()=>{await runtime.poll();return {
+        ack:approvalAcks.get('approval-1').state,
+        villager:villagers.find(v=>v.id==='codex:approval')?.state};})()`,signal,
+        "orphan decision does not close production approval");
+      assert.deepEqual(unrelated,{ack:"pending",villager:"knocking"});
+
+      const closing={...orphan,ts:new Date(frozenNow+3).toISOString(),agent_id:"codex:approval",
+        payload:{request_id:"approval-1",decision:"approve",decided_by:"api",action:"send_email"}};
+      fs.appendFileSync(events,JSON.stringify(closing)+"\n");
+      const closed=await eventually(send,`(async()=>{await runtime.poll();const ack=approvalAcks.get('approval-1');
+        return {ack:ack.state,villager:villagers.find(v=>v.id==='codex:approval')?.state,
+          confirmed:document.querySelector('[data-approval-confirmation="approval-1"]')?.textContent
+            .includes('Decision approve — confirmed by the exact closing event.')||false};})()`,signal,
+        "exact production approval closing event");
+      assert.deepEqual(closed,{ack:"acknowledged",villager:"resting",confirmed:true});
+      const resetTruth=await eventually(send,`(()=>{
+        const original=fleetView.approvalState.requests.get('approval-1');
+        const state=record=>({requests:new Map(record?[['approval-1',record]]:[])});
+        const resetCursor='v1:fedcba9876543210fedcba9876543210:1:2:3:30';
+        approvalAcks.observe({cursor:resetCursor,events:[],reset:true,
+          approvalState:state(original)});
+        const same=approvalAcks.get('approval-1').state;
+        const cases=[
+          ['pending',state({...original,resolution:null})],
+          ['missing',state(null)],
+          ['collided',state({...original,collided:true})],
+          ['different',state({...original,resolution:{...original.resolution,
+            payload:{...original.resolution.payload,decision:'deny'}}})],
+        ];
+        const invalid=cases.map(([name,approvalState])=>{
+          approvalAcks.observe({cursor:resetCursor,events:[],reset:true,approvalState});
+          const item=approvalAcks.get('approval-1');
+          const holder=document.createElement('div');holder.innerHTML=approvalFeedback(original);
+          return {name,state:item.state,blocked:approvalAcks.blocks('approval-1'),
+            role:holder.firstElementChild?.getAttribute('role'),text:holder.textContent};
+        });
+        approvalAcks.observe({cursor:'v1:fedcba9876543210fedcba9876543210:1:2:3:31',
+          events:[original.resolution],approvalState:state(original)});
+        return {same,invalid,recovered:approvalAcks.get('approval-1').state};
+      })()`,signal,"production approval reset fingerprint UI");
+      assert.deepEqual(resetTruth,{same:"acknowledged",invalid:[
+        {name:"pending",state:"indeterminate",blocked:true,role:"alert",
+          text:"Telemetry reset and the exact lifecycle is pending; retry is disabled until the exact authoritative close is observed again."},
+        {name:"missing",state:"indeterminate",blocked:true,role:"alert",
+          text:"Telemetry reset and the exact lifecycle is missing or collided; retry is disabled until the exact authoritative close is observed again."},
+        {name:"collided",state:"indeterminate",blocked:true,role:"alert",
+          text:"Telemetry reset and the exact lifecycle is missing or collided; retry is disabled until the exact authoritative close is observed again."},
+        {name:"different",state:"indeterminate",blocked:true,role:"alert",
+          text:"Telemetry reset and the replay selected a different closing decision; retry is disabled until the exact authoritative close is observed again."},
+      ],recovered:"acknowledged"});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("parked approval decisions remain globally visible without a villager", async () => {
+      const request={v:0,ts:new Date(frozenNow).toISOString(),source:"codex",
+        agent_id:"codex:parked-approval",project:"life",type:"needs_human",payload:{
+          message:"May I publish the parked note?",request_id:"parked-visible",
+          action:"publish_note",detail:{note:"exact parked detail"},options:["approve","deny"]}};
+      const ended={...request,ts:new Date(frozenNow+1).toISOString(),type:"session_ended",payload:{}};
+      const closing={...request,ts:new Date(frozenNow+2).toISOString(),source:"steward",
+        type:"needs_human_resolved",payload:{request_id:"parked-visible",decision:"deny",
+          decided_by:"api",action:"publish_note"}};
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,request,ended]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();await waitForTelemetry();
+      const pending=await eventually(send,`(()=>({
+        state:villagers.find(v=>v.id==='codex:parked-approval')?.state,
+        global:!!document.querySelector('[data-global-approval-confirmation="parked-visible"]')}))()`,
+      signal,"parked approval remains pending at the door");
+      assert.deepEqual(pending,{state:"knocking",global:false});
+
+      fs.appendFileSync(events,JSON.stringify(closing)+"\n");
+      const visible=await eventually(send,`(async()=>{
+        openPanel(FLEET_LEDGER_ID);fleetTab='attention';renderFleet(${frozenNow});
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const tab=document.querySelector('[data-fleet-tab="attention"]');tab.focus();
+        await runtime.poll();
+        const card=document.querySelector('[data-global-approval-confirmation="parked-visible"]');
+        return !villagers.some(v=>v.id==='codex:parked-approval')&&card&&{
+          villagerAbsent:true,focus:document.activeElement?.dataset?.fleetTab,
+          region:card.closest('section')?.getAttribute('aria-label'),
+          action:card.querySelector('h3')?.textContent,detail:card.querySelector('pre')?.textContent,
+          decision:card.querySelector('[role="status"]')?.textContent,
+          actionable:card.querySelectorAll('button,textarea,input,select').length};
+      })()`,signal,"parked approval exact decision in global production UI");
+      assert.deepEqual(visible,{villagerAbsent:true,focus:"attention",
+        region:"Recent confirmed approval decisions",action:"publish_note",
+        detail:'{\n  "note": "exact parked detail"\n}',
+        decision:"Decision deny — confirmed by the exact closing event.",actionable:0});
+
+      await resetPage();await waitForTelemetry();
+      const replayed=await eventually(send,`(()=>{
+        openPanel(FLEET_LEDGER_ID);fleetTab='attention';renderFleet(${frozenNow});
+        const card=document.querySelector('[data-global-approval-confirmation="parked-visible"]');
+        return !villagers.some(v=>v.id==='codex:parked-approval')&&card&&{
+          absent:true,decision:card.querySelector('[role="status"]')?.textContent};
+      })()`,signal,"parked approval bootstrap/reset replay parity");
+      assert.deepEqual(replayed,{absent:true,
+        decision:"Decision deny — confirmed by the exact closing event."});
+
+      const bounded=[];
+      for(let index=0;index<approvals.MAX_CONFIRMATIONS+2;index++){
+        const id=`parked-bound-${index}`,agent=`codex:parked-bound-${index}`;
+        const knock={...request,ts:new Date(frozenNow+index*3).toISOString(),agent_id:agent,
+          payload:{...request.payload,request_id:id,detail:{index}}};
+        bounded.push(knock,{...knock,ts:new Date(frozenNow+index*3+1).toISOString(),
+          type:"session_ended",payload:{}},{...closing,
+          ts:new Date(frozenNow+index*3+2).toISOString(),agent_id:agent,
+          payload:{...closing.payload,request_id:id,decision:index%2?"deny":"approve"}});
+      }
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,...bounded]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();await waitForTelemetry();
+      const capped=await eventually(send,`(()=>{
+        openPanel(FLEET_LEDGER_ID);fleetTab='attention';renderFleet(${frozenNow});
+        return [...document.querySelectorAll('[data-global-approval-confirmation]')]
+          .map(card=>card.dataset.globalApprovalConfirmation);
+      })()`,signal,"bounded global confirmation retention");
+      assert.deepEqual(capped,Array.from({length:approvals.MAX_CONFIRMATIONS},(_,offset)=>
+        `parked-bound-${approvals.MAX_CONFIRMATIONS+1-offset}`));
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("Fleet approval order matches append-authoritative resident panels under clock skew", async () => {
+      const approval=(id,agent,ts)=>({v:0,ts:new Date(ts).toISOString(),source:"codex",
+        agent_id:agent,project:"life",type:"needs_human",payload:{message:`Approve ${id}?`,
+          request_id:id,action:"send_email",detail:{id},options:["approve","deny"]}});
+      const oldSame=approval("order-old","codex:order-a",frozenNow+6*60*60*1000);
+      const newSame=approval("order-new","codex:order-a",frozenNow-60*60*1000);
+      const newestOther=approval("order-other","codex:order-b",frozenNow-2*60*60*1000);
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,oldSame,newSame,newestOther]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();await waitForTelemetry();
+      const evidence=await eventually(send,`(()=>{
+        openPanel(FLEET_LEDGER_ID);fleetTab='attention';renderFleet(${frozenNow});
+        const fleetOrder=[...document.querySelectorAll('.ledger-entry')]
+          .filter(row=>row.querySelector('.status-mark')?.textContent.trim()==='approval')
+          .map(row=>row.dataset.approvalRequest);
+        openPanel('codex:order-a');
+        const panelOrder=[...document.querySelectorAll('[data-approval-request]')]
+          .map(card=>card.dataset.approvalRequest);
+        return {fleetOrder,panelOrder,
+          fleetAOrder:fleetOrder.filter(id=>id==='order-old'||id==='order-new'),
+          descriptive:[...document.querySelectorAll('[data-approval-request] .ledger-small')]
+            .every(row=>row.textContent.includes('knocked'))};
+      })()`,signal,"append-authoritative Fleet approval ordering");
+      assert.deepEqual(evidence,{fleetOrder:["order-other","order-new","order-old"],
+        panelOrder:["order-new","order-old"],fleetAOrder:["order-new","order-old"],
+        descriptive:true});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("mixed plain and malformed knocks keep queued approval credentials actionable", async () => {
+      const structured=(id,agent,ts)=>({v:0,ts:new Date(ts).toISOString(),source:"codex",
+        agent_id:agent,project:"life",type:"needs_human",payload:{message:`Structured ${id}`,
+          request_id:id,action:"send_email",detail:{id},options:["approve","deny"]}});
+      const structuredPlain=structured("mixed-plain","codex:mixed-plain",frozenNow+3600000);
+      const plain={...structuredPlain,ts:new Date(frozenNow-3600000).toISOString(),
+        payload:{message:"Independent plain knock"}};
+      const structuredMalformed=structured("mixed-malformed","codex:mixed-malformed",frozenNow+7200000);
+      const malformed={...structuredMalformed,ts:new Date(frozenNow-7200000).toISOString(),
+        payload:{message:"Independent malformed knock",request_id:"broken-shape",
+          action:"SEND",detail:null,options:["approve"]}};
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,structuredPlain,plain,
+        structuredMalformed,malformed].map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();await waitForTelemetry();
+      const evidence=await eventually(send,`(async()=>{
+        const originalFetch=window.fetch.bind(window);window.__mixedApprovalPost=null;
+        window.fetch=async(url,options={})=>{
+          if(String(url)==='http://127.0.0.1:8801/approvals/mixed-malformed'){
+            window.__mixedApprovalPost={url:String(url),authorization:options.headers.Authorization,
+              credentials:options.credentials,body:JSON.parse(options.body)};
+            return {status:202,json:async()=>({request_id:'mixed-malformed',
+              status:'recorded',decision:'approve'})};
+          }
+          return originalFetch(url,options);
+        };
+        openPanel('codex:mixed-plain');await new Promise(resolve=>requestAnimationFrame(resolve));
+        const plainView={message:document.querySelector('.knock-msg')?.textContent,
+          displayedStructured:villagers.find(v=>v.id==='codex:mixed-plain')?.knock?.structured!==null,
+          queue:[...document.querySelectorAll('[data-approval-request]')]
+            .map(card=>card.dataset.approvalRequest),
+          connect:document.querySelector('[data-steward-change]')?.textContent.trim()};
+        document.querySelector('[data-steward-change]').focus();
+        document.querySelector('[data-steward-change]').click();
+        while(!stewardDialog.open)await new Promise(resolve=>setTimeout(resolve,5));
+        let token=document.querySelector('#steward-token');token.value='plain-connect-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        while(!stewardConfig||stewardConfig.token!=='plain-connect-secret')
+          await new Promise(resolve=>setTimeout(resolve,5));
+        const connected={focus:document.activeElement?.hasAttribute('data-steward-change')||false,
+          tokenCleared:token.value==='',secretAbsent:!document.documentElement.innerHTML.includes('plain-connect-secret')};
+        document.querySelector('[data-steward-change]').focus();
+        document.querySelector('[data-steward-change]').click();
+        while(!stewardDialog.open)await new Promise(resolve=>setTimeout(resolve,5));
+        token=document.querySelector('#steward-token');token.value='changed-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        while(!stewardConfig||stewardConfig.token!=='changed-secret')
+          await new Promise(resolve=>setTimeout(resolve,5));
+        const changed={focus:document.activeElement?.hasAttribute('data-steward-change')||false,
+          tokenCleared:token.value==='',secretAbsent:!document.documentElement.innerHTML.includes('changed-secret')};
+        openPanel('codex:mixed-malformed');await new Promise(resolve=>requestAnimationFrame(resolve));
+        const malformedView={message:document.querySelector('.knock-msg')?.textContent,
+          displayedStructured:villagers.find(v=>v.id==='codex:mixed-malformed')?.knock?.structured!==null,
+          queue:[...document.querySelectorAll('[data-approval-request]')]
+            .map(card=>card.dataset.approvalRequest),clear:!!document.querySelector('[data-steward-clear]')};
+        document.querySelector('[data-steward-clear]').focus();
+        document.querySelector('[data-steward-clear]').click();
+        const cleared={config:stewardConfig===null,focusInside:panelBody.contains(document.activeElement),
+          changedSecretAbsent:!document.documentElement.innerHTML.includes('changed-secret')};
+        document.querySelector('[data-approval-id="mixed-malformed"][data-approval-option="approve"]').click();
+        while(!stewardDialog.open)await new Promise(resolve=>setTimeout(resolve,5));
+        token=document.querySelector('#steward-token');token.value='direct-secret';
+        document.querySelector('#steward-auth button[value="connect"]').click();
+        while(!window.__mixedApprovalPost)await new Promise(resolve=>setTimeout(resolve,5));
+        while(!approvalAcks.get('mixed-malformed')||
+          approvalAcks.get('mixed-malformed').state==='requesting')
+          await new Promise(resolve=>setTimeout(resolve,5));
+        const direct={post:window.__mixedApprovalPost,
+          state:approvalAcks.get('mixed-malformed').state,stillPlain:
+            document.querySelector('.knock-msg')?.textContent==='Independent malformed knock',
+          tokenCleared:token.value==='',secretAbsent:!document.documentElement.innerHTML.includes('direct-secret')};
+        const staleClear=document.querySelector('[data-steward-clear]');
+        fleetView.approvalState.requests.get('mixed-malformed').resolution={type:'test-stale-control'};
+        staleClear.click();
+        const staleRejected=stewardConfig?.token==='direct-secret'&&!stewardDialog.open;
+        return {plainView,connected,changed,malformedView,cleared,direct,staleRejected};
+      })()`,signal,"mixed-knock approval credential controls");
+      assert.deepEqual(evidence,{plainView:{message:"Independent plain knock",
+        displayedStructured:false,queue:["mixed-plain"],connect:"connect to Steward"},
+        connected:{focus:true,tokenCleared:true,secretAbsent:true},
+        changed:{focus:true,tokenCleared:true,secretAbsent:true},
+        malformedView:{message:"Independent malformed knock",displayedStructured:false,
+          queue:["mixed-malformed"],clear:true},
+        cleared:{config:true,focusInside:true,changedSecretAbsent:true},
+        direct:{post:{url:"http://127.0.0.1:8801/approvals/mixed-malformed",
+          authorization:"Bearer direct-secret",credentials:"omit",body:{decision:"approve"}},
+          state:"pending",stillPlain:true,tokenCleared:true,secretAbsent:true},staleRejected:true});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("production 409 handling trusts only Steward's exact expiry envelope", async () => {
+      const approval=(id,offset)=>({v:0,ts:new Date(frozenNow+offset).toISOString(),
+        source:"codex",agent_id:"codex:approval-409",project:"life",type:"needs_human",
+        payload:{message:`Approve ${id}?`,request_id:id,action:"send_email",detail:{id},
+          options:["approve","deny"]}});
+      const ambiguous=approval("proxy-conflict",0), expired=approval("expired-conflict",1);
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,ambiguous,expired]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage();await waitForTelemetry();
+      const evidence=await eventually(send,`(async()=>{
+        stewardConfig={url:'http://127.0.0.1:8801',token:'conflict-secret'};
+        const originalFetch=window.fetch.bind(window);
+        window.fetch=async(url,options={})=>{
+          if(String(url).endsWith('/approvals/proxy-conflict'))return {status:409,
+            json:async()=>({error:'approval_expired'})};
+          if(String(url).endsWith('/approvals/expired-conflict'))return {status:409,
+            json:async()=>({detail:{error:'approval_expired',message:'expired'}})};
+          return originalFetch(url,options);
+        };
+        openPanel('codex:approval-409');await new Promise(resolve=>requestAnimationFrame(resolve));
+        document.querySelector('[data-approval-id="proxy-conflict"][data-approval-option="approve"]').click();
+        while(!approvalAcks.get('proxy-conflict')||approvalAcks.get('proxy-conflict').state==='requesting')
+          await new Promise(resolve=>setTimeout(resolve,5));
+        document.querySelector('[data-approval-id="expired-conflict"][data-approval-option="deny"]').click();
+        while(!approvalAcks.get('expired-conflict')||approvalAcks.get('expired-conflict').state==='requesting')
+          await new Promise(resolve=>setTimeout(resolve,5));
+        return {ambiguous:approvalAcks.get('proxy-conflict').state,
+          ambiguousBlocked:approvalAcks.blocks('proxy-conflict'),
+          expired:approvalAcks.get('expired-conflict').state,
+          expiredBlocked:approvalAcks.blocks('expired-conflict'),
+          proxyText:document.querySelector('[data-approval-request="proxy-conflict"] .approval-feedback')?.textContent,
+          expiryText:document.querySelector('[data-approval-request="expired-conflict"] .approval-feedback')?.textContent};
+      })()`,signal,"strict production approval 409 envelope");
+      assert.deepEqual(evidence,{ambiguous:"ambiguous",ambiguousBlocked:true,
+        expired:"failed",expiredBlocked:false,
+        proxyText:"Steward returned 409 after the decision may have been recorded.",
+        expiryText:"Steward reports this approval expired and denies by default."});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("approval rerenders preserve keyed focus, draft, and caret with queue fallback", async () => {
+      const approval = (id, offset) => ({v:0,ts:new Date(frozenNow+offset).toISOString(),
+        source:"codex",agent_id:"codex:approval-focus",project:"life",type:"needs_human",
+        payload:{message:`Approve ${id}?`,request_id:id,action:"send_email",
+          detail:{request:id},options:["approve","deny","edit"]}});
+      const first=approval("focus-1",0), second=approval("focus-2",1);
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,first,second]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage(); await waitForTelemetry();
+      const ticked=await eventually(send,`(async()=>{
+        openPanel('codex:approval-focus');
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const input=document.querySelector('[data-approval-edit="focus-1"]');
+        if(!input)return null;
+        input.focus();input.value='carefully edited';
+        input.dispatchEvent(new Event('input',{bubbles:true}));input.setSelectionRange(3,9);
+        renderChrome(${frozenNow+1000});
+        let active=document.activeElement;
+        const textarea={key:active.dataset.approvalEdit,value:active.value,
+          start:active.selectionStart,end:active.selectionEnd};
+        document.querySelector('[data-approval-id="focus-1"][data-approval-option="deny"]').focus();
+        renderChrome(${frozenNow+2000});active=document.activeElement;
+        const button={id:active.dataset.approvalId,option:active.dataset.approvalOption};
+        document.querySelector('[data-steward-change]').focus();renderChrome(${frozenNow+3000});
+        const link=document.activeElement.hasAttribute('data-steward-change');
+        active=document.querySelector('[data-approval-edit="focus-1"]');active.focus();active.setSelectionRange(3,9);
+        return {textarea,button,link};})()`,signal,
+        "one-second approval rerender focus");
+      assert.deepEqual(ticked,{textarea:{key:"focus-1",value:"carefully edited",start:3,end:9},
+        button:{id:"focus-1",option:"deny"},link:true});
+
+      const third=approval("focus-3",2);
+      fs.appendFileSync(events,JSON.stringify(third)+"\n");
+      const queued=await eventually(send,`(async()=>{await runtime.poll();const active=document.activeElement;
+        return {key:active?.dataset?.approvalEdit||null,value:active?.value||null,
+          start:active?.selectionStart??null,end:active?.selectionEnd??null,
+          tag:active?.tagName||null};})()`,signal,
+        "approval queue insertion preserves keyed focus");
+      assert.deepEqual(queued,{key:"focus-1",value:"carefully edited",start:3,end:9,tag:"TEXTAREA"});
+
+      const submitFallback=await eventually(send,`(()=>{
+        const button=document.querySelector('[data-approval-id="focus-1"][data-approval-option="deny"]');
+        button.focus();
+        const tracking=approvalAcks.request('focus-1','deny',null,runtime.snapshot().cursor,
+          {agent_id:'codex:approval-focus',project:'life',action:'send_email',
+            lifecycle:fleetView.approvalState.requests.get('focus-1').lifecycle});
+        const active=document.activeElement;
+        const result=tracking.ok&&active?.dataset?.approvalEdit==='focus-3'&&!active.disabled&&{
+          key:active.dataset.approvalEdit,enabled:true,inside:panelBody.contains(active)};
+        approvalAcks.failed('focus-1','test cleanup',true);
+        return result;
+      })()`,signal,"disabled submitted approval focus fallback");
+      assert.deepEqual(submitFallback,{key:"focus-3",enabled:true,inside:true});
+
+      const close={...first,ts:new Date(frozenNow+3).toISOString(),source:"steward",
+        type:"needs_human_resolved",payload:{request_id:"focus-1",decision:"edit",
+          decided_by:"api",action:"send_email"}};
+      fs.appendFileSync(events,JSON.stringify(close)+"\n");
+      const fallback=await eventually(send,`(async()=>{await runtime.poll();const active=document.activeElement;
+        const confirmation=document.querySelector('[data-approval-confirmation="focus-1"]');
+        const waiting=[...document.querySelectorAll('[data-approval-request]')]
+          .map(item=>item.dataset.approvalRequest);
+        return active?.dataset?.approvalEdit==='focus-3'&&panelBody.contains(active)&&confirmation&&{
+          key:active.dataset.approvalEdit,inside:true,
+          confirmation:confirmation.textContent.includes('Decision edit — confirmed by the exact closing event.'),
+          waiting};})()`,signal,
+        "resolved approval moves focus to remaining queue");
+      assert.deepEqual(fallback,{key:"focus-3",inside:true,confirmation:true,
+        waiting:["focus-3","focus-2"]});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      const resetFocus=await eventually(send,`(async()=>{await runtime.poll();return !panelEl.classList.contains('open')&&document.activeElement.id==='fleet-open'&&{
+          closed:true,focus:document.activeElement.id};})()`,signal,
+        "approval reset restores an accessible launcher");
+      assert.deepEqual(resetFocus,{closed:true,focus:"fleet-open"});
+    });
+
+    await t.test("collided approval identity is diagnostic-only in production UI", async () => {
+      const requestA={v:0,ts:new Date(frozenNow).toISOString(),source:"codex",
+        agent_id:"codex:collision-a",project:"life",type:"needs_human",payload:{
+          message:"Approve A?",request_id:"collision-1",action:"send_email",
+          detail:{target:"a"},options:["approve","deny"]}};
+      const requestB={...requestA,ts:new Date(frozenNow+1).toISOString(),
+        agent_id:"codex:collision-b",payload:{...requestA.payload,message:"Approve B?",
+          action:"publish_note",detail:{target:"b"}}};
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention,requestA,requestB]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage(); await waitForTelemetry();
+      const evidence=await eventually(send,`(()=>{
+        openPanel(FLEET_LEDGER_ID);fleetTab='attention';renderFleet(Date.now());
+        const approvalRows=[...panelBody.querySelectorAll('.status-mark')]
+          .filter(item=>item.textContent.trim()==='approval').length;
+        const diagnostic=panelBody.textContent.includes('request_id collision')&&
+          panelBody.textContent.includes('collision-1');
+        const count=document.getElementById('panel-status').textContent;
+        openPanel('codex:collision-a');
+        return approvalRows===0&&diagnostic&&
+          panelBody.querySelectorAll('[data-approval-option]').length===0&&{
+            actionable:false,diagnostic:true,
+            count,
+            knocking:villagers.some(item=>item.id.startsWith('codex:collision-')&&item.state==='knocking')};
+      })()`,signal,"collided approval quarantine UI");
+      assert.deepEqual(evidence,{actionable:false,diagnostic:true,
+        count:"Needs you: 1 item.",knocking:false});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
     });
 
     await t.test("slow successful job POST renders the request-start deadline before response", async () => {

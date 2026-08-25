@@ -1,0 +1,31 @@
+[
+  {
+    "name": "first append wins when a later close has an earlier timestamp",
+    "events": [
+      {"v":0,"ts":"2026-08-25T10:08:00.000Z","source":"codex","agent_id":"codex:keeper","project":"life","type":"needs_human","payload":{"message":"May I?","request_id":"append-order","action":"send_email","detail":{"to":"a@example.com"},"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T10:12:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"needs_human_resolved","payload":{"request_id":"append-order","decision":"approve","decided_by":"api","action":"send_email"}},
+      {"v":0,"ts":"2026-08-25T10:09:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"needs_human_resolved","payload":{"request_id":"append-order","decision":"deny","decided_by":"api","action":"send_email"}}
+    ],
+    "expected_request_ts": "2026-08-25T10:08:00.000Z",
+    "expected_decision": "approve"
+  },
+  {
+    "name": "equal timestamp closes use first append order",
+    "events": [
+      {"v":0,"ts":"2026-08-25T10:08:00.000Z","source":"codex","agent_id":"codex:keeper","project":"life","type":"needs_human","payload":{"message":"May I?","request_id":"equal-close","action":"send_email","detail":{"amount":1.0},"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T10:09:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"needs_human_resolved","payload":{"request_id":"equal-close","decision":"approve","decided_by":"api","action":"send_email","extension":{"amount":1.0}}},
+      {"v":0,"ts":"2026-08-25T10:09:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"needs_human_resolved","payload":{"extension":{"amount":1},"action":"send_email","decided_by":"api","decision":"deny","request_id":"equal-close"}}
+    ],
+    "expected_request_ts": "2026-08-25T10:08:00.000Z",
+    "expected_decision": "approve"
+  },
+  {
+    "name": "orphan close never binds to a future knock",
+    "events": [
+      {"v":0,"ts":"2026-08-25T10:12:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"needs_human_resolved","payload":{"request_id":"orphan-first","decision":"deny","decided_by":"api","action":"send_email"}},
+      {"v":0,"ts":"2026-08-25T10:08:00.000Z","source":"codex","agent_id":"codex:keeper","project":"life","type":"needs_human","payload":{"message":"May I?","request_id":"orphan-first","action":"send_email","detail":{"to":"a@example.com"},"options":["approve","deny"]}}
+    ],
+    "expected_request_ts": "2026-08-25T10:08:00.000Z",
+    "expected_decision": null
+  }
+]

@@ -8,10 +8,13 @@ import collections
 import fcntl
 import hashlib
 import json
+import math
 import os
+import struct
 import threading
 import uuid
 
+from approval_protocol import structured_approval
 from hooks import durable
 
 
@@ -20,9 +23,8 @@ KNOCKS = "knocks"
 NOTIFIED = "notified"
 DROPPED = "notify-dropped"
 KINDS = frozenset((DELIVERY_IDS, KNOCKS, NOTIFIED, DROPPED))
-
-
-def knock_key(event):
+def legacy_knock_key(event):
+    """Pre-structured-request fallback identity, retained for ledger migration."""
     delivery_id = event.get("delivery_id")
     if isinstance(delivery_id, str) and delivery_id:
         return "delivery:" + delivery_id
@@ -32,9 +34,92 @@ def knock_key(event):
         payload.get("message") if isinstance(payload, dict) else ""))
 
 
+def _canonical_json_bytes(value):
+    """Language-neutral JSON-semantic encoding used only as hash input.
+
+    Strings use their UTF-16 code units, object keys use the same ordering as
+    JavaScript's default string sort, and numbers use their IEEE-754 binary64
+    value (with both spellings of zero unified). Thus key order and ``1`` versus
+    ``1.0`` do not change identity, while array order and exact string whitespace
+    do. Length prefixes make the stream unambiguous without retaining secrets.
+    """
+    if value is None:
+        return b"n"
+    if type(value) is bool:
+        return b"b1" if value else b"b0"
+    if type(value) in (int, float):
+        try:
+            number = float(value)
+        except (OverflowError, ValueError):
+            return b"x"
+        if not math.isfinite(number):
+            return b"x"
+        if number == 0:
+            number = 0.0
+        return b"d" + struct.pack(">d", number)
+    if isinstance(value, str):
+        encoded = value.encode("utf-16-be", "surrogatepass")
+        return b"s" + len(encoded).to_bytes(8, "big") + encoded
+    if isinstance(value, list):
+        values = [_canonical_json_bytes(item) for item in value]
+        return b"a" + len(values).to_bytes(8, "big") + b"".join(values)
+    if isinstance(value, dict):
+        items = sorted(value.items(), key=lambda item: str(item[0]).encode(
+            "utf-16-be", "surrogatepass"))
+        encoded = [(_canonical_json_bytes(str(key)), _canonical_json_bytes(item))
+                   for key, item in items]
+        return (b"o" + len(encoded).to_bytes(8, "big")
+                + b"".join(key + item for key, item in encoded))
+    return b"x"
+
+
+def knock_key(event):
+    """Stable notification identity.
+
+    Producer ``delivery_id`` remains authoritative. Without one, valid structured
+    requests use a v3 hash of their complete immutable shape and event identity.
+    The hash is stable across JSON key/number spelling and never persists detail
+    values or other possibly sensitive fields in a key.
+    """
+    delivery_id = event.get("delivery_id")
+    if isinstance(delivery_id, str) and delivery_id:
+        return "delivery:" + delivery_id
+    approval = structured_approval(event)
+    shape = approval.notification_shape() if approval is not None else None
+    if shape is not None:
+        identity = {
+            "version": 3,
+            "event_version": event.get("v"),
+            "type": event.get("type"),
+            "ts": event.get("ts"),
+            "source": event.get("source"),
+            "agent_id": event.get("agent_id"),
+            "project": event.get("project"),
+            "approval": shape,
+        }
+        digest = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+        return "structured-v3-sha256-" + digest
+    return legacy_knock_key(event)
+
+
 def terminal_key(event):
     return "burrow-sha256-" + hashlib.sha256(
         knock_key(event).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def terminal_keys(event):
+    """Return only aliases that prove the same notification identity.
+
+    Old structured v1/v2 ledgers lack the immutable shape needed to prove an
+    alias. Trusting them can let a plain or differently shaped event suppress a
+    real approval forever, so an upgrade may re-notify one old structured event
+    once. Plain events and producer delivery IDs retain their exact old keys.
+    """
+    return (terminal_key(event),)
+
+
+def is_terminal(event, terminal):
+    return any(key in terminal for key in terminal_keys(event))
 
 
 class NotificationPersistence:
@@ -185,13 +270,13 @@ class NotificationPersistence:
                             continue
                         event = entry.get("event", entry) if isinstance(entry, dict) else None
                         if isinstance(event, dict):
-                            if terminal_key(event) not in terminal:
+                            if not is_terminal(event, terminal):
                                 latest[knock_key(event)] = entry
             except OSError:
                 pass
         if addition is not None:
             event = addition.get("event", addition)
-            if terminal_key(event) not in terminal:
+            if not is_terminal(event, terminal):
                 latest[knock_key(event)] = addition
         lines = [(key, json.dumps(entry, ensure_ascii=False,
                                   separators=(",", ":")) + "\n")
@@ -231,7 +316,7 @@ class NotificationPersistence:
                     retained.append(line)
                     continue
                 event = entry.get("event", entry) if isinstance(entry, dict) else None
-                if isinstance(event, dict) and terminal_key(event) in terminal:
+                if isinstance(event, dict) and is_terminal(event, terminal):
                     changed = True
                 else:
                     retained.append(line)
@@ -354,7 +439,7 @@ class NotificationPersistence:
         if not complete:
             return False
         terminal = self.load_ledger(NOTIFIED) | self.load_ledger(DROPPED)
-        if not all(terminal_key(event) in terminal for event in events):
+        if not all(is_terminal(event, terminal) for event in events):
             return False
         durable.retire_files((generation,))
         return True

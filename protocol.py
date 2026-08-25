@@ -14,6 +14,7 @@ EVENT_TYPES = frozenset({
     "heartbeat", "needs_human", "idle", "session_ended",
     "routine_started", "routine_finished", "routine_failed",
     "task_posted", "task_claimed", "task_done", "task_failed",
+    "needs_human_resolved",
 })
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _REQUIRED_TEXT = {
@@ -87,6 +88,15 @@ def _validate_task_payload(event_type, payload, agent_id):
     return None
 
 
+def _validate_approval_resolution(payload):
+    for field in ("request_id", "decided_by", "action"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    if payload.get("decision") not in ("approve", "deny", "edit"):
+        return "invalid payload.decision"
+    return None
+
+
 def _plain_object(value):
     return isinstance(value, dict)
 
@@ -130,8 +140,18 @@ def validate_event(event):
             return error
         if event["source"] != "steward":
             return "task events require source steward"
+    if event_type == "needs_human_resolved":
+        error = _validate_approval_resolution(payload)
+        if error:
+            return error
+        if event["source"] != "steward":
+            return "approval resolutions require source steward"
     for field in _OPTIONAL_TEXT:
-        if field in payload and not isinstance(payload[field], str):
+        # Structured approvals add an object-valued detail to the legacy
+        # string-valued knock. Shape validation remains a projection concern so
+        # a malformed structured attempt can degrade to the plain knock.
+        if (field in payload and not isinstance(payload[field], str)
+                and not (event_type == "needs_human" and field == "detail")):
             return f"invalid payload.{field}"
     if "stop_hook_active" in payload and type(payload["stop_hook_active"]) is not bool:
         return "invalid payload.stop_hook_active"

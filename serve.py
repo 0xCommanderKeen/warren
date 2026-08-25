@@ -39,6 +39,7 @@ import urllib.parse
 import urllib.request
 import weakref
 
+from approval_protocol import json_semantic_key, structured_approval, thaw_json
 from hooks import durable
 import notification_persistence
 from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES, validate_event
@@ -63,6 +64,7 @@ KEEP_PER_AGENT = 80                  # events the viewer keeps per villager
 VIEWER_LINE_LIMIT = 4000             # viewer/index.html bootstrap window
 DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 KEEP_TASKS = 24                       # viewer/job-board.js MAX_TASKS
+KEEP_APPROVALS = 40                   # viewer/approval-knocks.js MAX_REQUESTS
 TASK_EVENT_TYPES = {"task_posted", "task_claimed", "task_done", "task_failed"}
 
 # every read, append and rotation of the log goes through this, so an event can
@@ -305,6 +307,11 @@ def terminal_knock_key(event):
     return notification_persistence.terminal_key(event)
 
 
+def terminal_knock_keys(event):
+    """Current identity plus only migration aliases proven to be exact."""
+    return notification_persistence.terminal_keys(event)
+
+
 def _ledger_path(kind):
     return _notification_store.ledger_path(kind)
 
@@ -399,7 +406,8 @@ def claim_knock(event):
     with _notified_lock:
         delivered = _load_ledger(LEDGER_NOTIFIED, _notified_by_log)
         dropped = _load_ledger(LEDGER_NOTIFY_DROPPED, _dropped_by_log)
-        if key in delivered or key in dropped:
+        if any(candidate in delivered or candidate in dropped
+               for candidate in terminal_knock_keys(event)):
             return False
         if key in _notified or key in _notifying:
             if key in _notified:
@@ -436,12 +444,13 @@ def notify(event):
             message = str(message)
         name = villager_name(event)
         project = str(event.get("project") or "unknown")
-        title = f"{name} is at your door ({project})"
+        structured = structured_approval(event)
+        title = structured.action if structured else f"{name} is at your door ({project})"
         if not title.isascii():
             title = email.header.Header(
                 title, charset="utf-8", maxlinelen=0).encode()
-        # Internal knock identity is deliberately unchanged (legacy keys use
-        # NUL separators). Receiver IDs are a separate, HTTP-safe projection.
+        # Receiver IDs hash the internal identity; structured fallbacks include
+        # request_id so distinct same-millisecond requests remain distinct.
         headers = {
             "Content-Type": "text/plain; charset=utf-8",
             "Title": title,
@@ -451,7 +460,12 @@ def notify(event):
         }
         if NOTIFY_TOKEN:
             headers["Authorization"] = "Bearer " + NOTIFY_TOKEN
-        body = f"{name} · {project}\n{message}".encode("utf-8")
+        if structured:
+            detail = thaw_json(structured.detail)
+            body_text = json.dumps(detail, ensure_ascii=False, sort_keys=True)
+        else:
+            body_text = f"{name} · {project}\n{message}"
+        body = body_text.encode("utf-8")
         req = urllib.request.Request(NOTIFY_URL, data=body, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT):
             pass
@@ -472,8 +486,9 @@ def deliver_knock(event):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if (_ledger_contains(LEDGER_NOTIFIED, key)
-                or _ledger_contains(LEDGER_NOTIFY_DROPPED, key)):
+        if any(_ledger_contains(LEDGER_NOTIFIED, candidate)
+               or _ledger_contains(LEDGER_NOTIFY_DROPPED, candidate)
+               for candidate in terminal_knock_keys(event)):
             finish_knock(event, False)
             return True
         delivered = notify(event)
@@ -798,6 +813,106 @@ def _task_keep_indexes(parsed):
     return keep
 
 
+def _approval_resolution_identity(event, shape=None):
+    """The exact fields a closing event shares with its immutable request."""
+    payload = event.get("payload") or {}
+    if not isinstance(payload, dict):
+        return None
+    request_id = shape.request_id if shape is not None else payload.get("request_id")
+    action = shape.action if shape is not None else payload.get("action")
+    values = (request_id, event.get("agent_id"), event.get("project"), action)
+    if any(not isinstance(value, str) or not value.strip() for value in values):
+        return None
+    return json_semantic_key(list(values))
+
+
+def _approval_lifecycle_identity(event, shape=None):
+    """Steward's full immutable request identity as represented on the wire.
+
+    ``request_id`` is Steward's global primary key.  The other fields prevent a
+    corrupt/combined log from rewriting the question or offered answers behind
+    that ID. JSON detail equality is semantic, not Python serialization order.
+    """
+    if event.get("type") != "needs_human":
+        return None
+    payload = event.get("payload") or {}
+    shape = shape or structured_approval(event)
+    if not isinstance(payload, dict) or shape is None:
+        return None
+    return json_semantic_key({
+        "request_id": shape.request_id,
+        "agent_id": event.get("agent_id"),
+        "project": event.get("project"),
+        "action": shape.action,
+        "detail": shape.detail,
+        "options": shape.options,
+        "message": shape.message,
+        "expires_at": {"present": shape.expires_at_present,
+                       "value": shape.expires_at},
+    })
+
+
+def _approval_keep_indexes(parsed):
+    """Return append-ordered approval authority and isolated event indexes.
+
+    The first exact request append owns an ID and the first subsequent matching
+    close resolves it. Unknown closes and later replays/conflicts are isolated
+    from ordinary villager retention but deliberately not carried forward.
+    """
+    requests = {}
+    isolated = set()
+    sequence = 0
+    for index, event in parsed:
+        shape = None if validate_event(event) else structured_approval(event)
+        if shape is not None:
+            isolated.add(index)
+            request_id = shape.request_id
+            lifecycle = _approval_lifecycle_identity(event, shape)
+            resolution_identity = _approval_resolution_identity(event, shape)
+            sequence += 1
+            record = requests.get(request_id)
+            if record is None:
+                record = {"knock": (index, event), "resolution": None,
+                          "lifecycle": lifecycle,
+                          "resolution_identity": resolution_identity,
+                          "collision": None,
+                          "sequence": sequence}
+                requests[request_id] = record
+            elif lifecycle != record["lifecycle"]:
+                # One retained incompatible request is enough to replay the
+                # collision quarantine; append order chooses which one.
+                if record["collision"] is None:
+                    record["collision"] = (index, event)
+            if len(requests) > KEEP_APPROVALS:
+                ranked = sorted(requests.items(), key=lambda item: (
+                    item[1]["resolution"] is None,
+                    (item[1]["resolution"] or item[1]["knock"])[0],
+                    item[1]["sequence"], item[0]), reverse=True)
+                requests = dict(ranked[:KEEP_APPROVALS])
+            continue
+        if event.get("type") != "needs_human_resolved":
+            continue
+        isolated.add(index)
+        if validate_event(event):
+            continue
+        payload = event.get("payload") or {}
+        request_id = payload["request_id"]
+        record = requests.get(request_id)
+        resolution_identity = _approval_resolution_identity(event)
+        if record is None or resolution_identity != record["resolution_identity"]:
+            continue
+        if record["collision"] is None and record["resolution"] is None:
+            record["resolution"] = (index, event)
+    keep = set()
+    for record in requests.values():
+        keep.add(record["knock"][0])
+        if record["collision"] is not None:
+            keep.add(record["collision"][0])
+        if record["resolution"] is not None:
+            keep.add(record["resolution"][0])
+    return keep, isolated
+
+
 def carry_forward(lines, now_ms):
     """The bounded tail that preserves both village and job-board projections.
 
@@ -808,7 +923,6 @@ def carry_forward(lines, now_ms):
     # The browser deliberately ignores anything older than this global window.
     # Applying it here too prevents rotation from resurrecting a sparse agent.
     lines = lines[-VIEWER_LINE_LIMIT:]
-    per_agent = {}
     parsed = []
     for i, line in enumerate(lines):
         try:
@@ -820,11 +934,21 @@ def carry_forward(lines, now_ms):
         if event.get("type") not in EVENT_TYPES:
             continue
         parsed.append((i, event))
+    approval_keep, approval_isolated = _approval_keep_indexes(parsed)
+    retained_approval_knocks = collections.defaultdict(list)
+    for i, event in parsed:
+        if i in approval_keep and structured_approval(event) is not None:
+            retained_approval_knocks[event["agent_id"]].append(i)
+    per_agent = {}
+    for i, event in parsed:
         # Task events have their own cross-agent projection below. They never
         # create or refresh a villager in viewer/projection.js, and allowing
         # central posts back through per-agent retention could resurrect a task
         # whose terminal transition was correctly dropped by board capacity.
-        if event["type"] in TASK_EVENT_TYPES:
+        # Structured approvals have their own request-ID projection too. That
+        # keeps an unresolved old knock without allowing an orphan close to
+        # manufacture liveness or a capacity-evicted close to leave a ghost.
+        if event["type"] in TASK_EVENT_TYPES or i in approval_isolated:
             continue
         agent = per_agent.setdefault(
             event["agent_id"], {"events": [], "last": None, "lineage": None})
@@ -838,10 +962,17 @@ def carry_forward(lines, now_ms):
             agent["events"].append((i, event))
             if len(agent["events"]) > KEEP_PER_AGENT:
                 agent["events"].pop(0)
-    keep = list(_task_keep_indexes(parsed))
-    for agent in per_agent.values():
+    keep = list(_task_keep_indexes(parsed) | approval_keep)
+    for agent_id, agent in per_agent.items():
         last_i, last = agent["last"]
-        if last["type"] == "session_ended" or now_ms - event_ms(last) > DROP_MS:
+        if last["type"] == "session_ended":
+            # A parked approval deliberately keeps its knock after the hosting
+            # session exits. Keep the later terminal too, so a reset followed by
+            # the close cannot resurrect that resident as merely "resting".
+            if any(knock_i < last_i for knock_i in retained_approval_knocks[agent_id]):
+                keep.append(last_i)
+            continue
+        if now_ms - event_ms(last) > DROP_MS:
             continue
         keep.extend(i for i, _ in agent["events"])
         if agent["lineage"]:

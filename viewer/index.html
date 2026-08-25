@@ -123,6 +123,18 @@
     white-space: pre-wrap; overflow-wrap: anywhere;
   }
   #panel .knock .knock-when { font-size: 15px; color: var(--ink-dim); margin-top: 8px; }
+  .approval-card { border: 2px solid #a65b4a; background: rgba(166,91,74,.12); padding: 12px; margin: 0 0 14px; }
+  .approval-card.resolved { border-color: #6e9b63; background: rgba(79,125,91,.13); }
+  .approval-card h3 { font-size: 23px; font-weight: 400; color: #ffd0b8; overflow-wrap: anywhere; }
+  .approval-detail { margin: 9px 0; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; background: #0d0b14; border-left: 4px solid #6f5533; color: #fff; font: inherit; }
+  .approval-options { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+  .approval-options button { min-height: 40px; padding: 6px 10px; font: inherit; cursor: pointer; color: var(--ink); background: #351f1c; border: 1px solid var(--alert); }
+  .approval-edit { display: grid; gap: 4px; margin-top: 9px; color: #ffd0b8; }
+  .approval-edit textarea { min-height: 74px; resize: vertical; padding: 7px; font: inherit; color: var(--ink); background: #0d0b14; border: 1px solid #a65b4a; }
+  .approval-feedback { margin-top: 9px; color: var(--busy); }
+  .approval-feedback.failed, .approval-feedback.ambiguous, .approval-feedback.timeout,
+  .approval-feedback.indeterminate { color: var(--alert); }
+  .approval-diagnostic { color: #f2a17d; border-left: 4px solid #a65b4a; padding: 5px 8px; margin: 8px 0; }
   .evt { border-top: 2px solid #221d30; padding: 8px 0; font-size: 17px; }
   #panel .meta.role { color: var(--busy); }
   #panel .soul {
@@ -201,7 +213,8 @@
     #panel .close { top: max(10px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
       min-width: 44px; min-height: 44px; }
     #panel h2 { padding-right: 42px; line-height: 1; }
-    #fleet-open, .ledger-tabs button, .entry-link, .cap-row, .census-action { min-height: 44px; }
+    #fleet-open, .ledger-tabs button, .entry-link, .cap-row, .census-action,
+    .approval-options button { min-height: 44px; }
     .ledger-filters input, .ledger-filters select { min-height: 44px; font-size: 18px; }
     .ledger-filters { grid-template-columns: 1fr 1fr; }
     .ledger-filters input { grid-column: 1 / -1; }
@@ -278,6 +291,7 @@
 <script src="/fleet-controller.js"></script>
 <script src="/routine-ledger.js"></script>
 <script src="/job-board.js"></script>
+<script src="/approval-knocks.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -1248,7 +1262,8 @@ function placeLabel(v) {
 
 let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
   directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now(),
-  jobState: BurrowJobs.createState(), taskEvidence: [] };
+  jobState: BurrowJobs.createState(), approvalState: BurrowApprovals.createState(),
+  taskEvidence: [], approvalEvidence: [] };
 let fleetTab = "activity";
 const routineAcks = BurrowRoutines.createAcknowledgements();
 const routineRunNotices = new Map();
@@ -1257,6 +1272,33 @@ const jobAcks = BurrowJobs.createAcknowledgements({ onChange() {
   refreshJobFeedback();
   refreshJobListing(Date.now());
   refreshJobFormState();
+} });
+const approvalDrafts = new Map();
+const approvalNotices = new Map();
+function pruneApprovalUi(state) {
+  const retained = new Set(state && state.requests instanceof Map ? state.requests.keys() : []);
+  for (const target of [approvalDrafts, approvalNotices]) {
+    for (const key of target.keys()) if (!retained.has(key)) target.delete(key);
+  }
+}
+function selectedPendingApprovalQueue() {
+  const selected = villagers.find(v => v.id === selectedId);
+  const projected = selected && selected.knock && selected.knock.queue;
+  const state = fleetView.approvalState;
+  if (!selected || !Array.isArray(projected) || !(state && state.requests instanceof Map)) return [];
+  return projected.filter(candidate => {
+    if (!candidate || typeof candidate.id !== "string") return false;
+    const record = BurrowApprovals.recordFor(state, candidate.id);
+    return record === candidate && !record.resolution && !record.collided && record.knock &&
+      record.knock.agent_id === selected.id &&
+      BurrowApprovals.sameLifecycle(record, record.knock, record.shape);
+  });
+}
+const approvalAcks = BurrowApprovals.createAcknowledgements({ onChange(item) {
+  if (!selectedId) return;
+  const selected = villagers.find(v => v.id === selectedId);
+  if (selected && selected.knock && selected.knock.queue &&
+      selected.knock.queue.some(record => record.id === item.request_id)) renderPanel(Date.now());
 } });
 const jobDraft = { title: "", detail: "", required_skills: "" };
 let jobPostNotice = "";
@@ -1324,11 +1366,29 @@ function renderActivity(now) {
     <div class="ledger-small">${esc(entry.event.type)}</div>
   </li>`).join("")}</ol>` : `<div class="ledger-state">No valid recent events match these filters.</div>`}`;
 }
+function attentionEntries() {
+  const needs = BurrowFleet.outstandingNeeds(fleetView.state)
+    .filter(entry => BurrowApprovals.classify(entry.event).kind !== "structured");
+  const structured = fleetView.approvalState ? [...fleetView.approvalState.requests.values()]
+    .filter(record => !record.resolution && !record.collided)
+    .sort((a,b)=>BurrowApprovals.compareOrdinal(b.knockOrdinal,a.knockOrdinal)) : [];
+  const confirmations = BurrowApprovals.recentConfirmations(fleetView.approvalState);
+  return { needs, structured, confirmations };
+}
 function renderAttention(now) {
-  const needs = BurrowFleet.outstandingNeeds(fleetView.state);
-  return needs.length ? `<ol class="ledger-list">${needs.map(entry => `<li class="ledger-entry">
+  const { needs, structured, confirmations } = attentionEntries();
+  const diagnostics = fleetView.approvalState && fleetView.approvalState.diagnostics || [];
+  const rows = `${needs.map(entry => `<li class="ledger-entry">
     <div>${ago(entry.ts, now)}</div><div>${entryLink(entry.agent_id, villagerName(entry.agent_id))}<div class="ledger-small">owner · ${esc(entry.agent_id)} · project · ${esc(entry.project)}</div><div>${esc(entry.event.payload.message)}</div></div><div>${statusMark("needs human")}</div>
-  </li>`).join("")}</ol>` : `<div class="ledger-state">No outstanding needs-human requests in the bounded recent window.</div>`;
+  </li>`).join("")}${structured.map(record => `<li class="ledger-entry" data-approval-request="${esc(record.id)}">
+    <div>${ago(Date.parse(record.knock.ts),now)}</div><div>${entryLink(record.knock.agent_id,villagerName(record.knock.agent_id))}<div class="ledger-small">owner · ${esc(record.knock.agent_id)} · project · ${esc(record.knock.project)} · request · ${esc(record.id)}</div><div>${esc(record.shape.action)}</div></div><div>${statusMark("approval")}</div>
+  </li>`).join("")}`;
+  return `${rows ? `<ol class="ledger-list">${rows}</ol>` : `<div class="ledger-state">No outstanding needs-human requests in the bounded recent window.</div>`}
+    ${confirmations.length ? `<section aria-label="Recent confirmed approval decisions">
+      <div class="meta">recent confirmed decisions · newest first · at most ${BurrowApprovals.MAX_CONFIRMATIONS}</div>
+      ${confirmations.map(item => approvalConfirmationMarkup(item, now, true)).join("")}</section>` : ""}
+    ${fleetView.approvalState && fleetView.approvalState.capacityDropped ? `<div class="ledger-state bad">${fleetView.approvalState.capacityDropped} approval record${fleetView.approvalState.capacityDropped === 1 ? " was" : "s were"} omitted by bounded retention.</div>` : ""}
+    ${diagnostics.length ? `<div class="ledger-state bad">Approval diagnostics:<ul>${diagnostics.map(item=>`<li>${esc(item.reason)}${item.request_id?` · ${esc(item.request_id)}`:""}</li>`).join("")}</ul></div>` : ""}`;
 }
 function activeForResident(resident) {
   const match = resident.match || {};
@@ -1442,7 +1502,7 @@ function replaceFleet(now) {
     <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"],["routines","Routines"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
     <section>${body}</section>`;
   const counts = fleetTab === "activity" ? BurrowFleet.filterRecent(fleetView.state, fleetFilters).length :
-    fleetTab === "attention" ? BurrowFleet.outstandingNeeds(fleetView.state).length : fleetTab === "routines" ? routineRows(now).length :
+    fleetTab === "attention" ? Object.values(attentionEntries()).reduce((sum, items) => sum + items.length, 0) : fleetTab === "routines" ? routineRows(now).length :
     fleetView.residents.length + (fleetView.diagnosticResidents || []).length;
   const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : fleetTab === "routines" ? "Routines" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
   const live = document.getElementById("panel-status");
@@ -1479,6 +1539,7 @@ function showDialog(initialFocus = true) {
   if (reducedMotion.matches) reveal(); else requestAnimationFrame(reveal);
 }
 function openPanel(id, opener = document.activeElement) {
+  if (selectedId !== id) approvalFocusMemory = null;
   const wasFleet = selectedId === FLEET_LEDGER_ID;
   if (id !== FLEET_LEDGER_ID && wasFleet) {
     returnFleet = { tab: fleetTab, focus: focusIdentity(opener) };
@@ -1570,7 +1631,65 @@ function refreshJobFormState() {
   for (const control of form.elements) control.disabled = blocked;
   form.setAttribute("aria-busy", jobAcks.hasActive() ? "true" : "false");
 }
-function renderPanel(now) {
+function approvalDetail(detail) {
+  if (!detail || !Object.keys(detail).length) return "No additional detail was supplied.";
+  try { return JSON.stringify(detail, null, 2); }
+  catch { return "Detail could not be displayed."; }
+}
+function approvalConfirmationMarkup(item, now, global = false) {
+  const owner = global ? `owner · ${esc(item.record.knock.agent_id)} · project · ${esc(item.record.knock.project)} · ` : "";
+  const attribute = global ? "data-global-approval-confirmation" : "data-approval-confirmation";
+  return `<article class="approval-card resolved" ${attribute}="${esc(item.request_id)}">
+    <h3>${esc(item.record.shape.action)}</h3>
+    <pre class="approval-detail">${esc(approvalDetail(item.record.shape.detail))}</pre>
+    <div class="ledger-small">${owner}request · ${esc(item.request_id)} · closed ${ago(Date.parse(item.resolution.ts) || 0, now)}</div>
+    <div class="approval-feedback acknowledged" role="status">Decision ${esc(item.resolution.payload.decision)} — confirmed by the exact closing event.</div>
+  </article>`;
+}
+function approvalFeedback(record) {
+  const ack = approvalAcks.get(record.id);
+  const notice = approvalNotices.get(record.id);
+  const text = ack ? ack.state === "requesting" ? "Sending directly to Steward…" :
+    ack.state === "pending" ? "Steward recorded the decision; waiting for the exact closing event…" :
+    ack.message : notice;
+  if (!text) return "";
+  const state = ack ? ack.state : "failed";
+  const role = ["failed","ambiguous","timeout","indeterminate"].includes(state) ? "alert" : "status";
+  return `<div class="approval-feedback ${esc(state)}" role="${role}">${esc(text)}</div>`;
+}
+function renderApprovals(v, now) {
+  const records = v.knock && Array.isArray(v.knock.queue) ? v.knock.queue : [];
+  const confirmations = Array.isArray(v.approvals) ? v.approvals : [];
+  if (!records.length && !confirmations.length) return "";
+  return `<section aria-label="Approval requests">
+    ${v.knock && !v.knock.structured ? `<div class="knock">
+      <div class="knock-h">needs you</div>
+      <div class="knock-msg">${esc(v.knock.message)}</div>
+      <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
+    </div>` : ""}
+    ${records.length ? `<div class="ledger-truth">Decisions go directly to Steward; only the closing event releases the villager. ${stewardConfig ?
+      `<button type="button" class="routine-run" data-steward-change>change credentials</button>
+       <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+      `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+    <div class="meta">${records.length} decision${records.length === 1 ? "" : "s"} waiting · newest first</div>` : ""}
+    ${records.map(record => {
+      const shape = record.shape, blocked = approvalAcks.blocks(record.id);
+      const draft = approvalDrafts.get(record.id) || "";
+      return `<article class="approval-card" data-approval-request="${esc(record.id)}" aria-busy="${blocked ? "true" : "false"}">
+        <h3>${esc(shape.action)}</h3>
+        <pre class="approval-detail">${esc(approvalDetail(shape.detail))}</pre>
+        <div class="ledger-small">request · ${esc(record.id)} · knocked ${ago(Date.parse(record.knock.ts) || 0, now)}</div>
+        ${shape.options.includes("edit") ? `<label class="approval-edit">Edited detail
+          <textarea data-approval-edit="${esc(record.id)}"${blocked ? " disabled" : ""}>${esc(draft)}</textarea></label>` : ""}
+        <div class="approval-options" aria-label="Choose a decision">${shape.options.map((option, index) =>
+          `<button type="button" data-approval-option="${esc(option)}" data-approval-index="${index}" data-approval-id="${esc(record.id)}"${blocked ? " disabled" : ""}>${esc(option)}</button>`).join("")}</div>
+        ${approvalFeedback(record)}
+      </article>`;
+    }).join("")}
+    ${confirmations.length ? `<div class="meta">recent confirmed decisions · newest first · at most ${BurrowApprovals.MAX_CONFIRMATIONS}</div>
+      ${confirmations.map(item => approvalConfirmationMarkup(item, now)).join("")}` : ""}</section>`;
+}
+function renderPanelContent(now) {
   if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
   panelEl.classList.remove("ledger");
   panelEl.setAttribute("aria-label", "Villager details");
@@ -1653,6 +1772,8 @@ function renderPanel(now) {
     v.state === "working"  ? (v.doing || "working") + at :
     v.state === "stale"    ? "no signal for a while" + at : "resting";
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
+  const approvalDiagnostics = fleetView.approvalState && fleetView.approvalState.diagnostics ?
+    fleetView.approvalState.diagnostics.filter(item => item.agent_id === v.id) : [];
   panelBody.innerHTML = `
     <h2 id="panel-title" tabindex="-1"><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
     <div class="meta role">${v.residency === "resident" ? `resident · home ${v.home + 1}` : "visitor · based at the lodge"}</div>
@@ -1660,12 +1781,13 @@ function renderPanel(now) {
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
     <div class="meta">${esc(v.id)}</div>
     <div class="state-line ${cls}">${esc(stateText)}</div>
-    ${v.knock ? `
+    ${(v.knock && v.knock.queue && v.knock.queue.length) || (v.approvals && v.approvals.length) ? renderApprovals(v, now) : v.knock ? `
       <div class="knock">
         <div class="knock-h">needs you</div>
         <div class="knock-msg">${esc(v.knock.message)}</div>
         <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
       </div>` : ""}
+    ${approvalDiagnostics.map(item => `<div class="approval-diagnostic" role="status">${esc(item.reason)}</div>`).join("")}
     ${v.soul && v.soul.body ? `<div class="soul">${esc(v.soul.body)}</div>` : ""}
     ${renderResidentRoutines(v.soul, now)}
     ${v.events.slice().reverse().map(ev => `
@@ -1673,6 +1795,71 @@ function renderPanel(now) {
         <div class="when">${ago(Date.parse(ev.ts) || 0, now)} · ${esc(ev.type)}</div>
         <div class="what">${esc(describe(ev))}</div>
       </div>`).join("")}`;
+}
+let approvalFocusMemory = null;
+function captureApprovalFocus() {
+  const active = document.activeElement;
+  if (!active || !panelBody.contains(active)) {
+    // Replacing the focused keyed node transiently moves focus to body before
+    // another projection callback can run. Retain the key across that gap, but
+    // forget it when the user explicitly focuses another real control.
+    return approvalFocusMemory;
+  }
+  let selector = null;
+  if (active.matches("[data-approval-edit]")) {
+    selector = `[data-approval-edit="${CSS.escape(active.dataset.approvalEdit)}"]`;
+  } else if (active.matches("[data-approval-option]")) {
+    selector = `[data-approval-id="${CSS.escape(active.dataset.approvalId)}"][data-approval-index="${CSS.escape(active.dataset.approvalIndex)}"]`;
+  } else if (active.matches("[data-steward-change]")) selector = "[data-steward-change]";
+  else if (active.matches("[data-steward-clear]")) selector = "[data-steward-clear]";
+  if (!selector) return approvalFocusMemory;
+  approvalFocusMemory = { selector, textarea: active.matches("textarea"),
+    start: active.selectionStart, end: active.selectionEnd,
+    direction: active.selectionDirection };
+  return approvalFocusMemory;
+}
+panelEl.addEventListener("pointerdown", event => {
+  if (!event.target.closest(
+      "[data-approval-edit], [data-approval-option], [data-steward-change], [data-steward-clear]")) {
+    approvalFocusMemory = null;
+  }
+});
+function restoreApprovalFocus(saved) {
+  if (!saved || !selectedId) return;
+  let target = panelBody.querySelector(saved.selector);
+  // Queue advancement, bounded expiry, or a reset may remove the keyed
+  // request. A submit can also leave the keyed node present but disabled. In
+  // either case focus the next enabled approval control, then the heading.
+  const usedFallback = !target || target.matches(":disabled") ||
+    target.getAttribute("aria-disabled") === "true";
+  if (usedFallback) target = panelBody.querySelector(
+    "[data-approval-edit]:not(:disabled), [data-approval-option]:not(:disabled)") ||
+    panelBody.querySelector("#panel-title");
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  if (saved.textarea && target.matches("textarea") &&
+      Number.isInteger(saved.start) && Number.isInteger(saved.end)) {
+    const limit = target.value.length;
+    target.setSelectionRange(Math.min(saved.start, limit), Math.min(saved.end, limit),
+      saved.direction || "none");
+  }
+  approvalFocusMemory = captureApprovalFocus();
+  if (usedFallback) {
+    const selector = target.matches("[data-approval-edit]") ?
+      `[data-approval-edit="${CSS.escape(target.dataset.approvalEdit)}"]` :
+      target.matches("[data-approval-option]") ?
+        `[data-approval-id="${CSS.escape(target.dataset.approvalId)}"][data-approval-index="${CSS.escape(target.dataset.approvalIndex)}"]` :
+        target.matches("[data-steward-change]") ? "[data-steward-change]" : "#panel-title";
+    requestAnimationFrame(() => {
+      const settled = selectedId && panelBody.querySelector(selector);
+      if (settled && document.activeElement === document.body) settled.focus({ preventScroll: true });
+    });
+  }
+}
+function renderPanel(now) {
+  const approvalFocus = captureApprovalFocus();
+  renderPanelContent(now);
+  restoreApprovalFocus(approvalFocus);
 }
 function restoreIdentity(target) {
   if (!target) return false;
@@ -1684,6 +1871,7 @@ function restoreIdentity(target) {
   return true;
 }
 function closePanel() {
+  approvalFocusMemory = null;
   if (returnFleet && selectedId !== FLEET_LEDGER_ID) {
     const target = returnFleet;
     returnFleet = null;
@@ -1704,7 +1892,10 @@ function closePanel() {
     panelEl.hidden = true;
     panelEl.classList.remove("ledger");
     pageRegions.forEach(region => { if (region) region.inert = false; });
-    if (target && target.element && target.element.isConnected) target.element.focus({ preventScroll: true });
+    if (target && target.element && target.element.isConnected &&
+        target.element !== document.body && target.element !== document.documentElement) {
+      target.element.focus({ preventScroll: true });
+    }
     else if (!restoreIdentity(target && target.identity)) document.getElementById("fleet-open").focus();
   };
   if (reducedMotion.matches) { finish(); return; }
@@ -1736,6 +1927,7 @@ function dialogFocusable() {
 panelEl.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closePanel(); return; }
   if (event.key !== "Tab") return;
+  approvalFocusMemory = null;
   const focusable = dialogFocusable();
   if (!focusable.length) return;
   const first = focusable[0], last = focusable[focusable.length - 1];
@@ -1758,6 +1950,10 @@ const fleetController = BurrowFleetController.createFleetController({
 fleetController.fitViewport(window.innerWidth);
 window.addEventListener("resize", () => fleetController.fitViewport(window.innerWidth));
 panelBody.addEventListener("input", event => {
+  if (event.target.matches("[data-approval-edit]")) {
+    approvalDrafts.set(event.target.dataset.approvalEdit, event.target.value);
+    return;
+  }
   if (selectedId === JOB_BOARD_ID && event.target.name in jobDraft) {
     jobDraft[event.target.name] = event.target.value;
     return;
@@ -1767,13 +1963,69 @@ panelBody.addEventListener("input", event => {
   renderFleet(Date.now());
 });
 panelBody.addEventListener("click", async event => {
+  const approvalOption = event.target.closest("[data-approval-option]");
+  if (approvalOption) {
+    const requestId = approvalOption.dataset.approvalId;
+    const decision = approvalOption.dataset.approvalOption;
+    const record = fleetView.approvalState &&
+      BurrowApprovals.recordFor(fleetView.approvalState, requestId);
+    if (!record || record.resolution || record.collided) {
+      approvalNotices.set(requestId, "This request is no longer pending; no decision was sent.");
+      renderPanel(Date.now()); return;
+    }
+    const edit = approvalDrafts.get(requestId) || "";
+    if (decision === "edit" && !edit.trim()) {
+      approvalNotices.set(requestId, "Write the edited detail before choosing edit; no decision was sent.");
+      renderPanel(Date.now()); return;
+    }
+    const initial = runtime.snapshot();
+    const observable = BurrowRoutines.telemetryAvailability(initial.transport, initial.cursor);
+    if (!observable.ok) {
+      approvalNotices.set(requestId,
+        `Approval unavailable: telemetry is ${initial.transport || "disconnected"}; no decision was sent.`);
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) return;
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      approvalNotices.set(requestId,
+        "Telemetry changed while authorizing; no decision was sent. Review the still-current request and retry.");
+      renderPanel(Date.now()); return;
+    }
+    const tracking = approvalAcks.request(requestId, decision,
+      decision === "edit" ? { note: edit.trim() } : null, current.cursor,
+      { agent_id: record.knock.agent_id, project: record.knock.project,
+        action: record.shape.action, lifecycle: record.lifecycle });
+    if (!tracking.ok) {
+      approvalNotices.set(requestId, tracking.message); renderPanel(Date.now()); return;
+    }
+    approvalNotices.delete(requestId); renderPanel(Date.now());
+    try {
+      const receipt = await BurrowApprovals.decide(stewardConfig, requestId, decision, edit);
+      approvalAcks.accepted(requestId, receipt);
+    } catch (error) {
+      approvalAcks.failed(requestId, error && error.message || "Decision request failed.",
+        Boolean(error && error.definitive));
+      if (error && error.authRejected) {
+        forgetStewardConfig();
+        approvalNotices.set(requestId,
+          "Steward rejected those credentials. Correct them and retry; no decision was recorded.");
+      }
+    }
+    renderPanel(Date.now()); return;
+  }
   const claimant = event.target.closest("[data-agent]");
   if (claimant && selectedId === JOB_BOARD_ID) {
     openPanel(claimant.dataset.agent, claimant);
     return;
   }
   const changeCredentials = event.target.closest("[data-steward-change]");
-  if (changeCredentials && selectedId === JOB_BOARD_ID) {
+  if (changeCredentials && (selectedId === JOB_BOARD_ID ||
+      selectedPendingApprovalQueue().length > 0)) {
     forgetStewardConfig();
     renderPanel(Date.now());
     const config = await requestStewardConfig();
@@ -1782,9 +2034,10 @@ panelBody.addEventListener("click", async event => {
     return;
   }
   const clearCredentials = event.target.closest("[data-steward-clear]");
-  if (clearCredentials && selectedId === JOB_BOARD_ID) {
+  if (clearCredentials && (selectedId === JOB_BOARD_ID ||
+      selectedPendingApprovalQueue().length > 0)) {
     forgetStewardConfig();
-    jobPostNotice = "Steward credentials cleared from browser memory.";
+    if (selectedId === JOB_BOARD_ID) jobPostNotice = "Steward credentials cleared from browser memory.";
     renderPanel(Date.now());
     return;
   }
@@ -1947,10 +2200,13 @@ const runtime = BurrowBrowser.createBrowserRuntime({
   },
   onFleet(view) {
     fleetView = view;
+    pruneApprovalUi(view.approvalState);
     routineAcks.observe({ events: view.routineBatch, cursor: view.cursor, reset: view.reset },
       view.now, validateEvent);
     jobAcks.observe({ events: view.taskEvidence, cursor: view.cursor, reset: view.reset },
       validateEvent);
+    approvalAcks.observe({ events: view.approvalEvidence, cursor: view.cursor,
+      reset: view.reset, approvalState: view.approvalState });
     if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
     if (selectedId === JOB_BOARD_ID) {
       refreshJobListing(view.now);
@@ -1959,6 +2215,8 @@ const runtime = BurrowBrowser.createBrowserRuntime({
         refreshJobFormState();
       }
     }
+    if (selectedId && selectedId !== JOB_BOARD_ID && selectedId !== FLEET_LEDGER_ID &&
+        (view.approvalEvidence.length || view.reset)) renderPanel(view.now);
   },
   onTransport(state) {
     transportEl.dataset.state = state;

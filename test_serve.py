@@ -3,11 +3,14 @@ import glob
 import json
 import multiprocessing
 import os
+import queue
 import sys
 import tempfile
 import threading
 import unittest
 from unittest import mock
+
+import approval_protocol
 
 with mock.patch.object(sys, "argv", ["serve.py"]):
     import serve
@@ -111,6 +114,214 @@ class NotificationTests(unittest.TestCase):
         with mock.patch.object(serve, "notify", return_value=True):
             serve.deliver_knock(event)
         self.assertFalse(serve.claim_knock(event))
+
+    def test_structured_knock_push_uses_action_and_detail(self):
+        event = self.event(message="legacy fallback")
+        event["payload"].update({
+            "request_id": "r1", "action": "send_email",
+            "detail": {"subject": "Thursday", "to": "anna@example.com"},
+            "options": ["approve", "deny", "edit"],
+        })
+        with mock.patch.object(serve.urllib.request, "urlopen") as opened:
+            opened.return_value.__enter__.return_value = object()
+            self.assertTrue(serve.notify(event))
+        request = opened.call_args.args[0]
+        self.assertEqual(request.headers["Title"], "send_email")
+        self.assertEqual(json.loads(request.data.decode("utf-8")), event["payload"]["detail"])
+        self.assertEqual(request.headers["X-burrow-delivery-id"],
+                         serve.receiver_delivery_id(event))
+
+    def test_structured_knock_push_preserves_null_detail(self):
+        event = self.event(message="legacy fallback")
+        event["payload"].update({
+            "request_id": "r-null", "action": "restart_service",
+            "detail": None, "options": ["approve", "deny"],
+        })
+        with mock.patch.object(serve.urllib.request, "urlopen") as opened:
+            opened.return_value.__enter__.return_value = object()
+            self.assertTrue(serve.notify(event))
+        request = opened.call_args.args[0]
+        self.assertEqual(request.headers["Title"], "restart_service")
+        self.assertIsNone(json.loads(request.data.decode("utf-8")))
+
+    def test_malformed_structured_push_degrades_to_the_legacy_notification(self):
+        event = self.event(message="please inspect")
+        event["payload"].update({"action": "send_email", "detail": {}, "options": [{}]})
+        with mock.patch.object(serve.urllib.request, "urlopen") as opened:
+            opened.return_value.__enter__.return_value = object()
+            self.assertTrue(serve.notify(event))
+        request = opened.call_args.args[0]
+        self.assertIn("is at your door", request.headers["Title"])
+        self.assertIn("please inspect", request.data.decode("utf-8"))
+
+    def test_structured_shape_matrix_matches_projection_rotation_and_notification(self):
+        path = os.path.join(os.path.dirname(__file__), "tests", "fixtures",
+                            "approval-shapes.json")
+        with open(path, encoding="utf-8") as stream:
+            cases = json.load(stream)
+        for case in cases:
+            event = self.event()
+            event["payload"] = case["payload"]
+            classified = approval_protocol.classify_approval(event)
+            self.assertEqual(classified.kind, case["kind"], case["name"])
+            self.assertIs(serve.structured_approval,
+                          serve.notification_persistence.structured_approval)
+            self.assertIs(serve.structured_approval, approval_protocol.structured_approval)
+            self.assertEqual(serve.structured_approval(event) is not None,
+                             case["kind"] == "structured", case["name"])
+
+    def test_shared_structured_parser_returns_a_complete_deeply_immutable_shape(self):
+        event = self.event(message="exact message")
+        event["payload"].update({
+            "request_id": " request ", "action": "send_email",
+            "detail": {"nested": {"count": 1}, "items": [True, None]},
+            "options": ["approve", "approve", "edit"], "expires_at": None,
+        })
+        shape = approval_protocol.structured_approval(event)
+        self.assertEqual(shape.request_id, " request ")
+        self.assertEqual(shape.options, ("approve", "approve", "edit"))
+        self.assertTrue(shape.message_present)
+        self.assertTrue(shape.expires_at_present)
+        event["payload"]["detail"]["nested"]["count"] = 2
+        event["payload"]["options"].append("deny")
+        self.assertEqual(shape.detail["nested"]["count"], 1)
+        self.assertEqual(shape.options, ("approve", "approve", "edit"))
+        with self.assertRaises(TypeError):
+            shape.detail["new"] = "mutable"
+        with self.assertRaises((AttributeError, TypeError)):
+            shape.request_id = "changed"
+
+    def test_distinct_same_millisecond_structured_requests_have_distinct_durable_identity(self):
+        first = self.event(ts="2026-08-24T12:00:00.000Z")
+        first["payload"].update({"request_id": "request-a", "action": "send_email",
+                                 "detail": {}, "options": ["approve"]})
+        second = json.loads(json.dumps(first))
+        second["payload"]["request_id"] = "request-b"
+        self.assertNotEqual(serve.knock_key(first), serve.knock_key(second))
+        self.assertNotEqual(serve.terminal_knock_key(first), serve.terminal_knock_key(second))
+        self.assertTrue(serve.claim_knock(first))
+        self.assertTrue(serve.claim_knock(second))
+        self.assertTrue(serve.finish_knock(first, True))
+        self.assertTrue(serve.finish_knock(second, True))
+        self.assertFalse(serve.claim_knock(first), "exact replay stays terminal")
+        self.assertFalse(serve.claim_knock(second), "each distinct request is terminal once")
+
+    def test_structured_notification_identity_covers_exact_wire_and_immutable_shape(self):
+        baseline = self.event(agent_id=" agent ", project=" project ",
+                              ts="2026-08-24T12:00:00.000Z")
+        baseline["source"] = "codex"
+        baseline["payload"].update({
+            "request_id": " request ", "action": "send_email",
+            "detail": {"count": 1, "nested": {"b": True}},
+            "options": ["approve", "approve", "deny"],
+            "expires_at": "2026-08-25T12:00:00Z",
+        })
+        exact_replay = json.loads(json.dumps(baseline))
+        semantic_replay = json.loads(json.dumps(baseline))
+        semantic_replay["payload"]["detail"] = {
+            "nested": {"b": True}, "count": 1.0,
+        }
+        self.assertEqual(serve.knock_key(baseline), serve.knock_key(exact_replay))
+        self.assertEqual(serve.knock_key(baseline), serve.knock_key(semantic_replay))
+        self.assertTrue(serve.knock_key(baseline).startswith("structured-v3-sha256-"))
+        self.assertNotIn("request", serve.knock_key(baseline),
+                         "hashed identity must not retain approval data")
+
+        variants = []
+        for mutate in (
+                lambda item: item.update(agent_id="agent "),
+                lambda item: item.update(project="project "),
+                lambda item: item["payload"].update(request_id="request "),
+                lambda item: item["payload"].update(action="restart_service"),
+                lambda item: item["payload"].update(message="help "),
+                lambda item: item["payload"].update(detail={"count": 2}),
+                lambda item: item["payload"].update(options=["approve"]),
+                lambda item: item["payload"].update(
+                    options=["approve", "deny", "approve"]),
+                lambda item: item["payload"].update(
+                    expires_at="2026-08-25T12:00:01Z"),
+                lambda item: item["payload"].pop("expires_at"),
+                lambda item: item.update(ts="2026-08-24T12:00:00.001Z")):
+            variant = json.loads(json.dumps(baseline))
+            mutate(variant)
+            variants.append(variant)
+        keys = {serve.knock_key(baseline), *(serve.knock_key(item) for item in variants)}
+        self.assertEqual(len(keys), 1 + len(variants))
+
+    def test_structured_notification_identity_matches_shared_cross_language_vector(self):
+        path = os.path.join(os.path.dirname(__file__), "tests", "fixtures",
+                            "notification-identity.json")
+        with open(path, encoding="utf-8") as stream:
+            vector = json.load(stream)
+        self.assertEqual(serve.knock_key(vector["event"]), vector["expected_key"])
+
+    def test_plain_knock_cannot_suppress_structured_knock_with_same_legacy_tuple(self):
+        plain = self.event(ts="2026-08-24T12:00:00.000Z")
+        structured = json.loads(json.dumps(plain))
+        structured["payload"].update({"request_id": "request", "action": "send_email",
+                                      "detail": {}, "options": ["approve"]})
+        self.assertNotEqual(serve.knock_key(plain), serve.knock_key(structured))
+        self.assertTrue(serve.claim_knock(plain))
+        self.assertTrue(serve.finish_knock(plain, True))
+        self.assertTrue(serve.claim_knock(structured))
+
+    def test_ambiguous_pre_v3_terminal_keys_do_not_suppress_structured_upgrade(self):
+        event = self.event(ts="2026-08-24T12:00:00.000Z")
+        event["payload"].update({"request_id": "migrated", "action": "send_email",
+                                 "detail": {}, "options": ["approve"]})
+        legacy = "burrow-sha256-" + __import__("hashlib").sha256(
+            serve.notification_persistence.legacy_knock_key(event).encode(
+                "utf-8", "surrogatepass")).hexdigest()
+        v2 = "\x00".join(str(value) for value in (
+            "structured-v2", event.get("agent_id"), event.get("ts"),
+            event.get("project"), event.get("source"), "migrated",
+            "send_email", event["payload"]["message"]))
+        v2 = "burrow-sha256-" + __import__("hashlib").sha256(
+            v2.encode("utf-8", "surrogatepass")).hexdigest()
+        serve._remember_durable(
+            serve.LEDGER_NOTIFIED, serve._notified_by_log, legacy)
+        serve._remember_durable(
+            serve.LEDGER_NOTIFIED, serve._notified_by_log, v2)
+        self.assertEqual(serve.terminal_knock_keys(event),
+                         (serve.terminal_knock_key(event),))
+        self.assertTrue(serve.claim_knock(event),
+                        "ambiguous historical aliases favor one safe re-notification")
+
+    def test_plain_legacy_terminal_key_still_suppresses_exact_plain_replay(self):
+        event = self.event(ts="2026-08-24T12:00:00.000Z")
+        key = serve.terminal_knock_key(event)
+        serve._remember_durable(serve.LEDGER_NOTIFIED, serve._notified_by_log, key)
+        self.assertEqual(serve.terminal_knock_keys(event), (key,))
+        self.assertFalse(serve.claim_knock(event))
+
+    def test_repeated_options_are_structured_in_notification_and_survive_restart_once(self):
+        event = self.event(message="choose twice")
+        event["payload"].update({
+            "request_id": "repeat", "action": "send_email",
+            "detail": {"subject": "Repeated approval"},
+            "options": ["approve", "approve"],
+        })
+        self.assertEqual(serve.structured_approval(event).options,
+                         ("approve", "approve"))
+        with mock.patch.object(serve.urllib.request, "urlopen") as opened:
+            opened.return_value.__enter__.return_value = object()
+            self.assertTrue(serve.notify(event))
+        request = opened.call_args.args[0]
+        self.assertEqual(request.headers["Title"], "send_email")
+        self.assertEqual(json.loads(request.data.decode("utf-8")),
+                         {"subject": "Repeated approval"})
+        self.assertTrue(serve.persist_knock(event))
+        recovered = queue.Queue()
+        with mock.patch.object(serve, "_knock_queue", recovered):
+            serve._recover_knocks()
+        replay = recovered.get_nowait()
+        self.assertIn(serve.terminal_knock_key(replay), serve._notifying)
+        with mock.patch.object(serve, "notify", return_value=True):
+            self.assertTrue(serve.deliver_knock(replay))
+        serve._notified.clear()
+        serve._notifying.clear()
+        serve._notified_by_log.clear()
+        self.assertFalse(serve.claim_knock(event), "durable exact replay stays claimed once")
 
     def test_project_soul_is_consumed_once_across_the_fleet(self):
         self.write_soul("burrow.md", project="burrow", name="Maren")

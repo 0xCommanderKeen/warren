@@ -6,6 +6,7 @@
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
     : { validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
+      approvalRejections,
       foldEvents, foldArtifacts, reduce };
   const fleet = typeof module === "object" && module.exports
     ? require("./fleet-operations.js") : root.BurrowFleet;
@@ -13,10 +14,12 @@
     ? require("./job-board.js") : root.BurrowJobs;
   const routines = typeof module === "object" && module.exports
     ? require("./routine-ledger.js") : root.BurrowRoutines;
-  const runtime = factory(projection, fleet, jobs, routines);
+  const approvals = typeof module === "object" && module.exports
+    ? require("./approval-knocks.js") : root.BurrowApprovals;
+  const runtime = factory(projection, fleet, jobs, routines, approvals);
   if (typeof module === "object" && module.exports) module.exports = runtime;
   else root.BurrowBrowser = runtime;
-})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines) {
+})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines, approvals) {
   const MAX_TRANSPORT_EVENTS = 4000;
 
   function createBrowserRuntime(options) {
@@ -49,13 +52,15 @@
     let reportedResidentDiagnostics = new Set();
     let fleetState = fleet.createFleetState();
     let jobState = jobs.createState();
+    let approvalState = approvals.createState();
     let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
 
     function publishFleet(at = now(), routineBatch = [], reset = false,
-        cursor = eventCursor, taskEvidence = []) {
+        cursor = eventCursor, taskEvidence = [], approvalEvidence = []) {
       onFleet({ state: fleetState, residents: residentReport.residents,
         diagnosticResidents: residentReport.diagnosticResidents,
-        diagnostics: residentReport.diagnostics, routineBatch, taskEvidence, jobState, cursor, reset,
+        diagnostics: residentReport.diagnostics, routineBatch, taskEvidence, approvalEvidence,
+        jobState, approvalState, cursor, reset,
         directoryAvailable: residentReport.available, villagers, transport, now: at });
     }
 
@@ -72,24 +77,29 @@
 
     function project(lines, reset = false, publishRoutineEvidence = true) {
       if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState();
-        jobState = jobs.createState(); }
+        jobState = jobs.createState(); approvalState = approvals.createState(); }
       const batch = projection.parseEvents(lines);
       // The strict v0 adapter owns parsing and validation for every browser
       // consumer. Passing its validated batch and task-only rejection metadata
-      // keeps the board diagnostic without giving it a second, weaker raw parser.
+      // keeps boards/approvals diagnostic without a second, weaker raw parser.
       jobs.foldValidated(jobState, batch, { isValidatedBatch: projection.isValidatedBatch,
         rejections: projection.taskRejections(batch) });
+      approvals.foldValidated(approvalState, batch, {
+        isValidatedBatch: projection.isValidatedBatch,
+        rejections: projection.approvalRejections(batch),
+      });
       projection.foldEvents(agents, batch);
       projection.foldArtifacts(artifacts, batch);
       const at = now();
       fleet.foldFleet(fleetState, batch, lines.length - batch.length,
         projection.routineRejections(batch).length, at);
-      villagers = projection.reduce(agents, at, souls);
-      onProjection({ villagers, artifacts, souls, now: at });
+      villagers = projection.reduce(agents, at, souls, approvalState);
+      onProjection({ villagers, artifacts, souls, approvalState, now: at });
       const taskEvents = batch.filter(event => jobs.TYPES.has(event.type));
+      const approvalEvents = batch.filter(event => event.type === "needs_human_resolved");
       publishFleet(at, publishRoutineEvidence ?
         batch.filter(event => event.type.startsWith("routine_")) : [], reset, eventCursor,
-        publishRoutineEvidence ? taskEvents : []);
+        publishRoutineEvidence ? taskEvents : [], publishRoutineEvidence ? approvalEvents : []);
       return batch;
     }
 
@@ -213,7 +223,8 @@
       function publishStaging() {
         if (!stageEligible || stagingOverflowed) return false;
         for (const staged of stagedPublications) {
-          publishFleet(now(), staged.routineEvents, false, staged.cursor, staged.taskEvents);
+          publishFleet(now(), staged.routineEvents, false, staged.cursor, staged.taskEvents,
+            staged.approvalEvents);
         }
         return true;
       }
@@ -251,16 +262,19 @@
         if (streamReady || !stageEligible || stagingOverflowed) return;
         const evidence = batch.filter(event => event.type.startsWith("routine_"));
         const taskEvidence = batch.filter(event => jobs.TYPES.has(event.type));
-        if (!evidence.length && !taskEvidence.length) return;
-        if (stagedEvidenceCount + evidence.length + taskEvidence.length > MAX_TRANSPORT_EVENTS) {
+        const approvalEvidence = batch.filter(event => event.type === "needs_human_resolved");
+        if (!evidence.length && !taskEvidence.length && !approvalEvidence.length) return;
+        if (stagedEvidenceCount + evidence.length + taskEvidence.length +
+            approvalEvidence.length > MAX_TRANSPORT_EVENTS) {
           stagedPublications = [];
           stagedEvidenceCount = 0;
           stagingOverflowed = true;
           return;
         }
         stagedPublications.push({ routineEvents: evidence, taskEvents: taskEvidence,
+          approvalEvents: approvalEvidence,
           cursor: message.lastEventId || 0 });
-        stagedEvidenceCount += evidence.length + taskEvidence.length;
+        stagedEvidenceCount += evidence.length + taskEvidence.length + approvalEvidence.length;
       };
       stream.addEventListener("ready", async message => {
         if (eventStream !== stream || streamReady) return;
@@ -318,7 +332,7 @@
 
     function snapshot() {
       return { villagers, artifacts, souls, cursor: eventCursor, transport,
-        transportStatus, fleetState, jobState, residentReport };
+        transportStatus, fleetState, jobState, approvalState, residentReport };
     }
 
     onTransport(transport);
