@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -388,6 +389,82 @@ def test_the_daemon_stamps_the_heartbeat_every_iteration(
     assert s.SchedulerState.load(state_path).last_tick_at() == datetime(
         2026, 8, 24, 10, 41, tzinfo=UTC
     )
+
+
+def _blocking_runner() -> tuple[threading.Event, threading.Event, s.RunnerFactory]:
+    """Build a runner that announces it started and then hangs, as a long session would."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(_request: r.RunRequest) -> r.RunResult:
+        started.set()
+        release.wait(timeout=5)
+        return r.RunResult(outcome=r.Outcome.OK, exit_status=0)
+
+    return started, release, lambda _spec: r.MockRunner(behavior=slow)
+
+
+def _beat_after(path: Path, after: datetime) -> datetime | None:
+    """Poll the state file for a heartbeat stamped at or after ``after``."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        beat = s.SchedulerState.load(path).last_tick_at()
+        if beat is not None and beat >= after:
+            return beat
+        time.sleep(0.01)
+    return None
+
+
+def test_the_heartbeat_keeps_stamping_while_a_fire_blocks_the_daemon(
+    build, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bug this exists to prevent: the loop cannot come round while it is inside a
+    # 15-minute routine, so a heartbeat that only lands between wake-ups goes stale exactly
+    # when a run is in flight — and every reader calls the daemon running it dead.
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    started, release, factory = _blocking_runner()
+    engine = build(HOURLY, runner_factory=factory)
+    moment = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)
+    engine.state.set_anchor(engine.scheduled[0].key, moment - timedelta(hours=1))
+    watching_since = datetime.now(UTC)
+
+    daemon = threading.Thread(
+        target=lambda: engine.run(max_ticks=1, sleep=lambda _s: None, now_fn=lambda: moment)
+    )
+    daemon.start()
+    try:
+        assert started.wait(timeout=5), "the routine never fired"
+        beat = _beat_after(tmp_path / "state.json", watching_since)
+    finally:
+        release.set()
+        daemon.join(timeout=5)
+
+    assert beat is not None, "the heartbeat went quiet while the daemon was mid-run"
+
+
+def test_a_cron_tick_keeps_stamping_while_it_fires(
+    build, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The other deployment: `steward scheduler tick` fires inside its lock, with no loop to
+    # come round at all, so the heartbeat is the only thing that can say it is still here.
+    monkeypatch.setattr(s, "HEARTBEAT_EVERY_S", 0.01)
+    started, release, factory = _blocking_runner()
+    engine = build(HOURLY, runner_factory=factory)
+    moment = datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC)
+    engine.state.set_anchor(engine.scheduled[0].key, moment - timedelta(hours=1))
+    engine.state.save()
+    watching_since = datetime.now(UTC)
+
+    cron = threading.Thread(target=lambda: engine.tick(moment))
+    cron.start()
+    try:
+        assert started.wait(timeout=5), "the routine never fired"
+        beat = _beat_after(tmp_path / "state.json", watching_since)
+    finally:
+        release.set()
+        cron.join(timeout=5)
+
+    assert beat is not None, "the heartbeat went quiet while the tick was mid-run"
 
 
 def test_a_dry_run_leaves_no_heartbeat(write_resident: ResidentWriter, tmp_path: Path) -> None:

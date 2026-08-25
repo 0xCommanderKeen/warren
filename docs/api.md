@@ -490,11 +490,13 @@ the last run **somebody asked for through this API**. A routine that fired on it
 schedule leaves its record in burrow's event log, not here. `null` is the ordinary case.
 
 `scheduler` is the heartbeat the rest of this ledger has to be read against: `last_tick` is
-when a scheduler process last woke up against that state file — stamped every tick,
-**including the ticks where nothing was due**, so an idle daemon still counts as a live one
-— and `alive` says whether that is within `stale_after_s` of now. The threshold is not a
-new number: it is the daemon's longest sleep (60s) plus the catch-up window a fire may be
-late by (300s), so anything older could not have fired on time anyway.
+when a scheduler process was last alive against that state file — stamped every tick,
+**including the ticks where nothing was due**, so an idle daemon still counts as a live one,
+and stamped every 60s by the scheduler's own heartbeat thread **while it is inside a run**,
+so the fifteen minutes a daily summary takes do not read as fifteen minutes of nobody home.
+`alive` says whether that is within `stale_after_s` of now. The threshold is not a new
+number: it is the heartbeat's cadence (60s) plus the catch-up window a fire may be late by
+(300s), so anything older could not have fired on time anyway.
 
 `alive` has three values, and the third is the point. `true` is up, `false` is a daemon
 that stopped, and `null` means **nothing has ever ticked** — a fresh install, where every

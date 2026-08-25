@@ -104,6 +104,7 @@ from steward.skills import (
 __all__ = [
     "DEFAULT_CATCHUP_S",
     "DEFAULT_STATE_PATH",
+    "HEARTBEAT_EVERY_S",
     "STALE_TICK_AFTER_S",
     "TRIGGER_MANUAL",
     "TRIGGER_SCHEDULE",
@@ -135,11 +136,16 @@ DEFAULT_CATCHUP_S = 300.0
 MAX_SLEEP_S = 60.0
 MIN_SLEEP_S = 0.05
 
+#: How often a scheduler stamps the heartbeat while it is heads-down in a run. The
+#: daemon's own cadence, because that is the promise being kept: the file is touched at
+#: least this often for as long as a scheduler is alive, whatever it is busy with.
+HEARTBEAT_EVERY_S = MAX_SLEEP_S
+
 #: How long a state file may go untouched before "a scheduler is up" stops being a safe
-#: reading of it. Not a new number: a living daemon stamps the file at least every
-#: :data:`MAX_SLEEP_S`, and a fire is still honest work up to ``catchup_s`` late, so a
-#: heartbeat older than the two together could not have fired anything on time anyway.
-STALE_TICK_AFTER_S = MAX_SLEEP_S + DEFAULT_CATCHUP_S
+#: reading of it. Not a new number: a living scheduler stamps the file at least every
+#: :data:`HEARTBEAT_EVERY_S`, and a fire is still honest work up to ``catchup_s`` late, so
+#: a heartbeat older than the two together could not have fired anything on time anyway.
+STALE_TICK_AFTER_S = HEARTBEAT_EVERY_S + DEFAULT_CATCHUP_S
 
 #: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
 #: asking for it now through the API. The ledger has to be able to tell them apart.
@@ -354,6 +360,11 @@ class SchedulerState:
     ``last_tick`` is the one liveness fact in the file: when a scheduler process last woke
     up here. Anchors say what already ran; only this says whether anything is still around
     to run the next occurrence — which is what turns a ledger of promises into a report.
+
+    A live scheduler writes this from two threads — its own loop, and the heartbeat that
+    keeps stamping while the loop is inside a 15-minute run — so the object serialises its
+    own writes. Without that, a heartbeat saving while the loop anchors a routine iterates
+    a dict that is being mutated underneath it.
     """
 
     path: Path
@@ -361,6 +372,10 @@ class SchedulerState:
     #: When a scheduler last woke up against this file, in UTC. ``None`` is a real answer:
     #: nothing has ever ticked here, so nothing has ever fired from it.
     last_tick: str | None = None
+    #: Serialises this state's two writers: the scheduler's loop and its heartbeat.
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False, compare=False, init=False
+    )
 
     @classmethod
     def load(cls, path: Path | str) -> SchedulerState:
@@ -400,7 +415,9 @@ class SchedulerState:
         already ran. Reloading under the lock, before ``due`` is computed, is what makes
         the second tick see the first one's anchor and find nothing due.
         """
-        self.anchors.update(type(self).load(self.path).anchors)
+        fresh = type(self).load(self.path).anchors
+        with self._lock:
+            self.anchors.update(fresh)
 
     def anchor(self, key: str) -> datetime | None:
         """Return the moment this routine's next occurrence is computed from, if known."""
@@ -408,7 +425,8 @@ class SchedulerState:
 
     def set_anchor(self, key: str, moment: datetime) -> None:
         """Record a new anchor, in UTC."""
-        self.anchors[key] = moment.astimezone(UTC).isoformat()
+        with self._lock:
+            self.anchors[key] = moment.astimezone(UTC).isoformat()
 
     def last_tick_at(self) -> datetime | None:
         """Return when a scheduler last woke up here, or ``None`` if none ever has."""
@@ -416,19 +434,26 @@ class SchedulerState:
 
     def record_tick(self, moment: datetime) -> None:
         """Record that a scheduler woke up now, in UTC. Persisted by the next ``save()``."""
-        self.last_tick = moment.astimezone(UTC).isoformat()
+        with self._lock:
+            self.last_tick = moment.astimezone(UTC).isoformat()
 
     def save(self) -> None:
-        """Write the state atomically, so a kill mid-write cannot corrupt it."""
-        payload: dict[str, Any] = {
-            "version": STATE_VERSION,
-            "routines": {key: {"anchor": value} for key, value in sorted(self.anchors.items())},
-            "last_tick": self.last_tick,
-        }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(self.path)
+        """Write the state atomically, so a kill mid-write cannot corrupt it.
+
+        The lock is held across the write, not just the snapshot: the loop and the
+        heartbeat write the same ``.tmp`` sidecar, and two of those interleaving would
+        rename half a file over the state — the very corruption the rename exists to avoid.
+        """
+        with self._lock:
+            payload: dict[str, Any] = {
+                "version": STATE_VERSION,
+                "routines": {key: {"anchor": value} for key, value in sorted(self.anchors.items())},
+                "last_tick": self.last_tick,
+            }
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
+            temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(self.path)
 
 
 def scheduler_liveness(state: SchedulerState, now: datetime | None = None) -> dict[str, Any]:
@@ -438,6 +463,11 @@ def scheduler_liveness(state: SchedulerState, now: datetime | None = None) -> di
     when the heartbeat is fresher than :data:`STALE_TICK_AFTER_S`, ``False`` when it is
     older — a daemon that died is not the same as one that never existed — and ``None``
     when nothing has ever ticked, which is what a fresh install honestly reports.
+
+    The threshold only holds because the stamp is not the loop coming round: a scheduler
+    keeps stamping every :data:`HEARTBEAT_EVERY_S` for as long as it is alive, including
+    the fifteen minutes it spends inside one long run (see :meth:`Scheduler._beating`).
+    Otherwise every daily summary would report the daemon that is running it as dead.
     """
     last = state.last_tick_at()
     moment = now or datetime.now(UTC)
@@ -1081,6 +1111,57 @@ class Scheduler:
             "STEWARD_RUN_ID": run_id,
         }
 
+    # -- liveness ----------------------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _beating(self) -> Iterator[None]:
+        """Keep the heartbeat stamped for as long as this scheduler is inside its work.
+
+        The heartbeat cannot be the loop coming round, because coming round is exactly what
+        a scheduler stops doing while it works: ``run`` joins each wake-up's fires, ``tick``
+        fires inside its lock, and both then dispatch the board — sessions that the shipped
+        manifests give 600 and 900 seconds. A stamp that only lands between wake-ups is
+        therefore missing precisely when a routine is running, and every reader of it
+        (``GET /routines``, ``steward doctor``, the console badge) would call a daemon that
+        is mid-summary dead — false, and false at the moment somebody is checking on a run
+        that looks stuck.
+
+        So a small daemon thread stamps every :data:`HEARTBEAT_EVERY_S` on the wall clock —
+        the wall clock, not an injected one, because the fact being asserted is "a scheduler
+        process exists right now" and other processes read it against their own now. It
+        writes nothing else: the anchors are the loop's to own, and
+        :class:`SchedulerState` serialises the two writers.
+
+        What this asserts is the process, not its progress: a scheduler wedged with its
+        heartbeat thread still alive reads as up. That is the right division of labour —
+        "is anything attending these routines" is this file's question, and "is what it is
+        attending them with actually getting anywhere" is the watchdog's, which is why the
+        watchdog lives outside the daemon in the first place.
+
+        A rehearsal does not beat. Nothing is firing on a dry run's account, and a state
+        file it must not write cannot be stamped either.
+        """
+        if self.dry_run:
+            yield
+            return
+        stop = threading.Event()
+
+        def beat() -> None:
+            while not stop.wait(HEARTBEAT_EVERY_S):
+                try:
+                    self.state.record_tick(datetime.now(UTC))
+                    self._save_state()
+                except Exception as exc:  # noqa: BLE001 — a heartbeat must not kill the run
+                    log.warning("could not stamp the scheduler heartbeat: %s", exc)
+
+        thread = threading.Thread(target=beat, name="steward-heartbeat", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(timeout=HEARTBEAT_EVERY_S)
+
     # -- the two entry points --------------------------------------------------------
 
     def tick(self, now: datetime | None = None) -> list[FireReport]:
@@ -1108,15 +1189,18 @@ class Scheduler:
             self._dispatch(moment)
             return reports
         self._ensure_state_ready()
-        with self._state_lock():
-            self.state.reload()
-            due = self.due(moment)
-            for item in due:
-                self.state.set_anchor(item.key, moment)
-            self.state.record_tick(moment)
-            self._save_state()
-            reports = [self.fire(item, now=moment) for item in due]
-        self._dispatch(moment)
+        # The heartbeat covers the fires and the board sweep, which is where a cron-driven
+        # tick spends its minutes: this process really is here for all of them.
+        with self._beating():
+            with self._state_lock():
+                self.state.reload()
+                due = self.due(moment)
+                for item in due:
+                    self.state.set_anchor(item.key, moment)
+                self.state.record_tick(moment)
+                self._save_state()
+                reports = [self.fire(item, now=moment) for item in due]
+            self._dispatch(moment)
         return reports
 
     def _dispatch(self, moment: datetime) -> None:
@@ -1145,12 +1229,17 @@ class Scheduler:
         Long routines run on a small thread pool so a 15-minute daily summary does not
         hold up an hourly inbox read; the per-routine overlap guard is what makes that
         safe. ``max_ticks`` bounds the loop for tests.
+
+        The whole loop runs inside :meth:`_beating`, so the heartbeat keeps landing while
+        the daemon is heads-down in a fire or a board sweep rather than only between
+        wake-ups. Both stamps are wanted: the loop's says the clock came round, the
+        heartbeat's says the process is still here while it works.
         """
         self.require_ready()
         clock = now_fn or (lambda: datetime.now(UTC))
         reports: list[FireReport] = []
         ticks = 0
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+        with self._beating(), ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             while max_ticks is None or ticks < max_ticks:
                 ticks += 1
                 moment = clock()
@@ -1158,7 +1247,7 @@ class Scheduler:
                 for item in due:
                     self.state.set_anchor(item.key, moment)
                 # Every iteration, including the ones where nothing is due: an idle daemon
-                # is still a live one, and this stamp is the only thing that says so.
+                # is still a live one, and this stamp is what says the clock came round.
                 self.state.record_tick(moment)
                 self._save_state()
                 futures = [pool.submit(self.fire, item, now=moment) for item in due]
