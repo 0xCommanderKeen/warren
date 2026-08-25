@@ -146,7 +146,9 @@ function validateEvent(ev) {
 }
 
 /* One parse and validation pass per batch for village and notice board. */
+const VALIDATED_BATCH = Symbol("burrow validated event batch");
 function parseEvents(batch) {
+  if (batch && batch[VALIDATED_BATCH]) return batch;
   const events = [];
   for (const item of batch) {
     let ev = item;
@@ -156,6 +158,7 @@ function parseEvents(batch) {
     if (validateEvent(ev)) continue;
     events.push(ev);
   }
+  Object.defineProperty(events, VALIDATED_BATCH, { value: true });
   return events;
 }
 

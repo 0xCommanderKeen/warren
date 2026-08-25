@@ -6,10 +6,12 @@
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
     : { parseEvents, foldEvents, foldArtifacts, reduce };
-  const runtime = factory(projection);
+  const fleet = typeof module === "object" && module.exports
+    ? require("./fleet-operations.js") : root.BurrowFleet;
+  const runtime = factory(projection, fleet);
   if (typeof module === "object" && module.exports) module.exports = runtime;
   else root.BurrowBrowser = runtime;
-})(typeof globalThis === "object" ? globalThis : this, function (projection) {
+})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet) {
   function createBrowserRuntime(options) {
     const now = options.now;
     const fetch = options.fetch;
@@ -19,6 +21,7 @@
     const onProjection = options.onProjection || (() => {});
     const onTransport = options.onTransport || (() => {});
     const onTransportStatus = options.onTransportStatus || (() => {});
+    const onFleet = options.onFleet || (() => {});
     const warn = options.warn || (() => {});
 
     let souls = [];
@@ -37,11 +40,21 @@
     let transportStatus = null;
     let transportStatusPromise = null;
     let reportedResidentDiagnostics = new Set();
+    let fleetState = fleet.createFleetState();
+    let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
+
+    function publishFleet(at = now()) {
+      onFleet({ state: fleetState, residents: residentReport.residents,
+        diagnosticResidents: residentReport.diagnosticResidents,
+        diagnostics: residentReport.diagnostics,
+        directoryAvailable: residentReport.available, villagers, transport, now: at });
+    }
 
     function setTransport(next) {
       if (next === transport) return;
       transport = next;
       onTransport(next);
+      publishFleet();
     }
 
     function combineSouls() {
@@ -49,13 +62,15 @@
     }
 
     function project(lines, reset = false) {
-      if (reset) { agents = new Map(); artifacts = []; }
+      if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState(); }
       const batch = projection.parseEvents(lines);
       projection.foldEvents(agents, batch);
       projection.foldArtifacts(artifacts, batch);
+      fleet.foldFleet(fleetState, batch, lines.length - batch.length);
       const at = now();
       villagers = projection.reduce(agents, at, souls);
       onProjection({ villagers, artifacts, souls, now: at });
+      publishFleet(at);
     }
 
     function tick() { project([]); }
@@ -63,11 +78,20 @@
     function refreshResidents() {
       if (residentPromise) return residentPromise;
       residentPromise = (async () => {
+        function markUnavailable() {
+          residentReport = { ...residentReport, available: false };
+          project([]);
+        }
         try {
           const response = await fetch("/residents", { cache: "no-store" });
-          if (!response.ok) return;
+          if (!response.ok) { markUnavailable(); return; }
           const report = await response.json();
-          if (!report || !Array.isArray(report.residents)) return;
+          if (!report || !Array.isArray(report.residents)) { markUnavailable(); return; }
+          residentReport = { residents: report.residents,
+            diagnosticResidents: Array.isArray(report.diagnostic_residents) ?
+              report.diagnostic_residents : [],
+            diagnostics: Array.isArray(report.diagnostics) ? report.diagnostics : [],
+            available: true };
           residentSouls = report.residents;
           combineSouls();
           const nextDiagnostics = new Set();
@@ -78,7 +102,7 @@
           }
           reportedResidentDiagnostics = nextDiagnostics;
           project([]);
-        } catch {}
+        } catch { markUnavailable(); }
       })().finally(() => { residentPromise = null; });
       return residentPromise;
     }
@@ -183,7 +207,7 @@
 
     function snapshot() {
       return { villagers, artifacts, souls, cursor: eventCursor, transport,
-        transportStatus };
+        transportStatus, fleetState, residentReport };
     }
 
     onTransport(transport);

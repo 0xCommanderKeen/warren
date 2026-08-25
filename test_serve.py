@@ -162,6 +162,23 @@ class NotificationTests(unittest.TestCase):
 
         self.assertEqual("Resident", names["visitor"])
 
+    def test_invalid_diagnostic_resident_never_enters_villager_projection(self):
+        self.write_resident("unsafe.resident.json", {"agent_id": "unsafe"}, home=7)
+        path = os.path.join(self.villagers, "unsafe.resident.json")
+        with open(path, encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        manifest["skills"][0]["password"] = "do-not-leak-this-secret"
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream)
+
+        report = serve.read_residents()
+        self.assertEqual(report["residents"], [])
+        self.assertEqual(len(report["diagnostic_residents"]), 1)
+        self.assertEqual(serve.read_villagers(), [])
+        rendered = json.dumps(report)
+        self.assertNotIn("do-not-leak-this-secret", rendered)
+        self.assertNotIn('"password": "', rendered)
+
     def test_child_lineage_survives_later_events_for_notification_names(self):
         self.write_soul("burrow.md", project="burrow", name="Maren")
         parent = self.event(agent_id="z-parent")

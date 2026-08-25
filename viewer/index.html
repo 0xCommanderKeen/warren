@@ -67,6 +67,13 @@
   #transport { font-size: 16px; color: #9bb7a0; }
   #transport[data-state="reconnecting"], #transport[data-state="polling"] { color: var(--busy); }
   #transport[data-state="disconnected"] { color: var(--alert); }
+  #fleet-open {
+    pointer-events: auto; margin-top: 10px; padding: 4px 10px 5px;
+    font: inherit; font-size: 18px; color: #ead8aa; cursor: pointer;
+    background: rgba(39,31,24,.82); border: 2px solid #8e7045;
+    box-shadow: 3px 3px 0 rgba(9,7,12,.55);
+  }
+  #fleet-open:hover, #fleet-open:focus-visible { color: #fff4d2; border-color: #d2a15c; }
 
   #empty {
     position: absolute; left: 0; right: 0; top: 42vh; text-align: center;
@@ -82,6 +89,8 @@
     transform: translateX(100%); transition: transform .18s steps(4);
   }
   #panel.open { transform: translateX(0); }
+  #panel.ledger { width: min(760px, 58vw); background: #17130f; border-color: #6f5533; }
+  #panel.ledger[data-narrow="true"] { width: 100vw; }
   #panel .close {
     position: absolute; top: 14px; right: 16px; font-size: 26px; color: var(--ink-dim);
     cursor: pointer; background: none; border: none; font-family: inherit;
@@ -120,6 +129,48 @@
   .artifact-empty { color: var(--ink-dim); font-size: 19px; margin-top: 18px; }
   .artifact-path { color: var(--ink); overflow-wrap: anywhere; }
   .artifact-by { color: var(--ink-dim); font-size: 15px; }
+  .ledger-kicker { color: #d2a15c; letter-spacing: 2px; text-transform: uppercase; }
+  .ledger-truth { color: #aa9d81; font-size: 16px; max-width: 58ch; margin: 4px 0 14px; }
+  .ledger-tabs { display: flex; gap: 5px; border-bottom: 2px solid #6f5533; margin-bottom: 14px; }
+  .ledger-tabs button, .entry-link {
+    font: inherit; color: var(--ink); background: transparent; cursor: pointer;
+  }
+  .ledger-tabs button { border: 0; padding: 6px 10px; font-size: 19px; }
+  .ledger-tabs button[aria-selected="true"] { color: #17130f; background: #d2a15c; }
+  .ledger-filters { display: grid; grid-template-columns: 2fr repeat(4, 1fr); gap: 7px; margin-bottom: 12px; }
+  .ledger-filters input, .ledger-filters select {
+    width: 100%; min-width: 0; font: inherit; font-size: 16px; color: var(--ink);
+    background: #100d0a; border: 1px solid #6f5533; padding: 6px 7px;
+  }
+  .ledger-state { border: 1px solid #4f422f; padding: 7px 9px; color: #b7aa8f; margin-bottom: 9px; }
+  .ledger-state.bad { border-color: #a65b4a; color: #f2a17d; }
+  .ledger-list { list-style: none; }
+  .ledger-entry { display: grid; grid-template-columns: 104px 1fr auto; gap: 10px; border-top: 1px solid #403522; padding: 9px 2px; }
+  .ledger-entry > * { min-width: 0; overflow-wrap: anywhere; }
+  .entry-link { border: 0; text-align: left; font-size: 18px; text-decoration: underline; text-decoration-color: #6f5533; }
+  .entry-link:hover, .entry-link:focus-visible { color: #ffd486; }
+  .ledger-small { color: #a79b82; font-size: 15px; overflow-wrap: anywhere; }
+  .status-mark { display: inline-block; border: 1px solid #706149; padding: 0 5px; color: #d3c6aa; }
+  .status-mark.missing { color: #d8ad68; }
+  .status-mark.invalid, .status-mark.externally-unavailable { color: #f08a69; border-color: #a65b4a; }
+  .resident-card { border: 2px solid #55452e; padding: 12px; margin-bottom: 12px; background: rgba(79,61,34,.16); }
+  .resident-card h3 { font-weight: 400; font-size: 24px; }
+  .cap-row { width: 100%; display: grid; grid-template-columns: 92px 1fr; gap: 8px; border: 0; border-top: 1px dotted #55452e; padding: 5px 0; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+  .cap-row:hover, .cap-row:focus-visible { color: #ffd486; background: rgba(210,161,92,.08); }
+  .cap-values { overflow-wrap: anywhere; }
+  .lodge-group { border-left: 5px solid #7b6f57; padding-left: 10px; }
+
+  @media (max-width: 680px) {
+    header { top: 10px; left: 12px; }
+    header h1 { font-size: 34px; }
+    footer { display: none; }
+    #panel, #panel.ledger { left: 0; right: auto; width: 100vw; border-left: 0; padding: 20px 14px; }
+    .ledger-filters { grid-template-columns: 1fr 1fr; }
+    .ledger-filters input { grid-column: 1 / -1; }
+    .ledger-entry { grid-template-columns: 72px 1fr; }
+    .ledger-entry > :last-child { grid-column: 2; }
+    .ledger-tabs { overflow-x: auto; }
+  }
 
   footer {
     position: absolute; bottom: 8px; left: 24px; z-index: 20; pointer-events: none;
@@ -146,6 +197,7 @@
   <div id="census"></div>
   <div id="lastbeat"></div>
   <div id="transport" data-state="disconnected" role="status" aria-live="polite" aria-atomic="true">telemetry disconnected</div>
+  <button id="fleet-open" type="button" aria-haspopup="dialog">open fleet ledger</button>
 </header>
 
 <div id="empty" style="display:none">
@@ -153,8 +205,8 @@
   <div class="sub">events will appear from ~/.burrow/events.jsonl</div>
 </div>
 
-<aside id="panel">
-  <button class="close" title="close">✕</button>
+<aside id="panel" role="dialog" aria-modal="false" aria-label="Villager details">
+  <button class="close" title="close" aria-label="Close panel">✕</button>
   <div id="panel-body"></div>
 </aside>
 
@@ -163,6 +215,8 @@
 
 <script src="/routes.js"></script>
 <script src="/destinations.js"></script>
+<script src="/fleet-operations.js"></script>
+<script src="/fleet-controller.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -251,6 +305,7 @@ const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
 // direction indices in the character sheets: columns = down, up, left, right
 const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
 const NOTICE_BOARD_ID = "notice-board";
+const FLEET_LEDGER_ID = "fleet-ledger";
 
 // standing spots in front of a shared door: first arrival takes the middle, the
 // rest fan out in a staggered arc so their name chips stay readable. Fixed, so
@@ -1164,8 +1219,119 @@ function placeLabel(v) {
   return "";
 }
 
+let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
+  directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now() };
+let fleetTab = "activity";
+const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
+function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
+function villagerName(agentId) {
+  const current = villagerFor(agentId);
+  return current ? current.name : NAMES[hashCode(agentId) % NAMES.length];
+}
+function selectOptions(values, selected, label) {
+  return `<option value="">${esc(label)}</option>` + values.map(value =>
+    `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(value)}</option>`).join("");
+}
+function entryLink(detailId, label) {
+  return `<button class="entry-link" data-agent="${esc(detailId)}">${esc(label)}</button>`;
+}
+function residentDetailId(resident) { return `@resident/${resident.file}`; }
+function statusMark(status) {
+  return `<span class="status-mark ${esc(status.replaceAll(" ", "-"))}">${esc(status)}</span>`;
+}
+function capabilityLine(label, declarations, active, resident) {
+  const items = Array.isArray(declarations) ? declarations : declarations ? [declarations] : [];
+  const statuses = label === "soul" ? [!fleetView.directoryAvailable ? "externally unavailable" :
+    declarations && declarations.invalid ? "invalid" : items.length ? "configured" : "missing"] : items.length ? items.map(item =>
+    BurrowFleet.capabilityStatus(item, fleetView.directoryAvailable, item.invalid === true)) :
+    [BurrowFleet.capabilityStatus(null, fleetView.directoryAvailable)];
+  const status = statuses.includes("invalid") ? "invalid" :
+    statuses.includes("externally unavailable") ? "externally unavailable" : statuses[0];
+  const values = items.map(item => `${esc(item.id || item.ref || item.name || "declared")}` +
+    (item.status_ref ? ` <span class="ledger-small">(${esc(item.status_ref)})</span>` : "")).join(" · ");
+  const focusKey = `cap:${resident.file}:${label}`;
+  const detailId = active ? active.id : residentDetailId(resident);
+  const detailName = active ? active.name : resident.meta.name || resident.file;
+  const attrs = ` data-agent="${esc(detailId)}" data-fleet-focus="${esc(focusKey)}" aria-label="Open ${esc(detailName)} detail: ${esc(label)}"`;
+  return `<button type="button" class="cap-row"${attrs}><span>${esc(label)}</span><span class="cap-values">${statusMark(status)}${values ? ` ${values}` : ""}</span></button>`;
+}
+function renderActivity(now) {
+  const state = fleetView.state;
+  const recent = BurrowFleet.filterRecent(state, fleetFilters);
+  const opts = key => BurrowFleet.optionsFor(state, key);
+  return `<div class="ledger-filters">
+    <input name="query" data-fleet-focus="filter:query" type="search" aria-label="Search recent activity" placeholder="search the ledger…" value="${esc(fleetFilters.query)}">
+    <select name="project" data-fleet-focus="filter:project" aria-label="Filter by project">${selectOptions(opts("project"), fleetFilters.project, "all projects")}</select>
+    <select name="source" data-fleet-focus="filter:source" aria-label="Filter by source">${selectOptions(opts("source"), fleetFilters.source, "all runners")}</select>
+    <select name="state" data-fleet-focus="filter:state" aria-label="Filter by state">${selectOptions(opts("state"), fleetFilters.state, "all states")}</select>
+    <select name="villager" data-fleet-focus="filter:villager" aria-label="Filter by villager">${selectOptions(opts("agent_id"), fleetFilters.villager, "all villagers")}</select>
+  </div>
+  ${state.malformed ? `<div class="ledger-state bad">${state.malformed} malformed record${state.malformed === 1 ? " was" : "s were"} ignored; invalid data never enters the village.</div>` : ""}
+  ${fleetView.transport === "disconnected" ? `<div class="ledger-state bad">Telemetry disconnected. This ledger may be stale.</div>` : ""}
+  ${villagers.some(v => v.state === "stale") ? `<div class="ledger-state bad">Some activity is stale: its villager has had no signal for over 30 minutes.</div>` : ""}
+  ${recent.length ? `<ol class="ledger-list">${recent.map(entry => `<li class="ledger-entry">
+    <div>${ago(entry.ts, now)}<div class="ledger-small">${esc(entry.state)}</div></div>
+    <div>${entryLink(entry.agent_id, villagerName(entry.agent_id))}<div class="ledger-small">${esc(entry.project)} · ${esc(entry.source)}</div><div>${esc(describe(entry.event))}</div></div>
+    <div class="ledger-small">${esc(entry.event.type)}</div>
+  </li>`).join("")}</ol>` : `<div class="ledger-state">No valid recent events match these filters.</div>`}`;
+}
+function renderAttention(now) {
+  const needs = BurrowFleet.outstandingNeeds(fleetView.state);
+  return needs.length ? `<ol class="ledger-list">${needs.map(entry => `<li class="ledger-entry">
+    <div>${ago(entry.ts, now)}</div><div>${entryLink(entry.agent_id, villagerName(entry.agent_id))}<div class="ledger-small">owner · ${esc(entry.agent_id)} · project · ${esc(entry.project)}</div><div>${esc(entry.event.payload.message)}</div></div><div>${statusMark("needs human")}</div>
+  </li>`).join("")}</ol>` : `<div class="ledger-state">No outstanding needs-human requests in the bounded recent window.</div>`;
+}
+function activeForResident(resident) {
+  const match = resident.match || {};
+  return villagers.find(v => match.agent_id ? v.id === match.agent_id :
+    v.project === match.project && v.residency === "resident");
+}
+function renderDirectory() {
+  const directory = BurrowFleet.residentDirectory(fleetView.residents, fleetView.diagnostics,
+    fleetView.directoryAvailable, fleetView.diagnosticResidents);
+  const availability = directory.available ? "" : `<div class="ledger-state bad">Resident declarations are externally unavailable. Cached declarations are shown for orientation only; no capability is assumed configured.</div>`;
+  const cards = directory.residents.map(resident => {
+    const caps = resident.capabilities || {}, active = activeForResident(resident);
+    return `<article class="resident-card"><h3>${entryLink(active ? active.id : residentDetailId(resident), resident.meta.name)}</h3>
+      <div class="ledger-small">resident · stable home ${resident.home + 1} · ${esc(resident.meta.role || "role not declared")}</div>
+      ${caps.soul && caps.soul.description ? `<div class="soul">${esc(caps.soul.description)}<div class="ledger-small">sprite ${esc(caps.soul.char)} · accent ${esc(caps.soul.accent)}</div></div>` : ""}
+      ${capabilityLine("soul", caps.soul, active, resident)}${capabilityLine("skills", caps.skills, active, resident)}
+      ${capabilityLine("memory", caps.memory, active, resident)}${capabilityLine("routes", caps.routes, active, resident)}
+      ${capabilityLine("app grants", caps.app_grants, active, resident)}</article>`;
+  }).join("");
+  const diagnosticCards = directory.diagnosticResidents.map(resident => {
+    const caps = resident.capabilities || {};
+    const name = resident.meta && resident.meta.name || resident.file;
+    const home = Number.isInteger(resident.declared_home) ?
+      ` · declared home ${resident.declared_home + 1} (not reserved)` : "";
+    return `<article class="resident-card invalid-resident"><h3>${entryLink(residentDetailId(resident), name)}</h3>
+      <div class="ledger-small">invalid resident declaration${home} · no residency or home granted</div>
+      ${capabilityLine("soul", caps.soul, null, resident)}${capabilityLine("skills", caps.skills, null, resident)}
+      ${capabilityLine("memory", caps.memory, null, resident)}${capabilityLine("routes", caps.routes, null, resident)}
+      ${capabilityLine("app grants", caps.app_grants, null, resident)}</article>`;
+  }).join("");
+  const invalid = directory.invalid.length ? `<div class="ledger-state bad">Incomplete or invalid manifests:<ul>${directory.invalid.map(d => `<li>${esc(d.file)}${esc(d.path)} — ${esc(d.message)}</li>`).join("")}</ul>${statusMark("invalid")}</div>` : "";
+  const visitors = villagers.filter(v => v.residency === "visitor");
+  const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div>${entryLink(v.id, v.name)} · ${esc(v.project)}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
+  return availability + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
+}
+function replaceFleet(now) {
+  panelEl.classList.add("ledger");
+  panelEl.setAttribute("aria-label", "Fleet operations ledger");
+  const body = fleetTab === "activity" ? renderActivity(now) : fleetTab === "attention" ? renderAttention(now) : renderDirectory();
+  panelBody.innerHTML = `<div class="ledger-kicker">the steward's field ledger</div><h2>Fleet operations</h2>
+    <div class="ledger-truth">Configured means a complete, safe public declaration exists. Missing means none is declared. Invalid comes only from public diagnostics or an incomplete public record. Externally unavailable means the resident feed is unavailable. A status reference is only an opaque locator; Burrow never interprets it as live health or tests secret-backed access.</div>
+    <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
+    <section aria-live="polite">${body}</section>`;
+  panelEl.classList.add("open");
+}
+function renderFleet(now) { return fleetController.preserveFocus(() => replaceFleet(now)); }
+
 function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
 function renderPanel(now) {
+  if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
+  panelEl.classList.remove("ledger");
+  panelEl.setAttribute("aria-label", "Villager details");
   if (selectedId === NOTICE_BOARD_ID) {
     const named = nameArtifacts(artifacts, villagers, souls);
     panelBody.innerHTML = `
@@ -1181,7 +1347,40 @@ function renderPanel(now) {
     return;
   }
   const v = villagers.find(x => x.id === selectedId);
-  if (!v) { closePanel(); return; }
+  if (!v) {
+    const residentFile = selectedId.startsWith("@resident/") ? selectedId.slice(10) : null;
+    const candidates = [...fleetView.residents, ...(fleetView.diagnosticResidents || [])];
+    let resident = residentFile ? candidates.find(item => item.file === residentFile) : null;
+    let latest = resident ? fleetView.state.recent.find(entry => {
+      const match = resident.match || {};
+      return match.agent_id ? entry.agent_id === match.agent_id :
+        match.project ? entry.project === match.project : false;
+    }) : fleetView.state.recent.find(entry => entry.agent_id === selectedId);
+    if (!resident) resident = candidates.find(item =>
+      (item.match || {}).agent_id === selectedId ||
+      (latest && (item.match || {}).project === latest.project));
+    if (!resident && !latest) { closePanel(); return; }
+    const meta = resident && resident.meta || {};
+    const name = meta.name || (latest ? villagerName(latest.agent_id) : resident.file);
+    const identity = latest ? latest.agent_id : (resident.match || {}).agent_id ||
+      (resident.match || {}).project || resident.file;
+    const residency = resident && resident.valid === true ?
+      `resident · home ${resident.home + 1}` : resident && resident.diagnostic ?
+      "invalid declaration · no residency or home granted" : "visitor · no current village projection";
+    panelBody.innerHTML = `
+      <h2><span style="color:${esc(meta.accent || "#8aa65b")}">▪</span> ${esc(name)}</h2>
+      <div class="meta role">${esc(residency)}</div>
+      ${meta.role ? `<div class="meta role">${esc(meta.role)}</div>` : ""}
+      <div class="meta">${esc(identity)}</div>
+      <div class="state-line">inactive · no current signal</div>
+      ${resident && resident.body ? `<div class="soul">${esc(resident.body)}</div>` : ""}
+      ${latest ? `<div class="evt t-${esc(latest.event.type)}">
+        <div class="when">latest retained event · ${ago(latest.ts, now)} · ${esc(latest.event.type)}</div>
+        <div class="what">${esc(describe(latest.event))}</div>
+      </div>` : `<div class="meta">No retained event is available.</div>`}`;
+    panelEl.classList.add("open");
+    return;
+  }
   const at = placeLabel(v);
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
@@ -1210,12 +1409,27 @@ function renderPanel(now) {
       </div>`).join("")}`;
   panelEl.classList.add("open");
 }
-function closePanel() { selectedId = null; panelEl.classList.remove("open"); }
+function closePanel() { selectedId = null; panelEl.classList.remove("open", "ledger"); }
 panelEl.querySelector(".close").addEventListener("click", closePanel);
 censusEl.addEventListener("click", event => {
   if (!event.target.closest('[data-action="inspect-stale"]')) return;
   const staleVillager = villagers.find(v => v.state === "stale");
   if (staleVillager) openPanel(staleVillager.id);
+});
+document.getElementById("fleet-open").addEventListener("click", () => openPanel(FLEET_LEDGER_ID));
+const fleetController = BurrowFleetController.createFleetController({
+  panel: panelEl, body: panelBody, document,
+  moveFocus: BurrowFleet.moveFocus,
+  launcher: document.getElementById("fleet-open"),
+  renderTab(id) { fleetTab = id; renderFleet(Date.now()); },
+  openAgent: openPanel, close: closePanel,
+});
+fleetController.fitViewport(window.innerWidth);
+window.addEventListener("resize", () => fleetController.fitViewport(window.innerWidth));
+panelBody.addEventListener("input", event => {
+  if (!event.target.name || !(event.target.name in fleetFilters)) return;
+  fleetFilters[event.target.name] = event.target.value;
+  renderFleet(Date.now());
 });
 
 let souls = [];
@@ -1233,6 +1447,10 @@ const runtime = BurrowBrowser.createBrowserRuntime({
     souls = view.souls;
     if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
     renderChrome(view.now);
+  },
+  onFleet(view) {
+    fleetView = view;
+    if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
   },
   onTransport(state) {
     transportEl.dataset.state = state;
@@ -1269,6 +1487,7 @@ const runtime = BurrowBrowser.createBrowserRuntime({
     window.__burrow.village = scene;   // map self-check hook, see checkMap()
     scene.events.once("create", async () => {
       await runtime.poll();
+      runtime.refreshResidents();
       runtime.connectStream();
       // Idle while SSE is healthy; this is the fallback when it is not.
       setInterval(runtime.poll, 2000);

@@ -18,6 +18,7 @@ TOP_LEVEL = {"manifest_version", "match", "home", "soul", "skills", "memory",
 SOUL_FIELDS = {"name", "char", "accent", "role", "description"}
 REFERENCE_FIELDS = {"id", "status_ref"}
 MEMORY_FIELDS = {"ref", "status_ref"}
+UNKNOWN_PATH_SEGMENT = "<unknown>"
 FORBIDDEN_KEY = re.compile(
     r"(^|_)(secret|token|password|credential|api_key|private_key|access_key)(_|$)", re.I)
 FORBIDDEN_VALUE = re.compile(
@@ -41,32 +42,51 @@ def _nonempty_string(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def _find_sensitive_key(value, path="$"):
+def _trusted_child(path, key, fields):
+    """Build a path without ever appending attacker-controlled key text."""
+    trusted = next((field for field in fields or () if key == field), None)
+    return path + "." + (trusted if trusted is not None else UNKNOWN_PATH_SEGMENT), trusted
+
+
+def _child_fields(field):
+    if field == "match":
+        return {"agent_id", "project"}
+    if field == "soul":
+        return SOUL_FIELDS
+    if field == "memory":
+        return MEMORY_FIELDS
+    if field in {"skills", "routes", "app_grants"}:
+        return REFERENCE_FIELDS
+    return None
+
+
+def _find_sensitive_key(value, path="$", fields=TOP_LEVEL):
     if isinstance(value, dict):
         for key, child in value.items():
-            child_path = path + "." + str(key)
             if FORBIDDEN_KEY.search(str(key)):
-                return child_path
-            found = _find_sensitive_key(child, child_path)
+                return path + "." + UNKNOWN_PATH_SEGMENT
+            child_path, trusted = _trusted_child(path, key, fields)
+            found = _find_sensitive_key(child, child_path, _child_fields(trusted))
             if found:
                 return found
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            found = _find_sensitive_key(child, f"{path}[{index}]")
+            found = _find_sensitive_key(child, f"{path}[{index}]", fields)
             if found:
                 return found
     return None
 
 
-def _find_sensitive_value(value, path="$"):
+def _find_sensitive_value(value, path="$", fields=TOP_LEVEL):
     if isinstance(value, dict):
         for key, child in value.items():
-            found = _find_sensitive_value(child, path + "." + str(key))
+            child_path, trusted = _trusted_child(path, key, fields)
+            found = _find_sensitive_value(child, child_path, _child_fields(trusted))
             if found:
                 return found
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            found = _find_sensitive_value(child, f"{path}[{index}]")
+            found = _find_sensitive_value(child, f"{path}[{index}]", fields)
             if found:
                 return found
     elif isinstance(value, str) and (FORBIDDEN_VALUE.search(value) or
@@ -98,7 +118,7 @@ def _validate_reference_list(value, filename, path, diagnostics):
         extra = set(item) - REFERENCE_FIELDS
         if extra:
             diagnostics.append(_diagnostic(
-                filename, at + "." + sorted(extra)[0],
+                filename, at + "." + UNKNOWN_PATH_SEGMENT,
                 "is not allowed; declarations contain identifiers and status references only"))
         for field in REFERENCE_FIELDS:
             _validate_safe_string(item.get(field), filename, at + "." + field,
@@ -119,7 +139,7 @@ def validate_manifest(value, filename="<manifest>"):
                             "credential and secret material is forbidden; store only safe capability metadata")]
     extra = set(value) - TOP_LEVEL
     if extra:
-        diagnostics.append(_diagnostic(filename, "$." + sorted(extra)[0], "unknown field"))
+        diagnostics.append(_diagnostic(filename, "$." + UNKNOWN_PATH_SEGMENT, "unknown field"))
     for field in TOP_LEVEL:
         if field not in value:
             diagnostics.append(_diagnostic(filename, "$." + field, "is required"))
@@ -133,7 +153,9 @@ def validate_manifest(value, filename="<manifest>"):
         diagnostics.append(_diagnostic(filename, "$.match", "must be an object"))
     else:
         if set(match) - {"agent_id", "project"}:
-            diagnostics.append(_diagnostic(filename, "$.match", "allows only agent_id or project"))
+            diagnostics.append(_diagnostic(
+                filename, "$.match." + UNKNOWN_PATH_SEGMENT,
+                "allows only agent_id or project"))
         supplied = [key for key in ("agent_id", "project") if _nonempty_string(match.get(key))]
         if len(supplied) != 1 or len(match) != 1:
             diagnostics.append(_diagnostic(filename, "$.match",
@@ -152,7 +174,8 @@ def validate_manifest(value, filename="<manifest>"):
     else:
         extra_soul = set(soul) - SOUL_FIELDS
         if extra_soul:
-            diagnostics.append(_diagnostic(filename, "$.soul." + sorted(extra_soul)[0], "unknown field"))
+            diagnostics.append(_diagnostic(
+                filename, "$.soul." + UNKNOWN_PATH_SEGMENT, "unknown field"))
         for field in SOUL_FIELDS:
             if not _nonempty_string(soul.get(field)):
                 diagnostics.append(_diagnostic(filename, "$.soul." + field,
@@ -171,7 +194,8 @@ def validate_manifest(value, filename="<manifest>"):
     else:
         extra_memory = set(memory) - MEMORY_FIELDS
         if extra_memory:
-            diagnostics.append(_diagnostic(filename, "$.memory." + sorted(extra_memory)[0], "unknown field"))
+            diagnostics.append(_diagnostic(
+                filename, "$.memory." + UNKNOWN_PATH_SEGMENT, "unknown field"))
         for field in MEMORY_FIELDS:
             _validate_safe_string(memory.get(field), filename, "$.memory." + field,
                                   diagnostics, REFERENCE)
@@ -208,11 +232,114 @@ def _resident(filename, manifest):
     }
 
 
+def _safe_public_string(value, pattern=None):
+    """Return one independently safe public string, never a rejected value."""
+    if not _nonempty_string(value):
+        return None
+    if pattern is not None and not pattern.fullmatch(value):
+        return None
+    if _find_sensitive_value(value) or _find_sensitive_key(value):
+        return None
+    return value
+
+
+def _diagnostic_resident(filename, manifest, problems):
+    """Project safe fragments of a malformed manifest for capability diagnosis.
+
+    This record is deliberately separate from residents: it can explain a bad
+    declaration in the UI, but can never reserve a home or become a soul.
+    """
+    if not isinstance(manifest, dict):
+        return None
+    match = manifest.get("match")
+    public_match = {}
+    if isinstance(match, dict) and len(match) == 1:
+        field = next(iter(match))
+        if field in {"agent_id", "project"}:
+            safe = _safe_public_string(match[field], IDENTIFIER)
+            if safe:
+                public_match[field] = safe
+    soul = manifest.get("soul")
+    public_meta = {}
+    body = None
+    if isinstance(soul, dict):
+        patterns = {"char": re.compile("|".join(sorted(CHARACTERS))),
+                    "accent": re.compile(r"#[0-9A-Fa-f]{6}")}
+        for field in ("name", "char", "accent", "role"):
+            safe = _safe_public_string(soul.get(field), patterns.get(field))
+            if safe:
+                public_meta[field] = safe
+        body = _safe_public_string(soul.get("description"))
+    public_meta.update(public_match)
+
+    problem_paths = [problem.get("path") for problem in problems]
+    capabilities = {}
+
+    def reference_items(kind, value, id_field="id"):
+        items = []
+        if isinstance(value, list):
+            source = value
+        elif kind == "memory" and isinstance(value, dict):
+            source = [value]
+        else:
+            source = []
+        for index, item in enumerate(source):
+            if not isinstance(item, dict):
+                continue
+            public = {}
+            identifier = _safe_public_string(item.get(id_field),
+                                             REFERENCE if id_field == "ref" else IDENTIFIER)
+            status_ref = _safe_public_string(item.get("status_ref"), REFERENCE)
+            if identifier:
+                public[id_field] = identifier
+            if status_ref:
+                public["status_ref"] = status_ref
+            prefix = f"$.{kind}" if kind == "memory" else f"$.{kind}[{index}]"
+            affected = next((path for path in problem_paths if path == f"$.{kind}" or
+                             path.startswith(prefix)), None)
+            if affected:
+                public["invalid"] = True
+                public["diagnostic_path"] = affected
+            if public:
+                items.append(public)
+        kind_problem = next((path for path in problem_paths if path == f"$.{kind}" or
+                             path.startswith(f"$.{kind}[")), None)
+        if kind_problem and not any(item.get("invalid") for item in items):
+            items.append({"invalid": True, "diagnostic_path": kind_problem})
+        return items
+
+    capabilities["skills"] = reference_items("skills", manifest.get("skills"))
+    capabilities["memory"] = reference_items("memory", manifest.get("memory"), "ref")
+    capabilities["routes"] = reference_items("routes", manifest.get("routes"))
+    capabilities["app_grants"] = reference_items("app_grants", manifest.get("app_grants"))
+    soul_problem = next((path for path in problem_paths if path == "$.soul" or
+                         path.startswith("$.soul.")), None)
+    public_soul = dict(public_meta)
+    public_soul.pop("agent_id", None)
+    public_soul.pop("project", None)
+    if body:
+        public_soul["description"] = body
+    if soul_problem:
+        public_soul.update({"invalid": True, "diagnostic_path": soul_problem})
+    capabilities["soul"] = public_soul
+
+    home = manifest.get("home")
+    return {
+        "file": filename, "valid": False, "diagnostic": True,
+        "manifest_version": manifest.get("manifest_version")
+        if type(manifest.get("manifest_version")) is int else None,
+        "match": public_match, "declared_home": home
+        if type(home) is int and 0 <= home < 8 else None,
+        "meta": public_meta, "body": body, "capabilities": capabilities,
+    }
+
+
 def load_resident_manifests(directory):
     directory = pathlib.Path(directory)
-    residents, diagnostics = [], []
+    residents, diagnostic_residents, diagnostics = [], [], []
     if not directory.is_dir():
-        return {"residents": residents, "diagnostics": diagnostics}
+        return {"residents": residents, "diagnostic_residents": diagnostic_residents,
+                "diagnostics": diagnostics}
     claimed_homes = {}
     claimed_matches = {}
     for path in sorted(directory.glob("*.resident.json")):
@@ -224,6 +351,9 @@ def load_resident_manifests(directory):
         problems = validate_manifest(manifest, path.name)
         if problems:
             diagnostics.extend(problems)
+            partial = _diagnostic_resident(path.name, manifest, problems)
+            if partial:
+                diagnostic_residents.append(partial)
             continue
         home = manifest["home"]
         match_key = next(iter(manifest["match"].items()))
@@ -238,4 +368,5 @@ def load_resident_manifests(directory):
         claimed_homes[home] = path.name
         claimed_matches[match_key] = path.name
         residents.append(_resident(path.name, manifest))
-    return {"residents": residents, "diagnostics": diagnostics}
+    return {"residents": residents, "diagnostic_residents": diagnostic_residents,
+            "diagnostics": diagnostics}

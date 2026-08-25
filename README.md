@@ -25,6 +25,21 @@ recent `artifact_produced` events. It shows each artifact path, its maker and
 project, and how recently it was produced; an empty board says plainly that the
 recent event log contains no artifacts.
 
+The **fleet ledger** beside the census is the compact operational view. It keeps
+the newest 200 validated events from the shared parsed stream and filters them by
+search text, project, runner/source, event-derived state, and villager. Its
+needs-you leaf contains only villagers whose latest retained event remains
+`needs_human`. Resident leaves show stable homes and all five manifest dimensions;
+Visitors remain grouped under the lodge. “Configured” means a complete safe
+declaration exists—not that Burrow tested credentials or an external service. A
+`status_ref` is only an opaque locator for where status is established; its text
+is never interpreted as live health. “Missing” means no declaration, “invalid”
+comes from public diagnostics or an incomplete public record, and “externally
+unavailable” means the resident feed itself cannot currently be read.
+Missing declarations, invalid/incomplete manifests, an unavailable resident feed,
+malformed event records, stale telemetry, disconnection, and empty results are each
+named explicitly. No credentials or raw manifest objects are rendered.
+
 ## Running (v0.5)
 
 One village for the whole fleet, served from the NAS over Tailscale:

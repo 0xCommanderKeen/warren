@@ -22,4 +22,12 @@ assert.match(transport, /role="status"/,
 assert.match(transport, /aria-live="polite"/,
   "transport changes do not interrupt assistive technology");
 
+assert.match(html, /id="fleet-open"[^>]*aria-haspopup="dialog"/,
+  "the fleet ledger has an explicit keyboard-operable entry point");
+assert.match(html, /role="tablist"/, "fleet sections expose tab semantics");
+assert.match(html, /@media \(max-width: 680px\)/,
+  "the ledger has an explicit narrow viewport layout");
+assert.match(html, /Visitors share the lodge and are never presented as configured residents/,
+  "visitor grouping cannot imply residency");
+
 console.log("viewer chrome reports truthful, accessible status");

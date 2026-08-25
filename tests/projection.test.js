@@ -117,6 +117,8 @@ describe("notice board artifacts", () => {
     // The viewer parses a batch once and hands the same records to both folds.
     const batch = parseEvents(lines);
     assert.deepEqual(batch.map(ev => ev.type), ["artifact_produced", "tool_called"]);
+    assert.strictEqual(parseEvents(batch), batch,
+      "validated shared batches are not parsed or validated a second time");
 
     const agents = new Map(), artifacts = [];
     foldEvents(agents, batch);

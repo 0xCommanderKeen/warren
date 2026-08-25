@@ -32,6 +32,7 @@ const resident = name => ({
   match: { agent_id: "agent-1" }, meta: { name, char: "Monk", accent: "#fff" },
 });
 let currentResident = resident("Old Name");
+let residentsResponse = "ok";
 
 const runtime = createBrowserRuntime({
   now: () => now,
@@ -47,6 +48,8 @@ const runtime = createBrowserRuntime({
     }
     if (url === "/villagers") return { ok: true, json: async () => [currentResident] };
     if (url === "/residents") {
+      if (residentsResponse === "error") return { ok: false, status: 503 };
+      if (residentsResponse === "malformed") return { ok: true, json: async () => ({ residents: null }) };
       return { ok: true, json: async () => ({ residents: [currentResident], diagnostics: [] }) };
     }
     if (url === "/transport/status") return {
@@ -87,6 +90,16 @@ const runtime = createBrowserRuntime({
   await runtime.refreshResidents();
   assert.equal(runtime.snapshot().villagers[0].name, "New Name",
     "resident data refreshes while the event stream is silent");
+  residentsResponse = "error";
+  await runtime.refreshResidents();
+  assert.equal(runtime.snapshot().residentReport.available, false,
+    "a non-OK refresh truthfully marks a previously loaded directory unavailable");
+  assert.equal(runtime.snapshot().residentReport.residents[0].meta.name, "New Name",
+    "cached declarations remain deliberate but are no longer claimed available");
+  residentsResponse = "malformed";
+  await runtime.refreshResidents();
+  assert.equal(runtime.snapshot().residentReport.available, false,
+    "a malformed successful response cannot make cached declarations appear available");
   await runtime.refreshTransportStatus();
   assert.equal(deliveryStatuses.at(-1).notifications.dropped, 1);
   assert.equal(runtime.snapshot().transportStatus.notifications.queued, 3,
