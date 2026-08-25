@@ -695,7 +695,7 @@ def test_a_scheduler_with_no_hooks_behaves_exactly_as_before(
     item = engine.scheduled[0]
     admission = engine.sessions.admit(item.resident, now=NOW, rehearsal=True)
     assert isinstance(admission, ss.Admission)
-    preview = engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview", "schedule"))
+    preview = engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview"))
     assert "DECISIONS SINCE YOU LAST RAN" not in preview.prompt
 
 
@@ -1040,7 +1040,7 @@ def test_a_claimed_task_opens_and_closes_a_registry_row(
 def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
     write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
-    """Shared bookkeeping is contained before the board closes its own registry row."""
+    """Shared bookkeeping sees an answered runner's registry row already closed."""
 
     class BrokenGuard:
         def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
@@ -1053,6 +1053,7 @@ def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
 
         def record(self, manifest: ResidentManifest, **facts: object) -> object:
             del manifest, facts
+            assert store.open_runs() == []
             raise OSError("ledger unavailable")
 
     store.post_job(title="Read the mail")

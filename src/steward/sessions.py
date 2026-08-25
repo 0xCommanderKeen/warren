@@ -147,7 +147,6 @@ class RoutineWake:
 
     routine: Routine
     run_id: str
-    trigger: str
 
     @property
     def timeout_s(self) -> int:

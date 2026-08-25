@@ -85,9 +85,8 @@ class _RecordingHooks:
         return SessionHarvest(("approval-1",), ("handoff-1",))
 
 
-@pytest.mark.parametrize("trigger", ["schedule", "manual"])
 def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
-    write_resident: ResidentWriter, tmp_path: Path, trigger: str
+    write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     data = valid_manifest()
     data["runner"] = {"kind": "mock", "model": "pretend"}
@@ -107,7 +106,7 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
     assert isinstance(admission, Admission)
     result = sessions.run(
         admission,
-        RoutineWake(routine=routine, run_id="run-1", trigger=trigger),
+        RoutineWake(routine=routine, run_id="run-1"),
     )
 
     assert result.result is not None
@@ -248,7 +247,7 @@ def test_missing_skills_fail_before_decisions_are_consumed(
 
     result = sessions.run(
         admission,
-        RoutineWake(resident.manifest.routines[0], "run-1", "schedule"),
+        RoutineWake(resident.manifest.routines[0], "run-1"),
     ).require_result()
 
     assert not result.ok
@@ -287,7 +286,7 @@ def test_journal_and_harvest_failures_do_not_escape_or_erase_the_run_result(
 
     result = sessions.run(
         admission,
-        RoutineWake(resident.manifest.routines[0], "run-1", "schedule"),
+        RoutineWake(resident.manifest.routines[0], "run-1"),
     )
 
     assert result.require_result().outcome is Outcome.TIMEOUT
@@ -319,7 +318,7 @@ def test_timeout_is_resolved_once_before_the_caller_opens_its_registry(
     registry_timeout = admission.timeout_for(900)
     session = sessions.run(
         admission,
-        RoutineWake(resident.manifest.routines[0], "run-1", "schedule"),
+        RoutineWake(resident.manifest.routines[0], "run-1"),
     )
 
     assert registry_timeout == 123
@@ -366,7 +365,7 @@ def test_accounting_and_harvest_failures_do_not_erase_the_run_result(
 
     result = sessions.run(
         admission,
-        RoutineWake(resident.manifest.routines[0], "run-1", "schedule"),
+        RoutineWake(resident.manifest.routines[0], "run-1"),
     )
 
     assert result.require_result().ok

@@ -133,9 +133,7 @@ def routine_prompt(
     moment = now or datetime.now(UTC)
     admission = engine.sessions.admit(item.resident, now=moment, rehearsal=True)
     assert isinstance(admission, ss.Admission)
-    return engine.sessions.run(
-        admission, ss.RoutineWake(item.routine, "preview", s.TRIGGER_SCHEDULE)
-    ).prompt
+    return engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview")).prompt
 
 
 # --------------------------------------------------------------------------- cron and tz

@@ -48,6 +48,7 @@ reconstructible from those four events alone.
 
 import logging
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -64,8 +65,13 @@ from steward.manifest import (
     active_residents,
     validate_path,
 )
+from steward.manifest import (
+    Runner as RunnerSpec,
+)
 from steward.runners import (
     Outcome,
+    Runner,
+    RunRequest,
     RunResult,
     build_runner,
     check_runner,
@@ -123,6 +129,47 @@ LEASE_EXPIRED = "lease_expired"
 def _utcnow() -> datetime:
     """Read the wall clock, in UTC. The default source of each lease's own birth moment."""
     return datetime.now(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class _RegistryRun:
+    """The board registry row paired with the runner currently executing it."""
+
+    run_id: str
+    task_id: str
+    started_at: datetime
+
+
+def _close_registry(store: Store, run: _RegistryRun, moment: datetime) -> None:
+    """Answer one board-owned run row without interfering with session completion."""
+    try:
+        store.close_run(run.run_id, now=ev.utc_now_iso(moment))
+    except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
+        log.warning("could not record that task %s reported back: %s", run.task_id, exc)
+
+
+class _RegistryClosingRunner(Runner):
+    """Close a board run at the existing runner seam, before shared bookkeeping."""
+
+    def __init__(self, runner: Runner, store: Store, registry_run: _RegistryRun) -> None:
+        super().__init__()
+        self.runner = runner
+        self.store = store
+        self.registry_run = registry_run
+
+    def run(self, request: RunRequest) -> RunResult:
+        """Retain vanished-run semantics while closing every answered runner promptly."""
+        try:
+            result = self.runner.run(request)
+        except Exception:
+            _close_registry(self.store, self.registry_run, self.registry_run.started_at)
+            raise
+        _close_registry(
+            self.store,
+            self.registry_run,
+            self.registry_run.started_at + timedelta(seconds=result.duration_s),
+        )
+        return result
 
 
 def claimable_skills(manifest: ResidentManifest, library: SkillLibrary) -> frozenset[str]:
@@ -364,12 +411,17 @@ class Dispatcher:
     delegation_lease_s: int = DEFAULT_BOARD_LEASE_S
     delegation_timeout_s: int = DEFAULT_BOARD_TIMEOUT_S
     sessions: ResidentSessions = field(init=False, repr=False)
+    _registry_run: ContextVar[_RegistryRun | None] = field(
+        default_factory=lambda: ContextVar("steward_board_registry_run", default=None),
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the dispatcher's existing dependencies."""
         self.sessions = ResidentSessions(
             workdir=self.workdir,
-            runner_factory=self.runner_factory,
+            runner_factory=self._registry_runner,
             library=self.library,
             guard=self.guard,
             hooks=self,
@@ -503,9 +555,8 @@ class Dispatcher:
         A routine session has no task above it, so anything it hands over is attributed to
         the resident's own initiative rather than to a parent task.
         """
-        raised = self._harvest_approvals(manifest, output, None)
-        self.hand_over(manifest, output)
-        return raised
+        harvested = self.harvest_session(manifest, output)
+        return list(cast("tuple[ApprovalRecord, ...]", harvested.raised))
 
     def harvest_session(
         self,
@@ -685,14 +736,19 @@ class Dispatcher:
         timeout_s = admitted.timeout_for(declared_s)
         self._open_run(resident, job, run_id, timeout_s, moment)
 
-        session = self.sessions.run(admitted, wake)
+        registry_run = _RegistryRun(run_id, job.task_id, moment)
+        token = self._registry_run.set(registry_run)
+        try:
+            session = self.sessions.run(admitted, wake)
+        finally:
+            self._registry_run.reset(token)
         result = session.require_result()
 
         # The shared lifecycle contains and returns from every ordinary accounting or
         # harvest failure, so reaching here means this board-owned registry row can close
         # before the board records its task-specific conclusion. A process that vanishes
         # inside the lifecycle deliberately leaves the row open for the watchdog.
-        self._close_run(run_id, job.task_id, session.completed_at or moment)
+        _close_registry(self.store, registry_run, session.completed_at or moment)
         return self._record(
             resident,
             job,
@@ -750,12 +806,13 @@ class Dispatcher:
                 job.task_id,
             )
 
-    def _close_run(self, run_id: str, task_id: str, moment: datetime) -> None:
-        """Answer this session's registry row. Never raises, and never emits: ``_record`` does."""
-        try:
-            self.store.close_run(run_id, now=ev.utc_now_iso(moment))
-        except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
-            log.warning("could not record that task %s reported back: %s", task_id, exc)
+    def _registry_runner(self, spec: RunnerSpec) -> Runner:
+        """Wrap the real adapter when this context is working a watched board run."""
+        runner = self.runner_factory(spec)
+        registry_run = self._registry_run.get()
+        if registry_run is None:
+            return runner
+        return _RegistryClosingRunner(runner, self.store, registry_run)
 
     def _record(  # noqa: PLR0913 — one parameter per fact the report is built from
         self,

@@ -926,7 +926,7 @@ class Scheduler:
                 skipped_reason=admission.reason,
             )
 
-        wake = RoutineWake(item.routine, run_id, trigger)
+        wake = RoutineWake(item.routine, run_id)
         if self.dry_run:
             session = self.sessions.run(admission, wake)
             return FireReport(
