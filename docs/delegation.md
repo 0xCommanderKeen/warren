@@ -210,6 +210,20 @@ origin task:2c9a…
 `GET /tasks/{id}/lineage` for the same thing over HTTP. Inboxes are durable: a steward
 restart loses nothing, and a letter delivered last night is still waiting this morning.
 
+Which is why `steward doctor` prints a line per resident about the post as well:
+
+```console
+$ steward doctor
+life-agent: inbox 2 open via handoff
+burrow-builder: inbox — takes no letters
+some-agent: inbox — 3 open letter(s) behind a closed route: handoff (disabled); nothing will pick them up
+```
+
+That last line is an error and doctor exits non-zero on it. Closing a route stops delivery
+but not the letters already in the pile, and nothing claims them while the door is shut —
+so a route flipped to `pending` or `disabled` with work behind it is a resident quietly not
+doing work somebody was told it had accepted.
+
 ## Delegated work is budgeted work
 
 A letter is a session, so it costs somebody a day — and the somebody is the **receiver**,

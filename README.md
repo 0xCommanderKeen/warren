@@ -63,7 +63,7 @@ what Hob writes reads like Hob. Personality is expressed only through real work 
 a voice adds no event, no movement, no ambient liveliness to the village.
 
 ```console
-$ steward doctor                     # which brain, where the journal lives, what fires next
+$ steward doctor                     # which brain, the journal, the post, what fires next
 $ steward scheduler run              # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
 $ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
@@ -146,6 +146,11 @@ $ steward delegate burrow-builder --to life-agent --route handoff --title "…"
 $ steward inbox life-agent            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
+
+Closing a route stops delivery but not the pile already behind it, and nothing claims a
+letter while the door is shut — so `steward doctor` counts every resident's post and fails
+on the one case nobody would otherwise notice: open letters behind a `pending` or
+`disabled` delegation route.
 
 **The watchdog and budgets** (#8). An agent nobody is watching can fail in two directions,
 and steward now answers both. A manifest declares `budgets: {daily_cost_usd, daily_tokens,

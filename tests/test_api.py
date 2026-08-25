@@ -1276,13 +1276,35 @@ def test_the_inbox_lists_what_is_waiting(api: ApiFactory, write_resident: Reside
 
     body = harness.client.get("/residents/receiver-agent/inbox").json()
     assert body["status"] == "open"
-    assert body["routes"] == ["inbox"]
+    assert body["routes"] == [{"id": "inbox", "status": "active", "accepts": True}]
+    assert body["pending"] == 1
     assert [item["title"] for item in body["inbox"]] == ["Read the background"]
     assert body["inbox"][0]["depth"] == 1
 
     everything = harness.client.get("/residents/receiver-agent/inbox?status=all").json()
     assert len(everything["inbox"]) == 1
+    # `pending` is the open count whatever was asked for, so the audit view still says
+    # how much post is actually waiting.
+    assert everything["pending"] == 1
     assert harness.client.get("/residents/test-agent/inbox").json()["inbox"] == []
+
+
+def test_the_inbox_names_a_route_somebody_shut(
+    api: ApiFactory, write_resident: ResidentWriter
+) -> None:
+    """The console cannot show letters piling up behind a closed door it cannot see (#46)."""
+    harness = with_receiver(api, write_resident, status="disabled")
+    harness.store.delegate_job(
+        title="Read the background",
+        assignee="receiver-agent",
+        delegated_by="test-agent",
+        route="inbox",
+    )
+
+    body = harness.client.get("/residents/receiver-agent/inbox").json()
+
+    assert body["routes"] == [{"id": "inbox", "status": "disabled", "accepts": False}]
+    assert body["pending"] == 1
 
 
 def test_an_unknown_inbox_status_is_refused_rather_than_ignored(api: ApiFactory) -> None:

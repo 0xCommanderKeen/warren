@@ -818,6 +818,22 @@ class Store:
             rows = self._conn.execute(f"{query} ORDER BY created_at, rowid", params).fetchall()
         return [JobRecord.from_row(row) for row in rows]
 
+    def inbox_count(self, assignee: str, status: str | None = STATUS_OPEN) -> int:
+        """Return how many items sit in one resident's inbox, without reading them.
+
+        ``doctor`` and the console want the size of the pile, not the letters — a count is
+        the whole answer there, and reading every row to call ``len`` on it is a page of
+        work to print one number.
+        """
+        query = "SELECT COUNT(*) FROM jobs WHERE assignee = ?"
+        params: tuple[str, ...] = (assignee,)
+        if status is not None:
+            query += " AND status = ?"
+            params = (assignee, status)
+        with self._lock:
+            row = self._conn.execute(query, params).fetchone()
+        return int(row[0])
+
     def lineage(self, task_id: str) -> list[JobRecord]:
         """Return the chain this task belongs to, root first, ending at the task itself.
 
