@@ -144,7 +144,13 @@ async function stop(child, options = {}) {
   const timeout = options.timeout ?? 3000;
   const killProcess = options.killProcess ?? process.kill;
   const processGroup = options.processGroup === true && process.platform !== "win32";
-  if (!processGroup && exited(child)) return;
+  const closeStdio = () => {
+    // Custom CDP pipes remain referenced by Node even after Chrome exits unless
+    // the parent closes its stream endpoints. A green suite otherwise prints
+    // all results and idles until the outer CI timeout kills it.
+    for (const stream of child.stdio || []) stream?.destroy?.();
+  };
+  if (!processGroup && exited(child)) { closeStdio(); return; }
 
   const signal = name => {
     if (processGroup) {
@@ -166,12 +172,14 @@ async function stop(child, options = {}) {
   };
 
   signal("SIGTERM");
-  if (await wait()) return;
+  if (await wait()) { closeStdio(); return; }
   signal("SIGKILL");
   if (!await wait()) {
+    closeStdio();
     const target = processGroup ? `process group ${child.pid}` : `child ${child.pid}`;
     throw new Error(`${target} did not exit after SIGTERM and SIGKILL`);
   }
+  closeStdio();
 }
 
 module.exports = { abortError, cdp, delay, processGroupExists, stop };

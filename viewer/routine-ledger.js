@@ -13,6 +13,8 @@
   const DEFAULT_ACK_MS = 15 * 1000;
   const DEFAULT_FETCH_MS = 10 * 1000;
   const MAX_ACKNOWLEDGEMENTS = 200;
+  const MAX_REMOTE_DETAIL_BYTES = 2048;
+  const MAX_REMOTE_CODE_BYTES = 128;
   const MAX_UINT64 = "18446744073709551615";
   const OBSERVABLE_TRANSPORTS = new Set(["live", "polling"]);
   const ACTIVE_ACK_STATES = new Set([
@@ -20,6 +22,13 @@
   ]);
 
   function text(value) { return typeof value === "string" && value.trim() ? value : null; }
+  function byteLength(value) {
+    return typeof TextEncoder === "function" ? new TextEncoder().encode(value).length :
+      unescape(encodeURIComponent(value)).length;
+  }
+  function boundedRemoteText(value, maximum) {
+    return typeof value === "string" && value.trim() && byteLength(value) <= maximum ? value : null;
+  }
   function stewardSlug(value) { return typeof value === "string" && /^[a-z0-9][a-z0-9-]*$/.test(value); }
   function finite(value) { return typeof value === "number" && Number.isFinite(value) && value >= 0; }
   function validate(event, validateEvent) {
@@ -457,7 +466,6 @@
   function requestOptions(token, method = "GET") {
     return { method, headers: { Authorization: `Bearer ${token}` }, credentials: "omit" };
   }
-  async function responseBody(response) { try { return await response.json(); } catch (_) { return {}; } }
   function requireConfig(config) {
     if (!text(config && config.url) || !text(config && config.token)) throw new Error("Steward URL and token are required");
     return config.url.replace(/\/+$/, "");
@@ -468,6 +476,10 @@
     const schedule = timing.setTimeout || setTimeout;
     const cancel = timing.clearTimeout || clearTimeout;
     const controller = new AbortController();
+    const external = timing.signal;
+    const abort = () => controller.abort(external && external.reason);
+    if (external && external.aborted) abort();
+    else if (external) external.addEventListener("abort", abort, { once: true });
     let timer;
     const timeout = new Promise((_, reject) => {
       timer = schedule(() => {
@@ -476,17 +488,59 @@
       }, timeoutMs);
     });
     try { return await Promise.race([operation(controller.signal), timeout]); }
-    finally { if (timer !== undefined) cancel(timer); }
+    catch (error) {
+      if (external && external.aborted) {
+        const cancelled = new Error("Steward request was cancelled");
+        cancelled.aborted = true; throw cancelled;
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) cancel(timer);
+      if (external) external.removeEventListener("abort", abort);
+    }
+  }
+
+  async function requestJson(config, path, fetchImpl = fetch, timing = {}) {
+    const base = requireConfig(config), method = timing.method || "GET";
+    return withDeadline(async signal => {
+      const auth = requestOptions(config.token, method);
+      const options = { ...auth, cache: "no-store", signal };
+      if (Object.hasOwn(timing, "body")) {
+        options.headers = { ...auth.headers, "Content-Type": "application/json" };
+        options.body = JSON.stringify(timing.body);
+      }
+      let response;
+      try { response = await fetchImpl(`${base}${path}`, options); }
+      catch (error) {
+        if (signal.aborted) throw error;
+        const unavailable = new Error(error && error.message || "Steward could not be reached");
+        unavailable.kind = "transport"; throw unavailable;
+      }
+      let body = null;
+      try { body = await response.json(); } catch {}
+      const ok = response && (response.ok === true ||
+        (response.ok === undefined && response.status >= 200 && response.status < 300));
+      if (!ok) {
+        const status = Number.isInteger(response && response.status) ? response.status : 0;
+        const detail = body && typeof body === "object" && !Array.isArray(body) &&
+          body.detail && typeof body.detail === "object" && !Array.isArray(body.detail) ? body.detail : {};
+        const message = boundedRemoteText(detail.message, MAX_REMOTE_DETAIL_BYTES);
+        const code = boundedRemoteText(detail.error, MAX_REMOTE_CODE_BYTES);
+        const error = new Error(message ||
+          `Steward returned ${status ? `HTTP ${status}` : "an invalid response"}`);
+        error.status = status;
+        error.code = code;
+        error.kind = status === 401 ? "authentication" : status === 404 ? "missing" :
+          status === 409 ? "conflict" : status ? "http" : "transport";
+        error.body = body; throw error;
+      }
+      return { response, body };
+    }, timing);
   }
 
   async function fetchDeclarations(config, fetchImpl = fetch, timing) {
-    const base = requireConfig(config);
-    const { response, body } = await withDeadline(async signal => {
-      const options = { ...requestOptions(config.token), signal };
-      const response = await fetchImpl(`${base}/routines`, options);
-      return { response, body: await responseBody(response) };
-    }, timing);
-    if (response.status !== 200 || !Array.isArray(body.routines)) {
+    const { response, body } = await requestJson(config, "/routines", fetchImpl, timing);
+    if (response.status !== 200 || !body || !Array.isArray(body.routines)) {
       throw new Error(`Steward routines unavailable (${response.status})`);
     }
     const byRoutine = new Map();
@@ -529,5 +583,6 @@
     DEFAULT_FETCH_MS, validate, project, declared, canRun,
     canRunAuthoritatively, runDisabled, boundaryAvailability, telemetryAvailability,
     createAcknowledgements, fetchDeclarations, runNow, parseCursor: cursor, offsetAfter,
-    requestOptions, requireConfig, withDeadline };
+    requestOptions, requireConfig, withDeadline, requestJson, boundedRemoteText,
+    MAX_REMOTE_DETAIL_BYTES };
 });

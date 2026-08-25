@@ -58,5 +58,20 @@ assert.match(html, /approvalAcks\.observe\(\{ events: view\.approvalEvidence/,
 assert.match(html, /only the closing event releases the villager/,
   "the approval panel states its non-optimistic truth");
 assert.match(html, /data-approval-edit/, "Steward's edit option has an accessible free-text bridge");
+assert.match(html, /Declared by the Steward manifest · authoritative identity, not observed activity/,
+  "charter identity is explicitly separated from observed activity");
+assert.match(html, /Read-only Steward journal · newest first · latest/,
+  "journal provenance, ordering, and bound are visible");
+assert.match(html, /Steward unreachable/, "journal connectivity failure is explicit");
+assert.match(html, /Last successful fetch/, "stale journal state names its last successful fetch");
+assert.match(html, /This resident has written nothing yet/,
+  "true empty journal is distinct from an unavailable read");
+assert.match(html, /Could not read (?:charter|journal)/,
+  "malformed identity data has a plain could-not-read state");
+assert.match(html, /This visitor has no resident soul or manifest/,
+  "visitor panels explain why charter and journal do not apply");
+assert.match(html, /data-identity-refresh/, "identity reads have a keyboard-operable refresh action");
+assert.match(html, /BurrowIdentity\.refresh\(identityState, stewardConfig/,
+  "the browser reads identity directly with its memory-only Steward configuration");
 
 console.log("viewer chrome reports truthful, accessible status");

@@ -708,6 +708,139 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         disabledRun: true, retiredRun: true, latestDeclarationWins: true });
     });
 
+    await t.test("resident identity panel renders strict remote states and visitor truth", async () => {
+      await resetPage();
+      const result = await eventually(send, `(async () => {
+        await runtime.poll();
+        await runtime.refreshResidents();
+        const resident = fleetView.residents.find(item => item.file === 'routine.resident.json');
+        const visitorResident = villagers.find(item => item.id === 'layout-resident');
+        if (!resident || !visitorResident || visitorResident.residency !== 'visitor') return false;
+        const charter = {mission:'Keep the quiet work moving.',duties:['Read the inbox'],
+          rules:['Never invent a result'],escalation:{kind:'policy',when:['A person must decide'],
+          how:'needs_human',note:null}};
+        identityState = {status:'loaded',lastSuccessAt:${frozenNow},diagnostics:[],residents:new Map([
+          [resident.file,{status:'configured',remoteId:'life-agent',charter,lastSuccessAt:${frozenNow},
+            localFingerprint:BurrowIdentity.localFingerprint(resident),
+            stale:false,journal:{status:'loaded',entries:[
+              {date:'2025-01-15',routine:'close-of-day',text:'Newest note.'},
+              {date:'2025-01-14',routine:'close-of-day',text:'Older note.'}],
+              lastSuccessAt:${frozenNow},stale:false,diagnostic:null}}]])};
+        stewardConfig={url:'http://127.0.0.1:8801',token:'identity-memory-only'};
+        openPanel('@resident/' + resident.file);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const body = document.querySelector('#panel-body');
+        const configured = {mission:body.textContent.includes('Keep the quiet work moving.'),
+          distinct:!!body.querySelector('.declared-identity') && !!body.querySelector('.journal-section'),
+          order:[...body.querySelectorAll('.journal-entry time')].map(item=>item.dateTime).join(','),
+          bound:body.textContent.includes('latest 7'),
+          credentials:!!body.querySelector('[data-steward-change]') &&
+            !!body.querySelector('[data-steward-clear]')};
+        const refresh = body.querySelector('[data-identity-refresh]'); refresh.focus();
+        renderPanel(Date.now());
+        const focusPreserved = document.activeElement.matches('[data-identity-refresh]');
+        const record = identityState.residents.get(resident.file);
+        record.journal = {...record.journal,status:'unreachable',stale:true,
+          diagnostic:'Steward journal unreachable: network down'};
+        renderPanel(Date.now());
+        const unreachable = body.textContent.includes('Steward unreachable') &&
+          body.textContent.includes('Last successful fetch') && body.textContent.includes('Cached entries are stale');
+        record.status='authentication'; record.stale=true;
+        renderPanel(Date.now());
+        const cachedAuthentication = body.textContent.includes('Steward rejected these credentials') &&
+          body.textContent.includes('Cached declaration as of');
+        record.status='error';
+        renderPanel(Date.now());
+        const charterCopy = body.querySelector('.declared-identity').textContent;
+        const cachedDefinitive = charterCopy.includes('Steward definitively refused the latest charter read') &&
+          charterCopy.includes('Cached declaration as of') && !charterCopy.includes('Steward unreachable');
+        record.status='configured'; record.stale=false;
+        record.journal = {status:'loaded',entries:[],lastSuccessAt:${frozenNow},stale:false,diagnostic:null};
+        renderPanel(Date.now());
+        const empty = body.textContent.includes('has written nothing yet');
+        record.status='invalid'; record.charter=null; record.diagnostic='bad charter';
+        record.journal={status:'malformed',entries:[{date:'2025-01-13',routine:'close-of-day',
+          text:'Cached malformed note.'}],lastSuccessAt:${frozenNow},stale:true,diagnostic:'bad journal'};
+        renderPanel(Date.now());
+        const malformed = body.textContent.includes('Could not read charter') &&
+          body.textContent.includes('Could not read journal') && body.textContent.includes('close-of-day');
+        const local = {...resident};
+        const remote = {residents:[{id:'life-agent',agent_id:null,project:'quiet-project',
+          charter:{mission:'M',duties:['D'],rules:['R'],escalation:'ask'}}],errors:[]};
+        const reply = (payload,status=200) => ({ok:status>=200&&status<300,status,
+          json:async()=>payload});
+        const statusFor = async (status,code) => {
+          const state = await BurrowIdentity.refresh(BurrowIdentity.createState(),
+            {url:'http://steward',token:'secret'},[local],async url=>url.endsWith('/residents') ?
+              reply(remote) : reply({detail:{error:code,message:'exact '+code}},status),${frozenNow});
+          return BurrowIdentity.recordFor(state,local).journal.status;
+        };
+        const contract = {authentication:await statusFor(401,'invalid_token'),
+          absent:await statusFor(404,'unknown_resident'),
+          unreadable:await statusFor(409,'journal_unreadable')};
+        const exactRecord = identityState.residents.get(resident.file);
+        contract.rotationQuarantined = BurrowIdentity.recordFor(identityState,
+          {...resident,home:resident.home+1}) === null;
+        contract.exactRemote = exactRecord.remoteId === 'life-agent';
+        exactRecord.status='configured'; exactRecord.charter=charter;
+        exactRecord.lastSuccessAt=${frozenNow}; exactRecord.stale=false;
+        exactRecord.journal={status:'loaded',entries:[],lastSuccessAt:${frozenNow},
+          stale:false,diagnostic:null,localFingerprint:exactRecord.localFingerprint,
+          remoteId:exactRecord.remoteId};
+        reconcileIdentityLocals([resident], false);
+        const feedUnavailable = BurrowIdentity.recordFor(identityState,resident);
+        contract.localFeedUnavailable = feedUnavailable.status === 'local-unavailable' &&
+          feedUnavailable.stale === true && feedUnavailable.journal.status === 'local-unavailable' &&
+          body.textContent.includes("Burrow's resident manifest feed is unavailable") &&
+          body.textContent.includes('Cached declaration as of');
+        const originalFetch = window.fetch;
+        let gatedFetches = 0;
+        window.fetch = async url => {
+          gatedFetches += 1;
+          const configuredRemote = {id:'life-agent',agent_id:resident.match.agent_id || null,
+            project:resident.match.project || null,
+            charter:{mission:'Recovered',duties:['Read'],rules:['Tell truth'],escalation:'ask'}};
+          return String(url).endsWith('/residents') ? reply({residents:[configuredRemote],errors:[]}) :
+            reply({resident:'life-agent',entries:[]});
+        };
+        fleetView = {...fleetView,directoryAvailable:false,residents:[resident]};
+        await refreshIdentity();
+        contract.manualRefreshGated = gatedFetches === 0 &&
+          BurrowIdentity.recordFor(identityState,resident).status === 'local-unavailable';
+        forgetStewardConfig();
+        contract.credentialClearPreservesLocalUnavailable =
+          BurrowIdentity.recordFor(identityState,resident).status === 'local-unavailable';
+        stewardConfig={url:'http://127.0.0.1:8801',token:'replacement-identity-token'};
+        fleetView = {...fleetView,directoryAvailable:true,residents:[resident]};
+        await refreshIdentity();
+        contract.recoversAfterLocalFeed = gatedFetches === 2 &&
+          BurrowIdentity.recordFor(identityState,resident).status === 'configured';
+        window.fetch = originalFetch;
+        selectedId = null;
+        const recoveredRotated = {...resident,home:resident.home+1};
+        reconcileIdentityLocals([recoveredRotated], true);
+        contract.recoveryQuarantinesUnseenRotation =
+          BurrowIdentity.recordFor(identityState,recoveredRotated) === null;
+        forgetStewardConfig();
+        openPanel('layout-resident');
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        const visitor = body.textContent.includes('Temporary lodging') &&
+          body.textContent.includes('no resident soul or manifest') &&
+          !body.querySelector('.declared-identity') && !body.querySelector('.journal-section');
+        return {configured,focusPreserved,unreachable,cachedAuthentication,cachedDefinitive,
+          empty,malformed,contract,visitor};
+      })()`, signal, "resident identity states");
+      assert.deepEqual(result, { configured: { mission: true, distinct: true,
+        order: "2025-01-15,2025-01-14", bound: true, credentials: true }, focusPreserved: true,
+        unreachable: true, cachedAuthentication: true, cachedDefinitive: true,
+        empty: true, malformed: true,
+        contract:{authentication:"authentication",absent:"missing",unreadable:"malformed",
+          rotationQuarantined:true,exactRemote:true,localFeedUnavailable:true,
+          manualRefreshGated:true,credentialClearPreservesLocalUnavailable:true,
+          recoversAfterLocalFeed:true,
+          recoveryQuarantinesUnseenRotation:true},visitor: true });
+    });
+
     await t.test("job form stays non-optimistic until exact production event acknowledgement", async () => {
       await resetPage();
       await waitForTelemetry();

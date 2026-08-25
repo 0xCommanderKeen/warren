@@ -73,6 +73,18 @@ Missing declarations, invalid/incomplete manifests, an unavailable resident feed
 malformed event records, stale telemetry, disconnection, and empty results are each
 named explicitly. No credentials or raw manifest objects are rendered.
 
+Resident detail panels also read identity directly from Steward. The charter is the
+manifest-declared mission, duties, hard rules, and escalation policy, visually separated
+from log-observed work. The latest seven journal entries come from Steward's read-only
+`GET /residents/{id}/journal?limit=7` endpoint, newest first. Those reads use the same
+browser-memory-only URL and bearer token as the other Steward controls; Burrow's server
+never proxies or caches them. Unreachable and malformed reads remain explicit, with the
+last successful in-memory entries labeled stale rather than mistaken for an empty journal.
+If Burrow's own resident-manifest feed is unavailable, cached Steward associations are also
+marked externally unavailable and stale until the exact local declaration can be read again.
+Fleet resident rows show charter state and journal recency. Visitors instead explain that
+temporary lodge occupants have no resident soul, manifest, charter, or journal.
+
 ## Running (v0.5)
 
 ### Canonical operator path

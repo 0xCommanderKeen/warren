@@ -56,6 +56,18 @@ test("non-group cleanup retains the child kill fallback", async () => {
   assert.deepEqual(child.signals, ["SIGTERM"]);
 });
 
+test("cleanup closes parent-side custom stdio after an already-exited child", async () => {
+  const child = childProcess();
+  child.exitCode = 0;
+  child.stdio = [null, null, null, new PassThrough(), new PassThrough()];
+
+  await stop(child, { processGroup: false, timeout: 5 });
+
+  assert.equal(child.stdio[3].destroyed, true);
+  assert.equal(child.stdio[4].destroyed, true);
+  assert.deepEqual(child.signals, []);
+});
+
 test("cleanup reports a process tree that survives KILL", async () => {
   const child = childProcess();
   await assert.rejects(stop(child, { processGroup: true, timeout: 1,

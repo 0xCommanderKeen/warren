@@ -201,6 +201,19 @@
   .cap-row:hover, .cap-row:focus-visible { color: #ffd486; background: rgba(210,161,92,.08); }
   .cap-values { overflow-wrap: anywhere; }
   .lodge-group { border-left: 5px solid #7b6f57; padding-left: 10px; }
+  .declared-identity { border: 2px solid #6f5533; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; background: rgba(210,161,92,.08); }
+  .declared-identity h3, .journal-section h3 { font-size: 20px; font-weight: 400; color: #ffd486; }
+  .declared-identity h4 { margin-top: 9px; color: #d2a15c; font-weight: 400; }
+  .declared-identity ul { padding-left: 22px; }
+  .journal-section { border: 2px solid #344d3b; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; background: rgba(79,125,91,.08); }
+  .journal-entry { border-top: 1px dotted #4f6d56; padding: 8px 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .journal-entry time { display: block; color: #9fbd9f; font-size: 15px; }
+  .identity-warning { color: #f2a17d; margin: 7px 0; }
+  .visitor-truth { border: 2px solid #7b6f57; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; color: #d4cbb8; }
 
   @media (max-width: 680px) {
     header { top: max(10px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left));
@@ -292,6 +305,7 @@
 <script src="/routine-ledger.js"></script>
 <script src="/job-board.js"></script>
 <script src="/approval-knocks.js"></script>
+<script src="/charter-journal.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -1208,6 +1222,34 @@ async function refreshStewardDeclarations() {
   }
   renderPanel(Date.now());
 }
+async function refreshIdentity() {
+  if (!stewardConfig) { if (selectedId) renderPanel(Date.now()); return; }
+  if (!fleetView.directoryAvailable) {
+    if (identityAbortController) identityAbortController.abort();
+    identityAbortController = null;
+    identityGeneration += 1;
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, fleetView.residents);
+    if (selectedId) renderPanel(Date.now());
+    return;
+  }
+  if (identityAbortController) identityAbortController.abort();
+  const controller = new AbortController();
+  identityAbortController = controller;
+  const generation = ++identityGeneration;
+  identityState = { ...identityState, status: "loading" };
+  if (selectedId) renderPanel(Date.now());
+  const next = await BurrowIdentity.refresh(identityState, stewardConfig,
+    fleetView.residents, (...args) => fetch(...args), Date.now(), { signal: controller.signal,
+      isCurrent(_local, key, fingerprint) {
+        const current = fleetView.residents.find(item => item && item.file === key);
+        return generation === identityGeneration && fleetView.directoryAvailable && current &&
+          BurrowIdentity.localFingerprint(current) === fingerprint;
+      }, localAvailable() { return fleetView.directoryAvailable; } });
+  if (generation !== identityGeneration) return;
+  identityAbortController = null;
+  identityState = next;
+  if (selectedId) renderPanel(Date.now());
+}
 
 let villagers = [];
 let selectedId = null;
@@ -1305,12 +1347,57 @@ let jobPostNotice = "";
 let stewardConfig = null; // deliberately memory-only: never localStorage, URL, server, or manifest
 let stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
 let stewardDeclarationGeneration = 0;
+let identityState = BurrowIdentity.createState();
+let identityGeneration = 0;
+let identityAbortController = null;
+let identityLocalSignature = "";
 const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
 function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
 function forgetStewardConfig() {
+  if (identityAbortController) identityAbortController.abort();
+  identityAbortController = null;
   stewardConfig = null;
   stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
   stewardDeclarationGeneration += 1;
+  identityGeneration += 1;
+  if (!fleetView.directoryAvailable) {
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, fleetView.residents);
+    return;
+  }
+  identityState = { ...identityState, status: "unavailable",
+    residents: new Map([...identityState.residents].map(([key, value]) => [key, { ...value,
+      status: "unavailable", stale: Boolean(value.lastSuccessAt),
+      journal: value.journal ? { ...value.journal, status: "unavailable",
+        stale: Boolean(value.journal.lastSuccessAt) } : null }])) };
+}
+function currentIdentitySignature(residents = fleetView.residents,
+    available = fleetView.directoryAvailable) {
+  return `${available ? "available" : "unavailable"}\n` +
+    (residents || []).filter(item => item && item.valid === true)
+    .map(item => `${item.file}\0${BurrowIdentity.localFingerprint(item)}`).sort().join("\n");
+}
+function reconcileIdentityLocals(residents, available = fleetView.directoryAvailable) {
+  const signature = currentIdentitySignature(residents, available);
+  if (signature === identityLocalSignature) return;
+  identityLocalSignature = signature;
+  if (identityAbortController) identityAbortController.abort();
+  identityAbortController = null;
+  identityGeneration += 1;
+  if (!available) {
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, residents);
+    if (selectedId) renderPanel(Date.now());
+    return;
+  }
+  const current = new Map((residents || []).filter(item => item && item.valid === true)
+    .map(item => [item.file, item]));
+  identityState = { ...identityState, status: stewardConfig ? "unavailable" : identityState.status,
+    residents: new Map([...identityState.residents].filter(([key, record]) => {
+      const local = current.get(key);
+      return local && record.localFingerprint === BurrowIdentity.localFingerprint(local);
+    })) };
+  if (stewardConfig && selectedId && ![JOB_BOARD_ID, FLEET_LEDGER_ID].includes(selectedId)) {
+    queueMicrotask(refreshIdentity);
+  }
 }
 function routineNoticeKey(correlation, routine) {
   return `${correlation.agent_id ? `agent:${correlation.agent_id}` : `project:${correlation.project}`}\0${routine}`;
@@ -1345,6 +1432,29 @@ function capabilityLine(label, declarations, active, resident) {
   const detailName = active ? active.name : resident.meta.name || resident.file;
   const attrs = ` data-agent="${esc(detailId)}" data-fleet-focus="${esc(focusKey)}" aria-label="Open ${esc(detailName)} detail: ${esc(label)}"`;
   return `<button type="button" class="cap-row"${attrs}><span>${esc(label)}</span><span class="cap-values">${statusMark(status)}${values ? ` ${values}` : ""}</span></button>`;
+}
+function identityStatus(record, kind) {
+  if (!record) return identityState.status === "unconfigured" ? "externally unavailable" :
+    identityState.status === "loaded" ? "missing" : "externally unavailable";
+  if (kind === "charter") return record.status === "configured" ? "configured" :
+    ["invalid", "malformed"].includes(record.status) ? "invalid" : record.status === "missing" ? "missing" :
+      "externally unavailable";
+  const journal = record.journal;
+  return journal && journal.status === "loaded" ? "configured" :
+    journal && journal.status === "malformed" ? "invalid" : "externally unavailable";
+}
+function journalRecency(record) {
+  const journal = record && record.journal;
+  if (!journal || !journal.lastSuccessAt) return "never fetched";
+  if (!journal.entries.length) return `empty · checked ${new Date(journal.lastSuccessAt).toLocaleString()}`;
+  return `latest ${journal.entries[0].date}${journal.stale ? ` · stale as of ${new Date(journal.lastSuccessAt).toLocaleString()}` : ""}`;
+}
+function identityDirectoryLine(resident, active, kind) {
+  const record = BurrowIdentity.recordFor(identityState, resident), status = identityStatus(record, kind);
+  const detailId = active ? active.id : residentDetailId(resident), name = resident.meta.name || resident.file;
+  const value = kind === "journal" ? journalRecency(record) : record && record.charter ?
+    esc(record.charter.mission) : status;
+  return `<button type="button" class="cap-row" data-agent="${esc(detailId)}" data-fleet-focus="identity:${esc(resident.file)}:${kind}" aria-label="Open ${esc(name)} detail: ${kind}"><span>${kind}</span><span class="cap-values">${statusMark(status)} ${value}</span></button>`;
 }
 function renderActivity(now) {
   const state = fleetView.state;
@@ -1406,7 +1516,8 @@ function renderDirectory() {
       ${caps.soul && caps.soul.description ? `<div class="soul">${esc(caps.soul.description)}<div class="ledger-small">sprite ${esc(caps.soul.char)} · accent ${esc(caps.soul.accent)}</div></div>` : ""}
       ${capabilityLine("soul", caps.soul, active, resident)}${capabilityLine("skills", caps.skills, active, resident)}
       ${capabilityLine("memory", caps.memory, active, resident)}${capabilityLine("routes", caps.routes, active, resident)}
-      ${capabilityLine("app grants", caps.app_grants, active, resident)}</article>`;
+      ${capabilityLine("app grants", caps.app_grants, active, resident)}
+      ${identityDirectoryLine(resident, active, "charter")}${identityDirectoryLine(resident, active, "journal")}</article>`;
   }).join("");
   const diagnosticCards = directory.diagnosticResidents.map(resident => {
     const caps = resident.capabilities || {};
@@ -1417,12 +1528,17 @@ function renderDirectory() {
       <div class="ledger-small">invalid resident declaration${home} · no residency or home granted</div>
       ${capabilityLine("soul", caps.soul, null, resident)}${capabilityLine("skills", caps.skills, null, resident)}
       ${capabilityLine("memory", caps.memory, null, resident)}${capabilityLine("routes", caps.routes, null, resident)}
-      ${capabilityLine("app grants", caps.app_grants, null, resident)}</article>`;
+      ${capabilityLine("app grants", caps.app_grants, null, resident)}
+      <div class="cap-row"><span>charter</span><span>${statusMark("invalid")} invalid resident manifest</span></div>
+      <div class="cap-row"><span>journal</span><span>${statusMark("invalid")} no valid resident identity</span></div></article>`;
   }).join("");
   const invalid = directory.invalid.length ? `<div class="ledger-state bad">Incomplete or invalid manifests:<ul>${directory.invalid.map(d => `<li>${esc(d.file)}${esc(d.path)} — ${esc(d.message)}</li>`).join("")}</ul>${statusMark("invalid")}</div>` : "";
   const visitors = villagers.filter(v => v.residency === "visitor");
   const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div>${entryLink(v.id, v.name)} · ${esc(v.project)}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
-  return availability + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
+  const identityControls = `<div class="ledger-truth">Charters and journals are read directly from Steward into this browser tab. ${stewardConfig ?
+    `<button type="button" class="routine-run" data-identity-refresh>refresh identity</button>` :
+    `<button type="button" class="routine-run" data-identity-refresh>connect to load identity</button>`}</div>`;
+  return availability + identityControls + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
 }
 function routineRows(now) {
   const events = fleetView.state.routineRecent.slice().reverse().map(entry => entry.event);
@@ -1550,6 +1666,13 @@ function openPanel(id, opener = document.activeElement) {
   selectedId = id;
   renderPanel(Date.now());
   showDialog(true);
+  const resident = villagers.find(item => item.id === id);
+  const declaration = resident && resident.residency === "resident" ? resident.soul :
+    fleetView.residents.find(item => residentDetailId(item) === id);
+  if (stewardConfig && identityState.status !== "loading" && declaration &&
+      !BurrowIdentity.recordFor(identityState, declaration)) {
+    queueMicrotask(refreshIdentity);
+  }
 }
 function renderJobListing(now) {
   const boardRows = BurrowJobs.rows(fleetView.jobState, now);
@@ -1689,6 +1812,66 @@ function renderApprovals(v, now) {
     ${confirmations.length ? `<div class="meta">recent confirmed decisions · newest first · at most ${BurrowApprovals.MAX_CONFIRMATIONS}</div>
       ${confirmations.map(item => approvalConfirmationMarkup(item, now)).join("")}` : ""}</section>`;
 }
+function escalationMarkup(escalation) {
+  if (!escalation) return "";
+  if (escalation.kind === "text") return `<div>${esc(escalation.text)}</div>`;
+  return `<ul>${escalation.when.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <div class="ledger-small">how · ${esc(escalation.how)}${escalation.note ? ` · ${esc(escalation.note)}` : ""}</div>`;
+}
+function journalEntriesMarkup(entries) {
+  return (entries || []).map(entry => `<article class="journal-entry"><time datetime="${entry.date}">${entry.date}${entry.routine ?
+    ` · ${esc(entry.routine)}` : ""}</time>${esc(entry.text)}</article>`).join("");
+}
+function identityMarkup(resident) {
+  if (!resident || resident.valid !== true) return "";
+  const record = BurrowIdentity.recordFor(identityState, resident);
+  const controls = stewardConfig ? `<button type="button" class="routine-run" data-identity-refresh>refresh from Steward</button>
+    <button type="button" class="routine-run" data-steward-change>change credentials</button>
+    <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+    `<button type="button" class="routine-run" data-identity-refresh>connect to Steward</button>`;
+  let charter = `<div class="identity-warning">Charter externally unavailable. Connect to Steward to read the declared manifest identity.</div>`;
+  if (record && record.charter) charter = `<div class="${record.stale ? "identity-warning" : "ledger-small"}">${record.stale ?
+      `${record.status === "authentication" ? "Steward rejected these credentials. " :
+        record.status === "malformed" ? "Could not read the latest charter. " :
+        record.status === "error" || record.status === "missing" ? "Steward definitively refused the latest charter read. " :
+        record.status === "local-unavailable" ? "Burrow's resident manifest feed is unavailable. " :
+        record.status === "unavailable" ? "Steward credentials are not configured. " :
+        "Steward unreachable. "}Cached declaration as of ${new Date(record.lastSuccessAt).toLocaleString()}.` :
+      "Declared by the Steward manifest · authoritative identity, not observed activity."}</div>
+    <h4>Mission</h4><div>${esc(record.charter.mission)}</div>
+    <h4>Duties</h4><ul>${record.charter.duties.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <h4>Hard rules</h4><ul>${record.charter.rules.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <h4>Escalation policy</h4>${escalationMarkup(record.charter.escalation)}`;
+  else if (record && record.status === "missing") charter = `<div class="identity-warning">Missing charter: ${esc(record.diagnostic || "no Steward resident matches this resident declaration")}.</div>`;
+  else if (record && ["invalid", "malformed"].includes(record.status)) charter = `<div class="identity-warning">Could not read charter. ${esc(record.diagnostic || "The declaration is malformed.")}</div>`;
+  else if (record && record.diagnostic) charter = `<div class="identity-warning">Charter externally unavailable. ${esc(record.diagnostic)}</div>`;
+
+  const journal = record && record.journal;
+  let journalBody = `<div class="identity-warning">Journal externally unavailable. No empty-journal claim can be made.</div>`;
+  if (journal && journal.status === "loaded") journalBody = journal.entries.length ?
+    journalEntriesMarkup(journal.entries) :
+    `<div>This resident has written nothing yet.</div>`;
+  else if (journal && journal.status === "malformed") journalBody = `<div class="identity-warning">Could not read journal. ${esc(journal.diagnostic || "The response was malformed.")}</div>` +
+    (journal.stale ? `<div class="ledger-small">Cached entries below are stale as of ${new Date(journal.lastSuccessAt).toLocaleString()}.</div>${journalEntriesMarkup(journal.entries)}` : "");
+  else if (journal && ["unreachable", "unavailable", "local-unavailable", "authentication", "missing", "error"].includes(journal.status)) journalBody =
+    `<div class="identity-warning">${journal.status === "authentication" ? "Steward rejected these credentials." :
+      journal.status === "missing" ? "Steward reports this resident is missing." :
+      journal.status === "error" ? "Steward definitively refused the journal read." :
+      journal.status === "local-unavailable" ? "Burrow's resident manifest feed is unavailable." :
+      journal.status === "unavailable" ? "Steward credentials are not configured." :
+      "Steward unreachable."} ${journal.lastSuccessAt ? `Last successful fetch ${new Date(journal.lastSuccessAt).toLocaleString()}.` : "No successful fetch yet."}</div>` +
+    (journal.stale ? `<div class="ledger-small">Cached entries are stale as of that time.</div>${journalEntriesMarkup(journal.entries)}` : "");
+  return `<section class="declared-identity" aria-label="Declared charter"><h3>Charter ${statusMark(identityStatus(record, "charter"))}</h3>${charter}</section>
+    <section class="journal-section" aria-label="Resident journal"><h3>Journal ${statusMark(identityStatus(record, "journal"))}</h3>
+      <div class="ledger-small">Read-only Steward journal · newest first · latest ${BurrowIdentity.JOURNAL_LIMIT}</div>${journalBody}${controls}</section>`;
+}
+function visitorIdentityMarkup(declaration = null) {
+  const reason = declaration && declaration.diagnostic ?
+    "Its resident declaration is invalid, so it has no valid resident soul or manifest and no charter or journal can be trusted." :
+    "This visitor has no resident soul or manifest, so it has no charter or journal to show.";
+  return `<section class="visitor-truth" aria-label="Temporary visitor lodging"><strong>Temporary lodging.</strong>
+    ${reason} It stays in the shared lodge only while its session exists; this is not an unconfigured resident.</section>`;
+}
 function renderPanelContent(now) {
   if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
   panelEl.classList.remove("ledger");
@@ -1758,6 +1941,7 @@ function renderPanelContent(now) {
       <div class="state-line">inactive · no current signal</div>
       ${routineOwner && !latest ? `<div class="meta">Routine ownership observed from Steward; routine events do not manufacture interactive activity.</div>` : ""}
       ${resident && resident.body ? `<div class="soul">${esc(resident.body)}</div>` : ""}
+      ${resident && resident.valid === true ? identityMarkup(resident) : visitorIdentityMarkup(resident)}
       ${renderResidentRoutines(resident, now)}
       ${latest ? `<div class="evt t-${esc(latest.event.type)}">
         <div class="when">latest retained event · ${ago(latest.ts, now)} · ${esc(latest.event.type)}</div>
@@ -1789,6 +1973,7 @@ function renderPanelContent(now) {
       </div>` : ""}
     ${approvalDiagnostics.map(item => `<div class="approval-diagnostic" role="status">${esc(item.reason)}</div>`).join("")}
     ${v.soul && v.soul.body ? `<div class="soul">${esc(v.soul.body)}</div>` : ""}
+    ${v.residency === "resident" ? identityMarkup(v.soul) : visitorIdentityMarkup()}
     ${renderResidentRoutines(v.soul, now)}
     ${v.events.slice().reverse().map(ev => `
       <div class="evt t-${esc(ev.type)}">
@@ -1812,6 +1997,7 @@ function captureApprovalFocus() {
     selector = `[data-approval-id="${CSS.escape(active.dataset.approvalId)}"][data-approval-index="${CSS.escape(active.dataset.approvalIndex)}"]`;
   } else if (active.matches("[data-steward-change]")) selector = "[data-steward-change]";
   else if (active.matches("[data-steward-clear]")) selector = "[data-steward-clear]";
+  else if (active.matches("[data-identity-refresh]")) selector = "[data-identity-refresh]";
   if (!selector) return approvalFocusMemory;
   approvalFocusMemory = { selector, textarea: active.matches("textarea"),
     start: active.selectionStart, end: active.selectionEnd,
@@ -1820,7 +2006,7 @@ function captureApprovalFocus() {
 }
 panelEl.addEventListener("pointerdown", event => {
   if (!event.target.closest(
-      "[data-approval-edit], [data-approval-option], [data-steward-change], [data-steward-clear]")) {
+      "[data-approval-edit], [data-approval-option], [data-steward-change], [data-steward-clear], [data-identity-refresh]")) {
     approvalFocusMemory = null;
   }
 });
@@ -1849,7 +2035,8 @@ function restoreApprovalFocus(saved) {
       `[data-approval-edit="${CSS.escape(target.dataset.approvalEdit)}"]` :
       target.matches("[data-approval-option]") ?
         `[data-approval-id="${CSS.escape(target.dataset.approvalId)}"][data-approval-index="${CSS.escape(target.dataset.approvalIndex)}"]` :
-        target.matches("[data-steward-change]") ? "[data-steward-change]" : "#panel-title";
+        target.matches("[data-steward-change]") ? "[data-steward-change]" :
+          target.matches("[data-identity-refresh]") ? "[data-identity-refresh]" : "#panel-title";
     requestAnimationFrame(() => {
       const settled = selectedId && panelBody.querySelector(selector);
       if (settled && document.activeElement === document.body) settled.focus({ preventScroll: true });
@@ -2024,18 +2211,26 @@ panelBody.addEventListener("click", async event => {
     return;
   }
   const changeCredentials = event.target.closest("[data-steward-change]");
+  const identityResident = selectedId && villagers.find(item => item.id === selectedId);
+  const inactiveIdentity = selectedId && fleetView.residents.find(item =>
+    residentDetailId(item) === selectedId);
+  const inIdentityFlow = Boolean(inactiveIdentity ||
+    (identityResident && identityResident.residency === "resident"));
   if (changeCredentials && (selectedId === JOB_BOARD_ID ||
-      selectedPendingApprovalQueue().length > 0)) {
+      selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
     forgetStewardConfig();
     renderPanel(Date.now());
     const config = await requestStewardConfig();
-    if (config) stewardConfig = config;
+    if (config) {
+      stewardConfig = config;
+      if (inIdentityFlow) await refreshIdentity();
+    }
     renderPanel(Date.now());
     return;
   }
   const clearCredentials = event.target.closest("[data-steward-clear]");
   if (clearCredentials && (selectedId === JOB_BOARD_ID ||
-      selectedPendingApprovalQueue().length > 0)) {
+      selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
     forgetStewardConfig();
     if (selectedId === JOB_BOARD_ID) jobPostNotice = "Steward credentials cleared from browser memory.";
     renderPanel(Date.now());
@@ -2047,6 +2242,16 @@ panelBody.addEventListener("click", async event => {
     if (!config) return;
     stewardConfig = config;
     await refreshStewardDeclarations();
+    return;
+  }
+  const identityRefresh = event.target.closest("[data-identity-refresh]");
+  if (identityRefresh) {
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) return;
+      stewardConfig = config;
+      await refreshIdentity();
+    } else await refreshIdentity();
     return;
   }
   const button = event.target.closest("[data-run-routine]");
@@ -2200,6 +2405,7 @@ const runtime = BurrowBrowser.createBrowserRuntime({
   },
   onFleet(view) {
     fleetView = view;
+    reconcileIdentityLocals(view.residents, view.directoryAvailable);
     pruneApprovalUi(view.approvalState);
     routineAcks.observe({ events: view.routineBatch, cursor: view.cursor, reset: view.reset },
       view.now, validateEvent);
