@@ -522,7 +522,11 @@ def test_a_board_session_can_raise_an_approval_of_its_own(
         RunResult(
             outcome=Outcome.OK,
             exit_status=0,
-            output='drafted it\n<needs-human action="send_email">\n{"to": "a"}\n</needs-human>',
+            output=(
+                f"drafted it\n{prompt.ACTIONS_OPEN}\n"
+                '<needs-human action="send_email">\n{"to": "a"}\n</needs-human>\n'
+                f"{prompt.ACTIONS_CLOSE}"
+            ),
         )
     )
     (report,) = make_dispatcher(runner=runner).dispatch(NOW).reports

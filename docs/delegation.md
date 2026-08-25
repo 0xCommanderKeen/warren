@@ -55,7 +55,15 @@ them:
   resident. `0` is a legitimate value and turns delegation off fleet-wide.
 - **Cycles.** A chain may never revisit a resident: `A → B → A` is refused, and so is
   `A → B → C → A`. Without that, two residents can hand one task back and forth until
-  somebody's budget is gone. Delegating to yourself is refused too.
+  somebody's budget is gone. Delegating to yourself is refused too. The refusal names the
+  whole chain, root sender first and the revisited resident once (`A → B → C → A`), so a
+  human can see the loop rather than guess at it.
+
+  Depth and cycle are derived from the task the **sender is actually working on**, looked up
+  in the store — not from a `parent_task_id` the caller passes or omits. A session cannot
+  escape the depth cap or the cycle check by simply not naming its parent (steward #67); a
+  human on the API may still name the chain they are delegating on behalf of, because a human
+  is not mid-session on a task.
 
 Every refusal carries a structured reason:
 
@@ -64,6 +72,8 @@ Every refusal carries a structured reason:
 | `not_permitted` | the sender's manifest has no `delegation: {send: true}` |
 | `recipient_not_allowed` | the sender's `to:` list does not name this receiver |
 | `unknown_recipient` | no valid resident by that id (the near miss is named) |
+| `retired_recipient` | the receiver exists but has been retired — its own code, not `unknown_recipient`, so a panel can tell a departed resident from a typo |
+| `retired_sender` | the sender has been retired; a resident that has left the village delegates nothing on its way out |
 | `self_delegation` | a resident cannot hand work to itself |
 | `unknown_route` | the receiver declares no route by that id |
 | `route_not_delegable` | the route exists but is not of kind `delegation` |
@@ -84,11 +94,21 @@ ways in, both landing in the same row of the same table.
 
 ### 1. A block in the session's output
 
+Steward acts on a `<delegate>` block **only** from the machine-read region a session ends
+its message with — the same region [approvals](approvals.md) use, opened by a line reading
+exactly `===STEWARD-ACTIONS===` and closed by `===END-STEWARD-ACTIONS===`:
+
 ```
+===STEWARD-ACTIONS===
 <delegate to="life-agent" route="handoff">
 {"title": "Check what the errand list actually contains", "detail": "…"}
 </delegate>
+===END-STEWARD-ACTIONS===
 ```
+
+A block anywhere else — in prose, fenced, quoted, or copied from a job or task detail the
+session was handed — is ignored (steward #62). This is the guard that stops a poisoned job
+detail from delegating on the claiming session's behalf just by being quoted back.
 
 The grammar, exactly:
 
@@ -232,9 +252,12 @@ $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
     http://127.0.0.1:8801/delegate
 ```
 
-`from` names the resident handing the work over, and its manifest is checked exactly as it
-would be for a block: a person must not be able to make a resident do what its own
-declaration forbids. Omitting `from` means the *person* is the sender — then the token is
+`from` is the one **authorized** way a human delegates on a resident's behalf, and it is
+never a silent trust: the sender's manifest is checked exactly as it would be for a block —
+`delegation: {send: true}`, its `to:` allowlist, and the retirement check all apply — so the
+token holder cannot make a resident do what its own declaration forbids. A session never
+uses this path; it uses the block or the CLI, where the sender is the session itself and is
+not caller-supplied. Omitting `from` means the *person* is the sender — then the token is
 the permission and the receiver's route is the whole of the agreement. See
 [docs/api.md](api.md) for the status codes.
 

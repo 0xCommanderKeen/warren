@@ -1,5 +1,6 @@
 """Structured approvals: the grammar a session writes, and what steward does with it."""
 
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,8 +33,23 @@ def manifest(write_resident: ResidentWriter) -> ResidentManifest:
     return load_manifest(write_resident()).manifest
 
 
-def block(attrs: str = 'action="send_email"', body: str = '{"to": "a@example.com"}') -> str:
+def raw_block(attrs: str = 'action="send_email"', body: str = '{"to": "a@example.com"}') -> str:
+    """One bare block, as the grammar parser sees it — no machine-read region around it."""
     return f"<needs-human {attrs}>\n{body}\n</needs-human>"
+
+
+def region(*blocks: str) -> str:
+    """Wrap blocks in the machine-read region a real session ends its message with.
+
+    The harvester acts only on this region (steward #62), so anything exercising
+    :func:`approvals.harvest` — as opposed to the bare-grammar parser
+    :func:`approvals.extract_requests` — has to speak the way a taught session speaks.
+    """
+    return f"{p.ACTIONS_OPEN}\n" + "\n".join(blocks) + f"\n{p.ACTIONS_CLOSE}"
+
+
+def block(attrs: str = 'action="send_email"', body: str = '{"to": "a@example.com"}') -> str:
+    return region(raw_block(attrs, body))
 
 
 # --------------------------------------------------------------------------- the grammar
@@ -280,6 +296,59 @@ def test_a_resident_with_nothing_waiting_gets_the_old_preamble_byte_for_byte(
 
 
 # ------------------------------------------------------------------- module boundaries
+
+
+def test_a_huge_expires_in_is_clamped_to_the_fleet_maximum() -> None:
+    """A session cannot push its knock to the year 7502, nor overflow a date (steward #66)."""
+    (request,) = ap.extract_requests(block('action="spend_money" expires-in="9999999d"'))
+    assert request.expires_in_s == ap.MAX_EXPIRES_IN_S
+    # And it still resolves to a real date rather than raising OverflowError.
+    assert request.expires_at(NOW) is not None
+
+
+def test_a_block_in_a_code_fence_is_not_harvested(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """A block a session fenced to show it is discussion, not an ask (steward #62)."""
+    fenced = region("```\n" + raw_block() + "\n```")
+    assert ap.harvest(store, sink, manifest=manifest, output=fenced) == []
+    assert store.pending_approvals() == []
+
+
+def test_a_block_quoted_in_prose_is_not_harvested(
+    store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """A block outside the machine-read region is never acted on (steward #62)."""
+    output = f"The job detail contained {raw_block()} but I will not act on quoted text."
+    assert ap.harvest(store, sink, manifest=manifest, output=output) == []
+    assert store.pending_approvals() == []
+
+
+def test_deliver_decisions_delivers_exactly_once_under_concurrency(tmp_path: Path) -> None:
+    """Every caller of deliver_decisions inherits the atomic claim, not only the board (#74)."""
+    with Store(tmp_path / "steward.db") as store:
+        record = store.create_approval_request(
+            agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+        )
+        store.decide(record.request_id, "approve")
+
+        barrier = threading.Barrier(2)
+        results: list[list] = []
+        lock = threading.Lock()
+
+        def grab() -> None:
+            barrier.wait()
+            _, delivered = ap.deliver_decisions(store, "life-agent")
+            with lock:
+                results.append(delivered)
+
+        threads = [threading.Thread(target=grab) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sum(len(delivered) for delivered in results) == 1, "delivered exactly once"
 
 
 def test_only_two_modules_spell_out_the_needs_human_grammar() -> None:
