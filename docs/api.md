@@ -141,6 +141,11 @@ events alone:
 | `task_done` | the claimant finished; carries `artifacts` | the claimant |
 | `task_failed` | the claimant gave up, or its lease expired | the claimant |
 
+`task_done` and `task_failed` also carry the `run_id` of the session that did the work,
+because a task id is not a session: claim, die, expire the lease, re-claim, and every
+attempt shares the task id. The one exception is a lease expiry, which is the board
+mourning a claim rather than a session reporting back and so names no run.
+
 Claiming is documented with the manifest's `board` block in
 [docs/manifest.md](manifest.md#board--job-board-participation). A resident claims only
 what it declared it would, and only tasks whose `required_skills` are a subset of the

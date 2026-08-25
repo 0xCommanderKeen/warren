@@ -385,6 +385,11 @@ class Dispatcher:
                 claimant,
                 job.lease_expires_at,
             )
+            # No ``run_id``: this is the board mourning a claim, not a session reporting
+            # back, and steward does not know which session dropped it. Naming one would
+            # answer that session's run registry row — the very silence the registry is
+            # there to catch — and, worse, the retry claimed moments later in this same
+            # dispatch pass is the row a guess would land on (steward #39).
             self.emitter.emit(
                 ev.task_failed_event(
                     task_id=job.task_id,
@@ -688,7 +693,7 @@ class Dispatcher:
         handed = self.hand_over(
             resident.manifest, result.output, parent_task_id=job.task_id, now=moment
         )
-        return self._record(resident, job, result, moment, raised, handed=handed)
+        return self._record(resident, job, result, moment, raised, handed=handed, run_id=run_id)
 
     # -- the budget seam ---------------------------------------------------------------
 
@@ -808,8 +813,16 @@ class Dispatcher:
         moment: datetime,
         raised: Sequence[ApprovalRecord],
         *,
+        run_id: str,
         handed: Sequence[dg.Delivery] = (),
     ) -> BoardReport:
+        """Close the task on the board and say so, naming the session that did the work.
+
+        ``run_id`` rides along into the closing event because a task id is not a session:
+        it is the id of this attempt's run registry row, and it is what lets the watchdog
+        tell this close from the close of an attempt that came before (steward #39). It is
+        required rather than optional so a future caller cannot quietly drop the name.
+        """
         status = STATUS_DONE if result.ok else STATUS_FAILED
         reason = None if result.ok else f"{result.outcome}: {result.summary()}"
         closed = self.store.finish_job(
@@ -850,6 +863,7 @@ class Dispatcher:
                     project=resident.project,
                     artifacts=result.artifacts,
                     parent_task_id=job.parent_task_id,
+                    run_id=run_id,
                 )
             )
         else:
@@ -861,6 +875,7 @@ class Dispatcher:
                     project=resident.project,
                     reason=reason or str(result.outcome),
                     parent_task_id=job.parent_task_id,
+                    run_id=run_id,
                 )
             )
         return BoardReport(

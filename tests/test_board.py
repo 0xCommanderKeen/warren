@@ -12,6 +12,7 @@ from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
 from steward import events as ev
+from steward import watchdog as w
 from steward.manifest import Resident, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
@@ -71,16 +72,19 @@ def make_dispatcher(
         *,
         runner: Runner | None = None,
         residents: list[Resident] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> b.Dispatcher:
         if residents is None:
             path = write_resident(manifest if manifest is not None else board_manifest())
             residents = [load_manifest(path)]
+        kwargs: dict[str, Any] = {"clock": clock} if clock is not None else {}
         return b.Dispatcher(
             residents=residents,
             store=store,
             emitter=sink,
             workdir=tmp_path,
             runner_factory=lambda _spec: runner or ScriptedRunner(),
+            **kwargs,
         )
 
     return _make
@@ -1038,3 +1042,42 @@ def test_a_re_claimed_task_opens_a_second_row_of_its_own(
     assert first.run_id in ids, "the first session is still unaccounted for"
     assert len(ids) == 2, "and so is the one that claimed the task after it"
     assert {run.ref for run in store.open_runs()} == {posted.task_id}
+
+
+def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
+    make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The whole flow in one pass, against the log it actually writes (steward #39).
+
+    ``dispatch`` expires the dead predecessor's lease *and* re-claims the task in the same
+    breath. The sweep's ``task_failed`` is stamped at wall clock, so it lands at or after
+    the retry's row opens — which is why "a close from the row's own lifetime answers it"
+    was not enough: the predecessor's death answered the successor's row, the retry ran
+    unwatched, and recovery quietly fell back to the lease sweep alone.
+    """
+
+    class Vanishing(Runner):
+        def run(self, request: RunRequest) -> RunResult:  # noqa: ARG002 — it never returns
+            raise KeyboardInterrupt("the machine went away")
+
+    store.post_job(title="Read the mail")
+    with pytest.raises(KeyboardInterrupt):
+        make_dispatcher(runner=Vanishing(), clock=lambda: NOW).dispatch(NOW)
+
+    # One pass, past the 1800s lease: it reopens the dead claim and claims it again.
+    retried_at = NOW + timedelta(hours=1)
+    with pytest.raises(KeyboardInterrupt):
+        make_dispatcher(runner=Vanishing(), clock=lambda: retried_at).dispatch(retried_at)
+    assert len(store.open_runs()) == 2, "two sessions, both of them unaccounted for"
+
+    swept = [e for e in sink.events if e.payload.get("reason") == b.LEASE_EXPIRED]
+    assert [e.payload.get("run_id") for e in swept] == [None], "a sweep names no session"
+    assert swept[0].ts >= ev.utc_now_iso(retried_at), "and lands after the retry's row opens"
+
+    log = tmp_path / "events.jsonl"
+    log.write_text("\n".join(e.to_json() for e in sink.events) + "\n", encoding="utf-8")
+    stale = w.scan_unbracketed(log, now=retried_at + timedelta(hours=1), registry=store)
+
+    retry = next(run for run in store.open_runs() if run.started_at == ev.utc_now_iso(retried_at))
+    assert retry.run_id in {run.run_id for run in stale}, "the retry is found, not silenced"
+    assert w.answered_runs(log, store) == [], "and nothing quietly closes its row"

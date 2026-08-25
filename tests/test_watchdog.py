@@ -88,8 +88,16 @@ def task_closed(
     ts: datetime,
     agent: str = "claude-code:test-agent",
     type: str = "task_done",  # noqa: A002 — the event's own field name
+    run_id: str | None = None,
 ) -> str:
-    """Render the closing event a board session writes. It names the task, not the run."""
+    """Render the closing event a board session writes: it names the task *and* the run.
+
+    ``run_id=None`` renders the lease sweep's ``task_failed``, which names no session
+    because it is the board mourning a claim rather than a run reporting back.
+    """
+    payload: dict[str, Any] = {"task_id": task_id, "title": "Read the mail", "claimant": agent}
+    if run_id:
+        payload["run_id"] = run_id
     return json.dumps(
         {
             "v": 0,
@@ -98,7 +106,7 @@ def task_closed(
             "agent_id": agent,
             "project": "test-agent",
             "type": type,
-            "payload": {"task_id": task_id, "title": "Read the mail", "claimant": agent},
+            "payload": payload,
         }
     )
 
@@ -316,7 +324,10 @@ def test_a_task_closing_event_in_the_log_answers_an_open_registry_row(
         timeout_s=900.0,
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
-    log = write_log(tmp_path / "events.jsonl", task_closed("task-1", ts=NOW - timedelta(hours=1)))
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-1"),
+    )
 
     assert w.scan_unbracketed(log, now=NOW, registry=store) == []
 
@@ -361,7 +372,12 @@ def test_the_close_of_a_dead_first_attempt_does_not_answer_the_retry(
     attempt is appended to this log and stays there for ever. It names the *task*, which
     the retry shares, so matching on the id alone let one old line silence every later
     attempt — the retry ran unwatched, which is exactly what the registry is for.
+
+    Nor is "only a close after the row opened" enough. One dispatch pass expires the dead
+    lease and re-claims the task, so the sweep's ``task_failed`` is stamped *after* the
+    retry's row opens: the timestamps here are the ones that flow actually produces.
     """
+    opened = NOW - timedelta(hours=2)
     store.open_run(
         run_id="session-2",
         kind="task",
@@ -369,21 +385,22 @@ def test_the_close_of_a_dead_first_attempt_does_not_answer_the_retry(
         project="test-agent",
         ref="task-1",
         timeout_s=900.0,
-        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+        now=ev.utc_now_iso(opened),
     )
     log = write_log(
         tmp_path / "events.jsonl",
-        task_closed("task-1", ts=NOW - timedelta(hours=3), type="task_failed"),
+        task_closed("task-1", ts=opened + timedelta(milliseconds=1), type="task_failed"),
     )
 
     stale = w.scan_unbracketed(log, now=NOW, registry=store)
 
     assert [run.run_id for run in stale] == ["session-2"]
-    # And the retry's own close, once it lands, does answer it.
+    assert w.answered_runs(log, store) == [], "and nothing quietly closes its row either"
+    # And the retry's own close, once it lands, does answer it: it names the session.
     log = write_log(
         tmp_path / "events.jsonl",
-        task_closed("task-1", ts=NOW - timedelta(hours=3), type="task_failed"),
-        task_closed("task-1", ts=NOW - timedelta(hours=1)),
+        task_closed("task-1", ts=opened + timedelta(milliseconds=1), type="task_failed"),
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-2"),
     )
     assert w.scan_unbracketed(log, now=NOW, registry=store) == []
 
@@ -428,7 +445,10 @@ def test_a_task_row_the_log_has_answered_is_closed_too(
         timeout_s=900.0,
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
-    log = write_log(tmp_path / "events.jsonl", task_closed("task-1", ts=NOW - timedelta(hours=1)))
+    log = write_log(
+        tmp_path / "events.jsonl",
+        task_closed("task-1", ts=NOW - timedelta(hours=1), run_id="session-1"),
+    )
 
     report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
 
