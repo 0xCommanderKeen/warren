@@ -95,6 +95,7 @@ from steward.store import (
     ApprovalRecord,
     JobRecord,
     Store,
+    new_id,
 )
 
 __all__ = [
@@ -437,6 +438,11 @@ class Dispatcher:
                 claimant,
                 job.lease_expires_at,
             )
+            # No ``run_id``: this is the board mourning a claim, not a session reporting
+            # back, and steward does not know which session dropped it. Naming one would
+            # answer that session's run registry row — the very silence the registry is
+            # there to catch — and, worse, the retry claimed moments later in this same
+            # dispatch pass is the row a guess would land on (steward #39).
             self.emitter.emit(
                 ev.task_failed_event(
                     task_id=job.task_id,
@@ -688,6 +694,14 @@ class Dispatcher:
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
+        # The deadline this session actually gets, read once: the run registry is judged
+        # against it, and the runner is given it.
+        timeout_s = self._timeout_for(resident, declared_s)
+        # This session's own id, and not the task's: a task claimed, dropped on a dead
+        # lease and claimed again is *two* sessions, and the registry has to be able to
+        # hold both of them open at once (steward #39).
+        run_id = new_id()
+        self._open_run(resident, job, run_id, timeout_s, moment)
 
         prompt = ""
         try:
@@ -702,7 +716,7 @@ class Dispatcher:
                 RunRequest(
                     prompt=prompt,
                     workdir=workdir,
-                    timeout_s=self._timeout_for(resident, declared_s),
+                    timeout_s=timeout_s,
                     model=resident.manifest.runner.model,
                     env=self._session_env(resident, job),
                 )
@@ -715,6 +729,14 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 — a broken runner is a failed task, not a crash
             result = RunResult(outcome=Outcome.FAILED, error=f"{type(exc).__name__}: {exc}")
 
+        # The session is over the moment the runner returns, so the row is answered here
+        # rather than after the bookkeeping below. The other order left a window — die
+        # while ledgering, harvesting or recording, and the row of a session that plainly
+        # reported back stays open, and the watchdog calls a healthy resident dead. The
+        # scheduler closes its row the other way round on purpose: nobody but the watchdog
+        # would ever emit a routine's missing ``routine_failed``, while a task whose close
+        # never got written is the lease sweep's to reopen and to mourn.
+        self._close_run(run_id, job, moment + timedelta(seconds=result.duration_s))
         # Stamp the ledger at completion, so a task that crossed midnight bills the day it
         # finished in rather than an already-closed window (steward #68).
         self._ledger(resident, job, result, moment + timedelta(seconds=result.duration_s))
@@ -724,7 +746,7 @@ class Dispatcher:
         handed = self.hand_over(
             resident.manifest, result.output, parent_task_id=job.task_id, now=moment
         )
-        return self._record(resident, job, result, moment, raised, handed=handed)
+        return self._record(resident, job, result, moment, raised, handed=handed, run_id=run_id)
 
     # -- the budget seam ---------------------------------------------------------------
 
@@ -759,6 +781,60 @@ class Dispatcher:
         if self.guard is None:
             return declared_s
         return self.guard.timeout_for(resident.manifest, declared_s)
+
+    # -- the run registry ---------------------------------------------------------------
+
+    def _open_run(
+        self, resident: Resident, job: JobRecord, run_id: str, timeout_s: int, moment: datetime
+    ) -> None:
+        """Write this session into steward's run registry. Never raises.
+
+        The scheduler's :meth:`steward.scheduler.Scheduler._open_run` for the other kind
+        of wake-up, and the registry does not care which it was: a claimed task is a
+        session, so it belongs in the one place that knows which sessions are open
+        (steward #39). What happens to a stale row differs — a routine that vanished is
+        buried with the ``routine_failed`` its session never sent, while a task that
+        vanished is the lease sweep's to reopen — but "steward started this and heard
+        nothing back" is one fact with one home.
+
+        The row is keyed by ``run_id`` — this session — and carries the task as its
+        ``ref``. Keying it by the task instead used to lose every retry: the board's
+        ordinary flow is claim, die, expire the lease, re-claim, and a second row under
+        the id of a task the first attempt already closed is a conflict the registry
+        drops. The second session then vanished with nothing left open to find, which is
+        precisely the death this registry exists to catch.
+        """
+        try:
+            opened = self.store.open_run(
+                run_id=run_id,
+                kind=RUN_DELEGATED if job.delegated else RUN_TASK,
+                agent_id=resident.agent_id,
+                project=resident.project,
+                ref=job.task_id,
+                timeout_s=float(timeout_s),
+                now=ev.utc_now_iso(moment),
+            )
+        except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed task
+            log.warning(
+                "%s: could not record that task %s started: %s", resident.id, job.task_id, exc
+            )
+            return
+        if not opened:  # pragma: no cover — a fresh id per session cannot collide
+            # Said out loud rather than shrugged off: an ignored open means this session
+            # is invisible to the watchdog, and silence would make that look like health.
+            log.warning(
+                "%s: run %s was already recorded, so task %s is not being watched",
+                resident.id,
+                run_id,
+                job.task_id,
+            )
+
+    def _close_run(self, run_id: str, job: JobRecord, moment: datetime) -> None:
+        """Answer this session's registry row. Never raises, and never emits: ``_record`` does."""
+        try:
+            self.store.close_run(run_id, now=ev.utc_now_iso(moment))
+        except Exception as exc:  # noqa: BLE001 — the registry must not take the board down
+            log.warning("could not record that task %s reported back: %s", job.task_id, exc)
 
     def _ledger(
         self, resident: Resident, job: JobRecord, result: RunResult, moment: datetime
@@ -797,8 +873,16 @@ class Dispatcher:
         moment: datetime,
         raised: Sequence[ApprovalRecord],
         *,
+        run_id: str,
         handed: Sequence[dg.Delivery] = (),
     ) -> BoardReport:
+        """Close the task on the board and say so, naming the session that did the work.
+
+        ``run_id`` rides along into the closing event because a task id is not a session:
+        it is the id of this attempt's run registry row, and it is what lets the watchdog
+        tell this close from the close of an attempt that came before (steward #39). It is
+        required rather than optional so a future caller cannot quietly drop the name.
+        """
         status = STATUS_DONE if result.ok else STATUS_FAILED
         reason = None if result.ok else f"{result.outcome}: {result.summary()}"
         closed = self.store.finish_job(
@@ -839,6 +923,7 @@ class Dispatcher:
                     project=resident.project,
                     artifacts=result.artifacts,
                     parent_task_id=job.parent_task_id,
+                    run_id=run_id,
                 )
             )
         else:
@@ -850,6 +935,7 @@ class Dispatcher:
                     project=resident.project,
                     reason=reason or str(result.outcome),
                     parent_task_id=job.parent_task_id,
+                    run_id=run_id,
                 )
             )
         return BoardReport(

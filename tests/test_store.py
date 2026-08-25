@@ -288,6 +288,8 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         assert [entry.kind for entry in migrated.ledger("hob")] == ["delegated"]
         assert migrated.budget_pause("hob") is None
         assert migrated.last_watchdog_pass() is None
+        # The run registry (#39) is a whole table too, and an old database gets it empty.
+        assert migrated.open_runs() == []
 
 
 def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) -> None:
@@ -758,3 +760,48 @@ def test_the_rollup_is_ordered_by_what_each_origin_cost(store: Store) -> None:
         )
 
     assert [spend.origin for spend in store.spend_by_origin()] == ["task:dear", "task:cheap"]
+
+
+# ------------------------------------------------------------------- the run registry
+
+
+def test_an_opened_run_is_open_until_it_is_closed(store: Store) -> None:
+    """Steward's own record that a session exists, independent of where its events went."""
+    assert store.open_run(
+        run_id="r1",
+        kind="routine",
+        agent_id="claude-code:hob",
+        project="household",
+        ref="daily-summary",
+        timeout_s=900.0,
+        now=EARLY,
+    )
+
+    (opened,) = store.open_runs()
+    assert (opened.run_id, opened.kind, opened.ref) == ("r1", "routine", "daily-summary")
+    assert opened.timeout_s == pytest.approx(900.0)
+    assert opened.open
+
+    assert store.close_run("r1", now=LATER)
+    assert store.open_runs() == []
+
+
+def test_one_run_id_is_one_run(store: Store) -> None:
+    """A second open of the same id is a repeat, not a second session."""
+    assert store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=EARLY)
+    assert not store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=LATER)
+    assert [run.started_at for run in store.open_runs()] == [EARLY]
+
+
+def test_a_run_is_closed_once_however_late_its_session_reports(store: Store) -> None:
+    """A run the watchdog already buried is not re-answered by a session that turned up."""
+    store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=EARLY)
+
+    assert store.close_run("r1", now=EARLY)
+    assert not store.close_run("r1", now=LATER)
+
+
+def test_closing_a_run_nobody_opened_changes_nothing(store: Store) -> None:
+    """A close with no row is a no-op, not a row invented to close."""
+    assert not store.close_run("never-started")
+    assert store.open_runs() == []

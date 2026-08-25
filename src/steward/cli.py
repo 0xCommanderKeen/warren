@@ -751,11 +751,11 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     # one by expiry, or spend a budget. With no hooks and no guard the scheduler simply
     # fires routines, as it did before the board, approvals, and budgets existed.
     if dry_run:
-        hooks, guard = None, None
+        hooks, guard, registry = None, None, None
     else:
-        store = _open_store(db)
-        guard = BudgetGuard(store, ev.EventEmitter.from_env())
-        hooks = Dispatcher.from_path(residents, store, workdir=workdir, guard=guard)
+        registry = _open_store(db)
+        guard = BudgetGuard(registry, ev.EventEmitter.from_env())
+        hooks = Dispatcher.from_path(residents, registry, workdir=workdir, guard=guard)
     return Scheduler(
         scheduled,
         state=SchedulerState.load(state if state is not None else default_state_path()),
@@ -765,6 +765,7 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
         library=library_for(residents),
         hooks=hooks,
         guard=guard,
+        registry=registry,
     )
 
 
