@@ -47,6 +47,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from steward import events as ev
+from steward import prompt
 from steward.manifest import ResidentManifest
 from steward.store import APPROVAL_DECISIONS, ApprovalRecord, Store
 
@@ -55,6 +56,7 @@ __all__ = [
     "BLOCK_OPEN",
     "DEFAULT_EXPIRES_IN_S",
     "DETAIL_MAX_CHARS",
+    "MAX_EXPIRES_IN_S",
     "UNREADABLE_ACTION",
     "ApprovalError",
     "NeedsHuman",
@@ -78,6 +80,13 @@ BLOCK_CLOSE = "</needs-human>"
 #: long enough to survive one night's sleep and short enough that a forgotten request
 #: resolves itself rather than sitting pending forever.
 DEFAULT_EXPIRES_IN_S = 24 * 60 * 60
+
+#: The furthest out a session may push its own deadline (steward #66). Deny-by-default is
+#: the whole safety property, and a session that names ``expires-in="9999999d"`` is a
+#: session pushing its knock to the year 7502 — deny-by-default made unreachable, and, when
+#: the seconds are added to a datetime, an ``OverflowError`` on the way there. Thirty days
+#: is far longer than any real question should wait and short enough to stay a real date.
+MAX_EXPIRES_IN_S = 30 * 24 * 60 * 60
 
 #: A request is a question, not a transcript: the detail is bounded before it is stored.
 DETAIL_MAX_CHARS = 8000
@@ -122,6 +131,14 @@ def parse_duration(text: str) -> int:
     seconds = int(match.group("count")) * _UNITS[match.group("unit")]
     if seconds <= 0:
         raise ApprovalError(f"expires-in {text!r} is not a positive duration")
+    if seconds > MAX_EXPIRES_IN_S:
+        log.info(
+            "expires-in %r exceeds the fleet maximum of %d s; clamping so deny-by-default "
+            "stays reachable and no date overflows",
+            text,
+            MAX_EXPIRES_IN_S,
+        )
+        return MAX_EXPIRES_IN_S
     return seconds
 
 
@@ -361,10 +378,15 @@ def harvest(
     The one place a session's output becomes an approval, called by both session types —
     the scheduler's routines and the board's claimed tasks — so "how does a resident
     ask?" has a single answer that does not depend on why it woke up.
+
+    Only the session's machine-read region is scanned (:func:`steward.prompt.harvestable`),
+    and quoted or fenced parts of it are stripped first, so a ``<needs-human>`` block a
+    session quoted back from an attacker-supplied job or task detail is not mistaken for the
+    session actually asking (steward #62).
     """
     return [
         raise_request(store, emitter, manifest=manifest, request=request, now=now)
-        for request in extract_requests(output)
+        for request in extract_requests(prompt.harvestable(output))
     ]
 
 
@@ -439,9 +461,12 @@ def deliver_decisions(store: Store, resident_id: str) -> tuple[str | None, list[
     again on every wake-up until some run happens to succeed would have a resident
     re-reading "you may send that email" for a week. Told once, in the session that was
     given it, is the honest reading of "the decision reached the resident".
+
+    The read and the mark are one atomic store transaction
+    (:meth:`steward.store.Store.claim_undelivered_decisions`), so two wake-ups of the same
+    resident at the same instant cannot both walk away believing they were handed the same
+    answer: one gets it, the other opens without it, and it is delivered exactly once
+    (steward #74). Every caller of this function inherits that guarantee, not only the board.
     """
-    records = store.undelivered_decisions(resident_id)
-    if not records:
-        return None, []
-    store.mark_delivered([record.request_id for record in records])
+    records = store.claim_undelivered_decisions(resident_id)
     return decisions_preamble(records), records

@@ -20,7 +20,12 @@ steward resolves the request as `deny` with `decided_by: "expiry"` and emits
 `needs_human_resolved`. A gated action never proceeds because a person went to sleep. The
 sweep runs on every scheduler tick, every board dispatch, and every watchdog pass, which
 is what makes the deadline real rather than decorative — nothing sweeps a queue nobody
-visits.
+visits. A session's chosen `expires-in` is clamped to a fleet maximum of 30 days, so a
+block asking for `expires-in="9999999d"` cannot push its own deadline past the reach of
+deny-by-default (steward #66). Between the deadline and the sweep, the request is already
+past due: it is not listed as pending (`GET /approvals?status=pending` omits it) and it can
+no longer be decided — `POST /approvals/{id}` on it is a `409 approval_expired`, distinct
+from the replay a request someone already answered reads back.
 
 Two request shapes steward raises *for itself* have no `expires_at` at all: a budget pause
 (`budget_unpause`) and a crash loop (`resident_restart_failed`). The grammar cannot
@@ -42,18 +47,32 @@ landing in the same row of the same database.
 
 ### 1. A block in the session's output
 
+Steward acts on a block **only** from a machine-read region at the very end of the
+session's final message, opened by a line reading exactly `===STEWARD-ACTIONS===` and
+closed by a line reading exactly `===END-STEWARD-ACTIONS===`:
+
 ```
+===STEWARD-ACTIONS===
 <needs-human action="send_email" expires-in="4h" options="approve,deny,edit">
 {"to": "anna@example.com", "subject": "Re: Thursday", "body": "…"}
 </needs-human>
+===END-STEWARD-ACTIONS===
 ```
+
+A `<needs-human>` (or `<delegate>`) block **anywhere else** — in the session's prose,
+inside a code fence, quoted, or copied verbatim from an attacker-supplied job or task
+detail the session was handed — is ignored, and fenced and quoted spans of the region
+itself are stripped before it is scanned. This is what stops a job whose detail contains a
+control block from making the claiming session act on it just by quoting it back
+(steward #62). The prompt every session receives teaches the region in its charter, so a
+real session always wraps the blocks it means for steward.
 
 The grammar, exactly:
 
 | part | required | meaning |
 |---|---|---|
 | `action="…"` | **yes** | a slug naming the action: lowercase letters, digits, `_`, `-` |
-| `expires-in="…"` | no | `<number><unit>`, unit one of `s` `m` `h` `d`. Default `24h` |
+| `expires-in="…"` | no | `<number><unit>`, unit one of `s` `m` `h` `d`. Default `24h`, clamped to a fleet maximum of 30 days |
 | `options="…"` | no | comma-separated, any of `approve` `deny` `edit`. Default all three |
 | the body | no | a JSON **object**, or one plain sentence (stored as `{"note": …}`) |
 
@@ -103,11 +122,20 @@ A session that raises an approval **finishes its turn and stops**. Holding a `cl
 turn open waiting for a human is expensive and fragile, and a resident sitting on a
 paused session is not resting.
 
-The decision is delivered on the resident's **next wake-up** — routine or board task —
-injected into its preamble as a `DECISIONS SINCE YOU LAST RAN` section, then marked
-delivered. Told once, in the session it was given to. Re-delivering on every wake-up
-until some run happened to succeed would have a resident re-reading "you may send that
-email" for a week.
+The decision is delivered on the resident's **next wake-up** — a scheduled routine, a
+board task, or a manual `run-now` fired from burrow's viewer, which uses the same wake
+hooks as the scheduler and so delivers decisions and harvests new blocks exactly as a
+scheduled fire does (steward #W1) — injected into its preamble as a
+`DECISIONS SINCE YOU LAST RAN` section, then marked delivered. Delivery is atomic: two
+wake-ups of the same resident at the same instant cannot both be handed the same answer —
+one gets it, the other opens without it, and it is delivered exactly once (steward #74).
+Told once, in the session it was given to. Re-delivering on every wake-up until some run
+happened to succeed would have a resident re-reading "you may send that email" for a week.
+
+A **dry-run** wake-up (`scheduler tick --dry-run`) delivers nothing on purpose: a
+rehearsal that consumed a decision would leave the next *real* session without it, so a
+dry run assembles the prompt without the `DECISIONS SINCE YOU LAST RAN` section and marks
+nothing delivered.
 
 The section is framed as a record, not an order, and it sits *before* the charter, which
 keeps the last word. An `approve` authorises exactly the action it names and nothing

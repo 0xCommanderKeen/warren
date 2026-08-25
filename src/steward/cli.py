@@ -35,6 +35,7 @@ from steward.approvals import (
 from steward.board import BoardReport, Dispatcher, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
+from steward.deploy import TransportError
 from steward.journal import (
     JournalEntry,
     journal_complaint,
@@ -82,6 +83,10 @@ from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 DEFAULT_RESIDENTS_DIR = Path("residents")
 EXIT_OK = 0
 EXIT_INVALID = 1
+
+#: The only hosts on which ``serve --allow-open`` — no token, every endpoint a write path —
+#: is honoured. "Local development only" is only true on a loopback bind (steward #81).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 #: The two options half the commands here share. Declared once, at the top, because a
 #: subcommand that spelled ``--db`` slightly differently from its neighbour would be a
@@ -338,6 +343,26 @@ def doctor(residents: Path, db: Path | None) -> None:
     sys.exit(EXIT_OK if problems == 0 else EXIT_INVALID)
 
 
+def _probe_writable(directory: Path) -> str | None:
+    """Return why this journal location cannot be written to, or ``None`` when it can.
+
+    The README's Register stage promises doctor checks "the journal location is writable",
+    and a report that only *resolved* the path said nothing about whether a midnight
+    close-of-day run could actually write there — a non-existent ``/data`` mount and a
+    deliberately read-only directory both read as fine (steward #89). This makes the check
+    real: it creates the directory if it can and writes and removes a probe file, so an
+    unwritable location is an error at a reasonable hour rather than silence at midnight.
+    """
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".steward-doctor-write-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        return f"not writable: {exc}"
+    return None
+
+
 def _report_journal(resident: Resident) -> int:
     """Print where this resident's journal lives, or why it has none. Returns problems."""
     complaint = journal_complaint(resident.manifest)
@@ -350,7 +375,20 @@ def _report_journal(resident: Resident) -> int:
         None,
     )
     ends_with = f"closed by {closer}" if closer else "no routine closes the day"
-    click.secho(f"{resident.id}: journal {directory} — {ends_with}", fg="green")
+    unwritable = _probe_writable(directory)
+    if unwritable is not None:
+        # A warning, not a failure: a shipped resident's journal is a container path like
+        # /data that is unwritable on the laptop running doctor and perfectly writable in the
+        # container. Doctor still says so out loud — the point of steward #89 — but it does
+        # not fail the whole run over a path that is not this host's to write.
+        click.secho(
+            f"{resident.id}: journal {directory} — {unwritable} (writable on the resident's "
+            f"own host?); {ends_with}",
+            fg="yellow",
+            err=True,
+        )
+        return 0
+    click.secho(f"{resident.id}: journal {directory} — writable, {ends_with}", fg="green")
     return 0
 
 
@@ -578,10 +616,13 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     else:
         try:
             engine.require_ready()
+            # tick() raises too, on a STEWARD_STATE it cannot persist: a fire it could not
+            # record is a fire that would repeat on the next tick, so it must stop the cron
+            # run non-zero rather than fire blind and let cron think all is well.
+            reports = engine.tick()
         except SchedulerError as exc:
             click.secho(str(exc), fg="red", err=True)
             sys.exit(EXIT_INVALID)
-        reports = engine.tick()
     _report_fires(reports, dry_run=dry_run)
 
 
@@ -638,11 +679,17 @@ def board() -> None:
     is_flag=True,
     help="Reopen dead leases and deny stale approvals, but claim nothing and run nothing.",
 )
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print what would be claimed and worked, launching no session and spending nothing.",
+)
 def board_dispatch(
     residents: Path,
     db: Path | None,
     workdir: Path | None,
     sweep_only: bool,  # noqa: FBT001 — click passes flags positionally
+    dry_run: bool,  # noqa: FBT001
 ) -> None:
     """Sweep deadlines, then let board-enabled residents claim and work a task.
 
@@ -652,6 +699,11 @@ def board_dispatch(
     ``--sweep-only`` is not a dry run and does not pretend to be one: it writes, because
     reopening a dead lease and denying a stale approval are exactly the writes that keep
     the board honest. It just stops before claiming anything.
+
+    ``--dry-run`` is the opposite promise: it resolves and prints what *would* be claimed
+    and worked and launches no session at all (steward #88). Shipped residents run on a
+    paid brain, so the first dispatch a new operator runs against them would otherwise spend
+    real money before they had seen what it was about to do; this shows the plan first.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
@@ -661,12 +713,24 @@ def board_dispatch(
             workdir=workdir,
             guard=BudgetGuard(store, ev.EventEmitter.from_env()),
             sweep_only=sweep_only,
+            dry_run=dry_run,
         )
         run = dispatcher.dispatch()
     for job in run.reopened:
         click.secho(f"lease expired: {job.task_id} ({job.title}) is back on the board", fg="yellow")
     for record in run.expired_approvals:
         click.secho(f"approval expired: {record.action} denied by default", fg="yellow")
+    if dry_run:
+        if not run.planned:
+            click.echo("nothing would be claimed")
+            return
+        for plan in run.planned:
+            click.secho(
+                f"would claim {plan.task.task_id} ({plan.task.title}, {plan.source}) "
+                f"→ {plan.resident_id}",
+                fg="cyan",
+            )
+        return
     if not run.reports:
         click.echo("nothing claimed")
         return
@@ -1293,6 +1357,19 @@ def serve(
     the public internet: one shared token is the whole of its auth.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if allow_open and host.strip().lower() not in _LOOPBACK_HOSTS:
+        # --allow-open serves every write path — run-now, delegate, approve, deploy — with
+        # no token at all. On a non-loopback bind that is the whole fleet, unauthenticated,
+        # on every interface reachable there (steward #81). Loopback keeps "local
+        # development only" true; anything else must carry a token.
+        click.secho(
+            f"refusing --allow-open on {host!r}: it serves every write path with no token, "
+            f"so it may only bind loopback (127.0.0.1, ::1, or localhost). Bind one of "
+            f"those, or set STEWARD_TOKEN and drop --allow-open.",
+            fg="red",
+            err=True,
+        )
+        sys.exit(EXIT_INVALID)
     config = ApiConfig.from_env(residents_dir=residents, db_path=db, allow_open=allow_open)
     try:
         app = create_app(config)
@@ -1490,6 +1567,12 @@ def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per o
         for diagnostic in exc.diagnostics:
             click.secho(diagnostic.render(), fg="red", err=True)
         sys.exit(EXIT_INVALID)
+    except TransportError as exc:
+        # The declaration succeeded and the host did not answer: an ssh timeout, no route,
+        # a refused key. That is an operator problem, not a stack trace — say what failed in
+        # one line and exit non-zero rather than spilling a traceback (steward #90).
+        click.secho(f"could not reach the host to provision: {exc}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
         return
@@ -1523,6 +1606,11 @@ def _report_retire(report: RetireReport) -> None:
 @click.option("--dry-run", is_flag=True, help="Print what would happen and touch nothing.")
 @click.option("--allow-dirty", is_flag=True, help="Commit even though the worktree is dirty.")
 @click.option("--no-commit", is_flag=True, help="Mark the manifest but do not commit it.")
+@click.option(
+    "--no-deploy",
+    is_flag=True,
+    help="Mark and commit the manifest but reach no host; for a resident whose host is gone.",
+)
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
 def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
     resident_id: str,
@@ -1531,6 +1619,7 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
     allow_dirty: bool,  # noqa: FBT001
     no_commit: bool,  # noqa: FBT001
+    no_deploy: bool,  # noqa: FBT001
     output_format: str,
 ) -> None:
     """Retire a resident: mark it retired in git, then stop and remove its container.
@@ -1540,6 +1629,11 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     simply stops: no routines, no board claims, no letters, no run-now. It drops out of
     the village the honest way — it stops emitting — and steward forges nothing on its
     behalf on the way out.
+
+    `--no-deploy` marks and commits the manifest but reaches no host — the counterpart to
+    `new-resident`'s `--no-deploy`, for a resident whose host is already gone or was never
+    steward's to stop. The resident stops taking work the moment the mark is committed
+    either way; the container, if any, is simply left as it is.
     """
     try:
         report = retire_resident(
@@ -1547,6 +1641,7 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
             residents_dir=residents,
             repo=repo,
             commit=not no_commit,
+            deploy=not no_deploy,
             allow_dirty=allow_dirty,
             dry_run=dry_run,
         )

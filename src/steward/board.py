@@ -321,6 +321,7 @@ class Dispatcher:
         skills_dir: Path | str | None = None,
         guard: RunGuard | None = None,
         sweep_only: bool = False,
+        dry_run: bool = False,
         max_delegation_depth: int | None = None,
     ) -> Dispatcher:
         """Build a dispatcher over the valid residents of a residents tree.
@@ -344,6 +345,7 @@ class Dispatcher:
             library=resolved,
             guard=guard,
             sweep_only=sweep_only,
+            dry_run=dry_run,
             max_delegation_depth=(
                 max_delegation_depth if max_delegation_depth is not None else dg.max_depth()
             ),

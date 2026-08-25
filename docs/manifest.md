@@ -187,16 +187,18 @@ runner:
 | `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
 
 `command` is an argv list, not a shell string, and accepts only the `{prompt}` and
-`{workdir}` placeholders — manifest content can never become shell. Substitution is a
-single pass, so a prompt containing the literal text `{workdir}` is inserted as data
-and never re-scanned.
+`{workdir}` placeholders — manifest content can never become shell. `{prompt}` is
+**required**: a command that never receives the assembled preamble is a session told
+nothing, so a `command` runner without it fails validation. `{workdir}` is optional.
+Substitution is a single pass, so a prompt containing the literal text `{workdir}` is
+inserted as data and never re-scanned.
 
 A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
 ```console
 $ steward doctor
 life-agent: runner claude (claude-opus-5) — ready
-life-agent: journal /data/residents/life-agent/memory/journal — closed by close-of-day
+life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
   life-agent/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana

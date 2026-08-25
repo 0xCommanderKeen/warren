@@ -203,8 +203,8 @@ stay in git; retirement is a lifecycle state, not a deletion.
 ```console
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run
-$ steward new-resident … --skills research,write-journal   # declare, commit, build, check
-$ steward retire note-keeper                               # stop it, and say so in git
+$ steward new-resident … --skills research     # declare, commit, build, check
+$ steward retire note-keeper                    # stop it, and say so in git
 ```
 
 **The management console** (#13). A browser console for the fleet, served by steward's own
@@ -235,10 +235,31 @@ $ export BURROW_URL=http://dxp2800:8737
 $ export BURROW_TOKEN=…                    # the village's shared ingest secret
 
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
-    --accent '#4f7ea6' --role 'note bot' --charter charter.yaml \
-    --skills research,write-journal --dry-run     # read the plan first
-$ steward new-resident … --skills research,write-journal
+    --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run   # read the plan first
+$ steward new-resident … --skills research     # declare, commit, build, check
 ```
+
+`--charter` points at a YAML file — a charter is prose somebody thought about, and prose
+belongs in a file a diff can review rather than in four shell arguments. It mirrors the
+manifest's `charter` block exactly:
+
+```yaml
+mission: One paragraph of purpose.
+duties:
+  - Standing responsibilities, one per line.
+rules:
+  - Hard constraints, e.g. "Never send email without explicit approval."
+escalation: When and how to raise needs_human instead of acting.
+```
+
+The other flags: `--skills` grants library skills by name (comma-separated); `--runner`
+and `--model` choose the brain (default `claude`); `--project` and `--summary` are the
+optional soul fields; `--repo` names the checkout to commit into; `--dry-run`,
+`--allow-dirty`, and `--no-commit` behave as they do for `retire`; and **`--no-deploy`** is
+the only host-less path — it declares and checks but builds no container, for developing a
+resident before it has a machine. `--skills` is a grant *on top of* the default set every
+resident already gets, so naming a default skill (`write-journal`, `escalate`) is redundant
+rather than additive — grant only what a resident holds beyond the defaults.
 
 The three stages, and what each one really does:
 
@@ -310,6 +331,13 @@ and dutifully put it back. A retired resident fires no routines, claims nothing 
 board, receives no letters, and answers `409 resident_retired` to run-now; it leaves the
 village by going quiet, and steward forges no `session_ended` on its behalf. The soul and
 the manifest stay in git.
+
+`steward retire --no-deploy` marks and commits the manifest but reaches no host — the
+counterpart to `new-resident --no-deploy`, for a resident whose host is already gone or was
+never steward's to stop. It stops taking work the moment the mark is committed either way.
+The other flags mirror the two commands: `--dry-run` touches nothing, `--no-commit` writes
+the mark without committing it, `--allow-dirty` commits over a dirty worktree, and `--repo`
+names the checkout when it is not the parent of the residents tree.
 
 Burrow's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
 ([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
@@ -430,3 +458,22 @@ rule governs the board and the door: a task nobody finished goes back to `open` 
 and a request nobody answered is a `deny`, never a quiet yes. A restart is announced, a
 run that never reported back is buried out loud, and a resident that has spent its day
 stops and says which number stopped it.
+
+## Environment
+
+Steward reads a handful of environment variables. None is required for `steward validate`;
+the scheduler and the API name the ones they need on startup.
+
+| variable | who reads it | meaning |
+|---|---|---|
+| `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
+| `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
+| `STEWARD_EVENTS_FALLBACK` | everything that emits | Where events are appended when burrow is unreachable, so nothing a session did is lost. Defaults to `~/.burrow/events.jsonl`. |
+| `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
+| `STEWARD_UI` | API | Directory of the management console's static files. Unset looks for `ui/` beside the package and then in the checkout. |
+| `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
+| `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
+| `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
+
+Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
+`--allow-open`, `--residents` — and the flag wins over the variable.

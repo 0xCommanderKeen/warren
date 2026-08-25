@@ -497,6 +497,88 @@ def test_an_unknown_decision_is_refused(api: ApiFactory) -> None:
     assert harness.store.pending_approvals()[0].request_id == request_id
 
 
+def _expired_pending(harness: Harness) -> str:
+    """Seed a request whose deadline has already passed but the sweep has not run."""
+    past = ev.utc_now_iso(dt.datetime.now(dt.UTC) - dt.timedelta(hours=1))
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wanted to send an email, a while ago",
+        resident="test-agent",
+        expires_at=past,
+    )
+    return record.request_id
+
+
+def test_an_expired_request_is_not_listed_as_pending(api: ApiFactory) -> None:
+    """A deadline that has passed denies by default; pending must not offer it to a human (#66)."""
+    harness = api()
+    request_id = _expired_pending(harness)
+
+    assert harness.client.get("/approvals").json()["approvals"] == []
+    assert harness.client.get("/approvals?status=pending").json()["approvals"] == []
+    # It is still in the ledger — the audit view sees everything, decided or not.
+    listed_all = harness.client.get("/approvals?status=all").json()["approvals"]
+    assert [record["request_id"] for record in listed_all] == [request_id]
+
+
+def test_an_expired_request_cannot_be_decided(api: ApiFactory) -> None:
+    """A click past the deadline must not slip an action through ahead of the sweep (#66)."""
+    harness = api()
+    request_id = _expired_pending(harness)
+
+    response = harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "approval_expired"
+    # Nothing was recorded and nothing emitted: it is still pending, for the sweep to deny.
+    record = harness.store.approval(request_id)
+    assert record is not None
+    assert record.pending
+    assert harness.events("needs_human_resolved") == []
+
+
+def test_run_now_harvests_an_approval_block(api: ApiFactory) -> None:
+    """A manual fire is a fire: its <needs-human> region is harvested, not dropped (#W1)."""
+    block = (
+        "drafted it\n===STEWARD-ACTIONS===\n"
+        '<needs-human action="send_email">\n{"to": "a@example.com"}\n</needs-human>\n'
+        "===END-STEWARD-ACTIONS==="
+    )
+    harness = api(behavior=lambda _request: RunResult(outcome=Outcome.OK, output=block))
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    harness.settle()
+
+    assert [record.action for record in harness.store.pending_approvals()] == ["send_email"]
+    assert len(harness.events("needs_human")) == 1
+
+
+def test_run_now_delivers_a_pending_decision(api: ApiFactory) -> None:
+    """A decision answered while the resident slept reaches it on a manual wake-up too (#W1)."""
+    prompts: list[str] = []
+
+    def record_prompt(request: RunRequest) -> RunResult:
+        prompts.append(request.prompt)
+        return RunResult(outcome=Outcome.OK, output="did the thing")
+
+    harness = api(behavior=record_prompt)
+    request = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+        resident="test-agent",
+    )
+    harness.store.decide(request.request_id, "approve", decided_by="api")
+
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    harness.settle()
+
+    # Delivered exactly once, into the session's own preamble, and marked told.
+    assert harness.store.undelivered_decisions("test-agent") == []
+    assert any("send_email: approve" in prompt for prompt in prompts)
+
+
 def test_the_approval_list_defaults_to_pending_and_filters_on_request(api: ApiFactory) -> None:
     harness = api()
     decided = _pending(harness)
@@ -1362,4 +1444,7 @@ def test_a_retired_resident_takes_no_letters(api: ApiFactory) -> None:
     )
 
     assert response.status_code == 404
+    # A retired recipient is still a 404 from the sender's side, but it now carries its own
+    # reason code so a panel can tell a resident that left the village from a typo (#W21).
+    assert response.json()["detail"]["error"] == "retired_recipient"
     assert "is retired" in response.json()["detail"]["message"]

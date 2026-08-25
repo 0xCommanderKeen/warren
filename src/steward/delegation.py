@@ -59,10 +59,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from steward import approvals
+from steward import approvals, prompt
 from steward import events as ev
 from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match, retired_complaint
-from steward.store import JobRecord, Store
+from steward.store import STATUS_CLAIMED, JobRecord, Store
 
 __all__ = [
     "BLOCK_CLOSE",
@@ -115,6 +115,8 @@ HUMAN_SENDER = "api"
 #: Why a handoff was refused. Every rejection carries exactly one of these, so a session,
 #: a panel, or a test can key on the reason rather than parse the sentence.
 UNKNOWN_RECIPIENT = "unknown_recipient"
+RETIRED_RECIPIENT = "retired_recipient"
+RETIRED_SENDER = "retired_sender"
 SELF_DELEGATION = "self_delegation"
 NOT_PERMITTED = "not_permitted"
 RECIPIENT_NOT_ALLOWED = "recipient_not_allowed"
@@ -403,10 +405,11 @@ class Delegator:
             )
         complaint = retired_complaint(receiver)
         if complaint is not None:
-            # Reported as "no recipient", because from a sender's point of view that is
-            # exactly what a retired resident is: there is nobody at that address any
-            # more. The message says which, so nobody has to guess at a typo.
-            raise DelegationError(UNKNOWN_RECIPIENT, complaint)
+            # A retired resident gets its own reason code, not "unknown_recipient" (steward
+            # #W21): a panel keying on the code must be able to tell a typo from a resident
+            # that has left the village. The message still says which, so a human need not
+            # guess, but the code no longer conflates "no such address" with "gone quiet".
+            raise DelegationError(RETIRED_RECIPIENT, complaint)
         if receiver.id == sender_id:
             raise DelegationError(
                 SELF_DELEGATION,
@@ -414,6 +417,66 @@ class Delegator:
                 f"to be two, and the work is already yours",
             )
         return receiver
+
+    def _check_sender_active(self, sender: Resident | None) -> None:
+        """Refuse a handoff from a retired resident (steward #67).
+
+        Retirement was only ever checked on the *receiver*, so a resident marked retired
+        could still hand work out — it stops firing and stops claiming, but a stray block in
+        a last session's output, or a local ``steward delegate`` run against it, still
+        delivered. A resident that has left the village delegates nothing on its way out.
+        """
+        if sender is None:
+            return
+        complaint = retired_complaint(sender)
+        if complaint is not None:
+            raise DelegationError(
+                RETIRED_SENDER,
+                f"{sender.id!r} is retired and may not delegate: {complaint}",
+            )
+
+    def _claimed_by(self, sender: Resident) -> list[JobRecord]:
+        """Return the tasks this sender is working on right now — its in-flight lineage.
+
+        A board notice records the ``claimant`` by agent id; a delegated letter records the
+        resident it was addressed to as ``assignee``. Either is work this resident is
+        currently holding, and therefore the true parent of anything it delegates.
+        """
+        return [
+            job
+            for job in self.store.jobs(STATUS_CLAIMED)
+            if job.claimant == sender.agent_id or job.assignee == sender.id
+        ]
+
+    def _resolve_parent(
+        self, sender: Resident | None, parent_task_id: str | None
+    ) -> JobRecord | None:
+        """Decide the real parent of this handoff, without trusting a supplied id (steward #67).
+
+        Depth and cycle used to derive from a caller-supplied ``parent_task_id`` alone, so a
+        session could escape both by simply omitting it — ``A → B → A`` was accepted and the
+        depth cap was unreachable. The truth is the task the *sender* is working on: it is
+        looked up here, and a supplied id is honoured only when it is that task (a harvest
+        names it) or the sender is holding no task to contradict it — a human on the API, who
+        may name the chain they are delegating on behalf of, or a routine that legitimately
+        continues one. A sender that names a parent it is not actually working delegates from
+        the chain it *is* in, so omitting or forging the parent escapes nothing.
+        """
+        claimed = self._claimed_by(sender) if sender is not None else []
+        if parent_task_id:
+            supplied = self.store.job(parent_task_id)
+            if supplied is None:
+                # Dropping the parent would keep the letter and lose the chain: the item
+                # would look like a resident's own idea, and the spend attribute to nobody.
+                raise DelegationError(
+                    UNKNOWN_PARENT,
+                    f"no task {parent_task_id!r} to descend from; a handoff that names a "
+                    f"parent steward has never seen would be delivered with its lineage "
+                    f"silently lost",
+                )
+            if not claimed or any(job.task_id == supplied.task_id for job in claimed):
+                return supplied
+        return max(claimed, key=lambda job: job.depth) if claimed else None
 
     def _check_permission(self, sender: Resident | None, receiver: Resident) -> None:
         """Check the sending half: the sender's own manifest has to permit this."""
@@ -481,12 +544,33 @@ class Delegator:
         for record in chain:
             visited.update(part for part in (record.delegated_by, record.assignee) if part)
         if receiver_id in visited:
-            path = " → ".join([*(r.assignee or r.delegated_by or "?" for r in chain), sender_id])
             raise DelegationError(
                 CYCLE,
-                f"{receiver_id!r} is already in this task's lineage ({path}); a chain that "
-                f"revisits a resident is a loop, and steward will not start one",
+                f"{receiver_id!r} is already in this task's lineage "
+                f"({self._chain_path(chain, sender_id, receiver_id)}); a chain that revisits "
+                f"a resident is a loop, and steward will not start one",
             )
+
+    @staticmethod
+    def _chain_path(chain: Sequence[JobRecord], sender_id: str, receiver_id: str) -> str:
+        """Render the whole chain a cycle would close, root sender first, no duplicate hop.
+
+        The lineage records name each hop's ``delegated_by`` and ``assignee``; walking them
+        gives the root sender once, then every resident the work passed through, then the
+        resident about to be handed it again (steward #W5). Appending ``sender_id`` only when
+        it is not already the last hop is what stops the receiver-of-the-last-hop being
+        printed twice.
+        """
+        parts: list[str] = []
+        for record in chain:
+            if not parts and record.delegated_by:
+                parts.append(record.delegated_by)
+            if record.assignee:
+                parts.append(record.assignee)
+        if not parts or parts[-1] != sender_id:
+            parts.append(sender_id)
+        parts.append(receiver_id)
+        return " → ".join(parts)
 
     # -- the write ---------------------------------------------------------------------
 
@@ -506,20 +590,13 @@ class Delegator:
         if not handoff.ok:
             raise DelegationError(UNREADABLE_BLOCK, handoff.problem or "unreadable handoff")
         sender_id = sender.id if sender is not None else HUMAN_SENDER
+        self._check_sender_active(sender)
 
         receiver = self._find_receiver(handoff, sender_id)
         self._check_permission(sender, receiver)
         self._check_route(receiver, handoff.route)
 
-        parent = self.store.job(parent_task_id) if parent_task_id else None
-        if parent_task_id and parent is None:
-            # Dropping the parent would keep the letter and lose the chain: the item would
-            # look like a resident's own idea, and the spend would attribute to nobody.
-            raise DelegationError(
-                UNKNOWN_PARENT,
-                f"no task {parent_task_id!r} to descend from; a handoff that names a parent "
-                f"steward has never seen would be delivered with its lineage silently lost",
-            )
+        parent = self._resolve_parent(sender, parent_task_id)
         chain = self.store.lineage(parent.task_id) if parent is not None else []
         depth = (parent.depth if parent is not None else 0) + 1
         self._check_depth(depth)
@@ -574,9 +651,14 @@ class Delegator:
         resident hand work over?" has one answer that does not depend on why it woke up.
         A refusal knocks rather than disappearing, because the session that asked has
         already finished and there is nobody left to tell.
+
+        Only the session's machine-read region is scanned (:func:`steward.prompt.harvestable`),
+        with quoted and fenced parts stripped first, so a ``<delegate>`` block a session
+        quoted back from an attacker-supplied job or task detail it was handed is not
+        mistaken for the session actually delegating (steward #62).
         """
         delivered: list[Delivery] = []
-        for handoff in extract_handoffs(output):
+        for handoff in extract_handoffs(prompt.harvestable(output)):
             try:
                 task = self.delegate(sender=sender, handoff=handoff, parent_task_id=parent_task_id)
             except DelegationError as exc:

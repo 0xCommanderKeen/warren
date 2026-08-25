@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from steward import delegation as dg
 from steward import events as ev
+from steward.board import Dispatcher
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
 from steward.journal import journal_complaint, read_entries
@@ -301,9 +302,15 @@ class HandoffPost(_Body):
 
 
 #: What a refusal costs over HTTP. A recipient steward has never heard of is a 404 like
-#: any other unknown resident; everything else is a conflict between the request and what
-#: the two manifests actually declare, which is a 409 and not a malformed request.
-DELEGATION_STATUS: Mapping[str, int] = {dg.UNKNOWN_RECIPIENT: 404, dg.UNKNOWN_PARENT: 404}
+#: any other unknown resident, and a retired one is a 404 too — from the sender's side there
+#: is nobody at that address any more, even though the reason code now says which (steward
+#: #W21). Everything else is a conflict between the request and what the two manifests
+#: actually declare, which is a 409 and not a malformed request.
+DELEGATION_STATUS: Mapping[str, int] = {
+    dg.UNKNOWN_RECIPIENT: 404,
+    dg.RETIRED_RECIPIENT: 404,
+    dg.UNKNOWN_PARENT: 404,
+}
 DELEGATION_REFUSED_STATUS = 409
 
 
@@ -556,6 +563,20 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # One guard for the whole app: the run-now path refuses through it before it accepts
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
+    # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
+    # respect (steward #W1): a run-now session's <needs-human>/<delegate> blocks are
+    # harvested and its pending decisions are delivered into its preamble, exactly as they
+    # are on a scheduled fire. Without these a run-now silently dropped both while still
+    # reporting "ran" — and this is burrow's primary write path.
+    hooks = Dispatcher.from_path(
+        residents_dir,
+        db,
+        emitter=sink,
+        workdir=settings.workdir,
+        runner_factory=runner_factory,
+        library=library,
+        guard=guard,
+    )
     runs = ManualRuns(
         scheduler=Scheduler(
             [],
@@ -565,6 +586,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             runner_factory=runner_factory,
             library=library,
             guard=guard,
+            hooks=hooks,
         ),
         store=db,
     )
@@ -1000,6 +1022,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         The default stays ``pending`` so a panel that has always called this keeps seeing
         exactly what it saw before. ``all`` is the audit view: request and decision in one
         row, which is how "what did I approve, and when" gets answered.
+
+        A request past its ``expires_at`` but not yet swept is **not** pending here (steward
+        #66): it denies by default, and a panel that listed it as still answerable would let
+        a human click *approve* on something the deny-by-default sweep is about to close. It
+        reappears under ``resolved`` once :func:`steward.approvals.expire` records the deny.
         """
         wanted = status or APPROVAL_STATUS_PENDING
         if wanted not in APPROVAL_STATUSES:
@@ -1010,6 +1037,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"{', '.join(APPROVAL_STATUSES)}",
             )
         records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
+        if wanted == APPROVAL_STATUS_PENDING:
+            now = ev.utc_now_iso()
+            records = [r for r in records if r.expires_at is None or r.expires_at > now]
         return {"status": wanted, "approvals": [record.to_dict() for record in records]}
 
     @app.get("/approvals/{request_id}")
@@ -1030,6 +1060,18 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         )
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
+        if not recorded and record.pending:
+            # Not a replay: the request was still pending, so decide() refused it because it
+            # had already expired (steward #66). Deny-by-default has the last word — a click
+            # a minute past the deadline must not slip an action through ahead of the sweep,
+            # which denies it and closes the loop in the log. Distinct from an already-decided
+            # request, which comes back resolved and reads as a replay below.
+            _refuse(
+                409,
+                "approval_expired",
+                f"approval request {request_id!r} expired at {record.expires_at} and denies "
+                f"by default; it can no longer be decided",
+            )
         if not recorded:
             # The first decision won. A double-tapped notification changes nothing and
             # emits nothing — it is told what was recorded.

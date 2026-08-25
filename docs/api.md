@@ -90,11 +90,14 @@ $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
 {"request_id": "…", "status": "accepted", "trigger": "manual", …}
 ```
 
-`202` with a `request_id`. The run goes through the scheduler's own fire path, so it
-gets the same prompt assembly, the same timeout, the same runner seam, and the same
-bracketing events as a scheduled fire — with `routine_started.payload.trigger` set to
-`manual` instead of `schedule`, so the ledger can tell prompted work from standing
-work.
+`202` with a `request_id`. The run goes through the scheduler's own fire path **with the
+same wake hooks the scheduler daemon runs with**, so it gets the same prompt assembly, the
+same timeout, the same runner seam, and the same bracketing events as a scheduled fire —
+with `routine_started.payload.trigger` set to `manual` instead of `schedule`, so the ledger
+can tell prompted work from standing work. Because the hooks are the same, a run-now session
+delivers the resident's pending approval decisions into its preamble and harvests any
+`<needs-human>`/`<delegate>` blocks it emits, exactly as a scheduled fire does — a manual
+fire is a fire, not a lesser one (steward #W1).
 
 | status | error | meaning |
 |---|---|---|
@@ -197,7 +200,11 @@ must make, the block grammar, and the guardrails are in
 
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
-before the parameter existed, so a panel that never passed it sees exactly what it saw.
+before the parameter existed, so a panel that never passed it sees exactly what it saw. A
+request past its `expires_at` but not yet swept is **not** returned under `pending`
+(steward #66): it denies by default, so listing it as still answerable would let a human
+click *approve* on something the sweep is about to close. It reappears under `resolved`
+once the deny is recorded.
 
 `GET /approvals/{request_id}` is the audit query: request, full detail, decision,
 decider, and every timestamp, in one call. `404` for an id steward has never seen.
@@ -214,7 +221,10 @@ villager burrow has to walk away from your door is the one who knocked.
 
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
-changes nothing, and emits nothing. An unknown `request_id` is `404`.
+changes nothing, and emits nothing. An unknown `request_id` is `404`. A request that has
+already **expired** is a `409` with `approval_expired` — distinct from the replay of an
+already-decided one, because it was never decided: deny-by-default has the last word and the
+sweep records the deny (steward #66).
 
 Requests are *created* by the session that reaches a gated action — through a
 `<needs-human>` block in its output or `steward approval raise`, both documented in
@@ -378,6 +388,24 @@ resets because the daemon bounced is not a cap. `"limit": null` means no cap is 
 and `unreported_runs` counts the runs whose brain reported no usage at all (a `codex` or
 `command` session has none to give); steward writes those as zero and says how many they
 were rather than inventing a number.
+
+### `GET /residents/{id}/journal`
+
+The resident's own journal, **newest first** — the entries it wrote at the close of its
+own days, never anything steward synthesised. `?limit=` bounds how many (default 14,
+clamped to 100). The console reads this to show a resident's recent history.
+
+```console
+$ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
+    http://127.0.0.1:8801/residents/life-agent/journal?limit=3
+{"resident": "life-agent", "entries": [{"date": "2026-08-24", "routine": "close-of-day",
+                                        "text": "Two drafts still waiting."}]}
+```
+
+`404` for an unknown resident, and `409 journal_unreadable` when the manifest's `memory`
+cannot hold a journal (a `file` memory has nowhere to keep one entry per day). An empty
+journal is an empty list, not an error — a resident that has never written one has still
+answered the question.
 
 An exhausted budget **pauses** the resident. While it is paused:
 

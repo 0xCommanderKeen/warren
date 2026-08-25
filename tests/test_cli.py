@@ -11,7 +11,7 @@ from click.testing import CliRunner
 from conftest import REPO_ROOT, ResidentWriter, ScratchRepo, StubWriter, valid_manifest
 from steward.budgets import BudgetGuard
 from steward.cli import main
-from steward.deploy import LocalTransport
+from steward.deploy import LocalTransport, TransportError
 from steward.journal import write_entry
 from steward.manifest import load_manifest
 from steward.store import Store
@@ -165,6 +165,22 @@ def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
     assert "no routine closes the day" in result.output
 
 
+def test_doctor_warns_when_the_journal_location_is_not_writable(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """Doctor probes writability and says so — a warning, not a failure (#89)."""
+    stub_bin("claude", "exit 0")
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the journal's parent should be", encoding="utf-8")
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(blocker / "memory"), "journal": "journal"}
+    path = write_resident(data)
+
+    result = runner.invoke(main, ["doctor", str(path.parent)])
+    assert result.exit_code == 0, result.output  # a container path unwritable here is a warning
+    assert "not writable" in result.output
+
+
 def test_doctor_complains_about_a_memory_that_cannot_hold_a_journal(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:
@@ -309,6 +325,24 @@ def test_scheduler_tick_fires_and_reports(
     assert second.exit_code == 0, second.output
 
 
+def test_scheduler_tick_exits_non_zero_on_an_unpersistable_state(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduler that cannot persist its anchor must stop the cron run, not fire blind."""
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
+    path = write_resident(mock_resident())
+    state_dir = tmp_path / "state-is-a-directory"
+    state_dir.mkdir()
+    args = ["--residents", str(path.parent), "--state", str(state_dir), "--workdir", str(tmp_path)]
+
+    result = runner.invoke(main, ["scheduler", "tick", *args])
+    assert result.exit_code == 1
+    assert "STEWARD_STATE names a directory" in result.output
+
+
 def test_scheduler_dry_run_prints_the_prompt_and_emits_nothing(
     runner: CliRunner,
     write_resident: ResidentWriter,
@@ -438,6 +472,34 @@ def test_serve_says_out_loud_when_it_has_no_token(
     assert "cors: none" in result.output
 
 
+def test_allow_open_is_refused_on_a_non_loopback_bind(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--allow-open serves every write path with no token; a public bind is refused (#81)."""
+    monkeypatch.delenv("STEWARD_TOKEN", raising=False)
+    served: dict[str, object] = {}
+    monkeypatch.setattr("steward.cli.run_server", lambda *_a, **_k: served.setdefault("ran", True))
+    result = runner.invoke(
+        main,
+        ["serve", "--allow-open", "--host", "0.0.0.0", "--residents", str(tmp_path)],  # noqa: S104
+    )
+    assert result.exit_code == 1
+    assert "loopback" in result.output
+    assert "ran" not in served, "the server was never started"
+
+
+def test_allow_open_is_permitted_on_loopback(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("STEWARD_TOKEN", raising=False)
+    monkeypatch.setattr("steward.cli.run_server", lambda *_a, **_k: None)
+    for host in ("127.0.0.1", "::1", "localhost"):
+        result = runner.invoke(
+            main, ["serve", "--allow-open", "--host", host, "--residents", str(tmp_path)]
+        )
+        assert result.exit_code == 0, result.output
+
+
 # --------------------------------------------------------------------------------------
 # skills
 # --------------------------------------------------------------------------------------
@@ -558,6 +620,27 @@ def test_board_dispatch_claims_and_works_a_task(
     assert "done test-agent" in result.output
     with Store(db) as after:
         assert [job.status for job in after.jobs()] == ["done"]
+
+
+def test_board_dispatch_dry_run_plans_without_spending(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The first dispatch against shipped residents must be seeable before it spends (#88)."""
+    residents_dir = write_resident(board_manifest()).parent.parent
+    db = tmp_path / "board.db"
+    with Store(db) as store:
+        store.post_job(title="Research X")
+
+    result = runner.invoke(
+        main,
+        ["board", "dispatch", "--residents", str(residents_dir), "--db", str(db), "--dry-run"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "would claim" in result.output
+    assert "test-agent" in result.output
+    # Nothing was claimed and no session ran: the task is still open.
+    with Store(db) as after:
+        assert [job.status for job in after.jobs()] == ["open"]
 
 
 def test_board_dispatch_with_an_empty_board_says_so(
@@ -1766,6 +1849,69 @@ def test_retire_stops_the_container_and_commits_the_decision(
     assert "no event was emitted on its behalf" in result.output
     assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
     assert nas.calls[-1][-2:] == ("down", "--remove-orphans")
+
+
+def test_retire_no_deploy_marks_and_commits_but_reaches_no_host(
+    runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
+) -> None:
+    """--no-deploy is the host-less path: the resident stops, but no ssh is run (#90)."""
+    runner.invoke(main, new_resident_argv(scratch_repo, charter_file))
+    nas.calls.clear()
+
+    result = runner.invoke(
+        main,
+        [
+            "retire",
+            "note-keeper",
+            "--residents",
+            str(scratch_repo.residents),
+            "--repo",
+            str(scratch_repo.root),
+            "--no-deploy",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "note-keeper is retired" in result.output
+    assert nas.calls == [], "no host was reached"
+    assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
+
+
+def test_new_resident_reports_a_transport_failure_cleanly(
+    runner: CliRunner, tmp_path: Path, charter_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host that will not answer is an operator problem, not a traceback (#90)."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise TransportError("no route to dxp2800")
+
+    monkeypatch.setattr("steward.cli.raise_resident", boom)
+    residents_dir = tmp_path / "residents"
+    residents_dir.mkdir()
+
+    result = runner.invoke(
+        main,
+        [
+            "new-resident",
+            "--id",
+            "note-keeper",
+            "--name",
+            "Quill",
+            "--char",
+            "Scribe",
+            "--accent",
+            "#4f7ea6",
+            "--role",
+            "note bot",
+            "--charter",
+            str(charter_file),
+            "--residents",
+            str(residents_dir),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "could not reach the host" in result.output
+    assert "Traceback" not in result.output
 
 
 def test_retire_dry_run_changes_nothing(
