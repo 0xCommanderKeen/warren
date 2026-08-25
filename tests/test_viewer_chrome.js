@@ -24,6 +24,16 @@ assert.match(transport, /aria-live="polite"/,
 
 assert.match(html, /id="fleet-open"[^>]*aria-haspopup="dialog"/,
   "the fleet ledger has an explicit keyboard-operable entry point");
+for (const focusable of ["a[href]", "area[href]", "textarea", "select", "button", "input",
+  "iframe", "object", "embed", "audio[controls]", "video[controls]", "[contenteditable]", "[tabindex]"]) {
+  assert.ok(html.includes(focusable), `dialog focus trap includes ${focusable}`);
+}
+assert.match(html, /closest\('\[hidden\], \[inert\]'\)/,
+  "dialog focus trap rejects hidden and inert descendants");
+assert.match(html, /matches\(":disabled"\)/,
+  "dialog focus trap rejects disabled controls including disabled fieldsets");
+assert.match(html, /element\.tabIndex < 0/,
+  "dialog focus trap rejects every negative explicit tabindex");
 assert.match(html, /role="tablist"/, "fleet sections expose tab semantics");
 assert.match(html, /@media \(max-width: 680px\)/,
   "the ledger has an explicit narrow viewport layout");

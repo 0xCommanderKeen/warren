@@ -2,11 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>burrow</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
 <style>
   :root {
     --ink:     #e8dfc8;
@@ -14,15 +11,21 @@
     --alert:   #ff8f5e;
     --busy:    #ffc86b;
     --panel:   #100d18;
+    --focus:   #fff2a8;
     font-size: 16px;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
-    font-family: "VT323", "Courier New", monospace;
+    font-family: "Courier New", monospace;
     background: #142317;
     color: var(--ink);
     overflow: hidden;
+  }
+  button, input, select { touch-action: manipulation; }
+  :where(button, input, select):focus-visible {
+    outline: 3px solid var(--focus); outline-offset: 3px;
+    box-shadow: 0 0 0 2px #271b12;
   }
   #game { position: absolute; inset: 0; }
   #game canvas { image-rendering: pixelated; }
@@ -36,6 +39,7 @@
     border: 1px solid rgba(232, 223, 200, .22); border-radius: 4px;
     padding: 1px 7px 2px; font-size: 15px; line-height: 1.05;
     text-align: center; white-space: nowrap;
+    font-family: inherit;
   }
   .chip .dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; }
   .chip .sub { display: block; font-size: 12px; color: var(--ink-dim); }
@@ -85,17 +89,20 @@
   #panel {
     position: absolute; top: 0; right: 0; bottom: 0; width: 380px; z-index: 30;
     background: var(--panel); border-left: 4px solid #2a2438;
-    padding: 26px 22px; overflow-y: auto;
+    padding: 26px 22px; overflow-y: auto; overscroll-behavior: contain;
     transform: translateX(100%); transition: transform .18s steps(4);
   }
   #panel.open { transform: translateX(0); }
+  #panel[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   #panel.ledger { width: min(760px, 58vw); background: #17130f; border-color: #6f5533; }
   #panel.ledger[data-narrow="true"] { width: 100vw; }
   #panel .close {
     position: absolute; top: 14px; right: 16px; font-size: 26px; color: var(--ink-dim);
     cursor: pointer; background: none; border: none; font-family: inherit;
   }
-  #panel .close:hover { color: var(--ink); }
+  #panel .close:hover, #panel .close:focus-visible { color: var(--ink); }
   #panel h2 { font-size: 30px; font-weight: 400; }
   #panel .meta { font-size: 17px; color: var(--ink-dim); margin-bottom: 4px; word-break: break-all; }
   #panel .state-line { font-size: 20px; margin: 10px 0 16px; }
@@ -161,15 +168,32 @@
   .lodge-group { border-left: 5px solid #7b6f57; padding-left: 10px; }
 
   @media (max-width: 680px) {
-    header { top: 10px; left: 12px; }
+    header { top: max(10px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left));
+      right: max(12px, env(safe-area-inset-right)); }
     header h1 { font-size: 34px; }
     footer { display: none; }
-    #panel, #panel.ledger { left: 0; right: auto; width: 100vw; border-left: 0; padding: 20px 14px; }
+    #panel, #panel.ledger { left: 0; right: auto; width: 100vw; border-left: 0;
+      padding: max(20px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+        max(20px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
+    #panel .close { top: max(10px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
+      min-width: 44px; min-height: 44px; }
+    #panel h2 { padding-right: 42px; line-height: 1; }
+    #fleet-open, .ledger-tabs button, .entry-link, .cap-row, .census-action { min-height: 44px; }
+    .ledger-filters input, .ledger-filters select { min-height: 44px; font-size: 18px; }
     .ledger-filters { grid-template-columns: 1fr 1fr; }
     .ledger-filters input { grid-column: 1 / -1; }
     .ledger-entry { grid-template-columns: 72px 1fr; }
     .ledger-entry > :last-child { grid-column: 2; }
     .ledger-tabs { overflow-x: auto; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #panel { transition: none; }
+    *, *::before, *::after { scroll-behavior: auto !important; }
+  }
+  @media (prefers-contrast: more) {
+    :root { --ink: #fff8df; --ink-dim: #d7cfbb; --alert: #ffad86; --busy: #ffdc91; }
+    .chip, #fleet-open, #panel, .resident-card { border-color: currentColor; }
   }
 
   footer {
@@ -205,8 +229,9 @@
   <div class="sub">events will appear from ~/.burrow/events.jsonl</div>
 </div>
 
-<aside id="panel" role="dialog" aria-modal="false" aria-label="Villager details">
+<aside id="panel" role="dialog" aria-modal="true" aria-labelledby="panel-title" hidden>
   <button class="close" title="close" aria-label="Close panel">✕</button>
+  <div id="panel-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   <div id="panel-body"></div>
 </aside>
 
@@ -276,6 +301,8 @@ const PLACES = {
 };
 
 const T = 16, MAPW = 32, MAPH = 27, ZOOM = 3;
+const REDUCED_MOTION = typeof window !== "undefined" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const FLOOR_COLS = 22;
 const GRASS = 11 * FLOOR_COLS + 3, GRASS2 = 11 * FLOOR_COLS + 2;
 // dirt autotile block: cols 0-2 × rows 7-9 of the floor tileset (edges + center)
@@ -686,13 +713,18 @@ class Village extends Phaser.Scene {
   }
 
   makeChip(id, accent, wx, wy, name, sub) {
-    const el = document.createElement("div");
+    const el = document.createElement(id ? "button" : "div");
     el.className = "chip";
+    if (id) {
+      el.type = "button";
+      el.dataset.panelTarget = id;
+      el.setAttribute("aria-label", `${name}${sub ? `, ${sub}` : ""}. Open details`);
+    }
     el.innerHTML = `<span class="dot" style="background:${accent}"></span><span class="nm"></span><span class="sub"></span>`;
     el.querySelector(".nm").textContent = name;
     el.querySelector(".sub").textContent = sub || "";
     if (!sub) el.querySelector(".sub").style.display = "none";
-    if (id) el.addEventListener("click", () => openPanel(id));
+    if (id) el.addEventListener("click", () => openPanel(id, el));
     document.getElementById("labels").appendChild(el);
     const chip = { el, wx, wy };
     this.chips.push(chip);
@@ -883,6 +915,13 @@ class Village extends Phaser.Scene {
       console.error("burrow invariant: no walkable path to", tx, ty);
       return false;
     }
+    if (REDUCED_MOTION) {
+      if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+      c.setPosition(tx, ty);
+      viz.spr.stop().setTexture(char + "-idle", D_DOWN);
+      BurrowPresence.finishJourney(viz, Boolean(arrivesHome));
+      return true;
+    }
     if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
     BurrowPresence.startJourney(viz, Boolean(arrivesHome));
     const legs = [];
@@ -911,6 +950,7 @@ class Village extends Phaser.Scene {
   }
 
   hop(viz) {   // one real event just arrived → one small hop; never loops
+    if (REDUCED_MOTION) return;
     this.tweens.add({ targets: viz.spr, y: -3, duration: 110, yoyo: true });
   }
 
@@ -1004,6 +1044,7 @@ class Village extends Phaser.Scene {
         v.residency === "visitor" ? v.project + " · visitor" : v.project;
       sub.textContent = subText;
       sub.style.display = "";
+      viz.chip.el.setAttribute("aria-label", `${v.name}, ${subText}. Open details`);
 
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
@@ -1117,7 +1158,7 @@ function selectOptions(values, selected, label) {
     `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(value)}</option>`).join("");
 }
 function entryLink(detailId, label) {
-  return `<button class="entry-link" data-agent="${esc(detailId)}">${esc(label)}</button>`;
+  return `<button type="button" class="entry-link" data-agent="${esc(detailId)}" data-fleet-focus="agent:${esc(detailId)}">${esc(label)}</button>`;
 }
 function residentDetailId(resident) { return `@resident/${resident.file}`; }
 function statusMark(status) {
@@ -1203,15 +1244,59 @@ function replaceFleet(now) {
   panelEl.classList.add("ledger");
   panelEl.setAttribute("aria-label", "Fleet operations ledger");
   const body = fleetTab === "activity" ? renderActivity(now) : fleetTab === "attention" ? renderAttention(now) : renderDirectory();
-  panelBody.innerHTML = `<div class="ledger-kicker">the steward's field ledger</div><h2>Fleet operations</h2>
+  panelBody.innerHTML = `<div class="ledger-kicker">the steward's field ledger</div><h2 id="panel-title" tabindex="-1">Fleet operations</h2>
     <div class="ledger-truth">Configured means a complete, safe public declaration exists. Missing means none is declared. Invalid comes only from public diagnostics or an incomplete public record. Externally unavailable means the resident feed is unavailable. A status reference is only an opaque locator; Burrow never interprets it as live health or tests secret-backed access.</div>
     <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
-    <section aria-live="polite">${body}</section>`;
-  panelEl.classList.add("open");
+    <section>${body}</section>`;
+  const counts = fleetTab === "activity" ? BurrowFleet.filterRecent(fleetView.state, fleetFilters).length :
+    fleetTab === "attention" ? BurrowFleet.outstandingNeeds(fleetView.state).length :
+    fleetView.residents.length + (fleetView.diagnosticResidents || []).length;
+  const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
+  const live = document.getElementById("panel-status");
+  if (live.textContent !== status) live.textContent = status;
 }
 function renderFleet(now) { return fleetController.preserveFocus(() => replaceFleet(now)); }
 
-function openPanel(id) { selectedId = id; renderPanel(Date.now()); }
+const pageRegions = ["game", "labels", "empty", "preview"].map(id => document.getElementById(id))
+  .concat([document.querySelector("header"), document.querySelector("footer")]);
+let returnFocus = null;
+let returnFleet = null;
+let dialogGeneration = 0;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+function focusIdentity(element) {
+  if (!element) return null;
+  return element.dataset.fleetFocus ? { fleetFocus: element.dataset.fleetFocus } :
+    element.dataset.panelTarget ? { panelTarget: element.dataset.panelTarget } : null;
+}
+function showDialog(initialFocus = true) {
+  if (!panelEl.hidden && panelEl.classList.contains("open")) {
+    pageRegions.forEach(region => { if (region) region.inert = true; });
+    if (initialFocus) panelEl.querySelector(".close").focus({ preventScroll: true });
+    return;
+  }
+  const generation = ++dialogGeneration;
+  panelEl.hidden = false;
+  pageRegions.forEach(region => { if (region) region.inert = true; });
+  panelEl.classList.remove("open");
+  const reveal = () => {
+    if (generation !== dialogGeneration || panelEl.hidden) return;
+    panelEl.classList.add("open");
+    if (initialFocus) panelEl.querySelector(".close").focus({ preventScroll: true });
+  };
+  if (reducedMotion.matches) reveal(); else requestAnimationFrame(reveal);
+}
+function openPanel(id, opener = document.activeElement) {
+  const wasFleet = selectedId === FLEET_LEDGER_ID;
+  if (id !== FLEET_LEDGER_ID && wasFleet) {
+    returnFleet = { tab: fleetTab, focus: focusIdentity(opener) };
+  } else if (!selectedId) {
+    returnFocus = { element: opener, identity: focusIdentity(opener) };
+    returnFleet = null;
+  }
+  selectedId = id;
+  renderPanel(Date.now());
+  showDialog(true);
+}
 function renderPanel(now) {
   if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
   panelEl.classList.remove("ledger");
@@ -1219,7 +1304,7 @@ function renderPanel(now) {
   if (selectedId === NOTICE_BOARD_ID) {
     const named = nameArtifacts(artifacts, villagers, souls);
     panelBody.innerHTML = `
-      <h2><span style="color:#d2a15c">▪</span> What the fleet made</h2>
+      <h2 id="panel-title" tabindex="-1"><span style="color:#d2a15c">▪</span> What the fleet made</h2>
       <div class="meta">recent artifacts across the village</div>
       ${named.length ? named.map(a => `
         <div class="evt artifact">
@@ -1227,7 +1312,6 @@ function renderPanel(now) {
           <div class="artifact-by">${esc(a.name)} · ${esc(a.project)} · ${ago(a.ts, now)}</div>
         </div>`).join("") :
         `<div class="artifact-empty">Nothing has been produced in the recent event log.</div>`}`;
-    panelEl.classList.add("open");
     return;
   }
   const v = villagers.find(x => x.id === selectedId);
@@ -1252,7 +1336,7 @@ function renderPanel(now) {
       `resident · home ${resident.home + 1}` : resident && resident.diagnostic ?
       "invalid declaration · no residency or home granted" : "visitor · no current village projection";
     panelBody.innerHTML = `
-      <h2><span style="color:${esc(meta.accent || "#8aa65b")}">▪</span> ${esc(name)}</h2>
+      <h2 id="panel-title" tabindex="-1"><span style="color:${esc(meta.accent || "#8aa65b")}">▪</span> ${esc(name)}</h2>
       <div class="meta role">${esc(residency)}</div>
       ${meta.role ? `<div class="meta role">${esc(meta.role)}</div>` : ""}
       <div class="meta">${esc(identity)}</div>
@@ -1262,7 +1346,6 @@ function renderPanel(now) {
         <div class="when">latest retained event · ${ago(latest.ts, now)} · ${esc(latest.event.type)}</div>
         <div class="what">${esc(describe(latest.event))}</div>
       </div>` : `<div class="meta">No retained event is available.</div>`}`;
-    panelEl.classList.add("open");
     return;
   }
   const at = placeLabel(v);
@@ -1273,7 +1356,7 @@ function renderPanel(now) {
     v.state === "stale"    ? "no signal for a while" + at : "resting";
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
   panelBody.innerHTML = `
-    <h2><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
+    <h2 id="panel-title" tabindex="-1"><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
     <div class="meta role">${v.residency === "resident" ? `resident · home ${v.home + 1}` : "visitor · based at the lodge"}</div>
     ${v.soul && v.soul.meta.role ? `<div class="meta role">${esc(v.soul.meta.role)}</div>` : ""}
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
@@ -1291,16 +1374,81 @@ function renderPanel(now) {
         <div class="when">${ago(Date.parse(ev.ts) || 0, now)} · ${esc(ev.type)}</div>
         <div class="what">${esc(describe(ev))}</div>
       </div>`).join("")}`;
-  panelEl.classList.add("open");
 }
-function closePanel() { selectedId = null; panelEl.classList.remove("open", "ledger"); }
+function restoreIdentity(target) {
+  if (!target) return false;
+  const selector = target.fleetFocus ? `[data-fleet-focus="${CSS.escape(target.fleetFocus)}"]` :
+    target.panelTarget ? `[data-panel-target="${CSS.escape(target.panelTarget)}"]` : null;
+  const replacement = selector && document.querySelector(selector);
+  if (!replacement) return false;
+  replacement.focus({ preventScroll: true });
+  return true;
+}
+function closePanel() {
+  if (returnFleet && selectedId !== FLEET_LEDGER_ID) {
+    const target = returnFleet;
+    returnFleet = null;
+    selectedId = FLEET_LEDGER_ID;
+    fleetTab = target.tab;
+    renderPanel(Date.now());
+    showDialog(false);
+    requestAnimationFrame(() => { if (!restoreIdentity(target.focus)) panelEl.querySelector('[role="tab"][aria-selected="true"]').focus(); });
+    return;
+  }
+  selectedId = null;
+  const generation = ++dialogGeneration;
+  panelEl.classList.remove("open");
+  const target = returnFocus;
+  returnFocus = null;
+  const finish = () => {
+    if (generation !== dialogGeneration || panelEl.classList.contains("open")) return;
+    panelEl.hidden = true;
+    panelEl.classList.remove("ledger");
+    pageRegions.forEach(region => { if (region) region.inert = false; });
+    if (target && target.element && target.element.isConnected) target.element.focus({ preventScroll: true });
+    else if (!restoreIdentity(target && target.identity)) document.getElementById("fleet-open").focus();
+  };
+  if (reducedMotion.matches) { finish(); return; }
+  const ended = event => {
+    if (event.target !== panelEl || event.propertyName !== "transform") return;
+    panelEl.removeEventListener("transitionend", ended);
+    clearTimeout(fallback);
+    finish();
+  };
+  panelEl.addEventListener("transitionend", ended);
+  const timing = getComputedStyle(panelEl);
+  const seconds = value => value.split(",").reduce((maximum, item) =>
+    Math.max(maximum, parseFloat(item) * (item.trim().endsWith("ms") ? .001 : 1)), 0);
+  const fallback = setTimeout(() => {
+    panelEl.removeEventListener("transitionend", ended);
+    finish();
+  }, (seconds(timing.transitionDuration) + seconds(timing.transitionDelay)) * 1000 + 50);
+}
 panelEl.querySelector(".close").addEventListener("click", closePanel);
+function dialogFocusable() {
+  const selector = 'a[href], area[href], textarea, select, button, input, iframe, object, embed, audio[controls], video[controls], [contenteditable]:not([contenteditable="false"]), [tabindex]';
+  return [...panelEl.querySelectorAll(selector)].filter(element => {
+    if (element.matches(":disabled") || element.closest('[hidden], [inert]')) return false;
+    if (element.tabIndex < 0) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  });
+}
+panelEl.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closePanel(); return; }
+  if (event.key !== "Tab") return;
+  const focusable = dialogFocusable();
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
 censusEl.addEventListener("click", event => {
   if (!event.target.closest('[data-action="inspect-stale"]')) return;
   const staleVillager = villagers.find(v => v.state === "stale");
   if (staleVillager) openPanel(staleVillager.id);
 });
-document.getElementById("fleet-open").addEventListener("click", () => openPanel(FLEET_LEDGER_ID));
+document.getElementById("fleet-open").addEventListener("click", event => openPanel(FLEET_LEDGER_ID, event.currentTarget));
 const fleetController = BurrowFleetController.createFleetController({
   panel: panelEl, body: panelBody, document,
   moveFocus: BurrowFleet.moveFocus,
@@ -1355,7 +1503,6 @@ const runtime = BurrowBrowser.createBrowserRuntime({
 /* ————— boot ————— */
 
 (async () => {
-  try { await document.fonts.load('16px "VT323"'); } catch {}
   const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: "game",

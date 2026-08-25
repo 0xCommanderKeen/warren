@@ -18,7 +18,7 @@ Each real agent — the one summarizing your day, reviewing your code, reading y
 1. **The fleet** — real agents, running wherever they run. burrow does not own them.
 2. **Event protocol** — agents emit structured events (`task_started`, `tool_called`, `artifact_produced`, `needs_human`, `idle`). This is the core of the project; everything else consumes it.
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
-4. **Client** — pixel-art renderer. Click a villager to see its current task, its log, and chat with it.
+4. **Client** — pixel-art renderer. Open a villager to inspect its current task and retained event log.
 
 The notice board in the village square opens a fleet-wide review of the 30 most
 recent `artifact_produced` events. It shows each artifact path, its maker and
@@ -41,6 +41,26 @@ malformed event records, stale telemetry, disconnection, and empty results are e
 named explicitly. No credentials or raw manifest objects are rendered.
 
 ## Running (v0.5)
+
+### Canonical operator path
+
+There is one supported setup path for both Claude Code and Codex:
+
+1. Install the shared emitter with `sh scripts/install-emitter.sh`.
+2. Configure Claude Code or Codex using the copyable hook definitions in the
+   [protocol guide](docs/protocol.md#runner-setup). Both runners invoke the same
+   installed bundle; Codex adds `--runner codex`.
+3. Add or edit `villagers/*.resident.json`, then validate every manifest with
+   `python3 -m unittest tests.test_residents`. App-grant references and status
+   references describe public configuration/health locations only. Burrow never
+   stores app credentials; those stay in the owning app or secret store.
+4. Run the authoritative test suite with `sh tests/run.sh`.
+5. Deploy the exact tested tree with the tar-over-SSH command below and restart
+   the service. Check `/residents` for public validation diagnostics and open the
+   village at both phone and desktop widths.
+
+The detailed protocol sections explain event mappings and privacy, but the steps
+above are the canonical install, validation, test, and deployment sequence.
 
 One village for the whole fleet, served from the NAS over Tailscale:
 <http://dxp2800:8737>. Never exposed to the public internet — the event log is a
@@ -279,6 +299,19 @@ Cases are driven by fixture event logs in `tests/fixtures/*.jsonl`, all written
 against a fixed `now` (`2026-08-24T12:00:00Z`) so the 30-minute stale and 12-hour
 drop windows land exactly on their edges. Change a projection rule and a fixture
 should have to change with it.
+
+The fleet layout browser test uses reviewed, platform-specific visual baselines:
+`<viewport>.darwin.png` and `<viewport>.linux.png`. Only macOS and Linux are
+supported; a missing baseline fails and preserves the captured `actual.png` under
+`/tmp/burrow-visual-*` instead of accepting new pixels. To intentionally update
+baselines, run the focused test on the target platform and opt in explicitly:
+
+```sh
+BURROW_UPDATE_VISUAL_BASELINES=1 node --test tests/fleet-layout.browser.test.js
+```
+
+Review the resulting platform-named PNGs before committing them. Never set update
+mode in normal CI; the test refuses baseline updates when `CI=true`.
 
 ## Not this project
 

@@ -7,10 +7,28 @@ const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
+const zlib = require("node:zlib");
 const { spawn, spawnSync } = require("node:child_process");
-const { stop } = require("./browser-process");
+const { abortError, cdp, delay, stop } = require("./browser-process");
 
 const ROOT = path.resolve(__dirname, "..");
+const SNAPSHOT_DIR = path.join(__dirname, "snapshots", "fleet-layout");
+const E2E_TIMEOUT_MS = 120000;
+const SERVER_READY_TIMEOUT_MS = 8000;
+const SERVER_REQUEST_TIMEOUT_MS = 1000;
+const BROWSER_CONDITION_TIMEOUT_MS = 10000;
+const CDP_OPERATION_TIMEOUT_MS = 10000;
+// A cold CI Chrome can need longer to create and attach its first target. Keep
+// steady-state CDP failures fast while bounding only the startup handshake.
+const CHROME_STARTUP_HANDSHAKE_TIMEOUT_MS = 30000;
+// Baselines are immutable in ordinary runs. This deliberately conspicuous opt-in is
+// the only write path, so a rendering regression cannot bless itself in CI.
+const UPDATE_BASELINES = process.env.BURROW_UPDATE_VISUAL_BASELINES === "1";
+const SNAPSHOT_PLATFORMS = new Set(["darwin", "linux"]);
+// A >12 channel delta filters subpixel edge noise. Allowing only 0.15% such pixels
+// (and MAE 0.35) still fails a shifted glyph, control, panel edge, or canvas feature.
+const VISUAL_TOLERANCE = Object.freeze({ channelDelta: 12, changedRatio: 0.0015,
+  meanAbsoluteError: 0.35 });
 
 function chromeExecutable() {
   const candidates = [process.env.CHROME_BIN, process.env.GOOGLE_CHROME_BIN,
@@ -36,69 +54,206 @@ async function freePort() {
   });
 }
 
-async function waitForServer(port, process) {
-  const deadline = Date.now() + 8000;
+async function waitForServer(port, process, signal) {
+  const deadline = Date.now() + SERVER_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (signal.aborted) throw abortError(signal);
     if (process.exitCode !== null) throw new Error(`Burrow server exited with ${process.exitCode}`);
-    const ready = await new Promise(resolve => {
+    const ready = await new Promise((resolve, reject) => {
       const request = http.get(`http://127.0.0.1:${port}/`, response => {
+        signal.removeEventListener("abort", onAbort);
         response.resume(); resolve(response.statusCode === 200);
       });
-      request.once("error", () => resolve(false));
+      const onAbort = () => { request.destroy(); reject(abortError(signal)); };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      request.setTimeout(SERVER_REQUEST_TIMEOUT_MS, () => request.destroy());
+      request.once("error", error => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) reject(abortError(signal)); else resolve(false);
+      });
     });
     if (ready) return;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await delay(50, signal);
   }
-  throw new Error("Burrow server did not become ready");
+  throw new Error(`Burrow server did not become ready within ${SERVER_READY_TIMEOUT_MS}ms`);
 }
 
-function cdp(chrome) {
-  let nextId = 1, buffered = "", sessionId = null;
-  const pending = new Map();
-  chrome.stdio[4].setEncoding("utf8");
-  chrome.stdio[4].on("data", chunk => {
-    buffered += chunk;
-    for (;;) {
-      const end = buffered.indexOf("\0");
-      if (end < 0) break;
-      const raw = buffered.slice(0, end); buffered = buffered.slice(end + 1);
-      if (!raw) continue;
-      const message = JSON.parse(raw);
-      if (!message.id || !pending.has(message.id)) continue;
-      const { resolve, reject } = pending.get(message.id); pending.delete(message.id);
-      if (message.error) reject(new Error(message.error.message)); else resolve(message.result);
-    }
-  });
-  const send = (method, params = {}, browser = false) => new Promise((resolve, reject) => {
-    const id = nextId++;
-    pending.set(id, { resolve, reject });
-    const message = { id, method, params };
-    if (sessionId && !browser) message.sessionId = sessionId;
-    chrome.stdio[3].write(JSON.stringify(message) + "\0");
-  });
-  send.setSession = value => { sessionId = value; };
-  return send;
-}
-
-async function eventually(evaluate, expression) {
-  const deadline = Date.now() + 10000;
+async function eventually(evaluate, expression, signal, phase = "browser condition",
+  timeoutMs = BROWSER_CONDITION_TIMEOUT_MS) {
+  signal ??= evaluate.signal;
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const result = await evaluate("Runtime.evaluate", { expression, returnByValue: true,
-      awaitPromise: true });
+    const remaining = Math.max(1, deadline - Date.now());
+    let result;
+    try {
+      result = await evaluate("Runtime.evaluate", { expression, returnByValue: true,
+        awaitPromise: true }, { timeout: remaining });
+    } catch (error) {
+      throw new Error(`${phase} failed before its ${timeoutMs}ms deadline: ${expression}; ` +
+        error.message, { cause: error });
+    }
     if (result.result.value) return result.result.value;
-    await new Promise(resolve => setTimeout(resolve, 50));
+    await delay(50, signal);
   }
-  throw new Error(`browser condition timed out: ${expression}`);
+  throw new Error(`${phase} timed out after ${timeoutMs}ms: ${expression}`);
 }
 
-test("production fleet ledger has no horizontal overflow at 320px", { timeout: 30000 }, async () => {
+function decodePng(png) {
+  assert.equal(png.toString("ascii", 1, 4), "PNG");
+  const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
+  const bitDepth = png[24], colorType = png[25];
+  assert.equal(bitDepth, 8, "snapshot uses supported 8-bit pixels");
+  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
+  assert.ok(channels, `snapshot uses supported RGB/RGBA pixels, got PNG type ${colorType}`);
+  const chunks = [];
+  for (let offset = 8; offset < png.length;) {
+    const length = png.readUInt32BE(offset), type = png.toString("ascii", offset + 4, offset + 8);
+    if (type === "IDAT") chunks.push(png.subarray(offset + 8, offset + 8 + length));
+    offset += 12 + length;
+  }
+  const packed = zlib.inflateSync(Buffer.concat(chunks));
+  const stride = width * channels, pixels = Buffer.alloc(stride * height);
+  const paeth = (a, b, c) => { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); return pa <= pb && pa <= pc ? a : pb <= pc ? b : c; };
+  for (let y = 0, source = 0; y < height; y++) {
+    const filter = packed[source++], row = y * stride, previous = row - stride;
+    for (let x = 0; x < stride; x++) {
+      const raw = packed[source++], left = x >= channels ? pixels[row + x - channels] : 0;
+      const up = y ? pixels[previous + x] : 0;
+      const upperLeft = y && x >= channels ? pixels[previous + x - channels] : 0;
+      const predictor = filter === 0 ? 0 : filter === 1 ? left : filter === 2 ? up :
+        filter === 3 ? Math.floor((left + up) / 2) : filter === 4 ? paeth(left, up, upperLeft) : NaN;
+      assert.ok(Number.isFinite(predictor), `unsupported PNG filter ${filter}`);
+      pixels[row + x] = (raw + predictor) & 255;
+    }
+  }
+  return { width, height, channels, pixels };
+}
+
+function crc32(buffer) {
+  let crc = 0xffffffff;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function encodePng(width, height, rgba) {
+  const signature = Buffer.from("89504e470d0a1a0a", "hex");
+  const chunk = (type, data) => {
+    const name = Buffer.from(type), result = Buffer.alloc(data.length + 12);
+    result.writeUInt32BE(data.length); name.copy(result, 4); data.copy(result, 8);
+    result.writeUInt32BE(crc32(Buffer.concat([name, data])), data.length + 8);
+    return result;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width); header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 6;
+  const rows = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) rgba.copy(rows, y * (width * 4 + 1) + 1,
+    y * width * 4, (y + 1) * width * 4);
+  return Buffer.concat([signature, chunk("IHDR", header),
+    chunk("IDAT", zlib.deflateSync(rows, { level: 9 })), chunk("IEND", Buffer.alloc(0))]);
+}
+
+function rgbaPixels(image) {
+  if (image.channels === 4) return image.pixels;
+  const rgba = Buffer.alloc(image.width * image.height * 4);
+  for (let source = 0, target = 0; source < image.pixels.length; source += 3, target += 4) {
+    image.pixels.copy(rgba, target, source, source + 3); rgba[target + 3] = 255;
+  }
+  return rgba;
+}
+
+function compareSnapshot(name, actualPng, platform = process.platform) {
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), `burrow-visual-${name}-${platform}-`));
+  fs.writeFileSync(path.join(artifacts, "actual.png"), actualPng);
+  try {
+    assert.ok(SNAPSHOT_PLATFORMS.has(platform),
+      `visual baselines are supported only on darwin and linux, got ${platform}`);
+    const baselinePath = path.join(SNAPSHOT_DIR, `${name}.${platform}.png`);
+    if (UPDATE_BASELINES) {
+      assert.notEqual(process.env.CI, "true",
+        "refusing to update visual baselines in CI; review and commit platform output explicitly");
+      fs.mkdirSync(SNAPSHOT_DIR, { recursive: true });
+      fs.writeFileSync(baselinePath, actualPng);
+      fs.rmSync(artifacts, { recursive: true });
+      return { updated: true };
+    }
+    assert.ok(fs.existsSync(baselinePath),
+      `missing visual baseline ${baselinePath}; actual=${path.join(artifacts, "actual.png")}; ` +
+      "create/review it only on that platform with BURROW_UPDATE_VISUAL_BASELINES=1");
+    const actual = decodePng(actualPng), expectedPng = fs.readFileSync(baselinePath);
+    fs.writeFileSync(path.join(artifacts, "expected.png"), expectedPng);
+    const expected = decodePng(expectedPng);
+    assert.deepEqual([actual.width, actual.height], [expected.width, expected.height],
+      `${name} visual dimensions differ; artifacts=${artifacts}`);
+    const actualRgba = rgbaPixels(actual), expectedRgba = rgbaPixels(expected);
+    const diff = Buffer.alloc(actualRgba.length); let changed = 0, absolute = 0, maximum = 0;
+    for (let offset = 0; offset < actualRgba.length; offset += 4) {
+      let pixelDelta = 0;
+      for (let channel = 0; channel < 3; channel++) {
+        const delta = Math.abs(actualRgba[offset + channel] - expectedRgba[offset + channel]);
+        absolute += delta; maximum = Math.max(maximum, delta); pixelDelta = Math.max(pixelDelta, delta);
+        diff[offset + channel] = delta;
+      }
+      diff[offset + 3] = 255;
+      if (pixelDelta > VISUAL_TOLERANCE.channelDelta) changed++;
+    }
+    fs.writeFileSync(path.join(artifacts, "diff.png"), encodePng(actual.width, actual.height, diff));
+    const pixels = actual.width * actual.height;
+    const metrics = { changedPixels: changed, pixels,
+      changedRatio: changed / pixels, meanAbsoluteError: absolute / (pixels * 3), maximumDelta: maximum };
+    assert.ok(metrics.changedRatio <= VISUAL_TOLERANCE.changedRatio &&
+      metrics.meanAbsoluteError <= VISUAL_TOLERANCE.meanAbsoluteError,
+    `${name} visual mismatch: ${JSON.stringify(metrics)}; ` +
+      `tolerance=${JSON.stringify(VISUAL_TOLERANCE)}; artifacts=${artifacts}`);
+    fs.rmSync(artifacts, { recursive: true });
+    return metrics;
+  } catch (error) {
+    if (!String(error.message).includes("artifacts=")) error.message += `; artifacts=${artifacts}`;
+    throw error;
+  }
+}
+
+function pixelEvidence(png, regions) {
+  const image = decodePng(png);
+  const color = (x, y) => {
+    const offset = (y * image.width + x) * image.channels;
+    return image.pixels.toString("hex", offset, offset + 3);
+  };
+  const evidence = regions.map(([x0, y0, x1, y1]) => {
+    const colors = new Set(); let light = 0;
+    const known = { "142317": 0, "17130f": 0, "e8dfc8": 0, "d2a15c": 0 };
+    for (let y = y0; y < y1; y += 3) for (let x = x0; x < x1; x += 3) {
+      const value = color(x, y); colors.add(value);
+      if (value in known) known[value]++;
+      const offset = (y * image.width + x) * image.channels;
+      if (image.pixels[offset] + image.pixels[offset + 1] + image.pixels[offset + 2] > 500) light++;
+    }
+    return { colors: colors.size, light, known };
+  });
+  return { ...image, evidence };
+}
+
+async function pressTab(send, shift = false) {
+  const modifiers = shift ? 8 : 0;
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, modifiers });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, modifiers });
+}
+
+test("production fleet browser fixture runs isolated interaction and visual phases",
+  { timeout: E2E_TIMEOUT_MS }, async t => {
+  const { signal } = t;
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "burrow-layout-"));
   const events = path.join(temporary, "events.jsonl");
-  const currentEvent = { v: 0, ts: new Date().toISOString(),
+  const frozenNow = Date.parse("2025-01-15T12:00:00.000Z");
+  const currentEvent = { v: 0, ts: new Date(frozenNow).toISOString(),
     source: "claude-code", agent_id: "layout-resident", project: "burrow",
     type: "tool_called", payload: { tool: "Read",
       detail: "a/very/long/production/path/that/must/wrap/without/forcing/the/ledger/wider/than/the/viewport.md" } };
-  const agedEvent = { ...currentEvent, ts: new Date(Date.now() - 13 * 60 * 60 * 1000).toISOString(),
+  const agedEvent = { ...currentEvent, ts: new Date(frozenNow - 13 * 60 * 60 * 1000).toISOString(),
     agent_id: "aged-worker", type: "idle", payload: {} };
   const agedAttention = { ...agedEvent, agent_id: "aged-knocker", type: "needs_human",
     payload: { message: "A retained request still needs a truthful destination" } };
@@ -120,24 +275,54 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
   });
   let chrome, testFailure;
   try {
-    await waitForServer(port, server);
+    await waitForServer(port, server, signal);
     chrome = spawn(chromeExecutable(), ["--headless=new", "--disable-gpu", "--no-sandbox",
+      "--force-color-profile=srgb", "--disable-lcd-text", "--font-render-hinting=none",
       "--remote-debugging-pipe", `--user-data-dir=${path.join(temporary, "chrome")}`, "about:blank"],
     { detached: process.platform !== "win32",
       stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] });
     let chromeErrors = "";
     chrome.stderr.on("data", chunk => { chromeErrors += chunk; });
-    const send = cdp(chrome);
-    const target = await send("Target.createTarget", { url: "about:blank" }, true);
+    const send = cdp(chrome, { signal, operationTimeout: CDP_OPERATION_TIMEOUT_MS });
+    const target = await send("Target.createTarget", { url: "about:blank" },
+      { browser: true, timeout: CHROME_STARTUP_HANDSHAKE_TIMEOUT_MS });
     const attached = await send("Target.attachToTarget",
-      { targetId: target.targetId, flatten: true }, true);
+      { targetId: target.targetId, flatten: true },
+      { browser: true, timeout: CHROME_STARTUP_HANDSHAKE_TIMEOUT_MS });
     send.setSession(attached.sessionId);
     await send("Emulation.setDeviceMetricsOverride", { width: 320, height: 800,
       deviceScaleFactor: 1, mobile: false });
     await send("Page.enable");
     await send("Runtime.enable");
-    await send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
-    await eventually(send, "document.readyState === 'complete' && !!window.BurrowFleetController");
+    await send("Emulation.setEmulatedMedia", { features: [
+      { name: "prefers-reduced-motion", value: "no-preference" },
+      { name: "prefers-contrast", value: "no-preference" },
+      { name: "prefers-color-scheme", value: "dark" },
+    ] });
+    await send("Page.addScriptToEvaluateOnNewDocument", { source: `{
+      const NativeDate = Date; const now = ${frozenNow};
+      class FrozenDate extends NativeDate { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
+      FrozenDate.parse = NativeDate.parse; FrozenDate.UTC = NativeDate.UTC; window.Date = FrozenDate;
+      let randomState = 0x42c0ffee;
+      Math.random = () => ((randomState = (1664525 * randomState + 1013904223) >>> 0) / 4294967296);
+      window.setInterval = () => 0; window.clearInterval = () => {};
+      Object.defineProperty(window, 'EventSource', { configurable: true, value: undefined });
+      addEventListener('DOMContentLoaded', () => {
+        const style = document.createElement('style');
+        style.textContent = '@font-face{font-family:BurrowSnapshot;src:url(/assets/fonts/CousineSnapshot.ttf) format("truetype");font-style:normal;font-weight:400;font-display:block}html body,html button,html input,html select{font-family:BurrowSnapshot,monospace!important}';
+        document.head.appendChild(style);
+      }, { once: true });
+    }` });
+    const resetPage = async (width = 320, height = 800) => {
+      await send("Emulation.setDeviceMetricsOverride", { width, height,
+        deviceScaleFactor: 1, mobile: false });
+      await send("Page.navigate", { url: `http://127.0.0.1:${port}/` });
+      await eventually(send, "document.readyState === 'complete' && !!window.BurrowFleetController",
+        signal, `reset production page at ${width}x${height}`);
+    };
+
+    await t.test("production map routing validates promised capacity without all-pairs A*", async () => {
+      await resetPage();
     const routing = await eventually(send, `(() => {
       if (!scene || !scene.routing) return false;
       let findPathCalls = 0;
@@ -160,6 +345,10 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
     assert.equal(routing.distinctLodgeEndpoints, 32);
     assert.ok(routing.validatedEndpoints >= 8 * 4 + 32 + 16,
       "production self-check did not cover the promised shared/lodge/knock fleet");
+    });
+
+    await t.test("village lifecycle updates remain atomic across routing failures", async () => {
+      await resetPage();
     const lifecycle = await eventually(send, `(() => {
       if (!scene || !scene.routing || !scene.slotAllocator) return false;
       scene.updateVillage([]);
@@ -277,6 +466,10 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
       "duplicate snapshot left an orphan container/chip or mutated the production scene");
     assert.deepEqual(lifecycle.duplicateCalls,
       { allocatorCalls: 0, routeCalls: 0, spawnCalls: 0, walkCalls: 0, tweenCalls: 0 });
+    });
+
+    await t.test("fleet controls preserve logical focus across rerenders and detail views", async () => {
+      await resetPage();
     await eventually(send, "window.dispatchEvent(new Event('resize')); " +
       "document.querySelector('#fleet-open').click(); " +
       "document.querySelector('#panel.open.ledger .ledger-filters') && true");
@@ -326,6 +519,13 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
       "document.querySelector('#panel-body').textContent.includes('retained request still needs')");
     await eventually(send, "document.querySelector('#fleet-open').click(); " +
       "document.querySelector('[data-fleet-tab=\"activity\"]').click(); true");
+    });
+
+    await t.test("320px ledger stays bounded and live status remains stable", async () => {
+      await resetPage();
+      await eventually(send, "document.querySelector('#fleet-open').click(); " +
+        "document.querySelector('[data-fleet-tab=\"activity\"]').click(); " +
+        "!!document.querySelector('.ledger-entry')");
     await send("Runtime.evaluate", { expression:
       "new Promise(resolve => setTimeout(resolve, 300))", awaitPromise: true });
     const result = await eventually(send, `(() => {
@@ -359,6 +559,235 @@ test("production fleet ledger has no horizontal overflow at 320px", { timeout: 3
     assert.ok(result.panelScrollWidth <= result.panelClientWidth,
       `ledger overflowed: ${result.panelScrollWidth}px > ${result.panelClientWidth}px; ` +
       JSON.stringify(result.scrollOffenders));
+    const announcements = await eventually(send, `(async () => {
+      const live = document.querySelector('#panel-status');
+      const initial = live.textContent; let mutations = 0;
+      const observer = new MutationObserver(records => { mutations += records.length; });
+      observer.observe(live, { childList: true, characterData: true, subtree: true });
+      await new Promise(resolve => setTimeout(resolve, 2200)); observer.disconnect();
+      return { initial, final: live.textContent, mutations,
+        liveLedgerBodies: document.querySelectorAll('#panel-body section[aria-live]').length };
+    })()`);
+    assert.deepEqual(announcements, { initial: announcements.initial, final: announcements.initial,
+      mutations: 0, liveLedgerBodies: 0 });
+    assert.match(announcements.initial, /^Activity: \d+ items?\.$/);
+    });
+
+    await t.test("dialog transition races and native Tab trapping remain bounded", async () => {
+      await resetPage();
+      await eventually(send, "document.querySelector('#fleet-open').click(); " +
+        "document.querySelector('#panel.open.ledger') && true");
+    const transitionStart = await eventually(send, `(() => {
+      const dialog = document.querySelector('#panel');
+      dialog.querySelector('.close').click();
+      return !dialog.classList.contains('open') && !dialog.hidden;
+    })()`);
+    assert.equal(transitionStart, true, "close removes open before transition hides the dialog");
+    await eventually(send, "document.querySelector('#panel').hidden");
+    const reopenRace = await eventually(send, `(() => {
+      const launcher = document.querySelector('#fleet-open'), dialog = document.querySelector('#panel');
+      launcher.click();
+      requestAnimationFrame(() => dialog.querySelector('.close').click());
+      requestAnimationFrame(() => requestAnimationFrame(() => launcher.click()));
+      return true;
+    })()`);
+    assert.equal(reopenRace, true);
+    await eventually(send, "!document.querySelector('#panel').hidden && document.querySelector('#panel').classList.contains('open')");
+
+    await send("Runtime.evaluate", { expression: `(() => {
+      const dialog = document.querySelector('#panel');
+      dialog.insertAdjacentHTML('beforeend', '<div id="focus-fixtures"><button hidden>hidden</button><button disabled>disabled</button><span inert tabindex="0">inert</span><span tabindex="-1">negative</span><span id="trap-last" tabindex="0">last</span></div>');
+    })()` });
+    await send("Runtime.evaluate", { expression: "document.querySelector('#trap-last').focus()" });
+    const beforeTab = await send("Runtime.evaluate", { expression: "({active: document.activeElement.id, last: dialogFocusable().at(-1).id, first: dialogFocusable()[0].className})", returnByValue: true });
+    assert.deepEqual(beforeTab.result.value, { active: "trap-last", last: "trap-last", first: "close" });
+    await pressTab(send);
+    let trapped = await send("Runtime.evaluate", { expression: "({wrapped: document.activeElement === document.querySelector('#panel .close'), active: document.activeElement.outerHTML})", returnByValue: true });
+    assert.equal(trapped.result.value.wrapped, true, `native forward Tab wraps from the final focusable control; active=${trapped.result.value.active}`);
+    await pressTab(send, true);
+    trapped = await send("Runtime.evaluate", { expression: "({wrapped: document.activeElement.id === 'trap-last', active: document.activeElement.tagName + '#' + document.activeElement.id})", returnByValue: true });
+    assert.equal(trapped.result.value.wrapped, true, `native reverse Tab wraps from the first focusable control; active=${trapped.result.value.active}`);
+    await send("Runtime.evaluate", { expression: "document.querySelector('#focus-fixtures').remove()" });
+    });
+
+    await t.test("dialog controls expose accessible semantics, contrast, and focus restoration", async () => {
+      await resetPage();
+      await eventually(send,
+        "!!document.querySelector('button.chip[data-panel-target]:not([data-panel-target=\"notice-board\"])')",
+        signal, "accessibility production villager button readiness");
+      await eventually(send, "document.querySelector('#fleet-open').click(); " +
+        "document.querySelector('#panel.open.ledger') && true");
+    const launcherAccessibility = await eventually(send, `(async () => {
+      const close = document.querySelector('#panel .close');
+      close.click(); await new Promise(resolve => setTimeout(resolve, 250));
+      const launcher = document.querySelector('#fleet-open');
+      const launcherRestored = document.activeElement === launcher;
+      launcher.click(); await new Promise(resolve => requestAnimationFrame(resolve));
+      const initialFocus = document.activeElement === close;
+      const dialog = document.querySelector('#panel');
+      const tabs = [...dialog.querySelectorAll('[role="tab"]')];
+      const controls = [...dialog.querySelectorAll('button, input, select')].filter(el => !el.disabled);
+      const named = controls.every(el => (el.getAttribute('aria-label') || el.textContent || '').trim());
+      const focusRing = (() => { tabs[0].focus(); const css = getComputedStyle(tabs[0]);
+        return parseFloat(css.outlineWidth) >= 3 && css.outlineStyle !== 'none'; })();
+      const rgb = value => (value.match(/[\\d.]+/g) || []).slice(0, 3).map(Number);
+      const luminance = value => { const c = rgb(value).map(v => v / 255).map(v =>
+        v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
+        return .2126 * c[0] + .7152 * c[1] + .0722 * c[2]; };
+      const contrast = (a, b) => { const x = luminance(a), y = luminance(b);
+        return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); };
+      const contrastRatio = contrast(getComputedStyle(dialog).color, getComputedStyle(dialog).backgroundColor);
+      return { launcherRestored, initialFocus, named, focusRing, contrastRatio,
+        villagerButtons: document.querySelectorAll('.chip[data-panel-target]:not([data-panel-target="notice-board"])').length,
+        boardRole: document.querySelector('[data-panel-target="notice-board"]').tagName,
+        tabRoles: tabs.map(tab => tab.getAttribute('role')) };
+    })()`, signal, "accessibility launcher semantics and contrast");
+
+    const escapeAccessibility = await eventually(send, `(async () => {
+      const dialog = document.querySelector('#panel');
+      const close = dialog.querySelector('.close');
+      const launcher = document.querySelector('#fleet-open');
+      close.focus(); close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const escapeRestored = document.activeElement === launcher && dialog.hidden;
+      return { escapeRestored };
+    })()`, signal, "accessibility Escape focus restoration");
+
+    const boardAccessibility = await eventually(send, `(async () => {
+      const dialog = document.querySelector('#panel');
+      const close = dialog.querySelector('.close');
+      const board = document.querySelector('[data-panel-target="notice-board"]');
+      board.focus(); board.click(); await new Promise(resolve => requestAnimationFrame(resolve));
+      const boardDialog = dialog.getAttribute('aria-labelledby') === 'panel-title' &&
+        document.activeElement === close && dialog.getAttribute('aria-modal') === 'true';
+      close.click(); await new Promise(resolve => setTimeout(resolve, 250));
+      const boardRestored = document.activeElement === board;
+      return { boardDialog, boardRestored };
+    })()`, signal, "accessibility notice-board focus restoration");
+
+    const fleetAccessibility = await eventually(send, `(async () => {
+      const dialog = document.querySelector('#panel');
+      const close = dialog.querySelector('.close');
+      const launcher = document.querySelector('#fleet-open');
+      launcher.click(); await new Promise(resolve => requestAnimationFrame(resolve));
+      const row = document.querySelector('.ledger-entry [data-agent]');
+      const rowKey = row.dataset.fleetFocus; row.focus(); row.click();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      const detailReturnedToLedger = !dialog.hidden && dialog.classList.contains('ledger') &&
+        document.activeElement.dataset.fleetFocus === rowKey;
+      close.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 250));
+      const ledgerRestored = dialog.hidden && document.activeElement === launcher;
+      return { detailReturnedToLedger, ledgerRestored,
+        backgroundExposed: document.querySelector('header').inert };
+    })()`, signal, "accessibility fleet detail and ledger focus restoration");
+    const accessibility = { ...launcherAccessibility, ...escapeAccessibility,
+      ...boardAccessibility, ...fleetAccessibility };
+    assert.equal(accessibility.launcherRestored, true);
+    assert.equal(accessibility.initialFocus, true, "dialog close receives initial focus");
+    assert.equal(accessibility.named, true, "every rendered fleet control has an accessible name");
+    assert.equal(accessibility.focusRing, true, "keyboard focus has a production visible ring");
+    assert.ok(accessibility.contrastRatio >= 4.5,
+      `dialog text contrast was only ${accessibility.contrastRatio.toFixed(2)}:1`);
+    assert.equal(accessibility.escapeRestored, true);
+    assert.equal(accessibility.boardDialog, true);
+    assert.equal(accessibility.boardRestored, true);
+    assert.equal(accessibility.detailReturnedToLedger, true,
+      "detail Escape restores the logical fleet row across the rerender");
+    assert.equal(accessibility.ledgerRestored, true);
+    assert.ok(accessibility.villagerButtons >= 1);
+    assert.equal(accessibility.boardRole, "BUTTON");
+    assert.deepEqual(accessibility.tabRoles, ["tab", "tab", "tab"]);
+    assert.equal(accessibility.backgroundExposed, false, "background is restored after close");
+    });
+
+    await t.test("phone production layout matches the strict platform baseline", async () => {
+      await resetPage();
+    const phoneReady = await eventually(send, `(async () => {
+      if (!scene || !runtime || !window.__burrow) return false;
+      await runtime.poll(); await runtime.refreshResidents(); await document.fonts.ready;
+      if (!document.querySelector('#snapshot-motion-freeze')) {
+        const style = document.createElement('style'); style.id = 'snapshot-motion-freeze';
+        style.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
+        document.head.appendChild(style);
+      }
+      const dialog = document.querySelector('#panel');
+      if (!dialog.hidden) { dialog.querySelector('.close').click(); await new Promise(r => requestAnimationFrame(r)); }
+      scene.tweens.killAll();
+      for (const viz of scene.viz.values()) {
+        viz.cont.setPosition(viz.target.x, viz.target.y); viz.walk = null;
+        viz.spr.anims.stop(); viz.spr.setTexture(viz.char + '-idle', D_DOWN);
+      }
+      scene.events.emit('update'); document.activeElement?.blur();
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const canvas = document.querySelector('#game canvas').getBoundingClientRect();
+      return dialog.hidden && innerWidth === 320 && innerHeight === 800 &&
+        canvas.width > 300 && document.fonts.check('16px BurrowSnapshot');
+    })()`);
+    assert.equal(phoneReady, true, "phone snapshot reached its frozen final layout");
+    const phoneShot = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    const phonePng = Buffer.from(phoneShot.data, "base64");
+    const phonePixels = pixelEvidence(phonePng, [[0, 0, 320, 250], [0, 250, 320, 800]]);
+    assert.equal(phonePixels.width, 320, "phone production snapshot width");
+    assert.equal(phonePixels.height, 800, "phone production snapshot height");
+    assert.ok(phonePixels.evidence[0].colors > 25 && phonePixels.evidence[0].light > 20,
+      `phone chrome lost substantive rendered detail: ${JSON.stringify(phonePixels.evidence)}`);
+    assert.ok(phonePixels.evidence[1].colors > 40,
+      `phone village became blank/corrupt: ${JSON.stringify(phonePixels.evidence)}`);
+    assert.ok(phonePixels.evidence.reduce((sum, region) => sum + region.known["142317"], 0) > 100,
+      `phone snapshot lost the canonical village background: ${JSON.stringify(phonePixels.evidence)}`);
+    compareSnapshot("phone-320x800", phonePng);
+    });
+
+    await t.test("desktop production layout matches the strict platform baseline", async () => {
+      await resetPage(1440, 900);
+      await eventually(send, `(async () => {
+        if (!scene || !runtime || !window.__burrow) return false;
+        await runtime.poll(); await runtime.refreshResidents(); await document.fonts.ready;
+        const style = document.createElement('style'); style.id = 'snapshot-motion-freeze';
+        style.textContent = '*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}';
+        document.head.appendChild(style);
+        scene.tweens.killAll();
+        for (const viz of scene.viz.values()) {
+          viz.cont.setPosition(viz.target.x, viz.target.y); viz.walk = null;
+          viz.spr.anims.stop(); viz.spr.setTexture(viz.char + '-idle', D_DOWN);
+        }
+        scene.events.emit('update'); document.activeElement?.blur();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return innerWidth === 1440 && innerHeight === 900 &&
+          document.fonts.check('16px BurrowSnapshot');
+      })()`);
+    await eventually(send, "window.dispatchEvent(new Event('resize')); " +
+      "document.querySelector('#fleet-open').click(); document.querySelector('[data-fleet-tab=activity]').click(); " +
+      "document.querySelector('#panel.ledger.open') && true");
+    const desktop = await eventually(send, `(() => {
+      const canvas = document.querySelector('#game canvas').getBoundingClientRect();
+      if (innerWidth !== 1440 || innerHeight !== 900 || canvas.width < 1000 || canvas.height < 800) return false;
+      const panel = document.querySelector('#panel').getBoundingClientRect();
+      if (panel.left <= 600 || panel.right > 1440 || panel.width > 760) return false;
+      return { viewport: [innerWidth, innerHeight], canvas: [canvas.width, canvas.height],
+        panel: [panel.left, panel.right, panel.width], overflow: document.documentElement.scrollWidth - innerWidth };
+    })()`);
+    assert.deepEqual(desktop.viewport, [1440, 900]);
+    assert.ok(desktop.canvas[0] >= 1000 && desktop.canvas[1] >= 800,
+      `village lost its desktop composition: ${JSON.stringify(desktop.canvas)}`);
+    assert.ok(desktop.panel[0] > 600 && desktop.panel[1] <= 1440 && desktop.panel[2] <= 760);
+    assert.ok(desktop.overflow <= 0);
+    const desktopShot = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
+    const png = Buffer.from(desktopShot.data, "base64");
+    const desktopPixels = pixelEvidence(png, [[0, 0, 680, 450], [680, 0, 1440, 900]]);
+    assert.equal(desktopPixels.width, 1440, "desktop production snapshot width");
+    assert.equal(desktopPixels.height, 900, "desktop production snapshot height");
+    assert.ok(desktopPixels.evidence[0].colors > 80 && desktopPixels.evidence[0].light > 40,
+      `desktop village lost substantive pixels: ${JSON.stringify(desktopPixels.evidence)}`);
+    assert.ok(desktopPixels.evidence[1].colors > 25 && desktopPixels.evidence[1].light > 40,
+      `desktop ledger lost substantive pixels: ${JSON.stringify(desktopPixels.evidence)}`);
+    assert.ok(desktopPixels.evidence[1].known["17130f"] > 1000,
+      `desktop snapshot lost the canonical ledger surface: ${JSON.stringify(desktopPixels.evidence)}`);
+    compareSnapshot("desktop-1440x900", png);
+    });
   } catch (error) {
     testFailure = error;
   } finally {

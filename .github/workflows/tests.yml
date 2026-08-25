@@ -18,3 +18,10 @@ jobs:
         with:
           node-version: "22"
       - run: sh tests/run.sh
+      - name: Upload visual regression artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: burrow-visual-linux
+          path: /tmp/burrow-visual-*/
+          if-no-files-found: ignore

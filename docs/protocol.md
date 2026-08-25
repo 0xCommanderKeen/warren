@@ -450,13 +450,11 @@ The emitter must never break the agent: it swallows all errors and always exits 
 ### Installed emitter bundle
 
 `emit.py` depends on its sibling `durable.py`; supported deployments install both
-with the fail-open `burrow-emit` launcher. From the repository root:
+with the fail-open `burrow-emit` launcher. From the repository root, use the
+canonical installer:
 
 ```sh
-install_root="$HOME/.local/lib/burrow-emitter"
-install -d -m 700 "$install_root"
-install -m 600 hooks/emit.py hooks/durable.py "$install_root/"
-install -m 700 hooks/burrow-emit "$install_root/burrow-emit"
+sh scripts/install-emitter.sh
 ```
 
 Use the stable command `$HOME/.local/lib/burrow-emitter/burrow-emit` in hooks.
@@ -542,6 +540,39 @@ present, its value must be exactly one supported runner and the option may occur
 once. Positional and unknown arguments are not accepted. Invalid, missing, duplicate,
 conflicting, or stray arguments exit successfully but emit no event, preventing
 malformed Codex setup from being mislabeled as Claude.
+
+## Runner setup
+
+This section is the single source for runner hook configuration. Install the
+[shared emitter bundle](#installed-emitter-bundle) once. Claude Code invokes the
+stable command without a runner option from its documented lifecycle hooks;
+Codex uses the same command with `--runner codex`. Do not install separate emitter
+copies or configure duplicate user-level hook representations.
+
+The Claude Code hook names and their exact event mapping are listed in
+[v0 emitter: Claude Code hooks](#v0-emitter-claude-code-hooks). Point each configured
+command at `$HOME/.local/lib/burrow-emitter/burrow-emit` and provide `BURROW_URL`
+and `BURROW_TOKEN` through protected hook environment configuration.
+
+Merge this hook object into `~/.claude/settings.json`, replacing `REPLACE_ME`.
+The repeated command is intentional: every lifecycle callback enters the same
+fail-open adapter, which determines the event from the callback body.
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}]
+  }
+}
+```
 
 ### User-level Codex setup
 
