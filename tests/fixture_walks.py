@@ -15,6 +15,7 @@ Point the server at it and open the viewer:
 
     BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
 """
+
 import argparse
 import datetime as dt
 import itertools
@@ -53,10 +54,14 @@ def now():
 
 def event(agent_id, project, kind, payload):
     return {
-        "v": 0, "ts": now(), "source": "fixture",
-        "agent_id": agent_id, "project": project,
+        "v": 0,
+        "ts": now(),
+        "source": "fixture",
+        "agent_id": agent_id,
+        "project": project,
         "cwd": "/tmp/burrow-fixture/" + project,
-        "type": kind, "payload": payload,
+        "type": kind,
+        "payload": payload,
     }
 
 
@@ -70,7 +75,9 @@ def write(path, events):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/tmp/burrow-fixture.jsonl")
-    ap.add_argument("--every", type=float, default=3.0, help="seconds between transitions")
+    ap.add_argument(
+        "--every", type=float, default=3.0, help="seconds between transitions"
+    )
     ap.add_argument("--once", action="store_true", help="write one snapshot and exit")
     ap.add_argument("--fresh", action="store_true", help="truncate the log first")
     args = ap.parse_args()
@@ -79,12 +86,16 @@ def main():
         os.remove(args.out)
 
     # seed: everyone home and working, so the village starts settled
-    write(args.out, [event(a, p, "task_started", {"prompt": "settling in"})
-                     for a, p in AGENTS])
+    write(
+        args.out,
+        [event(a, p, "task_started", {"prompt": "settling in"}) for a, p in AGENTS],
+    )
     print(f"fixture → {args.out}", file=sys.stderr)
     if args.once:
-        write(args.out, [event(a, p, *CYCLE[i % len(CYCLE)])
-                         for i, (a, p) in enumerate(AGENTS)])
+        write(
+            args.out,
+            [event(a, p, *CYCLE[i % len(CYCLE)]) for i, (a, p) in enumerate(AGENTS)],
+        )
         return
 
     for step in itertools.count():

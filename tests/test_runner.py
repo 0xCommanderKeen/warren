@@ -1,4 +1,5 @@
 """Regression tests for the repository's dependency-free test runner."""
+
 import os
 import pathlib
 import shutil
@@ -53,7 +54,10 @@ class RunnerDiscoveryTest(unittest.TestCase):
             shutil.copy2(RUNNER, repo / "tests" / "run.sh")
             shutil.copy2(ROOT / "tests" / "runner.py", repo / "tests" / "runner.py")
 
-            python_tests = [repo / "test_alpha.py", repo / "nested" / "test_odd\nname.py"]
+            python_tests = [
+                repo / "test_alpha.py",
+                repo / "nested" / "test_odd\nname.py",
+            ]
             python_tests[1].parent.mkdir()
             for test in python_tests:
                 test.write_text(
@@ -72,7 +76,9 @@ class RunnerDiscoveryTest(unittest.TestCase):
                     "require('fs').appendFileSync(process.env.BURROW_RUNNER_LOG, "
                     f"'{test.name}\\n');\n"
                 )
-            (repo / "test_untracked.py").write_text("raise SystemExit('must not run')\n")
+            (repo / "test_untracked.py").write_text(
+                "raise SystemExit('must not run')\n"
+            )
 
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             subprocess.run(

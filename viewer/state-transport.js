@@ -94,9 +94,11 @@
         try { if (apply(JSON.parse(message.data))) setStatus("live"); }
         catch (error) { warn(`invalid state stream: ${error}`); }
       });
-      candidate.onerror = () => {
+      candidate.onerror = async () => {
         if (stream !== candidate) return;
-        candidate.close(); stream = null; setStatus("reconnecting"); poll();
+        candidate.close(); stream = null; setStatus("reconnecting");
+        await poll();
+        if (!stream) connect();
       };
     }
 

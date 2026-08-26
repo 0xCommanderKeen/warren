@@ -34,8 +34,11 @@ def validate_journal_event(event):
     if not isinstance(payload, dict):
         return "payload must be an object"
     routine = payload.get("routine")
-    if (not isinstance(routine, str) or not 1 <= len(routine) <= 128
-            or not _ROUTINE.fullmatch(routine)):
+    if (
+        not isinstance(routine, str)
+        or not 1 <= len(routine) <= 128
+        or not _ROUTINE.fullmatch(routine)
+    ):
         return "invalid payload.routine"
     day = payload.get("day")
     if not isinstance(day, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
@@ -47,10 +50,14 @@ def validate_journal_event(event):
     if parsed_day.isoformat() != day:
         return "invalid payload.day"
     path = payload.get("path")
-    if (not isinstance(path, str) or not 1 <= len(path) <= 2048
-            or path[0] in _EDGE_WHITESPACE or path[-1] in _EDGE_WHITESPACE
-            or any(0xD800 <= ord(character) <= 0xDFFF for character in path)
-            or _CONTROL.search(path)):
+    if (
+        not isinstance(path, str)
+        or not 1 <= len(path) <= 2048
+        or path[0] in _EDGE_WHITESPACE
+        or path[-1] in _EDGE_WHITESPACE
+        or any(0xD800 <= ord(character) <= 0xDFFF for character in path)
+        or _CONTROL.search(path)
+    ):
         return "invalid payload.path"
     segment = re.split(r"[/\\]", path)[-1]
     if segment != f"{day}.md":
@@ -96,14 +103,16 @@ def reduce_indexed(indexed_events):
         key = semantic_key(event)
         record = records.get(key)
         if record is None:
-            if (len(records) == MAX_DAYS
-                    and retention_rank(key) <= retention_rank(next(iter(records)))):
+            if len(records) == MAX_DAYS and retention_rank(key) <= retention_rank(
+                next(iter(records))
+            ):
                 continue
             records[key] = {"canonical": (index, event), "conflict": None}
             if len(records) > MAX_DAYS:
                 records.popitem(last=False)
-            records = collections.OrderedDict(sorted(
-                records.items(), key=lambda item: retention_rank(item[0])))
+            records = collections.OrderedDict(
+                sorted(records.items(), key=lambda item: retention_rank(item[0]))
+            )
             continue
         if canonical_identity(event) == canonical_identity(record["canonical"][1]):
             continue

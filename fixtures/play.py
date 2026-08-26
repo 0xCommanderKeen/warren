@@ -14,6 +14,7 @@ protocol events; the player only re-stamps each one with the current time (the
 projection ages villagers out after 30 minutes) and appends it, so the viewer's
 projection can be watched end to end without waiting on a live fleet.
 """
+
 import argparse
 import datetime
 import json
@@ -31,15 +32,26 @@ def now_ts():
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("fixture", nargs="?", default=DEFAULT_FIXTURE)
-    ap.add_argument("--out", default="/tmp/burrow-play.jsonl",
-                    help="event log to write (default: /tmp/burrow-play.jsonl)")
-    ap.add_argument("--step", type=float, default=2.5,
-                    help="seconds between events (default: 2.5, 0 = no pause)")
-    ap.add_argument("--keep", action="store_true",
-                    help="append to the log instead of truncating it first")
+    ap.add_argument(
+        "--out",
+        default="/tmp/burrow-play.jsonl",
+        help="event log to write (default: /tmp/burrow-play.jsonl)",
+    )
+    ap.add_argument(
+        "--step",
+        type=float,
+        default=2.5,
+        help="seconds between events (default: 2.5, 0 = no pause)",
+    )
+    ap.add_argument(
+        "--keep",
+        action="store_true",
+        help="append to the log instead of truncating it first",
+    )
     args = ap.parse_args()
 
     with open(args.fixture, encoding="utf-8") as f:
@@ -53,8 +65,11 @@ def main():
             out.flush()
             payload = event.get("payload") or {}
             what = payload.get("tool") or payload.get("prompt") or event["type"]
-            print(f"{i + 1:2d}/{len(events)}  {event['agent_id']:22s} "
-                  f"{event['type']:17s} {what}", flush=True)
+            print(
+                f"{i + 1:2d}/{len(events)}  {event['agent_id']:22s} "
+                f"{event['type']:17s} {what}",
+                flush=True,
+            )
             if args.step and i < len(events) - 1:
                 time.sleep(args.step)
     print(f"\nreplayed {len(events)} events into {args.out}", flush=True)

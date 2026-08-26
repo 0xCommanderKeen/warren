@@ -23,8 +23,11 @@ def fixture_cases():
         prefix = case.pop("path_prefix", None)
         if prefix:
             case["event"]["payload"]["path"] = (
-                "/" + prefix["scalar"] * prefix["count"] + "/"
-                + case["event"]["payload"]["path"])
+                "/"
+                + prefix["scalar"] * prefix["count"]
+                + "/"
+                + case["event"]["payload"]["path"]
+            )
         yield case
 
 
@@ -38,10 +41,19 @@ class JournalObservationTest(unittest.TestCase):
 
     @staticmethod
     def event(day, **changes):
-        event = {"v": 0, "ts": "2026-08-25T20:31:00.000Z", "source": "steward",
-                 "agent_id": "codex:life", "project": "life", "type": "journal_written",
-                 "payload": {"routine": "close-of-day", "day": day,
-                             "path": f"/journal/{day}.md"}}
+        event = {
+            "v": 0,
+            "ts": "2026-08-25T20:31:00.000Z",
+            "source": "steward",
+            "agent_id": "codex:life",
+            "project": "life",
+            "type": "journal_written",
+            "payload": {
+                "routine": "close-of-day",
+                "day": day,
+                "path": f"/journal/{day}.md",
+            },
+        }
         event.update(changes)
         return event
 
@@ -52,12 +64,16 @@ class JournalObservationTest(unittest.TestCase):
         conflict["payload"] = {**conflict["payload"], "routine": "nightly"}
         later = self.event("2026-08-25")
         later["payload"] = {**later["payload"], "path": "/other/2026-08-25.md"}
-        records, malformed = reduce_indexed(enumerate([canonical, replay, conflict, later]))
+        records, malformed = reduce_indexed(
+            enumerate([canonical, replay, conflict, later])
+        )
         record = records[("codex:life", "2026-08-25")]
         self.assertEqual(record["canonical"], (0, canonical))
         self.assertEqual(record["conflict"], (2, conflict))
         self.assertEqual(malformed, [])
-        self.assertEqual(keep_indexes(list(enumerate([canonical, replay, conflict, later]))), {0, 2})
+        self.assertEqual(
+            keep_indexes(list(enumerate([canonical, replay, conflict, later]))), {0, 2}
+        )
 
     def test_capacity_keeps_highest_day_keys_globally(self):
         events = [self.event(f"2026-07-{day:02d}") for day in range(1, 32)]
@@ -68,8 +84,10 @@ class JournalObservationTest(unittest.TestCase):
         self.assertIn(("codex:life", "2026-08-11"), records)
 
     def test_evicted_replay_and_conflict_stay_below_monotonic_frontier(self):
-        events = [self.event("2026-08-24", agent_id=f"codex:{index:02d}")
-                  for index in range(MAX_DAYS)]
+        events = [
+            self.event("2026-08-24", agent_id=f"codex:{index:02d}")
+            for index in range(MAX_DAYS)
+        ]
         events.append(self.event("2026-08-25", agent_id="codex:new"))
         replay = self.event("2026-08-24", agent_id="codex:00")
         conflict = self.event("2026-08-24", agent_id="codex:00")
@@ -79,27 +97,34 @@ class JournalObservationTest(unittest.TestCase):
         self.assertEqual(len(records), MAX_DAYS)
         self.assertNotIn(("codex:00", "2026-08-24"), records)
         self.assertIn(("codex:01", "2026-08-24"), records)
-        self.assertEqual(sum(record["conflict"] is not None
-                             for record in records.values()), 0)
+        self.assertEqual(
+            sum(record["conflict"] is not None for record in records.values()), 0
+        )
         self.assertEqual(malformed, [])
 
     def test_same_day_ties_compare_agent_ids_by_unicode_scalar(self):
-        events = [self.event("2026-08-24", agent_id=f"codex:{index:02d}")
-                  for index in range(39)]
-        events.extend([
-            self.event("2026-08-25", agent_id="codex:\uE000"),
-            self.event("2026-08-25", agent_id="codex:😀"),
-        ])
+        events = [
+            self.event("2026-08-24", agent_id=f"codex:{index:02d}")
+            for index in range(39)
+        ]
+        events.extend(
+            [
+                self.event("2026-08-25", agent_id="codex:\ue000"),
+                self.event("2026-08-25", agent_id="codex:😀"),
+            ]
+        )
         records, _ = reduce_indexed(enumerate(events))
         self.assertNotIn(("codex:00", "2026-08-24"), records)
-        self.assertIn(("codex:\uE000", "2026-08-25"), records)
+        self.assertIn(("codex:\ue000", "2026-08-25"), records)
         self.assertIn(("codex:😀", "2026-08-25"), records)
 
     def test_slug_path_and_gregorian_boundaries_are_exact(self):
         event = self.event("0001-01-01")
         event["payload"]["routine"] = "a" * 128
         filename = "0001-01-01.md"
-        event["payload"]["path"] = "/" + "a" * (2048 - len(filename) - 2) + "/" + filename
+        event["payload"]["path"] = (
+            "/" + "a" * (2048 - len(filename) - 2) + "/" + filename
+        )
         self.assertEqual(len(event["payload"]["path"]), 2048)
         self.assertIsNone(validate_event(event))
         event["payload"]["path"] = "x" + event["payload"]["path"]
@@ -122,8 +147,12 @@ class JournalIngestTest(unittest.TestCase):
 
     def post(self, event):
         connection = http.client.HTTPConnection(*self.running.server.server_address)
-        connection.request("POST", "/events", json.dumps(event).encode(),
-                           {"Content-Type": "application/json"})
+        connection.request(
+            "POST",
+            "/events",
+            json.dumps(event).encode(),
+            {"Content-Type": "application/json"},
+        )
         response = connection.getresponse()
         status = response.status
         response.read()

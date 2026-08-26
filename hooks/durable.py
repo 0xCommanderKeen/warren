@@ -4,6 +4,7 @@ Callers hold their protocol's stable lock while collecting authority. This
 module deliberately owns no locks or process state; it only owns the durable
 write, publish, and retirement ordering.
 """
+
 import glob
 import errno
 import json

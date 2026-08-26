@@ -17,15 +17,14 @@ Env:
 GET /transport/status exposes bounded ingest-deduplication and knock-forwarding
 pressure for the browser's live transport status.
 """
+
 import collections
 import dataclasses
 import datetime
 import email.header
-import errno
 import fcntl
 import glob
 import hmac
-import http.server
 import json
 import os
 import queue
@@ -34,9 +33,19 @@ import secrets
 import sys
 import threading
 import time
-import urllib.parse
+import tomllib
 import urllib.request
-import weakref
+from contextlib import asynccontextmanager
+from typing import Any, Literal
+
+import anyio
+import uvicorn
+from fastapi import FastAPI, Header, Query, Request
+from fastapi.openapi.utils import get_openapi
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, PlainTextResponse, Response
+from pydantic import BaseModel, ConfigDict, JsonValue, RootModel, model_validator
+from sse_starlette import EventSourceResponse, ServerSentEvent
 
 import notification_persistence
 import residents as resident_manifests
@@ -60,15 +69,15 @@ MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
 # every read, append and rotation of the log goes through this, so an event can
 # never land in the gap between reading the log and swapping it out
 LOG_LOCK = threading.Lock()
-_rotate_floor = 0                    # don't re-check until the log grows past this
-_log_generation = 0                 # changes when rotation rewrites the live inode
+_rotate_floor = 0  # don't re-check until the log grows past this
+_log_generation = 0  # changes when rotation rewrites the live inode
 NOTIFY_URL = (os.environ.get("BURROW_NOTIFY_URL") or "").strip()
 NOTIFY_TOKEN = (os.environ.get("BURROW_NOTIFY_TOKEN") or "").strip()
 try:
     NOTIFY_TIMEOUT = float(os.environ.get("BURROW_NOTIFY_TIMEOUT") or 5)
 except ValueError:
     NOTIFY_TIMEOUT = 5.0
-NOTIFY_MEMORY = 512      # how many knocks we remember, to not knock twice
+NOTIFY_MEMORY = 512  # how many knocks we remember, to not knock twice
 NOTIFY_WORKERS = 2
 NOTIFY_QUEUE = 64
 KNOCK_RECORDS = int(os.environ.get("BURROW_KNOCK_RECORDS") or 1024)
@@ -82,13 +91,24 @@ LEDGER_NOTIFIED = notification_persistence.NOTIFIED
 LEDGER_NOTIFY_DROPPED = notification_persistence.DROPPED
 LEDGER_KINDS = notification_persistence.KINDS
 DROP_SECONDS = 12 * 60 * 60
-VIEWER_EVENT_TYPES = {"task_started", "tool_called", "tool_failed",
-                      "artifact_produced", "needs_human", "idle",
-                      "session_ended"}
+VIEWER_EVENT_TYPES = {
+    "task_started",
+    "tool_called",
+    "tool_failed",
+    "artifact_produced",
+    "needs_human",
+    "idle",
+    "session_ended",
+}
 
 
-CTYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript",
-          ".css": "text/css", ".png": "image/png", ".json": "application/json"}
+CTYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".js": "text/javascript",
+    ".css": "text/css",
+    ".png": "image/png",
+    ".json": "application/json",
+}
 
 
 def read_villagers():
@@ -130,8 +150,24 @@ def read_residents():
 # accepts a POST works. It happens on a daemon thread and swallows every
 # error: a knock we fail to forward must never slow down or fail the ingest.
 
-NAMES = ["Bramble", "Poppy", "Wren", "Sorrel", "Fern", "Alder", "Maple", "Rowan",
-         "Thistle", "Clover", "Hazel", "Juniper", "Moss", "Reed", "Tansy", "Willow"]
+NAMES = [
+    "Bramble",
+    "Poppy",
+    "Wren",
+    "Sorrel",
+    "Fern",
+    "Alder",
+    "Maple",
+    "Rowan",
+    "Thistle",
+    "Clover",
+    "Hazel",
+    "Juniper",
+    "Moss",
+    "Reed",
+    "Tansy",
+    "Willow",
+]
 
 _notified = collections.OrderedDict()
 _notifying = set()
@@ -139,15 +175,23 @@ _notified_lock = threading.Lock()
 _knock_queue = queue.Queue(maxsize=NOTIFY_QUEUE)
 _knock_workers_started = False
 _knock_workers_lock = threading.Lock()
+_knock_worker_stop = threading.Event()
+_knock_worker_threads = []
 _transport_lock = threading.Lock()
 _transport_counters = {
-    "ingest_duplicates": 0, "notify_delivered": 0,
-    "notify_failed": 0, "notify_retried": 0, "notify_saturated": 0,
+    "ingest_duplicates": 0,
+    "notify_delivered": 0,
+    "notify_failed": 0,
+    "notify_retried": 0,
+    "notify_saturated": 0,
     "notify_dropped": 0,
 }
 _notification_store = notification_persistence.NotificationPersistence(
-    lambda: EVENTS, lambda: (KNOCK_RECORDS, KNOCK_BYTES), KNOCK_LOCK_SHARDS,
-    ledger_limits=lambda: (LEDGER_RECORDS, LEDGER_BYTES))
+    lambda: EVENTS,
+    lambda: (KNOCK_RECORDS, KNOCK_BYTES),
+    KNOCK_LOCK_SHARDS,
+    ledger_limits=lambda: (LEDGER_RECORDS, LEDGER_BYTES),
+)
 _delivery_ids_by_log = _notification_store.caches[LEDGER_DELIVERY_IDS]
 _notified_by_log = _notification_store.caches[LEDGER_NOTIFIED]
 _dropped_by_log = _notification_store.caches[LEDGER_NOTIFY_DROPPED]
@@ -165,7 +209,7 @@ def js_hash(s):
     h = 0
     encoded = s.encode("utf-16-be", errors="surrogatepass")
     for index in range(0, len(encoded), 2):
-        code_unit = int.from_bytes(encoded[index:index + 2], "big")
+        code_unit = int.from_bytes(encoded[index : index + 2], "big")
         h = (h * 31 + code_unit) & 0xFFFFFFFF
     if h >= 0x80000000:
         h -= 0x100000000
@@ -192,9 +236,11 @@ def villager_names(events):
     soul_by_project = {}
 
     def is_resident(soul):
-        return (soul.get("valid") is True
-                and soul.get("manifest_version") == 1
-                and type(soul.get("home")) is int)
+        return (
+            soul.get("valid") is True
+            and soul.get("manifest_version") == 1
+            and type(soul.get("home")) is int
+        )
 
     def index_soul(index, key, soul):
         current = index.get(key)
@@ -241,8 +287,11 @@ def villager_names(events):
 
         h = js_hash(agent_id)
         offset = 0
-        while (taken_names and NAMES[(h + offset) % len(NAMES)] in taken_names
-               and offset < len(NAMES)):
+        while (
+            taken_names
+            and NAMES[(h + offset) % len(NAMES)] in taken_names
+            and offset < len(NAMES)
+        ):
             offset += 1
         name = NAMES[(h + offset) % len(NAMES)]
         if soul and (soul.get("meta") or {}).get("name"):
@@ -258,14 +307,18 @@ def _fleet_events(event):
     try:
         with open(EVENTS, encoding="utf-8") as stream:
             lines = collections.deque(
-                stream, maxlen=retention.POLICY["viewer_line_limit"])
+                stream, maxlen=retention.POLICY["viewer_line_limit"]
+            )
         for line in lines:
             try:
                 parsed = json.loads(line)
             except (TypeError, ValueError):
                 continue
-            if (isinstance(parsed, dict) and parsed.get("agent_id")
-                    and parsed.get("type") in VIEWER_EVENT_TYPES):
+            if (
+                isinstance(parsed, dict)
+                and parsed.get("agent_id")
+                and parsed.get("type") in VIEWER_EVENT_TYPES
+            ):
                 events.append(parsed)
     except (OSError, UnicodeDecodeError):
         pass
@@ -286,7 +339,8 @@ def _fleet_events(event):
 def villager_name(event):
     agent_id = str(event.get("agent_id") or "")
     return villager_names(_fleet_events(event)).get(
-        agent_id, NAMES[js_hash(agent_id) % len(NAMES)])
+        agent_id, NAMES[js_hash(agent_id) % len(NAMES)]
+    )
 
 
 def knock_key(event):
@@ -324,7 +378,8 @@ def _remember_durable_batch(kind, cache, keys, preserve_existing=()):
     and cache are left unchanged.
     """
     return _notification_store.remember_batch(
-        kind, keys, preserve_existing=preserve_existing, cache=cache)
+        kind, keys, preserve_existing=preserve_existing, cache=cache
+    )
 
 
 def _remember_durable(kind, cache, key):
@@ -397,8 +452,10 @@ def claim_knock(event):
     with _notified_lock:
         delivered = _load_ledger(LEDGER_NOTIFIED, _notified_by_log)
         dropped = _load_ledger(LEDGER_NOTIFY_DROPPED, _dropped_by_log)
-        if any(candidate in delivered or candidate in dropped
-               for candidate in terminal_knock_keys(event)):
+        if any(
+            candidate in delivered or candidate in dropped
+            for candidate in terminal_knock_keys(event)
+        ):
             return False
         if key in _notified or key in _notifying:
             if key in _notified:
@@ -436,10 +493,11 @@ def notify(event):
         name = villager_name(event)
         project = str(event.get("project") or "unknown")
         structured = structured_approval(event)
-        title = structured.action if structured else f"{name} is at your door ({project})"
+        title = (
+            structured.action if structured else f"{name} is at your door ({project})"
+        )
         if not title.isascii():
-            title = email.header.Header(
-                title, charset="utf-8", maxlinelen=0).encode()
+            title = email.header.Header(title, charset="utf-8", maxlinelen=0).encode()
         # Receiver IDs hash the internal identity; structured fallbacks include
         # request_id so distinct same-millisecond requests remain distinct.
         headers = {
@@ -457,7 +515,9 @@ def notify(event):
         else:
             body_text = f"{name} · {project}\n{message}"
         body = body_text.encode("utf-8")
-        req = urllib.request.Request(NOTIFY_URL, data=body, headers=headers, method="POST")
+        req = urllib.request.Request(
+            NOTIFY_URL, data=body, headers=headers, method="POST"
+        )
         with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT):
             pass
         return True
@@ -477,9 +537,11 @@ def deliver_knock(event):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        if any(_ledger_contains(LEDGER_NOTIFIED, candidate)
-               or _ledger_contains(LEDGER_NOTIFY_DROPPED, candidate)
-               for candidate in terminal_knock_keys(event)):
+        if any(
+            _ledger_contains(LEDGER_NOTIFIED, candidate)
+            or _ledger_contains(LEDGER_NOTIFY_DROPPED, candidate)
+            for candidate in terminal_knock_keys(event)
+        ):
             finish_knock(event, False)
             return True
         delivered = notify(event)
@@ -552,8 +614,11 @@ def _process_knock(event):
 
 
 def _knock_worker():
-    while True:
-        event = _knock_queue.get()
+    while not _knock_worker_stop.is_set():
+        try:
+            event = _knock_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
         try:
             _process_knock(event)
         finally:
@@ -579,8 +644,7 @@ def _recover_knocks():
                     _transport_counters["notify_saturated"] += 1
                 return
         try:
-            _notification_store.retire_replay_if_terminal(
-                generation, complete, events)
+            _notification_store.retire_replay_if_terminal(generation, complete, events)
         except OSError:
             # Retirement failure leaves replay authority for the next recovery.
             pass
@@ -593,104 +657,30 @@ def ensure_knock_workers():
     with _knock_workers_lock:
         if _knock_workers_started:
             return
+        _knock_worker_stop.clear()
         for index in range(NOTIFY_WORKERS):
-            threading.Thread(target=_knock_worker,
-                             name=f"burrow-knock-{index}", daemon=True).start()
+            worker = threading.Thread(
+                target=_knock_worker, name=f"burrow-knock-{index}", daemon=True
+            )
+            worker.start()
+            _knock_worker_threads.append(worker)
         _knock_workers_started = True
         _recover_knocks()
 
 
-class BurrowHTTPServer(http.server.ThreadingHTTPServer):
-    """A process-bound server lifecycle, including its cursor namespace.
-
-    Construction establishes the parent's namespace.  If the listening server
-    is inherited across fork, the child hook replaces both the identity and its
-    lock before child code or handler threads can use either.  PID checks at
-    serving and cursor boundaries are a defensive fallback; serving refreshes
-    before ThreadingHTTPServer is allowed to create child handler threads.
-    """
-
-    def __init__(self, *args, **kwargs):
-        self._boot_id_lock = threading.Lock()
-        self._boot_id_pid = os.getpid()
-        self._boot_id = secrets.token_hex(16)
-        super().__init__(*args, **kwargs)
-        self.state_coordinator = StateCoordinator(
-            self._projection_inputs,
-            read_residents,
-            capabilities={"ingest": True, "approvals": True, "jobs": True,
-                          "routines": True},
-        )
-        self.state_coordinator.evaluate()
-        if hasattr(os, "register_at_fork"):
-            server_ref = weakref.ref(self)
-
-            def refresh_in_child():
-                server = server_ref()
-                if server is not None:
-                    server._refresh_process_identity()
-
-            # register_at_fork has no unregister API.  Its registry retains only
-            # this closure and the closure retains the server weakly.
-            self._refresh_in_child = refresh_in_child
-            os.register_at_fork(after_in_child=refresh_in_child)
-
-    def _projection_inputs(self):
-        """Return one log/cursor boundary for the pure projection seam."""
-        with LOG_LOCK:
-            maybe_rotate()
-            events = []
-            try:
-                with open(EVENTS, "rb") as stream:
-                    stat = os.fstat(stream.fileno())
-                    for line in stream:
-                        try:
-                            events.append(json.loads(line, parse_constant=_reject_json_constant))
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            events.append(None)
-                    cursor = EventCursor.issued(
-                        self.boot_id, stat, _log_generation, stat.st_size).format()
-            except FileNotFoundError:
-                cursor = EventCursor.issued(
-                    self.boot_id, None, _log_generation, 0).format()
-            return events, cursor, _log_generation
-
-    def _refresh_process_identity(self):
-        # Never acquire a lock copied from a multi-threaded parent: its owner no
-        # longer exists in the child.  Publish the replacement lock before the
-        # new identity.
-        self._boot_id_lock = threading.Lock()
-        with self._boot_id_lock:
-            self._boot_id = secrets.token_hex(16)
-            self._boot_id_pid = os.getpid()
-
-    def _ensure_process_identity(self):
-        if self._boot_id_pid != os.getpid():
-            # On fork-capable Python the child hook runs synchronously while the
-            # child still has one thread.  This fallback is also reached before
-            # serve_forever/handle_request can create handler threads.
-            self._refresh_process_identity()
-
-    @property
-    def boot_id(self):
-        self._ensure_process_identity()
-        with self._boot_id_lock:
-            return self._boot_id
-
-    def serve_forever(self, *args, **kwargs):
-        self._ensure_process_identity()
-        return super().serve_forever(*args, **kwargs)
-
-    def handle_request(self):
-        self._ensure_process_identity()
-        return super().handle_request()
-
-
-def serve_forever():
-    """Start background delivery before accepting requests, then serve."""
-    if NOTIFY_URL:
-        ensure_knock_workers()
-    BurrowHTTPServer((HOST, PORT), Handler).serve_forever()
+def stop_knock_workers():
+    """Stop and join transport-owned notification workers at ASGI shutdown."""
+    global _knock_workers_started
+    with _knock_workers_lock:
+        if not _knock_workers_started:
+            return
+        _knock_worker_stop.set()
+        workers = list(_knock_worker_threads)
+    for worker in workers:
+        worker.join()
+    with _knock_workers_lock:
+        _knock_worker_threads.clear()
+        _knock_workers_started = False
 
 
 def transport_status():
@@ -699,11 +689,15 @@ def transport_status():
         counters = dict(_transport_counters)
     delivered, dropped = _notification_store.terminal_counts()
     return {
-        "ingest": {"duplicates": counters["ingest_duplicates"],
-                   "dedupe_window": None, "durable": True},
+        "ingest": {
+            "duplicates": counters["ingest_duplicates"],
+            "dedupe_window": None,
+            "durable": True,
+        },
         "notifications": {
             "configured": bool(NOTIFY_URL),
-            "queued": _knock_queue.qsize(), "queue_capacity": NOTIFY_QUEUE,
+            "queued": _knock_queue.qsize(),
+            "queue_capacity": NOTIFY_QUEUE,
             "workers": NOTIFY_WORKERS,
             "delivered": delivered,
             "failed": counters["notify_failed"],
@@ -712,11 +706,14 @@ def transport_status():
             "dropped": dropped,
         },
     }
+
+
 def archive_dir():
     """Where segments land: BURROW_ARCHIVE, else `archive/` beside the live log —
     same volume in both local mode and the container's mounted /data."""
     return ARCHIVE_DIR or os.path.join(
-        os.path.dirname(os.path.abspath(EVENTS)), "archive")
+        os.path.dirname(os.path.abspath(EVENTS)), "archive"
+    )
 
 
 def archive_path(now=None):
@@ -747,7 +744,8 @@ def rotate(size):
         original = live.read()
         lines = original.decode("utf-8", errors="replace").splitlines()
         tail = retention.carry_forward(
-            lines, int(time.time() * 1000), retention.POLICY).lines
+            lines, int(time.time() * 1000), retention.POLICY
+        ).lines
         data = "".join(line + "\n" for line in tail).encode("utf-8")
         size = len(original)
         if len(data) > size * 9 // 10:
@@ -783,7 +781,7 @@ def maybe_rotate():
     try:
         rotate(size)
     except OSError:
-        pass    # a log we failed to rotate beats a dropped event
+        pass  # a log we failed to rotate beats a dropped event
 
 
 def read_log():
@@ -817,8 +815,9 @@ def append_event(event):
                 # The event log is the canonical commit record. Repair a missing
                 # acceleration ledger left by a crash after the event fsync.
                 try:
-                    _remember_durable(LEDGER_DELIVERY_IDS, _delivery_ids_by_log,
-                                      delivery_id)
+                    _remember_durable(
+                        LEDGER_DELIVERY_IDS, _delivery_ids_by_log, delivery_id
+                    )
                 except OSError:
                     pass
                 with _transport_lock:
@@ -830,8 +829,9 @@ def append_event(event):
                 os.fsync(f.fileno())
             _fsync_parent(EVENTS)
             if delivery_id:
-                _remember_durable(LEDGER_DELIVERY_IDS, _delivery_ids_by_log,
-                                  delivery_id)
+                _remember_durable(
+                    LEDGER_DELIVERY_IDS, _delivery_ids_by_log, delivery_id
+                )
             maybe_rotate()
             return True
 
@@ -848,8 +848,10 @@ def _event_log_has_delivery_id(delivery_id):
                         event = json.loads(line)
                     except ValueError:
                         continue
-                    if (isinstance(event, dict)
-                            and event.get("delivery_id") == delivery_id):
+                    if (
+                        isinstance(event, dict)
+                        and event.get("delivery_id") == delivery_id
+                    ):
                         return True
         except OSError:
             continue
@@ -900,7 +902,12 @@ class EventCursor:
     def _parse_integers(cls, fields):
         values = []
         for field in fields:
-            if not field or len(field) > 20 or not field.isascii() or not field.isdigit():
+            if (
+                not field
+                or len(field) > 20
+                or not field.isascii()
+                or not field.isdigit()
+            ):
                 raise ValueError
             value = int(field)
             if value > cls.MAX_INTEGER:
@@ -930,346 +937,561 @@ class EventCursor:
     def format(self):
         if self.boot_id is None:
             raise ValueError("only server-issued cursors can be formatted")
-        return ":".join(str(part) for part in (
-            "v1", self.boot_id, self.device, self.inode, self.generation,
-            self.offset,
-        ))
+        return ":".join(
+            str(part)
+            for part in (
+                "v1",
+                self.boot_id,
+                self.device,
+                self.inode,
+                self.generation,
+                self.offset,
+            )
+        )
 
 
-class Handler(http.server.BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
+class ProtocolEvent(BaseModel):
+    """Validated public event-ingestion wire shape."""
 
-    @staticmethod
-    def _expected_disconnect(error):
-        """Browser/proxy departure is normal; unrelated I/O failures are not."""
-        return isinstance(error, (BrokenPipeError, ConnectionResetError,
-                                  ConnectionAbortedError)) or getattr(
-            error, "errno", None) in {errno.EPIPE, errno.ECONNRESET,
-                                      errno.ECONNABORTED}
+    model_config = ConfigDict(extra="allow", strict=True)
+    v: int
+    ts: str
+    source: str
+    agent_id: str
+    project: str
+    cwd: str | None = None
+    type: str
+    payload: dict[str, Any]
 
-    def handle(self):
-        # Disconnects can surface while BaseHTTPRequestHandler parses the next
-        # keep-alive request, outside the SSE write loop.
+    @model_validator(mode="after")
+    def require_standard_json_numbers(self):
         try:
-            super().handle()
-        except OSError as error:
-            if not self._expected_disconnect(error):
-                raise
+            json.dumps(self.model_dump(), allow_nan=False)
+        except (TypeError, ValueError) as error:
+            raise ValueError("event must contain standard JSON values") from error
+        return self
 
-    def _authorized(self):
-        if not TOKEN:
-            return True
-        presented = self.headers.get("X-Burrow-Token") or ""
-        scheme, _, value = (self.headers.get("Authorization") or "").partition(" ")
-        if scheme.lower() == "bearer":
-            presented = value.strip() or presented
-        return hmac.compare_digest(presented, TOKEN)
 
-    def do_GET(self):
-        parsed = urllib.parse.urlsplit(self.path)
-        path = parsed.path
-        if path == "/state":
-            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            try:
-                generation = int(params["generation"][0]) if "generation" in params else None
-                cursor = params["cursor"][0] if "cursor" in params else None
-                if generation is not None and generation < 0:
-                    raise ValueError
-            except (TypeError, ValueError):
-                self._send(400, b"invalid state position", "text/plain")
-                return
-            snapshot = self.server.state_coordinator.evaluate()
-            delivery = self.server.state_coordinator.delivery(generation, cursor)
-            if delivery["kind"] == "unchanged":
-                self._send(204, b"", "application/json", {
-                    "X-Burrow-State-Generation": str(snapshot["generation"]),
-                    "X-Burrow-State-Cursor": snapshot["cursor"],
-                })
-                return
-            self._send(200, json.dumps(delivery, ensure_ascii=False,
-                       separators=(",", ":"), allow_nan=False).encode("utf-8"),
-                       "application/json")
-            return
-        if path == "/state/stream":
-            self._stream_state(parsed)
-            return
-        if path == "/villagers":
-            self._send(200, json.dumps(read_villagers()).encode("utf-8"),
-                       "application/json")
-            return
-        if path == "/residents":
-            self._send(200, json.dumps(read_residents()).encode("utf-8"),
-                       "application/json")
-            return
-        if path == "/transport/status":
-            self._send(200, json.dumps(transport_status()).encode("utf-8"),
-                       "application/json")
-            return
-        if path == "/retention-policy.json":
-            self._send_file(os.path.join(ROOT, "retention-policy.json"),
-                            "application/json")
-            return
-        if path == "/events":
-            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-            try:
-                cursor = (EventCursor.parse(params["since"][0])
-                          if "since" in params else EventCursor.initial())
-            except (TypeError, ValueError):
-                self._send(400, b"invalid since cursor", "text/plain")
-                return
+class VillagerWire(BaseModel):
+    """One projected villager record."""
 
-            records, cursor, reset = self._read_event_records(cursor)
-            data = b"".join(line for _, line in records)
+    id: str
+    name: str
+    char: str
+    accent: str
+    residency: Literal["resident", "visitor"]
+    home: int | None
+    base: Literal["home", "lodge"]
+    resident_file: str | None
+    state: Literal["knocking", "resting", "failed", "stale", "working"]
+    project: str
+    cwd: str
+    last_ts: str
+    last_line: str
+    place: str | None
+    lineage: dict[str, str]
+    history: list[ProtocolEvent]
+    mood: dict[str, JsonValue]
+    pending_approval_ids: list[str]
 
-            headers = {"X-Burrow-Cursor": cursor.format()}
-            if reset:
-                headers["X-Burrow-Reset"] = "1"
-            self._send(200, data, "application/x-ndjson", headers)
-            return
-        if path == "/events/stream":
-            self._stream_events(parsed)
-            return
-        # everything else is a static file under viewer/
-        if path in ("/", "/index.html"):
-            path = "/index.html"
-        base = os.path.join(ROOT, "viewer")
-        full = os.path.realpath(os.path.join(base, path.lstrip("/")))
-        if not full.startswith(base + os.sep) or not os.path.isfile(full):
-            self._send(404, b"not found", "text/plain")
-            return
-        ctype = CTYPES.get(os.path.splitext(full)[1], "application/octet-stream")
-        self._send_file(full, ctype)
 
-    def do_POST(self):
-        if self.path.split("?")[0] != "/events":
-            self._send(404, b"not found", "text/plain")
-            return
-        # Validate framing before authorization. Otherwise malformed or
-        # conflicting framing gets a credential-dependent response and can
-        # leave unread bytes to be mistaken for a keep-alive request.
-        length = self._event_content_length(send_error=True)
-        if length is None:
-            return
-        if not self._authorized():
-            try:
-                self.rfile.read(length)
-            except OSError:
-                self.close_connection = True
-            self._send(401, b"unauthorized", "text/plain")
-            return
-        body = self.rfile.read(length)
-        try:
-            event = json.loads(body, parse_constant=_reject_json_constant)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            self._send(400, b"not a protocol event", "text/plain")
-            return
-        error = validate_event(event)
-        if error:
-            self._send(400, error.encode("ascii"), "text/plain")
-            return
-        # Delivery identity is transport metadata owned by this adapter. Ignore
-        # any same-named body extension so only the authenticated header can
-        # participate in deduplication.
-        event = dict(event)
-        event.pop("delivery_id", None)
-        delivery_id = (self.headers.get("X-Burrow-Delivery-ID") or "").strip()
-        if delivery_id:
-            if not _delivery_id_pattern.fullmatch(delivery_id):
-                self._send(400, b"invalid delivery id", "text/plain")
-                return
-            event["delivery_id"] = delivery_id
-        append_event(event)
-        if not persist_knock(event):
-            self._send(503, b"notification queue unavailable", "text/plain")
-            return
-        if claim_knock(event):
-            notify_async(event)
-        coordinator = getattr(self.server, "state_coordinator", None)
-        if coordinator is not None:
-            coordinator.evaluate()
-        self._send(204, b"", "text/plain")
+class ResidentWire(BaseModel):
+    """One validated resident manifest projection."""
 
-    def _stream_state(self, parsed):
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        try:
-            generation = int(params.get("generation", ["0"])[0])
-            cursor = params.get("cursor", [None])[0]
-        except ValueError:
-            self._send(400, b"invalid state generation", "text/plain")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache, no-store")
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
-        try:
-            while True:
-                snapshot = self.server.state_coordinator.evaluate()
-                delivery = self.server.state_coordinator.delivery(generation, cursor)
-                if delivery["kind"] in {"snapshot", "reset"}:
-                    payload = json.dumps(delivery,
-                                         ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-                    self.wfile.write(f"id: {snapshot['generation']}\nevent: snapshot\ndata: {payload}\n\n".encode())
-                    self.wfile.flush()
-                    generation = snapshot["generation"]
-                    cursor = snapshot["cursor"]
-                self.server.state_coordinator.wait_for_newer(generation, 15)
-                self.wfile.write(b": keepalive\n\n")
-                self.wfile.flush()
-        except OSError as error:
-            if not self._expected_disconnect(error):
-                raise
+    file: str
+    valid: Literal[True]
+    manifest_version: Literal[1]
+    match: dict[str, str]
+    home: int
+    meta: dict[str, str]
+    body: str
+    capabilities: dict[str, JsonValue]
+    routines: list[dict[str, JsonValue]]
 
-    def _event_content_length(self, send_error=False):
-        """Parse one unambiguous request length or close the connection.
 
-        An invalid/oversized length cannot be drained safely: treating bytes as
-        a following keep-alive request would desynchronise the HTTP stream.
-        """
-        if self.headers.get_all("Transfer-Encoding", failobj=[]):
-            self.close_connection = True
-            if send_error:
-                self._send(400, b"unsupported transfer encoding", "text/plain",
-                           {"Connection": "close"})
-            return None
-        values = self.headers.get_all("Content-Length", failobj=[])
-        if len(values) != 1 or not values[0].isascii() or not values[0].isdigit():
-            self.close_connection = True
-            if send_error:
-                self._send(400, b"invalid content length", "text/plain",
-                           {"Connection": "close"})
-            return None
-        length = int(values[0])
-        if length <= 0:
-            self.close_connection = True
-            if send_error:
-                self._send(400, b"invalid content length", "text/plain",
-                           {"Connection": "close"})
-            return None
-        if length > MAX_EVENT_BYTES:
-            self.close_connection = True
-            if send_error:
-                self._send(413, b"event too large", "text/plain",
-                           {"Connection": "close"})
-            return None
-        return length
+class ResidentDiagnosticWire(BaseModel):
+    """One bounded resident-manifest diagnostic."""
 
-    def _send_file(self, path, ctype):
-        try:
-            with open(path, "rb") as f:
-                self._send(200, f.read(), ctype)
-        except OSError:
-            self._send(404, b"missing: " + path.encode(), "text/plain")
+    file: str
+    valid: Literal[False]
+    diagnostic: Literal[True]
+    manifest_version: int | None
+    match: dict[str, str]
+    declared_home: int | None
+    meta: dict[str, str]
+    body: str | None
+    capabilities: dict[str, JsonValue]
 
-    def _read_event_records(self, cursor):
-        """Read complete records once for both polling and SSE transports."""
+
+class ArtifactWire(BaseModel):
+    """One projected artifact record."""
+
+    agent_id: str
+    project: str
+    artifact: str
+    ts: str
+
+
+class TaskWire(BaseModel):
+    """One projected task lifecycle."""
+
+    id: str
+    title: str
+    state: Literal["open", "claimed", "done", "failed"]
+    required_skills: list[str]
+    posted_by: str
+    claimant: str | None
+    updated_at: str
+
+
+class ApprovalWire(BaseModel):
+    """One projected approval lifecycle."""
+
+    request_id: str
+    agent_id: str
+    project: str
+    state: Literal["pending", "resolved", "collision"]
+    message: str
+    action: str | None
+    detail: JsonValue
+    options: list[JsonValue]
+    expires_at_present: bool
+    expires_at: str | None
+    opened_at: str
+    decision: str | None = None
+    resolved_at: str | None = None
+
+
+class JournalWire(BaseModel):
+    """One projected journal observation."""
+
+    day: str
+    agent_id: str
+    project: str
+    source: str
+    routine: str
+    path: str
+    observed_at: str
+
+
+class RoutineWire(BaseModel):
+    """One projected routine lifecycle."""
+
+    run_id: str
+    routine: str
+    agent_id: str
+    project: str
+    source: str
+    state: Literal["running", "finished", "failed"]
+    trigger: str
+    started_at: str
+    updated_at: str
+    outcome: str | None
+    duration_s: int | float | None
+    artifacts: list[JsonValue]
+    error: str | None
+
+
+class DiagnosticWire(BaseModel):
+    """One bounded projection diagnostic."""
+
+    model_config = ConfigDict(extra="allow")
+    kind: str | None = None
+    file: str | None = None
+    path: str | None = None
+    message: str | None = None
+
+
+class ProjectionCapacity(BaseModel):
+    villagers: int
+    events_per_villager: int
+    tasks: int
+    approvals: int
+    journals: int
+    routines: int
+    diagnostics: int
+
+
+class VillageState(BaseModel):
+    """Complete browser snapshot wire contract."""
+
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1]
+    generation: int
+    cursor: str
+    log_generation: int
+    evaluated_at: str
+    villagers: list[VillagerWire]
+    residents: list[ResidentWire]
+    diagnostic_residents: list[ResidentDiagnosticWire]
+    artifacts: list[ArtifactWire]
+    tasks: list[TaskWire]
+    approvals: list[ApprovalWire]
+    journals: list[JournalWire]
+    routines: list[RoutineWire]
+    diagnostics: list[DiagnosticWire]
+    capacity: ProjectionCapacity
+    capabilities: dict[str, bool]
+
+
+class StateEnvelope(BaseModel):
+    kind: Literal["snapshot", "reset"]
+    snapshot: VillageState
+
+
+class ErrorResponse(RootModel[str]):
+    """Preserved plain-text transport error body."""
+
+
+class IngestStatus(BaseModel):
+    duplicates: int
+    dedupe_window: int | None
+    durable: bool
+
+
+class NotificationStatus(BaseModel):
+    configured: bool
+    queued: int
+    queue_capacity: int
+    workers: int
+    delivered: int
+    failed: int
+    retried: int
+    saturated: int
+    dropped: int
+
+
+class TransportStatus(BaseModel):
+    ingest: IngestStatus
+    notifications: NotificationStatus
+
+
+class VillagerList(RootModel[list[dict[str, Any]]]):
+    pass
+
+
+class ResidentReport(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    residents: list[dict[str, Any]]
+
+
+class Runtime:
+    """Process-local transport state; storage and projection remain synchronous."""
+
+    def __init__(self):
+        self.boot_id = secrets.token_hex(16)
+        self.state_coordinator = StateCoordinator(
+            self.projection_inputs,
+            read_residents,
+            capabilities={
+                "ingest": True,
+                "approvals": True,
+                "jobs": True,
+                "routines": True,
+            },
+        )
+
+    def projection_inputs(self):
         with LOG_LOCK:
-            return self._read_event_records_locked(cursor)
+            maybe_rotate()
+            events = []
+            try:
+                with open(EVENTS, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    for line in stream:
+                        try:
+                            events.append(
+                                json.loads(line, parse_constant=_reject_json_constant)
+                            )
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            events.append(None)
+                    cursor = EventCursor.issued(
+                        self.boot_id, stat, _log_generation, stat.st_size
+                    ).format()
+            except FileNotFoundError:
+                cursor = EventCursor.issued(
+                    self.boot_id, None, _log_generation, 0
+                ).format()
+            return events, cursor, _log_generation
 
-    def _read_event_records_locked(self, cursor):
-        """Read a log snapshot while the caller owns LOG_LOCK."""
-        records, reset = [], False
-        maybe_rotate()
-        try:
-            with open(EVENTS, "rb") as stream:
-                stat = os.fstat(stream.fileno())
-                current = EventCursor.issued(
-                    self.server.boot_id, stat, _log_generation, 0)
-                offset, reset = cursor.resume(current, stat.st_size)
-                stream.seek(offset)
-                chunk = stream.read()
-                end = chunk.rfind(b"\n") + 1
-                for line in chunk[:end].splitlines(keepends=True):
-                    offset += len(line)
-                    records.append((offset, line))
-                return records, dataclasses.replace(current, offset=offset), reset
-        except FileNotFoundError:
-            current = EventCursor.issued(
-                self.server.boot_id, None, _log_generation, 0)
-            _, reset = cursor.resume(current, 0)
-            return records, current, reset
+    def read_event_records(self, cursor):
+        with LOG_LOCK:
+            maybe_rotate()
+            records = []
+            try:
+                with open(EVENTS, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    current = EventCursor.issued(self.boot_id, stat, _log_generation, 0)
+                    offset, reset = cursor.resume(current, stat.st_size)
+                    stream.seek(offset)
+                    chunk = stream.read()
+                    end = chunk.rfind(b"\n") + 1
+                    for line in chunk[:end].splitlines(keepends=True):
+                        offset += len(line)
+                        records.append((offset, line))
+                    return records, dataclasses.replace(current, offset=offset), reset
+            except FileNotFoundError:
+                current = EventCursor.issued(self.boot_id, None, _log_generation, 0)
+                _, reset = cursor.resume(current, 0)
+                return records, current, reset
 
-    def _write_sse_records(self, records, cursor, reset):
-        if reset:
-            self.wfile.write(b"event: reset\ndata: {}\n\n")
-        for record_offset, line in records:
-            event_id = dataclasses.replace(cursor, offset=record_offset).format()
-            self.wfile.write(b"id: " + event_id.encode("ascii") + b"\n")
-            self.wfile.write(b"data: " + line.rstrip(b"\r\n") + b"\n\n")
 
-    def _stream_events(self, parsed):
-        """Tail complete JSONL records as SSE messages.
+@asynccontextmanager
+async def lifespan(application):
+    runtime = Runtime()
+    application.state.runtime = runtime
+    await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
+    if NOTIFY_URL:
+        await anyio.to_thread.run_sync(ensure_knock_workers)
+    try:
+        yield
+    finally:
+        if NOTIFY_URL:
+            await anyio.to_thread.run_sync(stop_knock_workers)
 
-        Each message id is the same inode-aware byte cursor used by GET /events.
-        That makes Last-Event-ID and the polling fallback interchangeable.
-        """
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        try:
-            if self.headers.get("Last-Event-ID"):
-                cursor = EventCursor.parse(self.headers["Last-Event-ID"])
-            elif "since" in params:
-                cursor = EventCursor.parse(params["since"][0])
-            else:
-                cursor = EventCursor.initial()
-        except (TypeError, ValueError):
-            self._send(400, b"invalid event cursor", "text/plain")
-            return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache, no-store")
-        self.send_header("Connection", "keep-alive")
-        # nginx honours this even when proxy_buffering is enabled globally.
-        self.send_header("X-Accel-Buffering", "no")
-        self.end_headers()
+with open(os.path.join(ROOT, "pyproject.toml"), "rb") as _project_file:
+    PROJECT_VERSION = tomllib.load(_project_file)["project"]["version"]
 
-        last_keepalive = time.monotonic()
-        recovering = True
-        try:
-            while True:
-                if recovering:
-                    # Snapshot one exact readiness boundary while appenders are
-                    # excluded, then release the log lock before touching the
-                    # socket. Appends after this snapshot are tailed from its
-                    # cursor after `ready`; a backpressured client can never
-                    # stall ingestion, polling, or rotation globally.
-                    with LOG_LOCK:
-                        records, cursor, reset = self._read_event_records_locked(cursor)
-                else:
-                    records, cursor, reset = self._read_event_records(cursor)
-                self._write_sse_records(records, cursor, reset)
-                if recovering:
-                    encoded = cursor.format().encode("ascii")
-                    self.wfile.write(b"event: ready\n")
-                    self.wfile.write(b"id: " + encoded + b"\n")
-                    self.wfile.write(b"data: {\"cursor\":\"" + encoded + b"\"}\n\n")
-                    self.wfile.flush()
-                    recovering = False
-                now = time.monotonic()
-                if records or reset or now - last_keepalive >= 15:
-                    if not records and not reset:
-                        self.wfile.write(b": keepalive\n\n")
-                    self.wfile.flush()
-                    last_keepalive = now
-                time.sleep(0.1)
-        except OSError as error:
-            if self._expected_disconnect(error):
-                return
-            raise
 
-    def _send(self, code, data, ctype, headers=None):
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(data)))
-        for name, value in (headers or {}).items():
-            self.send_header(name, value)
-        self.end_headers()
-        if data:
-            self.wfile.write(data)
+app = FastAPI(
+    title="Burrow Village API",
+    version=PROJECT_VERSION,
+    lifespan=lifespan,
+)
 
-    def log_message(self, *args):
-        pass
+
+def _openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    schema.setdefault("components", {}).setdefault("schemas", {})["ErrorResponse"] = (
+        ErrorResponse.model_json_schema(ref_template="#/components/schemas/{model}")
+    )
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _openapi
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_request, _error):
+    return PlainTextResponse("not a protocol event", status_code=400)
+
+
+def _runtime(request):
+    return request.app.state.runtime
+
+
+def _error(status, detail):
+    return PlainTextResponse(
+        detail, status_code=status, headers={"Cache-Control": "no-store"}
+    )
+
+
+PLAIN_ERROR_RESPONSES = {
+    status: {
+        "description": description,
+        "content": {
+            "text/plain": {"schema": {"$ref": "#/components/schemas/ErrorResponse"}}
+        },
+    }
+    for status, description in {
+        400: "Malformed framing or protocol event",
+        401: "Unauthorized",
+        413: "Event body too large",
+        503: "Notification queue unavailable",
+    }.items()
+}
+
+
+@app.middleware("http")
+async def guard_event_ingest(request: Request, call_next):
+    """Reject framing and auth before FastAPI consumes the JSON body."""
+    if request.method != "POST" or request.url.path != "/events":
+        return await call_next(request)
+    if request.headers.get("transfer-encoding"):
+        return _error(400, "unsupported transfer encoding")
+    lengths = request.headers.getlist("content-length")
+    if (
+        len(lengths) != 1
+        or not lengths[0].isascii()
+        or not lengths[0].isdigit()
+        or int(lengths[0]) <= 0
+    ):
+        return _error(400, "invalid content length")
+    if int(lengths[0]) > MAX_EVENT_BYTES:
+        return _error(413, "event too large")
+    presented = request.headers.get("x-burrow-token") or ""
+    scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
+    if scheme.lower() == "bearer":
+        presented = value.strip() or presented
+    if TOKEN and not hmac.compare_digest(presented, TOKEN):
+        return _error(401, "unauthorized")
+    return await call_next(request)
+
+
+@app.post(
+    "/events",
+    status_code=204,
+    responses={
+        204: {"description": "Appended or deduplicated"},
+        **PLAIN_ERROR_RESPONSES,
+    },
+)
+async def ingest_event(
+    request: Request,
+    event_wire: ProtocolEvent,
+    x_burrow_delivery_id: str | None = Header(None),
+):
+    event = event_wire.model_dump(mode="python", exclude_unset=True)
+    error = validate_event(event)
+    if error:
+        return _error(400, error)
+    event.pop("delivery_id", None)
+    delivery_id = (x_burrow_delivery_id or "").strip()
+    if delivery_id:
+        if not _delivery_id_pattern.fullmatch(delivery_id):
+            return _error(400, "invalid delivery id")
+        event["delivery_id"] = delivery_id
+    await anyio.to_thread.run_sync(append_event, event)
+    if not await anyio.to_thread.run_sync(persist_knock, event):
+        return _error(503, "notification queue unavailable")
+    if await anyio.to_thread.run_sync(claim_knock, event):
+        await anyio.to_thread.run_sync(notify_async, event)
+    await anyio.to_thread.run_sync(_runtime(request).state_coordinator.evaluate)
+    return Response(status_code=204)
+
+
+@app.get(
+    "/state",
+    response_model=StateEnvelope,
+    responses={204: {"description": "Snapshot unchanged"}},
+)
+async def get_state(
+    request: Request,
+    generation: int | None = Query(None, ge=0),
+    cursor: str | None = Query(None),
+):
+    coordinator = _runtime(request).state_coordinator
+    delivery = await anyio.to_thread.run_sync(
+        coordinator.evaluate_delivery, generation, cursor
+    )
+    if delivery["kind"] == "unchanged":
+        return Response(
+            status_code=204,
+            headers={
+                "X-Burrow-State-Generation": str(delivery["generation"]),
+                "X-Burrow-State-Cursor": delivery["cursor"],
+            },
+        )
+    return delivery
+
+
+@app.get(
+    "/state/stream",
+    response_class=EventSourceResponse,
+    responses={
+        200: {
+            "content": {"text/event-stream": {}},
+            "description": "Complete Village State snapshots",
+        }
+    },
+)
+async def stream_state(
+    request: Request, generation: int = Query(0, ge=0), cursor: str | None = Query(None)
+):
+    coordinator = _runtime(request).state_coordinator
+
+    async def events():
+        nonlocal generation, cursor
+        while not await request.is_disconnected():
+            delivery = await anyio.to_thread.run_sync(
+                coordinator.evaluate_delivery, generation, cursor
+            )
+            if delivery["kind"] in {"snapshot", "reset"}:
+                snapshot = delivery["snapshot"]
+                yield ServerSentEvent(
+                    data=json.dumps(
+                        delivery,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                    event="snapshot",
+                    id=str(snapshot["generation"]),
+                )
+                generation, cursor = snapshot["generation"], snapshot["cursor"]
+            await anyio.to_thread.run_sync(
+                coordinator.wait_for_newer, generation, 1, abandon_on_cancel=True
+            )
+
+    return EventSourceResponse(
+        events(),
+        ping=15,
+        headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/transport/status", response_model=TransportStatus)
+async def get_transport_status():
+    return await anyio.to_thread.run_sync(transport_status)
+
+
+@app.get("/villagers", response_model=VillagerList)
+async def get_villagers():
+    return await anyio.to_thread.run_sync(read_villagers)
+
+
+@app.get("/residents", response_model=ResidentReport)
+async def get_residents():
+    return await anyio.to_thread.run_sync(read_residents)
+
+
+@app.get("/events", include_in_schema=False)
+async def get_events(request: Request, since: str | None = Query(None)):
+    try:
+        cursor = (
+            EventCursor.parse(since) if since is not None else EventCursor.initial()
+        )
+    except ValueError:
+        return _error(400, "invalid since cursor")
+    records, issued, reset = await anyio.to_thread.run_sync(
+        _runtime(request).read_event_records, cursor
+    )
+    headers = {"X-Burrow-Cursor": issued.format(), "Cache-Control": "no-store"}
+    if reset:
+        headers["X-Burrow-Reset"] = "1"
+    return Response(
+        b"".join(line for _, line in records),
+        media_type="application/x-ndjson",
+        headers=headers,
+    )
+
+
+@app.get("/retention-policy.json", include_in_schema=False)
+async def retention_policy_file():
+    return FileResponse(
+        os.path.join(ROOT, "retention-policy.json"), media_type="application/json"
+    )
+
+
+@app.get("/{asset_path:path}", include_in_schema=False)
+async def static_viewer(asset_path: str):
+    asset_path = asset_path or "index.html"
+    base = os.path.realpath(os.path.join(ROOT, "viewer"))
+    full = os.path.realpath(os.path.join(base, asset_path))
+    if not full.startswith(base + os.sep) or not os.path.isfile(full):
+        return _error(404, "not found")
+    return FileResponse(
+        full,
+        media_type=CTYPES.get(os.path.splitext(full)[1], "application/octet-stream"),
+    )
+
+
+def serve_forever():
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
 
 
 if __name__ == "__main__":

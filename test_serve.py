@@ -21,9 +21,15 @@ def _append_same_deliveries(events, delivery_ids, barrier):
     serve._delivery_ids_by_log.clear()
     for delivery_id in delivery_ids:
         event = {
-            "v": 0, "ts": "2026-08-24T12:00:00.000Z", "source": "test",
-            "agent_id": "test:one", "project": "burrow", "cwd": "",
-            "type": "idle", "payload": {}, "delivery_id": delivery_id,
+            "v": 0,
+            "ts": "2026-08-24T12:00:00.000Z",
+            "source": "test",
+            "agent_id": "test:one",
+            "project": "burrow",
+            "cwd": "",
+            "type": "idle",
+            "payload": {},
+            "delivery_id": delivery_id,
         }
         barrier.wait()
         serve.append_event(event)
@@ -66,7 +72,9 @@ class NotificationTests(unittest.TestCase):
         serve._knock_attempts.clear()
 
     @staticmethod
-    def event(agent_id="agent-a", project="burrow", message="help", ts="2026-08-24T12:00:00Z"):
+    def event(
+        agent_id="agent-a", project="burrow", message="help", ts="2026-08-24T12:00:00Z"
+    ):
         return {
             "v": 1,
             "ts": ts,
@@ -82,7 +90,9 @@ class NotificationTests(unittest.TestCase):
                 stream.write(json.dumps(event) + "\n")
 
     def write_soul(self, filename, **metadata):
-        with open(os.path.join(self.villagers, filename), "w", encoding="utf-8") as stream:
+        with open(
+            os.path.join(self.villagers, filename), "w", encoding="utf-8"
+        ) as stream:
             stream.write("---\n")
             for key, value in metadata.items():
                 stream.write(f"{key}: {value}\n")
@@ -94,15 +104,20 @@ class NotificationTests(unittest.TestCase):
             "match": match,
             "home": home,
             "soul": {
-                "name": name, "char": "Monk", "accent": "#a68a4f",
-                "role": "resident", "description": "A validated resident.",
+                "name": name,
+                "char": "Monk",
+                "accent": "#a68a4f",
+                "role": "resident",
+                "description": "A validated resident.",
             },
             "skills": [{"id": "summary", "status_ref": "bundled"}],
             "memory": {"ref": "file:///memory.md", "status_ref": "mounted"},
             "routes": [{"id": "local", "status_ref": "configured"}],
             "app_grants": [{"id": "mail", "status_ref": "configured"}],
         }
-        with open(os.path.join(self.villagers, filename), "w", encoding="utf-8") as stream:
+        with open(
+            os.path.join(self.villagers, filename), "w", encoding="utf-8"
+        ) as stream:
             json.dump(manifest, stream)
 
     def test_failed_delivery_can_be_claimed_again_but_success_is_deduplicated(self):
@@ -117,26 +132,36 @@ class NotificationTests(unittest.TestCase):
 
     def test_structured_knock_push_uses_action_and_detail(self):
         event = self.event(message="legacy fallback")
-        event["payload"].update({
-            "request_id": "r1", "action": "send_email",
-            "detail": {"subject": "Thursday", "to": "anna@example.com"},
-            "options": ["approve", "deny", "edit"],
-        })
+        event["payload"].update(
+            {
+                "request_id": "r1",
+                "action": "send_email",
+                "detail": {"subject": "Thursday", "to": "anna@example.com"},
+                "options": ["approve", "deny", "edit"],
+            }
+        )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
             self.assertTrue(serve.notify(event))
         request = opened.call_args.args[0]
         self.assertEqual(request.headers["Title"], "send_email")
-        self.assertEqual(json.loads(request.data.decode("utf-8")), event["payload"]["detail"])
-        self.assertEqual(request.headers["X-burrow-delivery-id"],
-                         serve.receiver_delivery_id(event))
+        self.assertEqual(
+            json.loads(request.data.decode("utf-8")), event["payload"]["detail"]
+        )
+        self.assertEqual(
+            request.headers["X-burrow-delivery-id"], serve.receiver_delivery_id(event)
+        )
 
     def test_structured_knock_push_preserves_null_detail(self):
         event = self.event(message="legacy fallback")
-        event["payload"].update({
-            "request_id": "r-null", "action": "restart_service",
-            "detail": None, "options": ["approve", "deny"],
-        })
+        event["payload"].update(
+            {
+                "request_id": "r-null",
+                "action": "restart_service",
+                "detail": None,
+                "options": ["approve", "deny"],
+            }
+        )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
             self.assertTrue(serve.notify(event))
@@ -155,8 +180,9 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("please inspect", request.data.decode("utf-8"))
 
     def test_structured_shape_matrix_matches_projection_rotation_and_notification(self):
-        path = os.path.join(os.path.dirname(__file__), "tests", "fixtures",
-                            "approval-shapes.json")
+        path = os.path.join(
+            os.path.dirname(__file__), "tests", "fixtures", "approval-shapes.json"
+        )
         with open(path, encoding="utf-8") as stream:
             cases = json.load(stream)
         for case in cases:
@@ -164,19 +190,30 @@ class NotificationTests(unittest.TestCase):
             event["payload"] = case["payload"]
             classified = approval_protocol.classify_approval(event)
             self.assertEqual(classified.kind, case["kind"], case["name"])
-            self.assertIs(serve.structured_approval,
-                          serve.notification_persistence.structured_approval)
-            self.assertIs(serve.structured_approval, approval_protocol.structured_approval)
-            self.assertEqual(serve.structured_approval(event) is not None,
-                             case["kind"] == "structured", case["name"])
+            self.assertIs(
+                serve.structured_approval,
+                serve.notification_persistence.structured_approval,
+            )
+            self.assertIs(
+                serve.structured_approval, approval_protocol.structured_approval
+            )
+            self.assertEqual(
+                serve.structured_approval(event) is not None,
+                case["kind"] == "structured",
+                case["name"],
+            )
 
     def test_shared_structured_parser_returns_a_complete_deeply_immutable_shape(self):
         event = self.event(message="exact message")
-        event["payload"].update({
-            "request_id": " request ", "action": "send_email",
-            "detail": {"nested": {"count": 1}, "items": [True, None]},
-            "options": ["approve", "approve", "edit"], "expires_at": None,
-        })
+        event["payload"].update(
+            {
+                "request_id": " request ",
+                "action": "send_email",
+                "detail": {"nested": {"count": 1}, "items": [True, None]},
+                "options": ["approve", "approve", "edit"],
+                "expires_at": None,
+            }
+        )
         shape = approval_protocol.structured_approval(event)
         self.assertEqual(shape.request_id, " request ")
         self.assertEqual(shape.options, ("approve", "approve", "edit"))
@@ -191,66 +228,93 @@ class NotificationTests(unittest.TestCase):
         with self.assertRaises((AttributeError, TypeError)):
             shape.request_id = "changed"
 
-    def test_distinct_same_millisecond_structured_requests_have_distinct_durable_identity(self):
+    def test_distinct_same_millisecond_structured_requests_have_distinct_durable_identity(
+        self,
+    ):
         first = self.event(ts="2026-08-24T12:00:00.000Z")
-        first["payload"].update({"request_id": "request-a", "action": "send_email",
-                                 "detail": {}, "options": ["approve"]})
+        first["payload"].update(
+            {
+                "request_id": "request-a",
+                "action": "send_email",
+                "detail": {},
+                "options": ["approve"],
+            }
+        )
         second = json.loads(json.dumps(first))
         second["payload"]["request_id"] = "request-b"
         self.assertNotEqual(serve.knock_key(first), serve.knock_key(second))
-        self.assertNotEqual(serve.terminal_knock_key(first), serve.terminal_knock_key(second))
+        self.assertNotEqual(
+            serve.terminal_knock_key(first), serve.terminal_knock_key(second)
+        )
         self.assertTrue(serve.claim_knock(first))
         self.assertTrue(serve.claim_knock(second))
         self.assertTrue(serve.finish_knock(first, True))
         self.assertTrue(serve.finish_knock(second, True))
         self.assertFalse(serve.claim_knock(first), "exact replay stays terminal")
-        self.assertFalse(serve.claim_knock(second), "each distinct request is terminal once")
+        self.assertFalse(
+            serve.claim_knock(second), "each distinct request is terminal once"
+        )
 
-    def test_structured_notification_identity_covers_exact_wire_and_immutable_shape(self):
-        baseline = self.event(agent_id=" agent ", project=" project ",
-                              ts="2026-08-24T12:00:00.000Z")
+    def test_structured_notification_identity_covers_exact_wire_and_immutable_shape(
+        self,
+    ):
+        baseline = self.event(
+            agent_id=" agent ", project=" project ", ts="2026-08-24T12:00:00.000Z"
+        )
         baseline["source"] = "codex"
-        baseline["payload"].update({
-            "request_id": " request ", "action": "send_email",
-            "detail": {"count": 1, "nested": {"b": True}},
-            "options": ["approve", "approve", "deny"],
-            "expires_at": "2026-08-25T12:00:00Z",
-        })
+        baseline["payload"].update(
+            {
+                "request_id": " request ",
+                "action": "send_email",
+                "detail": {"count": 1, "nested": {"b": True}},
+                "options": ["approve", "approve", "deny"],
+                "expires_at": "2026-08-25T12:00:00Z",
+            }
+        )
         exact_replay = json.loads(json.dumps(baseline))
         semantic_replay = json.loads(json.dumps(baseline))
         semantic_replay["payload"]["detail"] = {
-            "nested": {"b": True}, "count": 1.0,
+            "nested": {"b": True},
+            "count": 1.0,
         }
         self.assertEqual(serve.knock_key(baseline), serve.knock_key(exact_replay))
         self.assertEqual(serve.knock_key(baseline), serve.knock_key(semantic_replay))
         self.assertTrue(serve.knock_key(baseline).startswith("structured-v3-sha256-"))
-        self.assertNotIn("request", serve.knock_key(baseline),
-                         "hashed identity must not retain approval data")
+        self.assertNotIn(
+            "request",
+            serve.knock_key(baseline),
+            "hashed identity must not retain approval data",
+        )
 
         variants = []
         for mutate in (
-                lambda item: item.update(agent_id="agent "),
-                lambda item: item.update(project="project "),
-                lambda item: item["payload"].update(request_id="request "),
-                lambda item: item["payload"].update(action="restart_service"),
-                lambda item: item["payload"].update(message="help "),
-                lambda item: item["payload"].update(detail={"count": 2}),
-                lambda item: item["payload"].update(options=["approve"]),
-                lambda item: item["payload"].update(
-                    options=["approve", "deny", "approve"]),
-                lambda item: item["payload"].update(
-                    expires_at="2026-08-25T12:00:01Z"),
-                lambda item: item["payload"].pop("expires_at"),
-                lambda item: item.update(ts="2026-08-24T12:00:00.001Z")):
+            lambda item: item.update(agent_id="agent "),
+            lambda item: item.update(project="project "),
+            lambda item: item["payload"].update(request_id="request "),
+            lambda item: item["payload"].update(action="restart_service"),
+            lambda item: item["payload"].update(message="help "),
+            lambda item: item["payload"].update(detail={"count": 2}),
+            lambda item: item["payload"].update(options=["approve"]),
+            lambda item: item["payload"].update(options=["approve", "deny", "approve"]),
+            lambda item: item["payload"].update(expires_at="2026-08-25T12:00:01Z"),
+            lambda item: item["payload"].pop("expires_at"),
+            lambda item: item.update(ts="2026-08-24T12:00:00.001Z"),
+        ):
             variant = json.loads(json.dumps(baseline))
             mutate(variant)
             variants.append(variant)
-        keys = {serve.knock_key(baseline), *(serve.knock_key(item) for item in variants)}
+        keys = {
+            serve.knock_key(baseline),
+            *(serve.knock_key(item) for item in variants),
+        }
         self.assertEqual(len(keys), 1 + len(variants))
 
-    def test_structured_notification_identity_matches_shared_cross_language_vector(self):
-        path = os.path.join(os.path.dirname(__file__), "tests", "fixtures",
-                            "notification-identity.json")
+    def test_structured_notification_identity_matches_shared_cross_language_vector(
+        self,
+    ):
+        path = os.path.join(
+            os.path.dirname(__file__), "tests", "fixtures", "notification-identity.json"
+        )
         with open(path, encoding="utf-8") as stream:
             vector = json.load(stream)
         self.assertEqual(serve.knock_key(vector["event"]), vector["expected_key"])
@@ -258,8 +322,14 @@ class NotificationTests(unittest.TestCase):
     def test_plain_knock_cannot_suppress_structured_knock_with_same_legacy_tuple(self):
         plain = self.event(ts="2026-08-24T12:00:00.000Z")
         structured = json.loads(json.dumps(plain))
-        structured["payload"].update({"request_id": "request", "action": "send_email",
-                                      "detail": {}, "options": ["approve"]})
+        structured["payload"].update(
+            {
+                "request_id": "request",
+                "action": "send_email",
+                "detail": {},
+                "options": ["approve"],
+            }
+        )
         self.assertNotEqual(serve.knock_key(plain), serve.knock_key(structured))
         self.assertTrue(serve.claim_knock(plain))
         self.assertTrue(serve.finish_knock(plain, True))
@@ -267,25 +337,52 @@ class NotificationTests(unittest.TestCase):
 
     def test_ambiguous_pre_v3_terminal_keys_do_not_suppress_structured_upgrade(self):
         event = self.event(ts="2026-08-24T12:00:00.000Z")
-        event["payload"].update({"request_id": "migrated", "action": "send_email",
-                                 "detail": {}, "options": ["approve"]})
-        legacy = "burrow-sha256-" + __import__("hashlib").sha256(
-            serve.notification_persistence.legacy_knock_key(event).encode(
-                "utf-8", "surrogatepass")).hexdigest()
-        v2 = "\x00".join(str(value) for value in (
-            "structured-v2", event.get("agent_id"), event.get("ts"),
-            event.get("project"), event.get("source"), "migrated",
-            "send_email", event["payload"]["message"]))
-        v2 = "burrow-sha256-" + __import__("hashlib").sha256(
-            v2.encode("utf-8", "surrogatepass")).hexdigest()
-        serve._remember_durable(
-            serve.LEDGER_NOTIFIED, serve._notified_by_log, legacy)
-        serve._remember_durable(
-            serve.LEDGER_NOTIFIED, serve._notified_by_log, v2)
-        self.assertEqual(serve.terminal_knock_keys(event),
-                         (serve.terminal_knock_key(event),))
-        self.assertTrue(serve.claim_knock(event),
-                        "ambiguous historical aliases favor one safe re-notification")
+        event["payload"].update(
+            {
+                "request_id": "migrated",
+                "action": "send_email",
+                "detail": {},
+                "options": ["approve"],
+            }
+        )
+        legacy = (
+            "burrow-sha256-"
+            + __import__("hashlib")
+            .sha256(
+                serve.notification_persistence.legacy_knock_key(event).encode(
+                    "utf-8", "surrogatepass"
+                )
+            )
+            .hexdigest()
+        )
+        v2 = "\x00".join(
+            str(value)
+            for value in (
+                "structured-v2",
+                event.get("agent_id"),
+                event.get("ts"),
+                event.get("project"),
+                event.get("source"),
+                "migrated",
+                "send_email",
+                event["payload"]["message"],
+            )
+        )
+        v2 = (
+            "burrow-sha256-"
+            + __import__("hashlib")
+            .sha256(v2.encode("utf-8", "surrogatepass"))
+            .hexdigest()
+        )
+        serve._remember_durable(serve.LEDGER_NOTIFIED, serve._notified_by_log, legacy)
+        serve._remember_durable(serve.LEDGER_NOTIFIED, serve._notified_by_log, v2)
+        self.assertEqual(
+            serve.terminal_knock_keys(event), (serve.terminal_knock_key(event),)
+        )
+        self.assertTrue(
+            serve.claim_knock(event),
+            "ambiguous historical aliases favor one safe re-notification",
+        )
 
     def test_plain_legacy_terminal_key_still_suppresses_exact_plain_replay(self):
         event = self.event(ts="2026-08-24T12:00:00.000Z")
@@ -294,22 +391,29 @@ class NotificationTests(unittest.TestCase):
         self.assertEqual(serve.terminal_knock_keys(event), (key,))
         self.assertFalse(serve.claim_knock(event))
 
-    def test_repeated_options_are_structured_in_notification_and_survive_restart_once(self):
+    def test_repeated_options_are_structured_in_notification_and_survive_restart_once(
+        self,
+    ):
         event = self.event(message="choose twice")
-        event["payload"].update({
-            "request_id": "repeat", "action": "send_email",
-            "detail": {"subject": "Repeated approval"},
-            "options": ["approve", "approve"],
-        })
-        self.assertEqual(serve.structured_approval(event).options,
-                         ("approve", "approve"))
+        event["payload"].update(
+            {
+                "request_id": "repeat",
+                "action": "send_email",
+                "detail": {"subject": "Repeated approval"},
+                "options": ["approve", "approve"],
+            }
+        )
+        self.assertEqual(
+            serve.structured_approval(event).options, ("approve", "approve")
+        )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
             self.assertTrue(serve.notify(event))
         request = opened.call_args.args[0]
         self.assertEqual(request.headers["Title"], "send_email")
-        self.assertEqual(json.loads(request.data.decode("utf-8")),
-                         {"subject": "Repeated approval"})
+        self.assertEqual(
+            json.loads(request.data.decode("utf-8")), {"subject": "Repeated approval"}
+        )
         self.assertTrue(serve.persist_knock(event))
         recovered = queue.Queue()
         with mock.patch.object(serve, "_knock_queue", recovered):
@@ -321,7 +425,9 @@ class NotificationTests(unittest.TestCase):
         serve._notified.clear()
         serve._notifying.clear()
         serve._notified_by_log.clear()
-        self.assertFalse(serve.claim_knock(event), "durable exact replay stays claimed once")
+        self.assertFalse(
+            serve.claim_knock(event), "durable exact replay stays claimed once"
+        )
 
     def test_project_soul_is_consumed_once_across_the_fleet(self):
         self.write_soul("burrow.md", project="burrow", name="Maren")
@@ -340,15 +446,18 @@ class NotificationTests(unittest.TestCase):
         second = self.event(agent_id="q", ts="2026-08-24T12:00:01Z")
         self.write_events(first, second)
 
-        self.assertEqual({"a": "Poppy", "q": "Wren"},
-                         serve.villager_names([first, second]))
+        self.assertEqual(
+            {"a": "Poppy", "q": "Wren"}, serve.villager_names([first, second])
+        )
 
     def test_hash_matches_javascript_for_non_bmp_agent_ids(self):
         event = self.event(agent_id="agent-U0001f407")
         self.assertEqual("Reed", serve.villager_names([event])["agent-U0001f407"])
 
     def test_exact_soul_is_not_reused_by_another_agent(self):
-        self.write_soul("resident.md", agent_id="resident", project="burrow", name="Maren")
+        self.write_soul(
+            "resident.md", agent_id="resident", project="burrow", name="Maren"
+        )
         ephemeral = self.event(agent_id="ephemeral")
         resident = self.event(agent_id="resident", ts="2026-08-24T12:00:01Z")
         self.write_events(ephemeral, resident)
@@ -395,7 +504,10 @@ class NotificationTests(unittest.TestCase):
         parent = self.event(agent_id="z-parent")
         child_start = self.event(agent_id="a-child", ts="2026-08-24T11:59:58Z")
         child_start["type"] = "task_started"
-        child_start["payload"] = {"parent_agent_id": "z-parent", "agent_type": "reviewer"}
+        child_start["payload"] = {
+            "parent_agent_id": "z-parent",
+            "agent_type": "reviewer",
+        }
         child_tool = self.event(agent_id="a-child", ts="2026-08-24T11:59:59Z")
         child_tool["type"] = "tool_called"
         child_tool["payload"] = {"tool": "Read"}
@@ -418,7 +530,9 @@ class NotificationTests(unittest.TestCase):
             captured["timeout"] = timeout
             return mock.MagicMock()
 
-        with mock.patch.object(serve.urllib.request, "urlopen", side_effect=open_request):
+        with mock.patch.object(
+            serve.urllib.request, "urlopen", side_effect=open_request
+        ):
             self.assertTrue(serve.notify(event))
 
         title = captured["request"].get_header("Title")
@@ -434,33 +548,46 @@ class NotificationTests(unittest.TestCase):
             captured["body"] = request.data
             return mock.MagicMock()
 
-        with mock.patch.object(serve.urllib.request, "urlopen", side_effect=open_request):
+        with mock.patch.object(
+            serve.urllib.request, "urlopen", side_effect=open_request
+        ):
             self.assertTrue(serve.notify(event))
 
         name = serve.villager_name(event)
         self.assertEqual(
-            f"{name} · burrow\n  first line\nsecond line\n".encode(), captured["body"])
+            f"{name} · burrow\n  first line\nsecond line\n".encode(), captured["body"]
+        )
 
         empty = self.event(message="")
-        with mock.patch.object(serve.urllib.request, "urlopen", side_effect=open_request):
+        with mock.patch.object(
+            serve.urllib.request, "urlopen", side_effect=open_request
+        ):
             self.assertTrue(serve.notify(empty))
         self.assertEqual(f"{name} · burrow\n".encode(), captured["body"])
 
     def test_notification_has_stable_receiver_dedupe_header(self):
         event = self.event()
         captured = {}
+
         def open_request(request, timeout):
             captured["request"] = request
             return mock.MagicMock()
-        with mock.patch.object(serve.urllib.request, "urlopen", side_effect=open_request):
+
+        with mock.patch.object(
+            serve.urllib.request, "urlopen", side_effect=open_request
+        ):
             self.assertTrue(serve.notify(event))
-        self.assertEqual(captured["request"].get_header("X-burrow-delivery-id"),
-                         serve.receiver_delivery_id(event))
+        self.assertEqual(
+            captured["request"].get_header("X-burrow-delivery-id"),
+            serve.receiver_delivery_id(event),
+        )
 
     def test_notification_queue_saturation_is_bounded_and_inspectable(self):
         tiny = serve.queue.Queue(maxsize=1)
-        with mock.patch.object(serve, "_knock_queue", tiny), \
-                mock.patch.object(serve, "ensure_knock_workers"):
+        with (
+            mock.patch.object(serve, "_knock_queue", tiny),
+            mock.patch.object(serve, "ensure_knock_workers"),
+        ):
             self.assertTrue(serve.notify_async(self.event(agent_id="first")))
             self.assertFalse(serve.notify_async(self.event(agent_id="second")))
         status = serve.transport_status()
@@ -497,14 +624,16 @@ class NotificationTests(unittest.TestCase):
         def append_after_handoff(source, destination):
             real_replace(source, destination)
             worker = threading.Thread(
-                target=lambda: appended.append(serve.persist_knock(second)))
+                target=lambda: appended.append(serve.persist_knock(second))
+            )
             worker.start()
             appenders.append(worker)
 
         recovered = serve.queue.Queue(maxsize=4)
         with mock.patch.object(serve, "_knock_queue", recovered):
-            with mock.patch.object(serve.os, "replace",
-                                   side_effect=append_after_handoff):
+            with mock.patch.object(
+                serve.os, "replace", side_effect=append_after_handoff
+            ):
                 serve._recover_knocks()
             appenders[0].join(1)
             self.assertEqual(appended, [True])
@@ -532,8 +661,10 @@ class NotificationTests(unittest.TestCase):
         second_restart = serve.queue.Queue(maxsize=4)
         with mock.patch.object(serve, "_knock_queue", second_restart):
             serve._recover_knocks()
-        recovered = {serve.knock_key(second_restart.get_nowait()),
-                     serve.knock_key(second_restart.get_nowait())}
+        recovered = {
+            serve.knock_key(second_restart.get_nowait()),
+            serve.knock_key(second_restart.get_nowait()),
+        }
         self.assertEqual(recovered, {serve.knock_key(old), serve.knock_key(new)})
 
     def test_legacy_knock_uses_stable_ascii_receiver_delivery_id(self):
@@ -547,9 +678,11 @@ class NotificationTests(unittest.TestCase):
             def __exit__(self, *args):
                 return False
 
-        with mock.patch.object(serve.urllib.request, "urlopen",
-                               side_effect=lambda request, timeout: requests.append(request)
-                               or Response()):
+        with mock.patch.object(
+            serve.urllib.request,
+            "urlopen",
+            side_effect=lambda request, timeout: requests.append(request) or Response(),
+        ):
             self.assertTrue(serve.notify(event))
             self.assertTrue(serve.notify(event))
         values = [request.get_header("X-burrow-delivery-id") for request in requests]
@@ -578,8 +711,10 @@ class NotificationTests(unittest.TestCase):
                 self.assertEqual(len(generations), 1)
                 # Simulate compaction crashing after the active publish but
                 # before its replay source is retired.
-                with open(generations[0], "rb") as source, \
-                        open(self.events + ".knocks", "wb") as active:
+                with (
+                    open(generations[0], "rb") as source,
+                    open(self.events + ".knocks", "wb") as active,
+                ):
                     active.write(source.read())
                     active.flush()
                     os.fsync(active.fileno())
@@ -604,25 +739,30 @@ class NotificationTests(unittest.TestCase):
             serve._recover_knocks()
         generations = glob.glob(self.events + ".knocks.replay.*")
         self.assertEqual(len(generations), 1)
-        serve._remember_durable("notified", serve._notified_by_log,
-                                serve.terminal_knock_key(delivered))
+        serve._remember_durable(
+            "notified", serve._notified_by_log, serve.terminal_knock_key(delivered)
+        )
         serve._recover_knocks()
         self.assertTrue(os.path.exists(generations[0]))
-        serve._remember_durable("notify-dropped", serve._dropped_by_log,
-                                serve.terminal_knock_key(dropped))
+        serve._remember_durable(
+            "notify-dropped", serve._dropped_by_log, serve.terminal_knock_key(dropped)
+        )
         serve._recover_knocks()
         self.assertFalse(os.path.exists(generations[0]))
 
     def test_server_startup_recovers_pending_knocks_without_new_ingest(self):
         event = self.event()
         self.assertTrue(serve.persist_knock(event))
-        fake_server = mock.MagicMock()
-        with mock.patch.object(serve, "ensure_knock_workers") as ensure, \
-                mock.patch.object(serve, "BurrowHTTPServer",
-                                  return_value=fake_server):
-            serve.serve_forever()
+        from fastapi.testclient import TestClient
+
+        with (
+            mock.patch.object(serve, "ensure_knock_workers") as ensure,
+            mock.patch.object(serve, "stop_knock_workers") as stop,
+            TestClient(serve.app),
+        ):
+            pass
         ensure.assert_called_once_with()
-        fake_server.serve_forever.assert_called_once_with()
+        stop.assert_called_once_with()
 
     def test_knock_is_not_acknowledgeable_when_durable_journal_fails(self):
         event = self.event()
@@ -632,9 +772,11 @@ class NotificationTests(unittest.TestCase):
     def test_failed_worker_delivery_has_bounded_retry_and_drop_accounting(self):
         event = self.event()
         tiny = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", tiny), \
-                mock.patch.object(serve, "notify", return_value=False), \
-                mock.patch.object(serve, "_recover_knocks"):
+        with (
+            mock.patch.object(serve, "_knock_queue", tiny),
+            mock.patch.object(serve, "notify", return_value=False),
+            mock.patch.object(serve, "_recover_knocks"),
+        ):
             self.assertTrue(serve.claim_knock(event))
             serve._process_knock(event)
             serve._process_knock(tiny.get_nowait())
@@ -651,9 +793,11 @@ class NotificationTests(unittest.TestCase):
         first_queue = serve.queue.Queue(maxsize=4)
         with mock.patch.object(serve, "_knock_queue", first_queue):
             serve._recover_knocks()
-        with mock.patch.object(serve, "_knock_queue", first_queue), \
-                mock.patch.object(serve, "notify", return_value=False), \
-                mock.patch.object(serve, "_recover_knocks"):
+        with (
+            mock.patch.object(serve, "_knock_queue", first_queue),
+            mock.patch.object(serve, "notify", return_value=False),
+            mock.patch.object(serve, "_recover_knocks"),
+        ):
             serve._process_knock(first_queue.get_nowait())
 
         serve._notifying.clear()
@@ -662,9 +806,11 @@ class NotificationTests(unittest.TestCase):
         restarted = serve.queue.Queue(maxsize=4)
         with mock.patch.object(serve, "_knock_queue", restarted):
             serve._recover_knocks()
-        with mock.patch.object(serve, "_knock_queue", restarted), \
-                mock.patch.object(serve, "notify", return_value=False), \
-                mock.patch.object(serve, "_recover_knocks"):
+        with (
+            mock.patch.object(serve, "_knock_queue", restarted),
+            mock.patch.object(serve, "notify", return_value=False),
+            mock.patch.object(serve, "_recover_knocks"),
+        ):
             serve._process_knock(restarted.get_nowait())
             serve._process_knock(restarted.get_nowait())
 
@@ -686,9 +832,15 @@ class TransportDiagnosticsTests(unittest.TestCase):
     @staticmethod
     def event(delivery_id):
         return {
-            "v": 0, "ts": "2026-08-24T12:00:00.000Z", "source": "test",
-            "agent_id": "test:one", "project": "burrow", "cwd": "",
-            "type": "idle", "payload": {}, "delivery_id": delivery_id,
+            "v": 0,
+            "ts": "2026-08-24T12:00:00.000Z",
+            "source": "test",
+            "agent_id": "test:one",
+            "project": "burrow",
+            "cwd": "",
+            "type": "idle",
+            "payload": {},
+            "delivery_id": delivery_id,
         }
 
     def test_retried_delivery_is_appended_exactly_once_within_dedupe_window(self):
@@ -711,8 +863,9 @@ class TransportDiagnosticsTests(unittest.TestCase):
 
     def test_event_log_repairs_crash_between_event_fsync_and_delivery_ledger(self):
         event = self.event("crash-window-delivery-0001")
-        with mock.patch.object(serve, "_remember_durable",
-                               side_effect=OSError("crash after event fsync")):
+        with mock.patch.object(
+            serve, "_remember_durable", side_effect=OSError("crash after event fsync")
+        ):
             with self.assertRaises(OSError):
                 serve.append_event(event)
         serve._delivery_ids_by_log.clear()
@@ -724,10 +877,13 @@ class TransportDiagnosticsTests(unittest.TestCase):
         delivery_ids = [f"multiprocess-delivery-{index:04d}" for index in range(20)]
         context = multiprocessing.get_context("fork")
         barrier = context.Barrier(2)
-        processes = [context.Process(
-            target=_append_same_deliveries,
-            args=(self.events, delivery_ids, barrier),
-        ) for _ in range(2)]
+        processes = [
+            context.Process(
+                target=_append_same_deliveries,
+                args=(self.events, delivery_ids, barrier),
+            )
+            for _ in range(2)
+        ]
 
         for process in processes:
             process.start()
@@ -741,21 +897,24 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.assertEqual(counts, collections.Counter({key: 1 for key in delivery_ids}))
 
     def test_auxiliary_ledger_is_bounded_by_records_and_bytes_after_restart(self):
-        with mock.patch.object(serve, "LEDGER_RECORDS", 4), \
-                mock.patch.object(serve, "LEDGER_BYTES", 24):
+        with (
+            mock.patch.object(serve, "LEDGER_RECORDS", 4),
+            mock.patch.object(serve, "LEDGER_BYTES", 24),
+        ):
             for index in range(10):
-                serve._remember_durable("delivery-ids",
-                                        serve._delivery_ids_by_log,
-                                        f"key-{index}")
+                serve._remember_durable(
+                    "delivery-ids", serve._delivery_ids_by_log, f"key-{index}"
+                )
             serve._delivery_ids_by_log.clear()
-            remembered = serve._load_ledger("delivery-ids",
-                                            serve._delivery_ids_by_log)
+            remembered = serve._load_ledger("delivery-ids", serve._delivery_ids_by_log)
         self.assertEqual(remembered, {"key-6", "key-7", "key-8", "key-9"})
         self.assertLessEqual(os.path.getsize(self.events + ".delivery-ids"), 24)
 
     def test_existing_ledger_key_refreshes_newest_retention(self):
-        with mock.patch.object(serve, "LEDGER_RECORDS", 2), \
-                mock.patch.object(serve, "LEDGER_BYTES", 4096):
+        with (
+            mock.patch.object(serve, "LEDGER_RECORDS", 2),
+            mock.patch.object(serve, "LEDGER_BYTES", 4096),
+        ):
             serve._remember_durable_batch("notified", {}, ("A", "B"))
             serve._remember_durable("notified", {}, "A")
             serve._remember_durable("notified", {}, "C")
@@ -763,14 +922,17 @@ class TransportDiagnosticsTests(unittest.TestCase):
             self.assertEqual(stream.read().splitlines(), ["A", "C"])
 
     def test_multiprocess_batch_refresh_preserves_atomic_order(self):
-        with mock.patch.object(serve, "LEDGER_RECORDS", 3), \
-                mock.patch.object(serve, "LEDGER_BYTES", 4096):
+        with (
+            mock.patch.object(serve, "LEDGER_RECORDS", 3),
+            mock.patch.object(serve, "LEDGER_BYTES", 4096),
+        ):
             serve._remember_durable_batch("notified", {}, ("A", "B", "C"))
             context = multiprocessing.get_context("fork")
             gate = context.Barrier(2)
             processes = [
-                context.Process(target=_remember_ledger_batch,
-                                args=(self.events, keys, gate))
+                context.Process(
+                    target=_remember_ledger_batch, args=(self.events, keys, gate)
+                )
                 for keys in (("A",), ("D",))
             ]
             for process in processes:
@@ -784,10 +946,11 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.assertEqual(retained[-1], "D" if retained[-2] == "A" else "A")
 
     def test_evicted_delivery_id_still_deduplicates_from_retained_event_authority(self):
-        events = [self.event(f"retained-delivery-{index:04d}")
-                  for index in range(3)]
-        with mock.patch.object(serve, "LEDGER_RECORDS", 2), \
-                mock.patch.object(serve, "LEDGER_BYTES", 4096):
+        events = [self.event(f"retained-delivery-{index:04d}") for index in range(3)]
+        with (
+            mock.patch.object(serve, "LEDGER_RECORDS", 2),
+            mock.patch.object(serve, "LEDGER_BYTES", 4096),
+        ):
             for event in events:
                 self.assertTrue(serve.append_event(event))
             serve._delivery_ids_by_log.clear()
@@ -801,13 +964,19 @@ class TransportDiagnosticsTests(unittest.TestCase):
         first = [f"first-{index}" for index in range(20)]
         second = [f"second-{index}" for index in range(20)]
         processes = [
-            context.Process(target=_remember_ledger_keys,
-                            args=(self.events, "notified", first, barrier)),
-            context.Process(target=_remember_ledger_keys,
-                            args=(self.events, "notified", second, barrier)),
+            context.Process(
+                target=_remember_ledger_keys,
+                args=(self.events, "notified", first, barrier),
+            ),
+            context.Process(
+                target=_remember_ledger_keys,
+                args=(self.events, "notified", second, barrier),
+            ),
         ]
-        with mock.patch.object(serve, "LEDGER_RECORDS", 64), \
-                mock.patch.object(serve, "LEDGER_BYTES", 4096):
+        with (
+            mock.patch.object(serve, "LEDGER_RECORDS", 64),
+            mock.patch.object(serve, "LEDGER_BYTES", 4096),
+        ):
             for process in processes:
                 process.start()
             for process in processes:

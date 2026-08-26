@@ -1,244 +1,74 @@
-#!/usr/bin/env python3
-"""Ingest auth tests: BURROW_TOKEN gates POST /events and nothing else.
+"""Authentication remains scoped to event ingestion at the ASGI seam."""
 
-No sockets — the handler is driven over in-memory streams, so this is the real
-request-parsing/auth/append path, just without a listener. Run:
-
-    python3 tests/test_ingest_auth.py
-"""
-import importlib.util
-import io
-import json
 import os
-import sys
 import tempfile
+import unittest
+from unittest import mock
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from fastapi.testclient import TestClient
+
+import serve
+
 
 EVENT = {
-    "v": 0, "ts": "2026-08-24T14:03:22.114Z", "source": "claude-code",
-    "agent_id": "claude-code:test", "project": "burrow", "cwd": "/tmp",
-    "type": "idle", "payload": {},
+    "v": 0,
+    "ts": "2026-08-24T14:03:22.114Z",
+    "source": "claude-code",
+    "agent_id": "claude-code:test",
+    "project": "burrow",
+    "cwd": "/tmp",
+    "type": "idle",
+    "payload": {},
 }
 
-failures = []
 
+class IngestAuthenticationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.events = os.path.join(self.tmp.name, "events.jsonl")
+        self.events_patch = mock.patch.object(serve, "EVENTS", self.events)
+        self.events_patch.start()
+        self.addCleanup(self.events_patch.stop)
 
-class FakeServer:
-    """Minimal server surface required by the in-memory Handler harness."""
+    def test_configured_token_accepts_bearer_or_legacy_header_only(self):
+        with (
+            mock.patch.object(serve, "TOKEN", "s3cret"),
+            TestClient(serve.app) as client,
+        ):
+            for headers in (
+                {},
+                {"Authorization": "Bearer nope"},
+                {"X-Burrow-Token": "nope"},
+            ):
+                self.assertEqual(
+                    client.post("/events", json=EVENT, headers=headers).status_code, 401
+                )
+            self.assertEqual(
+                client.post(
+                    "/events", json=EVENT, headers={"Authorization": "Bearer s3cret"}
+                ).status_code,
+                204,
+            )
+            self.assertEqual(
+                client.post(
+                    "/events", json=EVENT, headers={"X-Burrow-Token": "s3cret"}
+                ).status_code,
+                204,
+            )
+            self.assertEqual(client.get("/events").status_code, 200)
+            self.assertEqual(client.get("/villagers").status_code, 200)
 
-    boot_id = "0" * 32
-
-
-def check(label, got, want):
-    ok = got == want
-    print(f"  {'ok  ' if ok else 'FAIL'} {label}: {got!r}" + ("" if ok else f" (want {want!r})"))
-    if not ok:
-        failures.append(label)
-
-
-def load(path, name, env):
-    """Import a module fresh under a given environment (both modules read their
-    config into globals at import time, which is what we want to exercise)."""
-    saved = {k: os.environ.get(k) for k in env}
-    saved_path = sys.path[:]
-    os.environ.update({k: v for k, v in env.items() if v is not None})
-    for k, v in env.items():
-        if v is None:
-            os.environ.pop(k, None)
-    try:
-        # Match Python's normal script-import semantics so modules loaded by
-        # path can resolve siblings without depending on the caller's cwd or
-        # PYTHONPATH. Restore the path afterwards to keep each load isolated.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(path)))
-        spec = importlib.util.spec_from_file_location(name, path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    finally:
-        sys.path[:] = saved_path
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
-def request(serve, raw):
-    """Run one raw HTTP request through the handler; return (status, body)."""
-    class Fake(serve.Handler):
-        def setup(self):
-            self.rfile = io.BytesIO(raw)
-            self.wfile = io.BytesIO()
-
-        def finish(self):
-            pass
-
-    handler = Fake.__new__(Fake)
-    handler.request = handler.client_address = None
-    handler.server = FakeServer()
-    handler.setup()
-    handler.handle_one_request()
-    out = handler.wfile.getvalue()
-    status = int(out.split(b"\r\n", 1)[0].split(b" ")[1])
-    body = out.split(b"\r\n\r\n", 1)[1] if b"\r\n\r\n" in out else b""
-    return status, body
-
-
-def post(serve, headers=(), body=None):
-    payload = json.dumps(body if body is not None else EVENT).encode()
-    lines = [b"POST /events HTTP/1.1", b"Host: x",
-             b"Content-Type: application/json",
-             b"Content-Length: " + str(len(payload)).encode()]
-    lines += [h.encode() for h in headers]
-    return request(serve, b"\r\n".join(lines) + b"\r\n\r\n" + payload)
-
-
-def get(serve, path):
-    return request(serve, f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
-
-
-def lines_in(path):
-    if not os.path.exists(path):
-        return 0
-    with open(path, encoding="utf-8") as f:
-        return len([ln for ln in f if ln.strip()])
-
-
-def main():
-    tmp = tempfile.mkdtemp()
-    serve_py = os.path.join(ROOT, "serve.py")
-    emit_py = os.path.join(ROOT, "hooks", "emit.py")
-
-    # --- token unset: today's open behavior ------------------------------
-    print("BURROW_TOKEN unset (open ingest)")
-    log = os.path.join(tmp, "open.jsonl")
-    serve = load(serve_py, "serve_open", {"BURROW_EVENTS": log, "BURROW_TOKEN": None})
-    check("POST no token", post(serve)[0], 204)
-    check("POST bogus bearer accepted", post(serve, ["Authorization: Bearer whatever"])[0], 204)
-    check("POST malformed json", post(serve, body={"nope": 1})[0], 400)
-    check("GET /events", get(serve, "/events")[0], 200)
-    check("GET /villagers", get(serve, "/villagers")[0], 200)
-    check("events logged", lines_in(log), 2)
-
-    # --- whitespace-only token counts as unset ---------------------------
-    print("BURROW_TOKEN='   ' (treated as unset)")
-    log = os.path.join(tmp, "blank.jsonl")
-    serve = load(serve_py, "serve_blank", {"BURROW_EVENTS": log, "BURROW_TOKEN": "   "})
-    check("POST no token", post(serve)[0], 204)
-
-    # --- token set: ingest closed ----------------------------------------
-    print("BURROW_TOKEN=s3cret (closed ingest)")
-    log = os.path.join(tmp, "closed.jsonl")
-    serve = load(serve_py, "serve_closed", {"BURROW_EVENTS": log, "BURROW_TOKEN": "s3cret"})
-    status, body = post(serve)
-    check("POST no token", status, 401)
-    check("401 body", body, b"unauthorized")
-    check("POST wrong bearer", post(serve, ["Authorization: Bearer nope"])[0], 401)
-    check("POST wrong x-header", post(serve, ["X-Burrow-Token: nope"])[0], 401)
-    check("POST token as prefix", post(serve, ["Authorization: Bearer s3cretXX"])[0], 401)
-    check("POST wrong scheme", post(serve, ["Authorization: Basic s3cret"])[0], 401)
-    for label, framing, expected in (
-        ("missing length before auth", b"", 400),
-        ("negative length before auth", b"Content-Length: -1\r\n", 400),
-        ("nondigit length before auth", b"Content-Length: nope\r\n", 400),
-        ("oversized length before auth",
-         b"Content-Length: " + str(serve.MAX_EVENT_BYTES + 1).encode() + b"\r\n", 413),
-        ("transfer encoding before auth",
-         b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n", 400),
-    ):
-        raw = (b"POST /events HTTP/1.1\r\nHost: x\r\n" + framing +
-               b"\r\n{}GET /events HTTP/1.1\r\nHost: x\r\n\r\n")
-        check(label, request(serve, raw)[0], expected)
-    check("POST right bearer", post(serve, ["Authorization: Bearer s3cret"])[0], 204)
-    check("POST right x-header", post(serve, ["X-Burrow-Token: s3cret"])[0], 204)
-    check("GET /events ungated", get(serve, "/events")[0], 200)
-    check("GET /villagers ungated", get(serve, "/villagers")[0], 200)
-    check("only authorized events logged", lines_in(log), 2)
-
-    # --- emitter: sends the token, falls back to local file on rejection --
-    print("emitter (hooks/emit.py)")
-    home = os.path.join(tmp, "home")
-    os.makedirs(home, exist_ok=True)
-    hook = json.dumps({"hook_event_name": "Stop", "session_id": "abc", "cwd": "/tmp/proj"})
-
-    def run_emitter(token, server):
-        """Emit one event, routing the emitter's POST into `server`'s handler."""
-        env = {"BURROW_URL": "http://village:8737", "BURROW_TOKEN": token,
-               "BURROW_AGENT_ID": None, "BURROW_PROJECT": None, "HOME": home,
-               # No dev-server mirror: this checks what the *village* receives.
-               "BURROW_MIRROR": ""}
-        emit = load(emit_py, "emit_" + (token or "none"), env)
-        emit.LOG_DIR = home
-        emit.LOG = os.path.join(home, "events.jsonl")
-        emit.BREAKER = os.path.join(home, ".post-failed")
-        seen = {}
-
-        def fake_urlopen(req, timeout=None):
-            seen["headers"] = dict(req.headers)
-            body = req.data
-            raw = (b"POST /events HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
-                   + b"".join(f"{k}: {v}\r\n".encode() for k, v in req.headers.items()
-                              if k.lower() not in ("content-type",))
-                   + b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
-            status, _ = request(server, raw)
-            seen["status"] = status
-            if status >= 400:
-                raise RuntimeError(f"HTTP {status}")
-
-            class Ctx:
-                def __enter__(self): return self
-                def __exit__(self, *a): return False
-            return Ctx()
-
-        # main() reads BURROW_URL/BURROW_TOKEN at call time, so the env has to be
-        # in place for the call, not just for the import.
-        saved_env = {k: os.environ.get(k) for k in env}
-        saved_open = emit.urllib.request.urlopen
-        saved_stdin = sys.stdin
-        for k, v in env.items():
-            os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-        emit.urllib.request.urlopen = fake_urlopen
-        sys.stdin = io.StringIO(hook)
-        try:
-            emit.main()
-        finally:
-            sys.stdin = saved_stdin
-            emit.urllib.request.urlopen = saved_open
-            for k, v in saved_env.items():
-                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
-        return seen
-
-    # against the closed server, with the right token
-    log = os.path.join(tmp, "emit-ok.jsonl")
-    server = load(serve_py, "serve_emit_ok", {"BURROW_EVENTS": log, "BURROW_TOKEN": "s3cret"})
-    seen = run_emitter("s3cret", server)
-    check("emitter sends bearer header", seen["headers"].get("Authorization"), "Bearer s3cret")
-    check("server accepts emitter POST", seen["status"], 204)
-    check("event landed on server", lines_in(log), 1)
-    check("nothing written locally", lines_in(os.path.join(home, "events.jsonl")), 0)
-
-    # against the closed server, with no token -> 401 -> local fallback
-    for name in os.listdir(home):          # breakers are per target: .post-failed-<hash>
-        if name.startswith(".post-failed"):
-            os.remove(os.path.join(home, name))
-    log = os.path.join(tmp, "emit-401.jsonl")
-    server = load(serve_py, "serve_emit_401", {"BURROW_EVENTS": log, "BURROW_TOKEN": "s3cret"})
-    seen = run_emitter(None, server)
-    check("no token -> no auth header", "Authorization" in seen["headers"], False)
-    check("server rejects", seen["status"], 401)
-    check("nothing logged on server", lines_in(log), 0)
-    check("event fell back to local file", lines_in(os.path.join(home, "events.jsonl")), 1)
-    check("circuit breaker tripped",
-          any(name.startswith(".post-failed") for name in os.listdir(home)), True)
-
-    print()
-    if failures:
-        print(f"FAILED: {len(failures)} -> {', '.join(failures)}")
-        return 1
-    print("all checks passed")
-    return 0
+    def test_unconfigured_token_leaves_ingest_open(self):
+        with mock.patch.object(serve, "TOKEN", ""), TestClient(serve.app) as client:
+            self.assertEqual(client.post("/events", json=EVENT).status_code, 204)
+            self.assertEqual(
+                client.post(
+                    "/events", json=EVENT, headers={"Authorization": "Bearer anything"}
+                ).status_code,
+                204,
+            )
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()

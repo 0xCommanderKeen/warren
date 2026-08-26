@@ -23,6 +23,7 @@ Companion to play.py, which replays a recorded .jsonl. This one scripts the
 timeline in code, so a scenario can loop, hold, and reach states that are awkward
 to record — a villager going stale takes 30 real minutes.
 """
+
 import argparse
 import datetime
 import json
@@ -34,20 +35,26 @@ MINUTE = 60
 # Every villager the scenarios below can cast. agent_id is what the projection
 # keys on, so these stay stable across runs and keep their houses.
 AGENTS = {
-    "scholar":  {"id": "demo:scholar",  "project": "atlas",   "cwd": "/tmp/atlas"},
-    "scribe":   {"id": "demo:scribe",   "project": "almanac", "cwd": "/tmp/almanac"},
-    "mason":    {"id": "demo:mason",    "project": "burrow",  "cwd": "/tmp/burrow"},
-    "courier":  {"id": "demo:courier",  "project": "mail",    "cwd": "/tmp/mail"},
-    "forester": {"id": "demo:forester", "project": "life",    "cwd": "/tmp/life"},
-    "hermit":   {"id": "demo:hermit",   "project": "attic",   "cwd": "/tmp/attic"},
+    "scholar": {"id": "demo:scholar", "project": "atlas", "cwd": "/tmp/atlas"},
+    "scribe": {"id": "demo:scribe", "project": "almanac", "cwd": "/tmp/almanac"},
+    "mason": {"id": "demo:mason", "project": "burrow", "cwd": "/tmp/burrow"},
+    "courier": {"id": "demo:courier", "project": "mail", "cwd": "/tmp/mail"},
+    "forester": {"id": "demo:forester", "project": "life", "cwd": "/tmp/life"},
+    "hermit": {"id": "demo:hermit", "project": "attic", "cwd": "/tmp/attic"},
 }
 
 
 # ————— beats: (seconds from scenario start, agent, type, payload, backdate) —————
 
+
 def _beat(t, agent, type_, payload=None, backdate=0):
-    return {"t": t, "agent": agent, "type": type_,
-            "payload": payload or {}, "backdate": backdate}
+    return {
+        "t": t,
+        "agent": agent,
+        "type": type_,
+        "payload": payload or {},
+        "backdate": backdate,
+    }
 
 
 def started(t, agent, prompt):
@@ -93,42 +100,40 @@ SCENARIOS = {
         "loop_every": 60,
         "script": [
             started(0, "scholar", "how is the Lisbon tram network numbered?"),
-            tool(4,  "scholar", "Read", "notes/lisbon.md"),            # at home
+            tool(4, "scholar", "Read", "notes/lisbon.md"),  # at home
             tool(10, "scholar", "WebSearch", "lisbon tram numbering"),  # → library
-            tool(20, "scholar", "WebFetch", "carris.pt/en/history"),    # stays put
-            tool(30, "scholar", "Edit", "notes/lisbon.md"),             # → home
+            tool(20, "scholar", "WebFetch", "carris.pt/en/history"),  # stays put
+            tool(30, "scholar", "Edit", "notes/lisbon.md"),  # → home
             made(36, "scholar", "notes/lisbon.md"),
             idle(42, "scholar"),
         ],
     },
-
     # Several villagers at one place: distinct slots, and a departure that must
     # not nudge whoever stays.
     "slots": {
         "blurb": "three villagers share the library without shoving each other",
         "loop_every": 70,
         "script": [
-            tool(0,  "scholar", "WebSearch", "lisbon tram numbering"),
-            tool(6,  "scribe",  "WebFetch",  "carris.pt/en/history"),   # second slot
-            tool(16, "mason",   "WebSearch", "phaser tilemap culling"),  # third slot
-            tool(26, "scribe",  "Write",     "almanac/funicular.md"),   # leaves
-            tool(36, "scholar", "WebFetch",  "wikipedia.org/Trams"),    # still there
+            tool(0, "scholar", "WebSearch", "lisbon tram numbering"),
+            tool(6, "scribe", "WebFetch", "carris.pt/en/history"),  # second slot
+            tool(16, "mason", "WebSearch", "phaser tilemap culling"),  # third slot
+            tool(26, "scribe", "Write", "almanac/funicular.md"),  # leaves
+            tool(36, "scholar", "WebFetch", "wikipedia.org/Trams"),  # still there
             idle(46, "mason"),
             idle(52, "scholar"),
         ],
     },
-
     # Every state the projection can produce, held side by side. For looking at
     # chips, sprites and doorway light without chasing a moving target.
     "states": {
         "blurb": "one villager per state: working, researching, resting, knocking, stale",
         "loop_every": 90,
         "script": [
-            tool(0, "mason", "Edit", "viewer/index.html"),               # working, home
-            tool(0, "scholar", "WebSearch", "calm technology"),          # working, library
-            idle(0, "scribe"),                                           # resting
+            tool(0, "mason", "Edit", "viewer/index.html"),  # working, home
+            tool(0, "scholar", "WebSearch", "calm technology"),  # working, library
+            idle(0, "scribe"),  # resting
             knock(0, "courier", "the draft reply is ready — send it?"),  # knocking
-            stale(0, "forester", "Bash", "long build"),                  # stale
+            stale(0, "forester", "Bash", "long build"),  # stale
             # …and the states hold. Re-assert them so nobody ages out mid-look.
             tool(60, "mason", "Edit", "viewer/index.html"),
             tool(60, "scholar", "WebFetch", "example.com/calm"),
@@ -136,7 +141,6 @@ SCENARIOS = {
             knock(60, "courier", "the draft reply is ready — send it?"),
         ],
     },
-
     # A working fleet: overlapping tasks, a knock that gets answered, someone
     # leaving for the day. The default, because it looks like a real afternoon.
     "village": {
@@ -144,28 +148,28 @@ SCENARIOS = {
         "loop_every": 150,
         "script": [
             started(0, "mason", "fix the library trip"),
-            tool(5,   "mason", "Read", "viewer/projection.js"),
-            tool(12,  "scholar", "WebSearch", "phaser 3 tilemaps"),
+            tool(5, "mason", "Read", "viewer/projection.js"),
+            tool(12, "scholar", "WebSearch", "phaser 3 tilemaps"),
             started(15, "courier", "triage the inbox"),
-            tool(20,  "courier", "Read", "inbox/2026-08-24.md"),
-            tool(26,  "mason", "Edit", "viewer/projection.js"),
-            tool(30,  "scribe", "Grep", "funicular"),
-            tool(38,  "scholar", "WebFetch", "phaser.io/docs"),
+            tool(20, "courier", "Read", "inbox/2026-08-24.md"),
+            tool(26, "mason", "Edit", "viewer/projection.js"),
+            tool(30, "scribe", "Grep", "funicular"),
+            tool(38, "scholar", "WebFetch", "phaser.io/docs"),
             knock(44, "courier", "reply to the landlord — approve the wording?"),
-            tool(50,  "mason", "Bash", "node tests/projection.test.js"),
-            tool(56,  "scribe", "WebSearch", "elevador da gloria 1915"),
-            made(62,  "mason", "viewer/projection.js"),
-            tool(68,  "courier", "Write", "outbox/landlord.md"),   # knock answered
-            tool(74,  "scholar", "Edit", "notes/phaser.md"),
-            tool(80,  "hermit", "Bash", "rsync the attic"),
-            idle(86,  "scholar"),
-            tool(92,  "scribe", "Write", "almanac/funicular.md"),
-            idle(98,  "courier"),
+            tool(50, "mason", "Bash", "node tests/projection.test.js"),
+            tool(56, "scribe", "WebSearch", "elevador da gloria 1915"),
+            made(62, "mason", "viewer/projection.js"),
+            tool(68, "courier", "Write", "outbox/landlord.md"),  # knock answered
+            tool(74, "scholar", "Edit", "notes/phaser.md"),
+            tool(80, "hermit", "Bash", "rsync the attic"),
+            idle(86, "scholar"),
+            tool(92, "scribe", "Write", "almanac/funicular.md"),
+            idle(98, "courier"),
             made(104, "scribe", "almanac/funicular.md"),
             tool(110, "mason", "Bash", "git push"),
             idle(116, "scribe"),
             idle(122, "mason"),
-            gone(128, "hermit"),                                   # leaves the village
+            gone(128, "hermit"),  # leaves the village
         ],
     },
 }
@@ -193,8 +197,13 @@ def serialize(beat, now):
 
 def describe(beat):
     payload = beat["payload"]
-    return (payload.get("tool") or payload.get("message")
-            or payload.get("artifact") or payload.get("prompt") or "")
+    return (
+        payload.get("tool")
+        or payload.get("message")
+        or payload.get("artifact")
+        or payload.get("prompt")
+        or ""
+    )
 
 
 def run_pass(scenario, out, speed):
@@ -211,24 +220,41 @@ def run_pass(scenario, out, speed):
         now = datetime.datetime.now(datetime.timezone.utc)
         with open(out, "a", encoding="utf-8") as f:
             f.write(serialize(beat, now) + "\n")
-        print(f"  +{round(beat['t'] / speed):3d}s  {AGENTS[beat['agent']]['id']:14s} "
-              f"{beat['type']:17s} {describe(beat)}".rstrip(), flush=True)
+        print(
+            f"  +{round(beat['t'] / speed):3d}s  {AGENTS[beat['agent']]['id']:14s} "
+            f"{beat['type']:17s} {describe(beat)}".rstrip(),
+            flush=True,
+        )
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", nargs="?", default="village",
-                    help="which scenario to run (default: village)")
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "scenario",
+        nargs="?",
+        default="village",
+        help="which scenario to run (default: village)",
+    )
     ap.add_argument("--list", action="store_true", help="list the scenarios and exit")
-    ap.add_argument("--out", default="/tmp/burrow-demo.jsonl",
-                    help="event log to write (default: /tmp/burrow-demo.jsonl)")
-    ap.add_argument("--speed", type=float, default=1.0,
-                    help="time multiplier (default: 1, 2 = twice as fast)")
-    ap.add_argument("--once", action="store_true",
-                    help="one pass instead of looping")
-    ap.add_argument("--keep", action="store_true",
-                    help="append to the log instead of truncating it first")
+    ap.add_argument(
+        "--out",
+        default="/tmp/burrow-demo.jsonl",
+        help="event log to write (default: /tmp/burrow-demo.jsonl)",
+    )
+    ap.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help="time multiplier (default: 1, 2 = twice as fast)",
+    )
+    ap.add_argument("--once", action="store_true", help="one pass instead of looping")
+    ap.add_argument(
+        "--keep",
+        action="store_true",
+        help="append to the log instead of truncating it first",
+    )
     args = ap.parse_args()
 
     if args.list:
@@ -238,8 +264,10 @@ def main():
 
     scenario = SCENARIOS.get(args.scenario)
     if not scenario:
-        print(f"no scenario \"{args.scenario}\". Try: {', '.join(SCENARIOS)}",
-              file=sys.stderr)
+        print(
+            f'no scenario "{args.scenario}". Try: {", ".join(SCENARIOS)}',
+            file=sys.stderr,
+        )
         return 2
     if args.speed <= 0:
         print("--speed must be greater than 0", file=sys.stderr)
@@ -251,8 +279,9 @@ def main():
     print(f"{args.scenario}: {scenario['blurb']}")
     print(f"writing {args.out} at {args.speed:g}× — serve it with:")
     print(f"  BURROW_EVENTS={args.out} python3 serve.py")
-    print("one pass, then stop" if args.once else "looping (ctrl-c to stop)",
-          flush=True)
+    print(
+        "one pass, then stop" if args.once else "looping (ctrl-c to stop)", flush=True
+    )
 
     try:
         while True:

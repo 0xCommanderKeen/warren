@@ -25,14 +25,20 @@ class DurableGenerationTests(unittest.TestCase):
                 operations.append("retire")
                 real_unlink(target)
 
-            with mock.patch.object(durable.os, "replace", side_effect=replace), \
-                    mock.patch.object(durable.os, "unlink", side_effect=unlink), \
-                    mock.patch.object(durable, "fsync_parent",
-                                      side_effect=lambda _path: operations.append("dir-fsync")):
+            with (
+                mock.patch.object(durable.os, "replace", side_effect=replace),
+                mock.patch.object(durable.os, "unlink", side_effect=unlink),
+                mock.patch.object(
+                    durable,
+                    "fsync_parent",
+                    side_effect=lambda _path: operations.append("dir-fsync"),
+                ),
+            ):
                 durable.publish_lines(path, ("new\n",), retire=(replay,))
 
-            self.assertEqual(operations,
-                             ["replace", "dir-fsync", "retire", "dir-fsync"])
+            self.assertEqual(
+                operations, ["replace", "dir-fsync", "retire", "dir-fsync"]
+            )
             with open(path, encoding="utf-8") as stream:
                 self.assertEqual(stream.read(), "new\n")
             self.assertFalse(os.path.exists(replay))
@@ -53,22 +59,30 @@ class DurableGenerationTests(unittest.TestCase):
             if path == "second":
                 raise failure
 
-        with mock.patch.object(durable.os, "unlink", side_effect=unlink), \
-                mock.patch.object(durable, "fsync_parent",
-                                  side_effect=lambda path: operations.append(("fsync", path))):
+        with (
+            mock.patch.object(durable.os, "unlink", side_effect=unlink),
+            mock.patch.object(
+                durable,
+                "fsync_parent",
+                side_effect=lambda path: operations.append(("fsync", path)),
+            ),
+        ):
             with self.assertRaises(PermissionError) as raised:
                 durable.retire_files(("first", "second", "never-attempted"))
         self.assertIs(raised.exception, failure)
-        self.assertEqual([kind for kind, _ in operations],
-                         ["unlink", "unlink", "fsync"])
+        self.assertEqual(
+            [kind for kind, _ in operations], ["unlink", "unlink", "fsync"]
+        )
 
     def test_retirement_suppresses_only_missing_files(self):
         missing = FileNotFoundError("already gone")
         denied = OSError(5, "I/O failure")
         unlink = mock.Mock(side_effect=(missing, None, denied))
         fsync = mock.Mock()
-        with mock.patch.object(durable.os, "unlink", unlink), \
-                mock.patch.object(durable, "fsync_parent", fsync):
+        with (
+            mock.patch.object(durable.os, "unlink", unlink),
+            mock.patch.object(durable, "fsync_parent", fsync),
+        ):
             with self.assertRaises(OSError) as raised:
                 durable.retire_files(("missing", "removed", "failed"))
         self.assertIs(raised.exception, denied)

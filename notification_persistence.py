@@ -4,6 +4,7 @@ The HTTP server owns scheduling and webhook policy.  This module owns the comple
 durable lifecycle: stable lock names, bounded terminal ledgers, journal authority,
 attempt state, recovery handoff, and replay retirement.
 """
+
 import collections
 import fcntl
 import hashlib
@@ -23,15 +24,22 @@ KNOCKS = "knocks"
 NOTIFIED = "notified"
 DROPPED = "notify-dropped"
 KINDS = frozenset((DELIVERY_IDS, KNOCKS, NOTIFIED, DROPPED))
+
+
 def legacy_knock_key(event):
     """Pre-structured-request fallback identity, retained for ledger migration."""
     delivery_id = event.get("delivery_id")
     if isinstance(delivery_id, str) and delivery_id:
         return "delivery:" + delivery_id
     payload = event.get("payload") or {}
-    return "\x00".join(str(value) for value in (
-        event.get("agent_id"), event.get("ts"),
-        payload.get("message") if isinstance(payload, dict) else ""))
+    return "\x00".join(
+        str(value)
+        for value in (
+            event.get("agent_id"),
+            event.get("ts"),
+            payload.get("message") if isinstance(payload, dict) else "",
+        )
+    )
 
 
 def _canonical_json_bytes(value):
@@ -64,12 +72,19 @@ def _canonical_json_bytes(value):
         values = [_canonical_json_bytes(item) for item in value]
         return b"a" + len(values).to_bytes(8, "big") + b"".join(values)
     if isinstance(value, dict):
-        items = sorted(value.items(), key=lambda item: str(item[0]).encode(
-            "utf-16-be", "surrogatepass"))
-        encoded = [(_canonical_json_bytes(str(key)), _canonical_json_bytes(item))
-                   for key, item in items]
-        return (b"o" + len(encoded).to_bytes(8, "big")
-                + b"".join(key + item for key, item in encoded))
+        items = sorted(
+            value.items(),
+            key=lambda item: str(item[0]).encode("utf-16-be", "surrogatepass"),
+        )
+        encoded = [
+            (_canonical_json_bytes(str(key)), _canonical_json_bytes(item))
+            for key, item in items
+        ]
+        return (
+            b"o"
+            + len(encoded).to_bytes(8, "big")
+            + b"".join(key + item for key, item in encoded)
+        )
     return b"x"
 
 
@@ -103,8 +118,10 @@ def knock_key(event):
 
 
 def terminal_key(event):
-    return "burrow-sha256-" + hashlib.sha256(
-        knock_key(event).encode("utf-8", "surrogatepass")).hexdigest()
+    return (
+        "burrow-sha256-"
+        + hashlib.sha256(knock_key(event).encode("utf-8", "surrogatepass")).hexdigest()
+    )
 
 
 def terminal_keys(event):
@@ -166,8 +183,9 @@ class NotificationPersistence:
                 fcntl.flock(lock, fcntl.LOCK_SH)
                 try:
                     with open(path, encoding="utf-8") as stream:
-                        remembered.update(line.rstrip("\n") for line in stream
-                                          if line.strip())
+                        remembered.update(
+                            line.rstrip("\n") for line in stream if line.strip()
+                        )
                 except OSError:
                     pass
         except OSError:
@@ -268,7 +286,11 @@ class NotificationPersistence:
                             entry = json.loads(line)
                         except ValueError:
                             continue
-                        event = entry.get("event", entry) if isinstance(entry, dict) else None
+                        event = (
+                            entry.get("event", entry)
+                            if isinstance(entry, dict)
+                            else None
+                        )
                         if isinstance(event, dict):
                             if not is_terminal(event, terminal):
                                 latest[knock_key(event)] = entry
@@ -278,9 +300,10 @@ class NotificationPersistence:
             event = addition.get("event", addition)
             if not is_terminal(event, terminal):
                 latest[knock_key(event)] = addition
-        lines = [(key, json.dumps(entry, ensure_ascii=False,
-                                  separators=(",", ":")) + "\n")
-                 for key, entry in latest.items()]
+        lines = [
+            (key, json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+            for key, entry in latest.items()
+        ]
         records, byte_limit = self._limits()
         total = sum(len(line.encode("utf-8")) for _, line in lines)
         victims = []
@@ -290,10 +313,12 @@ class NotificationPersistence:
             victim = terminal_key(latest[key].get("event", latest[key]))
             if victim not in victims:
                 victims.append(victim)
-        retained = [terminal_key(latest[key].get("event", latest[key]))
-                    for key, _ in lines]
-        durable_drops = self.remember_batch(DROPPED, victims,
-                                            preserve_existing=retained)
+        retained = [
+            terminal_key(latest[key].get("event", latest[key])) for key, _ in lines
+        ]
+        durable_drops = self.remember_batch(
+            DROPPED, victims, preserve_existing=retained
+        )
         if not set(victims) <= durable_drops:
             raise OSError("knock victims exceed durable terminal capacity")
         self.publish_compaction(path, lines)
@@ -332,8 +357,9 @@ class NotificationPersistence:
 
     @staticmethod
     def publish_compaction(path, lines):
-        durable.publish_lines(path, (line for _, line in lines),
-                              retire=durable.replay_paths(path))
+        durable.publish_lines(
+            path, (line for _, line in lines), retire=durable.replay_paths(path)
+        )
 
     def commit_terminal(self, event, kind):
         if kind not in (NOTIFIED, DROPPED):
@@ -362,7 +388,8 @@ class NotificationPersistence:
                     known = self.read_journal_keys(path)
                     if knock_key(event) not in known:
                         known = self.compact_locked(
-                            path, {"event": event, "attempts": 0})
+                            path, {"event": event, "attempts": 0}
+                        )
                     self.caches[KNOCKS][path] = known
             return True
         except OSError:
@@ -419,8 +446,16 @@ class NotificationPersistence:
                         if not isinstance(entry, dict):
                             complete = False
                             continue
-                        attempts = entry.get("attempts", 0) if isinstance(entry.get("event"), dict) else 0
-                        event = dict(entry["event"]) if isinstance(entry.get("event"), dict) else entry
+                        attempts = (
+                            entry.get("attempts", 0)
+                            if isinstance(entry.get("event"), dict)
+                            else 0
+                        )
+                        event = (
+                            dict(entry["event"])
+                            if isinstance(entry.get("event"), dict)
+                            else entry
+                        )
                         if type(attempts) is not int or attempts < 0:
                             attempts = 0
                         key = knock_key(event)
@@ -432,7 +467,9 @@ class NotificationPersistence:
                 for attempts, event in events.values():
                     key = terminal_key(event)
                     self.attempts[key] = max(self.attempts.get(key, 0), attempts)
-            recovered.append((generation, complete, [item[1] for item in events.values()]))
+            recovered.append(
+                (generation, complete, [item[1] for item in events.values()])
+            )
         return recovered
 
     def retire_replay_if_terminal(self, generation, complete, events):

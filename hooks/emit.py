@@ -27,6 +27,7 @@ resident, SessionEnd maps to `idle` rather than `session_ended`: the session's
 process is gone but the agent-as-service is still home, resting.
 
 Must never break the hosting agent: swallow everything, always exit 0."""
+
 import collections
 import datetime
 import fcntl
@@ -58,9 +59,9 @@ BREAKER_SECONDS = 60
 LOOPBACK_BREAKER_SECONDS = 5
 DEFAULT_MIRROR = "http://127.0.0.1:8737"
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
-POST_TIMEOUT = .75
+POST_TIMEOUT = 0.75
 HOOK_BUDGET = 1.0
-HOOK_REAP_BUDGET = .05
+HOOK_REAP_BUDGET = 0.05
 MAX_TARGETS = 8
 REPLAY_BATCH = 16
 OUTBOX_RECORDS = 1024
@@ -88,7 +89,9 @@ def _target_id(url):
 
 ARTIFACT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 CODEX_ARTIFACT_TOOLS = ARTIFACT_TOOLS + (
-    "write_file", "edit_file", "notebook_edit",
+    "write_file",
+    "edit_file",
+    "notebook_edit",
 )
 RUNNER_SOURCES = {"claude": "claude-code", "codex": "codex"}
 
@@ -110,12 +113,22 @@ def agent_identity(source, identity):
 def tool_detail(tool_input):
     if not isinstance(tool_input, dict):
         return ""
-    for key in ("file_path", "notebook_path", "path", "pattern", "description",
-                "command", "url", "query", "skill"):
+    for key in (
+        "file_path",
+        "notebook_path",
+        "path",
+        "pattern",
+        "description",
+        "command",
+        "url",
+        "query",
+        "skill",
+    ):
         val = tool_input.get(key)
         if val:
-            return _ToolDetail(str(val)[:120], key in (
-                "file_path", "notebook_path", "path"))
+            return _ToolDetail(
+                str(val)[:120], key in ("file_path", "notebook_path", "path")
+            )
     return ""
 
 
@@ -149,7 +162,10 @@ def claude_event(hook):
     if name == "Notification":
         # idle/auth notices are informational. Only callbacks that prove an
         # actual question is visible to the human may knock.
-        if hook.get("notification_type") not in ("permission_prompt", "elicitation_dialog"):
+        if hook.get("notification_type") not in (
+            "permission_prompt",
+            "elicitation_dialog",
+        ):
             return None, None
         message = str(hook.get("message") or "Attention requested")[:200]
         return "needs_human", {"message": message}
@@ -177,7 +193,8 @@ def lineage(hook, runner="codex"):
         payload["agent_type"] = str(hook["agent_type"])[:120]
     if hook.get("session_id"):
         payload["parent_agent_id"] = agent_identity(
-            RUNNER_SOURCES[runner], hook["session_id"])
+            RUNNER_SOURCES[runner], hook["session_id"]
+        )
     return payload
 
 
@@ -202,7 +219,8 @@ def patch_artifacts(tool_input):
     blocks = re.finditer(
         r"^\*\*\* (Add|Update|Delete) File: (.+?)$"
         r"(.*?)(?=^\*\*\* (?:Add|Update|Delete) File: |^\*\*\* End Patch)",
-        command, flags=re.MULTILINE | re.DOTALL,
+        command,
+        flags=re.MULTILINE | re.DOTALL,
     )
     for block in blocks:
         operation, path, body = block.groups()
@@ -229,10 +247,15 @@ def tool_failure(hook):
         return str(hook.get("error") or "tool failed")[:200]
     response = hook.get("tool_response")
     if isinstance(response, dict):
-        if (response.get("success") is False or response.get("ok") is False
-                or response.get("is_error") is True
-                or response.get("status") in ("failed", "error")):
-            return str(response.get("error") or response.get("message") or "tool failed")[:200]
+        if (
+            response.get("success") is False
+            or response.get("ok") is False
+            or response.get("is_error") is True
+            or response.get("status") in ("failed", "error")
+        ):
+            return str(
+                response.get("error") or response.get("message") or "tool failed"
+            )[:200]
         code = response.get("exit_code")
         if type(code) is int and code != 0:
             return str(response.get("error") or f"exit code {code}")[:200]
@@ -240,7 +263,9 @@ def tool_failure(hook):
             return str(response["error"])[:200]
     if hook.get("tool_error"):
         return str(hook["tool_error"])[:200]
-    if isinstance(response, str) and re.search(r"(?:^|\n)(?:Error|Failed)(?::|\b)", response):
+    if isinstance(response, str) and re.search(
+        r"(?:^|\n)(?:Error|Failed)(?::|\b)", response
+    ):
         return response[:200]
     return None
 
@@ -256,11 +281,13 @@ def codex_tool_succeeded(tool_response):
     """True only when a Codex response positively reports tool success."""
     if not isinstance(tool_response, dict):
         return False
-    return (tool_response.get("success") is True
-            or tool_response.get("ok") is True
-            or tool_response.get("status") in ("success", "succeeded", "completed")
-            or type(tool_response.get("exit_code")) is int
-            and tool_response["exit_code"] == 0)
+    return (
+        tool_response.get("success") is True
+        or tool_response.get("ok") is True
+        or tool_response.get("status") in ("success", "succeeded", "completed")
+        or type(tool_response.get("exit_code")) is int
+        and tool_response["exit_code"] == 0
+    )
 
 
 def codex_events(hook):
@@ -332,8 +359,9 @@ def runner_name(argv):
 
 def hook_agent_id(runner, hook, resident_id=None):
     source = RUNNER_SOURCES[runner]
-    if hook.get("hook_event_name") in (
-            "SubagentStart", "SubagentStop") and hook.get("agent_id"):
+    if hook.get("hook_event_name") in ("SubagentStart", "SubagentStop") and hook.get(
+        "agent_id"
+    ):
         identity = hook["agent_id"]
     elif resident_id:
         return resident_id if ":" in resident_id else source + ":" + resident_id
@@ -360,9 +388,13 @@ def targets():
     out = []
     seen = set()
     mirror = os.environ.get("BURROW_MIRROR")
-    groups = ((os.environ.get("BURROW_URL"), os.environ.get("BURROW_TOKEN")),
-              (DEFAULT_MIRROR if mirror is None else mirror,
-               os.environ.get("BURROW_MIRROR_TOKEN")))
+    groups = (
+        (os.environ.get("BURROW_URL"), os.environ.get("BURROW_TOKEN")),
+        (
+            DEFAULT_MIRROR if mirror is None else mirror,
+            os.environ.get("BURROW_MIRROR_TOKEN"),
+        ),
+    )
     for raw, token in groups:
         for url in (u.strip().rstrip("/") for u in (raw or "").split(",")):
             if url and url not in seen:
@@ -406,12 +438,14 @@ def post_event(url, event, token="", delivery_id=""):
 
 def _target_groups(pending=()):
     configured = targets()
-    primary_urls = {u.strip().rstrip("/") for u in
-                    (os.environ.get("BURROW_URL") or "").split(",") if u.strip()}
+    primary_urls = {
+        u.strip().rstrip("/")
+        for u in (os.environ.get("BURROW_URL") or "").split(",")
+        if u.strip()
+    }
     primary = [item for item in configured if item[0] in primary_urls]
     mirrors = [item for item in configured if item[0] not in primary_urls]
-    by_key = {_target_id(url): (url, token)
-              for url, token in primary}
+    by_key = {_target_id(url): (url, token) for url, token in primary}
     # Each target queue carries its last attempt generation. New records inherit
     # that generation, so fresh events cannot jump a recently attempted target
     # ahead of a target that has never had a worker.
@@ -419,18 +453,25 @@ def _target_groups(pending=()):
     for record in pending:
         key = record.get("target")
         if key in by_key:
-            attempts[key] = max(attempts.get(key, 0),
-                                _attempt_generation(record))
+            attempts[key] = max(attempts.get(key, 0), _attempt_generation(record))
     order = {item[0]: index for index, item in enumerate(primary)}
-    ordered = sorted(primary, key=lambda item: (
-        attempts.get(hashlib.sha256(item[0].encode("utf-8")).hexdigest()[:16], 0),
-        order[item[0]],
-    ))
+    ordered = sorted(
+        primary,
+        key=lambda item: (
+            attempts.get(hashlib.sha256(item[0].encode("utf-8")).hexdigest()[:16], 0),
+            order[item[0]],
+        ),
+    )
     primary_slots = min(len(ordered), MAX_TARGETS)
     active_primary = ordered[:primary_slots]
     remaining = max(0, MAX_TARGETS - primary_slots)
     active_mirrors = mirrors[:remaining]
-    return (active_primary, active_mirrors, ordered[primary_slots:], mirrors[remaining:])
+    return (
+        active_primary,
+        active_mirrors,
+        ordered[primary_slots:],
+        mirrors[remaining:],
+    )
 
 
 def _read_outbox():
@@ -462,8 +503,11 @@ def _read_schedule():
             values = json.load(stream)
         if not isinstance(values, dict):
             return {}
-        valid = {key: value for key, value in values.items()
-                 if isinstance(key, str) and type(value) is int and value >= 0}
+        valid = {
+            key: value
+            for key, value in values.items()
+            if isinstance(key, str) and type(value) is int and value >= 0
+        }
         return valid if len(valid) <= SCHEDULE_RECORDS else {}
     except (OSError, ValueError, TypeError):
         return {}
@@ -480,13 +524,19 @@ def _new_enqueue_order():
 
 def _ordered_outbox(records):
     """Stable total enqueue order, including records written by older emitters."""
+
     def key(record):
         order = record.get("enqueue_order")
         if isinstance(order, str) and order:
             return (1, order)
         event = record.get("event") if isinstance(record.get("event"), dict) else {}
-        return (0, str(event.get("ts") or ""), str(record.get("delivery_id") or ""),
-                str(record.get("target") or ""))
+        return (
+            0,
+            str(event.get("ts") or ""),
+            str(record.get("delivery_id") or ""),
+            str(record.get("target") or ""),
+        )
+
     return sorted(records, key=key)
 
 
@@ -500,18 +550,26 @@ def _stamp_enqueue_order(records):
 
 
 def _bounded_schedule(schedule, durable_targets):
-    primary_urls = [url.strip().rstrip("/") for url in
-                    (os.environ.get("BURROW_URL") or "").split(",") if url.strip()]
-    configured = {_target_id(url)
-                  for url in primary_urls}
-    allowed = configured | {target for target in durable_targets
-                            if isinstance(target, str)}
-    entries = sorted(((key, value) for key, value in schedule.items()
-                      if key in allowed), key=lambda item: (item[1], item[0]))
+    primary_urls = [
+        url.strip().rstrip("/")
+        for url in (os.environ.get("BURROW_URL") or "").split(",")
+        if url.strip()
+    ]
+    configured = {_target_id(url) for url in primary_urls}
+    allowed = configured | {
+        target for target in durable_targets if isinstance(target, str)
+    }
+    entries = sorted(
+        ((key, value) for key, value in schedule.items() if key in allowed),
+        key=lambda item: (item[1], item[0]),
+    )
     entries = entries[:SCHEDULE_RECORDS]
     while entries:
         candidate = dict(entries)
-        if len(json.dumps(candidate, separators=(",", ":")).encode("utf-8")) <= SCHEDULE_BYTES:
+        if (
+            len(json.dumps(candidate, separators=(",", ":")).encode("utf-8"))
+            <= SCHEDULE_BYTES
+        ):
             return candidate
         entries.pop()
     return {}
@@ -539,14 +597,16 @@ def _journal_outbox(records):
                     auxiliary.extend(valid)
             auxiliary.extend(records)
             auxiliary = _ordered_outbox(_dedupe_outbox_records(auxiliary))
-            main_lines = [json.dumps(item, ensure_ascii=False) + "\n"
-                          for item in main]
+            main_lines = [json.dumps(item, ensure_ascii=False) + "\n" for item in main]
             record_cap = max(0, OUTBOX_RECORDS - len(main_lines))
-            byte_cap = max(0, OUTBOX_BYTES - sum(
-                len(line.encode("utf-8")) for line in main_lines))
+            byte_cap = max(
+                0, OUTBOX_BYTES - sum(len(line.encode("utf-8")) for line in main_lines)
+            )
             encoded, dropped = _bounded_records(auxiliary, record_cap, byte_cap)
-            replacement = (OUTBOX + ".journal.%020d.%s"
-                           % (time.time_ns(), uuid.uuid4().hex))
+            replacement = OUTBOX + ".journal.%020d.%s" % (
+                time.time_ns(),
+                uuid.uuid4().hex,
+            )
             pending = durable.stage_lines(OUTBOX + ".aux", encoded)
             durable.publish_staged(((pending, replacement),))
             durable.retire_files(journals)
@@ -578,8 +638,7 @@ def _read_outbox_journal(path):
 
 
 def _quarantine_outbox_tail(torn):
-    path = (OUTBOX + ".torn.%020d.%s"
-            % (time.time_ns(), uuid.uuid4().hex))
+    path = OUTBOX + ".torn.%020d.%s" % (time.time_ns(), uuid.uuid4().hex)
     with open(path, "xb") as stream:
         stream.write(torn)
         stream.flush()
@@ -705,31 +764,48 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                 journals.append((journal, torn))
                 records.extend(journal_records)
             records = _dedupe_outbox_records(records)
-            records = [record for record in records
-                       if _record_key(record) not in delivered_keys]
+            records = [
+                record
+                for record in records
+                if _record_key(record) not in delivered_keys
+            ]
             known = {_record_key(record) for record in records}
-            known_events = {(record.get("target"), json.dumps(record.get("event"),
-                            sort_keys=True, ensure_ascii=False)) for record in records}
+            known_events = {
+                (
+                    record.get("target"),
+                    json.dumps(record.get("event"), sort_keys=True, ensure_ascii=False),
+                )
+                for record in records
+            }
             target_generations = {}
             for record in records:
                 target = record.get("target")
                 target_generations[target] = max(
-                    target_generations.get(target, 0),
-                    _attempt_generation(record))
+                    target_generations.get(target, 0), _attempt_generation(record)
+                )
             for addition in additions:
-                if (_record_key(addition) in known
-                        or (addition.get("target"), json.dumps(addition.get("event"),
-                            sort_keys=True, ensure_ascii=False)) in known_events):
+                if (
+                    _record_key(addition) in known
+                    or (
+                        addition.get("target"),
+                        json.dumps(
+                            addition.get("event"), sort_keys=True, ensure_ascii=False
+                        ),
+                    )
+                    in known_events
+                ):
                     continue
                 addition = dict(addition)
                 addition["attempt_generation"] = target_generations.get(
-                    addition.get("target"), 0)
+                    addition.get("target"), 0
+                )
                 records.append(addition)
             attempted_targets = set(attempted_targets)
             if attempted_targets:
-                generation = max(
-                    (_attempt_generation(record) for record in records),
-                    default=0) + 1
+                generation = (
+                    max((_attempt_generation(record) for record in records), default=0)
+                    + 1
+                )
                 for record in records:
                     if record.get("target") in attempted_targets:
                         record["attempt_generation"] = generation
@@ -743,10 +819,12 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                     for target in attempted_targets:
                         schedule[target] = generation
                 schedule = _bounded_schedule(
-                    schedule, (record.get("target") for record in records))
+                    schedule, (record.get("target") for record in records)
+                )
                 schedule_pending = durable.stage_json(_schedule_path(), schedule)
-                durable.publish_staged(((pending, OUTBOX),
-                                        (schedule_pending, _schedule_path())))
+                durable.publish_staged(
+                    ((pending, OUTBOX), (schedule_pending, _schedule_path()))
+                )
                 for journal, torn in journals:
                     if torn:
                         _quarantine_outbox_tail(torn)
@@ -780,23 +858,25 @@ def _diagnose(kind, **details):
                             raise ValueError("diagnostic counter")
                     repaired = False
                 except (ValueError, OSError, TypeError):
-                    report = {"failures": 0, "retries": 0, "drops": 0,
-                              "recent": []}
+                    report = {"failures": 0, "retries": 0, "drops": 0, "recent": []}
                     repaired = True
                 if repaired:
-                    report["recent"].append({"kind": "repair",
-                                             "reason": "invalid diagnostics"})
+                    report["recent"].append(
+                        {"kind": "repair", "reason": "invalid diagnostics"}
+                    )
                 if kind in ("failure", "retry", "drop"):
-                    key = {"failure": "failures", "retry": "retries",
-                           "drop": "drops"}[kind]
+                    key = {"failure": "failures", "retry": "retries", "drop": "drops"}[
+                        kind
+                    ]
                     report[key] = int(report.get(key, 0)) + int(details.pop("count", 1))
-                report["updated_at"] = datetime.datetime.now(
-                    datetime.timezone.utc).isoformat(timespec="milliseconds").replace(
-                        "+00:00", "Z")
+                report["updated_at"] = (
+                    datetime.datetime.now(datetime.timezone.utc)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                )
                 report.setdefault("recent", []).append(dict(kind=kind, **details))
                 report["recent"] = report["recent"][-DIAGNOSTIC_HISTORY:]
-                pending = durable.stage_json(
-                    DIAGNOSTICS, report, ensure_ascii=False)
+                pending = durable.stage_json(DIAGNOSTICS, report, ensure_ascii=False)
                 durable.publish_staged(((pending, DIAGNOSTICS),))
                 return True
         except (OSError, ValueError, TypeError):
@@ -804,8 +884,11 @@ def _diagnose(kind, **details):
 
 
 def _deferred_generations(path):
-    return [path] + [candidate for candidate in durable.replay_paths(path)
-                     if ".torn." not in candidate]
+    return [path] + [
+        candidate
+        for candidate in durable.replay_paths(path)
+        if ".torn." not in candidate
+    ]
 
 
 def _read_deferred(path):
@@ -825,23 +908,22 @@ def _read_deferred(path):
             break
         if not isinstance(record, dict):
             continue
-        record.setdefault(_DEFERRED_ID_FIELD,
-                          hashlib.sha256(line.encode("utf-8")).hexdigest())
+        record.setdefault(
+            _DEFERRED_ID_FIELD, hashlib.sha256(line.encode("utf-8")).hexdigest()
+        )
         records.append(record)
     return records, torn
 
 
 def _quarantine_deferred_tail(path, torn):
     """Durably retain a bounded forensic sample outside replay authority."""
-    quarantine = (path + ".torn.%020d.%s"
-                  % (time.time_ns(), uuid.uuid4().hex))
+    quarantine = path + ".torn.%020d.%s" % (time.time_ns(), uuid.uuid4().hex)
     with open(quarantine, "xb") as damaged:
         damaged.write(torn)
         damaged.flush()
         os.fsync(damaged.fileno())
     root = path.rsplit(".replay.", 1)[0]
-    candidates = (glob.glob(root + ".torn.*")
-                  + glob.glob(root + ".replay.*.torn.*"))
+    candidates = glob.glob(root + ".torn.*") + glob.glob(root + ".replay.*.torn.*")
     candidates.sort(key=lambda item: (os.path.getmtime(item), item), reverse=True)
     retained_bytes = 0
     for index, candidate in enumerate(candidates):
@@ -849,8 +931,7 @@ def _quarantine_deferred_tail(path, torn):
             size = os.path.getsize(candidate)
         except OSError:
             continue
-        if (index >= DEFERRED_TORN_FILES
-                or retained_bytes + size > DEFERRED_TORN_BYTES):
+        if index >= DEFERRED_TORN_FILES or retained_bytes + size > DEFERRED_TORN_BYTES:
             try:
                 os.unlink(candidate)
             except OSError:
@@ -904,7 +985,8 @@ def _compact_deferred_locked(path, addition=None):
     # Report victims before the authority that omits them is published. A crash
     # may conservatively over-report a drop, but can never create a silent one.
     if dropped and not _diagnose(
-            "drop", count=dropped, reason="local deferred capacity"):
+        "drop", count=dropped, reason="local deferred capacity"
+    ):
         raise OSError("local deferred drop diagnostic was not durable")
     pending = durable.stage_lines(path, encoded)
     durable.publish_staged(((pending, path),))
@@ -1020,19 +1102,23 @@ def deliver(event):
 
         workers = []
         for url, token in mirrors:
-            worker = threading.Thread(target=mirror_worker, args=(url, token), daemon=True)
+            worker = threading.Thread(
+                target=mirror_worker, args=(url, token), daemon=True
+            )
             worker.start()
             workers.append(worker)
         for worker in workers:
             worker.join(max(0, deadline - time.monotonic()))
         if deferred_mirrors:
-            _diagnose("failure", reason="target limit",
-                      count=len(deferred_mirrors))
+            _diagnose("failure", reason="target limit", count=len(deferred_mirrors))
         return
 
-    additions = _stamp_enqueue_order([{"delivery_id": current_id,
-                  "target": _target_id(url),
-                  "event": event} for url, _ in configured_primary])
+    additions = _stamp_enqueue_order(
+        [
+            {"delivery_id": current_id, "target": _target_id(url), "event": event}
+            for url, _ in configured_primary
+        ]
+    )
     dropped, queued = _update_outbox(set(), additions)
     if dropped:
         _diagnose("drop", count=dropped, reason="outbox capacity")
@@ -1042,18 +1128,24 @@ def deliver(event):
         _append_local(event)
         local_written = True
         if journal_dropped:
-            _diagnose("drop", count=journal_dropped,
-                      reason="outbox capacity under contention")
-        _diagnose("failure", reason=("outbox lock contention"
-                  if journaled else "outbox contention journal failure"))
+            _diagnose(
+                "drop", count=journal_dropped, reason="outbox capacity under contention"
+            )
+        _diagnose(
+            "failure",
+            reason=(
+                "outbox lock contention"
+                if journaled
+                else "outbox contention journal failure"
+            ),
+        )
     pending = _read_durable_outbox_snapshot()
     primary, mirrors, deferred_primary, deferred_mirrors = _target_groups(pending)
     results = {}
 
     # Reserve the selected turn before network work. Fairness therefore
     # survives success (which removes queue records), failure, and restart.
-    attempted = {_target_id(url)
-                 for url, _ in primary}
+    attempted = {_target_id(url) for url, _ in primary}
     _, reserved = _update_outbox(set(), [], attempted)
     if not reserved:
         _diagnose("failure", reason="schedule reservation contention")
@@ -1063,8 +1155,12 @@ def deliver(event):
         queued = [record for record in pending if record.get("target") == target_key]
         delivered_keys = []
         for record in queued[:REPLAY_BATCH]:
-            if not post_event(url, record.get("event") or {}, token,
-                              str(record.get("delivery_id") or "")):
+            if not post_event(
+                url,
+                record.get("event") or {},
+                token,
+                str(record.get("delivery_id") or ""),
+            ):
                 results[url] = (delivered_keys, False, target_key)
                 return
             delivered_keys.append(_record_key(record))
@@ -1077,8 +1173,9 @@ def deliver(event):
         worker.start()
         workers.append(worker)
     for url, token in mirrors:
-        worker = threading.Thread(target=post_event,
-                                  args=(url, event, token, ""), daemon=True)
+        worker = threading.Thread(
+            target=post_event, args=(url, event, token, ""), daemon=True
+        )
         worker.start()
         workers.append(worker)
     for worker in workers:
@@ -1095,8 +1192,11 @@ def deliver(event):
     if deferred_primary:
         primary_failed = True
     if deferred_primary or deferred_mirrors:
-        _diagnose("failure", reason="target limit",
-                  count=len(deferred_primary) + len(deferred_mirrors))
+        _diagnose(
+            "failure",
+            reason="target limit",
+            count=len(deferred_primary) + len(deferred_mirrors),
+        )
     if time.monotonic() < deadline:
         _, updated = _update_outbox(delivered_keys, [])
         if not updated:
@@ -1129,11 +1229,16 @@ def redact_event(event):
         return out
     out["cwd"] = ""
     if "artifact" in payload:
-        payload["artifact"] = _safe_path(payload["artifact"]) if policy == "safe" else "[redacted]"
+        payload["artifact"] = (
+            _safe_path(payload["artifact"]) if policy == "safe" else "[redacted]"
+        )
     for key in ("prompt", "message", "detail", "error"):
         if key in payload:
-            if (policy == "safe" and key == "detail"
-                    and getattr(payload[key], "is_path", False)):
+            if (
+                policy == "safe"
+                and key == "detail"
+                and getattr(payload[key], "is_path", False)
+            ):
                 payload[key] = _safe_path(payload[key])
             else:
                 payload[key] = "[redacted]"
@@ -1150,7 +1255,9 @@ def main(runner="claude"):
     resident_parent = None
     if resident_id:
         source = RUNNER_SOURCES[runner]
-        resident_parent = resident_id if ":" in resident_id else source + ":" + resident_id
+        resident_parent = (
+            resident_id if ":" in resident_id else source + ":" + resident_id
+        )
     cwd = hook.get("cwd") or ""
     now = datetime.datetime.now(datetime.timezone.utc)
     for etype, payload in specs:
@@ -1161,17 +1268,19 @@ def main(runner="claude"):
             # parent rests between backing sessions.
             if agent_id == resident_parent:
                 etype, payload = "idle", {}
-        deliver({
-            "v": 0,
-            "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            "source": RUNNER_SOURCES[runner],
-            "agent_id": agent_id,
-            "project": os.environ.get("BURROW_PROJECT")
-                       or (_safe_path(cwd) if cwd else "unknown"),
-            "cwd": cwd,
-            "type": etype,
-            "payload": payload,
-        })
+        deliver(
+            {
+                "v": 0,
+                "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "source": RUNNER_SOURCES[runner],
+                "agent_id": agent_id,
+                "project": os.environ.get("BURROW_PROJECT")
+                or (_safe_path(cwd) if cwd else "unknown"),
+                "cwd": cwd,
+                "type": etype,
+                "payload": payload,
+            }
+        )
 
 
 def run_hook_bounded(runner="claude"):
@@ -1193,15 +1302,16 @@ def run_hook_bounded(runner="claude"):
         try:
             main(runner)
         except Exception as error:
-            sys.stderr.write("burrow transport failure: "
-                             + type(error).__name__[:80] + "\n")
+            sys.stderr.write(
+                "burrow transport failure: " + type(error).__name__[:80] + "\n"
+            )
         finally:
             os._exit(0)
     while time.monotonic() < work_deadline:
         waited, _ = os.waitpid(pid, os.WNOHANG)
         if waited == pid:
             return
-        time.sleep(min(.005, max(0, work_deadline - time.monotonic())))
+        time.sleep(min(0.005, max(0, work_deadline - time.monotonic())))
     sys.stderr.write("burrow transport timeout\n")
     try:
         os.kill(pid, 9)
@@ -1214,7 +1324,7 @@ def run_hook_bounded(runner="claude"):
             return
         if waited == pid:
             return
-        time.sleep(min(.005, max(0, deadline - time.monotonic())))
+        time.sleep(min(0.005, max(0, deadline - time.monotonic())))
 
 
 if __name__ == "__main__":
@@ -1226,8 +1336,9 @@ if __name__ == "__main__":
             # Last-resort diagnostic when even the durable state directory is
             # unavailable. Never echo exception text: it may contain a path,
             # URL, credential, or event detail.
-            sys.stderr.write("burrow transport failure: "
-                             + type(error).__name__[:80] + "\n")
+            sys.stderr.write(
+                "burrow transport failure: " + type(error).__name__[:80] + "\n"
+            )
     if runner == "codex":
         # Stop/SubagentStop require JSON on stdout; an empty object is advisory
         # and deliberately never approves, denies, blocks, or continues Codex.

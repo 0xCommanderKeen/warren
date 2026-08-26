@@ -4,6 +4,7 @@ This module is the server-side adapter for the contract documented in
 ``docs/protocol.md``.  The browser implements the same small interface as
 ``validateEvent`` and both adapters are exercised by one fixture matrix.
 """
+
 import datetime
 import math
 import re
@@ -11,14 +12,27 @@ import re
 from journal_observations import validate_journal_event
 
 
-EVENT_TYPES = frozenset({
-    "task_started", "tool_called", "tool_failed", "artifact_produced",
-    "heartbeat", "needs_human", "idle", "session_ended",
-    "routine_started", "routine_finished", "routine_failed",
-    "task_posted", "task_claimed", "task_done", "task_failed",
-    "needs_human_resolved",
-    "journal_written",
-})
+EVENT_TYPES = frozenset(
+    {
+        "task_started",
+        "tool_called",
+        "tool_failed",
+        "artifact_produced",
+        "heartbeat",
+        "needs_human",
+        "idle",
+        "session_ended",
+        "routine_started",
+        "routine_finished",
+        "routine_failed",
+        "task_posted",
+        "task_claimed",
+        "task_done",
+        "task_failed",
+        "needs_human_resolved",
+        "journal_written",
+    }
+)
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _REQUIRED_TEXT = {
     "task_started": ("prompt",),
@@ -27,10 +41,20 @@ _REQUIRED_TEXT = {
     "artifact_produced": ("artifact",),
     "needs_human": ("message",),
 }
-_OPTIONAL_TEXT = frozenset({
-    "prompt", "tool", "artifact", "message", "detail", "error", "phase",
-    "turn_id", "agent_type", "parent_agent_id",
-})
+_OPTIONAL_TEXT = frozenset(
+    {
+        "prompt",
+        "tool",
+        "artifact",
+        "message",
+        "detail",
+        "error",
+        "phase",
+        "turn_id",
+        "agent_type",
+        "parent_agent_id",
+    }
+)
 
 
 def _nonempty_text(value):
@@ -48,19 +72,27 @@ def _validate_routine_payload(event_type, payload):
         if not _nonempty_text(payload.get("outcome")):
             return "invalid payload.outcome"
         artifacts = payload.get("artifacts")
-        if not isinstance(artifacts, list) or not all(_nonempty_text(item) for item in artifacts):
+        if not isinstance(artifacts, list) or not all(
+            _nonempty_text(item) for item in artifacts
+        ):
             return "invalid payload.artifacts"
         duration = payload.get("duration_s")
-        if (type(duration) not in (int, float) or not math.isfinite(duration)
-                or duration < 0):
+        if (
+            type(duration) not in (int, float)
+            or not math.isfinite(duration)
+            or duration < 0
+        ):
             return "invalid payload.duration_s"
     elif event_type == "routine_failed":
         if not _nonempty_text(payload.get("error")):
             return "invalid payload.error"
         if "duration_s" in payload:
             duration = payload["duration_s"]
-            if (type(duration) not in (int, float) or not math.isfinite(duration)
-                    or duration < 0):
+            if (
+                type(duration) not in (int, float)
+                or not math.isfinite(duration)
+                or duration < 0
+            ):
                 return "invalid payload.duration_s"
     return None
 
@@ -73,7 +105,9 @@ def _validate_task_payload(event_type, payload, agent_id):
         if not _nonempty_text(payload.get("posted_by")):
             return "invalid payload.posted_by"
         skills = payload.get("required_skills")
-        if not isinstance(skills, list) or not all(isinstance(item, str) for item in skills):
+        if not isinstance(skills, list) or not all(
+            isinstance(item, str) for item in skills
+        ):
             return "invalid payload.required_skills"
     else:
         if not _nonempty_text(payload.get("claimant")):
@@ -84,7 +118,9 @@ def _validate_task_payload(event_type, payload, agent_id):
         return "invalid payload.parent_task_id"
     if event_type == "task_done":
         artifacts = payload.get("artifacts")
-        if not isinstance(artifacts, list) or not all(_nonempty_text(item) for item in artifacts):
+        if not isinstance(artifacts, list) or not all(
+            _nonempty_text(item) for item in artifacts
+        ):
             return "invalid payload.artifacts"
     if event_type == "task_failed" and not _nonempty_text(payload.get("reason")):
         return "invalid payload.reason"
@@ -157,8 +193,11 @@ def validate_event(event):
         # Structured approvals add an object-valued detail to the legacy
         # string-valued knock. Shape validation remains a projection concern so
         # a malformed structured attempt can degrade to the plain knock.
-        if (field in payload and not isinstance(payload[field], str)
-                and not (event_type == "needs_human" and field == "detail")):
+        if (
+            field in payload
+            and not isinstance(payload[field], str)
+            and not (event_type == "needs_human" and field == "detail")
+        ):
             return f"invalid payload.{field}"
     if "stop_hook_active" in payload and type(payload["stop_hook_active"]) is not bool:
         return "invalid payload.stop_hook_active"

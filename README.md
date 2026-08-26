@@ -103,7 +103,7 @@ First append owns each resident/day,
 and the highest 40 canonical `(day, agent_id)` keys survive log rotation with one
 representative collision diagnosed per retained key.
 
-## Running (v0.5)
+## Running
 
 ### Canonical operator path
 
@@ -130,10 +130,12 @@ One village for the whole fleet, served from the NAS over Tailscale:
 map of everything the fleet does.
 
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
-  `python:3.14-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
+  `python:3.14-slim` installs the locked environment with
+  `uv sync --frozen --no-dev` and runs `uv run uvicorn serve:app --host 0.0.0.0 --port 8737`
+  with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py hooks viewer villagers | ssh
@@ -172,7 +174,8 @@ map of everything the fleet does.
   `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
   `BURROW_TOKEN` pair, so it appears as one resident villager that rests between
   turns instead of leaving.
-- **Local-only mode** — `python3 serve.py` and no `BURROW_URL` still works: same
+- **Local-only mode** — `uv run uvicorn serve:app --host 127.0.0.1 --port 8737` and no
+  `BURROW_URL` still works: same
   viewer over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
 
 ### Working on burrow locally
@@ -182,7 +185,9 @@ emitter mirrors every event to `http://127.0.0.1:8737` as well as to the village
 so:
 
 ```sh
-python3 serve.py                  # then open http://127.0.0.1:8737
+uv sync --frozen
+uv run uvicorn serve:app --host 127.0.0.1 --port 8737
+                                # then open http://127.0.0.1:8737
 ```
 
 is a live copy of your own fleet — the same sessions, the same villagers, the same
@@ -215,7 +220,7 @@ plus at most 8 non-authoritative torn-tail files within 256 KiB.
 Two caveats worth knowing:
 
 - The local server's log defaults to `~/.burrow/events.jsonl`, which is also the
-  emitter's offline fallback. Use `BURROW_EVENTS=/tmp/burrow-dev.jsonl python3 serve.py`
+  emitter's offline fallback. Use `BURROW_EVENTS=/tmp/burrow-dev.jsonl uv run uvicorn serve:app`
   to keep a dev run's history separate.
 - Hook *env* is read when a session starts, so changing `BURROW_MIRROR` only affects
   sessions started afterwards. Updating the installed emitter bundle applies
