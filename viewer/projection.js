@@ -26,6 +26,8 @@ const APPROVAL_ORDINALS = typeof module === "object" && module.exports ?
   require("./approval-knocks.js") : null;
 const JOURNALS = typeof module === "object" && module.exports ?
   require("./journal-observations.js") : null;
+const TYPED_JSON = typeof module === "object" && module.exports ?
+  require("./typed-json.js") : BurrowTypedJSON;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -123,7 +125,7 @@ const OPTIONAL_PAYLOAD_TEXT = [
  * interface aligned with protocol.validate_event; one fixture matrix exercises
  * both so ingestion and projection cannot silently drift. */
 function validateEvent(ev) {
-  if (!ev || typeof ev !== "object" || Array.isArray(ev)) return "event must be an object";
+  if (!exactPlainObject(ev)) return "event must be an object";
   if (!Number.isInteger(ev.v) || ev.v !== 0) return "unsupported protocol version";
   if (typeof ev.ts !== "string" || !TIMESTAMP_V0.test(ev.ts) ||
       ev.ts.slice(0, 4) === "0000" ||
@@ -135,7 +137,7 @@ function validateEvent(ev) {
   }
   if (Object.hasOwn(ev, "cwd") && typeof ev.cwd !== "string") return "invalid cwd";
   if (typeof ev.type !== "string" || !EVENT_TYPES.has(ev.type)) return "unsupported event type";
-  if (!ev.payload || typeof ev.payload !== "object" || Array.isArray(ev.payload)) {
+  if (!exactPlainObject(ev.payload)) {
     return "payload must be an object";
   }
   for (const field of REQUIRED_PAYLOAD_TEXT[ev.type] || []) {
@@ -248,29 +250,305 @@ function validateEvent(ev) {
 /* One parse and validation pass per batch for village and notice board. */
 const VALIDATED_BATCH = Symbol("burrow validated event batch");
 const REJECTIONS = Symbol("burrow rejected event diagnostics");
-function parseItem(item) {
-  let ev = item;
-  if (typeof ev === "string") {
-    try { ev = JSON.parse(ev); } catch { return { event: null, rejection: null }; }
+const MOOD_AUTHORITY = Symbol("burrow internal mood authority");
+const MOOD_AUTHORITY_COPIES = Symbol("burrow internal mood authority copies");
+const MOOD_AUTHORITY_ORDINALS = Symbol("burrow internal mood authority ordinals");
+const MOOD_AUTHORITY_ORDER = Symbol("burrow internal mood authority raw order");
+const MOOD_AUTHORITY_RAW_INDEXES = Symbol("burrow internal mood authority raw indexes");
+const MOOD_AUTHORITY_RAW_COUNT = Symbol("burrow internal mood authority raw count");
+const MOOD_AUTHORITY_OVERFLOW = Symbol("burrow internal mood authority overflow");
+const MOOD_AUTHORITY_OBSERVED = Symbol("burrow internal mood authority observed");
+const MOOD_AUTHORITY_KIND = "mood-authority-v1";
+const MOOD_AUTHORITY_ENCODING = "typed-binary64-v1";
+const MOOD_AUTHORITY_MAX_BYTES = 32 * 1024;
+// Capsule metadata is recursively canonicalized, so bound its container depth
+// before that traversal. The capsule object itself is depth one; 64 leaves 60
+// nested containers for a valid v0 needs_human detail value.
+const MOOD_AUTHORITY_MAX_DEPTH = 64;
+function exactDenseArray(value) {
+  return TYPED_JSON.exactDenseArray(value);
+}
+function exactPlainObject(value) {
+  return TYPED_JSON.exactPlainObject(value);
+}
+function jsonDomainWithin(value, maxDepth = Infinity) {
+  const seen = new WeakSet(), active = new WeakSet();
+  const stack = [{ value, depth: 0, exit: false }];
+  try {
+    while (stack.length) {
+      const current = stack.pop(), item = current.value;
+      if (current.exit) { active.delete(item); continue; }
+      if (item === null || ["boolean", "number", "string"].includes(typeof item)) continue;
+      if (typeof item !== "object") return false;
+      const depth = current.depth + 1;
+      // A parsed JSON value can never contain a repeated container identity.
+      // Reject direct-object aliases globally, before a later canonicalizer
+      // can expand a small shared DAG into exponentially many nodes.
+      if (depth > maxDepth || seen.has(item)) return false;
+      if (!Array.isArray(item) && !exactPlainObject(item)) return false;
+      seen.add(item); active.add(item);
+      stack.push({ value: item, depth, exit: true });
+      if (Array.isArray(item)) {
+        if (!exactDenseArray(item)) return false;
+        for (let index = item.length - 1; index >= 0; index--) {
+          stack.push({ value: item[index], depth, exit: false });
+        }
+      } else {
+        const keys = Object.keys(item);
+        for (let index = keys.length - 1; index >= 0; index--) {
+          stack.push({ value: item[keys[index]], depth, exit: false });
+        }
+      }
+    }
+  } catch {
+    return false;
   }
-  const reason = validateEvent(ev);
-  if (!reason) return { event: ev, rejection: null };
-  const diagnostic = ev && typeof ev.type === "string" &&
-    (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
-      ev.type === "journal_written" ||
-      ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type));
-  return { event: null, rejection: diagnostic ? { type: ev.type, reason } : null };
+  return true;
+}
+
+/* JSON.parse deliberately accepts duplicate object names. Internal capsule
+ * wire data does not: ambiguity at any envelope/graph/event nesting level
+ * invalidates the capsule atomically. Public v0 parsing remains unchanged. */
+function duplicateFreeJSON(text) {
+  let at = 0;
+  const whitespace = () => { while (/\s/.test(text[at] || "")) at++; };
+  function string() {
+    const start = at++;
+    while (at < text.length) {
+      const char = text[at++];
+      if (char === '"') return JSON.parse(text.slice(start, at));
+      if (char === "\\") {
+        if (text[at] === "u") at += 5;
+        else at++;
+      }
+    }
+    throw new SyntaxError("unterminated JSON string");
+  }
+  function value(depth) {
+    if (depth > MOOD_AUTHORITY_MAX_DEPTH + 4) throw new SyntaxError("JSON too deep");
+    whitespace();
+    if (text[at] === '"') { string(); return; }
+    if (text[at] === "[") {
+      at++; whitespace();
+      if (text[at] === "]") { at++; return; }
+      while (true) {
+        value(depth + 1); whitespace();
+        if (text[at] === "]") { at++; return; }
+        if (text[at++] !== ",") throw new SyntaxError("invalid JSON array");
+      }
+    }
+    if (text[at] === "{") {
+      at++; whitespace(); const keys = new Set();
+      if (text[at] === "}") { at++; return; }
+      while (true) {
+        if (text[at] !== '"') throw new SyntaxError("invalid JSON object key");
+        const key = string();
+        if (keys.has(key)) throw new SyntaxError("duplicate JSON object key");
+        keys.add(key); whitespace();
+        if (text[at++] !== ":") throw new SyntaxError("invalid JSON object");
+        value(depth + 1); whitespace();
+        if (text[at] === "}") { at++; return; }
+        if (text[at++] !== ",") throw new SyntaxError("invalid JSON object");
+        whitespace();
+      }
+    }
+    const start = at;
+    while (at < text.length && !/[\s,\]}]/.test(text[at])) at++;
+    if (start === at) throw new SyntaxError("invalid JSON value");
+    JSON.parse(text.slice(start, at));
+  }
+  try { value(0); whitespace(); return at === text.length; } catch { return false; }
+}
+function canonicalJSONString(value) {
+  let encoded = '"';
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22) encoded += '\\"';
+    else if (code === 0x5c) encoded += "\\\\";
+    else if (code === 0x08) encoded += "\\b";
+    else if (code === 0x09) encoded += "\\t";
+    else if (code === 0x0a) encoded += "\\n";
+    else if (code === 0x0c) encoded += "\\f";
+    else if (code === 0x0d) encoded += "\\r";
+    else if (code >= 0x20 && code <= 0x7e) encoded += value[index];
+    else encoded += "\\u" + code.toString(16).padStart(4, "0");
+  }
+  return encoded + '"';
+}
+const canonicalJSONStringify = value => TYPED_JSON.identity(value);
+function encodedBytes(value) {
+  const text = typeof value === "string" ? value : canonicalJSONStringify(value);
+  if (typeof Buffer === "function") return Buffer.byteLength(text, "utf8");
+  return new TextEncoder().encode(text).length;
+}
+function canonicalIdentity(value) { return TYPED_JSON.identity(value); }
+function capsuleIdentityEqual(left, right) {
+  try { return canonicalIdentity(left) === canonicalIdentity(right); } catch { return false; }
+}
+function validOrdinal(value) {
+  return typeof value === "string" && /^(0|[1-9]\d*)$/.test(value) &&
+    Number.isSafeInteger(Number(value));
+}
+function increasingOrdinals(values) {
+  return values.every((value, index) => index === 0 ||
+    Number(values[index - 1]) < Number(value));
+}
+function validRawIndex(value) {
+  return typeof value === "string" && /^\d{16}$/.test(value) &&
+    Number.isSafeInteger(Number(value));
+}
+function rawIndex(index) {
+  return String(index).padStart(16, "0");
+}
+function parseMoodAuthority(item, encoded = item) {
+  if (typeof encoded === "string" && !duplicateFreeJSON(encoded)) return null;
+  // Validate the entire direct-object domain before reading even the envelope
+  // discriminator. This prevents getters, hidden fields, symbols, and exotic
+  // prototypes at any envelope/graph/event/payload depth from executing or
+  // being silently discarded during canonicalization.
+  if (!jsonDomainWithin(item, MOOD_AUTHORITY_MAX_DEPTH)) return null;
+  if (exactPlainObject(item) && item.encoding === MOOD_AUTHORITY_ENCODING) {
+    if (Object.keys(item).sort().join("|") !== "_burrow_internal|encoding|graph") return null;
+    try {
+      const logical = TYPED_JSON.decodeGraph(item.graph);
+      if (!logical || typeof logical !== "object" || Array.isArray(logical)) return null;
+      if (Object.keys(logical).sort().join("|") !==
+          "copies|events|observed|ordinals|overflow|raw_count|raw_indexes|raw_ordinals") return null;
+      item = { _burrow_internal: MOOD_AUTHORITY_KIND, ...logical };
+    } catch { return null; }
+  }
+  const has = key => Object.hasOwn(item, key);
+  if (!item || typeof item !== "object" || Array.isArray(item) ||
+      Object.keys(item).sort().join("|") !==
+        "_burrow_internal|copies|events|observed|ordinals|overflow|raw_count|raw_indexes|raw_ordinals" ||
+      item._burrow_internal !== MOOD_AUTHORITY_KIND || !Array.isArray(item.events) ||
+      !Array.isArray(item.ordinals) || item.ordinals.length !== item.events.length ||
+      (has("copies") && !Array.isArray(item.copies)) ||
+      (has("raw_ordinals") && !Array.isArray(item.raw_ordinals)) ||
+      (has("raw_indexes") && !Array.isArray(item.raw_indexes)) ||
+      typeof item.overflow !== "boolean" || typeof item.observed !== "number" ||
+      !Number.isFinite(item.observed) || !Number.isInteger(item.observed) ||
+      item.observed < 0 || item.observed > 257 ||
+      (item.overflow ? item.observed !== 257 : item.observed !== item.events.length) ||
+      encodedBytes(encoded) > MOOD_AUTHORITY_MAX_BYTES ||
+      (item.overflow && (item.events.length || item.ordinals.length ||
+        (item.copies || []).length || (item.raw_ordinals || []).length ||
+        (item.raw_indexes || []).length))) return null;
+  const events = [];
+  for (let index = 0; index < item.events.length; index++) {
+    const event = item.events[index];
+    if (validateEvent(event)) return null;
+    const payload = event.payload || {};
+    const rootPrompt = event.type === "task_started" &&
+      ["claude-code", "codex"].includes(event.source) &&
+      !Object.hasOwn(payload, "parent_agent_id");
+    if (!["needs_human", "needs_human_resolved"].includes(event.type) && !rootPrompt) return null;
+    events.push(event);
+  }
+  const copies = item.copies;
+  const rawOrdinals = item.raw_ordinals;
+  const rawIndexes = item.raw_indexes;
+  const rawCount = item.raw_count;
+  if (rawIndexes.length !== rawOrdinals.length ||
+      !validRawIndex(rawCount) || (item.overflow && Number(rawCount) !== 0) ||
+      rawIndexes.some(index => Number(index) >= Number(rawCount)) ||
+      !rawIndexes.every(validRawIndex) || !increasingOrdinals(rawIndexes) ||
+      !item.ordinals.every(validOrdinal) || !increasingOrdinals(item.ordinals) ||
+      !copies.every(validOrdinal) || !increasingOrdinals(copies) ||
+      !rawOrdinals.every(validOrdinal) ||
+      !increasingOrdinals(rawOrdinals)) return null;
+  return { events, ordinals: item.ordinals, copies,
+    rawOrdinals, rawIndexes, rawCount, overflow: item.overflow,
+    observed: item.observed };
+}
+function parseItem(item) {
+  try {
+    let ev = item;
+    if (typeof ev === "string") {
+      try { ev = JSON.parse(ev); } catch { return { event: null, rejection: null }; }
+    }
+    // Recognize our reserved marker before walking hostile direct-object data:
+    // malformed/cyclic metadata is internal null authority, never a public
+    // protocol rejection, and cannot hide any following raw event.
+    let internalMarker = false;
+    try {
+      if (ev && typeof ev === "object" && !Array.isArray(ev)) {
+        const marker = Object.getOwnPropertyDescriptor(ev, "_burrow_internal");
+        // An accessor in the reserved namespace is itself malformed internal
+        // metadata; never invoke it or report it as a public protocol record.
+        internalMarker = Boolean(marker && (!Object.hasOwn(marker, "value") ||
+          marker.value === MOOD_AUTHORITY_KIND));
+      }
+    } catch { return { event: null, rejection: null }; }
+    if (internalMarker) return { event: null, rejection: null,
+      moodAuthority: parseMoodAuthority(ev, item), internalMarker: true };
+    if (!jsonDomainWithin(ev)) return { event: null, rejection: null };
+    const reason = validateEvent(ev);
+    if (!reason) return { event: ev, rejection: null };
+    const diagnostic = ev && typeof ev.type === "string" &&
+      (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
+        ev.type === "journal_written" ||
+        ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type));
+    return { event: null, rejection: diagnostic ? { type: ev.type, reason } : null };
+  } catch {
+    // Direct object inputs can contain getters/proxies or values JSON cannot
+    // represent. They fail closed just like malformed wire JSON.
+    return { event: null, rejection: null };
+  }
 }
 function parseEvents(batch) {
   if (batch && batch[VALIDATED_BATCH]) return batch;
-  const events = [], rejections = [];
-  for (const item of batch) {
+  const events = [], rejections = [], capsules = [];
+  for (let physicalIndex = 0; physicalIndex < batch.length; physicalIndex++) {
+    const item = batch[physicalIndex];
     const parsed = parseItem(item);
     if (parsed.event) events.push(parsed.event);
     if (parsed.rejection) rejections.push(parsed.rejection);
+    if (parsed.internalMarker) capsules.push({ authority: parsed.moodAuthority, physicalIndex });
+  }
+  let moodAuthority = [], moodOrdinals = [], moodCopies = [], moodOrder = [], moodRawIndexes = [],
+    moodRawCount = rawIndex(0), moodOverflow = false,
+    moodObserved = 0;
+  // Exactly one capsule is legal. Its manifests are accepted only as an
+  // atomic unit after proving they are structural multisets of both its own
+  // authority and the surrounding raw batch. This prevents metadata from
+  // suppressing an unrelated event with a merely similar serialization.
+  if (capsules.length === 1 && capsules[0].physicalIndex === 0 && capsules[0].authority) {
+    const capsule = capsules[0].authority;
+    const byOrdinal = new Map(capsule.ordinals.map((ordinal, index) =>
+      [ordinal, capsule.events[index]]));
+    const rawByOrdinal = new Map(capsule.rawOrdinals.map((ordinal, index) =>
+      [ordinal, events[Number(capsule.rawIndexes[index])]]));
+    const copiesSafe = Number(capsule.rawCount) <= events.length &&
+      capsule.copies.length === new Set(capsule.copies).size &&
+      capsule.rawIndexes.every(index => Number(index) < events.length) && capsule.copies.every(ordinal =>
+        byOrdinal.has(ordinal) && rawByOrdinal.has(ordinal) &&
+        capsuleIdentityEqual(byOrdinal.get(ordinal), rawByOrdinal.get(ordinal)));
+    const authorityOrdinals = new Set(capsule.ordinals);
+    const intersections = capsule.rawOrdinals.filter(ordinal => authorityOrdinals.has(ordinal));
+    const orderSafe = capsule.rawIndexes.every(index => Number(index) < events.length) &&
+      intersections.length === capsule.copies.length &&
+      intersections.every(ordinal => capsule.copies.includes(ordinal));
+    if (copiesSafe && orderSafe) {
+      moodAuthority = capsule.events; moodOrdinals = capsule.ordinals;
+      moodCopies = capsule.copies; moodOrder = capsule.rawOrdinals;
+      moodRawIndexes = capsule.rawIndexes;
+      moodRawCount = capsule.rawCount;
+      moodOverflow = capsule.overflow;
+      moodObserved = capsule.observed;
+    }
   }
   Object.defineProperty(events, VALIDATED_BATCH, { value: true });
   Object.defineProperty(events, REJECTIONS, { value: rejections });
+  Object.defineProperty(events, MOOD_AUTHORITY, { value: moodAuthority });
+  Object.defineProperty(events, MOOD_AUTHORITY_COPIES, {
+    value: moodCopies });
+  Object.defineProperty(events, MOOD_AUTHORITY_ORDINALS, { value: moodOrdinals });
+  Object.defineProperty(events, MOOD_AUTHORITY_ORDER, { value: moodOrder });
+  Object.defineProperty(events, MOOD_AUTHORITY_RAW_INDEXES, { value: moodRawIndexes });
+  Object.defineProperty(events, MOOD_AUTHORITY_RAW_COUNT, { value: moodRawCount });
+  Object.defineProperty(events, MOOD_AUTHORITY_OVERFLOW, { value: moodOverflow });
+  Object.defineProperty(events, MOOD_AUTHORITY_OBSERVED, { value: moodObserved });
   return events;
 }
 /* Parse a grouped raw response once while retaining two independently marked
@@ -281,28 +559,23 @@ function parseEventWindows(batch, limit) {
   if (!Array.isArray(batch) || !Number.isInteger(limit) || limit < 0) {
     throw new TypeError("parseEventWindows requires an array and a non-negative limit");
   }
-  const all = [], tail = [], allRejections = [], tailRejections = [];
   const tailStart = Math.max(0, batch.length - limit);
+  const all = parseEvents(batch), tailSelection = [];
+  let eventIndex = 0;
   for (let index = 0; index < batch.length; index++) {
     const parsed = parseItem(batch[index]);
-    if (parsed.rejection) {
-      allRejections.push(parsed.rejection);
-      if (index >= tailStart) tailRejections.push(parsed.rejection);
-    }
     if (!parsed.event) continue;
-    all.push(parsed.event);
-    if (index >= tailStart) tail.push(parsed.event);
+    if (index >= tailStart) tailSelection.push(all[eventIndex]);
+    eventIndex++;
   }
-  for (const [events, rejections] of [[all, allRejections], [tail, tailRejections]]) {
-    Object.defineProperty(events, VALIDATED_BATCH, { value: true });
-    Object.defineProperty(events, REJECTIONS, { value: rejections });
-  }
-  // `rejected` describes the complete raw response, including malformed
-  // records before the published tail. This matches incremental ingestion:
-  // every rejected append is counted exactly once, while valid records omitted
-  // only by transport retention are never mislabeled malformed.
-  return { full: all, tail, rejected: batch.length - all.length,
-    tailRejected: batch.slice(tailStart).length - tail.length };
+  const tail = validatedSelection(all, tailSelection);
+  const internal = batch.reduce((count, item) => count +
+    (parseItem(item).internalMarker ? 1 : 0), 0);
+  const tailItems = batch.slice(tailStart);
+  const tailInternal = tailItems.reduce((count, item) => count +
+    (parseItem(item).internalMarker ? 1 : 0), 0);
+  return { full: all, tail, rejected: batch.length - all.length - internal,
+    tailRejected: tailItems.length - tail.length - tailInternal };
 }
 function routineRejections(batch) {
   const parsed = parseEvents(batch);
@@ -336,7 +609,82 @@ function validatedSelection(source, selection) {
   }
   Object.defineProperty(selection, VALIDATED_BATCH, { value: true });
   Object.defineProperty(selection, REJECTIONS, { value: [] });
+  Object.defineProperty(selection, MOOD_AUTHORITY, {
+    value: source[MOOD_AUTHORITY] || [], configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_COPIES, {
+    value: source[MOOD_AUTHORITY_COPIES] || [], configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_ORDINALS, {
+    value: source[MOOD_AUTHORITY_ORDINALS] || [], configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_ORDER, {
+    value: source[MOOD_AUTHORITY_ORDER] || [], configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_RAW_INDEXES, {
+    value: source[MOOD_AUTHORITY_RAW_INDEXES] || [], configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_RAW_COUNT, {
+    value: source[MOOD_AUTHORITY_RAW_COUNT] || rawIndex(0), configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_OVERFLOW, {
+    value: source[MOOD_AUTHORITY_OVERFLOW] || false, configurable: true });
+  Object.defineProperty(selection, MOOD_AUTHORITY_OBSERVED, {
+    value: source[MOOD_AUTHORITY_OBSERVED] || 0, configurable: true });
   return selection;
+}
+
+function moodAuthority(batch) {
+  return parseEvents(batch)[MOOD_AUTHORITY] || [];
+}
+
+function moodAuthorityCopies(batch) {
+  return parseEvents(batch)[MOOD_AUTHORITY_COPIES] || [];
+}
+
+function moodAuthorityState(batch) {
+  const parsed = parseEvents(batch);
+  return { events: parsed[MOOD_AUTHORITY] || [],
+    ordinals: parsed[MOOD_AUTHORITY_ORDINALS] || [],
+    copies: parsed[MOOD_AUTHORITY_COPIES] || [],
+    rawOrdinals: parsed[MOOD_AUTHORITY_ORDER] || [],
+    rawIndexes: parsed[MOOD_AUTHORITY_RAW_INDEXES] || [],
+    rawCount: parsed[MOOD_AUTHORITY_RAW_COUNT] || rawIndex(0),
+    overflow: Boolean(parsed[MOOD_AUTHORITY_OVERFLOW]),
+    observed: parsed[MOOD_AUTHORITY_OBSERVED] || 0 };
+}
+
+function withMoodAuthority(source, selection, authority, copies = [], options = {}) {
+  const validated = validatedSelection(source, selection);
+  Object.defineProperty(validated, MOOD_AUTHORITY, {
+    value: authority.slice(), configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_COPIES, {
+    value: copies.slice(), configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_ORDINALS, {
+    value: (options.ordinals || authority.map((_, index) => String(index))).slice(), configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_ORDER, {
+    value: (options.rawOrdinals || []).slice(), configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_RAW_INDEXES, {
+    value: (options.rawIndexes || (options.rawOrdinals || []).map((_, index) => rawIndex(index))).slice(),
+    configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_RAW_COUNT, {
+    value: options.rawCount || rawIndex(selection.length), configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_OVERFLOW, {
+    value: options.overflow === true, configurable: true });
+  Object.defineProperty(validated, MOOD_AUTHORITY_OBSERVED, {
+    value: options.observed || 0, configurable: true });
+  return validated;
+}
+
+function moodAuthorityCapsuleByteLength(authority, copies = [], options = {}) {
+  const rawOrdinals = options.rawOrdinals || [];
+  const capsule = { _burrow_internal: MOOD_AUTHORITY_KIND,
+    events: authority, ordinals: options.ordinals || authority.map((_, index) => String(index)),
+    copies, raw_ordinals: rawOrdinals,
+    raw_indexes: options.rawIndexes || rawOrdinals.map((_, index) => rawIndex(index)),
+    raw_count: options.rawCount || rawIndex(rawOrdinals.length),
+    overflow: options.overflow === true,
+    observed: options.observed || 0 };
+  try {
+    const logical = { ...capsule }; delete logical._burrow_internal;
+    const graph = TYPED_JSON.graphString(TYPED_JSON.typedGraph(logical));
+    return encodedBytes(`{"_burrow_internal":${canonicalJSONString(MOOD_AUTHORITY_KIND)},` +
+      `"encoding":${canonicalJSONString(MOOD_AUTHORITY_ENCODING)},"graph":${graph}}`);
+  } catch { return Infinity; }
 }
 
 function foldEvents(agents, batch, journalState = null) {
@@ -654,6 +1002,11 @@ if (typeof module === "object" && module.exports) {
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
     validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+    moodAuthority, moodAuthorityCopies, moodAuthorityState, withMoodAuthority,
+    canonicalIdentity, canonicalJSONStringify, capsuleIdentityEqual,
+    MOOD_AUTHORITY_KIND, MOOD_AUTHORITY_ENCODING, MOOD_AUTHORITY_MAX_BYTES,
+    MOOD_AUTHORITY_MAX_DEPTH,
+    moodAuthorityCapsuleByteLength,
     routineRejections, taskRejections,
     approvalRejections, journalRejections,
     foldEvents, foldArtifacts, nameArtifacts, reduce,

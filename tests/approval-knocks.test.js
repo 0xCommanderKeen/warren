@@ -153,6 +153,18 @@ test("shared immutable request fixture uses JSON semantic equality", () => {
   }
 });
 
+test("deep public approval identity is iterative and preserves exact lifecycle truth", () => {
+  let detail = { leaf: 1.2345678901234567 };
+  for (let index = 0; index < 3000; index++) detail = { child: detail };
+  const request = knock("deep-public", undefined, { detail });
+  const close = resolved("deep-public");
+  const state = fold([request, close]);
+  assert.equal(state.requests.get("deep-public").resolution, close);
+  assert.doesNotThrow(() => approvals.lifecycleIdentity(request, approvals.classify(request)));
+  const replay = knock("deep-public", "2026-08-25T10:02:00.000Z", { detail });
+  assert.equal(fold([request, replay]).requests.get("deep-public").collided, false);
+});
+
 test("exact wire identities preserve surrounding whitespace and never cross-close", () => {
   const request={...knock(" request "),agent_id:" codex:keeper ",project:" life "};
   const wrong={...resolved("request"),agent_id:"codex:keeper",project:"life"};

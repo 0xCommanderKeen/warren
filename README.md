@@ -58,6 +58,15 @@ incompatibly; equal-time decisions use append order. Recent confirmed cards rema
 beside a newer pending queue, while a parked session stays ended after its approval
 closes. Only Steward's exact parsed `approval_expired` 409 envelope permits safe retry.
 
+Every projected Resident and Visitor also carries one inspectable operational
+mood glyph beside its name. It is a deterministic summary of retained failures,
+work density, exact human interactions, and unresolved needs—not personality or
+sentiment. Its native details disclosure says exactly which evidence was
+observed and anchors ages to the log, so a quiet browser clock never changes the
+claim. Inactive declarations receive no glyph; stale presence only fades the
+same unmodified reading. The exact reducer and thresholds are documented in
+[the protocol](docs/protocol.md#operational-mood-glyph).
+
 The **fleet ledger** beside the census is the compact operational view. It keeps
 the newest 200 validated events from the shared parsed stream and filters them by
 search text, project, runner/source, event-derived state, and villager. Its
@@ -252,7 +261,12 @@ order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   village still needs, so nothing on screen changes. Archives are plain JSONL and
   keep the full history; set `BURROW_ARCHIVE` to put them elsewhere (on the NAS,
   they land next to the log in the mounted volume). `BURROW_MAX_LOG=0` turns
-  rotation off. The delivery-ID acceleration ledger is separately bounded to
+  rotation off. One reserved non-event capsule (at most 32 KiB) carries bounded Mood approval
+  identity, stable append order, and an explicit conservative overflow state
+  across rotations; it is ignored by every ordinary projection and cannot
+  create presence. Exact future invalidation over unrestricted request IDs is
+  impossible in fixed space, so overflow displays an uncertain mood instead of
+  guessing. The delivery-ID acceleration ledger is separately bounded to
   1,024 records/5 MiB plus one atomic-copy allowance (10 MiB physical at
   defaults); retained live/archive events remain the dedupe authority after
   ledger eviction. This is exactly-once replay within retained event authority,

@@ -12,12 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import serve
+import approval_protocol
 from tests.http_test_support import RunningServer
 
 
@@ -59,6 +61,12 @@ def village(lines, now_ms=None):
     return out
 
 
+def protocol_events(lines):
+    """Decode public v0 events while excluding reserved transport metadata."""
+    return [item for item in map(json.loads, lines)
+            if item.get("_burrow_internal") != serve.MOOD_AUTHORITY_KIND]
+
+
 class CarryForwardTest(unittest.TestCase):
     @staticmethod
     def journal(agent, day, routine="close-of-day", path=None, minutes_ago=0):
@@ -66,6 +74,1461 @@ class CarryForwardTest(unittest.TestCase):
                          day=day, path=path or f"/journal/{day}.md")
         observed["source"] = "steward"
         return observed
+
+    def test_shared_mood_fixture_is_byte_equivalent_after_python_rotation(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-rotation.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        lines = [json.dumps(item, separators=(",", ":"))
+                 for item in fixture["events"]]
+        now_ms = int(datetime.datetime.fromisoformat(
+            fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
+        rotated = serve.carry_forward(lines, now_ms)
+        script = r"""
+const fs=require('fs');
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(fs.readFileSync(0,'utf8'));
+const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
+            capture_output=True, text=True, check=True)
+        before, after = json.loads(completed.stdout)
+        self.assertEqual(after, before)
+        self.assertEqual(after["codex:mood"]["glyph"], "!")
+
+    def test_timestamp_disordered_terminal_frontier_matches_javascript_after_rotations(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+
+        def observed(hours, event_type, **payload):
+            return {"v": 0, "ts": (anchor + datetime.timedelta(hours=hours))
+                    .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "source": "codex", "agent_id": "codex:frontier",
+                    "project": "burrow", "type": event_type, "payload": payload}
+
+        initial = [observed(-10, "tool_failed", tool="early"),
+                   observed(-23.5, "heartbeat")]
+        initial.extend(observed(hours, "tool_failed", tool=f"frontier-{index}")
+                       for index, hours in enumerate((-23, -22.5, -22, -21.5)))
+        initial.extend([observed(-1, "tool_called", tool="Read"),
+                        observed(0, "idle")])
+        appended = observed(2, "idle")
+        initial_lines = [json.dumps(item, separators=(",", ":")) for item in initial]
+        once = serve.carry_forward(initial_lines, serve.event_ms(initial[-1]))
+        twice = serve.carry_forward(
+            [*once, json.dumps(appended, separators=(",", ":"))],
+            serve.event_ms(appended))
+        thrice = serve.carry_forward(twice, serve.event_ms(appended))
+        self.assertEqual(thrice, twice, "repeated Python rotation is byte stable")
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify({full:read([...input.initial,input.append]),
+  grouped:read([...input.once,input.append]),rotated:read(input.twice)}));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+            "initial": initial_lines, "append": json.dumps(appended, separators=(",", ":")),
+            "once": once, "twice": twice}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["grouped"], result["full"])
+        self.assertEqual(result["rotated"], result["full"])
+        mood = result["full"]["codex:frontier"]
+        self.assertEqual([mood["signals"]["failure"]["streak"],
+                          mood["signals"]["failure"]["failures"],
+                          mood["enoughEvidence"], mood["status"]],
+                         [2, 2, True, "watchful"])
+
+    def test_terminal_witness_ceiling_matches_javascript_and_new_epoch_recovers(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+
+        def frontier(count):
+            records = []
+            for index in range(count):
+                when = anchor - datetime.timedelta(hours=24) + datetime.timedelta(
+                    milliseconds=(index + 1) * 24 * 60 * 60 * 1000 / count)
+                records.append({"v": 0,
+                    "ts": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                    "source": "codex", "agent_id": "codex:ceiling",
+                    "project": "burrow", "type": "heartbeat",
+                    "payload": {"sequence": index}})
+            return records
+
+        groups = []
+        for count in (160, 161):
+            events = frontier(count)
+            lines = [json.dumps(item, separators=(",", ":")) for item in events]
+            rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
+            repeated = serve.carry_forward(rotated, int(anchor.timestamp() * 1000))
+            self.assertEqual(repeated, rotated)
+            capsule = serve._mood_authority_from_line(rotated[0])
+            self.assertEqual(bool(capsule and capsule["overflow"]), count == 161)
+            groups.append({"full": lines, "rotated": rotated})
+
+        fresh = frontier(1)
+        fresh_lines = serve.carry_forward(
+            [json.dumps(fresh[0], separators=(",", ":"))],
+            int(anchor.timestamp() * 1000))
+        self.assertIsNone(serve._mood_authority_from_line(fresh_lines[0]))
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const inspect=lines=>{const batch=p.parseEvents(lines),
+  retained=m.retainMoodWitnesses(batch),state=p.moodAuthorityState(retained),
+  mood=m.deriveMoods(batch).get('codex:ceiling');return {overflow:state.overflow,
+  status:mood.status,mood:JSON.stringify(mood),retained:[...retained]};};
+process.stdout.write(JSON.stringify(groups.map(group=>({full:inspect(group.full),
+  rotated:inspect(group.rotated)}))));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(groups),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        results = json.loads(completed.stdout)
+        self.assertEqual(results[0]["full"]["overflow"], False)
+        self.assertEqual(results[0]["rotated"]["mood"], results[0]["full"]["mood"])
+        self.assertEqual(results[1]["full"]["status"], "authority history uncertain")
+        self.assertEqual(results[1]["rotated"], results[1]["full"])
+        for group, result in zip(groups, results):
+            self.assertEqual(protocol_events(group["rotated"]),
+                             result["full"]["retained"],
+                             "Python and JavaScript retain identical public witness bytes")
+
+    def test_forged_nonoverflow_manifest_cannot_hide_witness_overflow(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        heartbeats = []
+        for index in range(161):
+            heartbeats.append({"v": 0,
+                "ts": (anchor - datetime.timedelta(seconds=160 - index))
+                    .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "source": "codex", "agent_id": "codex:forged-frontier",
+                "project": "burrow", "type": "heartbeat",
+                "payload": {"sequence": index}})
+        root = {**heartbeats[0],
+                "ts": (anchor - datetime.timedelta(hours=3))
+                    .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "type": "task_started", "payload": {"prompt": "old root"}}
+        raw = [*heartbeats, root]
+        indexes = [*range(159), 161]
+        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                   "events": [root], "ordinals": ["161"], "copies": ["161"],
+                   "raw_ordinals": list(map(str, indexes)),
+                   "raw_indexes": [str(index).zfill(16) for index in indexes],
+                   "raw_count": str(len(raw)).zfill(16),
+                   "overflow": False, "observed": 1}
+        lines = [json.dumps(capsule, separators=(",", ":")),
+                 *[json.dumps(item, separators=(",", ":")) for item in raw]]
+        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
+        rerotated = serve.carry_forward(rotated, int(anchor.timestamp() * 1000))
+        rebuilt = serve._mood_authority_from_line(rotated[0])
+        self.assertTrue(rebuilt and rebuilt["overflow"],
+                        "semantic rejection must rebuild canonical durable overflow")
+        self.assertEqual(rerotated, rotated)
+        self.assertLessEqual(len(protocol_events(rotated)),
+                             serve.MAX_MOOD_RETAINED_PER_AGENT)
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const batches=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>m.deriveMoods(p.parseEvents(lines)).get('codex:forged-frontier');
+process.stdout.write(JSON.stringify(batches.map(read)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps([
+            [json.dumps(item, separators=(",", ":")) for item in raw], lines,
+            rotated, [*rotated, json.dumps({**root,
+                "ts": (anchor + datetime.timedelta(minutes=1))
+                    .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "type": "idle", "payload": {}}, separators=(",", ":"))]]),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        full, parsed, after_rotation, appended = json.loads(completed.stdout)
+        self.assertEqual(parsed, full, "invalid capsule preserves the raw epoch atomically")
+        self.assertEqual(after_rotation, full)
+        self.assertEqual(appended["status"], "authority history uncertain")
+
+    def test_future_plain_supersession_keeps_backup_sufficiency_witnesses(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-future-sufficiency.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        initial = [json.dumps(item, separators=(",", ":"))
+                   for item in fixture["initial"]]
+        appended = json.dumps(fixture["append"], separators=(",", ":"))
+        now_ms = serve.event_ms(fixture["initial"][3])
+        grouped = serve.carry_forward(initial, now_ms)
+        once = serve.carry_forward([*grouped, appended], now_ms)
+        twice = serve.carry_forward(once, now_ms)
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const batches=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const derive=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        full = [*initial, appended]
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps([full, once, twice]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        expected, after_once, after_twice = json.loads(completed.stdout)
+        agent_id = fixture["agent_id"]
+        self.assertEqual(after_once[agent_id], expected[agent_id])
+        self.assertEqual(after_twice[agent_id], expected[agent_id])
+        self.assertEqual(expected[agent_id]["status"], "active")
+        self.assertEqual(expected[agent_id]["evidence"],
+                         {"count": 6, "spanMs": 30 * 60 * 1000})
+        self.assertEqual(twice, once,
+                         "a second Python rotation is byte-for-byte stable")
+
+    def test_overflow_bounds_cross_agent_collision_attachments(self):
+        anchor = datetime.datetime(2026, 8, 25, 12,
+                                   tzinfo=datetime.timezone.utc)
+        events = []
+        for index in range(300):
+            timestamp = (anchor + datetime.timedelta(seconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            for agent_id, action in (("codex:hub", "deploy"),
+                                     (f"codex:temporary-{index}", "erase")):
+                events.append({
+                    "v": 0, "ts": timestamp, "source": "codex",
+                    "agent_id": agent_id, "project": "burrow",
+                    "type": "needs_human", "payload": {
+                        "message": f"collision {index}",
+                        "request_id": f"shared-{index}", "action": action,
+                        "detail": None, "options": ["approve"]}})
+        lines = [json.dumps(item, separators=(",", ":")) for item in events]
+        rotated = serve.carry_forward(
+            lines, int((anchor + datetime.timedelta(minutes=5)).timestamp() * 1000))
+        capsule = serve._mood_authority_from_line(rotated[0])
+        self.assertTrue(capsule["overflow"])
+        counts = {}
+        for item in protocol_events(rotated):
+            counts[item["agent_id"]] = counts.get(item["agent_id"], 0) + 1
+        self.assertLessEqual(max(counts.values()),
+                             serve.MAX_MOOD_RETAINED_PER_AGENT)
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const lines=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const mood=m.deriveMoods(p.parseEvents(lines)).get('codex:hub');
+process.stdout.write(JSON.stringify(mood));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps(rotated), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        self.assertEqual(json.loads(completed.stdout)["status"],
+                         "authority history uncertain")
+
+    def test_mood_rotation_ignores_orphan_resolutions_as_threshold_witnesses(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-rotation-adversarial.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        lines = [json.dumps(item, separators=(",", ":"))
+                 for item in fixture["events"]]
+        now_ms = int(datetime.datetime.fromisoformat(
+            fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
+        rotated = serve.carry_forward(lines, now_ms)
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
+            capture_output=True, text=True, check=True)
+        before, after = json.loads(completed.stdout)
+        self.assertTrue(before["codex:mood-adversarial"]["enoughEvidence"])
+        self.assertEqual(before["codex:mood-interrupted"]["signals"]["failure"], {
+            "observed": True, "streak": 0, "failures": 3,
+            "failuresLabel": "3+"})
+        self.assertEqual(after, before)
+
+    def test_mood_rotation_preserves_uncapped_and_append_order_authority(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-rotation-regressions.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        base = {"v": 0, "source": "codex", "project": "burrow"}
+        plain = fixture["plain"]
+        plain_events = [
+            {**base, "ts": plain["knock"], "agent_id": plain["agent_id"],
+             "type": "needs_human", "payload": {"message": "legacy"}},
+            {**base, "source": "steward", "ts": plain["failure"],
+             "agent_id": plain["agent_id"], "type": "routine_failed",
+             "payload": {"routine": "nightly", "run_id": "r", "error": "boom"}},
+            {**base, "ts": plain["boundary"], "agent_id": plain["agent_id"],
+             "type": "idle", "payload": {}},
+        ]
+        capacity = fixture["capacity"]
+        capacity_events = [
+            {**base, "ts": capacity["oldest"], "agent_id": capacity["agent_id"],
+             "type": "needs_human", "payload": {"message": "Old",
+                 "request_id": "oldest", "action": "deploy", "detail": None,
+                 "options": ["approve", "deny"]}}
+        ]
+        newest = datetime.datetime.fromisoformat(
+            fixture["now"].replace("Z", "+00:00"))
+        for index in range(capacity["recent_count"]):
+            when = newest - datetime.timedelta(
+                minutes=capacity["recent_count"] - 1 - index)
+            capacity_events.append({
+                **base, "ts": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "agent_id": capacity["agent_id"], "type": "needs_human",
+                "payload": {"message": "Recent", "request_id": f"recent-{index}",
+                            "action": "deploy", "detail": None,
+                            "options": ["approve", "deny"]}})
+        events = [*plain_events, *capacity_events]
+        parsed = list(enumerate(events))
+        selected_indexes = serve._mood_keep_indexes(
+            parsed, {plain["agent_id"], capacity["agent_id"]})
+        mood_selected = [events[index] for index in sorted(selected_indexes)]
+        self.assertIn(2, selected_indexes,
+                      "append-later idle accompanies a retained plain anchor")
+        self.assertTrue(any(item["payload"].get("request_id") == "oldest"
+                            for item in mood_selected))
+
+        lines = [json.dumps(item, separators=(",", ":")) for item in events]
+        now_ms = int(newest.timestamp() * 1000)
+        rotated = serve.carry_forward(lines, now_ms)
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
+            capture_output=True, text=True, check=True)
+        before, after = json.loads(completed.stdout)
+        self.assertEqual(after, before)
+        self.assertFalse(after[plain["agent_id"]]["signals"]["unresolvedNeed"]["observed"])
+        self.assertEqual(after[capacity["agent_id"]]["signals"]["unresolvedNeed"]["request_id"],
+                         "oldest")
+        self.assertEqual(after[capacity["agent_id"]]["status"], "blocked")
+
+    def test_mood_rotation_completes_anchored_closes_and_cross_agent_collisions(self):
+        """Python carries the same per-lifecycle authority the JS reducer uses."""
+        agent = "codex:anchor"
+        first = self.approval("r1", agent)
+        first["ts"] = "2026-08-25T12:20:00.000Z"
+        first_close = self.resolution("r1", agent)
+        first_close["ts"] = "2026-08-25T12:10:00.000Z"
+        second = self.approval("r2", agent)
+        second["ts"] = "2026-08-25T12:11:00.000Z"
+        second_close = self.resolution("r2", agent)
+        second_close["ts"] = "2026-08-25T12:12:00.000Z"
+        closed = [first, first_close, second, second_close]
+        closed_indexes = serve._mood_keep_indexes(
+            list(enumerate(closed)), {agent})
+        self.assertIn(1, closed_indexes,
+                      "the timestamp-anchor request carries its exact close")
+
+        canonical = self.approval("shared", "codex:source", 10)
+        collision = self.approval("shared", "codex:owner", 500)
+        collision["payload"]["message"] = "Owner's incompatible question"
+        owner_idle = event("codex:owner", "idle")
+        collided = [canonical, collision, owner_idle]
+        collided_indexes = serve._mood_keep_indexes(
+            list(enumerate(collided)), {"codex:owner"})
+        self.assertIn(0, collided_indexes,
+                      "canonical cross-agent authority survives for the projected owner")
+        self.assertIn(1, collided_indexes)
+
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const groups=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
+process.stdout.write(JSON.stringify(groups.map(group=>[derive(group.full),derive(group.kept)])));
+"""
+        groups = [{"full": closed,
+                   "kept": [closed[index] for index in sorted(closed_indexes)]},
+                  {"full": collided,
+                   "kept": [collided[index] for index in sorted(collided_indexes)]}]
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps(groups), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        (closed_before, closed_after), (collision_before, collision_after) = json.loads(
+            completed.stdout)
+        self.assertEqual(closed_after, closed_before)
+        self.assertEqual(collision_after["codex:owner"],
+                         collision_before["codex:owner"])
+        self.assertEqual(collision_after["codex:owner"]["status"], "blocked")
+
+    def test_mood_capsule_survives_two_stage_invalidation_and_cross_agent_reuse(self):
+        """A rotation capsule replaces finite resolved-lifecycle fallback stacks."""
+        anchor = datetime.datetime(2026, 8, 25, 20, tzinfo=datetime.timezone.utc)
+        agent = "codex:capsule-python"
+        base = {"v": 0, "source": "codex", "agent_id": agent,
+                "project": "burrow"}
+
+        def when(minutes):
+            return (anchor + datetime.timedelta(minutes=minutes)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+
+        def knock(index, request_id, owner=agent, action="deploy"):
+            return {**base, "agent_id": owner, "ts": when(index),
+                    "type": "needs_human", "payload": {"message": request_id,
+                        "request_id": request_id, "action": action, "detail": None,
+                        "options": ["approve", "deny"]}}
+
+        def close(index, request_id):
+            return {**base, "source": "steward", "ts": when(index),
+                    "type": "needs_human_resolved", "payload": {
+                        "request_id": request_id, "decision": "approve",
+                        "decided_by": "human", "action": "deploy"}}
+
+        first = []
+        for index in range(81):
+            first.extend([knock(index * 2, f"q{index}"),
+                          close(index * 2 + 1, f"q{index}")])
+        first_idle = {**base, "ts": when(163), "type": "idle", "payload": {}}
+        first.append(first_idle)
+        first_lines = list(map(lambda item: json.dumps(item, separators=(",", ":")), first))
+        once = serve.carry_forward(first_lines, serve.event_ms(first_idle))
+        self.assertEqual(sum("mood-authority-v1" in line for line in once), 1)
+
+        later = [knock(200 + index, f"q{index}", action="erase")
+                 for index in range(1, 81)]
+        second_idle = {**base, "ts": when(300), "type": "idle", "payload": {}}
+        later.append(second_idle)
+        later_lines = list(map(lambda item: json.dumps(item, separators=(",", ":")), later))
+        twice = serve.carry_forward([*once, *later_lines], serve.event_ms(second_idle))
+
+        other = "codex:capsule-other"
+        reuse = knock(301, "q0", owner=other, action="erase")
+        other_idle = {**base, "agent_id": other, "ts": when(302),
+                      "type": "idle", "payload": {}}
+        thrice = serve.carry_forward([*twice, json.dumps(reuse, separators=(",", ":")),
+                                      json.dumps(other_idle, separators=(",", ":"))],
+                                     serve.event_ms(other_idle))
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const groups=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
+process.stdout.write(JSON.stringify(groups.map(derive)));
+"""
+        full_second = [*first_lines, *later_lines]
+        full_third = [*full_second, json.dumps(reuse, separators=(",", ":")),
+                      json.dumps(other_idle, separators=(",", ":"))]
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+            [full_second, twice, full_third, thrice]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        full_two, rotated_two, full_three, rotated_three = json.loads(completed.stdout)
+        self.assertEqual(rotated_two[agent], full_two[agent])
+        self.assertEqual(rotated_two[agent]["status"], "authority history uncertain")
+        self.assertIsNone(rotated_two[agent]["signals"]["interaction"]["kind"])
+        self.assertEqual(rotated_three[other], full_three[other])
+        self.assertEqual(rotated_three[other]["status"], "authority history uncertain")
+
+    def test_mood_authority_overflow_is_bounded_fast_and_reclaimable(self):
+        agent = "codex:authority-pressure"
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        base = {"v": 0, "source": "codex", "agent_id": agent,
+                "project": "burrow"}
+        count = 20_001
+        events = [{**base,
+            "ts": (anchor + datetime.timedelta(milliseconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z"),
+            "type": "needs_human", "payload": {"message": f"Request {index}",
+                "request_id": f"bounded-{index}", "action": "deploy",
+                "detail": None, "options": ["approve", "deny"]}}
+            for index in range(count)]
+        lines = list(map(json.dumps, events))
+        started = time.monotonic()
+        once = serve.carry_forward(lines, int(anchor.timestamp() * 1000) + count)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 5, f"bounded rotation took {elapsed:.2f}s")
+        self.assertLessEqual(len(once), serve.VIEWER_LINE_LIMIT)
+        capsule = serve._mood_authority_from_line(once[0])
+        self.assertTrue(capsule["overflow"])
+        self.assertEqual(capsule["events"], [])
+        self.assertEqual([capsule["ordinals"], capsule["copies"],
+                          capsule["raw_ordinals"]], [[], [], []])
+        self.assertLess(len(once[0].encode()), 32 * 1024)
+        twice = serve.carry_forward(once, int(anchor.timestamp() * 1000) + count)
+        self.assertEqual(twice, once, "a second rotation reclaims no extra authority")
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify([read(input.full),read(input.retained)]));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+            "full": lines, "retained": once}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        full, retained = json.loads(completed.stdout)
+        self.assertEqual(retained[agent], full[agent])
+        self.assertEqual(full[agent]["status"], "authority history uncertain")
+
+    def test_mood_capsule_encoded_boundary_and_rotation_reclamation(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        base = {"v": 0, "source": "codex", "agent_id": "codex:byte-boundary",
+                "project": "burrow"}
+
+        def timestamp(index):
+            return (anchor + datetime.timedelta(milliseconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+
+        def lines(count):
+            result = []
+            for index in range(count):
+                detail = {"pad": "x" * 50}
+                request_id = f"bounded-{index}"
+                result.extend([
+                    json.dumps({**base, "ts": timestamp(index * 2),
+                        "type": "needs_human", "payload": {"message": f"r{index}",
+                            "request_id": request_id, "action": "deploy",
+                            "detail": detail, "options": ["approve", "deny"]}},
+                        separators=(",", ":")),
+                    json.dumps({**base, "source": "steward",
+                        "ts": timestamp(index * 2 + 1),
+                        "type": "needs_human_resolved", "payload": {
+                            "request_id": request_id, "decision": "approve",
+                            "decided_by": "human", "action": "deploy",
+                            "detail": detail}}, separators=(",", ":")),
+                ])
+            return result
+
+        boundary = next(count for count in range(1, 200)
+                        if serve._mood_authority_from_line(serve.carry_forward(
+                            lines(count), int(anchor.timestamp() * 1000) + 1000)[0])["overflow"])
+        below = lines(boundary - 1)
+        rotated_below = serve.carry_forward(below, int(anchor.timestamp() * 1000) + 1000)
+        capsule_below = serve._mood_authority_from_line(rotated_below[0])
+        self.assertFalse(capsule_below["overflow"])
+        self.assertLessEqual(len(rotated_below[0].encode()),
+                             serve.MOOD_AUTHORITY_MAX_BYTES)
+        self.assertGreater(len(rotated_below[0].encode()), 32_000,
+                           "exercise the actual near-ceiling capsule")
+
+        above = lines(boundary)
+        rotated_above = serve.carry_forward(above, int(anchor.timestamp() * 1000) + 1000)
+        capsule_above = serve._mood_authority_from_line(rotated_above[0])
+        self.assertTrue(capsule_above["overflow"])
+        self.assertEqual([capsule_above["events"], capsule_above["ordinals"],
+                          capsule_above["copies"], capsule_above["raw_ordinals"]],
+                         [[], [], [], []])
+        self.assertLess(sum(len(line.encode()) + 1 for line in rotated_above),
+                        .9 * sum(len(line.encode()) + 1 for line in above))
+
+    def test_typed_binary64_authority_matches_javascript_for_property_fixture(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-capsule-parity.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            bits = json.load(stream)["finite_binary64_bits"]
+        import struct
+        values = [struct.unpack(">d", bytes.fromhex(token))[0] for token in bits]
+        python = [serve._canonical_identity(value) for value in values]
+        script = r"""
+const t=require('./viewer/typed-json.js'),bits=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const values=bits.map(hex=>new DataView(Uint8Array.from(hex.match(/../g),x=>parseInt(x,16)).buffer).getFloat64(0,false));
+process.stdout.write(JSON.stringify(values.map(t.identity)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(bits),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        self.assertEqual(json.loads(completed.stdout), python)
+        self.assertEqual(serve._canonical_identity(-0.0),
+                         serve._canonical_identity(0.0))
+        self.assertEqual(serve._canonical_identity(float("inf")),
+                         serve._canonical_identity(float("-inf")))
+
+    def test_deep_approval_authority_rotates_iteratively_and_preserves_raw(self):
+        depth = 600
+        detail = '{"child":' * depth + 'null' + '}' * depth
+        request = ('{"v":0,"ts":"2026-08-25T10:00:00.000Z","source":"codex",'
+                   '"agent_id":"codex:deep","project":"burrow","type":"needs_human",'
+                   '"payload":{"message":"deep","request_id":"deep","action":"deploy",'
+                   '"detail":' + detail + ',"options":["approve"]}}')
+        close = ('{"v":0,"ts":"2026-08-25T10:01:00.000Z","source":"steward",'
+                 '"agent_id":"codex:deep","project":"burrow",'
+                 '"type":"needs_human_resolved","payload":{"request_id":"deep",'
+                 '"decision":"approve","decided_by":"api","action":"deploy"}}')
+        now_ms = serve.event_ms(json.loads(close))
+        once = serve.carry_forward([request, close], now_ms)
+        capsule = serve._mood_authority_from_line(once[0])
+        self.assertIsNotNone(capsule)
+        self.assertFalse(capsule["overflow"])
+        self.assertEqual([line for line in once if line in {request, close}], [request, close])
+        self.assertEqual(serve.carry_forward(once, now_ms), once)
+
+    def test_every_carry_forward_rescan_rejects_nonstandard_json_constants(self):
+        root = event("codex:strict", "task_started", prompt="kept")
+        root["source"] = "codex"
+        valid = json.dumps(root, separators=(",", ":"))
+        malformed = valid.replace('"v":0', '"v":NaN')
+        for lines in ([malformed, valid], [valid, malformed, valid], [valid, malformed]):
+            rotated = serve.carry_forward(lines, serve.event_ms(root))
+            self.assertEqual(protocol_events(rotated), [root] * lines.count(valid))
+            self.assertFalse(any("NaN" in line or "Infinity" in line for line in rotated))
+            self.assertEqual(serve.carry_forward(rotated, serve.event_ms(root)), rotated)
+
+    def test_overflowing_exponent_identity_survives_future_reuse_and_two_rotations(self):
+        def request(ts):
+            return ('{"v":0,"ts":"' + ts + '","source":"codex",'
+                    '"agent_id":"codex:exponent","project":"burrow",'
+                    '"type":"needs_human","payload":{"message":"same",'
+                    '"request_id":"exponent","action":"deploy",'
+                    '"detail":{"n":1e400},"options":["approve"]}}')
+        close = ('{"v":0,"ts":"2026-08-25T10:01:00.000Z","source":"steward",'
+                 '"agent_id":"codex:exponent","project":"burrow",'
+                 '"type":"needs_human_resolved","payload":{"request_id":"exponent",'
+                 '"decision":"approve","decided_by":"api","action":"deploy"}}')
+        now_ms = serve.event_ms(json.loads(close))
+        once = serve.carry_forward([request("2026-08-25T10:00:00.000Z"), close], now_ms)
+        twice = serve.carry_forward([*once, request("2026-08-25T10:02:00.000Z")], now_ms + 60_000)
+        thrice = serve.carry_forward(twice, now_ms + 60_000)
+        self.assertEqual(thrice, twice)
+        script = r"""
+const p=require('./viewer/projection.js'),a=require('./viewer/approval-knocks.js');
+const lines=JSON.parse(require('fs').readFileSync(0,'utf8')),batch=p.parseEvents(lines),state=a.createState();
+a.foldValidated(state,batch,{isValidatedBatch:p.isValidatedBatch,rejections:p.approvalRejections(batch)});
+const record=state.requests.get('exponent');process.stdout.write(JSON.stringify({collision:record.collided,resolved:!!record.resolution}));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(thrice),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        self.assertEqual(json.loads(completed.stdout), {"collision": False, "resolved": True})
+
+    def test_numeric_capsule_boundary_matches_javascript_before_and_after_rotation(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        base = {"v": 0, "source": "codex", "agent_id": "codex:numeric-boundary",
+                "project": "burrow"}
+
+        def timestamp(index):
+            return (anchor + datetime.timedelta(milliseconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+
+        def lifecycle(index):
+            detail = {"numbers": [1.0, -0.0, 1e-7, 1e20, 1e21,
+                                  {"fraction": 1.25e-12, "integer": 42.0}]}
+            request_id = f"numeric-{index}"
+            return [
+                {**base, "ts": timestamp(index * 2), "type": "needs_human",
+                 "payload": {"message": request_id, "request_id": request_id,
+                             "action": "deploy", "detail": detail,
+                             "options": ["approve", "deny"]}},
+                {**base, "source": "steward", "ts": timestamp(index * 2 + 1),
+                 "type": "needs_human_resolved", "payload": {
+                     "request_id": request_id, "decision": "approve",
+                     "decided_by": "human", "action": "deploy", "detail": detail}},
+            ]
+
+        groups = []
+        boundary = next(count for count in range(1, 150)
+                        if serve._mood_authority_from_line(serve.carry_forward(
+                            [json.dumps(item, separators=(",", ":"))
+                             for index in range(count) for item in lifecycle(index)],
+                            int(anchor.timestamp() * 1000) + 1000)[0])["overflow"])
+        for count in (boundary - 1, boundary):
+            events = [item for index in range(count) for item in lifecycle(index)]
+            lines = [json.dumps(item, separators=(",", ":")) for item in events]
+            groups.append({"full": lines, "rotated": serve.carry_forward(
+                lines, int(anchor.timestamp() * 1000) + 1000)})
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const inspect=lines=>{const parsed=p.parseEvents(lines),kept=m.retainMoodWitnesses(parsed),
+  state=p.moodAuthorityState(kept); return {mood:Object.fromEntries(m.deriveMoods(parsed)),
+  overflow:state.overflow,bytes:p.moodAuthorityCapsuleByteLength(state.events,state.copies,state)}};
+process.stdout.write(JSON.stringify(groups.map(group=>({js:inspect(group.full),
+  rotated:inspect(group.rotated)}))));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(groups),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        results = json.loads(completed.stdout)
+        for result in results:
+            self.assertEqual(result["rotated"]["overflow"], result["js"]["overflow"])
+            self.assertEqual(result["rotated"]["bytes"], result["js"]["bytes"])
+            self.assertEqual(result["rotated"]["mood"], result["js"]["mood"])
+        self.assertFalse(results[0]["js"]["overflow"])
+        self.assertTrue(results[1]["js"]["overflow"])
+
+    def test_capsule_manifest_excludes_non_mood_projection_records(self):
+        """Approval/task/presence retention cannot consume Mood capsule bytes."""
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        base = {"v": 0, "source": "codex", "agent_id": "codex:manifest",
+                "project": "burrow"}
+        events = []
+        for index in range(50):
+            when = (anchor + datetime.timedelta(milliseconds=index * 3))
+            request_id = f"manifest-{index}"
+            detail = {"pad": "x" * 38}
+            events.extend([
+                {**base, "ts": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                 "type": "needs_human", "payload": {"message": request_id,
+                     "request_id": request_id, "action": "deploy", "detail": detail,
+                     "options": ["approve", "deny"]}},
+                {**base, "source": "steward",
+                 "ts": (when + datetime.timedelta(milliseconds=1)).isoformat(
+                     timespec="milliseconds").replace("+00:00", "Z"),
+                 "type": "needs_human_resolved", "payload": {"request_id": request_id,
+                     "decision": "approve", "decided_by": "human",
+                     "action": "deploy", "detail": detail}},
+            ])
+        # These records survive other projections, but none is an additional
+        # Mood witness beyond the independently selected anchor/work evidence.
+        events.extend([
+            {**base, "ts": (anchor + datetime.timedelta(seconds=1)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z"),
+             "type": "tool_called", "payload": {"tool": "Read"}},
+            {**base, "agent_id": "steward", "source": "steward",
+             "ts": (anchor + datetime.timedelta(seconds=2)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z"),
+             "type": "task_posted", "payload": {"task_id": "other-projection",
+                "subject": "Retained task", "description": "not Mood authority"}},
+        ])
+        lines = [json.dumps(item, separators=(",", ":")) for item in events]
+        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000) + 3000)
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+const retained=m.retainMoodWitnesses(p.parseEvents(input.full));
+const js=p.moodAuthorityState(retained),py=p.moodAuthorityState(p.parseEvents(input.rotated));
+process.stdout.write(JSON.stringify({before:read(input.full),after:read(input.rotated),
+  js:{overflow:js.overflow,raw:js.rawOrdinals.length,bytes:p.moodAuthorityCapsuleByteLength(js.events,js.copies,js)},
+  py:{overflow:py.overflow,raw:py.rawOrdinals.length,bytes:p.moodAuthorityCapsuleByteLength(py.events,py.copies,py)}}));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+            {"full": lines, "rotated": rotated}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["after"], result["before"])
+        self.assertEqual(result["py"], result["js"])
+        self.assertFalse(result["js"]["overflow"])
+
+    def test_plain_and_malformed_fallback_rotation_scales_linearly(self):
+        anchor = datetime.datetime(2026, 8, 25, 12, tzinfo=datetime.timezone.utc)
+        base = {"v": 0, "source": "codex", "agent_id": "codex:plain-pressure",
+                "project": "burrow", "type": "needs_human"}
+        lines = []
+        for index in range(6000):
+            payload = ({"message": f"plain {index}"} if index % 2 else
+                       {"message": f"fallback {index}", "request_id": f"bad-{index}"})
+            event = {**base, "ts": (anchor + datetime.timedelta(milliseconds=index))
+                     .isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                     "payload": payload}
+            lines.append(json.dumps(event, separators=(",", ":")))
+        started = time.monotonic()
+        serve.carry_forward(lines, int(anchor.timestamp() * 1000) + 7000)
+        self.assertLess(time.monotonic() - started, 2.5)
+
+    def test_shared_adversarial_mood_lifecycles_survive_python_rotation(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-lifecycle-adversarial.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        events = fixture["events"]
+        mood_indexes = serve._mood_keep_indexes(
+            list(enumerate(events)), {"codex:close", "codex:owner"})
+        self.assertIn(0, mood_indexes,
+                      "Mood's exact q1 close independently carries its canonical knock")
+        self.assertIn(6, mood_indexes,
+                      "Mood independently carries the owner's cross-agent canonical truth")
+        lines = [json.dumps(item, separators=(",", ":")) for item in events]
+        now_ms = int(datetime.datetime.fromisoformat(
+            fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
+        rotated = serve.carry_forward(lines, now_ms)
+        decoded = [json.loads(line) for line in rotated]
+        self.assertIn(events[0], decoded,
+                      "the retained q1 close carries its displaced canonical knock")
+        self.assertIn(events[6], decoded,
+                      "the projected collision owner carries cross-agent canonical truth")
+
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps([events, decoded]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        before, after = json.loads(completed.stdout)
+        self.assertEqual(after["codex:close"], before["codex:close"])
+        self.assertEqual(after["codex:owner"], before["codex:owner"])
+        self.assertEqual(after["codex:close"]["signals"]["interaction"]["kind"],
+                         "approval decision")
+        self.assertEqual(after["codex:owner"]["signals"]["unresolvedNeed"]["kind"],
+                         "structured collision")
+
+    def test_shared_capsule_raw_append_order_survives_repeated_rotation(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-authority-order.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        lines = list(map(json.dumps, fixture["events"]))
+        now_ms = int(datetime.datetime.fromisoformat(
+            fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
+        once = serve.carry_forward(lines, now_ms)
+        twice = serve.carry_forward(once, now_ms)
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify(groups.map(read)));
+"""
+        completed = subprocess.run(["node", "-e", script],
+            input=json.dumps([lines, once, twice]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        full, rotated, rerotated = json.loads(completed.stdout)
+        self.assertEqual(rotated, full)
+        self.assertEqual(rerotated, full)
+        self.assertEqual(full["codex:orphan-first"]["signals"]["unresolvedNeed"]["request_id"],
+                         "late")
+        self.assertFalse(full["codex:plain-root"]["signals"]["unresolvedNeed"]["observed"])
+        self.assertEqual(full["codex:multiple-roots"]["signals"]["interaction"]["level"],
+                         "aging")
+
+    def test_unsafe_mood_capsules_are_ignored_atomically(self):
+        root = event("codex:owner", "task_started", prompt="Hello")
+        root["source"] = "codex"
+        other = copy.deepcopy(root); other["agent_id"] = "codex:other"
+
+        def capsule(**changes):
+            value = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                     "events": [root], "ordinals": ["7"],
+                     "copies": ["7"], "raw_ordinals": ["7"],
+                     "raw_indexes": ["0000000000000000"],
+                     "raw_count": "0000000000000001",
+                     "overflow": False, "observed": 1}
+            value.update(changes)
+            return json.dumps(value)
+
+        bad = [
+            capsule(copies=["7", "7"]),
+            capsule(ordinals=["01"]),
+            capsule(raw_indexes=[]),
+            capsule(raw_indexes=["0000000000000001"]),
+            capsule(raw_count="1"),
+        ]
+        for unsafe in bad:
+            retained = serve.carry_forward([unsafe, json.dumps(root)], serve.event_ms(root))
+            self.assertEqual(protocol_events(retained).count(root), 1)
+            rebuilt = serve._mood_authority_from_line(retained[0])
+            self.assertNotEqual(rebuilt.get("copies"), json.loads(unsafe).get("copies"))
+        cross = serve.carry_forward([capsule(), json.dumps(other)], serve.event_ms(other))
+        self.assertEqual(protocol_events(cross).count(other), 1)
+        retained = serve.carry_forward([capsule(copies=[], raw_ordinals=[]),
+            capsule(copies=[], raw_ordinals=[]), json.dumps(root)], serve.event_ms(root))
+        self.assertEqual(protocol_events(retained).count(root), 1)
+        malformed = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                                "events": "broken"})
+        for records in (["not-json", capsule(), json.dumps(root)],
+                        [malformed, json.dumps(root)],
+                        [capsule(copies=[], raw_ordinals=[]), malformed,
+                         json.dumps(root)]):
+            rotated = serve.carry_forward(records, serve.event_ms(root))
+            rebuilt = serve._mood_authority_from_line(rotated[0])
+            self.assertEqual(rebuilt.get("ordinals"), ["0"],
+                             "invalid physical placement/marker rebuilds only raw authority")
+            self.assertEqual(protocol_events(rotated).count(root), 1)
+        for field in ("events", "ordinals", "copies", "raw_ordinals", "raw_indexes"):
+            nonempty = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                        "events": [], "ordinals": [], "copies": [],
+                        "raw_ordinals": [], "raw_indexes": [],
+                        "raw_count": "0000000000000000",
+                        "overflow": True, "observed": 257}
+            nonempty[field] = [root] if field == "events" else ["7"]
+            self.assertIsNone(serve._mood_authority_from_line(json.dumps(nonempty)))
+        self.assertIsNone(serve._mood_authority_from_line(json.dumps({
+            "_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            "events": [], "ordinals": [], "copies": [], "raw_ordinals": [],
+            "raw_indexes": [], "raw_count": "0000000000000001",
+            "overflow": True, "observed": 257})))
+        oversized = capsule(pad="x" * serve.MOOD_AUTHORITY_MAX_BYTES)
+        self.assertIsNone(serve._mood_authority_from_line(oversized))
+        numeric = copy.deepcopy(root); numeric["payload"]["n"] = 1.0
+        integer = copy.deepcopy(root); integer["payload"]["n"] = 1
+        self.assertEqual(serve._canonical_identity(numeric),
+                         serve._canonical_identity(integer))
+
+    def test_capsule_authority_is_the_exact_canonical_source_epoch_fold(self):
+        agent = "codex:exact-authority"
+        request = event(agent, "needs_human", 30, message="choose",
+                        request_id="exact", action="deploy", detail=None,
+                        options=["approve", "deny"])
+        resolution = event(agent, "needs_human_resolved", 20,
+                           request_id="exact", decision="approve",
+                           decided_by="human", action="deploy")
+        resolution["source"] = "steward"
+        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                   "events": [request], "ordinals": ["5"], "copies": [],
+                   "raw_ordinals": ["10"],
+                   "raw_indexes": ["0000000000000000"],
+                   "raw_count": "0000000000000001", "overflow": False,
+                   "observed": 1}
+        self.assertFalse(serve._exact_capsule_authority(capsule, [resolution]),
+                         "an injected later close cannot be omitted from authority")
+        rotated = serve.carry_forward([serve._encode_mood_authority(capsule),
+                                       json.dumps(resolution)],
+                                      serve.event_ms(resolution))
+        rebuilt = (serve._mood_authority_from_line(rotated[0])
+                   if rotated and serve.MOOD_AUTHORITY_KIND in rotated[0] else None)
+        self.assertFalse(rebuilt and any(item == request
+                                        for item in rebuilt["events"]))
+
+        omitted_copy = dict(capsule, raw_ordinals=[], raw_indexes=[])
+        omitted_rotated = serve.carry_forward([
+            serve._encode_mood_authority(omitted_copy), json.dumps(request)],
+            serve.event_ms(request))
+        omitted_rebuilt = serve._mood_authority_from_line(omitted_rotated[0])
+        self.assertEqual(omitted_rebuilt["copies"], ["0"],
+                         "omitted raw authority copy is rebuilt from raw truth")
+
+        plain = event(agent, "needs_human", 40, message="legacy")
+        orphan = copy.deepcopy(resolution)
+        orphan["payload"]["request_id"] = "orphan"
+        for item in (plain, orphan):
+            claimed = dict(capsule, events=[item], ordinals=["5"], copies=[],
+                           raw_ordinals=[], raw_indexes=[],
+                           raw_count="0000000000000000")
+            self.assertFalse(serve._exact_capsule_authority(claimed, []))
+
+        valid = dict(capsule, events=[request, resolution],
+                     ordinals=["5", "10"], copies=["5"],
+                     raw_ordinals=["5"], observed=2)
+        self.assertTrue(serve._exact_capsule_authority(valid, [request]),
+                        "a valid co-retained authority copy stays accepted")
+        reordered = dict(valid, events=[orphan, request], ordinals=["4", "5"],
+                         copies=[], raw_ordinals=[], raw_indexes=[],
+                         raw_count="0000000000000000")
+        self.assertFalse(serve._exact_capsule_authority(reordered, []))
+
+    def test_sparse_capsule_completeness_preserves_every_mood_witness(self):
+        authority = event("codex:authority", "task_started", 200,
+                          prompt="authority")
+        authority["source"] = "codex"
+        anchor = event("codex:proof", "idle")
+        failure = event("codex:proof", "tool_failed", 60,
+                        tool="Bash", error="boom")
+        root = event("codex:proof", "task_started", 60, prompt="human")
+        root["source"] = "codex"
+        knock = event("codex:proof", "needs_human", 60, message="choose",
+                      request_id="pending", action="deploy", detail=None,
+                      options=["approve", "deny"])
+        claimed = event("codex:proof", "task_claimed", 60, task_id="t",
+                        title="Task", claimant="codex:proof")
+        claimed["source"] = "steward"
+        for witness in (failure, root, knock, claimed):
+            capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                       "events": [authority], "ordinals": ["0"], "copies": [],
+                       "raw_ordinals": ["2"],
+                       "raw_indexes": ["0000000000000001"],
+                       "raw_count": "0000000000000002", "overflow": False,
+                       "observed": 1}
+            rotated = serve.carry_forward(
+                [serve._encode_mood_authority(capsule), json.dumps(witness),
+                 json.dumps(anchor)], serve.event_ms(anchor))
+            self.assertIn(witness, protocol_events(rotated), witness["type"])
+
+        irrelevant = event("codex:proof", "idle", 120)
+        safe = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                "events": [authority], "ordinals": ["0"], "copies": [],
+                "raw_ordinals": ["2"], "raw_indexes": ["0000000000000001"],
+                "raw_count": "0000000000000002", "overflow": False,
+                "observed": 1}
+        rotated = serve.carry_forward([serve._encode_mood_authority(safe),
+            json.dumps(irrelevant), json.dumps(anchor)], serve.event_ms(anchor))
+        self.assertIsNotNone(serve._mood_authority_from_line(rotated[0]))
+
+    def test_sparse_capsule_manifest_rejects_surplus_indexes_exactly(self):
+        authority = event("codex:authority", "task_started", 240,
+                          prompt="unrelated authority")
+        authority["source"] = "codex"
+        plain = event("codex:proof", "needs_human", 120, message="plain")
+        idle = event("codex:proof", "idle", 60)
+        terminal = event("codex:proof", "routine_finished", routine="r",
+                         run_id="r-surplus", outcome="ok", artifacts=[], duration_s=1)
+        terminal["source"] = "steward"
+        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                   "events": [authority], "ordinals": ["0"], "copies": [],
+                   "raw_ordinals": ["1", "3"],
+                   "raw_indexes": ["0000000000000000", "0000000000000002"],
+                   "raw_count": "0000000000000003", "overflow": False,
+                   "observed": 1}
+        raw_lines = [json.dumps(plain), json.dumps(idle), json.dumps(terminal)]
+        attacked = serve.carry_forward(
+            [serve._encode_mood_authority(capsule), *raw_lines],
+            serve.event_ms(terminal))
+        expected = serve.carry_forward(raw_lines, serve.event_ms(terminal))
+        self.assertEqual(attacked, expected,
+                         "surplus manifest is discarded atomically before rotation")
+
+        accepted = {**capsule, "raw_ordinals": ["3"],
+                    "raw_indexes": ["0000000000000002"]}
+        accepted_lines = serve.carry_forward(
+            [serve._encode_mood_authority(accepted), *raw_lines],
+            serve.event_ms(terminal))
+        self.assertIsNotNone(serve._mood_authority_from_line(accepted_lines[0]),
+                             "exact sparse manifest remains valid with irrelevant co-retained records")
+
+    def test_capsule_duplicate_wire_keys_reject_atomically(self):
+        root = event("codex:duplicate", "task_started", prompt="raw")
+        root["source"] = "codex"
+        base = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            "events": [root], "ordinals": ["0"], "copies": ["0"],
+            "raw_ordinals": ["0"], "raw_indexes": ["0000000000000000"],
+            "raw_count": "0000000000000001", "overflow": False,
+            "observed": 1}, separators=(",", ":"))
+        attacks = [
+            base.replace('{"_burrow_internal":',
+                '{"_burrow_internal":"mood-authority-v1","_burrow_internal":'),
+            base.replace('"events":', '"events":[],"events":'),
+            base.replace('"type":"task_started"',
+                         '"type":"idle","type":"task_started"'),
+        ]
+        for line in attacks:
+            self.assertIsNone(serve._mood_authority_from_line(line))
+            rotated = serve.carry_forward([line, json.dumps(root)],
+                                          serve.event_ms(root))
+            self.assertIn(root, protocol_events(rotated))
+
+    def test_safe_ordinal_exhaustion_and_capsule_only_two_rotation_boundary(self):
+        agent = "codex:max-safe"
+        knock = event(agent, "needs_human", 20, message="choose",
+                      request_id="max", action="deploy", detail=None,
+                      options=["approve", "deny"])
+        close = event(agent, "needs_human_resolved", 10, request_id="max",
+                      decision="approve", decided_by="human", action="deploy")
+        close["source"] = "steward"
+        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                   "events": [knock, close],
+                   "ordinals": ["9007199254740990", "9007199254740991"],
+                   "copies": [], "raw_ordinals": [], "raw_indexes": [],
+                   "raw_count": "0000000000000000", "overflow": False,
+                   "observed": 2}
+        once = serve.carry_forward([serve._encode_mood_authority(capsule)],
+                                   serve.event_ms(close))
+        twice = serve.carry_forward(once, serve.event_ms(close))
+        self.assertFalse(serve._mood_authority_from_line(once[0])["overflow"])
+        self.assertFalse(serve._mood_authority_from_line(twice[0])["overflow"])
+        appended = event(agent, "idle")
+        exhausted = serve.carry_forward(
+            [serve._encode_mood_authority(capsule), json.dumps(appended)],
+            serve.event_ms(appended))
+        rebuilt = serve._mood_authority_from_line(exhausted[0])
+        self.assertTrue(rebuilt["overflow"])
+        self.assertEqual([rebuilt["events"], rebuilt["ordinals"],
+                          rebuilt["copies"], rebuilt["raw_ordinals"],
+                          rebuilt["raw_indexes"]], [[], [], [], [], []])
+        self.assertIn(appended, protocol_events(exhausted))
+
+    def test_shared_capsule_field_domain_matrix_is_strict_and_non_throwing(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-capsule-malformed.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            matrix = json.load(stream)
+        base = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                "events": [matrix["authority_event"]], "ordinals": ["0"],
+                "copies": [], "raw_ordinals": [], "raw_indexes": [],
+                "raw_count": "0000000000000000", "overflow": False,
+                "observed": 1}
+        raw = json.dumps(matrix["raw_event"], separators=(",", ":"))
+
+        def assert_ignored(line):
+            rotated = serve.carry_forward([line, raw],
+                                          serve.event_ms(matrix["raw_event"]))
+            self.assertEqual(protocol_events(rotated), [matrix["raw_event"]])
+            self.assertFalse(any(serve._mood_authority_marker(json.loads(item))
+                                 for item in rotated))
+
+        for field, value in matrix["invalid_mutations"]:
+            malformed = copy.deepcopy(base)
+            malformed[field] = value
+            assert_ignored(json.dumps(malformed, separators=(",", ":")))
+        encoded = json.dumps(base, separators=(",", ":"))
+        for token in matrix["nonstandard_observed_tokens"]:
+            assert_ignored(encoded.replace('"observed":1', f'"observed":{token}'))
+        integral = encoded.replace('"observed":1', '"observed":1.0')
+        rotated = serve.carry_forward([integral, raw],
+                                      serve.event_ms(matrix["raw_event"]))
+        self.assertEqual(serve._mood_authority_from_line(rotated[0])["events"],
+                         [matrix["authority_event"]])
+        assert_ignored_multi = serve.carry_forward([encoded, encoded, raw],
+                                                   serve.event_ms(matrix["raw_event"]))
+        self.assertEqual(protocol_events(assert_ignored_multi), [matrix["raw_event"]])
+
+    def test_shared_capsule_schema_and_typed_graph_attacks_preserve_raw_moods(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-capsule-malformed.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            matrix = json.load(stream)
+        second = copy.deepcopy(matrix["authority_event"])
+        second.update({"ts": "2026-08-25T10:30:00.000Z",
+                       "agent_id": "codex:capsule-second",
+                       "payload": {"prompt": "Second retained root"}})
+        raw_events = [matrix["authority_event"], second, matrix["raw_event"]]
+        raw = [json.dumps(item, separators=(",", ":")) for item in raw_events]
+        logical = {"events": raw_events[:2], "ordinals": ["1", "2"],
+                   "copies": ["1", "2"], "raw_ordinals": ["1", "2", "3"],
+                   "raw_indexes": ["0000000000000000", "0000000000000001",
+                                   "0000000000000002"],
+                   "raw_count": "0000000000000003", "overflow": False,
+                   "observed": 2}
+
+        def direct(value):
+            return json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND, **value},
+                              separators=(",", ":"))
+
+        def envelope(value, outer=None):
+            record = json.loads(serve._encode_mood_authority(
+                {"_burrow_internal": serve.MOOD_AUTHORITY_KIND, **value}))
+            record.update(outer or {})
+            return json.dumps(record, separators=(",", ":"))
+
+        cases = []
+
+        def ignored(line, name):
+            self.assertIsNone(serve._mood_authority_from_line(line), name)
+            rotated = serve.carry_forward([line, *raw], serve.event_ms(raw_events[-1]))
+            self.assertCountEqual(protocol_events(rotated), raw_events,
+                                  f"{name}: all raw public evidence survives")
+            cases.append(rotated)
+
+        self.assertEqual(len(serve._mood_authority_from_line(envelope(logical))["events"]), 2)
+        for mutation in matrix["canonical_schema_mutations"]:
+            changed = copy.deepcopy(logical)
+            changed[mutation["field"]] = mutation["value"]
+            ignored(direct(changed), mutation["name"] + " direct root")
+            ignored(envelope(changed), mutation["name"] + " encoded state")
+        missing = copy.deepcopy(logical)
+        del missing["copies"]
+        ignored(direct(missing), "missing direct root field")
+        ignored(envelope(missing), "missing encoded state field")
+        ignored(envelope(logical, {"surplus": True}), "surplus envelope field")
+
+        def clone_graph():
+            return copy.deepcopy(approval_protocol.json_typed_graph(logical))
+
+        def references(node):
+            if node[0] == "a":
+                return node[1]
+            if node[0] == "o":
+                return [entry[1] for entry in node[1]]
+            return []
+
+        unused = clone_graph()
+        unused[0].insert(unused[1], ["s", "unused"])
+        unused[1] += 1
+
+        shared_scalar = clone_graph()
+        prompt = next(index for index, node in enumerate(shared_scalar[0])
+                      if node == ["s", "Retained root"])
+        source = next(index for index, node in enumerate(shared_scalar[0])
+                      if node == ["s", "codex:capsule-authority"])
+        scalar_parent = next(node for node in shared_scalar[0]
+                             if prompt in references(node))
+        if scalar_parent[0] == "a":
+            scalar_parent[1][scalar_parent[1].index(prompt)] = source
+        else:
+            next(entry for entry in scalar_parent[1] if entry[1] == prompt)[1] = source
+
+        shared_container = clone_graph()
+        root_entries = shared_container[0][shared_container[1]][1]
+        event_array_index = next(entry[1] for entry in root_entries
+                                 if entry[0] == "events")
+        shared_container[0][event_array_index][1][1] = \
+            shared_container[0][event_array_index][1][0]
+
+        amplified = clone_graph()
+        leaf = next(index for index, node in enumerate(amplified[0])
+                    if node == ["s", "Retained root"])
+        depth = matrix["amplification_depth"]
+        for node in amplified[0]:
+            if node[0] == "a":
+                node[1] = [index + depth if index > leaf else index
+                           for index in node[1]]
+            elif node[0] == "o":
+                for entry in node[1]:
+                    if entry[1] > leaf:
+                        entry[1] += depth
+        if amplified[1] > leaf:
+            amplified[1] += depth
+        chain = []
+        for index in range(depth):
+            prior = leaf + index
+            chain.append(["a", [prior, prior]])
+        amplified[0][leaf + 1:leaf + 1] = chain
+        prompt_parent = next(node for node in amplified[0]
+                             if node[0] == "o" and any(
+                                 entry == ["prompt", leaf] for entry in node[1]))
+        next(entry for entry in prompt_parent[1] if entry[0] == "prompt")[1] = leaf + depth
+
+        attacks = {"unused node": unused, "shared scalar": shared_scalar,
+                   "shared container": shared_container,
+                   "nested amplification": amplified}
+        expanded = "Retained root"
+        for _ in range(depth):
+            expanded = [copy.deepcopy(expanded), copy.deepcopy(expanded)]
+        self.assertGreater(len(approval_protocol.json_semantic_key(expanded).encode("utf-8")),
+                           serve.MOOD_AUTHORITY_MAX_BYTES)
+        shared_leaf = {"bounded": True}
+        self.assertFalse(serve._json_domain_within([shared_leaf, shared_leaf]))
+        with self.assertRaisesRegex(ValueError, "aliased JSON value"):
+            approval_protocol.json_typed_graph([shared_leaf, shared_leaf])
+        for name in matrix["typed_graph_attacks"]:
+            line = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                               "encoding": serve.MOOD_AUTHORITY_ENCODING,
+                               "graph": attacks[name]}, separators=(",", ":"))
+            self.assertLess(len(line.encode("utf-8")), serve.MOOD_AUTHORITY_MAX_BYTES)
+            with self.assertRaisesRegex(ValueError, "noncanonical"):
+                approval_protocol.decode_json_typed_graph(attacks[name])
+            ignored(line, name)
+
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const view=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify(groups.map(view)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps([raw, *cases]),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        views = json.loads(completed.stdout)
+        self.assertTrue(all(view == views[0] for view in views[1:]),
+                        "every invalid capsule leaves the raw Mood result unchanged")
+
+    def test_shared_capsule_depth_bound_is_atomic_and_non_throwing(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-capsule-malformed.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            matrix = json.load(stream)
+        self.assertEqual(serve.MOOD_AUTHORITY_MAX_DEPTH,
+                         matrix["max_structural_depth"])
+
+        def nested(containers):
+            value = "leaf"
+            for _ in range(containers):
+                value = [value]
+            return value
+
+        def capsule(containers):
+            authority = copy.deepcopy(matrix["authority_event"])
+            authority["type"] = "needs_human"
+            authority["payload"] = {"message": "Deep request",
+                                    "detail": nested(containers)}
+            return {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+                    "events": [authority], "ordinals": ["0"], "copies": [],
+                    "raw_ordinals": [], "raw_indexes": [],
+                    "raw_count": "0000000000000000", "overflow": False,
+                    "observed": 1}
+
+        accepted = capsule(matrix["accepted_detail_containers"])
+        accepted_line = json.dumps(accepted, separators=(",", ":"))
+        self.assertIsNotNone(serve._mood_authority_from_line(accepted_line))
+        over_depth = json.dumps(capsule(matrix["rejected_detail_containers"]),
+                                separators=(",", ":"))
+        self.assertIsNone(serve._mood_authority_from_line(over_depth))
+        raw = json.dumps(matrix["raw_event"], separators=(",", ":"))
+        self.assertEqual(protocol_events(serve.carry_forward([over_depth, raw],
+            serve.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
+        parser_overflow = ('{"_burrow_internal":"mood-authority-v1","events":' +
+                           '[' * 1100 + '0' + ']' * 1100 + '}')
+        self.assertLess(len(parser_overflow.encode("utf-8")),
+                        serve.MOOD_AUTHORITY_MAX_BYTES)
+        self.assertIsNone(serve._mood_authority_from_line(parser_overflow))
+        self.assertEqual(protocol_events(serve.carry_forward([parser_overflow, raw],
+            serve.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
+
+    def test_invalid_tail_records_never_affect_rotation_coordinates_or_mood(self):
+        root = event("codex:strict-tail", "task_started", 50, prompt="Root")
+        root["source"] = "codex"
+        work = [event("codex:strict-tail", "tool_called", 40 - index * 5,
+                      tool="Read") for index in range(6)]
+        invalid_before = event("codex:strict-tail", "idle", 60)
+        invalid_before["source"] = ""
+        invalid_among = event("codex:strict-tail", "idle", 1)
+        invalid_among["ts"] = "not-a-timestamp"
+        original_events = [invalid_before, root, *work[:3], invalid_among, *work[3:]]
+        original = [json.dumps(item, separators=(",", ":")) for item in original_events]
+        clean = [json.dumps(item, separators=(",", ":"))
+                 for item in [root, *work]]
+        now_ms = serve.event_ms(work[-1])
+        once = serve.carry_forward(original, now_ms)
+        clean_once = serve.carry_forward(clean, now_ms)
+        self.assertEqual(once, clean_once,
+                         "invalid records cannot consume retained/capsule coordinates")
+        self.assertNotIn(invalid_before, protocol_events(once))
+        self.assertNotIn(invalid_among, protocol_events(once))
+        appended = event("codex:strict-tail", "heartbeat", 0)
+        twice = serve.carry_forward([*once, json.dumps(appended, separators=(",", ":"))],
+                                    serve.event_ms(appended))
+        clean_twice = serve.carry_forward(
+            [*clean_once, json.dumps(appended, separators=(",", ":"))],
+            serve.event_ms(appended))
+        self.assertEqual(twice, clean_twice)
+        self.assertNotIn(invalid_before, protocol_events(twice))
+        self.assertNotIn(invalid_among, protocol_events(twice))
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const view=lines=>({moods:Object.fromEntries(m.deriveMoods(p.parseEvents(lines))),
+  state:p.moodAuthorityState(p.parseEvents(lines))});
+process.stdout.write(JSON.stringify(groups.map(view)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps([
+            [*original, json.dumps(appended, separators=(",", ":"))],
+            [*once, json.dumps(appended, separators=(",", ":"))], twice]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        full, appended_view, rerotated = json.loads(completed.stdout)
+        self.assertEqual(appended_view["moods"], full["moods"])
+        self.assertEqual(rerotated["moods"], full["moods"])
+
+    def test_grouped_authority_survives_unrelated_appends_and_python_rotation(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-grouped-unrelated.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        initial = [json.dumps(item, separators=(",", ":")) for item in fixture["initial"]]
+        unrelated = [json.dumps(item, separators=(",", ":"))
+                     for item in fixture["unrelated"]]
+        now_ms = serve.event_ms(fixture["unrelated"][-1])
+        once = serve.carry_forward(initial, now_ms)
+        twice = serve.carry_forward([*once, unrelated[0]], now_ms)
+        thrice = serve.carry_forward([*twice, unrelated[1]], now_ms)
+        script = r"""
+const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
+const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
+process.stdout.write(JSON.stringify(groups.map(read)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+            [initial, once, twice, thrice]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        moods = json.loads(completed.stdout)
+        target = "codex:resident-a"
+        for rotated in moods[1:]:
+            self.assertEqual(rotated[target], moods[0][target])
+        self.assertEqual(moods[0][target]["signals"]["interaction"]["kind"],
+                         "root prompt")
+        self.assertEqual(moods[0][target]["signals"]["interaction"]["logAgeMs"], 0)
+
+    def test_shared_ambiguous_and_post_collision_mood_authority_survives_rotation(self):
+        fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
+                                    "mood-lifecycle-ambiguity.json")
+        with open(fixture_path, encoding="utf-8") as stream:
+            fixture = json.load(stream)
+        ambiguous = fixture["scenarios"]["ambiguous_close"]
+        post = fixture["scenarios"]["post_close_collision"]
+        pending_start = datetime.datetime.fromisoformat(
+            post["pending_start"].replace("Z", "+00:00"))
+        pending = []
+        for index in range(post["pending_count"]):
+            item = copy.deepcopy(post["anchor"])
+            item["ts"] = (pending_start + datetime.timedelta(minutes=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            item["type"] = "needs_human"
+            item["payload"] = {"message": f"Pending {index}",
+                               "request_id": f"pressure-{index}",
+                               "action": "deploy", "detail": None,
+                               "options": ["approve", "deny"]}
+            pending.append(item)
+        post_collision = [*post["events"], *pending, post["anchor"]]
+        scenarios = [
+            (ambiguous, {"codex:ambiguous"}),
+            (post_collision, {"codex:post-collision"}),
+        ]
+        rotated_batches = []
+        for events, eligible in scenarios:
+            indexes = serve._mood_keep_indexes(list(enumerate(events)), eligible)
+            selected = [events[index] for index in sorted(indexes)]
+            if events is ambiguous:
+                self.assertTrue({0, 1}.issubset(indexes),
+                                "both incompatible collision candidates remain unresolved")
+            else:
+                self.assertTrue({0, 1}.issubset(indexes),
+                                "final non-collided q1 decision survives pressure")
+            lines = [json.dumps(item, separators=(",", ":")) for item in events]
+            now_ms = int(datetime.datetime.fromisoformat(
+                fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
+            rotated = serve.carry_forward(lines, now_ms)
+            rotated_batches.append((events, selected, [json.loads(line) for line in rotated]))
+
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
+process.stdout.write(JSON.stringify(batches.map(group=>group.map(derive))));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps(rotated_batches), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        (ambiguous_full, ambiguous_selected, ambiguous_rotated), \
+            (post_full, post_selected, post_rotated) = json.loads(completed.stdout)
+        self.assertEqual(ambiguous_selected["codex:ambiguous"],
+                         ambiguous_full["codex:ambiguous"])
+        self.assertEqual(ambiguous_rotated["codex:ambiguous"],
+                         ambiguous_full["codex:ambiguous"])
+        self.assertEqual(post_selected["codex:post-collision"],
+                         post_full["codex:post-collision"])
+        self.assertEqual(post_rotated["codex:post-collision"],
+                         post_full["codex:post-collision"])
+        self.assertEqual(post_full["codex:post-collision"]["signals"]["interaction"]["kind"],
+                         "approval decision")
+
+    def test_specialized_mood_history_before_liveness_survives_python_rotation(self):
+        anchor = datetime.datetime(2026, 8, 25, 20, tzinfo=datetime.timezone.utc)
+        agent_id = "codex:late-visible"
+        events = []
+        for index in range(4100):
+            item = event(agent_id, "routine_finished", 0, routine="watch",
+                         run_id=f"run-{index}", outcome="ok", artifacts=[], duration_s=1)
+            item["source"] = "steward"
+            item["ts"] = (anchor - datetime.timedelta(seconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            events.append(item)
+        idle = event(agent_id, "idle")
+        idle["ts"] = (anchor - datetime.timedelta(milliseconds=500)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        events.append(idle)
+        lines = [json.dumps(item, separators=(",", ":")) for item in events]
+        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
+
+        script = r"""
+const projection=require('./viewer/projection.js');
+const moods=require('./viewer/moods.js');
+const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
+process.stdout.write(JSON.stringify(batches.map(derive)));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps([lines, rotated]), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        before, after = json.loads(completed.stdout)
+        self.assertEqual(after[agent_id], before[agent_id])
+        self.assertEqual(after[agent_id]["anchor"],
+                         anchor.isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+        self.assertEqual(after[agent_id]["status"], "authority history uncertain")
+        self.assertEqual(after[agent_id]["evidence"], {"count": 0, "spanMs": 0})
+        self.assertTrue(serve._mood_authority_from_line(rotated[0])["overflow"])
 
     def test_rotation_keeps_bounded_canonical_journal_authority_and_one_conflict(self):
         lines = []
@@ -350,7 +1813,8 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
         pending = json.dumps(self.approval("old-pending", minutes_ago=13 * 60))
         tail = serve.carry_forward([pending], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
-        self.assertEqual(tail, [pending])
+        self.assertEqual(protocol_events(tail), [json.loads(pending)])
+        self.assertEqual(sum("mood-authority-v1" in line for line in tail), 1)
 
     def test_retained_journal_carries_distant_approval_truth_into_browser_reset(self):
         """Rotation and grouped replay share pending/closed/collision truth."""
@@ -377,7 +1841,7 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
         for name, prefix in variants.items():
             tail = serve.carry_forward(
                 list(map(json.dumps, [*prefix, *chatter])), now_ms)
-            decoded = [json.loads(line) for line in tail]
+            decoded = protocol_events(tail)
             rotated[name] = tail
             self.assertLessEqual(len(tail), serve.VIEWER_LINE_LIMIT)
             self.assertIn(request, decoded, name)
@@ -469,7 +1933,7 @@ Promise.all(Object.entries(input.lines).flatMap(([name,lines])=>[
                         "collided": [collision, orphan]}.items():
                     source = [*sequence, *suffix, *chatter]
                     tail = serve.carry_forward(list(map(json.dumps, source)), now_ms)
-                    retained = [json.loads(line) for line in tail]
+                    retained = protocol_events(tail)
                     lifecycle_tails[f"{age}/{side}/{lifecycle}"] = tail
                     self.assertLessEqual(len(retained), serve.VIEWER_LINE_LIMIT)
                     self.assertEqual(len(retained), len({source.index(item) for item in retained}),
@@ -716,7 +2180,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         lines = [json.dumps(item) for item in [knock, activity, ended, close]]
         tail = serve.carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
-        retained = [json.loads(line) for line in tail]
+        retained = protocol_events(tail)
         self.assertEqual([item["type"] for item in retained],
                          ["needs_human", "session_ended", "needs_human_resolved"])
         self.assertEqual(retained[-1]["payload"]["decision"], "approve",
@@ -1031,8 +2495,8 @@ class RotationTest(unittest.TestCase):
             fd.flush()
         finally:
             fd.close()
-        self.assertIn("late", {json.loads(line)["agent_id"]
-                               for line in self.live_lines()})
+        self.assertIn("late", {item["agent_id"]
+                               for item in protocol_events(self.live_lines())})
 
     def test_archive_names_carry_a_timestamp(self):
         self.write(self.noisy_history())

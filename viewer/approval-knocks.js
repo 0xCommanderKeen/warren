@@ -6,10 +6,12 @@
 (function (root, factory) {
   const transport = typeof module === "object" && module.exports
     ? require("./routine-ledger.js") : root.BurrowRoutines;
-  const api = factory(transport);
+  const typedJSON = typeof module === "object" && module.exports
+    ? require("./typed-json.js") : root.BurrowTypedJSON;
+  const api = factory(transport, typedJSON);
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowApprovals = api;
-})(typeof globalThis === "object" ? globalThis : this, function (transport) {
+})(typeof globalThis === "object" ? globalThis : this, function (transport, typedJSON) {
   const TYPES = new Set(["needs_human", "needs_human_resolved"]);
   const DECISIONS = new Set(["approve", "deny", "edit"]);
   const ACTION = /^[a-z0-9][a-z0-9_-]*$/;
@@ -27,16 +29,7 @@
   const trimmedText = value => typeof value === "string" && value.trim() ? value.trim() : null;
   const plainObject = value => value !== null && typeof value === "object" &&
     !Array.isArray(value);
-  function canonicalJson(value) {
-    if (value === null) return "null";
-    if (typeof value === "boolean") return value ? "true" : "false";
-    if (typeof value === "number") return Number.isFinite(value) ? JSON.stringify(value) : "invalid";
-    if (typeof value === "string") return JSON.stringify(value);
-    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-    if (plainObject(value)) return `{${Object.keys(value).sort().map(key =>
-      `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-    return `invalid:${typeof value}`;
-  }
+  const canonicalJson = value => typedJSON.identity(value);
   function identity(event) {
     return canonicalJson({ type: event && event.type, ts: event && event.ts,
       source: event && event.source, agent_id: event && event.agent_id,
@@ -105,13 +98,18 @@
       detail: payload.detail, options };
   }
 
-  function createState() {
+  function createState(options = {}) {
     const state = { requests: new Map(), diagnostics: [], malformed: 0,
       capacityDropped: 0, sequence: "0", ordinals: new WeakMap(), classify };
+    const maxRequests = Object.hasOwn(options, "maxRequests") ? options.maxRequests : MAX_REQUESTS;
+    if (maxRequests !== null && (!Number.isInteger(maxRequests) || maxRequests < 0)) {
+      throw new TypeError("approval maxRequests must be a non-negative integer or null");
+    }
     // BigInt prevents precision loss, while only canonical decimal ordinals
     // escape into projection records. Keeping the counter non-enumerable makes
     // snapshots and villager data safe for ordinary JSON tooling.
     Object.defineProperty(state, "appendSequence", { value: 0n, writable: true });
+    Object.defineProperty(state, "maxRequests", { value: maxRequests });
     state.recordForEvent = event => recordForEvent(state, event);
     state.ordinalForEvent = event => ordinalForEvent(state, event);
     return state;
@@ -160,14 +158,14 @@
       a.length > b.length ? 1 : -1;
   }
   function enforceCapacity(state) {
-    if (state.requests.size <= MAX_REQUESTS) return;
+    if (state.maxRequests === null || state.requests.size <= state.maxRequests) return;
     const ranked = [...state.requests.values()].sort((a, b) => {
       const aPending = a.resolution ? 0 : 1, bPending = b.resolution ? 0 : 1;
       if (aPending !== bPending) return bPending - aPending;
       return compareOrdinal(b.sequence, a.sequence);
     });
-    for (const record of ranked.slice(MAX_REQUESTS)) state.requests.delete(record.id);
-    state.capacityDropped += ranked.length - MAX_REQUESTS;
+    for (const record of ranked.slice(state.maxRequests)) state.requests.delete(record.id);
+    state.capacityDropped += ranked.length - state.maxRequests;
   }
   function foldTrusted(state, batch, options = {}) {
     if (options.reset) {

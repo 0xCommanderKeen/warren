@@ -640,6 +640,134 @@ every tool in the log and lying about what the agent is doing right now. A separ
 type keeps the stale rule (last signal wins) working unchanged while letting the
 projection ignore heartbeats when deciding what to *show*.
 
+## Operational mood glyph
+
+`viewer/moods.js` is the sole mood reducer. Its public derivation is
+`deriveMoods(validatedAppendOrderedEvents) -> Map<agent_id, Mood>`: it has no
+clock, manifest, DOM, random input, or configurable threshold. Each agent's
+greatest retained valid timestamp is anchor `A`; every displayed duration is
+non-negative **log age as of A**. Consequently an unchanged log is byte-stable
+across wall-clock ticks, and events for another agent cannot age a mood.
+
+The reducer observes exactly four operational signals. Its rolling terminal
+stream uses `(A-24h,A]`, append order, failures `tool_failed`, `routine_failed`,
+and `task_failed`, and successes `heartbeat`, `routine_finished`, and
+`task_done`; the trailing failure streak saturates at three, while the separate
+failure count counts every rolling-window failure and displays three or more as
+`3+`.
+Work density is the sum of one maximum-weight witness in UTC quarter-hour
+buckets `floor(A/15m)-7..floor(A/15m)`: task/routine starts and claims weigh 3,
+artifacts and journals 2, and tool calls and heartbeats 1. Human interaction is
+the append-newest authoritative exact approval close or root `task_started`
+from `claude-code`/`codex` with no `parent_agent_id`. The fourth signal is the
+oldest unresolved canonical structured approval (collisions remain unresolved)
+or plain/fallback knock not superseded by a later ordinary lifecycle event.
+Mood evaluates canonical requests independently of the approval panel's
+40-request presentation capacity, so an older pending request cannot disappear
+behind newer questions.
+Orphans, jobs, routines, journals, child/custom starts, and invalid v0 records
+do not acquire meanings outside those exact lists.
+
+Enough evidence means an unresolved need, a failure streak of at least two, or
+six distinct signal witnesses spanning at least 30 log-minutes with at least
+two of failure, workload, and interaction observed. Scores are: failure
+`unobserved=0, 0=+2, 1=-1, 2=-3, 3=-5`; workload `active=+2,
+saturated=-2`, otherwise zero; interaction `recent=+1, old=-1`, otherwise zero;
+and unresolved age `≤1h=-1, >1–6h=-3, >6h=-5`. Equality stays in the named
+lower-risk range. Precedence is insufficient `?`, need older than 6h `!`,
+failure streak 3 `×`, saturated work `▲`, then total `≥4` steady `●`, `1..3`
+active `◆`, or `≤0` watchful `◇`.
+
+`retainMoodWitnesses()` and `serve._mood_keep_indexes()` independently preserve
+the anchor, the complete append-ordered terminal frontier currently in
+`(A-24h,A]`, one maximum-weight event per relevant bucket, latest interaction,
+approval/plain-knock authority, and six threshold witnesses selected from the
+reducer's same deduplicated contributing set in append order. The complete
+frontier is necessary because a timestamp-disordered future anchor may expire
+an append-later success and expose any earlier outcome. They also retain a
+backup six-witness selection with unresolved
+plain, fallback, and structured needs excluded, so a future superseder or exact
+close cannot consume the only evidence-threshold witness. Resolved structured
+approvals cannot be made exact forever in
+fixed space: unrestricted request IDs let a future incompatible append
+invalidate any chosen suffix and reveal an arbitrarily old decision. Burrow
+therefore makes that information limit explicit. Full-log and retained-log
+reduction both admit at most 256 irreducible approval facts plus the latest
+root prompt per agent, and the encoded capsule is capped at 32 KiB. Replayed immutable knocks, orphan closes, and superseded
+roots are folded away before this bound is evaluated. Within
+those count and byte bounds they are exact. Crossing either sets a durable global `overflow` bit,
+discards all authority, copy, and order manifests, and renders `? authority history
+uncertain` with `authority.complete=false`; it never presents a guessed suffix
+or retained partial signal/score as exact. Once a request ID collides, every
+candidate remains unresolved and every close for that ID is ignored for Mood
+through the rest of the source epoch. An archive can retain the raw history, but exact answers after
+unbounded future ID reuse require an external unbounded index or a bounded
+request-ID namespace.
+
+Compaction stores bounded authority in one reserved `mood-authority-v1`
+capsule. Its logical `events` have safe decimal `ordinals`; `copies` names authority
+ordinals also represented by raw witnesses. `raw_ordinals` contains only Mood's
+independently selected raw witnesses; fixed-width `raw_indexes` locates that
+sparse set among records retained for other projections, and fixed-width
+`raw_count` separates the rotated source epoch from genuinely later appends.
+The logical state has exactly `events`, `ordinals`, `copies`, `raw_ordinals`,
+`raw_indexes`, `raw_count`, `overflow`, and `observed`; the direct form adds only
+`_burrow_internal`, while the encoded envelope has exactly `_burrow_internal`,
+`encoding`, and `graph`. All ordinal and index arrays, including `copies`, are
+strictly increasing in canonical append order. Missing, duplicate, reordered,
+or surplus fields invalidate the entire capsule.
+Thus approval, task, journal, or presence retention cannot consume Mood's byte
+budget or change its append interleaving.
+
+Capsules use the shallow `typed-binary64-v1` graph for both emission and the
+32 KiB measurement. Every node has an explicit null, boolean, string, array,
+object, or number tag; children precede their parent and containers refer to
+child indexes. Object keys sort by their ASCII-escaped UTF-16 JSON spelling.
+The root is the last node and is never referenced; every earlier scalar or
+container node has exactly one incoming reference. Decoders iteratively
+re-encode the decoded value and require exact graph equality, so unused nodes,
+shared scalars, shared containers, and compressed DAGs cannot amplify beyond
+the measured 32 KiB canonical tree.
+Number nodes carry the exact big-endian IEEE-754 binary64 bits, with both zeros
+normalized to positive zero and every non-finite result (including a legal
+extreme JSON exponent such as `1e400`) normalized to one `nonfinite` token.
+The graph is unambiguous with user objects because tags are interpreted only
+inside the reserved internal envelope. It stays shallow regardless of public
+detail depth, so identity, freezing, capsule emission, parsing, structural
+comparison, and byte measurement are iterative and byte-identical in
+JavaScript and Python. Cycles, repeated direct-object container identities, and
+non-JSON direct inputs fail closed before graph expansion without hiding raw
+public evidence. Legacy direct capsules retain their defensive
+64-container metadata limit; ordinary valid public records and the typed graph
+do not inherit it. A capsule is accepted only at physical raw batch index zero, when every copy ordinal maps
+to canonically identical capsule and raw events, and there is exactly one
+capsule. Malformed, surplus, cross-agent, reordered, or multiple
+capsules are ignored atomically and cannot suppress public evidence. Recognized
+internal markers never become public rejection diagnostics. The
+capsule is transport metadata, not a v0 event: ingestion rejects it,
+projections and boards never count it as an event or rejection, and it cannot
+create or refresh presence. Browser compaction and Python rotation replace it
+atomically. The canonical union of the terminal frontier and every other
+ordinary Mood witness is bounded to 160 records per agent. A 161st required
+record enters the same durable global authority-overflow state as the authority
+count or byte limits; full-log derivation applies this decision too, so it never
+presents signals that rotation cannot preserve exactly. The lower 24-hour
+boundary is open and the upper boundary closed. Overflow clears only when a
+genuinely new complete source epoch replaces the retained history.
+The `observed` field records the compact authority cardinality (or the
+saturating value 257 after overflow), so discarded roots and duplicate facts
+cannot make grouped and incremental overflow decisions diverge. Once overflow
+is known, cross-agent lifecycle completion is not attempted; uncertain raw
+attachments remain inside the same strict 160-record per-owner ceiling.
+Breakdown ages are rendered losslessly through milliseconds, so
+threshold-adjacent evidence is never rounded onto the safer side. This evidence
+is attached only to an already
+projected villager; specialized events never manufacture presence. Panel,
+resident-card, and Visitor-lodge views render the same `Mood` object through
+`viewer/mood-glyph.js`. Its native details control has visible text and a full
+`dl`, works by hover, focus, tap, and keyboard, closes with Escape, never
+animates, and treats stale alpha as an unscored presence wrapper.
+
 ## Log rotation
 
 The live log is a window, not an archive. When `events.jsonl` grows past
@@ -668,6 +796,10 @@ activity drop window;
 resolved pairs stay paired, capacity removes whole pairs, and resolution-only evidence
 never becomes villager liveness. A retained approval also carries a later ordinary
 `session_ended` record so its eventual close cannot manufacture liveness after reset.
+That 40-record rule belongs only to approval-panel presentation. Operational
+Mood's bounded identity authority and explicit overflow state travel in the
+internal capsule above; it
+neither expands panel history nor changes the public JSONL event protocol.
 Rotation therefore cannot create a ghost knock or resurrect a parked session by keeping
 only one part of the authoritative projection.
 

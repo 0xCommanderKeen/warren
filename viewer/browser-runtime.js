@@ -6,6 +6,9 @@
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
     : { validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+      moodAuthority, moodAuthorityCopies, moodAuthorityState, withMoodAuthority, canonicalIdentity,
+      capsuleIdentityEqual,
+      moodAuthorityCapsuleByteLength,
       routineRejections, taskRejections,
       approvalRejections, journalRejections,
       foldEvents, foldArtifacts, reduce };
@@ -19,10 +22,12 @@
     ? require("./approval-knocks.js") : root.BurrowApprovals;
   const journals = typeof module === "object" && module.exports
     ? require("./journal-observations.js") : root.BurrowJournals;
-  const runtime = factory(projection, fleet, jobs, routines, approvals, journals);
+  const moods = typeof module === "object" && module.exports
+    ? require("./moods.js") : root.BurrowMoods;
+  const runtime = factory(projection, fleet, jobs, routines, approvals, journals, moods);
   if (typeof module === "object" && module.exports) module.exports = runtime;
   else root.BurrowBrowser = runtime;
-})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines, approvals, journals) {
+})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines, approvals, journals, moods) {
   const MAX_TRANSPORT_EVENTS = 4000;
 
   function createBrowserRuntime(options) {
@@ -57,6 +62,12 @@
     let jobState = jobs.createState();
     let approvalState = approvals.createState();
     let journalState = journals.createState();
+    let moodSequence = 0;
+    let moodOrdinals = new Map();
+    let moodEvidenceByAgent = new Map();
+    let moodApprovalsByRequest = new Map();
+    let moodAuthorityState = { events: [], ordinals: [], copies: [], rawOrdinals: [],
+      overflow: false, observed: 0 };
     let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
 
     function publishFleet(at = now(), routineBatch = [], reset = false,
@@ -82,10 +93,15 @@
     function project(lines, reset = false, publishRoutineEvidence = true, grouped = false) {
       if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState();
         jobState = jobs.createState(); approvalState = approvals.createState();
-        journalState = journals.createState(); }
+        journalState = journals.createState(); moodSequence = 0; moodOrdinals = new Map();
+        moodEvidenceByAgent = new Map(); moodApprovalsByRequest = new Map();
+        moodAuthorityState = { events: [], ordinals: [], copies: [], rawOrdinals: [],
+          overflow: false, observed: 0 }; }
       const windows = grouped ? projection.parseEventWindows(lines, MAX_TRANSPORT_EVENTS) : null;
       const batch = windows ? windows.tail : projection.parseEvents(lines);
       const journalBatch = windows ? windows.full : batch;
+      const moodBatch = windows ? journalBatch : batch;
+      updateMoodEvidence(moodBatch, Boolean(windows));
       // The strict v0 adapter owns parsing and validation for every browser
       // consumer. Passing its validated batch and task-only rejection metadata
       // keeps boards/approvals diagnostic without a second, weaker raw parser.
@@ -134,6 +150,15 @@
         projection.routineRejections(journalBatch).length, at,
         event => journalState.ordinalForEvent(event));
       villagers = projection.reduce(agents, at, souls, approvalState, journalState);
+      let moodByAgent = new Map();
+      if (villagers.length) {
+        // Derive from the complete retained authority. In particular, a
+        // projected collision owner may depend on a canonical knock emitted by
+        // a different, currently invisible agent.
+        moodByAgent = moods.deriveMoods(moodEvidenceFor(
+          new Set(villagers.map(villager => villager.id))));
+      }
+      for (const villager of villagers) villager.mood = moodByAgent.get(villager.id) || null;
       onProjection({ villagers, artifacts, souls, approvalState, journalState, now: at });
       const taskEvents = batch.filter(event => jobs.TYPES.has(event.type));
       const approvalEvents = batch.filter(event => event.type === "needs_human_resolved");
@@ -142,6 +167,171 @@
         publishRoutineEvidence ? taskEvents : [], publishRoutineEvidence ? approvalEvents : [],
         publishRoutineEvidence ? batch : []);
       return batch;
+    }
+
+    function moodRequestId(event) {
+      if (event.type === "needs_human") {
+        const shape = approvals.classify(event);
+        return shape.kind === "structured" ? shape.request_id : null;
+      }
+      return event.type === "needs_human_resolved" && event.payload ?
+        event.payload.request_id : null;
+    }
+
+    function replaceMoodAgent(agentId, next) {
+      const previous = moodEvidenceByAgent.get(agentId) || [];
+      const retained = new Set(next);
+      for (const event of previous) if (!retained.has(event)) moodOrdinals.delete(event);
+      const oldIds = new Set(previous.map(moodRequestId).filter(Boolean));
+      for (const requestId of oldIds) {
+        const agents = moodApprovalsByRequest.get(requestId);
+        if (!agents) continue;
+        agents.delete(agentId);
+        if (!agents.size) moodApprovalsByRequest.delete(requestId);
+      }
+      if (next.length) moodEvidenceByAgent.set(agentId, next);
+      else moodEvidenceByAgent.delete(agentId);
+      const grouped = new Map();
+      for (const event of next) {
+        const requestId = moodRequestId(event);
+        if (!requestId) continue;
+        const events = grouped.get(requestId) || [];
+        events.push(event); grouped.set(requestId, events);
+      }
+      for (const [requestId, events] of grouped) {
+        const agents = moodApprovalsByRequest.get(requestId) || new Map();
+        agents.set(agentId, events); moodApprovalsByRequest.set(requestId, agents);
+      }
+    }
+
+    function updateMoodEvidence(batch, grouped) {
+      for (const event of batch) moodOrdinals.set(event, moodSequence++);
+      if (grouped) {
+        const retained = moods.retainMoodWitnesses(batch);
+        moodAuthorityState = projection.moodAuthorityState(retained);
+        const retainedOrder = moodAuthorityState.rawOrdinals.length === retained.length ?
+          moodAuthorityState.rawOrdinals.map(Number) : retained.map(event => moodOrdinals.get(event));
+        moodOrdinals = new Map(retained.map((event, index) => [event, retainedOrder[index]]));
+        for (const value of retainedOrder) moodSequence = Math.max(moodSequence, value + 1);
+        moodEvidenceByAgent = new Map(); moodApprovalsByRequest = new Map();
+        const byAgent = new Map();
+        for (const event of retained) {
+          const events = byAgent.get(event.agent_id) || [];
+          events.push(event); byAgent.set(event.agent_id, events);
+        }
+        for (const [agentId, events] of byAgent) replaceMoodAgent(agentId, events);
+        return;
+      }
+      const additions = new Map();
+      for (const event of batch) {
+        const events = additions.get(event.agent_id) || [];
+        events.push(event); additions.set(event.agent_id, events);
+      }
+      // Capsule authority remains one atomic global fold, while signal
+      // witnesses stay per-agent. Remapping the capsule to each local source
+      // gives it fresh raw coordinates; filtering the result by its real owner
+      // prevents a cross-agent dependency from being assigned to the changed
+      // agent. This preserves linear incremental ingestion for wide fleets.
+      for (const [agentId, events] of additions) {
+        const previous = moodEvidenceByAgent.get(agentId) || [];
+        const ordered = [...previous, ...events].sort((left, right) =>
+          moodOrdinals.get(left) - moodOrdinals.get(right));
+        const globalOrdinalByEvent = new Map(moodAuthorityState.events.map((event, index) =>
+          [event, moodAuthorityState.ordinals[index]]));
+        for (const event of ordered) globalOrdinalByEvent.set(event, String(moodOrdinals.get(event)));
+        const source = projection.parseEvents(ordered);
+        const retained = moods.retainMoodWitnesses(remappedMoodAuthority(
+          source, ordered, previous.length));
+        moodAuthorityState = globalMoodAuthorityState(retained,
+          projection.moodAuthorityState(retained), globalOrdinalByEvent);
+        const ordinalByRetained = new Map(retained.map(event =>
+          [event, Number(globalOrdinalByEvent.get(event))]));
+        const owned = retained.filter(event => event.agent_id === agentId);
+        const retainedSet = new Set(owned);
+        for (const event of ordered) if (!retainedSet.has(event)) moodOrdinals.delete(event);
+        for (const event of owned) moodOrdinals.set(event, ordinalByRetained.get(event));
+        replaceMoodAgent(agentId, owned);
+      }
+    }
+
+    function remappedMoodAuthority(source, ordered, sourceEpochCount = ordered.length) {
+      if (moodAuthorityState.overflow) {
+        return projection.withMoodAuthority(source, ordered, [], [], {
+          ordinals: [], rawOrdinals: [], overflow: true,
+          observed: moodAuthorityState.observed });
+      }
+      const authorityByOrdinal = new Map(moodAuthorityState.ordinals.map((ordinal, index) =>
+        [ordinal, moodAuthorityState.events[index]]));
+      // The carried capsule describes the prior source epoch. Newly received
+      // records are append-after evidence and must be folded only after that
+      // capsule has independently proved its prior canonical authority.
+      const sourceEpoch = ordered.slice(0, sourceEpochCount);
+      const proof = moods.requiredMoodRawIndexes(
+        sourceEpoch, moodAuthorityState.events);
+      if (proof.witnessOverflow) {
+        return projection.withMoodAuthority(source, ordered, [], [], {
+          ordinals: [], rawOrdinals: [], rawIndexes: [],
+          rawCount: "0000000000000000", overflow: true,
+          observed: moods.MAX_AUTHORITY_EVENTS + 1 });
+      }
+      const requiredIndexes = proof.indexes;
+      const rawOrdinals = requiredIndexes.map(index => String(moodOrdinals.get(ordered[index])));
+      const rawIndexes = requiredIndexes.map(index => String(index).padStart(16, "0"));
+      const copies = rawOrdinals.filter((ordinal, index) => authorityByOrdinal.has(ordinal) &&
+        projection.capsuleIdentityEqual(authorityByOrdinal.get(ordinal),
+          ordered[requiredIndexes[index]]));
+      return projection.withMoodAuthority(source, ordered, moodAuthorityState.events, copies, {
+        ...moodAuthorityState, rawOrdinals, rawIndexes,
+        rawCount: String(sourceEpochCount).padStart(16, "0"), copies });
+    }
+
+    function globalMoodAuthorityState(retained, local, globalOrdinalByEvent) {
+      if (local.overflow) return { events: [], ordinals: [], copies: [], rawOrdinals: [],
+        rawIndexes: [], rawCount: "0000000000000000", overflow: true,
+        observed: local.observed };
+      const localAuthorityByOrdinal = new Map(local.ordinals.map((ordinal, index) =>
+        [ordinal, local.events[index]]));
+      const copiedEvents = new Set(local.copies.map(ordinal => localAuthorityByOrdinal.get(ordinal)));
+      const ordinals = local.events.map(event => globalOrdinalByEvent.get(event));
+      const requiredIndexes = local.rawIndexes.map(Number);
+      const rawOrdinals = requiredIndexes.map(index => globalOrdinalByEvent.get(retained[index]));
+      const copies = local.events.filter(event => copiedEvents.has(event)).map(event =>
+        globalOrdinalByEvent.get(event));
+      const rawIndexes = local.rawIndexes.slice();
+      const rawCount = String(retained.length).padStart(16, "0");
+      const translated = { events: local.events, ordinals, copies, rawOrdinals, rawIndexes,
+        rawCount, overflow: false, observed: local.observed };
+      if (projection.moodAuthorityCapsuleByteLength(local.events, copies, translated) >
+          moods.MAX_AUTHORITY_BYTES) {
+        return { events: [], ordinals: [], copies: [], rawOrdinals: [], rawIndexes: [],
+          rawCount: "0000000000000000", overflow: true,
+          observed: moods.MAX_AUTHORITY_EVENTS + 1 };
+      }
+      return translated;
+    }
+
+    function moodEvidenceFor(projectedAgents) {
+      const selected = new Set();
+      const requestIds = new Set();
+      for (const agentId of projectedAgents) {
+        for (const event of moodEvidenceByAgent.get(agentId) || []) {
+          selected.add(event);
+          const requestId = moodRequestId(event);
+          if (requestId) requestIds.add(requestId);
+        }
+      }
+      // Approval collision truth is global by request ID, independent of the
+      // approval panel's owner and capacity. Pull only connected lifecycle
+      // members, not every invisible agent's unrelated Mood evidence.
+      for (const requestId of requestIds) {
+        const agents = moodApprovalsByRequest.get(requestId);
+        if (!agents) continue;
+        for (const events of agents.values()) for (const event of events) selected.add(event);
+      }
+      const ordered = [...selected].sort((left, right) =>
+        moodOrdinals.get(left) - moodOrdinals.get(right));
+      const source = projection.parseEvents(ordered);
+      return remappedMoodAuthority(source, ordered);
     }
 
     function tick() { project([]); }
@@ -370,7 +560,10 @@
 
     function snapshot() {
       return { villagers, artifacts, souls, cursor: eventCursor, transport,
-        transportStatus, fleetState, jobState, approvalState, journalState, residentReport };
+        transportStatus, fleetState, jobState, approvalState, journalState, residentReport,
+        moodAuthority: { retained: moodAuthorityState.events.length,
+          overflow: moodAuthorityState.overflow,
+          observed: moodAuthorityState.observed } };
     }
 
     onTransport(transport);

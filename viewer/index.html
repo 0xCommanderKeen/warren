@@ -203,6 +203,24 @@
   .nursery-error { color:#ffb09a; font-size:13px; }
   .resident-card { border: 2px solid #55452e; padding: 12px; margin-bottom: 12px; background: rgba(79,61,34,.16); }
   .resident-card h3 { font-weight: 400; font-size: 24px; }
+  .name-with-mood { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  .mood { position: relative; display: inline-block; font-size: 15px; color: var(--ink-dim); opacity: 1; }
+  .mood.mood-stale { opacity: .45; }
+  .mood summary { display: inline-flex; align-items: baseline; gap: 5px; cursor: pointer;
+    list-style: none; border: 1px solid #625238; padding: 2px 7px; background: #1a1710; }
+  .mood summary::-webkit-details-marker { display: none; }
+  .mood summary:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+  .mood-glyph { color: var(--busy); font-size: 18px; line-height: 1; }
+  .mood-status { white-space: nowrap; }
+  .mood-breakdown { position: relative; z-index: 3; width: min(430px, calc(100vw - 72px));
+    margin-top: 5px; border: 2px solid #625238; padding: 10px; background: #15130e;
+    color: var(--ink); box-shadow: 5px 5px 0 rgba(0,0,0,.5); }
+  .mood-breakdown dl { display: grid; grid-template-columns: minmax(120px, 1fr) 2fr;
+    gap: 5px 10px; margin: 8px 0; }
+  .mood-breakdown dt { color: var(--ink-dim); }
+  .mood-breakdown dd { margin: 0; overflow-wrap: anywhere; }
+  .mood-asof { color: var(--ink-dim); }
+  .mood, .mood * { animation: none !important; transition: none !important; }
   .cap-row { width: 100%; display: grid; grid-template-columns: 92px 1fr; gap: 8px; border: 0; border-top: 1px dotted #55452e; padding: 5px 0; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
   .cap-row:hover, .cap-row:focus-visible { color: #ffd486; background: rgba(210,161,92,.08); }
   .cap-values { overflow-wrap: anywhere; }
@@ -269,6 +287,7 @@
 <script src="/presence.js"></script>
 <script src="/sprites.js"></script>
 <script src="/journal-observations.js"></script>
+<script src="/typed-json.js"></script>
 <script src="/projection.js"></script>
 </head>
 <body>
@@ -316,6 +335,8 @@
 <script src="/routine-ledger.js"></script>
 <script src="/job-board.js"></script>
 <script src="/approval-knocks.js"></script>
+<script src="/moods.js"></script>
+<script src="/mood-glyph.js"></script>
 <script src="/nursery.js"></script>
 <script src="/charter-journal.js"></script>
 <script src="/browser-runtime.js"></script>
@@ -1210,6 +1231,7 @@ const transportEl = document.getElementById("transport");
 const emptyEl   = document.getElementById("empty");
 const panelEl   = document.getElementById("panel");
 const panelBody = document.getElementById("panel-body");
+BurrowMoodGlyph.bind(panelEl);
 const stewardDialog = document.getElementById("steward-auth");
 const stewardForm = document.getElementById("steward-auth-form");
 const stewardTokenInput = document.getElementById("steward-token");
@@ -1624,7 +1646,7 @@ function renderDirectory() {
   const availability = directory.available ? "" : `<div class="ledger-state bad">Resident declarations are externally unavailable. Cached declarations are shown for orientation only; no capability is assumed configured.</div>`;
   const cards = directory.residents.map(resident => {
     const caps = resident.capabilities || {}, active = activeForResident(resident);
-    return `<article class="resident-card"><h3>${entryLink(active ? active.id : residentDetailId(resident), resident.meta.name)}</h3>
+    return `<article class="resident-card"><div class="name-with-mood"><h3>${entryLink(active ? active.id : residentDetailId(resident), resident.meta.name)}</h3>${active ? BurrowMoodGlyph.render(active.name, active.mood, { stale: active.state === "stale" }) : ""}</div>
       <div class="ledger-small">resident · stable home ${resident.home + 1} · ${esc(resident.meta.role || "role not declared")}</div>
       ${caps.soul && caps.soul.description ? `<div class="soul">${esc(caps.soul.description)}<div class="ledger-small">sprite ${esc(caps.soul.char)} · accent ${esc(caps.soul.accent)}</div></div>` : ""}
       ${capabilityLine("soul", caps.soul, active, resident)}${capabilityLine("skills", caps.skills, active, resident)}
@@ -1647,7 +1669,7 @@ function renderDirectory() {
   }).join("");
   const invalid = directory.invalid.length ? `<div class="ledger-state bad">Incomplete or invalid manifests:<ul>${directory.invalid.map(d => `<li>${esc(d.file)}${esc(d.path)} — ${esc(d.message)}</li>`).join("")}</ul>${statusMark("invalid")}</div>` : "";
   const visitors = villagers.filter(v => v.residency === "visitor");
-  const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div>${entryLink(v.id, v.name)} · ${esc(v.project)}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
+  const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div class="name-with-mood">${entryLink(v.id, v.name)} · ${esc(v.project)} ${BurrowMoodGlyph.render(v.name, v.mood, { stale: v.state === "stale" })}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
   const identityControls = `<div class="ledger-truth"><button type="button" class="routine-run" data-open-nursery>found a resident at the town hall</button><br>Charters and journals are read directly from Steward into this browser tab. ${stewardConfig ?
     `<button type="button" class="routine-run" data-identity-refresh>refresh identity</button>` :
     `<button type="button" class="routine-run" data-identity-refresh>connect to load identity</button>`}</div>`;
@@ -2163,7 +2185,7 @@ function renderPanelContent(now) {
   const approvalDiagnostics = fleetView.approvalState && fleetView.approvalState.diagnostics ?
     fleetView.approvalState.diagnostics.filter(item => item.agent_id === v.id) : [];
   panelBody.innerHTML = `
-    <h2 id="panel-title" tabindex="-1"><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>
+    <div class="name-with-mood"><h2 id="panel-title" tabindex="-1"><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>${BurrowMoodGlyph.render(v.name, v.mood, { stale: v.state === "stale" })}</div>
     <div class="meta role">${v.residency === "resident" ? `resident · home ${v.home + 1}` : "visitor · based at the lodge"}</div>
     ${v.soul && v.soul.meta.role ? `<div class="meta role">${esc(v.soul.meta.role)}</div>` : ""}
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>

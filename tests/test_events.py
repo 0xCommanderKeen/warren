@@ -788,12 +788,14 @@ class EventsEndpointTest(unittest.TestCase):
 
     def test_in_place_rotation_resets_a_cursor_still_within_the_new_log(self):
         ts = "2099-01-01T00:00:00.000Z"
-        self.append({"type": "idle", "agent_id": "one", "ts": ts})
+        self.append({"type": "idle", "agent_id": "one", "ts": ts, "v": 0,
+                     "source": "test", "project": "burrow", "payload": {}})
         _, headers, _ = self.get_events()
         old_cursor = headers["X-Burrow-Cursor"]
 
         for index in range(100):
-            self.append({"type": "tool_called", "agent_id": "one", "ts": ts,
+            self.append({"type": "tool_called", "agent_id": "one", "ts": ts, "v": 0,
+                         "source": "test", "project": "burrow",
                          "payload": {"tool": "Read", "detail": str(index)}})
         with serve.LOG_LOCK:
             archive = serve.rotate(os.path.getsize(self.events))

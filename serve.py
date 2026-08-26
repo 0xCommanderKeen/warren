@@ -28,6 +28,7 @@ import glob
 import hmac
 import http.server
 import json
+import math
 import os
 import queue
 import re
@@ -39,7 +40,8 @@ import urllib.parse
 import urllib.request
 import weakref
 
-from approval_protocol import json_semantic_key, structured_approval, thaw_json
+from approval_protocol import (decode_json_typed_graph, json_semantic_key,
+                               structured_approval, thaw_json)
 from journal_observations import reduce_indexed as reduce_journal_indexed
 from hooks import durable
 import notification_persistence
@@ -67,6 +69,241 @@ DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 KEEP_TASKS = 24                       # viewer/job-board.js MAX_TASKS
 KEEP_APPROVALS = 40                   # viewer/approval-knocks.js MAX_REQUESTS
 TASK_EVENT_TYPES = {"task_posted", "task_claimed", "task_done", "task_failed"}
+MOOD_TERMINAL_TYPES = {"tool_failed", "routine_failed", "task_failed",
+                       "heartbeat", "routine_finished", "task_done"}
+MOOD_FAILURE_TYPES = {"tool_failed", "routine_failed", "task_failed"}
+MOOD_WORK_WEIGHTS = {"task_started": 3, "task_claimed": 3,
+                     "routine_started": 3, "artifact_produced": 2,
+                     "journal_written": 2, "tool_called": 1, "heartbeat": 1}
+MOOD_ORDINARY_SUPERSEDERS = {"task_started", "tool_called", "tool_failed",
+                             "artifact_produced", "heartbeat", "needs_human",
+                             "idle", "session_ended"}
+MOOD_AUTHORITY_KIND = "mood-authority-v1"
+MOOD_AUTHORITY_ENCODING = "typed-binary64-v1"
+MOOD_AUTHORITY_LIMIT = 256
+MOOD_AUTHORITY_MAX_BYTES = 32 * 1024
+MAX_MOOD_RETAINED_PER_AGENT = 160
+MOOD_AUTHORITY_MAX_DEPTH = 64
+
+
+def _canonical_json_string(value):
+    """ASCII JSON string escaping shared with viewer/projection.js."""
+    encoded = ['"']
+    short = {0x08: "\\b", 0x09: "\\t", 0x0A: "\\n",
+             0x0C: "\\f", 0x0D: "\\r"}
+    for character in value:
+        codepoint = ord(character)
+        units = ([codepoint] if codepoint <= 0xFFFF else
+                 [0xD800 + ((codepoint - 0x10000) >> 10),
+                  0xDC00 + ((codepoint - 0x10000) & 0x3FF)])
+        for code in units:
+            if code == 0x22:
+                encoded.append('\\"')
+            elif code == 0x5C:
+                encoded.append("\\\\")
+            elif code in short:
+                encoded.append(short[code])
+            elif 0x20 <= code <= 0x7E:
+                encoded.append(chr(code))
+            else:
+                encoded.append(f"\\u{code:04x}")
+    encoded.append('"')
+    return "".join(encoded)
+
+
+def _json_domain_within(value, max_depth=math.inf):
+    """Iteratively prove a bounded JSON tree, rejecting cycles and aliases."""
+    seen = set()
+    active = set()
+    stack = [(value, 0, False)]
+    try:
+        while stack:
+            item, parent_depth, exiting = stack.pop()
+            if exiting:
+                active.remove(id(item))
+                continue
+            if item is None or isinstance(item, (bool, int, float, str)):
+                continue
+            if not isinstance(item, (list, dict)):
+                return False
+            depth = parent_depth + 1
+            identity = id(item)
+            if depth > max_depth or identity in seen:
+                return False
+            seen.add(identity)
+            active.add(identity)
+            stack.append((item, depth, True))
+            if isinstance(item, list):
+                stack.extend((child, depth, False) for child in reversed(item))
+            else:
+                if not all(isinstance(key, str) for key in item):
+                    return False
+                stack.extend((item[key], depth, False) for key in reversed(list(item)))
+    except (KeyError, RuntimeError, TypeError, ValueError, OverflowError):
+        return False
+    return True
+
+
+def _mood_raw_index(index):
+    return f"{index:016d}"
+
+
+def _mood_authority_event(event):
+    payload = event.get("payload") or {}
+    return (event.get("type") in {"needs_human", "needs_human_resolved"}
+            or (event.get("type") == "task_started"
+                and event.get("source") in {"claude-code", "codex"}
+                and "parent_agent_id" not in payload))
+
+
+def _mood_authority_input_event(event):
+    """Raw event that must enter the compact authority fold in ordinal order."""
+    payload = event.get("payload") or {}
+    return (structured_approval(event) is not None
+            or event.get("type") == "needs_human_resolved"
+            or (event.get("type") == "task_started"
+                and event.get("source") in {"claude-code", "codex"}
+                and "parent_agent_id" not in payload))
+
+
+def _mood_authority_marker(record):
+    return (isinstance(record, dict)
+            and record.get("_burrow_internal") == MOOD_AUTHORITY_KIND)
+
+
+def _encode_mood_authority(capsule):
+    """Encode logical capsule data as a shallow exact-binary64 typed graph."""
+    logical = dict(capsule)
+    logical.pop("_burrow_internal", None)
+    graph = json_semantic_key(logical)
+    return ('{"_burrow_internal":' + _canonical_json_string(MOOD_AUTHORITY_KIND)
+            + ',"encoding":' + _canonical_json_string(MOOD_AUTHORITY_ENCODING)
+            + ',"graph":' + graph + '}')
+
+
+def _reject_json_constant(value):
+    """Capsule JSON is RFC JSON; Python's NaN/Infinity extension is not."""
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _mood_authority_from_line_checked(line):
+    try:
+        too_large = (not isinstance(line, str)
+                     or len(line.encode("utf-8")) > MOOD_AUTHORITY_MAX_BYTES)
+    except (TypeError, UnicodeError, OverflowError):
+        return None
+    if too_large:
+        return None
+    def duplicate_free_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate capsule JSON member")
+            result[key] = value
+        return result
+    try:
+        record = json.loads(line, parse_constant=_reject_json_constant,
+                            object_pairs_hook=duplicate_free_object)
+    except (TypeError, ValueError, RecursionError, OverflowError):
+        return None
+    if (isinstance(record, dict)
+            and record.get("encoding") == MOOD_AUTHORITY_ENCODING):
+        if set(record) != {"_burrow_internal", "encoding", "graph"}:
+            return None
+        try:
+            logical = decode_json_typed_graph(record.get("graph"))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not isinstance(logical, dict):
+            return None
+        if set(logical) != {"events", "ordinals", "copies", "raw_ordinals",
+                           "raw_indexes", "raw_count", "overflow", "observed"}:
+            return None
+        record = {"_burrow_internal": MOOD_AUTHORITY_KIND, **logical}
+    elif not _json_domain_within(record, MOOD_AUTHORITY_MAX_DEPTH):
+        return None
+    if (not isinstance(record, dict)
+            or not _mood_authority_marker(record)
+            or set(record) != {"_burrow_internal", "events", "ordinals", "copies",
+                               "raw_ordinals", "raw_indexes", "raw_count",
+                               "overflow", "observed"}
+            or not isinstance(record.get("events"), list)
+            or not isinstance(record.get("ordinals"), list)
+            or len(record["ordinals"]) != len(record["events"])
+            or not isinstance(record.get("overflow"), bool)
+            or isinstance(record.get("observed"), bool)
+            or not isinstance(record.get("observed"), (int, float))
+            or not math.isfinite(record["observed"])
+            or not float(record["observed"]).is_integer()
+            or not 0 <= record["observed"] <= MOOD_AUTHORITY_LIMIT + 1
+            or (record["overflow"] and record["observed"] != MOOD_AUTHORITY_LIMIT + 1)
+            or (not record["overflow"] and record["observed"] != len(record["events"]))
+            or ("copies" in record and not isinstance(record["copies"], list))
+            or ("raw_ordinals" in record
+                and not isinstance(record["raw_ordinals"], list))
+            or ("raw_indexes" in record
+                and not isinstance(record["raw_indexes"], list))
+            or (record["overflow"] and (record["events"] or record["ordinals"]
+                or record.get("copies", []) or record.get("raw_ordinals", [])
+                or record.get("raw_indexes", [])))):
+        return None
+    events = record["events"]
+    copies = record["copies"]
+    raw_ordinals = record["raw_ordinals"]
+    raw_indexes = record["raw_indexes"]
+    raw_count = record["raw_count"]
+    valid_ordinal = lambda value: (isinstance(value, str)
+                                   and re.fullmatch(r"0|[1-9][0-9]*", value)
+                                   and int(value) <= 9007199254740991)
+    increasing = lambda values: all(int(values[index - 1]) < int(value)
+                                    for index, value in enumerate(values) if index)
+    valid_raw_index = lambda value: (isinstance(value, str)
+                                     and re.fullmatch(r"[0-9]{16}", value)
+                                     and int(value) <= 9007199254740991)
+    if (not isinstance(copies, list) or not isinstance(raw_ordinals, list)
+            or len(raw_indexes) != len(raw_ordinals)
+            or not valid_raw_index(raw_count)
+            or (record["overflow"] and int(raw_count) != 0)
+            or not all(valid_raw_index(item) for item in raw_indexes)
+            or any(int(item) >= int(raw_count) for item in raw_indexes)
+            or not increasing(raw_indexes)
+            or not all(valid_ordinal(item) for item in record["ordinals"])
+            or len(set(record["ordinals"])) != len(record["ordinals"])
+            or not all(valid_ordinal(item) for item in copies + raw_ordinals)
+            or not increasing(record["ordinals"]) or not increasing(copies)
+            or not increasing(raw_ordinals)
+            or any(validate_event(event) or not _mood_authority_event(event)
+                   for event in events)):
+        return None
+    return {"events": events, "ordinals": record["ordinals"], "copies": copies,
+            "raw_ordinals": raw_ordinals, "raw_indexes": raw_indexes,
+            "raw_count": raw_count,
+            "overflow": record["overflow"],
+            "observed": record["observed"]}
+
+
+def _mood_authority_from_line(line):
+    """Parse one untrusted capsule atomically; every boundary fault is invalid."""
+    try:
+        return _mood_authority_from_line_checked(line)
+    except (RecursionError, TypeError, OverflowError, ValueError, UnicodeError):
+        return None
+
+
+def _canonical_identity(value):
+    """Language-neutral typed structural identity with exact binary64 values."""
+    return json_semantic_key(value)
+
+
+def _capsule_identity_equal(left, right):
+    """Fail closed at the recursive capsule-canonicalization boundary."""
+    if (not _json_domain_within(left, MOOD_AUTHORITY_MAX_DEPTH)
+            or not _json_domain_within(right, MOOD_AUTHORITY_MAX_DEPTH)):
+        return False
+    try:
+        return _canonical_identity(left) == _canonical_identity(right)
+    except (RecursionError, TypeError, OverflowError, ValueError):
+        return False
 
 # every read, append and rotation of the log goes through this, so an event can
 # never land in the gap between reading the log and swapping it out
@@ -853,7 +1090,7 @@ def _approval_lifecycle_identity(event, shape=None):
     })
 
 
-def _approval_keep_indexes(parsed):
+def _approval_keep_indexes(parsed, capacity=KEEP_APPROVALS):
     """Return append-ordered approval authority and isolated event indexes.
 
     The first exact request append owns an ID and the first subsequent matching
@@ -884,12 +1121,12 @@ def _approval_keep_indexes(parsed):
                 # collision quarantine; append order chooses which one.
                 if record["collision"] is None:
                     record["collision"] = (index, event)
-            if len(requests) > KEEP_APPROVALS:
+            if capacity is not None and len(requests) > capacity:
                 ranked = sorted(requests.items(), key=lambda item: (
                     item[1]["resolution"] is None,
                     (item[1]["resolution"] or item[1]["knock"])[0],
                     item[1]["sequence"], item[0]), reverse=True)
-                requests = dict(ranked[:KEEP_APPROVALS])
+                requests = dict(ranked[:capacity])
             continue
         if event.get("type") != "needs_human_resolved":
             continue
@@ -951,6 +1188,414 @@ def _journal_approval_keep_indexes(parsed, retained_journal_indexes):
     }
 
 
+def _mood_keep_indexes(parsed, eligible_agents, authority_uncertain=False,
+                       overflow_state=None):
+    """Independent bounded witnesses for the pure browser mood reducer.
+
+    These indexes are evidence only. The caller intersects agent IDs with its
+    ordinary presence projection, so routine/task facts cannot manufacture a
+    villager during reset.
+    """
+    by_agent = collections.defaultdict(list)
+    for index, event in parsed:
+        if event.get("agent_id") in eligible_agents and not validate_event(event):
+            by_agent[event["agent_id"]].append((index, event))
+    if authority_uncertain:
+        # Partial approval graphs are neither useful nor truthful once the
+        # global gate is durable. Keep only bounded attachment evidence; do not
+        # construct an arbitrarily large graph merely to discard it below.
+        minimal = set()
+        for entries in by_agent.values():
+            minimal.add(max(entries, key=lambda item: (event_ms(item[1]), item[0]))[0])
+            minimal.add(entries[-1][0])
+        return minimal
+    # Mood authority is independent of the approval panel's bounded,
+    # one-record-per-ID presentation. Every first append of an incompatible
+    # immutable request is a canonical candidate owned by that event's agent.
+    # A matching decision closes a candidate only when the append prefix makes
+    # the resolution identity unambiguous.
+    approval_groups = {}
+    approval_by_knock_index = {}
+    approval_by_resolution_index = {}
+    approval_resolution_dependencies = {}
+    for item in parsed:
+        index, event = item
+        if validate_event(event):
+            continue
+        shape = structured_approval(event)
+        if shape is not None:
+            group = approval_groups.setdefault(shape.request_id, {
+                "request_id": shape.request_id, "candidates": [],
+                "by_lifecycle": {}, "collided": False})
+            lifecycle = _approval_lifecycle_identity(event, shape)
+            if lifecycle in group["by_lifecycle"]:
+                continue
+            candidate = {
+                "knock": item, "resolution": None, "group": group,
+                "lifecycle": lifecycle,
+                "resolution_identity": _approval_resolution_identity(event, shape)}
+            group["candidates"].append(candidate)
+            group["by_lifecycle"][lifecycle] = candidate
+            approval_by_knock_index[index] = candidate
+            if len(group["candidates"]) > 1:
+                group["collided"] = True
+                for member in group["candidates"]:
+                    if member["resolution"] is not None:
+                        approval_by_resolution_index.pop(member["resolution"][0], None)
+                        approval_resolution_dependencies.pop(member["resolution"][0], None)
+                    member["resolution"] = None
+            continue
+        if event["type"] != "needs_human_resolved":
+            continue
+        payload = event.get("payload") or {}
+        group = approval_groups.get(payload.get("request_id"))
+        resolution_identity = _approval_resolution_identity(event)
+        if group is None or group["collided"] or resolution_identity is None:
+            continue
+        matches = [candidate for candidate in group["candidates"]
+                   if candidate["resolution"] is None and
+                   candidate["resolution_identity"] == resolution_identity]
+        if matches:
+            # A retained close must carry enough append-prefix authority to
+            # remain ambiguous. Otherwise rotation can drop one matching
+            # lifecycle and manufacture an exact human decision.
+            approval_resolution_dependencies[index] = matches[:2]
+        if len(matches) == 1:
+            matches[0]["resolution"] = item
+            approval_by_resolution_index[index] = matches[0]
+    approval_candidates = [candidate for group in approval_groups.values()
+                           for candidate in group["candidates"]]
+    # Human interaction follows the final approval-panel authority, not Mood's
+    # independent per-collision candidates. A close whose request ID collided
+    # later is quarantined and cannot displace an earlier truthful decision.
+    authoritative_close_indexes = {
+        group["candidates"][0]["resolution"][0]
+        for group in approval_groups.values()
+        if len(group["candidates"]) == 1
+        and group["candidates"][0]["resolution"] is not None
+    }
+    def complete_candidate(candidate):
+        """Bounded facts that reconstruct this canonical collision member."""
+        canonical = candidate["group"]["candidates"][0]
+        members = [canonical, candidate]
+        if candidate is canonical and len(candidate["group"]["candidates"]) > 1:
+            members.append(candidate["group"]["candidates"][1])
+        return {member["knock"][0]: member for member in members}.values()
+    mood_approval_indexes = set()
+    unresolved_by_agent = collections.defaultdict(list)
+    for record in approval_candidates:
+        agent_id = record["knock"][1]["agent_id"]
+        if record["resolution"] is None:
+            unresolved_by_agent[agent_id].append(record)
+    for agent_id, entries in by_agent.items():
+        anchor = max(event_ms(item[1]) for item in entries)
+        oldest = min(unresolved_by_agent[agent_id], key=lambda record: (
+            -max(0, anchor - event_ms(record["knock"][1])),
+            record["knock"][0]), default=None)
+        # Resolved predecessors live in the internal authority capsule rather
+        # than an arbitrary finite raw-event stack. Raw retention needs only
+        # today's oldest open lifecycle.
+        for record in ([oldest] if oldest is not None else []):
+            if record is None:
+                continue
+            # Complete the whole canonical/collision group. This includes a
+            # cross-agent canonical request even when only the colliding owner
+            # is independently eligible for Mood projection.
+            for candidate in complete_candidate(record):
+                mood_approval_indexes.add(candidate["knock"][0])
+                if candidate["resolution"] is not None:
+                    mood_approval_indexes.add(candidate["resolution"][0])
+    keep = set()
+    minimal_keep = set()
+    witness_overflow = False
+    quarter = 15 * 60 * 1000
+    day = 24 * 60 * 60 * 1000
+    for agent_id, entries in by_agent.items():
+        # One reverse pass provides both the unresolved plain/fallback set and
+        # the append-later ordinary boundary needed by retained anchor knocks.
+        open_plain = []
+        boundary_after = {}
+        latest_ordinary = None
+        for item in reversed(entries):
+            event = item[1]
+            if event["type"] == "needs_human" and structured_approval(event) is None:
+                if latest_ordinary is None:
+                    open_plain.append(item)
+                else:
+                    boundary_after[item[0]] = latest_ordinary
+            if event["type"] in MOOD_ORDINARY_SUPERSEDERS:
+                latest_ordinary = item
+        open_plain.reverse()
+        anchor_item = max(entries, key=lambda item: (event_ms(item[1]), item[0]))
+        minimal_keep.add(anchor_item[0])
+        minimal_keep.add(entries[-1][0])
+        anchor = event_ms(anchor_item[1])
+        candidates = []
+        # Timestamps need not follow append order. Retain the complete current
+        # lower-open terminal frontier so a later anchor can expire an
+        # append-later success without losing the earlier outcome it exposed.
+        terminal_ring = collections.deque(maxlen=MAX_MOOD_RETAINED_PER_AGENT)
+        terminal_observed = 0
+        for item in entries:
+            if (item[1]["type"] not in MOOD_TERMINAL_TYPES or
+                    max(0, anchor - event_ms(item[1])) >= day):
+                continue
+            terminal_observed = min(MAX_MOOD_RETAINED_PER_AGENT + 1,
+                                    terminal_observed + 1)
+            terminal_ring.append(item)
+        terminal = list(terminal_ring)
+        if terminal_observed > MAX_MOOD_RETAINED_PER_AGENT:
+            witness_overflow = True
+            if overflow_state is not None:
+                overflow_state["overflow"] = True
+        candidates.extend(terminal)
+        base_bucket = anchor // quarter
+        bucket_best = {}
+        for item in entries:
+            weight = MOOD_WORK_WEIGHTS.get(item[1]["type"])
+            bucket = event_ms(item[1]) // quarter
+            if not weight or bucket < base_bucket - 7 or bucket > base_bucket:
+                continue
+            current = bucket_best.get(bucket)
+            if current is None or weight >= current[0]:
+                bucket_best[bucket] = (weight, item)
+        candidates.extend(value[1] for value in bucket_best.values())
+        human = []
+        for item in entries:
+            event = item[1]
+            payload = event.get("payload") or {}
+            root_prompt = (event["type"] == "task_started"
+                           and event.get("source") in {"claude-code", "codex"}
+                           and "parent_agent_id" not in payload)
+            exact_close = (event["type"] == "needs_human_resolved"
+                           and item[0] in authoritative_close_indexes)
+            if root_prompt or exact_close:
+                human.append(item)
+        if human:
+            candidates.append(human[-1])
+        # Complete only the lifecycle witnesses selected above. Selection uses
+        # the canonical knock's agent, while retaining a cross-agent collision
+        # at its own append position.
+        candidates.extend(item for item in entries
+                          if item[0] in mood_approval_indexes)
+        # A plain/fallback knock is open only if no later ordinary event
+        # supersedes it. Retaining the latest such boundary is sufficient.
+        if open_plain:
+            candidates.append(open_plain[-1])
+        # Threshold witnesses must be the exact deduplicated contributors used
+        # by the reducer, rather than merely events whose types could contribute.
+        contributing = {item[0]: item for item in terminal}
+        contributing.update((item[0], item) for _, item in bucket_best.values())
+        contributing.update((item[0], item) for item in human[-1:])
+        unresolved_indexes = set()
+        unresolved_indexes.update(
+            record["knock"][0] for record in unresolved_by_agent[agent_id])
+        unresolved_indexes.update(item[0] for item in open_plain)
+        contributing.update((item[0], item) for item in entries
+                            if item[0] in unresolved_indexes)
+        signal_candidates = sorted(contributing.values())
+        if signal_candidates:
+            if len(signal_candidates) <= 6:
+                threshold = signal_candidates
+            else:
+                by_time = sorted(signal_candidates,
+                                 key=lambda item: (event_ms(item[1]), item[0]))
+                selected = {}
+                for item in [by_time[0], by_time[-1],
+                             *reversed(signal_candidates)]:
+                    selected[item[0]] = item
+                    if len(selected) == 6:
+                        break
+                threshold = sorted(selected.values())
+            candidates.extend(threshold)
+        # Preserve a second threshold proof without unresolved needs. A later
+        # ordinary superseder or exact close can remove those contributors;
+        # the backup keeps evidence sufficient across the future append.
+        stable_contributing = {item[0]: item for item in terminal}
+        stable_contributing.update((item[0], item)
+                                   for _, item in bucket_best.values())
+        stable_contributing.update((item[0], item) for item in human[-1:])
+        stable_candidates = sorted(stable_contributing.values())
+        if stable_candidates:
+            if len(stable_candidates) <= 6:
+                stable_threshold = stable_candidates
+            else:
+                stable_by_time = sorted(
+                    stable_candidates,
+                    key=lambda item: (event_ms(item[1]), item[0]))
+                stable_selected = {}
+                for item in [stable_by_time[0], stable_by_time[-1],
+                             *reversed(stable_candidates)]:
+                    stable_selected[item[0]] = item
+                    if len(stable_selected) == 6:
+                        break
+                stable_threshold = sorted(stable_selected.values())
+            candidates.extend(stable_threshold)
+        candidates.append(anchor_item)
+        # Keep a strict per-agent ceiling. Only Mood's selected oldest-open and
+        # latest-close lifecycles enter this set; presentation capacity is not
+        # part of their authority.
+        selected = sorted({item[0]: item for item in candidates}.values())
+        # A timestamp-anchor plain/fallback knock can already be superseded in
+        # append order. Carry one later ordinary boundary for every such knock
+        # retained by another Mood rule, or reset would reopen it.
+        for item in list(selected):
+            if (item[1]["type"] != "needs_human" or
+                    structured_approval(item[1]) is not None):
+                continue
+            boundary = boundary_after.get(item[0])
+            if boundary is not None:
+                selected.append(boundary)
+        selected = sorted({item[0]: item for item in selected}.values())
+        if len(selected) > MAX_MOOD_RETAINED_PER_AGENT:
+            witness_overflow = True
+            if overflow_state is not None:
+                overflow_state["overflow"] = True
+        selected = selected[-MAX_MOOD_RETAINED_PER_AGENT:]
+        if anchor_item not in selected:
+            selected = sorted([*selected[1:], anchor_item])
+        for index, _ in selected:
+            keep.add(index)
+    if authority_uncertain or witness_overflow:
+        return minimal_keep
+    bounded_keep = set(keep)
+    # Cross-agent lifecycle members cannot be added from the projected owner's
+    # per-agent list, but remain required authority for that owner's collision.
+    if not authority_uncertain and not witness_overflow:
+        keep.update(mood_approval_indexes)
+    # Structured knocks selected for another reason (especially the greatest
+    # timestamp anchor) also carry their exact close/collision lifecycle.
+    if not authority_uncertain and not witness_overflow:
+        for index in list(keep):
+            selected = (approval_by_knock_index.get(index) or
+                        approval_by_resolution_index.get(index))
+            dependencies = approval_resolution_dependencies.get(index, [])
+            for record in ([selected] if selected is not None else []) + dependencies:
+                for candidate in complete_candidate(record):
+                    keep.add(candidate["knock"][0])
+                    if candidate["resolution"] is not None:
+                        keep.add(candidate["resolution"][0])
+        counts = collections.Counter(
+            event["agent_id"] for index, event in parsed if index in keep)
+        if any(count > MAX_MOOD_RETAINED_PER_AGENT
+               for count in counts.values()):
+            keep = minimal_keep
+            if overflow_state is not None:
+                overflow_state["overflow"] = True
+    return keep
+
+
+def _compact_mood_authority(events):
+    """Exact append-prefix approval/root authority; orphan closes are final."""
+    groups = {}
+    selected = set()
+    latest_roots = {}
+    for position, (ordinal, event) in enumerate(events):
+        payload = event.get("payload") or {}
+        root_prompt = (event.get("type") == "task_started"
+                       and event.get("source") in {"claude-code", "codex"}
+                       and "parent_agent_id" not in payload)
+        if root_prompt:
+            latest_roots[event["agent_id"]] = position
+            continue
+        shape = structured_approval(event)
+        if shape is not None:
+            group = groups.setdefault(shape.request_id,
+                                      {"candidates": [], "lifecycles": set(),
+                                       "collided": False})
+            lifecycle = _approval_lifecycle_identity(event, shape)
+            if lifecycle in group["lifecycles"]:
+                continue
+            group["lifecycles"].add(lifecycle)
+            group["candidates"].append({"ordinal": position, "resolved": False,
+                                         "resolution": None,
+                                         "resolution_identity":
+                                             _approval_resolution_identity(event, shape)})
+            selected.add(position)
+            if len(group["candidates"]) > 1:
+                group["collided"] = True
+                for candidate in group["candidates"]:
+                    if candidate["resolution"] is not None:
+                        selected.discard(candidate["resolution"])
+                    candidate["resolved"] = False
+                    candidate["resolution"] = None
+            continue
+        if event.get("type") != "needs_human_resolved":
+            continue
+        identity = _approval_resolution_identity(event)
+        group = groups.get(payload.get("request_id"))
+        if identity is None or group is None or group["collided"]:
+            continue
+        matches = [candidate for candidate in group["candidates"]
+                   if not candidate["resolved"]
+                   and candidate["resolution_identity"] == identity]
+        if matches:
+            # One match closes exactly; two or more retain the same ambiguity.
+            selected.add(position)
+        if len(matches) == 1:
+            matches[0]["resolved"] = True
+            matches[0]["resolution"] = position
+    selected.update(latest_roots.values())
+    return [item for position, item in enumerate(events) if position in selected]
+
+
+def _mood_authority_overflow_tracker():
+    """Bounded monotonic lower bound for irreducible Mood authority."""
+    return {"roots": set(), "lifecycles": {}, "observed": 0}
+
+
+def _mood_authority_tracker_add(tracker, event):
+    """Return true as soon as exact authority is guaranteed to exceed 256.
+
+    A later root replaces an earlier root for the same owner, while a distinct
+    owner remains one irreducible fact. Structured lifecycle candidates are
+    never removed by closes or collisions. Thus this bounded lower bound may
+    delay overflow caused by close witnesses, but can never declare it early.
+    """
+    payload = event.get("payload") or {}
+    root = (event.get("type") == "task_started"
+            and event.get("source") in {"claude-code", "codex"}
+            and "parent_agent_id" not in payload)
+    if root:
+        agent_id = event["agent_id"]
+        if agent_id not in tracker["roots"]:
+            tracker["roots"].add(agent_id)
+            tracker["observed"] += 1
+    else:
+        shape = structured_approval(event)
+        if shape is not None:
+            lifecycles = tracker["lifecycles"].setdefault(shape.request_id, set())
+            lifecycle = _approval_lifecycle_identity(event, shape)
+            if lifecycle not in lifecycles:
+                lifecycles.add(lifecycle)
+                tracker["observed"] += 1
+    return tracker["observed"] > MOOD_AUTHORITY_LIMIT
+
+
+def _exact_capsule_authority(capsule, raw_events):
+    """Prove a capsule is the canonical irreducible fold of its source epoch."""
+    copies = set(map(int, capsule["copies"]))
+    ordered = [(int(ordinal), event)
+               for ordinal, event in zip(capsule["ordinals"], capsule["events"])
+               if int(ordinal) not in copies]
+    for raw_index, ordinal in zip(capsule["raw_indexes"],
+                                  capsule["raw_ordinals"]):
+        index = int(raw_index)
+        if index < len(raw_events) and _mood_authority_input_event(raw_events[index]):
+            ordered.append((int(ordinal), raw_events[index]))
+    ordered.sort(key=lambda item: item[0])
+    if any(ordered[index - 1][0] == item[0]
+           for index, item in enumerate(ordered) if index):
+        return False
+    folded = _compact_mood_authority(ordered)
+    expected = list(zip(map(int, capsule["ordinals"]), capsule["events"]))
+    return (len(folded) == len(expected)
+            and all(left_ordinal == right_ordinal
+                    and _capsule_identity_equal(left_event, right_event)
+                    for (left_ordinal, left_event),
+                        (right_ordinal, right_event) in zip(folded, expected)))
+
+
 def carry_forward(lines, now_ms):
     """The bounded tail that preserves both village and job-board projections.
 
@@ -962,17 +1607,130 @@ def carry_forward(lines, now_ms):
     # its bounded canonical/collision selection from the complete segment
     # before clipping ordinary history. Absolute line indexes let the final
     # merge preserve append order without duplicating specialized records.
+    capsule_attempts = []
     full_parsed = []
     for i, line in enumerate(lines):
         try:
-            event = json.loads(line)
-        except ValueError:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError, RecursionError, OverflowError):
+            continue
+        if _mood_authority_marker(event):
+            capsule_attempts.append((i, _mood_authority_from_line(line)))
             continue
         if (not isinstance(event, dict) or not event.get("agent_id")
                 or event.get("type") not in EVENT_TYPES
                 or validate_event(event)):
             continue
         full_parsed.append((i, event))
+    # A capsule is all-or-nothing metadata. Copies must be a structural
+    # multiset subset of both capsule authority and surrounding raw records;
+    # order entries must likewise be a raw subset. Multiple capsules are
+    # ambiguous and therefore ignored together.
+    capsule = (capsule_attempts[0][1]
+               if len(capsule_attempts) == 1 and capsule_attempts[0][0] == 0
+               else None)
+    if capsule is not None:
+        authority_by_ordinal = dict(zip(capsule["ordinals"], capsule["events"]))
+        raw_by_ordinal = {ordinal: full_parsed[int(raw_index)][1]
+                          for ordinal, raw_index in zip(capsule["raw_ordinals"],
+                                                        capsule["raw_indexes"])
+                          if int(raw_index) < len(full_parsed)}
+        safe = (int(capsule["raw_count"]) <= len(full_parsed)
+                and all(int(index) < len(full_parsed) for index in capsule["raw_indexes"])
+                and len(capsule["copies"]) == len(set(capsule["copies"]))
+                and all(ordinal in authority_by_ordinal
+                        and ordinal in raw_by_ordinal
+                        and _capsule_identity_equal(authority_by_ordinal[ordinal],
+                                                    raw_by_ordinal[ordinal])
+                        for ordinal in capsule["copies"]))
+        intersections = set(capsule["ordinals"]) & set(capsule["raw_ordinals"])
+        safe = safe and intersections == set(capsule["copies"])
+        if safe and not capsule["overflow"]:
+            raw_count = int(capsule["raw_count"])
+            raw_events = [event for _, event in full_parsed[:raw_count]]
+            safe = _exact_capsule_authority(capsule, raw_events)
+            required_raw = set()
+            for prefix in ([], capsule["events"]):
+                proof_events = [*prefix, *raw_events]
+                proof = list(enumerate(proof_events))
+                proof_agents = {event["agent_id"] for event in proof_events}
+                proof_overflow = {"overflow": False}
+                selected = _mood_keep_indexes(
+                    proof, proof_agents, overflow_state=proof_overflow)
+                if proof_overflow["overflow"]:
+                    safe = False
+                    break
+                offset = len(prefix)
+                required_raw.update(position - offset for position in selected
+                                    if offset <= position < offset + raw_count)
+            # Co-retained board/journal/presence records stay outside the Mood
+            # list. The manifest must equal—not merely cover—the exact Mood
+            # witness union, so a surplus entry cannot hide its superseder.
+            safe = safe and required_raw == set(map(int, capsule["raw_indexes"]))
+        if not safe:
+            capsule = None
+    authority_events = []
+    authority_overflow = bool(capsule and capsule["overflow"])
+    authority_observed = capsule["observed"] if capsule else 0
+    authority_tracker = _mood_authority_overflow_tracker()
+    raw_ordinals = {}
+    copy_ordinals = set()
+    if capsule:
+        if not authority_overflow:
+            authority_events.extend((int(ordinal), event) for ordinal, event in
+                                    zip(capsule["ordinals"], capsule["events"]))
+            for _, event in authority_events:
+                _mood_authority_tracker_add(authority_tracker, event)
+        copy_ordinals.update(map(int, capsule["copies"]))
+    maximum_ordinal = max([-1] + [ordinal for ordinal, _ in authority_events] +
+                          (list(map(int, capsule["raw_ordinals"]))
+                           if capsule else []))
+    required_allocations = (max(0, len(full_parsed) - int(capsule["raw_count"]))
+                            if capsule and not authority_overflow else
+                            len(full_parsed))
+    ordinal_exhausted = maximum_ordinal > 9007199254740991 - required_allocations
+    if ordinal_exhausted:
+        # Do not assign even one inexact coordinate. Preserve raw transports,
+        # but replace all partial authority/manifests with canonical durable
+        # overflow. A capsule-only rotation allocates zero and stays exact.
+        authority_overflow = True
+        authority_observed = MOOD_AUTHORITY_LIMIT + 1
+        authority_events = []
+        copy_ordinals.clear()
+        capsule = None
+        maximum_ordinal = -1
+    next_ordinal = maximum_ordinal + 1 if required_allocations else 0
+    retained_ordinal_by_position = ({int(raw_index): int(ordinal)
+                                     for raw_index, ordinal in zip(
+                                         capsule["raw_indexes"], capsule["raw_ordinals"])}
+                                    if capsule else {})
+    capsule_raw_count = int(capsule["raw_count"]) if capsule else 0
+    for raw_position, (index, event) in enumerate(full_parsed):
+        if ordinal_exhausted:
+            continue
+        had_ordinal = raw_position in retained_ordinal_by_position
+        ordinal = retained_ordinal_by_position[raw_position] if had_ordinal else next_ordinal
+        if not had_ordinal:
+            next_ordinal += 1
+        raw_ordinals[index] = ordinal
+        source_epoch_excluded = (capsule is not None and not authority_overflow
+                                 and raw_position < capsule_raw_count
+                                 and raw_position not in retained_ordinal_by_position)
+        if (not authority_overflow and _mood_authority_event(event)
+                and not source_epoch_excluded):
+            if ordinal in copy_ordinals:
+                copy_ordinals.remove(ordinal)
+            else:
+                authority_events.append((ordinal, event))
+                if _mood_authority_tracker_add(authority_tracker, event):
+                    # The lower bound is monotonic, so no later close/replay can
+                    # recover exact authority. Discard the partial graph now and
+                    # keep subsequent work independent of authority cardinality.
+                    authority_overflow = True
+                    authority_observed = MOOD_AUTHORITY_LIMIT + 1
+                    authority_events = []
+                    copy_ordinals.clear()
+    authority_events.sort(key=lambda item: item[0])
     journal_parsed = [(i, event) for i, event in full_parsed
                       if event.get("type") == "journal_written"]
     journal_records, _ = reduce_journal_indexed(journal_parsed)
@@ -1075,12 +1833,14 @@ def carry_forward(lines, now_ms):
     for i in range(tail_start, len(lines)):
         line = lines[i]
         try:
-            event = json.loads(line)
-        except ValueError:
+            event = json.loads(line, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError, RecursionError, OverflowError):
+            continue
+        if _mood_authority_marker(event):
             continue
         if not isinstance(event, dict) or not event.get("agent_id"):
             continue
-        if event.get("type") not in EVENT_TYPES:
+        if event.get("type") not in EVENT_TYPES or validate_event(event):
             continue
         parsed.append((i, event))
     approval_keep, approval_isolated = _approval_keep_indexes(parsed)
@@ -1140,7 +1900,100 @@ def carry_forward(lines, now_ms):
                 keep.append(lineage_i)
         if last["type"] == "heartbeat":
             keep.append(last_i)
-    return [lines[i] for i in sorted(set(keep))]
+    # Mood authority comes from the complete pre-rotation segment, but only
+    # for agents whose ordinary projection above remains live. It therefore
+    # cannot turn task/routine evidence into villager liveness.
+    mood_agents = {agent_id for agent_id, agent in per_agent.items()
+                   if agent["last"][1]["type"] != "session_ended"
+                   and now_ms - event_ms(agent["last"][1]) <= DROP_MS}
+    mood_agents.update(event["agent_id"] for index, event in full_parsed
+                       if index in approval_keep and
+                       structured_approval(event) is not None and
+                        (event["agent_id"] not in per_agent or
+                         per_agent[event["agent_id"]]["last"][1]["type"] != "session_ended"))
+    compacted_authority = ([] if authority_overflow else
+                           _compact_mood_authority(authority_events))
+    authority_overflow = (authority_overflow or
+                          len(compacted_authority) > MOOD_AUTHORITY_LIMIT)
+    dependency_state = {"overflow": False}
+    mood_keep_indexes = _mood_keep_indexes(
+        full_parsed, mood_agents, authority_overflow, dependency_state)
+    authority_overflow = authority_overflow or dependency_state["overflow"]
+    keep.extend(mood_keep_indexes)
+    kept_indexes = sorted(set(keep))
+    full_by_index = dict(full_parsed)
+    retained_parsed = [(position, full_by_index[index])
+                       for position, index in enumerate(kept_indexes)
+                       if index in full_by_index]
+    retained_agents = {event["agent_id"] for _, event in retained_parsed}
+    proof_positions = _mood_keep_indexes(
+        retained_parsed, retained_agents, authority_overflow)
+    combined_events = [event for _, event in compacted_authority]
+    combined_events.extend(event for _, event in retained_parsed)
+    combined_parsed = list(enumerate(combined_events))
+    combined_agents = {event["agent_id"] for event in combined_events}
+    combined_keep = _mood_keep_indexes(
+        combined_parsed, combined_agents, authority_overflow)
+    authority_prefix = len(compacted_authority)
+    proof_positions.update(position - authority_prefix for position in combined_keep
+                           if authority_prefix <= position < len(combined_events))
+    retained_original = [index for index in kept_indexes if index in full_by_index]
+    # The sparse transport manifest is canonical, not merely sufficient: it is
+    # exactly the union selected by the raw-only and authority+all-raw folds
+    # that the consumer independently recomputes over this retained epoch.
+    manifest_mood_indexes = {retained_original[position]
+                             for position in proof_positions}
+    authority_events = [] if authority_overflow else compacted_authority
+    authority_observed = (MOOD_AUTHORITY_LIMIT + 1 if authority_overflow
+                          else len(authority_events))
+    authority_signatures = {ordinal: event for ordinal, event in authority_events}
+    copies = []
+    for index in ([] if authority_overflow else sorted(manifest_mood_indexes)):
+        try:
+            event = json.loads(lines[index], parse_constant=_reject_json_constant)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(event, dict) and _mood_authority_event(event) and not validate_event(event):
+            ordinal = raw_ordinals[index]
+            if (ordinal in authority_signatures and
+                    _capsule_identity_equal(authority_signatures[ordinal], event)):
+                copies.append(str(ordinal))
+    retained = [lines[i] for i in kept_indexes]
+    retained_position = {index: position for position, index in enumerate(kept_indexes)}
+    if authority_events or authority_overflow:
+        capsule = ({"_burrow_internal": MOOD_AUTHORITY_KIND,
+                    "events": [], "ordinals": [], "copies": [],
+                    "raw_ordinals": [], "raw_indexes": [],
+                    "raw_count": _mood_raw_index(0), "overflow": True,
+                    "observed": MOOD_AUTHORITY_LIMIT + 1}
+                   if authority_overflow else
+                   {"_burrow_internal": MOOD_AUTHORITY_KIND,
+                    "events": [event for _, event in authority_events],
+                    "ordinals": [str(ordinal) for ordinal, _ in authority_events],
+                    "copies": copies,
+                    "raw_ordinals": [str(raw_ordinals[index])
+                                     for index in sorted(manifest_mood_indexes)
+                                     if index in full_by_index],
+                    "raw_indexes": [_mood_raw_index(retained_position[index])
+                                    for index in sorted(manifest_mood_indexes)
+                                    if index in full_by_index],
+                    "raw_count": _mood_raw_index(len(kept_indexes)),
+                    "overflow": False, "observed": authority_observed})
+        try:
+            encoded_capsule = _encode_mood_authority(capsule)
+        except (RecursionError, TypeError, OverflowError, ValueError):
+            encoded_capsule = None
+        if (encoded_capsule is None or
+                len(encoded_capsule.encode("utf-8")) > MOOD_AUTHORITY_MAX_BYTES):
+            authority_overflow = True
+            capsule = {"_burrow_internal": MOOD_AUTHORITY_KIND,
+                       "events": [], "ordinals": [], "copies": [],
+                       "raw_ordinals": [], "raw_indexes": [],
+                       "raw_count": _mood_raw_index(0), "overflow": True,
+                       "observed": MOOD_AUTHORITY_LIMIT + 1}
+            encoded_capsule = _encode_mood_authority(capsule)
+        retained.insert(0, encoded_capsule)
+    return retained
 
 
 def archive_dir():

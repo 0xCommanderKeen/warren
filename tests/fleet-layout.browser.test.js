@@ -592,6 +592,106 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     assert.match(announcements.initial, /^Activity: \d+ items?\.$/);
     });
 
+    await t.test("mood glyph shares truthful details across panel, resident, and Visitor views", async () => {
+      const moodAgent = "codex:mood-browser", visitorAgent = "codex:mood-visitor";
+      const at = minutes => new Date(frozenNow + minutes * 60_000).toISOString();
+      const ordinary = (agent, minutes, type, payload, source = "codex") =>
+        ({v:0,ts:at(minutes),source,agent_id:agent,project:"mood-project",type,payload});
+      const moodEvents = [
+        ordinary(moodAgent,-120,"tool_called",{tool:"Read"}),
+        ordinary(moodAgent,-100,"task_started",{prompt:"Inspect mood"},"claude-code"),
+        ordinary(moodAgent,-90,"tool_called",{tool:"Read"}),
+        ordinary(moodAgent,-75,"tool_called",{tool:"Read"}),
+        ordinary(moodAgent,-60,"tool_called",{tool:"Read"}),
+        ordinary(moodAgent,-45,"tool_called",{tool:"Read"}),
+        ordinary(moodAgent,-31,"heartbeat",{}),
+        ordinary(visitorAgent,-480,"needs_human",{message:"Choose",request_id:"mood-browser-r",
+          action:"deploy",detail:null,options:["approve","deny"]}),
+        ordinary(visitorAgent,-31,"tool_called",{tool:"Read"}),
+      ];
+      fs.writeFileSync(events, [...moodEvents, currentEvent].map(JSON.stringify).join("\n") + "\n");
+      const moodManifest = path.join(villagers, "mood.resident.json");
+      fs.writeFileSync(moodManifest, JSON.stringify({manifest_version:1,
+        match:{agent_id:moodAgent},home:6,soul:{name:"Mood Keeper",char:"Monk",
+          accent:"#a68a4f",role:"observer",description:"Reads retained operational evidence."},
+        skills:[],memory:{ref:"config:mood",status_ref:"config:mood"},routes:[],app_grants:[]}));
+      await resetPage();
+      const initial = await eventually(send, `(async()=>{
+        await runtime.poll();await runtime.refreshResidents();
+        const resident=villagers.find(v=>v.id==='${moodAgent}');
+        const visitor=villagers.find(v=>v.id==='${visitorAgent}');
+        if(!resident||!visitor||!resident.mood||!visitor.mood)return false;
+        openPanel(resident.id);await new Promise(r=>requestAnimationFrame(r));
+        const details=document.querySelector('#panel-body details[data-mood]');
+        if(!details)return false;
+        const summary=details.querySelector('summary'),css=getComputedStyle(details);
+        window.__moodBefore=JSON.stringify(resident.mood);
+        return {resident:resident.mood,visitor:visitor.mood,summary:summary.textContent,
+          aria:summary.getAttribute('aria-label'),terms:details.querySelectorAll('dt').length,
+          staleClass:details.classList.contains('mood-stale'),opacity:css.opacity,
+          animation:css.animationName,transition:css.transitionDuration};
+      })()`, signal, "production mood panel");
+      assert.equal(initial.resident.status, "steady");
+      assert.equal(initial.visitor.status, "blocked");
+      assert.equal(initial.terms, 5);
+      assert.match(initial.aria, /Mood Keeper: mood steady; open observed-signal breakdown/);
+      assert.equal(initial.staleClass, true);
+      assert.equal(initial.opacity, "0.45");
+      assert.equal(initial.animation, "none");
+      assert.equal(initial.transition, "0s");
+
+      const summaryExpression = "document.querySelector('#panel-body details[data-mood] summary')";
+      await send("Runtime.evaluate", {expression:`${summaryExpression}.click()`});
+      assert.equal(await eventually(send,
+        "document.querySelector('#panel-body details[data-mood]').open"), true, "click opens");
+      await send("Runtime.evaluate", {expression:`${summaryExpression}.focus()`});
+      await send("Input.dispatchKeyEvent", {type:"rawKeyDown",key:"Escape",code:"Escape",windowsVirtualKeyCode:27});
+      await send("Input.dispatchKeyEvent", {type:"keyUp",key:"Escape",code:"Escape",windowsVirtualKeyCode:27});
+      const escaped = await eventually(send, `(()=>{const d=document.querySelector('#panel-body details[data-mood]');
+        return !d.open&&document.activeElement===d.querySelector('summary')})()`);
+      assert.equal(escaped, true, "Escape closes and returns focus");
+      await send("Input.dispatchKeyEvent", {type:"keyDown",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
+      await send("Input.dispatchKeyEvent", {type:"keyUp",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
+      assert.equal(await eventually(send,
+        "document.querySelector('#panel-body details[data-mood]').open"), true, "Enter opens");
+      await send("Input.dispatchKeyEvent", {type:"keyDown",key:" ",code:"Space",windowsVirtualKeyCode:32});
+      await send("Input.dispatchKeyEvent", {type:"keyUp",key:" ",code:"Space",windowsVirtualKeyCode:32});
+      assert.equal(await eventually(send,
+        "!document.querySelector('#panel-body details[data-mood]').open"), true, "Space toggles closed");
+      const hover = await eventually(send, `(()=>{const d=document.querySelector('#panel-body details[data-mood]');
+        d.open=false;d.querySelector('summary').dispatchEvent(new PointerEvent('pointerover',
+          {bubbles:true,pointerType:'mouse'}));
+        return d.open})()`);
+      assert.equal(hover, true, "pointer hover reveals details");
+      const touch = await eventually(send, `(()=>{const d=document.querySelector('#panel-body details[data-mood]');
+        const summary=d.querySelector('summary');d.open=false;
+        summary.dispatchEvent(new PointerEvent('pointerover',{bubbles:true,pointerType:'touch'}));
+        const afterOver=d.open;
+        summary.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch'}));
+        summary.click();return {afterOver,afterTap:d.open}})()`);
+      assert.deepEqual(touch, {afterOver:false,afterTap:true},
+        "touch pointerover does not consume the first native summary tap");
+
+      const shared = await eventually(send, `(async()=>{
+        window.__advanceBurrowClock(4*60*60*1000);runtime.tick();
+        await new Promise(r=>requestAnimationFrame(r));
+        const unchanged=window.__moodBefore===JSON.stringify(villagers.find(v=>v.id==='${moodAgent}').mood);
+        openPanel('fleet-ledger');fleetTab='residents';renderPanel(Date.now());
+        await new Promise(r=>requestAnimationFrame(r));
+        const cards=[...document.querySelectorAll('.resident-card')];
+        const resident=cards.find(card=>card.textContent.includes('Mood Keeper'));
+        const lodge=cards.find(card=>card.textContent.includes('Visitor lodge'));
+        return {unchanged,residentMood:resident&&resident.querySelector('.mood-status')?.textContent,
+          visitorMood:lodge&&[...lodge.querySelectorAll('.mood-status')].map(x=>x.textContent),
+          inactiveMood:cards.find(card=>card.textContent.includes('Safe Name'))?.querySelector('[data-mood]')||null};
+      })()`, signal, "shared resident and visitor mood renderer");
+      assert.deepEqual(shared, {unchanged:true,residentMood:"steady",
+        visitorMood:["blocked","not enough observed"],inactiveMood:null});
+      fs.unlinkSync(moodManifest);
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+    });
+
     await t.test("inactive routine detail and transient masked Steward credentials are production UI", async () => {
       const routineStarted = { v:0, ts:new Date(frozenNow - 60_000).toISOString(),
         source:"steward", agent_id:"layout-routine", project:"quiet-project",

@@ -1,0 +1,18 @@
+{
+  "now": "2026-08-25T12:00:00.000Z",
+  "events": [
+    {"v":0,"ts":"2026-08-25T03:00:00.000Z","source":"steward","agent_id":"codex:orphan-first","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"late","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T04:00:00.000Z","source":"codex","agent_id":"codex:orphan-first","project":"burrow","type":"needs_human","payload":{"message":"Still pending","request_id":"late","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:orphan-first","project":"burrow","type":"idle","payload":{}},
+
+    {"v":0,"ts":"2026-08-25T02:00:00.000Z","source":"custom","agent_id":"codex:plain-root","project":"burrow","type":"needs_human","payload":{"message":"Legacy question"}},
+    {"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"codex","agent_id":"codex:plain-root","project":"burrow","type":"task_started","payload":{"prompt":"Continue"}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:plain-root","project":"burrow","type":"idle","payload":{}},
+
+    {"v":0,"ts":"2026-08-25T10:00:00.000Z","source":"codex","agent_id":"codex:multiple-roots","project":"burrow","type":"task_started","payload":{"prompt":"First root"}},
+    {"v":0,"ts":"2026-08-25T04:00:00.000Z","source":"codex","agent_id":"codex:multiple-roots","project":"burrow","type":"needs_human","payload":{"message":"Approve","request_id":"root-order","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"steward","agent_id":"codex:multiple-roots","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"root-order","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T05:00:00.000Z","source":"codex","agent_id":"codex:multiple-roots","project":"burrow","type":"task_started","payload":{"prompt":"Newest append root"}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:multiple-roots","project":"burrow","type":"idle","payload":{}}
+  ]
+}
