@@ -420,7 +420,9 @@ class Filesystem:
         """Answer as the remote shell would for this path's state."""
         parts = tuple(argv)
         if "test" in parts:
-            return CommandOutcome(argv=parts, exit_status=0 if self.present else 1)
+            asked = parts[-1]
+            exists = self.present or asked in {"~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
         if self.present and self.readable:
             return CommandOutcome(argv=parts, exit_status=0, stdout="services:\n")
         detail = "Permission denied" if self.present else "No such file or directory"
@@ -440,6 +442,27 @@ def test_a_file_that_is_there_but_unreadable_is_not_reported_as_absent() -> None
 
     assert unreadable.exists("~/docker/x/compose.yaml") is True
     assert SshTransport(command=Filesystem(present=False, readable=False)).exists("~/x") is False
+
+
+def test_an_unsearchable_parent_is_not_reported_as_an_absent_file() -> None:
+    """A false ``test -e`` below a forbidden directory is not proof of absence."""
+
+    def unsearchable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the run_argv signature
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        predicate, candidate = parts[-2], parts[-1]
+        if predicate == "-e":
+            exists = candidate in {"~/docker", "~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
+        assert predicate == "-x"
+        return CommandOutcome(argv=parts, exit_status=1)
+
+    with pytest.raises(TransportError, match="not searchable"):
+        SshTransport(command=unsearchable).exists("~/docker/x/compose.yaml")
 
 
 @pytest.mark.parametrize(

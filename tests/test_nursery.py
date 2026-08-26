@@ -739,6 +739,35 @@ def test_retiring_stops_a_container_whose_compose_file_cannot_be_read(
     assert "nothing at" not in report.note
 
 
+def test_retiring_does_not_report_success_below_an_unsearchable_directory(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """An inaccessible compose tree is not evidence that no container exists."""
+    raise_into(scratch_repo, host)
+
+    def unsearchable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the run_argv signature
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        predicate, candidate = parts[-2], parts[-1]
+        if predicate == "-e":
+            exists = candidate in {"~/docker", "~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
+        assert predicate == "-x"
+        return CommandOutcome(argv=parts, exit_status=1)
+
+    with pytest.raises(NurseryError, match="could not be reached"):
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=SshTransport(command=unsearchable),
+        )
+
+
 def test_retiring_marks_the_manifest_before_it_touches_the_host(
     scratch_repo: ScratchRepo, tmp_path: Path
 ) -> None:

@@ -550,17 +550,32 @@ class SshTransport:
     def exists(self, path: str) -> bool:
         """Report whether a path is there. Raises rather than guessing when unreachable.
 
-        ``test -e`` where :meth:`read` uses ``cat``, because their non-zero statuses mean
-        different things: ``cat`` exits 1 both for a file that is missing and for one it
-        may not open, while ``test -e`` exits 1 only for genuinely not there. Retiring a
-        resident turns on exactly that distinction — a compose file steward could not read
-        is not a resident with nothing to stop (steward #136).
+        ``test -e`` where :meth:`read` uses ``cat``, because an unreadable file still
+        exists. A false answer is not sufficient on its own, though: ``test -e`` also
+        returns false when an ancestor cannot be traversed. Walk upward to the nearest
+        ancestor the remote shell can see and require it to be searchable before calling
+        the original path absent. Retiring a resident must fail closed when it cannot tell
+        "missing" from "forbidden", or it can leave a container running (steward #136).
         """
-        outcome = self.run(["test", "-e", path])
-        if outcome.ok:
-            return True
-        self._require_reached(outcome)
-        return False
+        candidate = PurePosixPath(path)
+        original = candidate
+        while True:
+            outcome = self.run(["test", "-e", str(candidate)])
+            if outcome.ok:
+                if candidate == original:
+                    return True
+                searchable = self.run(["test", "-x", str(candidate)])
+                if searchable.ok:
+                    return False
+                self._require_reached(searchable)
+                raise TransportError(
+                    f"{self.target}: cannot inspect {path}: ancestor {candidate} is not searchable"
+                )
+            self._require_reached(outcome)
+            parent = candidate.parent
+            if parent == candidate:
+                raise TransportError(f"{self.target}: cannot inspect {path}")
+            candidate = parent
 
     def _require_reached(self, outcome: CommandOutcome) -> None:
         """Raise unless the far side actually ran the command and answered for itself.
