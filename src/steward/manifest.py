@@ -29,7 +29,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import yaml
-from croniter import croniter
+from croniter import CroniterBadDateError, croniter
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -115,8 +115,8 @@ MAX_JOURNAL_KEEP = 3650
 #: The one legal value of a routine's ``journal:`` flag: the run that ends the day.
 CLOSE_OF_DAY = "close_of_day"
 
-#: Stop counting a closing routine's daily fires here; anything over one is already wrong.
-MAX_CLOSER_FIRES = 24
+#: Keep an over-firing diagnostic compact once its exact count stops being useful.
+MANY_FIRES_DISPLAY_THRESHOLD = 24
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
@@ -1420,6 +1420,11 @@ def _cron_values(field: Sequence[int | str], lowest: int, highest: int) -> set[i
 
 
 def _daily_fire_range(routine: Routine) -> tuple[int, int]:
+    return _daily_fire_range_for_schedule(routine.schedule)
+
+
+@cache
+def _daily_fire_range_for_schedule(schedule: str) -> tuple[int, int]:
     """Return the least and most fires over every distinct cron calendar day.
 
     A five-field cron date predicate can observe only month, day-of-month, and weekday.
@@ -1429,13 +1434,16 @@ def _daily_fire_range(routine: Routine) -> tuple[int, int]:
     than 146,097.  Fixed-offset datetimes are deliberate: cron names local wall-clock
     occurrences; DST resolution remains the scheduler's separate responsibility.
     """
-    # The manifest grammar is deliberately smaller than croniter's, but croniter remains
-    # the scheduler's authority on the forms we accept.  In particular, a stepped
-    # singleton ending at a field maximum has canonical semantics that a textual range
-    # expansion misses: ``23/1`` hours, ``31/1`` month-days, ``12/1`` months, and ``6/1``
-    # or ``7/1`` weekdays all expand to ``*``.  Reusing its bounded expansion keeps this
-    # diagnostic identical to the schedules the runtime will actually execute.
-    expanded, _ = croniter.expand(routine.schedule)
+    # croniter is the scheduler's semantic authority.  First let its iterator decide
+    # whether the complete expression can ever fire.  This matters for expressions such
+    # as February 31 with a weekday alternative: croniter considers the restricted,
+    # impossible DOM unsatisfiable rather than applying the usual DOM/DOW union.
+    try:
+        croniter(schedule, datetime(2000, 1, 1, tzinfo=UTC)).get_next(datetime)
+    except CroniterBadDateError:
+        return 0, 0
+
+    expanded, _ = croniter.expand(schedule)
     minute, hour, dom, month, dow = expanded
     fires_on_matching_day = len(_cron_values(minute, 0, 59)) * len(_cron_values(hour, 0, 23))
     months = _cron_values(month, 1, 12)
@@ -1505,7 +1513,11 @@ def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagno
         if least == 0:
             cadence = "does not fire every day"
         elif least == most:
-            many = f"{MAX_CLOSER_FIRES}+" if most > MAX_CLOSER_FIRES else str(most)
+            many = (
+                f"{MANY_FIRES_DISPLAY_THRESHOLD}+"
+                if most > MANY_FIRES_DISPLAY_THRESHOLD
+                else str(most)
+            )
             cadence = f"fires {many} times a day"
         else:
             cadence = "fires more than once on some days"

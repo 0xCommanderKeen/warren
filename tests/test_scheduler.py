@@ -1071,6 +1071,7 @@ def test_a_wildcard_with_redundant_calendar_members_still_means_daily(
         "30 22 *,5 * *",
         "30 22 * *,5 *",
         "30 22 * * *,1",
+        "0 */2,1 31 2 1",  # impossible DOM in a restricted month suppresses the DOW arm
     ],
 )
 def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
@@ -1103,6 +1104,10 @@ def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
         for candidate in representatives.values()
     ]
     assert m._daily_fire_range(routine(schedule=schedule)) == (min(expected), max(expected))
+
+
+def test_impossible_month_day_has_no_fires_even_with_a_matching_weekday() -> None:
+    assert m._daily_fire_range(routine(schedule="0 */2,1 31 2 1")) == (0, 0)
 
 
 def test_a_disabled_routine_cannot_close_the_day(write_resident: ResidentWriter) -> None:
