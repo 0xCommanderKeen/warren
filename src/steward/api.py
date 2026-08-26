@@ -1109,7 +1109,14 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
-        decided = approvals.decide(request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit)
+        moment = now()
+        decided = approvals.decide(
+            request_id,
+            body.decision,
+            decided_by=DECIDED_BY,
+            edit=body.edit,
+            now=moment,
+        )
         record = decided.record
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
@@ -1118,7 +1125,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             # not slip an action through ahead of the sweep, which denies it and closes the
             # loop in the log (steward #66). Do that sweep here too: an API-only steward
             # must not leave the refused request pending forever.
-            approvals.expire(now())
+            approvals.expire(moment)
             _refuse(
                 409,
                 "approval_expired",

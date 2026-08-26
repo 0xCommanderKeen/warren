@@ -628,6 +628,39 @@ def test_an_expired_request_cannot_be_decided(api: ApiFactory) -> None:
     assert [r.request_id for r in harness.store.undelivered_decisions("test-agent")] == [request_id]
 
 
+def test_post_uses_the_app_clock_to_deny_an_expired_request_before_the_sweep(
+    api: ApiFactory,
+) -> None:
+    """The request-time guard holds even before the lifespan worker has started (#143)."""
+    moment = dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC)
+    harness = api(now=lambda: moment)
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email after its deadline",
+        resident="test-agent",
+        expires_at=ev.utc_now_iso(moment - dt.timedelta(seconds=1)),
+    )
+
+    late = harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+    replay = harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+
+    assert late.status_code == 409
+    assert late.json()["detail"]["error"] == "approval_expired"
+    assert replay.status_code == 200
+    assert replay.json()["decision"] == "deny"
+    decided = harness.store.approval(record.request_id)
+    assert decided is not None
+    assert decided.decision == "deny"
+    assert decided.decided_by == "expiry"
+    assert decided.decided_at == ev.utc_now_iso(moment)
+    resolved = harness.events("needs_human_resolved")
+    assert len(resolved) == 1
+    assert resolved[0]["payload"]["decision"] == "deny"
+    assert resolved[0]["payload"]["decided_by"] == "expiry"
+
+
 def test_expiry_and_late_decisions_race_to_one_deny_and_one_event(api: ApiFactory) -> None:
     """Concurrent API traffic cannot duplicate or replace the expiry decision (#143)."""
     harness = api()
