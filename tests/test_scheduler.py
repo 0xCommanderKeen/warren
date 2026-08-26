@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from croniter import croniter
 
 from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import events as ev
@@ -987,6 +988,68 @@ def test_a_routine_that_fires_once_each_day_may_close_it(
     path = write_resident(manifest_with(CLOSER))
     scheduled = s.load_scheduled(path.parent)
     assert scheduled[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize("weekday", ["6/1", "7/1"])
+def test_croniter_stepped_weekday_aliases_that_mean_daily_may_close_the_day(
+    write_resident: ResidentWriter, weekday: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": f"30 22 * * {weekday}"}))
+    scheduled = s.load_scheduled(path.parent)
+    assert scheduled[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 31/1 * *",  # max day-of-month / 1 is croniter's wildcard
+        "30 22 * 12/1 *",  # max month / 1 is croniter's wildcard
+    ],
+)
+def test_croniter_stepped_field_maxima_that_mean_daily_may_close_the_day(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    assert s.load_scheduled(path.parent)[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
+    ("schedule", "cadence"),
+    [("59/1 22 * * *", r"fires 24\+ times"), ("0 23/1 * * *", "fires 24 times")],
+)
+def test_croniter_stepped_clock_maxima_that_mean_wildcard_cannot_close_the_day(
+    write_resident: ResidentWriter, schedule: str, cadence: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match=cadence):
+        s.load_scheduled(path.parent)
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 * * *",
+        "30 22 * * 7/1",
+        "30 22 * * 6/1",
+        "30 22 * * 1/2",
+        "30 22 31/1 * *",
+        "30 22 * 12/1 *",
+        "30 22 1-30 * 0,2-6",
+        "30 22 */2 2-11/3 1-6/2",
+    ],
+)
+def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
+    schedule: str,
+) -> None:
+    representatives: dict[tuple[int, int, int], datetime] = {}
+    moment = datetime(2000, 1, 1, 22, 30, tzinfo=UTC)
+    for offset in range(146_097):
+        candidate = moment + timedelta(days=offset)
+        key = (candidate.month, candidate.day, (candidate.weekday() + 1) % 7)
+        representatives.setdefault(key, candidate)
+
+    expected = [int(croniter.match(schedule, candidate)) for candidate in representatives.values()]
+    assert m._daily_fire_range(routine(schedule=schedule)) == (min(expected), max(expected))
 
 
 def test_a_disabled_routine_cannot_close_the_day(write_resident: ResidentWriter) -> None:

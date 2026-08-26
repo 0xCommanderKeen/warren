@@ -1412,22 +1412,11 @@ def _gregorian_cron_days() -> tuple[tuple[int, int, int], ...]:
     return tuple(sorted(representatives))
 
 
-def _cron_values(field: str, lowest: int, highest: int) -> set[int]:
-    """Expand one field from the deliberately small five-field manifest grammar."""
-    values: set[int] = set()
-    for item in field.split(","):
-        base, slash, step_text = item.partition("/")
-        step = int(step_text) if slash else 1
-        if base == "*":
-            start, end = lowest, highest
-        elif "-" in base:
-            start_text, end_text = base.split("-", 1)
-            start, end = int(start_text), int(end_text)
-        else:
-            start = int(base)
-            end = highest if slash else start
-        values.update(range(start, end + 1, step))
-    return values
+def _cron_values(field: Sequence[int | str], lowest: int, highest: int) -> set[int]:
+    """Turn croniter's canonical field expansion into concrete matching values."""
+    if field == ["*"]:
+        return set(range(lowest, highest + 1))
+    return {value for value in field if isinstance(value, int)}
 
 
 def _daily_fire_range(routine: Routine) -> tuple[int, int]:
@@ -1440,13 +1429,20 @@ def _daily_fire_range(routine: Routine) -> tuple[int, int]:
     than 146,097.  Fixed-offset datetimes are deliberate: cron names local wall-clock
     occurrences; DST resolution remains the scheduler's separate responsibility.
     """
-    minute, hour, dom, month, dow = routine.schedule.split()
+    # The manifest grammar is deliberately smaller than croniter's, but croniter remains
+    # the scheduler's authority on the forms we accept.  In particular, a stepped
+    # singleton ending at a field maximum has canonical semantics that a textual range
+    # expansion misses: ``23/1`` hours, ``31/1`` month-days, ``12/1`` months, and ``6/1``
+    # or ``7/1`` weekdays all expand to ``*``.  Reusing its bounded expansion keeps this
+    # diagnostic identical to the schedules the runtime will actually execute.
+    expanded, _ = croniter.expand(routine.schedule)
+    minute, hour, dom, month, dow = expanded
     fires_on_matching_day = len(_cron_values(minute, 0, 59)) * len(_cron_values(hour, 0, 23))
     months = _cron_values(month, 1, 12)
     month_days = _cron_values(dom, 1, 31)
-    weekdays = {value % 7 for value in _cron_values(dow, 0, 7)}
-    dom_wildcard = dom == "*"
-    dow_wildcard = dow == "*"
+    weekdays = _cron_values(dow, 0, 6)
+    dom_wildcard = dom == ["*"]
+    dow_wildcard = dow == ["*"]
 
     counts: list[int] = []
     for candidate_month, candidate_day, candidate_weekday in _gregorian_cron_days():
