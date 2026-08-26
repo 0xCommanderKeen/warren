@@ -743,7 +743,14 @@
     "skills": {
       "description": "Granted capabilities (may be empty).",
       "items": {
-        "$ref": "#/$defs/SkillGrant"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SkillGrant"
+          },
+          {
+            "type": "string"
+          }
+        ]
       },
       "title": "Skills",
       "type": "array"

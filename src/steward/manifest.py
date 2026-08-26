@@ -25,12 +25,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 import yaml
 from croniter import croniter
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     ValidationError,
@@ -569,6 +570,13 @@ class Charter(_Model):
         return value
 
 
+def _normalize_skill_grant(value: object) -> object:
+    """Expand the documented bare-string spelling before binding a skill grant."""
+    if isinstance(value, str):
+        return {"id": value}
+    return value
+
+
 class SkillGrant(_Model):
     """A named, reusable capability granted to a resident.
 
@@ -588,9 +596,19 @@ class SkillGrant(_Model):
     @model_validator(mode="before")
     @classmethod
     def _accept_bare_string(cls, value: object) -> object:
-        if isinstance(value, str):
-            return {"id": value}
-        return value
+        return _normalize_skill_grant(value)
+
+
+# The model validator above preserves ``SkillGrant.model_validate("name")`` as part of
+# the public parsing API. The annotated input type makes that same pre-validation rule
+# visible to Pydantic's schema generator while the stored/runtime type stays SkillGrant.
+SkillGrantInput = Annotated[
+    SkillGrant,
+    BeforeValidator(
+        _normalize_skill_grant,
+        json_schema_input_type=SkillGrant | str,
+    ),
+]
 
 
 class Memory(_Model):
@@ -949,7 +967,7 @@ class ResidentManifest(_Model):
 
     soul: SoulIdentity
     charter: Charter
-    skills: list[SkillGrant] = Field(description="Granted capabilities (may be empty).")
+    skills: list[SkillGrantInput] = Field(description="Granted capabilities (may be empty).")
     memory: Memory
     routes: list[Route] = Field(description="Declared inbound channels (may be empty).")
     app_grants: list[AppGrant] = Field(description="Declared app access (may be empty).")
