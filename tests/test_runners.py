@@ -127,6 +127,84 @@ def test_claude_runner_passes_permission_mode_when_declared(
     assert "--permission-mode\nacceptEdits" in (tmp_path / "argv.txt").read_text()
 
 
+# ------------------------------------------- what a brain may claim it spent (steward #129)
+
+
+HOSTILE_COST_STUB = r"""
+cat <<JSON
+{"type":"result","is_error":false,"result":"the summary",
+ "usage":{"input_tokens":120,"output_tokens":34},"total_cost_usd":$COST}
+JSON
+"""
+
+
+@pytest.mark.parametrize(
+    ("reported", "why"),
+    [
+        ("NaN", "every comparison against a poisoned sum returns False"),
+        ("Infinity", "and an infinite one trips the cap for ever"),
+        ("-Infinity", "as does its opposite, in the other direction"),
+        ("-5.0", "a negative cost offsets real spend"),
+        ("1e12", "and an absurd one is a bug or a lie either way"),
+    ],
+)
+def test_a_cost_steward_cannot_believe_is_recorded_as_unknown(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: str, why: str
+) -> None:
+    """The daily cap is computed from a number the model process supplies.
+
+    ``json.loads`` accepts ``NaN``, ``Infinity`` and ``-Infinity`` — non-standard literals
+    that pass every type gate and then poison the ``SUM`` the cap reads. One such row and
+    ``spent >= limit`` returns ``False`` for the rest of the day, so a declared safety
+    control silently stops being one while the gauge still reads green.
+
+    Refused, not clamped: the run is recorded as usage-unknown, which the ledger already
+    has a word for, rather than as a cost steward made up.
+    """
+    stub_bin("claude", HOSTILE_COST_STUB)
+    monkeypatch.setenv("COST", reported)
+
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert result.outcome is r.Outcome.OK
+    assert result.output == "the summary", "the run itself is untouched"
+    assert result.cost_usd is None, why
+
+
+def test_a_plausible_cost_still_gets_through(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound is an absurdity ceiling, not a policy — ordinary money passes."""
+    stub_bin("claude", HOSTILE_COST_STUB)
+    monkeypatch.setenv("COST", "12.5")
+
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert result.cost_usd == pytest.approx(12.5)
+
+
+@pytest.mark.parametrize("reported", ["-1", "999999999999999999999"])
+def test_a_token_count_steward_cannot_believe_is_recorded_as_unknown(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: str
+) -> None:
+    """Token counts are summed into an 8-byte column, so they are bounded too."""
+    stub_bin(
+        "claude",
+        r"""
+cat <<JSON
+{"type":"result","is_error":false,"result":"the summary",
+ "usage":{"input_tokens":$TOKENS,"output_tokens":$TOKENS},"total_cost_usd":0.01}
+JSON
+""",
+    )
+    monkeypatch.setenv("TOKENS", reported)
+
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert (result.input_tokens, result.output_tokens) == (None, None)
+    assert result.cost_usd == pytest.approx(0.01), "the cost it did report is still believed"
+
+
 def test_claude_reporting_its_own_error_is_a_failed_run(
     stub_bin: StubWriter, tmp_path: Path
 ) -> None:
