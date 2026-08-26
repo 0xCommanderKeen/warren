@@ -60,7 +60,7 @@ that is worth a caller being able to see.
 | **guard** | unconditional `INSERT INTO jobs` |
 | **before → after** | (no row) → `status=open`, `claimant=NULL`, `assignee=NULL`, `posted_by='api'` |
 | **outcomes** | applied only |
-| **fact** | `task_posted`, `agent_id=steward:api`, `project=steward`, payload `{task_id, title, required_skills, posted_by}` |
+| **fact** | `task_posted`, `agent_id=steward:api`, `project=steward` — not parameters, unlike every other act here: a posted notice has one possible author, so `task_posted_event` supplies both and no caller can get them wrong — payload `{task_id, title, required_skills, posted_by}` |
 | **lineage** | none — a posted notice has no parent |
 | **redaction** | none |
 | **delivery failure** | fallback log; the row stands |
@@ -112,7 +112,7 @@ the way it learns of any other.
 | **precondition** | `status='claimed'` and `lease_expires_at <= now` |
 | **guard** | per row, `UPDATE … WHERE task_id=? AND status='claimed'`; `rowcount!=1` → skipped silently |
 | **before → after** | `claimed` → `open`, `claimant=NULL`, `claimed_at=NULL`, `lease_expires_at=NULL` |
-| **outcomes** | applied per swept row · superseded per row that changed under the sweep (no fact) |
+| **outcomes** | applied per swept row, and only that: a row that changed under the sweep never reaches the seam, because `Store.expire_leases` appends a record only on `rowcount==1` and drops the rest. `Dispatcher.expire_leases` still guards on `.wrote` before `require()`, so a seam that one day *does* surface the lost race cannot turn it into a `ValueError` mid-dispatch |
 | **returns** | `list[Transition[JobRecord]]`, one per lease swept — a sweep is a batch of transitions and says so; `Dispatcher.expire_leases` reads the rows off. Building a transition and dropping it would make `outcome.applied` a fire-and-forget emit conduit |
 | **fact** | `task_failed` with `reason='lease_expired'`, `agent_id = job.claimant or steward:api`, `project` resolved from the fleet or `steward`, `parent_task_id` when set, and **no `run_id`** — this is the board mourning a claim, not a session reporting back, and naming a session would answer a registry row this sweep knows nothing about (#39) |
 | **row shape emitted from** | the row *as it was when the lease died* (claimant still named), not the reopened row |
@@ -146,6 +146,7 @@ the way it learns of any other.
 | **repeat guard** | a property of *which act was called*, not a flag: `raise_request` is a session's own ask and the guard is always on; `knock` is steward's own news about a resident (budget pause, watchdog give-up, delegation refusals) and the guard is always off. Never applied to `unreadable_escalation` either way |
 | **callers of `raise_request`** | `ApprovalTransitions.harvest` (session output), `steward approval raise` |
 | **callers of `knock`** | `BudgetTransitions.pause`, `Delegator._knock`, `Watchdog._give_up` |
+| **returns (`harvest`)** | `list[Transition[ApprovalRecord]]`, one per block a session wrote, for the same reason the sweeps return transitions — and here it is also the only way a caller can tell an ask somebody was knocked about from one the guard swallowed on arrival. `Dispatcher._harvest_approvals` reads the rows off with `require`, safe because both outcomes wrote one |
 
 #### A2 — decide
 
@@ -164,7 +165,7 @@ the way it learns of any other.
 |---|---|
 | **owner** | `ApprovalTransitions.expire`, called by `Dispatcher.dispatch` |
 | **guard** | per row, `UPDATE … WHERE request_id=? AND status='pending'`; `rowcount!=1` → skipped (a human answered in the same instant, and their answer wins) |
-| **outcomes** | applied per row · superseded per row a human won (no fact) |
+| **outcomes** | applied per request denied, and only that: a request a human answered in the same instant is filtered inside `Store.expire_approvals` (`rowcount != 1` → skipped), so it is absent rather than superseded. `Dispatcher.dispatch` guards on `.wrote` before `require()` for the reason T6 gives |
 | **returns** | `list[Transition[ApprovalRecord]]`, one per request denied, for the same reason `expire_leases` does |
 | **fact** | `needs_human_resolved`, `decision='deny'`, `decided_by = record.decided_by or 'expiry'` |
 | **callers** | one: `Dispatcher.dispatch`, which the scheduler tick, `steward board dispatch`, and every watchdog pass all reach |

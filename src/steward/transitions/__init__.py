@@ -27,6 +27,16 @@ durable record, which of six named outcomes happened, and the fact that was hand
 The outcomes are the vocabulary this refactor is really about: *applied*, *refused*,
 *replayed*, *expired*, *superseded*, *answered*. Only the first ever emits.
 
+**Every owner builds its own seam, and that is deliberate.** A ``Watchdog`` pass ends up
+holding three or four ``ApprovalTransitions`` over the same ``(store, emitter)`` — its own,
+its dispatcher's, its budget guard's, and the delegator's — which looks like waste and is
+not. These classes are frozen value dataclasses over exactly those two fields: they hold no
+connection, no cursor, no buffer and no state between calls, so two of them are the same
+seam in every sense a caller can observe. What building one per owner buys is that "which
+emitter did that fact go to" is answered by the owner's own two fields rather than by
+tracing an injected object back through however many constructors passed it along — and a
+test handing one owner a ``NullEmitter`` cannot accidentally silence another.
+
 ``docs/transitions.md`` holds the full matrix: every transition, its guard, its outcomes,
 its event payload, and what stays outside these modules.
 """

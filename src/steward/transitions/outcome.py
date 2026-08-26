@@ -209,10 +209,14 @@ def carried[RecordT, InnerT](
     for anybody reading a log — the first is one answer recorded once, the second is a
     pause lifted against a standing no. The outer outcome cannot tell them apart, so the
     inner one is carried along to be asked.
+
+    ``reason`` is this transition's own, and it is not inherited from the inner one. A
+    reason is documented as a durable detail of the act it belongs to, and the inner act's
+    is frequently a *refusal* — "this request was already decided", "no such approval
+    request" — which an applied outer transition would then be reporting about itself. The
+    inner story stays in ``via``, where asking for it is deliberate.
     """
-    return Transition(
-        APPLIED, record=record, fact=inner.fact, reason=reason or inner.reason, via=inner
-    )
+    return Transition(APPLIED, record=record, fact=inner.fact, reason=reason, via=inner)
 
 
 def refused[RecordT](reason: str, record: RecordT | None = None) -> Transition[RecordT]:

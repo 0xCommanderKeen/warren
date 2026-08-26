@@ -241,7 +241,7 @@ class ApprovalTransitions:
         manifest: ResidentManifest,
         output: str,
         now: datetime | None = None,
-    ) -> list[ApprovalRecord]:
+    ) -> list[Transition[ApprovalRecord]]:
         """Turn every ``<needs-human>`` block a finished session wrote into a request.
 
         The one place a session's output becomes an approval, called by both session types
@@ -253,15 +253,19 @@ class ApprovalTransitions:
         first, so a ``<needs-human>`` block a session quoted back from an attacker-supplied
         job or task detail is not mistaken for the session actually asking (steward #62).
 
-        Returns the records, raised and auto-denied alike: the caller is reporting what
-        this session asked for, and an ask steward answered itself was still an ask.
-        ``require`` rather than a ``None`` check because both outcomes a raise can come
-        back as wrote a row — see
-        :attr:`steward.transitions.outcome.Transition.wrote` — so a missing record here
-        would be a bug worth surfacing rather than a request to skip quietly.
+        Returns one transition per ask, raised and auto-denied alike, for the same reason
+        the sweeps do: a batch of transitions is a batch of transitions, and collapsing it
+        to rows here would throw away the one distinction
+        :data:`steward.transitions.outcome.ANSWERED` exists to make.
+        ``raise_request`` is the single act with two row-writing outcomes, and a caller
+        reporting what a session asked for — ``steward approval raise`` renders it already
+        — should be able to tell an ask somebody was knocked about from one the repeat
+        guard swallowed on arrival. A caller that only wants the rows reads them off with
+        ``require``, which is safe here because both outcomes wrote one (see
+        :attr:`steward.transitions.outcome.Transition.wrote`).
         """
         return [
-            self.raise_request(manifest=manifest, request=request, now=now).require()
+            self.raise_request(manifest=manifest, request=request, now=now)
             for request in extract_requests(prompt.harvestable(output))
         ]
 

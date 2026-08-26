@@ -65,25 +65,34 @@ class TaskTransitions:
 
     store: Store
     emitter: ev.Emitter
-    project_of: Callable[[str], str] = field(default=_steward_project, repr=False)
+    #: ``default_factory`` rather than ``default``: a plain function as a field default is
+    #: also a class attribute, and a function class attribute binds as a method on access,
+    #: so ``self.project_of(claimant)`` would pass ``self`` as the agent id. ``slots=True``
+    #: happens to hide that today — the rebuilt class pops the defaults out of the class
+    #: dict — but the correctness of this line should not depend on a ``slots`` interaction.
+    project_of: Callable[[str], str] = field(default_factory=lambda: _steward_project, repr=False)
 
     # -- posting -------------------------------------------------------------------------
 
-    def post(  # noqa: PLR0913 — every field is keyword-only and part of the row or the fact
+    def post(
         self,
         *,
         title: str,
         detail: str = "",
         required_skills: Sequence[str] = (),
         posted_by: str = "api",
-        agent_id: str = ev.API_AGENT_ID,
-        project: str = ev.API_PROJECT,
     ) -> Transition[JobRecord]:
         """Put a task on the board and announce it. Nobody is prompted.
 
         The board *burrow* renders is rebuilt from events alone, so a task that was never
         announced does not exist as far as the village is concerned. There is no guard
         here and no way to lose: an insert with a fresh id always wins.
+
+        The identity the notice is filed under is not a parameter, unlike every other act
+        here. The others are told the resident because a caller already resolved one; a
+        posted notice has exactly one possible author — the board itself — so
+        :func:`steward.events.task_posted_event` supplies ``steward:api`` and there is no
+        knob for a caller to reach for and get wrong.
         """
         job = self.store.post_job(
             title=title,
@@ -99,8 +108,6 @@ class TaskTransitions:
                 title=job.title,
                 required_skills=job.required_skills,
                 posted_by=job.posted_by,
-                agent_id=agent_id,
-                project=project,
             ),
         )
 

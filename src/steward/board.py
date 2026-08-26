@@ -55,7 +55,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import cast
 
-from steward import approvals as ap
+from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
 from steward.manifest import (
@@ -539,12 +539,17 @@ class Dispatcher:
         """The seam a session's escalations and the deadline sweep both cross."""
         return ApprovalTransitions(store=self.store, emitter=self.emitter)
 
-    @cached_property
+    @property
     def delegator(self) -> dg.Delegator:
         """The arbiter this dispatch validates handoffs through.
 
         Built from the same residents, store, and emitter, so a handoff harvested out of a
-        session is judged against exactly the fleet this dispatcher can see.
+        session is judged against exactly the fleet this dispatcher can see. Rebuilt per
+        access, unlike the two transition seams above: a ``Dispatcher`` is a plain
+        dataclass and its fields are assignable, and caching this one would freeze the
+        fleet at first access — a later ``dispatcher.residents = …`` would leave the
+        arbiter judging handoffs against a roster the dispatcher no longer has, silently.
+        Four field reads and a dataclass construction is not a cost worth that.
         """
         return dg.Delegator(
             residents=self.residents,
@@ -562,9 +567,14 @@ class Dispatcher:
         under the agent id of the resident that dropped it. A task silently returning to
         ``open`` would let the village show unattended work as work in progress.
 
-        The seam returns a transition per lease swept; a dispatch reports the rows.
+        The seam returns a transition per lease swept; a dispatch reports the rows. Only
+        the ones that wrote: a sweep that lost a row to another writer has no record to
+        report, and ``require`` would turn that lost race into a ``ValueError`` that aborts
+        the whole dispatch pass — no admissions, no inbox drain, no claims. The store drops
+        those rows before they reach the seam today, so the guard costs nothing and holds
+        even if it stops doing so.
         """
-        return [swept.require() for swept in self.tasks.expire_leases(now=now)]
+        return [swept.require() for swept in self.tasks.expire_leases(now=now) if swept.wrote]
 
     def _project_of(self, claimant: str) -> str:
         """Name the burrow project a claimant belongs to, falling back to steward's own."""
@@ -586,7 +596,7 @@ class Dispatcher:
         The preamble is rendered from what *this* call claimed.
         """
         records = self.store.claim_undelivered_decisions(resident_id)
-        return ap.decisions_preamble(records)
+        return approvals.decisions_preamble(records)
 
     def harvest(self, manifest: ResidentManifest, output: str) -> list[ApprovalRecord]:
         """Turn what a finished session wrote into requests and handoffs.
@@ -706,7 +716,8 @@ class Dispatcher:
         if not output:
             return []
         try:
-            return self.approvals.harvest(manifest=manifest, output=output, now=now)
+            raised = self.approvals.harvest(manifest=manifest, output=output, now=now)
+            return [ask.require() for ask in raised]
         except Exception as exc:  # noqa: BLE001 — a failed escalation is not a failed task
             log.warning("%s: could not record an approval from this session: %s", manifest.id, exc)
             return []
@@ -934,7 +945,9 @@ class Dispatcher:
         if self.dry_run:
             return self._rehearse(moment)
         reopened = self.expire_leases(moment)
-        expired_approvals = [swept.require() for swept in self.approvals.expire(moment)]
+        expired_approvals = [
+            swept.require() for swept in self.approvals.expire(moment) if swept.wrote
+        ]
 
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))

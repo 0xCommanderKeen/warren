@@ -6,6 +6,7 @@ event module's still prove delivery and fallback; what is proved here is that th
 fact reaches the emitter on the winning branch, and that no fact reaches it on any other.
 """
 
+import ast
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -162,6 +163,8 @@ def test_a_carried_transition_keeps_the_inner_one_whole_rather_than_only_its_fac
     assert outer.silent, "and it said nothing, because the inner act had nothing to say"
     assert outer.via is already
     assert outer.via.replayed, "and the reason it said nothing is still answerable"
+    assert outer.reason == "", "an applied transition does not report the inner act's refusal"
+    assert outer.via.reason == "this request was already decided"
 
 
 def test_both_row_writing_outcomes_answer_to_wrote_and_only_one_to_applied() -> None:
@@ -503,8 +506,35 @@ def test_harvesting_a_session_raises_every_block_it_wrote(
 
     raised = approvals.harvest(manifest=manifest, output=output, now=NOW)
 
-    assert [record.action for record in raised] == ["send_email", "spend_money"]
+    assert [ask.require().action for ask in raised] == ["send_email", "spend_money"]
+    assert all(ask.applied for ask in raised), "both were knocked about"
     assert types(sink) == ["needs_human", "needs_human"]
+
+
+def test_harvesting_says_which_asks_the_repeat_guard_swallowed(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """A batch of raises is a batch of transitions: two rows, two different stories."""
+    denied = approvals.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    approvals.decide(denied.require().request_id, "deny", now=NOW)
+    sink.events.clear()
+    output = (
+        f"{p.ACTIONS_OPEN}\n"
+        '<needs-human action="send_email">{"to": "a@example.com"}</needs-human>\n'
+        '<needs-human action="spend_money">{"amount": 5}</needs-human>\n'
+        f"{p.ACTIONS_CLOSE}"
+    )
+
+    swallowed, knocked = approvals.harvest(
+        manifest=manifest, output=output, now=NOW + timedelta(hours=1)
+    )
+
+    assert swallowed.answered, "asked again inside the window, auto-denied, nobody woken"
+    assert knocked.applied, "a different action is a different question"
+    assert [ask.require().action for ask in (swallowed, knocked)] == ["send_email", "spend_money"]
+    assert types(sink) == ["needs_human"], "one knock, for the ask that was not swallowed"
 
 
 def test_deciding_resolves_the_row_and_closes_the_loop_in_the_log(
@@ -836,6 +866,35 @@ def test_resuming_against_a_request_a_person_already_denied_lifts_the_pause_and_
     assert request.decision == "deny", "the first decision keeps the last word"
 
 
+def test_resuming_a_pause_that_names_no_window_grants_no_allowance(
+    budgets: tr.BudgetTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    """The other side of the carry-on branch: a pause row written before windows existed.
+
+    ``window_end`` defaults to empty in the store, so rows predating it reach ``resume``
+    with nothing to scope an allowance to. The pause still lifts — that is this call's own
+    durable act — but no "carry on" is granted, and the next fire re-trips the same cap.
+    That is the shape the required ``window_end`` at the seam exists to keep new pauses out
+    of; this asserts what happens to the old ones rather than leaving the branch untested.
+    """
+    store.pause_resident(
+        resident="test-agent",
+        agent_id=CLAIMANT,
+        budget="daily_cost_usd",
+        spent=5.2,
+        cap=5.0,
+        reason="spent 5.20 of 5.00",
+        now=ev.utc_now_iso(NOW),
+    )
+
+    outcome = budgets.resume("test-agent", decided_by="cli")
+
+    assert outcome.applied, "the pause lifts either way"
+    assert store.budget_pause("test-agent") is None
+    assert store.budget_allowance("test-agent") is None, "no window to scope a carry-on to"
+    assert sink.events == [], "nobody asked, so there is nothing to answer"
+
+
 def test_resuming_a_resident_that_was_never_paused_is_refused(
     budgets: tr.BudgetTransitions, sink: ev.NullEmitter
 ) -> None:
@@ -849,19 +908,26 @@ def test_resuming_a_resident_that_was_never_paused_is_refused(
 def test_the_transitions_package_has_exactly_one_place_that_emits() -> None:
     """The structural half of the pairing invariant, asserted rather than trusted.
 
-    Deliberately a source scan and deliberately a narrow one. It cannot see through an
-    alias (``send = emitter.emit``) and it would not catch an emit reached by getattr —
-    what it does catch is the ordinary way a second emit site gets added, which is
-    somebody writing ``.emit(`` in a new branch. Counting first, and only then naming the
-    file, so a scan that finds nothing fails with the sentence rather than an IndexError
-    from the assertion trying to describe an empty list.
+    An AST walk rather than a scan for ``.emit(`` in the source text, because the subject
+    matter defeats a text scan in both directions. This package's own prose is *about*
+    emitting, so one docstring sentence spelling the call out would fail the assertion with
+    no bug present; and a glob over ``*.py`` cannot see into a subpackage somebody adds
+    tomorrow, nor past a stray space in ``emitter . emit(fact)``.
+
+    Still deliberately narrow: it cannot see through an alias (``send = emitter.emit``) or
+    an emit reached by getattr. What it catches is the ordinary way a second emit site gets
+    added, which is somebody writing ``emitter.emit(…)`` in a new branch. Counting first,
+    and only then naming the file, so a walk that finds nothing fails with the sentence
+    rather than an IndexError from the assertion trying to describe an empty list.
     """
     package = Path(__file__).resolve().parents[1] / "src" / "steward" / "transitions"
     emitting = [
-        f"{path.name}:{number}"
-        for path in sorted(package.glob("*.py"))
-        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if ".emit(" in line and not line.lstrip().startswith("#")
+        f"{path.relative_to(package)}:{node.lineno}"
+        for path in sorted(package.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "emit"
     ]
     assert len(emitting) == 1, (
         f"exactly one line in steward.transitions may reach an emitter; found {emitting}"

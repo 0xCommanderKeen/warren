@@ -197,7 +197,8 @@ def test_a_malformed_ask_still_reaches_a_person(
 ) -> None:
     """A session that tried to escalate and failed must not look like one that did not."""
     raised = seam(store, sink).harvest(manifest=manifest, output=block('expires-in="4h"'))
-    (record,) = raised
+    (ask,) = raised
+    record = ask.require()
     assert record.action == ap.UNREADABLE_ACTION
     assert "needs an action" in str(record.detail["problem"])
     assert record.detail["raw"].startswith("<needs-human")
@@ -365,11 +366,12 @@ def test_a_second_unreadable_escalation_still_reaches_a_person(
     seam(store, sink).expire(NOW + timedelta(hours=5))
     sink.events.clear()
 
-    (again,) = seam(store, sink).harvest(
+    (raised,) = seam(store, sink).harvest(
         manifest=manifest,
         output=block('action="spend_money" expires-in="4h"', '{"to": '),
         now=NOW + timedelta(hours=6),
     )
+    again = raised.require()
     assert again.action == ap.UNREADABLE_ACTION
     assert again.pending, "a different malformed ask is a different question"
     assert [event.type for event in sink.events] == ["needs_human"]
