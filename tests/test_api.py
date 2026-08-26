@@ -6,6 +6,7 @@ file. That last piece is what lets a test assert the thing the contract actually
 promises: not that a request returned 202, but that the matching protocol event landed.
 """
 
+import asyncio
 import copy
 import datetime as dt
 import json
@@ -18,13 +19,15 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import events as ev
 from steward import journal
-from steward.api import ApiConfig, ApiError, create_app
+from steward.api import ApiConfig, ApiError, _ApprovalBodyDepthMiddleware, create_app
 from steward.deploy import LocalTransport
 from steward.input_bounds import (
+    APPROVAL_BODY_MAX_BYTES,
     DETAIL_MAX_CHARS,
     EDIT_MAX_BYTES,
     EDIT_MAX_CONTAINER_ITEMS,
@@ -222,6 +225,30 @@ def test_the_token_is_compared_in_constant_time(
         == 401
     )
     assert calls == [(same_length.encode(), TOKEN.encode())]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [f"Bearer {TOKEN}", "Bearer wrong"],
+        ["Bearer wrong", f"Bearer {TOKEN}"],
+        [f"Bearer {TOKEN}", f"Bearer {TOKEN}"],
+    ],
+)
+def test_duplicate_authorization_is_401_before_deep_body(
+    api: ApiFactory, values: list[str]
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_000 + "0" + "]" * 1_000 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw,
+        headers=[("content-type", "application/json"), *[("authorization", v) for v in values]],
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "unauthorized"
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
 
 
 # --------------------------------------------------------------------------------------
@@ -601,6 +628,100 @@ def test_edit_serialized_byte_boundary_is_exact(api: ApiFactory) -> None:
         ).status_code
         == 202
     )
+
+
+def test_approval_wire_body_boundary_and_oversize_inputs_have_no_effect(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    prefix = b'{"decision":"approve","padding":"'
+    suffix = b'"}'
+    exact = prefix + b" " * (APPROVAL_BODY_MAX_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(exact) == APPROVAL_BODY_MAX_BYTES
+    assert (
+        harness.client.post(
+            f"/approvals/{request_id}", content=exact, headers={"content-type": "application/json"}
+        ).status_code
+        == 422
+    )
+
+    for raw in (b" " * (APPROVAL_BODY_MAX_BYTES + 1), b'"' + b"x" * APPROVAL_BODY_MAX_BYTES):
+        response = harness.client.post(
+            f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 413
+        assert response.json()["detail"]["error"] == "approval_body_too_large"
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.store.requests() == []
+    assert harness.events() == []
+
+
+def test_approval_wire_limit_stops_receiving_at_first_oversize_chunk() -> None:
+    received = 0
+    downstream: list[bytes] = []
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"x" * APPROVAL_BODY_MAX_BYTES, "more_body": True},
+            {"type": "http.request", "body": b"!", "more_body": True},
+            {"type": "http.request", "body": b"never-read", "more_body": False},
+        ]
+    )
+
+    async def receive() -> Message:
+        nonlocal received
+        received += 1
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append((await receive())["body"])
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert received == 2
+    assert downstream == []
+    assert sent[0]["status"] == 413
+
+
+def test_approval_middleware_replays_normal_chunks_then_preserves_disconnect() -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b'{"decision":', "more_body": True},
+            {"type": "http.request", "body": b'"approve"}', "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert downstream == [
+        {"type": "http.request", "body": b'{"decision":"approve"}', "more_body": False},
+        {"type": "http.disconnect"},
+    ]
 
 
 def test_deep_raw_approval_json_is_422_before_materialization(api: ApiFactory) -> None:

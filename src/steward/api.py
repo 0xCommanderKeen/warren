@@ -53,6 +53,7 @@ from steward.board import Dispatcher
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
 from steward.input_bounds import (
+    APPROVAL_BODY_MAX_BYTES,
     DETAIL_MAX_CHARS,
     EDIT_MAX_DEPTH,
     IDENTIFIER_MAX_CHARS,
@@ -559,12 +560,7 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     """Build the bearer-token gate every endpoint hangs off."""
 
     def require_token(request: Request) -> None:
-        if token is None:
-            return
-        scheme, _, presented = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not compare_digest(
-            presented.strip().encode("utf-8"), token.encode("utf-8")
-        ):
+        if not _authorized(request.scope.get("headers", []), token):
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -577,8 +573,28 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     return require_token
 
 
+def _authorized(headers: Sequence[tuple[bytes, bytes]], token: str | None) -> bool:
+    """Apply the API's one bearer policy to raw ASGI headers.
+
+    Exactly one Authorization field is accepted.  Rejecting duplicates avoids proxy and
+    framework disagreement over first/last/comma-joined semantics.  All presented bearer
+    tokens reach the same constant-time comparison used by the route dependency.
+    """
+    if token is None:
+        return True
+    values = [value for key, value in headers if key.lower() == b"authorization"]
+    if len(values) != 1:
+        return False
+    scheme, separator, presented = values[0].partition(b" ")
+    return (
+        separator == b" "
+        and scheme.lower() == b"bearer"
+        and compare_digest(presented.strip(), token.encode("utf-8"))
+    )
+
+
 class _ApprovalBodyDepthMiddleware:
-    """Bound approval JSON before FastAPI's recursive JSON/Pydantic materialisation."""
+    """Bound approval JSON while receiving, before recursive materialisation."""
 
     def __init__(self, app: ASGIApp, *, token: str | None) -> None:
         self.app = app
@@ -592,23 +608,40 @@ class _ApprovalBodyDepthMiddleware:
             and path.startswith("/approvals/")
             and "/" not in path.removeprefix("/approvals/")
         )
-        if not is_decision or not self._authorized(scope):
+        if not is_decision or not _authorized(scope.get("headers", []), self.token):
             await self.app(scope, receive, send)
             return
 
-        messages: list[Message] = []
         body = bytearray()
+        complete = False
         while True:
             message = await receive()
-            messages.append(message)
             if message["type"] != "http.request":
                 break
-            body.extend(message.get("body", b""))
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > APPROVAL_BODY_MAX_BYTES:
+                response = JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": {
+                            "error": "approval_body_too_large",
+                            "message": (
+                                "approval request body exceeds the "
+                                f"{APPROVAL_BODY_MAX_BYTES} byte wire limit"
+                            ),
+                        }
+                    },
+                )
+                await response(scope, receive, send)
+                return
+            body.extend(chunk)
             if not message.get("more_body", False):
+                complete = True
                 break
         try:
             # The request object is level one; an eight-level edit is therefore level nine.
-            validate_json_container_depth(bytes(body), EDIT_MAX_DEPTH + 1)
+            if complete:
+                validate_json_container_depth(body, EDIT_MAX_DEPTH + 1)
         except ValueError as error:
             response = JSONResponse(
                 status_code=422,
@@ -626,24 +659,20 @@ class _ApprovalBodyDepthMiddleware:
             await response(scope, receive, send)
             return
 
-        pending = iter(messages)
+        replayed = False
 
         async def replay() -> Message:
-            try:
-                return next(pending)
-            except StopIteration:
-                return await receive()
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": not complete,
+                }
+            return await receive()
 
         await self.app(scope, replay, send)
-
-    def _authorized(self, scope: Scope) -> bool:
-        if self.token is None:
-            return True
-        headers = {key.lower(): value for key, value in scope.get("headers", [])}
-        scheme, _, presented = headers.get(b"authorization", b"").partition(b" ")
-        return scheme.lower() == b"bearer" and compare_digest(
-            presented.strip(), self.token.encode("utf-8")
-        )
 
 
 def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collaborator is a seam

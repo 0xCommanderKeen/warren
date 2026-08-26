@@ -11,6 +11,10 @@ IDENTIFIER_MAX_CHARS = 100
 SKILLS_MAX_ITEMS = 100
 
 EDIT_MAX_BYTES = 16_384
+#: Wire envelope for ``ApprovalDecision``.  The compact edit may consume 16 KiB; 4 KiB
+#: leaves ample room for the decision field, JSON punctuation, and ordinary whitespace
+#: without allowing padding or malformed input to make pre-parse buffering unbounded.
+APPROVAL_BODY_MAX_BYTES = 20_480
 EDIT_MAX_DEPTH = 8
 EDIT_MAX_CONTAINER_ITEMS = 100
 EDIT_MAX_NODES = 1_000
@@ -53,7 +57,7 @@ def _bounded_children(value: object, depth: int) -> list[tuple[object, int]]:
     raise TypeError("edit values must be JSON strings, numbers, booleans, null, arrays, or objects")
 
 
-def validate_json_container_depth(raw: bytes, max_depth: int) -> None:  # noqa: C901
+def validate_json_container_depth(raw: bytes | bytearray, max_depth: int) -> None:  # noqa: C901
     """Reject excessive raw JSON nesting without parsing or recursively materialising it.
 
     Only ASCII JSON structure is relevant.  Quotes and backslash escapes are tracked so
