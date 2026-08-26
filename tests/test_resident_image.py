@@ -15,6 +15,7 @@ the pilot) there.
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -107,6 +108,9 @@ def test_the_vendored_emitter_is_burrows_file_byte_for_byte() -> None:
     digest = hashlib.sha256(upstream.encode("utf-8")).hexdigest()
     expected = recorded()
 
+    assert re.fullmatch(r"[0-9a-f]{40}", expected.get("commit", "")), (
+        f"{CHECKSUM} must record the full upstream commit"
+    )
     assert digest == expected["sha256"], (
         f"{EMITTER} no longer matches the emitter recorded in {CHECKSUM.name}.\n"
         f"  recorded: {expected['sha256']} (burrow commit {expected['commit']})\n"
