@@ -630,6 +630,35 @@ def test_edit_serialized_byte_boundary_is_exact(api: ApiFactory) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("character", "counts"),
+    [
+        pytest.param("\u0080", (8_000, 184), id="bmp"),
+        pytest.param("🦉", (4_092, 0), id="surrogate-pair"),
+    ],
+)
+@pytest.mark.parametrize("wire_encoding", ["utf8", "ascii"])
+def test_wire_cap_accepts_equivalent_near_maximum_utf8_edits(
+    api: ApiFactory, wire_encoding: str, character: str, counts: tuple[int, int]
+) -> None:
+    # U+0080 is the worst JSON escaping ratio: two compact UTF-8 bytes become six ASCII
+    # bytes; astral characters use two \uXXXX escapes. Both edits are one byte below
+    # the semantic serialized limit in compact UTF-8.
+    edit = {"a": character * counts[0], "b": character * counts[1]}
+    assert len(json.dumps(edit, ensure_ascii=False, separators=(",", ":")).encode()) == 16_383
+    raw = json.dumps(
+        {"decision": "edit", "edit": edit},
+        ensure_ascii=wire_encoding == "ascii",
+        separators=(",", ":"),
+    ).encode()
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 202
+
+
 def test_approval_wire_body_boundary_and_oversize_inputs_have_no_effect(api: ApiFactory) -> None:
     harness = api()
     request_id = _pending(harness)
@@ -691,6 +720,35 @@ def test_approval_wire_limit_stops_receiving_at_first_oversize_chunk() -> None:
     assert sent[0]["status"] == 413
 
 
+def test_approval_wire_limit_accepts_exact_streaming_boundary() -> None:
+    chunks = [b"x" * (APPROVAL_BODY_MAX_BYTES - 1), b"!"]
+    messages = iter(
+        [
+            {"type": "http.request", "body": chunks[0], "more_body": True},
+            {"type": "http.request", "body": chunks[1], "more_body": False},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert downstream == [{"type": "http.request", "body": b"".join(chunks), "more_body": False}]
+
+
 def test_approval_middleware_replays_normal_chunks_then_preserves_disconnect() -> None:
     messages = iter(
         [
@@ -720,6 +778,44 @@ def test_approval_middleware_replays_normal_chunks_then_preserves_disconnect() -
     asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
     assert downstream == [
         {"type": "http.request", "body": b'{"decision":"approve"}', "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+
+def test_approval_middleware_replays_partial_body_then_disconnect_without_waiting() -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b'{"decision":', "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+
+    async def exercise() -> None:
+        await asyncio.wait_for(
+            _ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send), timeout=0.1
+        )
+
+    asyncio.run(exercise())
+    assert downstream == [
+        {"type": "http.request", "body": b'{"decision":', "more_body": True},
         {"type": "http.disconnect"},
     ]
 

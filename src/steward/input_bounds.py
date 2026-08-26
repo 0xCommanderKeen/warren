@@ -11,10 +11,16 @@ IDENTIFIER_MAX_CHARS = 100
 SKILLS_MAX_ITEMS = 100
 
 EDIT_MAX_BYTES = 16_384
-#: Wire envelope for ``ApprovalDecision``.  The compact edit may consume 16 KiB; 4 KiB
-#: leaves ample room for the decision field, JSON punctuation, and ordinary whitespace
-#: without allowing padding or malformed input to make pre-parse buffering unbounded.
-APPROVAL_BODY_MAX_BYTES = 20_480
+#: A non-ASCII code point's longest ASCII JSON spelling is three times its shortest
+#: UTF-8 spelling: ``U+0080`` is 2 bytes versus ``\u0080`` at 6, and an astral code
+#: point is 4 bytes versus a 12-byte surrogate pair. Quotes, backslashes, control
+#: characters, keys, and punctuation are already escaped/count toward ``EDIT_MAX_BYTES``.
+JSON_ASCII_ESCAPE_MAX_EXPANSION = 3
+#: Wire envelope for ``ApprovalDecision``. Three edit budgets admit the worst legal
+#: ``ensure_ascii=True`` representation of every compact UTF-8 edit at the semantic
+#: limit. One further edit budget covers the request envelope and modest formatting,
+#: while still bounding arbitrary whitespace and duplicate-key padding at 64 KiB.
+APPROVAL_BODY_MAX_BYTES = EDIT_MAX_BYTES * (JSON_ASCII_ESCAPE_MAX_EXPANSION + 1)
 EDIT_MAX_DEPTH = 8
 EDIT_MAX_CONTAINER_ITEMS = 100
 EDIT_MAX_NODES = 1_000

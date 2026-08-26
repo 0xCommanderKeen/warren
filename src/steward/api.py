@@ -600,7 +600,7 @@ class _ApprovalBodyDepthMiddleware:
         self.app = app
         self.token = token
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901
         path = scope.get("path", "")
         is_decision = (
             scope.get("type") == "http"
@@ -614,10 +614,14 @@ class _ApprovalBodyDepthMiddleware:
 
         body = bytearray()
         complete = False
+        terminal: Message | None = None
+        saw_request = False
         while True:
             message = await receive()
             if message["type"] != "http.request":
+                terminal = message
                 break
+            saw_request = True
             chunk = message.get("body", b"")
             if len(body) + len(chunk) > APPROVAL_BODY_MAX_BYTES:
                 response = JSONResponse(
@@ -659,17 +663,21 @@ class _ApprovalBodyDepthMiddleware:
             await response(scope, receive, send)
             return
 
-        replayed = False
+        replayed_body = False
+        replayed_terminal = False
 
         async def replay() -> Message:
-            nonlocal replayed
-            if not replayed:
-                replayed = True
+            nonlocal replayed_body, replayed_terminal
+            if saw_request and not replayed_body:
+                replayed_body = True
                 return {
                     "type": "http.request",
                     "body": bytes(body),
                     "more_body": not complete,
                 }
+            if terminal is not None and not replayed_terminal:
+                replayed_terminal = True
+                return terminal
             return await receive()
 
         await self.app(scope, replay, send)
