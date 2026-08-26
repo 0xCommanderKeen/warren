@@ -1026,6 +1026,36 @@ def test_croniter_stepped_clock_maxima_that_mean_wildcard_cannot_close_the_day(
 
 
 @pytest.mark.parametrize(
+    ("schedule", "cadence"),
+    [
+        ("*,5 22 * * *", r"fires 24\+ times"),
+        ("30 *,5 * * *", "fires 24 times"),
+    ],
+)
+def test_a_wildcard_with_redundant_clock_members_still_over_fires(
+    write_resident: ResidentWriter, schedule: str, cadence: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match=cadence):
+        s.load_scheduled(path.parent)
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 *,5 * *",
+        "30 22 * *,5 *",
+        "30 22 * * *,1",
+    ],
+)
+def test_a_wildcard_with_redundant_calendar_members_still_means_daily(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    assert s.load_scheduled(path.parent)[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
     "schedule",
     [
         "30 22 * * *",
@@ -1036,6 +1066,11 @@ def test_croniter_stepped_clock_maxima_that_mean_wildcard_cannot_close_the_day(
         "30 22 * 12/1 *",
         "30 22 1-30 * 0,2-6",
         "30 22 */2 2-11/3 1-6/2",
+        "*,5 22 * * *",
+        "30 *,5 * * *",
+        "30 22 *,5 * *",
+        "30 22 * *,5 *",
+        "30 22 * * *,1",
     ],
 )
 def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
@@ -1048,7 +1083,25 @@ def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
         key = (candidate.month, candidate.day, (candidate.weekday() + 1) % 7)
         representatives.setdefault(key, candidate)
 
-    expected = [int(croniter.match(schedule, candidate)) for candidate in representatives.values()]
+    minute, hour, *_ = schedule.split()
+    clock_schedule = f"{minute} {hour} * * *"
+    clock_day = datetime(2000, 1, 1, tzinfo=UTC)
+    matching_clocks = [
+        clock_day + timedelta(minutes=offset)
+        for offset in range(24 * 60)
+        if croniter.match(clock_schedule, clock_day + timedelta(minutes=offset))
+    ]
+    matching_clock = matching_clocks[0]
+    expected = [
+        len(matching_clocks)
+        * int(
+            croniter.match(
+                schedule,
+                candidate.replace(hour=matching_clock.hour, minute=matching_clock.minute),
+            )
+        )
+        for candidate in representatives.values()
+    ]
     assert m._daily_fire_range(routine(schedule=schedule)) == (min(expected), max(expected))
 
 

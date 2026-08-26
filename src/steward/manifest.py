@@ -1414,7 +1414,7 @@ def _gregorian_cron_days() -> tuple[tuple[int, int, int], ...]:
 
 def _cron_values(field: Sequence[int | str], lowest: int, highest: int) -> set[int]:
     """Turn croniter's canonical field expansion into concrete matching values."""
-    if field == ["*"]:
+    if "*" in field:
         return set(range(lowest, highest + 1))
     return {value for value in field if isinstance(value, int)}
 
@@ -1441,8 +1441,8 @@ def _daily_fire_range(routine: Routine) -> tuple[int, int]:
     months = _cron_values(month, 1, 12)
     month_days = _cron_values(dom, 1, 31)
     weekdays = _cron_values(dow, 0, 6)
-    dom_wildcard = dom == ["*"]
-    dow_wildcard = dow == ["*"]
+    dom_wildcard = "*" in dom
+    dow_wildcard = "*" in dow
 
     counts: list[int] = []
     for candidate_month, candidate_day, candidate_weekday in _gregorian_cron_days():
