@@ -1750,6 +1750,15 @@ def _check_directory_name(manifest: ResidentManifest, source: Path) -> list[Diag
 def _read_yaml(path: Path) -> tuple[object, list[Diagnostic]]:
     try:
         text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return None, [
+            Diagnostic(
+                file=path,
+                field_path="<file>",
+                problem=f"manifest is not valid UTF-8: {exc}",
+                example=f"a UTF-8 encoded {MANIFEST_FILENAME}",
+            )
+        ]
     except OSError as exc:
         return None, [
             Diagnostic(
@@ -1802,7 +1811,27 @@ def _load_soul(manifest: ResidentManifest, source: Path) -> tuple[SoulDocument, 
                 example=f"create {soul_path.name} with frontmatter and a short body",
             )
         ]
-    return parse_soul(soul_path.read_text(encoding="utf-8"), soul_path)
+    try:
+        text = soul_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return SoulDocument(path=soul_path), [
+            Diagnostic(
+                file=soul_path,
+                field_path="soul.file",
+                problem=f"soul file is not valid UTF-8: {exc}",
+                example=f"save {soul_path.name} as UTF-8",
+            )
+        ]
+    except OSError as exc:
+        return SoulDocument(path=soul_path), [
+            Diagnostic(
+                file=soul_path,
+                field_path="soul.file",
+                problem=f"cannot read soul file: {exc.strerror or exc}",
+                example=f"a readable {soul_path.name} next to the manifest",
+            )
+        ]
+    return parse_soul(text, soul_path)
 
 
 def _library(residents_dir: Path, skills_dir: Path | str | None) -> SkillLibrary:

@@ -62,6 +62,19 @@ def test_validate_exits_non_zero_on_error(
     assert "failed:" in result.output
 
 
+def test_validate_reports_invalid_utf8_without_a_traceback(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_bytes(b"\xff\xfe")
+
+    result = runner.invoke(main, ["validate", str(manifest_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "manifest is not valid UTF-8" in result.output
+
+
 def test_validate_reports_json(runner: CliRunner, write_resident: ResidentWriter) -> None:
     data = valid_manifest()
     del data["memory"]
