@@ -469,6 +469,10 @@ class Transport(Protocol):
         """Return the contents of a file on the host, or ``None`` when there is none."""
         ...
 
+    def exists(self, path: str) -> bool:
+        """Report whether a path is there, for a caller that does not want the bytes."""
+        ...
+
 
 @dataclass
 class SshTransport:
@@ -535,18 +539,47 @@ class SshTransport:
         outcome = self.run(["cat", path])
         if outcome.ok:
             return outcome.stdout
+        self._require_reached(outcome)
+        # ssh connected and ``cat`` exited non-zero. Usually that is "no such file", but
+        # ``cat`` answers 1 for an unreadable file too and does not distinguish the two in
+        # its status. A caller that must not confuse "absent" with "there but unreadable"
+        # asks :meth:`exists` — which is the question, and the only question,
+        # ``_stop_retired_container`` was ever using this method for.
+        return None
+
+    def exists(self, path: str) -> bool:
+        """Report whether a path is there. Raises rather than guessing when unreachable.
+
+        ``test -e`` where :meth:`read` uses ``cat``, because their non-zero statuses mean
+        different things: ``cat`` exits 1 both for a file that is missing and for one it
+        may not open, while ``test -e`` exits 1 only for genuinely not there. Retiring a
+        resident turns on exactly that distinction — a compose file steward could not read
+        is not a resident with nothing to stop (steward #136).
+        """
+        outcome = self.run(["test", "-e", path])
+        if outcome.ok:
+            return True
+        self._require_reached(outcome)
+        return False
+
+    def _require_reached(self, outcome: CommandOutcome) -> None:
+        """Raise unless the far side actually ran the command and answered for itself.
+
+        The shared half of :meth:`read` and :meth:`exists`: every way a command can fail
+        *without having run* — no ssh binary, a host that never answered, ssh refusing the
+        connection — is a :class:`TransportError`, because none of them say anything about
+        what is on the host.
+        """
         if outcome.error is not None:
             # The command never ran at all: no ssh binary, or it hung until steward gave
             # up on it. Either way this says nothing about what is on the far side.
             raise TransportError(f"{self.target}: {outcome.error}")
         if outcome.exit_status == SSH_FAILURE_STATUS:
             # ssh's own reserved status — refused, timed out, bad host key, no such user.
-            # The far side never got as far as running ``cat``.
+            # The far side never got as far as running anything.
             raise TransportError(
                 f"{self.target}: ssh could not open the connection ({outcome.summary()})"
             )
-        # ssh connected and ``cat`` said no. That is a real answer about a real host.
-        return None
 
 
 @dataclass
@@ -618,6 +651,11 @@ class LocalTransport:
         self._reachable()
         target = self.resolve(path)
         return target.read_text(encoding="utf-8") if target.is_file() else None
+
+    def exists(self, path: str) -> bool:
+        """Report whether the fake host has this path."""
+        self._reachable()
+        return self.resolve(path).exists()
 
 
 def transport_for(target: DeployTarget) -> Transport:

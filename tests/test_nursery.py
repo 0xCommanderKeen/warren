@@ -702,6 +702,43 @@ def test_retiring_against_an_unreachable_host_does_not_report_success(
     assert validate_tree(scratch_repo.residents).residents[0].retired
 
 
+def test_retiring_stops_a_container_whose_compose_file_cannot_be_read(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """An unreadable compose file is not a resident with nothing to stop (steward #136).
+
+    ``cat`` exits 1 both for a file that is missing and for one steward may not open — a
+    root-owned directory on the NAS is enough. Deciding "nothing to stop" from that status
+    is the same wrong conclusion as reading an unreachable host as an empty one, reached
+    by a different route: the manifest is marked, the command exits 0, and the container
+    keeps running. So the question asked is ``test -e``, which answers it.
+    """
+    raise_into(scratch_repo, host)
+
+    def unreadable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        if "test" in parts:
+            return CommandOutcome(argv=parts, exit_status=0)  # it is there
+        if "cat" in parts:
+            return CommandOutcome(argv=parts, exit_status=1, stderr="cat: Permission denied")
+        return CommandOutcome(argv=parts, exit_status=0)  # docker compose down works
+
+    report = retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=SshTransport(command=unreadable),
+    )
+
+    assert report.stopped, "the container was there, so it was brought down"
+    assert "nothing at" not in report.note
+
+
 def test_retiring_marks_the_manifest_before_it_touches_the_host(
     scratch_repo: ScratchRepo, tmp_path: Path
 ) -> None:
