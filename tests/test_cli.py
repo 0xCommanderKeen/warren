@@ -222,6 +222,37 @@ def test_help_lists_the_commands(runner: CliRunner) -> None:
 # ------------------------------------------------------------------------------- doctor
 
 
+def test_doctor_with_no_path_fails_when_it_found_nothing(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A health check that found no residents must not silently report healthy (#176)."""
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+
+    result = runner.invoke(main, ["doctor", "--db", str(tmp_path / "steward.db")])
+
+    assert result.exit_code == 1, result.output
+    assert "failed:" in result.output
+    assert "this run validated nothing" in result.output
+    assert str((tmp_path / "residents").resolve()) in result.output
+
+
+def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicitly named empty tree is valid, but its warning must remain visible."""
+    empty = tmp_path / "drafts"
+    empty.mkdir()
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+
+    result = runner.invoke(main, ["doctor", str(empty), "--db", str(tmp_path / "steward.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "ok: 0 valid resident(s), 0 error(s), 1 warning(s)" in result.output
+    assert "no resident manifests found" in result.output
+
+
 def test_doctor_names_the_brain_and_the_next_fire(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

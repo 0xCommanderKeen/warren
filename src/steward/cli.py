@@ -360,9 +360,9 @@ def _render_effective_set(
 
 
 @main.command()
-@click.argument("residents", type=click.Path(path_type=Path), default=DEFAULT_RESIDENTS_DIR)
+@click.argument("residents", type=click.Path(path_type=Path), default=None)
 @_DB_OPTION
-def doctor(residents: Path, db: Path | None) -> None:
+def doctor(residents: Path | None, db: Path | None) -> None:
     """Check that what the manifests declare can actually run, here, now.
 
     Names the brain each resident runs on, whether its binary exists, what it has spent
@@ -374,9 +374,14 @@ def doctor(residents: Path, db: Path | None) -> None:
     are work nobody will ever pick up. Board claimants are pre-flighted here too — a
     resident that claims work and schedules none is a resident nothing else checks.
     """
+    defaulted = residents is None
+    residents = residents or DEFAULT_RESIDENTS_DIR
     result = validate_paths([residents])
-    if not result.ok:
+    if defaulted:
+        result = _require_residents(result, DEFAULT_RESIDENTS_DIR)
+    if result.diagnostics:
         _report_text(result, [residents])
+    if not result.ok:
         sys.exit(EXIT_INVALID)
 
     problems = 0
