@@ -69,6 +69,7 @@ __all__ = [
     "DEFAULT_ROOT",
     "DEFAULT_USER",
     "ENV_FILENAME",
+    "SSH_FAILURE_STATUS",
     "DeployTarget",
     "LocalTransport",
     "SshTransport",
@@ -137,6 +138,12 @@ FALLBACK_MEMORY_PATH = "/data/memory"
 #: remote ``.env``; never into the compose file, never into a manifest, never into git.
 BURROW_URL_ENV = "BURROW_URL"
 BURROW_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
+
+
+#: ssh's reserved exit status for "ssh itself failed" — connection refused, host
+#: unreachable, auth denied, host-key mismatch. Every other status belongs to the remote
+#: command, so this is the one value that tells the two apart from the near side.
+SSH_FAILURE_STATUS = 255
 
 
 class TransportError(Exception):
@@ -511,9 +518,35 @@ class SshTransport:
         )
 
     def read(self, path: str) -> str | None:
-        """Read a file on the host, or return ``None`` when it is not there."""
+        """Read a file on the host, or return ``None`` when it is not there.
+
+        ``None`` means one thing only: *the host answered, and the file is absent*. Every
+        other failure raises :class:`TransportError`, which is the word this module
+        already has for "there was nobody to ask".
+
+        The distinction is load-bearing rather than tidy. ``run`` reports a missing ssh
+        binary, a host that never answered, and an auth refusal all as non-``ok``
+        outcomes, so folding them into ``None`` told a caller the file was not there —
+        about a machine steward never reached. ``steward retire`` read the compose file
+        to decide whether there was a container to stop, took an unreachable NAS for an
+        empty directory, and reported the resident retired while its container kept
+        running and kept spending (steward #136).
+        """
         outcome = self.run(["cat", path])
-        return outcome.stdout if outcome.ok else None
+        if outcome.ok:
+            return outcome.stdout
+        if outcome.error is not None:
+            # The command never ran at all: no ssh binary, or it hung until steward gave
+            # up on it. Either way this says nothing about what is on the far side.
+            raise TransportError(f"{self.target}: {outcome.error}")
+        if outcome.exit_status == SSH_FAILURE_STATUS:
+            # ssh's own reserved status — refused, timed out, bad host key, no such user.
+            # The far side never got as far as running ``cat``.
+            raise TransportError(
+                f"{self.target}: ssh could not open the connection ({outcome.summary()})"
+            )
+        # ssh connected and ``cat`` said no. That is a real answer about a real host.
+        return None
 
 
 @dataclass

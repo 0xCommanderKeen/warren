@@ -15,7 +15,7 @@ from steward.board import (
     load_board_residents,
     load_residents,
 )
-from steward.deploy import LocalTransport, TransportError
+from steward.deploy import LocalTransport, SshTransport, TransportError
 from steward.manifest import (
     Diagnostic,
     ValidationResult,
@@ -660,6 +660,46 @@ def test_retiring_something_that_was_never_deployed_says_so(
     assert report.marked
     assert not report.stopped
     assert "nothing at" in report.note
+
+
+def test_retiring_against_an_unreachable_host_does_not_report_success(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The container is still running, so `steward retire` must not say it is not.
+
+    `_stop_retired_container` decides whether there is anything to stop by reading the
+    compose file, and `SshTransport.read` used to fold every failure — no ssh binary, a
+    host that never answered, an auth refusal — into the same `None` a missing file gives.
+    So an unreachable NAS returned "nothing at ~/docker/<id> on dxp2800 to stop", the
+    function completed normally, and `steward retire` printed `<id> is retired` in green
+    and exited 0 while the container kept firing and kept spending (steward #136).
+
+    A `LocalTransport` cannot show this: it raises on an unreachable host, which is the
+    behaviour the real one was missing. So this drives a real `SshTransport` over an ssh
+    that never connects.
+    """
+    raise_into(scratch_repo, host)
+
+    def never_connects(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        return CommandOutcome(argv=tuple(argv), error="'ssh' did not answer within 20s")
+
+    with pytest.raises(NurseryError, match="could not be reached"):
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=SshTransport(command=never_connects),
+        )
+
+    # The mark is committed before the host is touched, and stays committed: that order is
+    # what keeps the watchdog from restarting a resident nobody could stop.
+    assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
+    assert validate_tree(scratch_repo.residents).residents[0].retired
 
 
 def test_retiring_marks_the_manifest_before_it_touches_the_host(

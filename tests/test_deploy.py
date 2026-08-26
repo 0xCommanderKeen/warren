@@ -358,6 +358,54 @@ def test_reading_over_ssh_is_a_cat_and_a_missing_file_is_none() -> None:
     assert SshTransport(command=Recorder(ok=False)).read("~/x") is None
 
 
+class Unreachable:
+    """A stand-in for run_argv that answers the way a host nobody can reach does."""
+
+    def __init__(self, *, error: str | None = None, exit_status: int | None = None) -> None:
+        """Answer with steward's own diagnostic, or with ssh's reserved status."""
+        self.error = error
+        self.exit_status = exit_status
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG002 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG002 — likewise
+    ) -> CommandOutcome:
+        """Report the failure without launching anything."""
+        return CommandOutcome(argv=tuple(argv), error=self.error, exit_status=self.exit_status)
+
+
+@pytest.mark.parametrize(
+    ("command", "why"),
+    [
+        (Unreachable(error="cannot launch 'ssh': No such file or directory"), "no ssh at all"),
+        (Unreachable(error="'ssh' did not answer within 20s"), "the host never answered"),
+        (Unreachable(exit_status=255), "ssh refused the connection, so cat never ran"),
+    ],
+)
+def test_a_host_steward_never_reached_is_not_an_empty_one(command: Unreachable, why: str) -> None:
+    """``None`` from ``read`` must mean the file is absent, and nothing weaker.
+
+    ``run`` reports a missing ssh binary, a host that never answered, and an auth refusal
+    all as non-ok outcomes. Folding them into ``None`` told the caller the file was not
+    there — about a machine steward never reached (steward #136).
+    """
+    with pytest.raises(TransportError) as raised:
+        SshTransport(command=command).read("~/docker/x/compose.yaml")
+
+    assert f"{DEFAULT_USER}@{DEFAULT_HOST}" in str(raised.value), why
+
+
+def test_a_host_that_answered_and_said_no_is_still_an_empty_one() -> None:
+    """The other half: ssh connected, ``cat`` exited non-zero, the file is genuinely gone.
+
+    This is the answer ``read`` exists to give, and the one the fix must not swallow.
+    """
+    assert SshTransport(command=Unreachable(exit_status=1)).read("~/docker/x/nope") is None
+
+
 def test_the_default_transport_is_built_from_the_manifest(write_resident) -> None:
     target = target_for(resident(write_resident, deploy={"host": "other-nas"}).manifest)
     built = transport_for(target)
