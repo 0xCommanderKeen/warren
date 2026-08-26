@@ -911,15 +911,15 @@ def test_a_dropped_letter_goes_back_to_the_inbox_loudly(
 
 
 def test_the_delegated_session_is_told_who_sent_it_and_still_reads_its_charter(
-    fleet: Fleet, make_dispatcher: MakeDispatcher, store: Store
+    fleet: Fleet, make_dispatcher: MakeDispatcher
 ) -> None:
     """A letter is the last section, after skills and decisions; the charter still wins."""
     residents = fleet(sender_manifest(), receiver_manifest())
-    dispatcher = make_dispatcher(residents)
-    task = dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
-    receiver = next(r for r in residents if r.id == RECEIVER)
-
-    text = dispatcher.build_prompt(receiver, job(store, task.task_id))
+    runner = ScriptedRunner()
+    dispatcher = make_dispatcher(residents, runner)
+    dispatcher.delegator.delegate(sender=residents[0], handoff=handoff())
+    dispatcher.dispatch(NOW)
+    text = runner.requests[0].prompt
 
     assert prompt.DELEGATED_TITLE in text
     assert "Sender (sender-agent)" in text
@@ -934,14 +934,17 @@ def test_a_letter_from_somebody_no_longer_in_the_tree_still_names_them(
 ) -> None:
     """A sender that has since been retired is named by id rather than guessed at."""
     (receiver,) = fleet(receiver_manifest())
-    dispatcher = make_dispatcher([receiver])
-    letter = store.delegate_job(
+    runner = ScriptedRunner()
+    dispatcher = make_dispatcher([receiver], runner)
+    store.delegate_job(
         title="Read the background", assignee=RECEIVER, delegated_by="gone-agent", route="inbox"
     )
-    assert "gone-agent" in dispatcher.build_prompt(receiver, letter)
+    dispatcher.dispatch(NOW)
+    assert "gone-agent" in runner.requests[0].prompt
 
-    orphan = store.delegate_job(title="Read it", assignee=RECEIVER, delegated_by="", route="inbox")
-    assert "another resident" in dispatcher.build_prompt(receiver, orphan)
+    store.delegate_job(title="Read it", assignee=RECEIVER, delegated_by="", route="inbox")
+    dispatcher.dispatch(NOW)
+    assert "another resident" in runner.requests[1].prompt
 
 
 def test_only_a_resident_that_may_delegate_is_told_how(fleet: Fleet) -> None:

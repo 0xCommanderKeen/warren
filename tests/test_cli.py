@@ -309,7 +309,7 @@ def test_doctor_will_not_call_a_claimant_ready_because_it_looked_at_no_library(
     ``steward doctor residents/<id>`` is a shape validation accepts, and the library is at
     ``residents/../skills`` in every shape. Resolving it from the target instead found
     ``residents/<id>/skills``, got an unconfigured library back — and an unconfigured
-    library makes :func:`steward.scheduler.workdir_refusal` return ``None``, because a run
+    library makes :func:`steward.sessions.workdir_refusal` return ``None``, because a run
     that materializes no skills deletes nothing. The claimant was then called ready on the
     grounds that nothing had been checked.
     """

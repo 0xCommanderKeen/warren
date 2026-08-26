@@ -53,6 +53,14 @@ from steward.scheduler import (
     WakeHooks,
     load_scheduled,
 )
+from steward.sessions import (
+    Admission,
+    DelegatedWake,
+    Refusal,
+    ResidentSessions,
+    RoutineWake,
+    TaskWake,
+)
 from steward.skills import (
     Skill,
     SkillLibrary,
@@ -65,11 +73,13 @@ from steward.store import LedgerEntry, PauseRecord, Store
 from steward.watchdog import DockerSupervisor, Health, LocalProbe, ProcessSupervisor, Watchdog
 
 __all__ = [
+    "Admission",
     "ApiConfig",
     "ApiError",
     "BoardReport",
     "BudgetGuard",
     "BudgetStatus",
+    "DelegatedWake",
     "DelegationError",
     "Delegator",
     "Diagnostic",
@@ -90,8 +100,11 @@ __all__ = [
     "Outcome",
     "PauseRecord",
     "ProcessSupervisor",
+    "Refusal",
     "Resident",
     "ResidentManifest",
+    "ResidentSessions",
+    "RoutineWake",
     "RunRequest",
     "RunResult",
     "Runner",
@@ -102,6 +115,7 @@ __all__ = [
     "Skill",
     "SkillLibrary",
     "Store",
+    "TaskWake",
     "ValidationResult",
     "WakeHooks",
     "Watchdog",

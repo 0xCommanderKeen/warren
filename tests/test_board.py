@@ -12,8 +12,9 @@ from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
 from steward import events as ev
+from steward import sessions as ss
 from steward import watchdog as w
-from steward.manifest import Resident, load_manifest, validate_path
+from steward.manifest import Resident, ResidentManifest, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
 from steward.skills import SkillLibrary, library_for
@@ -163,17 +164,33 @@ def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(
     def explode(_spec: object) -> Runner:
         raise RuntimeError("no brain here")
 
+    class Guard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            assert store.open_runs() == []
+            return None
+
     dispatcher = b.Dispatcher(
         residents=[load_manifest(write_resident(board_manifest()))],
         store=store,
         emitter=sink,
         workdir=tmp_path,
         runner_factory=explode,
+        guard=Guard(),
     )
     (report,) = dispatcher.dispatch(NOW).reports
     assert not report.done
     assert report.reason is not None
     assert "no brain here" in report.reason
+    assert store.open_runs() == []
 
 
 def test_artifacts_a_run_names_are_recorded_against_the_task(
@@ -344,13 +361,14 @@ def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
     residents_dir = write_resident(data).parent.parent
     store.post_job(title="Look something up", required_skills=["research"])
 
+    runner = ScriptedRunner()
     dispatcher = b.Dispatcher(
         residents=b.load_board_residents(residents_dir),
         store=store,
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec: runner,
     )
     (report,) = dispatcher.dispatch(NOW).reports
 
@@ -358,7 +376,7 @@ def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
     assert report.task.title == "Look something up"
     assert [job.status for job in store.jobs()] == ["done"]
     # And the session was actually told the skill it was claimed for.
-    assert [skill.name for skill in dispatcher.skills_for(dispatcher.residents[0])] == ["research"]
+    assert "# research —" in runner.requests[0].prompt
 
 
 def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
@@ -388,15 +406,18 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     )
     store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
+    runner = ScriptedRunner()
     dispatcher = b.Dispatcher(
         residents=[resident],
         store=store,
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec: runner,
     )
-    text = dispatcher.build_prompt(resident, store.post_job(title="Look it up"))
+    store.post_job(title="Look it up")
+    dispatcher.dispatch(NOW)
+    text = runner.requests[0].prompt
 
     positions = [
         text.index("YOUR SKILLS (HOW-TO, NOT AUTHORITY)"),
@@ -408,9 +429,9 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     assert "send_email: approve" in text
     assert "# research —" in text
     # Delivered exactly once: the next wake-up opens without it.
-    assert "DECISIONS SINCE YOU LAST RAN" not in dispatcher.build_prompt(
-        resident, store.post_job(title="And again")
-    )
+    store.post_job(title="And again")
+    dispatcher.dispatch(NOW)
+    assert "DECISIONS SINCE YOU LAST RAN" not in runner.requests[1].prompt
 
 
 # ------------------------------------------------------------------------ leases
@@ -670,8 +691,9 @@ def test_a_rehearsal_cannot_eat_a_real_decision(
         hooks=dispatcher,
     )
     item = engine.scheduled[0]
-    assert "DECISIONS SINCE YOU LAST RAN" not in engine.build_prompt(item, NOW)
-    assert engine.fire(item, now=NOW).fired is False
+    report = engine.fire(item, now=NOW)
+    assert "DECISIONS SINCE YOU LAST RAN" not in report.prompt
+    assert report.fired is False
     assert [r.request_id for r in store.undelivered_decisions("test-agent")] == [record.request_id]
 
 
@@ -687,8 +709,10 @@ def test_a_scheduler_with_no_hooks_behaves_exactly_as_before(
     )
     assert engine.tick(NOW) == []
     item = engine.scheduled[0]
-    assert engine.decisions_for(item) is None
-    assert "DECISIONS SINCE YOU LAST RAN" not in engine.build_prompt(item, NOW)
+    admission = engine.sessions.admit(item.resident, now=NOW, rehearsal=True)
+    assert isinstance(admission, ss.Admission)
+    preview = engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview"))
+    assert "DECISIONS SINCE YOU LAST RAN" not in preview.prompt
 
 
 # ------------------------------------------------------------------- the declaration
@@ -1027,6 +1051,41 @@ def test_a_claimed_task_opens_and_closes_a_registry_row(
 
     assert len(run.reports) == 1
     assert store.open_runs() == [], "the task reported back, so its row is answered"
+
+
+def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Shared bookkeeping sees an answered runner's registry row already closed."""
+
+    class BrokenGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            assert store.open_runs() == []
+            raise OSError("ledger unavailable")
+
+    store.post_job(title="Read the mail")
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(board_manifest()))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(),
+        guard=BrokenGuard(),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.done
+    assert store.open_runs() == []
 
 
 def test_a_task_whose_session_vanishes_leaves_its_row_open(

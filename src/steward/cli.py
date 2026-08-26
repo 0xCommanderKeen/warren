@@ -77,8 +77,8 @@ from steward.scheduler import (
     default_state_path,
     load_scheduled,
     scheduler_liveness,
-    workdir_refusal,
 )
+from steward.sessions import workdir_refusal
 from steward.skills import Skill, SkillLibrary, effective_skills, library_for
 from steward.store import (
     APPROVAL_DECISIONS,

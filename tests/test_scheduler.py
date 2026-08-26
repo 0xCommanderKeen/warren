@@ -18,6 +18,7 @@ from steward import manifest as m
 from steward import prompt as p
 from steward import runners as r
 from steward import scheduler as s
+from steward import sessions as ss
 from steward import skills as sk
 from steward.store import Store
 
@@ -123,6 +124,16 @@ def emitted(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def routine_prompt(
+    engine: s.Scheduler, item: s.ScheduledRoutine, now: datetime | None = None
+) -> str:
+    """Preview a routine through the same lifecycle interface production crosses."""
+    moment = now or datetime.now(UTC)
+    admission = engine.sessions.admit(item.resident, now=moment, rehearsal=True)
+    assert isinstance(admission, ss.Admission)
+    return engine.sessions.run(admission, ss.RoutineWake(item.routine, "preview")).prompt
 
 
 # --------------------------------------------------------------------------- cron and tz
@@ -602,7 +613,7 @@ def test_artifacts_are_reported_when_the_runner_actually_knows_them(build, tmp_p
 
 def test_the_session_is_told_charter_voice_and_task(build) -> None:
     engine = build(DAILY)
-    prompt = engine.build_prompt(engine.scheduled[0])
+    prompt = routine_prompt(engine, engine.scheduled[0])
     assert "Flat, factual, short." in prompt
     assert "Never send email without explicit approval." in prompt
     assert prompt.index("Flat, factual, short.") < prompt.index("HARD RULES")
@@ -610,9 +621,10 @@ def test_the_session_is_told_charter_voice_and_task(build) -> None:
 
 
 def test_the_session_inherits_this_residents_identity(build) -> None:
-    engine = build(HOURLY)
-    item = engine.scheduled[0]
-    env = engine._session_env(item, "run-1")
+    mock = r.MockRunner()
+    engine = build(HOURLY, runner_factory=lambda _spec: mock)
+    engine.fire(engine.scheduled[0])
+    env = mock.requests[0].env
     assert env["BURROW_AGENT_ID"] == "claude-code:test-agent"
     assert env["BURROW_PROJECT"] == "test-agent"
     assert env["STEWARD_ROUTINE"] == "inbox-read"
@@ -641,7 +653,7 @@ EVENING = datetime(2026, 8, 24, 20, 30, tzinfo=UTC)  # 22:30 in Ljubljana
 
 def test_only_the_flagged_routine_is_told_to_close_the_day(journaling) -> None:
     engine = journaling(DAILY, HOURLY, CLOSER)
-    prompts = {item.routine.id: engine.build_prompt(item, EVENING) for item in engine.scheduled}
+    prompts = {item.routine.id: routine_prompt(engine, item, EVENING) for item in engine.scheduled}
 
     assert p.CLOSING_TITLE in prompts["close-of-day"]
     assert p.CLOSING_TITLE not in prompts["daily-summary"]
@@ -652,7 +664,7 @@ def test_only_the_flagged_routine_is_told_to_close_the_day(journaling) -> None:
 def test_the_closing_session_is_still_told_who_it_is_and_how_it_writes(journaling) -> None:
     """A close-of-day run is an ordinary session: identity, voice, journal, charter, task."""
     engine = journaling(CLOSER)
-    text = engine.build_prompt(engine.scheduled[0], EVENING)
+    text = routine_prompt(engine, engine.scheduled[0], EVENING)
 
     positions = [
         text.index("WHO YOU ARE"),
@@ -668,7 +680,7 @@ def test_the_closing_session_is_still_told_who_it_is_and_how_it_writes(journalin
 
 def test_the_closing_instruction_carries_the_markers_and_the_precedence(journaling) -> None:
     engine = journaling(CLOSER)
-    text = engine.build_prompt(engine.scheduled[0], EVENING)
+    text = routine_prompt(engine, engine.scheduled[0], EVENING)
     assert "<journal>" in text
     assert "</journal>" in text
     assert text.index("HARD RULES") < text.index(p.CLOSING_TITLE), (
@@ -681,7 +693,7 @@ def test_the_next_session_opens_with_the_last_entry(journaling) -> None:
     manifest = engine.scheduled[0].resident.manifest
     j.write_entry(manifest, date(2026, 8, 23), "close-of-day", "Two drafts are still waiting.")
 
-    text = engine.build_prompt(engine.scheduled[0], EVENING)
+    text = routine_prompt(engine, engine.scheduled[0], EVENING)
     assert "YOUR JOURNAL FROM LAST TIME" in text
     assert "Two drafts are still waiting." in text
     assert text.index("Two drafts are still waiting.") < text.index("HARD RULES")
@@ -689,7 +701,7 @@ def test_the_next_session_opens_with_the_last_entry(journaling) -> None:
 
 def test_a_resident_with_no_journal_yet_is_told_about_no_journal(journaling) -> None:
     engine = journaling(HOURLY)
-    assert "YOUR JOURNAL FROM LAST TIME" not in engine.build_prompt(engine.scheduled[0], EVENING)
+    assert "YOUR JOURNAL FROM LAST TIME" not in routine_prompt(engine, engine.scheduled[0], EVENING)
 
 
 def test_a_session_that_writes_its_own_entry_keeps_it(journaling, tmp_path: Path) -> None:
@@ -965,7 +977,7 @@ def test_an_edited_voice_takes_effect_on_the_next_load(
             state=s.SchedulerState(path=tmp_path / "state.json"),
             workdir=tmp_path,
         )
-        return engine.build_prompt(engine.scheduled[0])
+        return routine_prompt(engine, engine.scheduled[0])
 
     assert "Flat, factual, short." in prompt_now()
     soul = path.parent / "soul.md"
@@ -983,7 +995,7 @@ def test_an_edited_voice_takes_effect_on_the_next_load(
 def test_a_voiced_session_emits_no_event_of_its_own(build, tmp_path: Path) -> None:
     """Personality is expressed only in work products. It adds nothing to the village."""
     engine = build(HOURLY)
-    prompt = engine.build_prompt(engine.scheduled[0])
+    prompt = routine_prompt(engine, engine.scheduled[0])
     assert "Flat, factual, short." in prompt, "the voice really is in this session"
 
     engine.fire(engine.scheduled[0])
@@ -1103,7 +1115,7 @@ def provisioned(write_resident: ResidentWriter, write_skill, tmp_path: Path):
 
 def test_a_session_is_told_the_defaults_plus_its_own_grants(provisioned) -> None:
     engine = provisioned()
-    prompt = engine.build_prompt(engine.scheduled[0])
+    prompt = routine_prompt(engine, engine.scheduled[0])
     assert "YOUR SKILLS (HOW-TO, NOT AUTHORITY)" in prompt
     assert prompt.index("# write-journal") < prompt.index("# read-inbox")
     assert prompt.index("# read-inbox") < prompt.index("HARD RULES")
@@ -1111,8 +1123,10 @@ def test_a_session_is_told_the_defaults_plus_its_own_grants(provisioned) -> None
 
 
 def test_a_skill_removed_from_a_manifest_is_absent_from_the_next_session(provisioned) -> None:
-    with_grant = provisioned().build_prompt(provisioned().scheduled[0])
-    without = provisioned(granted=[]).build_prompt(provisioned(granted=[]).scheduled[0])
+    granted = provisioned()
+    ungranted = provisioned(granted=[])
+    with_grant = routine_prompt(granted, granted.scheduled[0])
+    without = routine_prompt(ungranted, ungranted.scheduled[0])
     assert "read-inbox" in with_grant
     assert "read-inbox" not in without
     assert "write-journal" in without, "the defaults are not something a manifest can drop"
@@ -1224,7 +1238,7 @@ def test_load_scheduled_refuses_a_tree_whose_grants_do_not_resolve(
 def test_a_scheduler_without_a_library_injects_and_writes_nothing(build, tmp_path: Path) -> None:
     """The behaviour before #12, unchanged: no library, no skills section, no files."""
     engine = build(HOURLY)
-    assert "YOUR SKILLS" not in engine.build_prompt(engine.scheduled[0])
+    assert "YOUR SKILLS" not in routine_prompt(engine, engine.scheduled[0])
     engine.fire(engine.scheduled[0])
     assert not (tmp_path / ".claude").exists()
 
