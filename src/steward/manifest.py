@@ -24,6 +24,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Self
 
@@ -1400,29 +1401,67 @@ def _check_routine_requirements(
     return diagnostics
 
 
-def _daily_fire_range(routine: Routine) -> tuple[int, int]:
-    """Return the least and most fires on any day in a complete leap year.
+@cache
+def _gregorian_cron_days() -> tuple[tuple[int, int, int], ...]:
+    """Return every observable Gregorian ``(month, day, cron-weekday)`` tuple."""
+    cycle_start = datetime(2000, 1, 1, tzinfo=UTC)
+    representatives: set[tuple[int, int, int]] = set()
+    for offset in range(146_097):  # exactly one 400-year Gregorian cycle
+        day = cycle_start + timedelta(days=offset)
+        representatives.add((day.month, day.day, (day.weekday() + 1) % 7))
+    return tuple(sorted(representatives))
 
-    Five-field cron has no year field.  A leap year therefore contains every month and
-    day-of-month it can name, as well as every weekday.  Fixed-offset datetimes are
-    deliberate: the expression names local wall-clock occurrences, while DST resolution
-    belongs to the scheduler after the manifest's daily cadence has been established.
+
+def _cron_values(field: str, lowest: int, highest: int) -> set[int]:
+    """Expand one field from the deliberately small five-field manifest grammar."""
+    values: set[int] = set()
+    for item in field.split(","):
+        base, slash, step_text = item.partition("/")
+        step = int(step_text) if slash else 1
+        if base == "*":
+            start, end = lowest, highest
+        elif "-" in base:
+            start_text, end_text = base.split("-", 1)
+            start, end = int(start_text), int(end_text)
+        else:
+            start = int(base)
+            end = highest if slash else start
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def _daily_fire_range(routine: Routine) -> tuple[int, int]:
+    """Return the least and most fires over every distinct cron calendar day.
+
+    A five-field cron date predicate can observe only month, day-of-month, and weekday.
+    The Gregorian calendar repeats those alignments every 400 years (146,097 days), so
+    one representative of each ``(month, day, weekday)`` tuple is exhaustive.  There are
+    only 366 possible month/day pairs times seven weekdays: at most 2,562 probes rather
+    than 146,097.  Fixed-offset datetimes are deliberate: cron names local wall-clock
+    occurrences; DST resolution remains the scheduler's separate responsibility.
     """
-    year_start = datetime(2024, 1, 1, tzinfo=UTC)
-    least = MAX_CLOSER_FIRES + 1
-    most = 0
-    for offset in range(366):
-        start = year_start + timedelta(days=offset)
-        end = start + timedelta(days=1)
-        cursor = croniter(routine.schedule, start - timedelta(seconds=1))
-        fires = 0
-        while fires <= MAX_CLOSER_FIRES:
-            if cursor.get_next(datetime) >= end:
-                break
-            fires += 1
-        least = min(least, fires)
-        most = max(most, fires)
-    return least, most
+    minute, hour, dom, month, dow = routine.schedule.split()
+    fires_on_matching_day = len(_cron_values(minute, 0, 59)) * len(_cron_values(hour, 0, 23))
+    months = _cron_values(month, 1, 12)
+    month_days = _cron_values(dom, 1, 31)
+    weekdays = {value % 7 for value in _cron_values(dow, 0, 7)}
+    dom_wildcard = dom == "*"
+    dow_wildcard = dow == "*"
+
+    counts: list[int] = []
+    for candidate_month, candidate_day, candidate_weekday in _gregorian_cron_days():
+        date_matches = candidate_day in month_days
+        weekday_matches = candidate_weekday in weekdays
+        if dom_wildcard:
+            calendar_matches = weekday_matches
+        elif dow_wildcard:
+            calendar_matches = date_matches
+        else:
+            calendar_matches = date_matches or weekday_matches
+        counts.append(
+            fires_on_matching_day if candidate_month in months and calendar_matches else 0
+        )
+    return min(counts), max(counts)
 
 
 def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
@@ -1451,6 +1490,19 @@ def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagno
         for index, routine in closers[1:]
     ]
     for index, routine in closers:
+        if not routine.enabled:
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"routines[{index}].enabled",
+                    problem=(
+                        f"routine {routine.id!r} closes the day but is disabled and "
+                        "therefore cannot close any day"
+                    ),
+                    example="enabled: true",
+                )
+            )
+            continue
         least, most = _daily_fire_range(routine)
         if least == most == 1:
             continue

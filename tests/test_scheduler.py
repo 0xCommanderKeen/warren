@@ -970,6 +970,7 @@ def test_a_routine_that_fires_hourly_may_not_close_the_day(write_resident: Resid
         "30 22 * * 1",  # weekly, including the Monday the old probe happened to use
         "30 22 31 * *",  # month-end
         "30 22 * 6 *",  # every day, but only in June
+        "30 22 1-30 * 0,2-6",  # 2024 is covered; Monday 2025-03-31 is not
     ],
 )
 def test_a_close_of_day_routine_must_fire_every_day(
@@ -986,6 +987,19 @@ def test_a_routine_that_fires_once_each_day_may_close_it(
     path = write_resident(manifest_with(CLOSER))
     scheduled = s.load_scheduled(path.parent)
     assert scheduled[0].routine.journal == "close_of_day"
+
+
+def test_a_disabled_routine_cannot_close_the_day(write_resident: ResidentWriter) -> None:
+    path = write_resident(manifest_with({**CLOSER, "enabled": False}))
+    with pytest.raises(s.SchedulerError, match=r"disabled.*cannot close any day"):
+        s.load_scheduled(path.parent)
+
+
+def test_the_gregorian_cadence_bound_has_one_probe_per_observable_calendar_day() -> None:
+    days = m._gregorian_cron_days()
+    assert len(days) == 366 * 7
+    assert len(set(days)) == len(days)
+    assert (3, 31, 1) in days  # Monday 2025-03-31, the cross-year regression case
 
 
 def test_an_edited_voice_takes_effect_on_the_next_load(
