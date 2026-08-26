@@ -16,6 +16,7 @@ from conftest import (
     StubWriter,
     valid_manifest,
 )
+from steward import cli
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
@@ -83,6 +84,94 @@ def test_validate_json_lists_valid_residents(
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["residents"][0]["agent_id"] == "claude-code:test-agent"
+
+
+def test_validate_with_no_path_fails_when_it_found_nothing(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The merge gate must not pass green having validated nothing (steward #137).
+
+    CI runs a bare ``uv run steward validate``, which falls back to a *relative*
+    ``residents``, resolved against the process cwd. Rename the tree, move it, or change
+    the job's working directory and this used to print ``ok: 0 valid resident(s)`` and
+    exit 0 — the step whose stated purpose is that an invalid manifest must never merge,
+    reporting success without reading a manifest.
+    """
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(main, ["validate"])
+
+    assert result.exit_code == 1, result.output
+    assert "failed:" in result.output
+    assert "this run validated nothing" in result.output
+
+
+def test_validate_with_no_path_names_the_tree_it_actually_looked_in(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A green run in the wrong directory should be visible in the log by its path."""
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(main, ["validate"])
+
+    assert str((tmp_path / "residents").resolve()) in result.output
+
+
+def test_validate_with_no_path_reports_the_failure_as_json_too(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both reporters read the same result, so neither can disagree about ``ok``."""
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(main, ["validate", "--format", "json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["diagnostics"][0]["severity"] == "error"
+
+
+def test_validate_with_no_path_fails_even_if_the_empty_tree_warning_is_reworded(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate keys on the count, not on the wording (steward #137).
+
+    An earlier draft promoted the diagnostic whose ``problem`` matched
+    ``NO_MANIFESTS_PROBLEM`` exactly, which fails *open*: reword that string at the
+    source, or reach zero residents down a path that words it differently, and the
+    promotion matches nothing and CI silently goes back to exiting 0 on a run that
+    validated nothing. A merge gate has to fail closed.
+    """
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "NO_MANIFESTS_PROBLEM", "something else entirely")
+
+    result = runner.invoke(main, ["validate"])
+
+    assert result.exit_code == 1, result.output
+    assert "failed:" in result.output
+
+
+def test_validate_on_a_named_empty_tree_is_still_only_a_warning(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Asking about an empty directory is a fair question, and gets a fair answer.
+
+    Only the *defaulted* run is held to "you must have found something": naming a tree is
+    a deliberate act, and ``steward validate ./drafts`` before anything is drafted is not
+    a failure.
+    """
+    empty = tmp_path / "drafts"
+    empty.mkdir()
+
+    result = runner.invoke(main, ["validate", str(empty)])
+
+    assert result.exit_code == 0, result.output
+    assert "ok:" in result.output
+    assert "warning" in result.output
 
 
 def test_validate_rejects_a_missing_path(runner: CliRunner, tmp_path: Path) -> None:
