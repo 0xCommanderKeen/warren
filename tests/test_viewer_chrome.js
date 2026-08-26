@@ -63,6 +63,13 @@ assert.match(html, /Declared by the Steward manifest · authoritative identity, 
   "charter identity is explicitly separated from observed activity");
 assert.match(html, /Read-only Steward journal · newest first · latest/,
   "journal provenance, ordering, and bound are visible");
+assert.match(html, /observed written/, "journal observation recency is distinct from fetched content");
+assert.match(html, /contents are not yet refreshed/,
+  "observed writes cannot masquerade as refreshed journal text");
+assert.match(html, /text only; never opened or fetched/,
+  "journal paths are explicitly non-navigable evidence");
+assert.match(html, /illuminated desk, paper, and lamp/,
+  "the code-drawn writing spot has an accessible description");
 assert.match(html, /Steward unreachable/, "journal connectivity failure is explicit");
 assert.match(html, /Last successful fetch/, "stale journal state names its last successful fetch");
 assert.match(html, /This resident has written nothing yet/,
@@ -77,6 +84,8 @@ assert.match(html, /BurrowIdentity\.refresh\(identityState, stewardConfig/,
 assert.match(html, /NURSERY_ID = "nursery"/, "the town hall exposes the resident nursery");
 assert.match(html, /src="\/sprites\.js"[\s\S]*src="\/projection\.js"/,
   "the shared sprite authority loads before projection and nursery consumers");
+assert.match(html, /src="\/journal-observations\.js"[\s\S]*src="\/projection\.js"/,
+  "journal validation authority loads before the browser protocol adapter");
 assert.match(html, /data-open-nursery/, "fleet operations links back to the nursery");
 assert.match(html, /data-create-resident/, "the nursery exposes its accessible declaration form");
 assert.match(nursery, /deploy: true|deploy:true/,

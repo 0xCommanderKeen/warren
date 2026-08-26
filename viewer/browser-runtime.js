@@ -5,8 +5,9 @@
 (function (root, factory) {
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
-    : { validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
-      approvalRejections,
+    : { validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+      routineRejections, taskRejections,
+      approvalRejections, journalRejections,
       foldEvents, foldArtifacts, reduce };
   const fleet = typeof module === "object" && module.exports
     ? require("./fleet-operations.js") : root.BurrowFleet;
@@ -16,10 +17,12 @@
     ? require("./routine-ledger.js") : root.BurrowRoutines;
   const approvals = typeof module === "object" && module.exports
     ? require("./approval-knocks.js") : root.BurrowApprovals;
-  const runtime = factory(projection, fleet, jobs, routines, approvals);
+  const journals = typeof module === "object" && module.exports
+    ? require("./journal-observations.js") : root.BurrowJournals;
+  const runtime = factory(projection, fleet, jobs, routines, approvals, journals);
   if (typeof module === "object" && module.exports) module.exports = runtime;
   else root.BurrowBrowser = runtime;
-})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines, approvals) {
+})(typeof globalThis === "object" ? globalThis : this, function (projection, fleet, jobs, routines, approvals, journals) {
   const MAX_TRANSPORT_EVENTS = 4000;
 
   function createBrowserRuntime(options) {
@@ -53,6 +56,7 @@
     let fleetState = fleet.createFleetState();
     let jobState = jobs.createState();
     let approvalState = approvals.createState();
+    let journalState = journals.createState();
     let residentReport = { residents: [], diagnosticResidents: [], diagnostics: [], available: false };
 
     function publishFleet(at = now(), routineBatch = [], reset = false,
@@ -60,7 +64,7 @@
       onFleet({ state: fleetState, residents: residentReport.residents,
         diagnosticResidents: residentReport.diagnosticResidents,
         diagnostics: residentReport.diagnostics, routineBatch, taskEvidence, approvalEvidence,
-        jobState, approvalState, cursor, reset, eventEvidence,
+        jobState, approvalState, journalState, cursor, reset, eventEvidence,
         directoryAvailable: residentReport.available, villagers, transport, now: at });
     }
 
@@ -75,26 +79,62 @@
       souls = residentSouls.concat(legacySouls);
     }
 
-    function project(lines, reset = false, publishRoutineEvidence = true) {
+    function project(lines, reset = false, publishRoutineEvidence = true, grouped = false) {
       if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState();
-        jobState = jobs.createState(); approvalState = approvals.createState(); }
-      const batch = projection.parseEvents(lines);
+        jobState = jobs.createState(); approvalState = approvals.createState();
+        journalState = journals.createState(); }
+      const windows = grouped ? projection.parseEventWindows(lines, MAX_TRANSPORT_EVENTS) : null;
+      const batch = windows ? windows.tail : projection.parseEvents(lines);
+      const journalBatch = windows ? windows.full : batch;
       // The strict v0 adapter owns parsing and validation for every browser
       // consumer. Passing its validated batch and task-only rejection metadata
       // keeps boards/approvals diagnostic without a second, weaker raw parser.
       jobs.foldValidated(jobState, batch, { isValidatedBatch: projection.isValidatedBatch,
-        rejections: projection.taskRejections(batch) });
-      approvals.foldValidated(approvalState, batch, {
+        rejections: projection.taskRejections(journalBatch) });
+      journals.foldValidated(journalState, journalBatch, {
         isValidatedBatch: projection.isValidatedBatch,
-        rejections: projection.approvalRejections(batch),
+        rejections: projection.journalRejections(journalBatch),
       });
-      projection.foldEvents(agents, batch);
+      const approvalBatch = windows ? approvals.lifecycleWindow(journalBatch,
+        MAX_TRANSPORT_EVENTS, journals.records(journalState), {
+          isValidatedBatch: projection.isValidatedBatch,
+          validatedSelection: projection.validatedSelection,
+        }) : batch;
+      approvals.foldValidated(approvalState, approvalBatch, {
+        isValidatedBatch: projection.isValidatedBatch,
+        rejections: projection.approvalRejections(journalBatch),
+        ordinalBatch: windows ? journalBatch : null,
+        ordinalForEvent: windows ? event => journalState.ordinalForEvent(event) : null,
+        sequence: windows ? journalState.sequence : null,
+      });
+      if (windows) {
+        const inTail = new Set(batch);
+        const retainedBeforeWindow = new Set(journals.records(journalState)
+          .map(record => record.event).filter(event => !inTail.has(event)));
+        for (const event of approvalBatch) {
+          const record = event.type === "needs_human" ?
+            approvalState.recordForEvent(event) : null;
+          if (!inTail.has(event) && record && !record.resolution && !record.collided) {
+            retainedBeforeWindow.add(event);
+          }
+        }
+        const positions = new Map(journalBatch.map((event, index) => [event, index]));
+        const retainedEvidence = [...retainedBeforeWindow]
+          .sort((left, right) => positions.get(left) - positions.get(right));
+        // Only bounded canonical journals and still-pending exact requests for
+        // those journal residents bypass the ordinary transport tail. They
+        // establish village identity without leaking other early evidence into
+        // boards, Fleet activity, or acknowledgement publications.
+        projection.foldEvents(agents, retainedEvidence, journalState);
+      }
+      projection.foldEvents(agents, batch, journalState);
       projection.foldArtifacts(artifacts, batch);
       const at = now();
-      fleet.foldFleet(fleetState, batch, lines.length - batch.length,
-        projection.routineRejections(batch).length, at);
-      villagers = projection.reduce(agents, at, souls, approvalState);
-      onProjection({ villagers, artifacts, souls, approvalState, now: at });
+      fleet.foldFleet(fleetState, batch, windows ? windows.rejected : lines.length - batch.length,
+        projection.routineRejections(journalBatch).length, at,
+        event => journalState.ordinalForEvent(event));
+      villagers = projection.reduce(agents, at, souls, approvalState, journalState);
+      onProjection({ villagers, artifacts, souls, approvalState, journalState, now: at });
       const taskEvents = batch.filter(event => jobs.TYPES.has(event.type));
       const approvalEvents = batch.filter(event => event.type === "needs_human_resolved");
       publishFleet(at, publishRoutineEvidence ?
@@ -172,8 +212,7 @@
           const lines = text.split("\n").filter(Boolean);
           const previousCursor = eventCursor;
           eventCursor = evRes.headers.get("X-Burrow-Cursor") || 0;
-          project(previousCursor === 0 || reset ?
-            lines.slice(-MAX_TRANSPORT_EVENTS) : lines, reset);
+          project(lines, reset, true, previousCursor === 0 || reset);
           setTransport("polling");
           if (soulRes && soulRes.ok) {
             try {
@@ -331,7 +370,7 @@
 
     function snapshot() {
       return { villagers, artifacts, souls, cursor: eventCursor, transport,
-        transportStatus, fleetState, jobState, approvalState, residentReport };
+        transportStatus, fleetState, jobState, approvalState, journalState, residentReport };
     }
 
     onTransport(transport);

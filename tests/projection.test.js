@@ -14,7 +14,8 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
-  MAX_ARTIFACTS, parseEvents, routineRejections, foldEvents, foldArtifacts, nameArtifacts,
+  MAX_ARTIFACTS, parseEvents, parseEventWindows, validatedSelection, routineRejections,
+  foldEvents, foldArtifacts, nameArtifacts,
   describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
 
@@ -79,6 +80,28 @@ describe("event filtering", () => {
   it("survives an empty log", () => {
     assert.deepEqual(reduce([], NOW, []), []);
     assert.deepEqual(reduce([], NOW, undefined), []);
+  });
+});
+
+describe("grouped event windows", () => {
+  it("counts only full-response validation rejections, never valid records clipped from the tail", () => {
+    const valid = index => protocolLine({ts:new Date(NOW + index).toISOString(),
+      agent_id:`codex:${index}`,type:"tool_called",payload:{tool:"Read"}});
+    const windows = parseEventWindows([
+      valid(0), "{", ...Array.from({length:4},(_,index)=>valid(index+1)), "null",
+    ], 4);
+    assert.equal(windows.full.length,5);
+    assert.equal(windows.tail.length,3,
+      "the malformed raw record inside the newest-four window still occupies one slot");
+    assert.equal(windows.rejected,2,
+      "malformed records both before and inside the tail count exactly once");
+    assert.equal(windows.tailRejected,1);
+    assert.strictEqual(validatedSelection(windows.full,windows.full.slice(0,1))[0],
+      windows.full[0]);
+    assert.throws(()=>validatedSelection(windows.full,[{}]),/cannot introduce unvalidated/,
+      "bounded selectors cannot use the marker to smuggle unchecked events into folds");
+    assert.throws(()=>validatedSelection(windows.full,[windows.full[0],windows.full[0]]),
+      /distinct source records/,"validated selections cannot replay one append twice");
   });
 });
 

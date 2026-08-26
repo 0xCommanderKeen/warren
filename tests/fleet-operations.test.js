@@ -27,6 +27,50 @@ test("recent activity stays bounded while incremental batches remain searchable"
   assert.equal(fleet.filterRecent(state, { project: "life" }).length, 0);
 });
 
+test("activity merges journals into one newest-200 append-ordered window", () => {
+  const state = fleet.createFleetState();
+  const ordinary = Array.from({length:200}, (_, index) => event(index, {
+    // Producer clocks are deliberately reversed and heavily tied. Append
+    // ordinals, not timestamps, own Fleet recency.
+    ts: new Date(BASE + (index % 2)).toISOString(),
+    agent_id:`ordinary-${index}`, project:index % 2 ? "odd" : "even",
+  }));
+  let ordinal = 0;
+  fleet.foldFleet(state, ordinary, 0, 0, BASE, () => String(++ordinal));
+  const journals = Array.from({length:40}, (_, index) => {
+    const journal = event(-10_000 - index, {source:"steward",
+      agent_id:`journal-${index}`,project:index % 2 ? "odd" : "even",
+      type:"journal_written",payload:{routine:"close-of-day",
+        day:`2026-07-${String(index % 28 + 1).padStart(2,"0")}`,
+        path:`/journal/${index}.md`}});
+    return {event:journal,ts:Date.parse(journal.ts),agent_id:journal.agent_id,
+      project:journal.project,source:journal.source,state:"journal observed",
+      ordinal:String(201 + index)};
+  });
+  const merged = fleet.recentActivity(state, journals);
+  assert.equal(merged.length, fleet.MAX_RECENT_EVENTS);
+  assert.deepEqual(merged.slice(0,40).map(entry => entry.agent_id),
+    journals.slice().reverse().map(entry => entry.agent_id));
+  assert.equal(merged.at(-1).ordinal,"41",
+    "the forty journals displace the forty oldest ordinary entries after merging");
+  assert.equal(new Set(merged.map(entry => entry.event)).size,merged.length);
+  assert.equal(fleet.filterEntries(merged,{source:"steward"}).length,40);
+  assert.equal(fleet.filterEntries(merged,{source:"claude-code"}).length,160);
+  assert.equal(fleet.filterEntries(merged,{project:"odd"}).length,100);
+  assert.deepEqual(fleet.optionsForEntries(merged,"source"),["claude-code","steward"]);
+});
+
+test("activity merge is stable for equal ordinals and never duplicates one event", () => {
+  const state = fleet.createFleetState(), shared = event(0);
+  fleet.foldFleet(state,[shared],0,0,BASE,()=>"7");
+  const other = {...event(999),agent_id:"other"};
+  const merged = fleet.recentActivity(state,[
+    {event:shared,ordinal:"7"},
+    {event:other,ordinal:"7"},
+  ]);
+  assert.deepEqual(merged.map(entry=>entry.event),[shared,other]);
+});
+
 test("outstanding needs-human means the latest retained event still needs a human", () => {
   const state = fleet.createFleetState();
   fleet.foldFleet(state, [

@@ -426,6 +426,30 @@ test("capacity omits whole old approvals instead of degrading them into unresolv
   assert.equal(village.some(v=>v.id==="codex:capacity-0"),false);
 });
 
+test("grouped lifecycle window retains bounded journal-predecessor truth in append order", () => {
+  const request=knock("retained");
+  const activity={...request,type:"tool_called",payload:{tool:"Read"}};
+  const journal={...request,source:"steward",type:"journal_written",
+    payload:{routine:"close-of-day",day:"2026-08-25",path:"/journal/2026-08-25.md"}};
+  const chatter=Array.from({length:4000},(_,index)=>({...activity,
+    agent_id:`codex:other-${index}`,payload:{tool:"Read",index}}));
+  for (const suffix of [[], [resolved("retained")],
+    [{...request,payload:{...request.payload,message:"Different immutable question"}}]]) {
+    const raw=[request,activity,journal,...suffix,...chatter];
+    const full=projection.parseEvents(raw);
+    const selected=approvals.lifecycleWindow(full,4000,[{event:full[2]}],
+      {isValidatedBatch:projection.isValidatedBatch,
+        validatedSelection:projection.validatedSelection});
+    assert.equal(selected.length,4000);
+    assert.equal(new Set(selected).size,selected.length);
+    assert.equal(selected.includes(request),true,"canonical request is retained");
+    assert.deepEqual(selected,full.filter(event=>selected.includes(event)),
+      "selection never changes authoritative append order");
+    for(const event of suffix) assert.equal(selected.includes(event),true,
+      "closing or collision evidence is retained with its request");
+  }
+});
+
 test("acknowledgement requires an exact post-boundary closing event and reset is ambiguous", () => {
   let now=1000, timer;
   const acks=approvals.createAcknowledgements({timeoutMs:10,now:()=>now,

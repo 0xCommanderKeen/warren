@@ -19,10 +19,12 @@
     task_started: "working", tool_called: "working", artifact_produced: "working",
     heartbeat: "working", needs_human: "needs human", tool_failed: "failed",
     idle: "resting", session_ended: "ended",
+    journal_written: "journal observed",
   };
   function createFleetState() {
     return { recent: [], routineRecent: [], routineOrphans: [], routineKeys: [], malformed: 0,
-      routineMalformed: 0, routineCapacityDropped: 0, routineSequence: 0 };
+      routineMalformed: 0, routineCapacityDropped: 0, routineSequence: 0,
+      activitySequence: "0" };
   }
   function routineKey(event) {
     return `${event.source}\0${event.agent_id}\0${event.payload.routine}`;
@@ -123,17 +125,58 @@
     const orphans = orphan.slice(0, MAX_ROUTINE_ORPHANS).map(group => group.close);
     return { entries: kept, orphans, dropped };
   }
-  function foldFleet(state, events, rejected = 0, routineRejected = 0, now = null) {
+  function nextActivityOrdinal(state) {
+    let current;
+    try { current = BigInt(state.activitySequence || "0"); }
+    catch (_) { current = 0n; }
+    current += 1n;
+    state.activitySequence = current.toString();
+    return state.activitySequence;
+  }
+  function validOrdinal(value) {
+    return typeof value === "string" && /^\d+$/.test(value);
+  }
+  function activityOrdinal(state, shared) {
+    if (!validOrdinal(shared)) return nextActivityOrdinal(state);
+    let current;
+    try { current = BigInt(state.activitySequence || "0"); }
+    catch (_) { current = 0n; }
+    const incoming = BigInt(shared);
+    if (incoming > current) state.activitySequence = shared;
+    return shared;
+  }
+  function compareActivity(left, right) {
+    const leftOrdinal = validOrdinal(left && left.ordinal) ? BigInt(left.ordinal) : 0n;
+    const rightOrdinal = validOrdinal(right && right.ordinal) ? BigInt(right.ordinal) : 0n;
+    if (leftOrdinal !== rightOrdinal) return leftOrdinal > rightOrdinal ? -1 : 1;
+    return 0;
+  }
+  function recentActivity(state, journalEntries = []) {
+    const seen = new Set(), merged = [];
+    for (const entry of state.recent.concat(journalEntries || [])) {
+      if (!entry || !entry.event || seen.has(entry.event)) continue;
+      seen.add(entry.event); merged.push(entry);
+    }
+    merged.sort(compareActivity);
+    return merged.slice(0, MAX_RECENT_EVENTS);
+  }
+  function foldFleet(state, events, rejected = 0, routineRejected = 0, now = null,
+      ordinalForEvent = null) {
     state.malformed += Math.max(0, Number(rejected) || 0);
     state.routineMalformed += Math.max(0, Number(routineRejected) || 0);
     let receivedRoutine = false;
     for (const event of events) {
+      // Journal history has first-append identity and collision semantics that
+      // the generic timestamp-sorted activity list cannot preserve.
+      if (event.type === "journal_written") continue;
       const routine = event.type.startsWith("routine_");
       const target = routine ? state.routineRecent : state.recent;
+      const sharedOrdinal = typeof ordinalForEvent === "function" ? ordinalForEvent(event) : null;
       target.push({ event, ts: Date.parse(event.ts) || 0, agent_id: event.agent_id,
         project: event.project, source: event.source,
         state: EVENT_STATE[event.type] || "unknown",
-        sequence: routine ? nextRoutineSequence(state) : 0 });
+        sequence: routine ? nextRoutineSequence(state) : 0,
+        ordinal: routine ? null : activityOrdinal(state, sharedOrdinal) });
       if (routine) {
         receivedRoutine = true;
       }
@@ -150,7 +193,7 @@
       state.routineKeys = [...new Set(state.routineRecent.map(entry => routineKey(entry.event)))];
     }
     for (const target of [state.recent]) {
-      target.sort((a, b) => b.ts - a.ts);
+      target.sort(compareActivity);
       if (target.length > MAX_RECENT_EVENTS) target.length = MAX_RECENT_EVENTS;
     }
     return state;
@@ -167,6 +210,7 @@
       (!text(filters.villager) || text(entry.agent_id) === text(filters.villager));
   }
   function filterRecent(state, filters) { return state.recent.filter(e => matches(e, filters)); }
+  function filterEntries(entries, filters) { return entries.filter(e => matches(e, filters)); }
   function outstandingNeeds(state) {
     const latest = new Map();
     for (const entry of state.recent) if (!latest.has(entry.agent_id)) latest.set(entry.agent_id, entry);
@@ -174,6 +218,10 @@
   }
   function optionsFor(state, key) {
     return [...new Set(state.recent.map(entry => entry[key]).filter(Boolean))]
+      .sort((a, b) => String(a).localeCompare(String(b)));
+  }
+  function optionsForEntries(entries, key) {
+    return [...new Set(entries.map(entry => entry[key]).filter(Boolean))]
       .sort((a, b) => String(a).localeCompare(String(b)));
   }
   /* status_ref is only an opaque locator for where status is established. Its
@@ -213,6 +261,7 @@
     MAX_ROUTINE_ORPHANS,
     DEFAULT_STALE_MS,
     EVENT_STATE, createFleetState, foldFleet,
-    filterRecent, outstandingNeeds, optionsFor, capabilityStatus,
+    filterRecent, filterEntries, recentActivity, compareActivity,
+    outstandingNeeds, optionsFor, optionsForEntries, capabilityStatus,
     residentDirectory, moveFocus };
 });

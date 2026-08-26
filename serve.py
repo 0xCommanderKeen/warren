@@ -40,6 +40,7 @@ import urllib.request
 import weakref
 
 from approval_protocol import json_semantic_key, structured_approval, thaw_json
+from journal_observations import reduce_indexed as reduce_journal_indexed
 from hooks import durable
 import notification_persistence
 from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES, validate_event
@@ -913,6 +914,43 @@ def _approval_keep_indexes(parsed):
     return keep, isolated
 
 
+def _journal_approval_keep_indexes(parsed, retained_journal_indexes):
+    """Approval truth required by retained journal residents.
+
+    A journal observation can be separated from a structured knock on either
+    side by arbitrary ordinary activity and by more than the viewer's raw tail.
+    Select approval authority from the complete segment, then retain every
+    selected lifecycle for an agent with retained canonical journal authority.
+    Pending requests override both journals and later ordinary evidence, so
+    their append position relative to the journal is irrelevant.  Keeping the
+    selected close/collision with its request prevents reset from resurrecting
+    terminal authority.  ``_approval_keep_indexes`` remains the single owner of
+    request-ID collision, close, orphan, capacity, and append-order semantics.
+    """
+    approval_keep, _ = _approval_keep_indexes(parsed)
+    if not approval_keep:
+        return set()
+    journal_agents = {
+        agent_id for agent_id, indexes in retained_journal_indexes.items()
+        if indexes
+    }
+    eligible_request_ids = set()
+    for index, event in parsed:
+        if index not in approval_keep:
+            continue
+        shape = structured_approval(event)
+        if shape is None:
+            continue
+        if event.get("agent_id") in journal_agents:
+            eligible_request_ids.add(shape.request_id)
+    return {
+        index for index, event in parsed
+        if index in approval_keep
+        and isinstance(event.get("payload"), dict)
+        and event["payload"].get("request_id") in eligible_request_ids
+    }
+
+
 def carry_forward(lines, now_ms):
     """The bounded tail that preserves both village and job-board projections.
 
@@ -920,11 +958,122 @@ def carry_forward(lines, now_ms):
     task ID because Steward posts centrally and emits later transitions under
     the claimant; the two lifecycles intentionally have different owners.
     """
-    # The browser deliberately ignores anything older than this global window.
-    # Applying it here too prevents rotation from resurrecting a sparse agent.
-    lines = lines[-VIEWER_LINE_LIMIT:]
-    parsed = []
+    # Journal authority is independent from the ordinary viewer tail. Derive
+    # its bounded canonical/collision selection from the complete segment
+    # before clipping ordinary history. Absolute line indexes let the final
+    # merge preserve append order without duplicating specialized records.
+    full_parsed = []
     for i, line in enumerate(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if (not isinstance(event, dict) or not event.get("agent_id")
+                or event.get("type") not in EVENT_TYPES
+                or validate_event(event)):
+            continue
+        full_parsed.append((i, event))
+    journal_parsed = [(i, event) for i, event in full_parsed
+                      if event.get("type") == "journal_written"]
+    journal_records, _ = reduce_journal_indexed(journal_parsed)
+    journal_canonical_keep = {
+        record["canonical"][0] for record in journal_records.values()
+    }
+    journal_keep = journal_canonical_keep | {
+        record["conflict"][0] for record in journal_records.values()
+        if record["conflict"] is not None
+    }
+    retained_journal_indexes = collections.defaultdict(set)
+    for i, event in journal_parsed:
+        if i in journal_canonical_keep:
+            retained_journal_indexes[event["agent_id"]].add(i)
+    # Every retained journal needs the ordinary facts on both sides of the
+    # short-lived overlay. Select them per canonical journal segment rather
+    # than merely per agent: a resident may retain several days separated by
+    # ordinary activity, and the newest event after each observation is just as
+    # authoritative as its predecessor. Keeping only session_ended here would
+    # let rotation resurrect journal animation over a later tool, idle, knock,
+    # heartbeat, or other ordinary state.
+    def projection_ordinary(event):
+        event_type = event.get("type", "")
+        return (event_type not in TASK_EVENT_TYPES
+                and event_type != "journal_written"
+                and event_type != "needs_human_resolved"
+                and not event_type.startswith("routine_"))
+
+    latest_ordinary = {}
+    journal_predecessor_keep = set()
+    journal_successors = {}
+    active_journal = {}
+    for i, event in full_parsed:
+        agent_id = event.get("agent_id")
+        if agent_id not in retained_journal_indexes:
+            continue
+        if i in retained_journal_indexes[agent_id]:
+            predecessor = latest_ordinary.get(agent_id)
+            if predecessor is not None:
+                journal_predecessor_keep.add(predecessor[0])
+            active_journal[agent_id] = i
+            continue
+        if not projection_ordinary(event):
+            continue
+        latest_ordinary[agent_id] = (i, event)
+        if agent_id in active_journal:
+            journal_successors[active_journal[agent_id]] = (i, event)
+    journal_successor_keep = {item[0] for item in journal_successors.values()}
+
+    # Heartbeats refresh liveness without entering the visible event history,
+    # and lineage may have been declared on an older ordinary event. Preserve
+    # those tiny dependencies for every selected neighbour so reset reconstructs
+    # the same displayed action and resident/visitor ownership as incremental
+    # folding, rather than merely the same top-level event type.
+    journal_neighbour_keep = journal_predecessor_keep | journal_successor_keep
+    journal_support_keep = set()
+    latest_nonheartbeat = {}
+    latest_lineage = {}
+    for i, event in full_parsed:
+        agent_id = event.get("agent_id")
+        if i in journal_neighbour_keep:
+            if event["type"] == "heartbeat" and agent_id in latest_nonheartbeat:
+                journal_support_keep.add(latest_nonheartbeat[agent_id][0])
+            if agent_id in latest_lineage:
+                journal_support_keep.add(latest_lineage[agent_id][0])
+        if not projection_ordinary(event):
+            continue
+        if event["type"] != "heartbeat":
+            latest_nonheartbeat[agent_id] = (i, event)
+        payload = event.get("payload")
+        if isinstance(payload, dict) and payload.get("parent_agent_id"):
+            latest_lineage[agent_id] = (i, event)
+
+    # A structured knock's reducer owns whether it is pending, collided, or
+    # exactly resolved. Select that authority from the complete segment for
+    # every retained journal resident: intervening ordinary activity must not
+    # hide a request that predates the journal, even when both are outside the
+    # raw tail. Resolved/collided lifecycles are retained whole so replay cannot
+    # resurrect them, while orphan decisions remain excluded by the reducer.
+    journal_approval_keep = _journal_approval_keep_indexes(
+        full_parsed, retained_journal_indexes)
+
+    # The browser's transport window remains globally bounded even when older
+    # journal authority is merged into it. Reserve only protected indexes that
+    # fall before the candidate tail; moving the boundary can expose another
+    # protected index, so converge the tiny (at most journal-bound) frontier.
+    protected_journal_indexes = (journal_keep | journal_predecessor_keep |
+                                 journal_successor_keep | journal_support_keep |
+                                 journal_approval_keep)
+    tail_start = max(0, len(lines) - VIEWER_LINE_LIMIT)
+    while True:
+        protected_before_tail = sum(
+            index < tail_start for index in protected_journal_indexes)
+        adjusted = max(0, len(lines) -
+                       (VIEWER_LINE_LIMIT - protected_before_tail))
+        if adjusted == tail_start:
+            break
+        tail_start = adjusted
+    parsed = []
+    for i in range(tail_start, len(lines)):
+        line = lines[i]
         try:
             event = json.loads(line)
         except ValueError:
@@ -935,7 +1084,13 @@ def carry_forward(lines, now_ms):
             continue
         parsed.append((i, event))
     approval_keep, approval_isolated = _approval_keep_indexes(parsed)
+    journal_isolated = {i for i, event in parsed
+                        if event.get("type") == "journal_written"}
     retained_approval_knocks = collections.defaultdict(list)
+    retained_journals = collections.defaultdict(list)
+    for i, event in journal_parsed:
+        if i in journal_keep:
+            retained_journals[event["agent_id"]].append(i)
     for i, event in parsed:
         if i in approval_keep and structured_approval(event) is not None:
             retained_approval_knocks[event["agent_id"]].append(i)
@@ -948,7 +1103,8 @@ def carry_forward(lines, now_ms):
         # Structured approvals have their own request-ID projection too. That
         # keeps an unresolved old knock without allowing an orphan close to
         # manufacture liveness or a capacity-evicted close to leave a ghost.
-        if event["type"] in TASK_EVENT_TYPES or i in approval_isolated:
+        if (event["type"] in TASK_EVENT_TYPES or i in approval_isolated
+                or i in journal_isolated):
             continue
         agent = per_agent.setdefault(
             event["agent_id"], {"events": [], "last": None, "lineage": None})
@@ -962,14 +1118,17 @@ def carry_forward(lines, now_ms):
             agent["events"].append((i, event))
             if len(agent["events"]) > KEEP_PER_AGENT:
                 agent["events"].pop(0)
-    keep = list(_task_keep_indexes(parsed) | approval_keep)
+    keep = list(_task_keep_indexes(parsed) | approval_keep | journal_keep
+                | journal_predecessor_keep | journal_successor_keep
+                | journal_support_keep | journal_approval_keep)
     for agent_id, agent in per_agent.items():
         last_i, last = agent["last"]
         if last["type"] == "session_ended":
             # A parked approval deliberately keeps its knock after the hosting
             # session exits. Keep the later terminal too, so a reset followed by
             # the close cannot resurrect that resident as merely "resting".
-            if any(knock_i < last_i for knock_i in retained_approval_knocks[agent_id]):
+            if (any(knock_i < last_i for knock_i in retained_approval_knocks[agent_id])
+                    or any(journal_i < last_i for journal_i in retained_journals[agent_id])):
                 keep.append(last_i)
             continue
         if now_ms - event_ms(last) > DROP_MS:

@@ -247,6 +247,8 @@ An event is accepted and projected only when all of these checks pass. HTTP
 ingestion uses `protocol.validate_event`; browser ingestion uses `validateEvent`
 in `viewer/projection.js`. Both adapters run the same fixture matrix in
 `tests/fixtures/protocol-v0-validation.json`.
+The stricter journal observation fields are additionally shared through
+`tests/fixtures/journal-observations.json`.
 
 - The record and `payload` are JSON objects, not nulls, arrays, or scalars.
 - `v` is the integer `0`; `ts` is a real UTC instant written exactly
@@ -310,6 +312,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `task_claimed`      | a resident atomically claimed that job       | `task_id`, `title`, `claimant` |
 | `task_done`         | the claimant finished the job                | `task_id`, `title`, `claimant`, `artifacts` |
 | `task_failed`       | the claimant failed or its lease expired      | `task_id`, `title`, `claimant`, `reason` |
+| `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
 and run id. They do not by themselves rewrite ordinary tool/activity history. A start
@@ -318,6 +321,62 @@ are diagnosed and skipped instead of partially rendered.
 Only events whose source is exactly `steward` are routine lifecycle evidence. This is
 Steward's `EVENT_SOURCE` contract; a `routine_*` event from any other producer is
 diagnosed and ignored, including for run-now acknowledgement.
+
+### Journal-written observation
+
+`journal_written` is emitted only by `source: "steward"`. Its `agent_id` and
+`project` are the scheduled resident identities from Steward's manifest; the
+runner is not substituted. `routine` is a 1–128 character lowercase slug matching
+`^[a-z0-9][a-z0-9-]*$`. `day` is a real Gregorian `YYYY-MM-DD` date in the
+routine's `schedule_tz` (years 0001–9999). `path` is 1–2048 Unicode scalar values
+(code points), not UTF-16 code units. Its first and last scalar may not be one of
+the Unicode White_Space values U+0009–U+000D, U+0020, U+0085, U+00A0, U+1680,
+U+2000–U+200A, U+2028, U+2029, U+202F, U+205F, or U+3000. C0 controls
+U+0000–U+001F and DEL U+007F are forbidden anywhere; other characters,
+including internal U+0085 and astral scalars, are preserved literally. Unpaired
+UTF-16 surrogate code points U+D800–U+DFFF are not Unicode scalars and are
+rejected. The final slash- or backslash-separated segment must be exactly
+`<day>.md`. The path is
+escaped text evidence, never a URL, link, or fetch target. Additive payload
+extensions are permitted.
+
+The semantic key is `(agent_id, day)`. First valid append owns it; equal immutable
+`project`/`routine`/`path` replays do not refresh recency or animation, while the
+first incompatible replay is retained as a diagnosed collision and cannot replace
+the canonical fact. Producer timestamps never choose ownership. The journal fold
+keeps the 40 highest `(day, agent_id)` keys globally, comparing the Gregorian day
+first and then `agent_id` by Unicode scalar value. This gives same-day ties a
+deterministic cross-runtime order independent of arrival grouping. Once full, its
+lowest retained key is a monotonic frontier: an event at or below that frontier is
+ignored, so an evicted key cannot return, manufacture a new canonical identity, or
+trigger another eviction. First append still owns every retained key. One
+representative incompatible append and one collision diagnostic are kept per
+retained key; later conflicts and exact replays consume no diagnostic capacity.
+Collision diagnostics are derived from those retained conflicted records and are
+therefore not part of a shared FIFO: all 40 retained keys may each expose one even
+under malformed-input pressure, and evicting a key removes its diagnostic. Malformed
+validation details have their own newest-40 bound while the total malformed counter
+remains exact. Fleet labels both counts so a bounded detail list is not presented as
+the complete malformed history.
+Reset discards the authority and rebuilds it from empty. Rotation derives this
+bounded journal authority from the full pre-rotation log before allocating the
+remaining ordinary evidence inside the viewer's global 4,000-line transport
+window, then preserves original append order while merging the retained records.
+
+For 60 seconds after the canonical event timestamp, a matching valid Resident works
+at its own home, “writing the journal.” One ownership resolver serves projection,
+resident detail, directory recency and Fleet links. It accepts an exact declared
+`agent_id`, or one unambiguous declared project only for a lineage-free root. A
+`payload.parent_agent_id` on the observation or any retained child lineage makes a
+shared-project match a Visitor fact, including when lineage is appended before or
+after the journal. Invalid, ambiguous and unmatched declarations likewise remain
+Fleet-only and diagnostic. Pending approvals and subsequently appended
+ordinary events keep their normal precedence; `session_ended` removes the villager
+immediately. Expiry recomputes the ordinary projection from its original evidence
+rather than refreshing it. Visitors and unmatched or invalid resident declarations
+never gain a house or writing animation. The event records observation only: it does
+not fabricate body text, refresh the direct Steward journal read, send a notification,
+or make a request.
 `duration_s` is deliberately optional on failures: Steward's watchdog closes vanished
 runs without inventing a duration it cannot know, and Burrow renders that absence as
 `duration unknown`. When present, durations must be finite, non-negative numbers in
@@ -601,8 +660,11 @@ Structured approvals are independently retained by lifecycle: at most 40 bounded
 request records (including one representative incompatible collision). Rotation
 preserves the first request and first subsequent matching close by original log index;
 later replays/conflicts and unknown closes are isolated from ordinary retention and
-discarded, so rotation cannot let an orphan bind to a future knock. Pending requests survive the
-ordinary activity drop window;
+discarded, so rotation cannot let an orphan bind to a future knock. For every retained
+journal resident, lifecycle authority is selected from the complete segment on both
+sides of the journal: a pending request survives whether it precedes or follows the
+observation and despite later ordinary activity. Pending requests survive the ordinary
+activity drop window;
 resolved pairs stay paired, capacity removes whole pairs, and resolution-only evidence
 never becomes villager liveness. A retained approval also carries a later ordinary
 `session_ended` record so its eventual close cannot manufacture liveness after reset.

@@ -8,6 +8,8 @@ import datetime
 import math
 import re
 
+from journal_observations import validate_journal_event
+
 
 EVENT_TYPES = frozenset({
     "task_started", "tool_called", "tool_failed", "artifact_produced",
@@ -15,6 +17,7 @@ EVENT_TYPES = frozenset({
     "routine_started", "routine_finished", "routine_failed",
     "task_posted", "task_claimed", "task_done", "task_failed",
     "needs_human_resolved",
+    "journal_written",
 })
 _TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 _REQUIRED_TEXT = {
@@ -146,6 +149,10 @@ def validate_event(event):
             return error
         if event["source"] != "steward":
             return "approval resolutions require source steward"
+    if event_type == "journal_written":
+        error = validate_journal_event(event)
+        if error:
+            return error
     for field in _OPTIONAL_TEXT:
         # Structured approvals add an object-valued detail to the legacy
         # string-valued knock. Shape validation remains a projection concern so

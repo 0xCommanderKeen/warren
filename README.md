@@ -84,6 +84,15 @@ If Burrow's own resident-manifest feed is unavailable, cached Steward associatio
 marked externally unavailable and stale until the exact local declaration can be read again.
 Fleet resident rows show charter state and journal recency. Visitors instead explain that
 temporary lodge occupants have no resident soul, manifest, charter, or journal.
+A strict Steward `journal_written` observation adds a
+separate “observed written” recency without inventing text or refreshing that direct read.
+For its first 60 seconds a matched Resident writes at a small illuminated home desk. Matching
+requires an exact declared agent or one unambiguous project-root declaration: a Claude or
+Codex child with `parent_agent_id` never borrows its parent's project home. Child, ambiguous,
+invalid, and unmatched observations stay only in Fleet history with an explicit diagnostic.
+First append owns each resident/day,
+and the highest 40 canonical `(day, agent_id)` keys survive log rotation with one
+representative collision diagnosed per retained key.
 
 ## Running (v0.5)
 
@@ -116,7 +125,8 @@ map of everything the fleet does.
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
   and all runtime support, resident manifests, and legacy souls with the
   authoritative tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py
-  notification_persistence.py protocol.py residents.py hooks viewer villagers | ssh
+  approval_protocol.py journal_observations.py notification_persistence.py protocol.py
+  residents.py hooks viewer villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
   `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every

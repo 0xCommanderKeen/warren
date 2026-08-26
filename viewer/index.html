@@ -217,6 +217,8 @@
   .journal-entry { border-top: 1px dotted #4f6d56; padding: 8px 0; white-space: pre-wrap;
     overflow-wrap: anywhere; }
   .journal-entry time { display: block; color: #9fbd9f; font-size: 15px; }
+  .journal-observed { color: #ffd486; border-left: 4px solid #d2a15c; padding: 7px 9px;
+    margin: 8px 0; background: rgba(210,161,92,.08); }
   .identity-warning { color: #f2a17d; margin: 7px 0; }
   .visitor-truth { border: 2px solid #7b6f57; border-left-width: 6px; padding: 11px;
     margin: 14px 0; color: #d4cbb8; }
@@ -266,6 +268,7 @@
 <script src="/vendor/phaser.min.js"></script>
 <script src="/presence.js"></script>
 <script src="/sprites.js"></script>
+<script src="/journal-observations.js"></script>
 <script src="/projection.js"></script>
 </head>
 <body>
@@ -546,11 +549,13 @@ class Village extends Phaser.Scene {
 
   applySky() {
     const sky=skyAt(clockHour()); this.sky.setFillStyle(sky.color,1);
+    for (const prop of this.journalProps || []) prop.setVisible(false);
     for(const viz of this.viz.values()) {
       if(viz.state==="stale") viz.cont.setAlpha(.45+.15*sky.dark);
       if(viz.plot>=0) {
         const light=BurrowPresence.houseLight(viz);
         this.glows[viz.plot].setVisible(light.home).setAlpha(light.working?.55+.4*sky.dark:.3*sky.dark);
+        if (viz.journal && this.journalProps[viz.plot]) this.journalProps[viz.plot].setVisible(true);
       }
     }
     if(this.knockGlow) this.knockGlow.setVisible(this.knockers>0).setAlpha(.2+.5*sky.dark);
@@ -735,6 +740,7 @@ class Village extends Phaser.Scene {
 
   buildBuildings() {
     this.glows = [];
+    this.journalProps = [];
     PLOTS.forEach(([px, py], i) => {
       this.add.image(px * T, py * T, "houses", "h" + (i % 4))
         .setOrigin(0, 0).setDepth((py + 3) * T);
@@ -744,6 +750,19 @@ class Village extends Phaser.Scene {
       const g = this.add.rectangle(px * T + PLOT_DOOR_X, (py + 3) * T - 9, 12, 11, 0xffc86b, .55)
         .setDepth(LIGHT_DEPTH).setVisible(false);
       this.glows.push(g);
+      // A code-drawn desk, paper and lamp: visible evidence of the observation,
+      // never fabricated journal contents and never a link to the supplied path.
+      const desk = this.add.container(px * T + 53, (py + 3) * T + 2)
+        .setDepth((py + 3) * T + 10).setVisible(false);
+      desk.add([
+        this.add.rectangle(0, 0, 20, 5, 0x5e3923).setStrokeStyle(1, 0x9c6941),
+        this.add.rectangle(-7, 5, 3, 9, 0x442818),
+        this.add.rectangle(7, 5, 3, 9, 0x442818),
+        this.add.rectangle(1, -3, 10, 7, 0xf0e2b8).setAngle(-5),
+        this.add.rectangle(-7, -8, 3, 9, 0xd2a15c),
+        this.add.circle(-7, -13, 4, 0xffd486, .85),
+      ]);
+      this.journalProps.push(desk);
     });
     this.add.image(YOUR_HOUSE.tx * T, YOUR_HOUSE.ty * T, "houses", "yours")
       .setOrigin(0, 0).setDepth((YOUR_HOUSE.ty + 3) * T)
@@ -1141,9 +1160,12 @@ class Village extends Phaser.Scene {
       sub.textContent = subText;
       sub.style.display = "";
       viz.chip.el.setAttribute("aria-label", `${v.name}, ${subText}. Open details`);
+      if (v.journal) viz.chip.el.setAttribute("aria-label",
+        `${v.name}, writing the journal at home beside an illuminated desk, paper, and lamp. Open details`);
 
       if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
       viz.lastTs = v.lastTs;
+      viz.journal = Boolean(v.journal);
 
       if (dest.kind === "building" && v.state === "working") busyPlaces.add(dest.id);
       if (v.state === "knocking") knockers++;
@@ -1317,6 +1339,7 @@ function placeLabel(v) {
 let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
   directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now(),
   jobState: BurrowJobs.createState(), approvalState: BurrowApprovals.createState(),
+  journalState: BurrowJournals.createState(),
   taskEvidence: [], approvalEvidence: [] };
 let fleetTab = "activity";
 const routineAcks = BurrowRoutines.createAcknowledgements();
@@ -1458,6 +1481,25 @@ function entryLink(detailId, label) {
   return `<button type="button" class="entry-link" data-agent="${esc(detailId)}" data-fleet-focus="agent:${esc(detailId)}">${esc(label)}</button>`;
 }
 function residentDetailId(resident) { return `@resident/${resident.file}`; }
+function journalResident(record) {
+  return BurrowJournals.ownerFor(fleetView.journalState, record);
+}
+function journalForResident(resident) {
+  if (!resident || resident.valid !== true) return null;
+  return BurrowJournals.records(fleetView.journalState).slice().reverse().find(record => {
+    const owner = journalResident(record);
+    return owner && (owner === resident || owner.file === resident.file);
+  }) || null;
+}
+function journalObservationMarkup(resident) {
+  const record = journalForResident(resident);
+  if (!record) return `<div class="ledger-small">No journal write has been observed in retained telemetry.</div>`;
+  const event = record.event, payload = event.payload;
+  return `<div class="journal-observed" data-journal-observed>
+    observed written ${esc(payload.day)} · ${ago(Date.parse(event.ts) || 0, fleetView.now || Date.now())}<br>
+    <span class="ledger-small">${esc(BurrowJournals.sentence(event))} · evidence path
+    <code>${esc(payload.path)}</code> (text only; never opened or fetched)</span></div>`;
+}
 function statusMark(status) {
   return `<span class="status-mark ${esc(status.replaceAll(" ", "-"))}">${esc(status)}</span>`;
 }
@@ -1496,14 +1538,36 @@ function journalRecency(record) {
 function identityDirectoryLine(resident, active, kind) {
   const record = BurrowIdentity.recordFor(identityState, resident), status = identityStatus(record, kind);
   const detailId = active ? active.id : residentDetailId(resident), name = resident.meta.name || resident.file;
-  const value = kind === "journal" ? journalRecency(record) : record && record.charter ?
+  const observed = kind === "journal" ? journalForResident(resident) : null;
+  const value = kind === "journal" ? `${observed ? `observed written ${esc(observed.event.payload.day)} · ` : ""}${journalRecency(record)}` : record && record.charter ?
     esc(record.charter.mission) : status;
   return `<button type="button" class="cap-row" data-agent="${esc(detailId)}" data-fleet-focus="identity:${esc(resident.file)}:${kind}" aria-label="Open ${esc(name)} detail: ${kind}"><span>${kind}</span><span class="cap-values">${statusMark(status)} ${value}</span></button>`;
 }
+function fleetActivityEntries() {
+  return BurrowFleet.recentActivity(fleetView.state,
+    BurrowJournals.activityEntries(fleetView.journalState));
+}
+function journalActivityOwner(entry) {
+  if (!entry || !entry.event || entry.event.type !== "journal_written") return null;
+  return journalResident(fleetView.journalState.records.get(BurrowJournals.keyFor(entry.event)));
+}
 function renderActivity(now) {
   const state = fleetView.state;
-  const recent = BurrowFleet.filterRecent(state, fleetFilters);
-  const opts = key => BurrowFleet.optionsFor(state, key);
+  const all = fleetActivityEntries();
+  const recent = BurrowFleet.filterEntries(all, fleetFilters);
+  const opts = key => BurrowFleet.optionsForEntries(all, key);
+  const journalDiagnostics = fleetView.journalState ? [
+    ...(fleetView.journalState.diagnostics || []),
+    ...(fleetView.journalState.ownershipDiagnostics || []),
+  ] : [];
+  const collisionDiagnosticCount = fleetView.journalState ?
+    (fleetView.journalState.collisionDiagnostics || []).length : 0;
+  const malformedDiagnosticCount = fleetView.journalState ?
+    (fleetView.journalState.malformedDiagnostics || []).length : 0;
+  const journalDiagnosticSummary = [
+    collisionDiagnosticCount ? `${collisionDiagnosticCount} retained collision${collisionDiagnosticCount === 1 ? "" : "s"}` : "",
+    malformedDiagnosticCount ? `${malformedDiagnosticCount} most recent malformed detail${malformedDiagnosticCount === 1 ? "" : "s"} of ${fleetView.journalState.malformed}` : "",
+  ].filter(Boolean).join("; ");
   return `<div class="ledger-filters">
     <input name="query" data-fleet-focus="filter:query" type="search" aria-label="Search recent activity" placeholder="search the ledger…" value="${esc(fleetFilters.query)}">
     <select name="project" data-fleet-focus="filter:project" aria-label="Filter by project">${selectOptions(opts("project"), fleetFilters.project, "all projects")}</select>
@@ -1512,11 +1576,16 @@ function renderActivity(now) {
     <select name="villager" data-fleet-focus="filter:villager" aria-label="Filter by villager">${selectOptions(opts("agent_id"), fleetFilters.villager, "all villagers")}</select>
   </div>
   ${state.malformed ? `<div class="ledger-state bad">${state.malformed} malformed record${state.malformed === 1 ? " was" : "s were"} ignored; invalid data never enters the village.</div>` : ""}
+  ${fleetView.journalState && fleetView.journalState.malformed ? `<div class="ledger-state bad">${fleetView.journalState.malformed} malformed journal observation${fleetView.journalState.malformed === 1 ? " was" : "s were"} ignored; it entered no journal history or recency state.</div>` : ""}
+  ${journalDiagnostics.length ? `<div class="ledger-state bad">Journal diagnostics${journalDiagnosticSummary ? ` (${journalDiagnosticSummary})` : ""}:<ul>${journalDiagnostics.map(item => `<li>${esc(item.reason)}${item.day ? ` · ${esc(item.day)}` : ""}</li>`).join("")}</ul></div>` : ""}
+  ${fleetView.journalState && fleetView.journalState.capacityDropped ? `<div class="ledger-state bad">${fleetView.journalState.capacityDropped} older canonical journal day${fleetView.journalState.capacityDropped === 1 ? " was" : "s were"} omitted by the 40-day global bound.</div>` : ""}
   ${!new Set(["live", "polling"]).has(fleetView.transport) ? `<div class="ledger-state bad">Telemetry ${esc(fleetView.transport || "disconnected")}. This ledger may be stale.</div>` : ""}
   ${villagers.some(v => v.state === "stale") ? `<div class="ledger-state bad">Some activity is stale: its villager has had no signal for over 30 minutes.</div>` : ""}
   ${recent.length ? `<ol class="ledger-list">${recent.map(entry => `<li class="ledger-entry">
     <div>${ago(entry.ts, now)}<div class="ledger-small">${esc(entry.state)}</div></div>
-    <div>${entryLink(entry.agent_id, villagerName(entry.agent_id))}<div class="ledger-small">${esc(entry.project)} · ${esc(entry.source)}</div><div>${esc(describe(entry.event))}</div></div>
+    <div>${entry.event.type === "journal_written" && !journalActivityOwner(entry) ?
+      `<span>${esc(entry.agent_id)}</span><div class="identity-warning">${esc((fleetView.journalState.ownershipDiagnostics || []).find(item => item.key === BurrowJournals.keyFor(entry.event))?.reason || "unmatched resident; journal observation remains Fleet-only")} · no house animation was created</div>` :
+      entryLink(entry.agent_id, journalActivityOwner(entry)?.meta?.name || villagerName(entry.agent_id))}<div class="ledger-small">${esc(entry.project)} · ${esc(entry.source)}</div><div>${esc(describe(entry.event))}</div></div>
     <div class="ledger-small">${esc(entry.event.type)}</div>
   </li>`).join("")}</ol>` : `<div class="ledger-state">No valid recent events match these filters.</div>`}`;
 }
@@ -1661,7 +1730,7 @@ function replaceFleet(now) {
     <div class="ledger-truth">Configured means a complete, safe public declaration exists. Missing means none is declared. Invalid comes only from public diagnostics or an incomplete public record. Externally unavailable means the resident feed is unavailable. A status reference is only an opaque locator; Burrow never interprets it as live health or tests secret-backed access.</div>
     <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"],["routines","Routines"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
     <section>${body}</section>`;
-  const counts = fleetTab === "activity" ? BurrowFleet.filterRecent(fleetView.state, fleetFilters).length :
+  const counts = fleetTab === "activity" ? BurrowFleet.filterEntries(fleetActivityEntries(), fleetFilters).length :
     fleetTab === "attention" ? Object.values(attentionEntries()).reduce((sum, items) => sum + items.length, 0) : fleetTab === "routines" ? routineRows(now).length :
     fleetView.residents.length + (fleetView.diagnosticResidents || []).length;
   const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : fleetTab === "routines" ? "Routines" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
@@ -1891,6 +1960,7 @@ function identityMarkup(resident) {
   else if (record && record.diagnostic) charter = `<div class="identity-warning">Charter externally unavailable. ${esc(record.diagnostic)}</div>`;
 
   const journal = record && record.journal;
+  const observation = journalForResident(resident);
   let journalBody = `<div class="identity-warning">Journal externally unavailable. No empty-journal claim can be made.</div>`;
   if (journal && journal.status === "loaded") journalBody = journal.entries.length ?
     journalEntriesMarkup(journal.entries) :
@@ -1905,8 +1975,12 @@ function identityMarkup(resident) {
       journal.status === "unavailable" ? "Steward credentials are not configured." :
       "Steward unreachable."} ${journal.lastSuccessAt ? `Last successful fetch ${new Date(journal.lastSuccessAt).toLocaleString()}.` : "No successful fetch yet."}</div>` +
     (journal.stale ? `<div class="ledger-small">Cached entries are stale as of that time.</div>${journalEntriesMarkup(journal.entries)}` : "");
+  const observedMismatch = observation && (!journal || journal.status !== "loaded" ||
+    !(journal.entries || []).some(entry => entry.date === observation.event.payload.day)) ?
+    `<div class="identity-warning" data-journal-mismatch>The write was observed for ${esc(observation.event.payload.day)}, but contents are not yet refreshed. Burrow does not fabricate text or automatically refetch Steward.</div>` : "";
   return `<section class="declared-identity" aria-label="Declared charter"><h3>Charter ${statusMark(identityStatus(record, "charter"))}</h3>${charter}</section>
     <section class="journal-section" aria-label="Resident journal"><h3>Journal ${statusMark(identityStatus(record, "journal"))}</h3>
+      ${journalObservationMarkup(resident)}${observedMismatch}
       <div class="ledger-small">Read-only Steward journal · newest first · latest ${BurrowIdentity.JOURNAL_LIMIT}</div>${journalBody}${controls}</section>`;
 }
 function visitorIdentityMarkup(declaration = null) {
@@ -2038,6 +2112,9 @@ function renderPanelContent(now) {
     const residentFile = selectedId.startsWith("@resident/") ? selectedId.slice(10) : null;
     const candidates = [...fleetView.residents, ...(fleetView.diagnosticResidents || [])];
     let resident = residentFile ? candidates.find(item => item.file === residentFile) : null;
+    const journalOwner = resident ? journalForResident(resident) :
+      BurrowJournals.records(fleetView.journalState).slice().reverse()
+        .find(record => record.event.agent_id === selectedId && journalResident(record)) || null;
     let latest = resident ? fleetView.state.recent.find(entry => {
       const match = resident.match || {};
       return match.agent_id ? entry.agent_id === match.agent_id :
@@ -2045,7 +2122,10 @@ function renderPanelContent(now) {
     }) : fleetView.state.recent.find(entry => entry.agent_id === selectedId);
     const routineOwner = residentFile ? null :
       fleetView.state.routineRecent.find(entry => entry.agent_id === selectedId);
-    const ownerEvidence = latest || routineOwner;
+    const journalEvidence = journalOwner ? { event: journalOwner.event,
+      ts: Date.parse(journalOwner.event.ts) || 0, agent_id: journalOwner.event.agent_id,
+      project: journalOwner.event.project } : null;
+    const ownerEvidence = latest || routineOwner || journalEvidence;
     if (!resident) resident = candidates.find(item =>
       (item.match || {}).agent_id === selectedId ||
       (ownerEvidence && (item.match || {}).project === ownerEvidence.project));
@@ -2088,7 +2168,8 @@ function renderPanelContent(now) {
     ${v.soul && v.soul.meta.role ? `<div class="meta role">${esc(v.soul.meta.role)}</div>` : ""}
     <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
     <div class="meta">${esc(v.id)}</div>
-    <div class="state-line ${cls}">${esc(stateText)}</div>
+      <div class="state-line ${cls}">${esc(stateText)}</div>
+    ${v.journal ? `<div class="journal-observed" role="status">Writing at the resident's own illuminated desk with paper and lamp. ${esc(BurrowJournals.sentence(v.journal.event))}.</div>` : ""}
     ${(v.knock && v.knock.queue && v.knock.queue.length) || (v.approvals && v.approvals.length) ? renderApprovals(v, now) : v.knock ? `
       <div class="knock">
         <div class="knock-h">needs you</div>
@@ -2650,6 +2731,7 @@ const runtime = BurrowBrowser.createBrowserRuntime({
     villagers = view.villagers;
     artifacts = view.artifacts;
     souls = view.souls;
+    fleetView = { ...fleetView, journalState: view.journalState, now: view.now };
     if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
     renderChrome(view.now);
   },
@@ -2675,7 +2757,8 @@ const runtime = BurrowBrowser.createBrowserRuntime({
     }
     if (selectedId === NURSERY_ID && (view.eventEvidence.length || view.reset)) renderPanel(view.now);
     if (selectedId && selectedId !== JOB_BOARD_ID && selectedId !== FLEET_LEDGER_ID &&
-        (view.approvalEvidence.length || view.reset)) renderPanel(view.now);
+        (view.approvalEvidence.length || view.eventEvidence.some(event =>
+          event.type === "journal_written") || view.reset)) renderPanel(view.now);
   },
   onTransport(state) {
     transportEl.dataset.state = state;

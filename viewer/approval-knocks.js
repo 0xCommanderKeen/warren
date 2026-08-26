@@ -176,20 +176,46 @@
       state.appendSequence = 0n;
       state.ordinals = new WeakMap();
     }
+    const ordinalBatch = options.ordinalBatch || null;
+    const ordinalForEvent = options.ordinalForEvent;
+    if (ordinalBatch) {
+      for (const event of ordinalBatch) {
+        const ordinal = normalizeOrdinal(ordinalForEvent(event));
+        if (ordinal !== "0") state.ordinals.set(event, ordinal);
+        if (event.type === "needs_human") {
+          const shape = classify(event);
+          if (shape.kind === "malformed") {
+            state.malformed += 1;
+            diagnose(state, shape.reason, event);
+          }
+        }
+      }
+      const sequence = normalizeOrdinal(options.sequence);
+      if (compareOrdinal(sequence, state.sequence) > 0) {
+        state.sequence = sequence;
+        state.appendSequence = BigInt(sequence);
+      }
+    }
     for (const rejection of options.rejections || []) {
       state.malformed += 1;
       diagnose(state, rejection.reason || "malformed approval resolution skipped", rejection);
     }
     for (const event of batch || []) {
-      state.appendSequence += 1n;
-      const ordinal = state.appendSequence.toString();
-      state.sequence = ordinal;
-      state.ordinals.set(event, ordinal);
+      let ordinal = ordinalBatch ? state.ordinals.get(event) : null;
+      if (!ordinal) {
+        state.appendSequence += 1n;
+        ordinal = state.appendSequence.toString();
+        state.sequence = ordinal;
+        state.ordinals.set(event, ordinal);
+      }
       if (!TYPES.has(event.type)) continue;
       if (event.type === "needs_human") {
         const shape = classify(event);
         if (shape.kind === "malformed") {
-          state.malformed += 1; diagnose(state, shape.reason, event); continue;
+          if (!ordinalBatch) {
+            state.malformed += 1; diagnose(state, shape.reason, event);
+          }
+          continue;
         }
         if (shape.kind !== "structured") continue;
         let record = state.requests.get(shape.request_id);
@@ -204,6 +230,7 @@
           // corrupt log reuses it for any incompatible immutable request shape,
           // neither question is safe to send through the ID-only HTTP endpoint.
           record.collided = true;
+          if (!record.collision) record.collision = event;
           diagnose(state, "request_id collision has an incompatible immutable approval request; decision controls disabled", event,
             `collision\0${record.id}\0${lifecycleIdentity(event, shape) || identity(event)}`);
         } else if (!exactSame(event, record.knock)) {
@@ -236,6 +263,10 @@
         !options.isValidatedBatch(batch)) {
       throw new TypeError("foldValidated requires the shared strict validated batch");
     }
+    if (options.ordinalBatch && (!options.isValidatedBatch(options.ordinalBatch) ||
+        typeof options.ordinalForEvent !== "function")) {
+      throw new TypeError("approval ordinal authority requires a shared validated batch and provider");
+    }
     return foldTrusted(state, batch, options);
   }
   function pendingForAgent(state, agentId) {
@@ -264,6 +295,57 @@
   function ordinalForEvent(state, event) {
     return event && state && state.ordinals instanceof WeakMap ?
       state.ordinals.get(event) || null : null;
+  }
+
+  /* Build the approval consumer's bounded grouped-response window. The normal
+   * newest raw tail remains the default. For every agent with a retained
+   * journal observation, reserve enough slots for each exact lifecycle selected
+   * by this module's own fold, whether the request precedes or follows the
+   * journal. Pending requests override later ordinary evidence; terminal and
+   * collided lifecycles must remain whole so reset cannot resurrect them. */
+  function lifecycleWindow(batch, limit, journalRecords = [], options = {}) {
+    if (!Array.isArray(batch) || !Number.isInteger(limit) || limit < 0) {
+      throw new TypeError("lifecycleWindow requires a validated array and a non-negative limit");
+    }
+    if (typeof options.isValidatedBatch !== "function" || !options.isValidatedBatch(batch) ||
+        typeof options.validatedSelection !== "function") {
+      throw new TypeError("lifecycleWindow requires the shared strict validated batch");
+    }
+    if (limit === 0) return options.validatedSelection(batch, []);
+    const temporary = createState();
+    foldTrusted(temporary, batch);
+    const positions = new Map(batch.map((event, index) => [event, index]));
+    const journalAgents = new Set();
+    for (const record of journalRecords || []) {
+      const event = record && record.event;
+      if (!event || positions.get(event) === undefined) continue;
+      journalAgents.add(event.agent_id);
+    }
+    const eligible = [...temporary.requests.values()].filter(record => {
+      return positions.get(record.knock) !== undefined &&
+        journalAgents.has(record.knock.agent_id);
+    }).sort((left, right) => compareOrdinal(right.sequence, left.sequence));
+    const required = new Set();
+    for (const record of eligible) {
+      const lifecycle = [record.knock, record.resolution, record.collision].filter(Boolean);
+      const additions = lifecycle.filter(event => !required.has(event));
+      if (required.size + additions.length > limit) continue;
+      for (const event of additions) required.add(event);
+    }
+    const tailStart = Math.max(0, batch.length - limit);
+    const selected = new Set(batch.slice(tailStart));
+    for (const event of required) selected.add(event);
+    let ordered = batch.filter(event => selected.has(event));
+    if (ordered.length > limit) {
+      // Required lifecycle facts displace the oldest ordinary tail facts first.
+      // If pressure is entirely approval evidence, preserve required facts and
+      // retain the newest remaining evidence within the same global bound.
+      const removable = ordered.filter(event => !required.has(event));
+      const remove = new Set(removable.slice(0, ordered.length - limit));
+      ordered = ordered.filter(event => !remove.has(event));
+    }
+    if (ordered.length > limit) ordered = ordered.slice(ordered.length - limit);
+    return options.validatedSelection(batch, ordered);
   }
 
   function createAcknowledgements(options = {}) {
@@ -487,5 +569,6 @@
     createState, foldValidated, pendingForAgent, recentConfirmations,
     recordFor, recordForEvent,
     ordinalForEvent, normalizeOrdinal, compareOrdinal,
+    lifecycleWindow,
     createAcknowledgements, decide };
 });

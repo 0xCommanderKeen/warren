@@ -262,7 +262,7 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     agent_id: "aged-worker", type: "idle", payload: {} };
   const agedAttention = { ...agedEvent, agent_id: "aged-knocker", type: "needs_human",
     payload: { message: "A retained request still needs a truthful destination" } };
-  fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+  fs.writeFileSync(events, [agedAttention, agedEvent, currentEvent]
     .map(value => JSON.stringify(value)).join("\n") + "\n");
   const villagers = path.join(temporary, "villagers");
   fs.mkdirSync(villagers);
@@ -2312,6 +2312,210 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         {state:"completed",visible:"completed — confirmed by matching real event"});
     });
 
+    await t.test("journal observation draws an accessible home writing spot and keeps content truth separate", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      await eventually(send, "runtime.refreshResidents().then(() => fleetView.residents.length > 0)",
+        signal, "journal resident declaration");
+      const before = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
+      const observed = {v:0,ts:new Date(frozenNow).toISOString(),source:"steward",
+        agent_id:"codex:journal-layout",project:"quiet-project",type:"journal_written",
+        payload:{routine:"close-of-day",day:"2025-01-15",
+          path:"/data/residents/life/memory/journal/2025-01-15.md"}};
+      fs.appendFileSync(events, JSON.stringify(observed) + "\n");
+      const villageEvidence = await eventually(send, `(async () => {
+        await runtime.poll(); await runtime.refreshResidents();
+        const villager=runtime.snapshot().villagers.find(item=>item.id==='codex:journal-layout');
+        const prop=scene && scene.journalProps && scene.journalProps[5];
+        if(!villager||!prop||!prop.visible)return false;
+        const chip=scene.viz.get(villager.id).chip.el;
+        return {state:villager.state,doing:villager.doing,home:villager.home,place:villager.place,
+          propVisible:prop.visible,parts:prop.list.length,partKinds:prop.list.map(item=>item.type),
+          glow:scene.glows[5].visible,aria:chip.getAttribute('aria-label')};
+      })()`, signal, "journal home writing spot");
+      const after = await send("Page.captureScreenshot", { format: "png", fromSurface: true });
+      const panels = await eventually(send, `(async () => {
+        openPanel('codex:journal-layout'); await new Promise(r=>requestAnimationFrame(r));
+        const detail=document.querySelector('#panel-body');
+        const path=detail.querySelector('[data-journal-observed] code');
+        const detailText=detail.textContent;
+        const mismatch=Boolean(detail.querySelector('[data-journal-mismatch]'));
+        closePanel(); await new Promise(r=>setTimeout(r,250));
+        document.querySelector('#fleet-open').click();
+        await new Promise(r=>requestAnimationFrame(r));
+        const activity=document.querySelector('#panel-body').textContent;
+        document.querySelector('[data-fleet-tab="residents"]').click();
+        await new Promise(r=>requestAnimationFrame(r));
+        const directory=document.querySelector('#panel-body').textContent;
+        return {detailText,activity,directory,pathText:path&&path.textContent,
+          pathLinked:Boolean(path&&path.closest('a[href]')),mismatch};
+      })()`, signal, "journal resident and Fleet copy");
+      const expired = await eventually(send, `(() => {
+        window.__advanceBurrowClock(60000); runtime.tick();
+        return {villager:runtime.snapshot().villagers.some(item=>item.id==='codex:journal-layout'),
+          prop:scene.journalProps[5].visible,
+          retained:runtime.snapshot().journalState.records.size};
+      })()`, signal, "journal overlay expiry");
+      fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
+
+      assert.deepEqual(villageEvidence, {state:"working",doing:"writing the journal",home:5,
+        place:null,propVisible:true,parts:6,
+        partKinds:["Rectangle","Rectangle","Rectangle","Rectangle","Rectangle","Arc"],
+        glow:true,
+        aria:"Routine Keeper, writing the journal at home beside an illuminated desk, paper, and lamp. Open details"});
+      assert.notEqual(after.data, before.data,
+        "the production screenshot must contain a visible journal writing-state change");
+      assert.match(panels.detailText,/wrote the journal for 2025-01-15 after close-of-day/);
+      assert.match(panels.detailText,/contents are not yet refreshed/);
+      assert.match(panels.activity,/wrote the journal for 2025-01-15 after close-of-day/);
+      assert.match(panels.directory,/observed written 2025-01-15/);
+      assert.equal(panels.pathText,observed.payload.path);
+      assert.equal(panels.pathLinked,false,"journal evidence path is escaped text, never navigation");
+      assert.equal(panels.mismatch,true);
+      assert.deepEqual(expired,{villager:false,prop:false,retained:1});
+    });
+
+    await t.test("Fleet reports every retained journal collision under malformed pressure", async () => {
+      const journalPressure=[];
+      for(let index=0;index<40;index++) {
+        const day=new Date(Date.UTC(2024,10,1+index)).toISOString().slice(0,10);
+        const canonical={v:0,ts:new Date(frozenNow-index).toISOString(),source:"steward",
+          agent_id:"codex:journal-layout",project:"quiet-project",type:"journal_written",
+          payload:{routine:"close-of-day",day,path:`/journal/${day}.md`}};
+        const conflict={...canonical,payload:{...canonical.payload,routine:"nightly"}};
+        journalPressure.push(canonical,conflict);
+      }
+      for(let index=0;index<45;index++) {
+        const malformed={...journalPressure[0],source:"codex",
+          ts:new Date(frozenNow-100-index).toISOString()};
+        journalPressure.push(malformed);
+      }
+      fs.writeFileSync(events,[currentEvent,...journalPressure]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage(); await waitForTelemetry();
+      const evidence=await eventually(send,`(async()=>{
+        await runtime.refreshResidents(); await runtime.poll();
+        const state=runtime.snapshot().journalState;
+        if(state.records.size!==40||state.malformed!==45)return false;
+        if(!panelEl.classList.contains('open'))document.querySelector('#fleet-open').click();
+        document.querySelector('[data-fleet-tab="activity"]').click();
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const block=[...document.querySelectorAll('#panel-body .ledger-state.bad')]
+          .find(item=>item.textContent.includes('Journal diagnostics'));
+        if(!block)return false;
+        const rows=[...block.querySelectorAll('li')];
+        return {records:state.records.size,malformed:state.malformed,
+          collisions:state.collisionDiagnostics.length,
+          malformedDetails:state.malformedDiagnostics.length,
+          combined:state.diagnostics.length,
+          collisionRows:rows.filter(item=>item.textContent.includes('journal day collision')).length,
+          rows:rows.length,summary:block.firstChild.textContent,
+          malformedCopy:[...document.querySelectorAll('#panel-body .ledger-state.bad')]
+            .some(item=>item.textContent.includes('45 malformed journal observations were ignored'))};
+      })()`,signal,"journal collision diagnostic pressure");
+      assert.deepEqual(evidence,{records:40,malformed:45,collisions:40,
+        malformedDetails:40,combined:80,collisionRows:40,rows:80,
+        summary:"Journal diagnostics (40 retained collisions; 40 most recent malformed details of 45):",
+        malformedCopy:true});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
+    await t.test("Claude and Codex child journal observations remain explicit Fleet-only visitor facts", async () => {
+      const lineage=(agent,parent,offset)=>({v:0,ts:new Date(frozenNow+offset).toISOString(),
+        source:agent.startsWith("claude-code:")?"claude-code":"codex",agent_id:agent,
+        project:"quiet-project",type:"tool_called",
+        payload:{tool:"Read",parent_agent_id:parent}});
+      const written=(agent,day,offset)=>({v:0,ts:new Date(frozenNow+offset).toISOString(),
+        source:"steward",agent_id:agent,project:"quiet-project",type:"journal_written",
+        payload:{routine:"close-of-day",day,path:`/journal/${day}.md`}});
+      const claudeLineage=lineage("claude-code:journal-child","claude-code:root",-3);
+      const claudeJournal=written("claude-code:journal-child","2025-01-14",-2);
+      const codexJournal=written("codex:journal-child","2025-01-15",-1);
+      const codexLineage=lineage("codex:journal-child","codex:root",0);
+      fs.writeFileSync(events,[currentEvent,claudeLineage,claudeJournal,codexJournal,codexLineage]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      await resetPage(); await waitForTelemetry();
+      const evidence=await eventually(send,`(async()=>{
+        await runtime.refreshResidents(); await runtime.poll();
+        const snapshot=runtime.snapshot();
+        const children=['claude-code:journal-child','codex:journal-child'].map(id=>{
+          const item=snapshot.villagers.find(value=>value.id===id);
+          return item&&{id:item.id,residency:item.residency,home:item.home,journal:item.journal};
+        });
+        if(children.some(item=>!item))return false;
+        document.querySelector('#fleet-open').click();
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const activity=document.querySelector('#panel-body').textContent;
+        const activityVisitorCount=[...document.querySelectorAll('.ledger-entry .identity-warning')]
+          .filter(item=>item.textContent.includes('visitor child of')).length;
+        document.querySelector('[data-fleet-tab="residents"]').click();
+        await new Promise(resolve=>requestAnimationFrame(resolve));
+        const directory=document.querySelector('#panel-body').textContent;
+        return {children,diagnostics:snapshot.journalState.ownershipDiagnostics.map(item=>item.reason),
+          homeWritingProp:scene.journalProps[5].visible,
+          activityVisitorCount,
+          directoryClaimsObserved:directory.includes('observed written 2025-01-14')||
+            directory.includes('observed written 2025-01-15')};
+      })()`,signal,"child journal Fleet-only ownership");
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+      assert.deepEqual(evidence.children,[
+        {id:"claude-code:journal-child",residency:"visitor",home:null,journal:null},
+        {id:"codex:journal-child",residency:"visitor",home:null,journal:null},
+      ]);
+      assert.equal(evidence.diagnostics.length,2);
+      assert.ok(evidence.diagnostics.every(reason=>reason.includes("visitor child of")));
+      assert.equal(evidence.homeWritingProp,false);
+      assert.equal(evidence.activityVisitorCount,2);
+      assert.equal(evidence.directoryClaimsObserved,false);
+    });
+
+    await t.test("Fleet Activity applies one append-ordered newest-200 cap after journal merge", async () => {
+      await resetPage();
+      await waitForTelemetry();
+      const ordinary=Array.from({length:200},(_,index)=>({v:0,
+        ts:new Date(frozenNow+(index%2)).toISOString(),source:"codex",
+        agent_id:`codex:activity-${index}`,project:index%2?"odd":"even",
+        type:"tool_called",payload:{tool:"Read",index}}));
+      const journals=Array.from({length:40},(_,index)=>{
+        const date=new Date(Date.UTC(2025,0,1+index)).toISOString().slice(0,10);
+        return {v:0,ts:new Date(frozenNow-100000-index).toISOString(),source:"steward",
+          agent_id:`codex:journal-history-${index}`,project:index%2?"odd":"even",
+          type:"journal_written",payload:{routine:"close-of-day",day:date,
+            path:`/journal/${date}.md`}};
+      });
+      fs.writeFileSync(events,[...ordinary,...journals].map(value=>JSON.stringify(value)).join("\n")+"\n");
+      const unfiltered=await eventually(send,`(async()=>{
+        await runtime.poll();
+        if(!panelEl.classList.contains('open'))document.querySelector('#fleet-open').click();
+        await new Promise(r=>requestAnimationFrame(r));
+        const rows=[...document.querySelectorAll('#panel-body .ledger-list .ledger-entry')];
+        return rows.length===200&&{
+          rows:rows.length,journals:rows.filter(row=>row.textContent.includes('journal_written')).length,
+          ordinary:rows.filter(row=>row.textContent.includes('tool_called')).length,
+          first:rows[0]?.textContent.includes('journal_written'),
+          last:rows.at(-1)?.textContent.includes('tool_called'),
+          status:document.querySelector('#panel-status').textContent,
+          uniqueEvidence:new Set(fleetActivityEntries().map(entry=>entry.event)).size===200};
+      })()`,signal,"globally capped Fleet activity");
+      const filtered=await eventually(send,`(()=>{
+        const select=document.querySelector('#panel-body select[name="source"]');
+        select.value='steward';select.dispatchEvent(new Event('input',{bubbles:true}));
+        const rows=[...document.querySelectorAll('#panel-body .ledger-list .ledger-entry')];
+        return rows.length===40&&{rows:rows.length,
+          journals:rows.every(row=>row.textContent.includes('journal_written')),
+          status:document.querySelector('#panel-status').textContent};
+      })()`,signal,"filtered Fleet count labels");
+      assert.deepEqual(unfiltered,{rows:200,journals:40,ordinary:160,first:true,last:true,
+        status:"Activity: 200 items.",uniqueEvidence:true});
+      assert.deepEqual(filtered,{rows:40,journals:true,
+        status:"Activity: 40 items."});
+      fs.writeFileSync(events,[currentEvent,agedEvent,agedAttention]
+        .map(value=>JSON.stringify(value)).join("\n")+"\n");
+    });
+
     await t.test("Run Now refuses unavailable telemetry before credentials or network", async () => {
       await resetPage();
       await waitForTelemetry();
@@ -2741,6 +2945,8 @@ test("production fleet browser fixture runs isolated interaction and visual phas
     });
 
     await t.test("phone production layout matches the strict platform baseline", async () => {
+      fs.writeFileSync(events, [agedAttention, agedEvent, currentEvent]
+        .map(value => JSON.stringify(value)).join("\n") + "\n");
       await resetPage();
     const phoneReady = await eventually(send, `(async () => {
       if (!scene || !runtime || !window.__burrow) return false;

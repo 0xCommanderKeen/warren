@@ -15,12 +15,14 @@ const response = at => ({ ok: true,
 function specializedEvent(index) {
   const common = { v:0, ts:timestamp(index), source:"steward",
     agent_id:`agent-${index}`, project:"burrow" };
-  if (index % 3 === 0) return { ...common, type:"routine_started",
+  if (index % 4 === 0) return { ...common, type:"routine_started",
     payload:{routine:"summary",run_id:`run-${index}`,trigger:"manual"} };
-  if (index % 3 === 1) return { ...common, type:"task_posted",
+  if (index % 4 === 1) return { ...common, type:"task_posted",
     payload:{task_id:`task-${index}`,title:`Task ${index}`,required_skills:[],posted_by:"api"} };
-  return { ...common, type:"needs_human_resolved",
+  if (index % 4 === 2) return { ...common, type:"needs_human_resolved",
     payload:{request_id:`approval-${index}`,decision:"approve",decided_by:"api",action:"publish"} };
+  return { ...common, type:"journal_written",
+    payload:{routine:"close-of-day",day:"2026-08-25",path:`/journal/${index}/2026-08-25.md`} };
 }
 
 async function stage(count) {
@@ -54,9 +56,9 @@ test("exactly 4,000 mixed specialized records cross the pre-ready boundary", asy
   assert.equal(publications.some(view => view.reset), false,
     "the documented capacity is inclusive rather than an early conservative reset");
   assert.equal(publications.reduce((total, view) => total + view.eventEvidence.length, 0), 4000);
-  assert.equal(publications.reduce((total, view) => total + view.routineBatch.length, 0), 1334);
-  assert.equal(publications.reduce((total, view) => total + view.taskEvidence.length, 0), 1333);
-  assert.equal(publications.reduce((total, view) => total + view.approvalEvidence.length, 0), 1333);
+  assert.equal(publications.reduce((total, view) => total + view.routineBatch.length, 0), 1000);
+  assert.equal(publications.reduce((total, view) => total + view.taskEvidence.length, 0), 1000);
+  assert.equal(publications.reduce((total, view) => total + view.approvalEvidence.length, 0), 1000);
   assert.equal(publications.length, 4000,
     "every retained record is published once with its exact cursor boundary");
 });

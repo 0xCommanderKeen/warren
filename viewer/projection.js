@@ -24,6 +24,8 @@ const MAX_EVENTS = 80;
 const MAX_ARTIFACTS = 30;
 const APPROVAL_ORDINALS = typeof module === "object" && module.exports ?
   require("./approval-knocks.js") : null;
+const JOURNALS = typeof module === "object" && module.exports ?
+  require("./journal-observations.js") : null;
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -86,6 +88,7 @@ function describe(ev) {
     case "needs_human":       return "needs you: " + (p.message || "(no message)");
     case "idle":              return "finished, resting";
     case "session_ended":     return "went home";
+    case "journal_written":   return "wrote the journal for " + p.day + " after " + p.routine;
     default:                  return ev.type;
   }
 }
@@ -104,6 +107,7 @@ const EVENT_TYPES = new Set(["task_started","tool_called","tool_failed",
                              "routine_finished","routine_failed","task_posted",
                              "task_claimed","task_done","task_failed",
                              "needs_human_resolved"]);
+EVENT_TYPES.add("journal_written");
 const ACTION_TYPES = new Set(["task_started","tool_called","artifact_produced"]);
 const TIMESTAMP_V0 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const REQUIRED_PAYLOAD_TEXT = {
@@ -217,6 +221,14 @@ function validateEvent(ev) {
     }
     if (ev.source !== "steward") return "approval resolutions require source steward";
   }
+  if (ev.type === "journal_written") {
+    const journalApi = JOURNALS || globalThis.BurrowJournals;
+    if (!journalApi || typeof journalApi.validate !== "function") {
+      return "journal validation unavailable";
+    }
+    const error = journalApi.validate(ev);
+    if (error) return error;
+  }
   for (const field of OPTIONAL_PAYLOAD_TEXT) {
     // Any attempted structured detail remains ingestible so its message can
     // degrade to a plain knock; approval-knocks.js owns the stricter shape.
@@ -236,28 +248,61 @@ function validateEvent(ev) {
 /* One parse and validation pass per batch for village and notice board. */
 const VALIDATED_BATCH = Symbol("burrow validated event batch");
 const REJECTIONS = Symbol("burrow rejected event diagnostics");
+function parseItem(item) {
+  let ev = item;
+  if (typeof ev === "string") {
+    try { ev = JSON.parse(ev); } catch { return { event: null, rejection: null }; }
+  }
+  const reason = validateEvent(ev);
+  if (!reason) return { event: ev, rejection: null };
+  const diagnostic = ev && typeof ev.type === "string" &&
+    (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
+      ev.type === "journal_written" ||
+      ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type));
+  return { event: null, rejection: diagnostic ? { type: ev.type, reason } : null };
+}
 function parseEvents(batch) {
   if (batch && batch[VALIDATED_BATCH]) return batch;
   const events = [], rejections = [];
   for (const item of batch) {
-    let ev = item;
-    if (typeof ev === "string") {
-      try { ev = JSON.parse(ev); } catch { continue; }
-    }
-    const reason = validateEvent(ev);
-    if (reason) {
-      if (ev && typeof ev.type === "string" &&
-          (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
-            ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type))) {
-        rejections.push({ type: ev.type, reason });
-      }
-      continue;
-    }
-    events.push(ev);
+    const parsed = parseItem(item);
+    if (parsed.event) events.push(parsed.event);
+    if (parsed.rejection) rejections.push(parsed.rejection);
   }
   Object.defineProperty(events, VALIDATED_BATCH, { value: true });
   Object.defineProperty(events, REJECTIONS, { value: rejections });
   return events;
+}
+/* Parse a grouped raw response once while retaining two independently marked
+ * validated views: complete journal authority and the ordinary transport
+ * window. The window is measured in raw records, matching the server cursor
+ * contract (a malformed line still occupied its append position). */
+function parseEventWindows(batch, limit) {
+  if (!Array.isArray(batch) || !Number.isInteger(limit) || limit < 0) {
+    throw new TypeError("parseEventWindows requires an array and a non-negative limit");
+  }
+  const all = [], tail = [], allRejections = [], tailRejections = [];
+  const tailStart = Math.max(0, batch.length - limit);
+  for (let index = 0; index < batch.length; index++) {
+    const parsed = parseItem(batch[index]);
+    if (parsed.rejection) {
+      allRejections.push(parsed.rejection);
+      if (index >= tailStart) tailRejections.push(parsed.rejection);
+    }
+    if (!parsed.event) continue;
+    all.push(parsed.event);
+    if (index >= tailStart) tail.push(parsed.event);
+  }
+  for (const [events, rejections] of [[all, allRejections], [tail, tailRejections]]) {
+    Object.defineProperty(events, VALIDATED_BATCH, { value: true });
+    Object.defineProperty(events, REJECTIONS, { value: rejections });
+  }
+  // `rejected` describes the complete raw response, including malformed
+  // records before the published tail. This matches incremental ingestion:
+  // every rejected append is counted exactly once, while valid records omitted
+  // only by transport retention are never mislabeled malformed.
+  return { full: all, tail, rejected: batch.length - all.length,
+    tailRejected: batch.slice(tailStart).length - tail.length };
 }
 function routineRejections(batch) {
   const parsed = parseEvents(batch);
@@ -271,27 +316,83 @@ function approvalRejections(batch) {
   const parsed = parseEvents(batch);
   return (parsed[REJECTIONS] || []).filter(item => item.type === "needs_human_resolved");
 }
+function journalRejections(batch) {
+  const parsed = parseEvents(batch);
+  return (parsed[REJECTIONS] || []).filter(item => item.type === "journal_written");
+}
 function isValidatedBatch(batch) {
   return Boolean(batch && batch[VALIDATED_BATCH]);
 }
+function validatedSelection(source, selection) {
+  if (!isValidatedBatch(source) || !Array.isArray(selection)) {
+    throw new TypeError("validatedSelection requires a validated source and an array");
+  }
+  const available = new Set(source);
+  if (selection.some(event => !available.has(event))) {
+    throw new TypeError("validatedSelection cannot introduce unvalidated records");
+  }
+  if (new Set(selection).size !== selection.length) {
+    throw new TypeError("validatedSelection requires distinct source records");
+  }
+  Object.defineProperty(selection, VALIDATED_BATCH, { value: true });
+  Object.defineProperty(selection, REJECTIONS, { value: [] });
+  return selection;
+}
 
-function foldEvents(agents, batch) {
+function foldEvents(agents, batch, journalState = null) {
   for (const ev of parseEvents(batch)) {
     // Routines have their own run ledger. They neither create an ordinary
     // villager nor refresh/change one whose last interactive state is known.
     if (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
         ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) continue;
+    if (ev.type === "journal_written" && (!journalState ||
+        typeof journalState.recordForEvent !== "function" ||
+        !journalState.recordForEvent(ev))) continue;
     let a = agents.get(ev.agent_id);
     if (!a) {
-      a = { id: ev.agent_id, events: [], lastAny: null, parentAgentId: null };
+      a = { id: ev.agent_id, events: [], lastAny: null, lastOrdinaryAny: null,
+        parentAgentId: null };
       agents.set(ev.agent_id, a);
     }
     a.lastAny = ev;
+    if (ev.type !== "journal_written") a.lastOrdinaryAny = ev;
     const payload = ev.payload || {};
-    if (payload.parent_agent_id) a.parentAgentId = String(payload.parent_agent_id);
+    // A retained journal carries its own direct lineage for ownership checks;
+    // it must not make that lineage permanent after the journal is evicted.
+    if (ev.type !== "journal_written" && payload.parent_agent_id) {
+      a.parentAgentId = String(payload.parent_agent_id);
+    }
     if (ev.type === "heartbeat") continue;
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
+  }
+  if (journalState && typeof journalState.recordForEvent === "function") {
+    const journalApi = JOURNALS || globalThis.BurrowJournals;
+    const affected = new Set(journalApi && typeof journalApi.evictedAgentIds === "function" ?
+      journalApi.evictedAgentIds(journalState) : []);
+    for (const agentId of affected) {
+      const agent = agents.get(agentId);
+      if (!agent) continue;
+      agent.events = agent.events.filter(event => event.type !== "journal_written" ||
+        journalState.recordForEvent(event));
+      if (agent.lastAny && agent.lastAny.type === "journal_written" &&
+          !journalState.recordForEvent(agent.lastAny)) {
+        const retained = journalApi && typeof journalApi.latestForAgent === "function" ?
+          journalApi.latestForAgent(journalState, agent.id) : null;
+        const ordinary = agent.lastOrdinaryAny || null;
+        const ordinaryOrdinal = ordinary && typeof journalState.ordinalForEvent === "function" ?
+          journalState.ordinalForEvent(ordinary) : null;
+        agent.lastAny = retained && (!ordinary || (typeof ordinaryOrdinal === "string" &&
+          journalApi.compareOrdinal(retained.ordinal, ordinaryOrdinal) > 0)) ?
+          retained.event : ordinary;
+      }
+      const retained = journalApi && typeof journalApi.latestForAgent === "function" ?
+        journalApi.latestForAgent(journalState, agent.id) : null;
+      const ordinaryAuthority = agent.lastOrdinaryAny ||
+        agent.events.some(event => event.type !== "journal_written") ||
+        (agent.lastAny && agent.lastAny.type !== "journal_written");
+      if (!retained && !ordinaryAuthority && !agent.parentAgentId) agents.delete(agentId);
+    }
   }
 }
 
@@ -326,7 +427,7 @@ function nameArtifacts(artifacts, villagers, souls) {
       soulByProject.get(a.project) || NAMES[hashCode(a.agent_id) % NAMES.length],
   }));
 }
-function reduce(input, now, souls, approvalState = null) {
+function reduce(input, now, souls, approvalState = null, journalState = null) {
   const soulByAgent = new Map(), soulByProject = new Map();
   const isResident = soul => Boolean(soul && soul.valid === true &&
     soul.manifest_version === 1 && Number.isInteger(soul.home));
@@ -342,7 +443,25 @@ function reduce(input, now, souls, approvalState = null) {
     if (match.project) indexSoul(soulByProject, match.project, s);
   }
   const agents = input instanceof Map ? input : new Map();
-  if (!(input instanceof Map)) foldEvents(agents, input);
+  if (!(input instanceof Map)) foldEvents(agents, input, journalState);
+  const journalApi = JOURNALS || globalThis.BurrowJournals;
+  if (journalState && journalApi && typeof journalApi.resolveOwnership === "function") {
+    journalApi.resolveOwnership(journalState, souls, agents);
+  }
+  const effectiveLast = agent => {
+    const ordinary = agent.lastOrdinaryAny || agent.events.slice().reverse()
+      .find(event => event.type !== "journal_written") || null;
+    const retained = journalState && journalApi &&
+      typeof journalApi.latestOwnedActiveForAgent === "function" ?
+      journalApi.latestOwnedActiveForAgent(journalState, agent.id, now) : null;
+    if (!retained) return ordinary;
+    if (!ordinary) return retained.event;
+    const ordinaryOrdinal = typeof journalState.ordinalForEvent === "function" ?
+      journalState.ordinalForEvent(ordinary) : null;
+    return typeof ordinaryOrdinal === "string" &&
+      journalApi.compareOrdinal(retained.ordinal, ordinaryOrdinal) > 0 ?
+      retained.event : ordinary;
+  };
   const approvalRecordFor = event => {
     if (!approvalState || !(approvalState.requests instanceof Map) ||
         typeof approvalState.classify !== "function" || !event) return { shape: null, record: null };
@@ -385,7 +504,7 @@ function reduce(input, now, souls, approvalState = null) {
   const takenNames = new Set(), takenChars = new Set();
   const sorted = [...agents.values()].sort((x, y) => x.id < y.id ? -1 : 1);
   const visible = sorted.filter(a => {
-    const last = a.lastAny || a.events[a.events.length - 1];
+    const last = effectiveLast(a);
     const tracked = approvalRecordFor(last);
     if (tracked.shape && tracked.shape.kind === "structured" && !tracked.record) return false;
     const hasPendingApproval = approvalState && approvalState.requests instanceof Map &&
@@ -403,7 +522,21 @@ function reduce(input, now, souls, approvalState = null) {
   // Reserve exact identities in a separate pass. A project fallback must never
   // consume the declaration belonging to an exact agent that sorts later.
   const assignedSouls = new Map(), usedSouls = new Set();
+  // Journal ownership is resolved once by BurrowJournals with full lineage and
+  // declaration knowledge. Reuse that answer instead of independently falling
+  // back by project and accidentally housing a child visitor.
   for (const a of visible) {
+    const last = effectiveLast(a);
+    const record = last && last.type === "journal_written" && journalState &&
+      typeof journalState.recordForEvent === "function" ? journalState.recordForEvent(last) : null;
+    const owner = record && journalApi && typeof journalApi.ownerFor === "function" ?
+      journalApi.ownerFor(journalState, record) : null;
+    if (owner && !usedSouls.has(owner)) {
+      assignedSouls.set(a.id, owner); usedSouls.add(owner);
+    }
+  }
+  for (const a of visible) {
+    if (assignedSouls.has(a.id)) continue;
     const exact = soulByAgent.get(a.id);
     if (exact && !usedSouls.has(exact)) {
       assignedSouls.set(a.id, exact);
@@ -415,7 +548,7 @@ function reduce(input, now, souls, approvalState = null) {
     // Project declarations describe the root working session. A child without
     // its own exact declaration remains a Visitor even though it shares cwd.
     if (a.parentAgentId) continue;
-    const last = a.lastAny || a.events[a.events.length - 1];
+    const last = effectiveLast(a);
     const fallback = soulByProject.get(last.project || "unknown");
     if (fallback && !usedSouls.has(fallback)) {
       assignedSouls.set(a.id, fallback);
@@ -423,7 +556,8 @@ function reduce(input, now, souls, approvalState = null) {
     }
   }
   for (const a of sorted) {
-    const ordinaryLast = a.lastAny || a.events[a.events.length - 1];
+    const ordinaryLast = effectiveLast(a);
+    if (!ordinaryLast) continue;
     const trackedOrdinary = approvalRecordFor(ordinaryLast);
     if (trackedOrdinary.shape && trackedOrdinary.shape.kind === "structured" &&
         !trackedOrdinary.record) continue;
@@ -462,7 +596,7 @@ function reduce(input, now, souls, approvalState = null) {
       last.type === "idle"        ? "resting"  : "working";
     if (last.type === "tool_failed") state = "failed";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
-    const prev = a.events[a.events.length - 1];
+    const prev = a.events.slice().reverse().find(event => event.type !== "journal_written");
     const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
     const h = hashCode(a.id);
     const project = last.project || "unknown";
@@ -483,6 +617,9 @@ function reduce(input, now, souls, approvalState = null) {
     takenNames.add(name);
     takenChars.add(char);
     const resident = isResident(soul);
+    if (last.type === "journal_written" && !resident) continue;
+    const journalRecord = last.type === "journal_written" && journalState &&
+      typeof journalState.recordForEvent === "function" ? journalState.recordForEvent(last) : null;
     out.push({
       id: a.id, state, lastTs, events: a.events,
       name, char, accent, soul,
@@ -493,7 +630,7 @@ function reduce(input, now, souls, approvalState = null) {
       cwd: last.cwd || "",
       // A lost signal is not travel: a stale villager keeps its last place.
       place: state === "working" || state === "stale" ? workPlace(shown) : null,
-      doing: state === "working" ? doingLabel(shown) : "",
+      doing: state === "working" ? (shown.type === "journal_written" ? "writing the journal" : doingLabel(shown)) : "",
       lastLine: describe(shown),
       knock: state === "knocking"
         ? { message: (last.payload && last.payload.message) || "(no message)", ts: lastTs,
@@ -504,6 +641,7 @@ function reduce(input, now, souls, approvalState = null) {
       approval: lastRecord ?
         { request_id: lastRecord.id, resolution: lastRecord.resolution } : null,
       approvals: recentApprovals,
+      journal: journalRecord,
     });
   }
   return out;
@@ -515,8 +653,9 @@ if (typeof module === "object" && module.exports) {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
-    validateEvent, parseEvents, isValidatedBatch, routineRejections, taskRejections,
-    approvalRejections,
+    validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+    routineRejections, taskRejections,
+    approvalRejections, journalRejections,
     foldEvents, foldArtifacts, nameArtifacts, reduce,
   };
 }

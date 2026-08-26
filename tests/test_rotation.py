@@ -3,6 +3,7 @@ village the viewer reduces to is identical before and after the roll.
 
     python3 tests/test_rotation.py        (from the repo root)
 """
+import copy
 import datetime
 import http.client
 import json
@@ -60,6 +61,277 @@ def village(lines, now_ms=None):
 
 class CarryForwardTest(unittest.TestCase):
     @staticmethod
+    def journal(agent, day, routine="close-of-day", path=None, minutes_ago=0):
+        observed = event(agent, "journal_written", minutes_ago, routine=routine,
+                         day=day, path=path or f"/journal/{day}.md")
+        observed["source"] = "steward"
+        return observed
+
+    def test_rotation_keeps_bounded_canonical_journal_authority_and_one_conflict(self):
+        lines = []
+        for index in range(42):
+            month, day = (7, index + 1) if index < 31 else (8, index - 30)
+            lines.append(json.dumps(self.journal(
+                f"codex:{index}", f"2026-{month:02d}-{day:02d}")))
+        canonical = self.journal("codex:41", "2026-08-11")
+        replay = {**canonical, "ts": ts(500)}
+        conflict = self.journal("codex:41", "2026-08-11", routine="nightly")
+        second_conflict = self.journal("codex:41", "2026-08-11",
+                                       path="/else/2026-08-11.md")
+        lines.extend(map(json.dumps, [replay, conflict, second_conflict]))
+        tail = [json.loads(line) for line in serve.carry_forward(lines, serve.event_ms(canonical))]
+        journals = [item for item in tail if item["type"] == "journal_written"]
+        canonical_days = {(item["agent_id"], item["payload"]["day"])
+                          for item in journals}
+        self.assertEqual(len(canonical_days), 40)
+        self.assertNotIn(("codex:0", "2026-07-01"), canonical_days)
+        selected = [item for item in journals if item["agent_id"] == "codex:41"]
+        self.assertEqual([item["payload"]["routine"] for item in selected],
+                         ["close-of-day", "nightly"])
+
+    def test_rotation_preserves_later_session_end_without_erasing_journal_recency(self):
+        observed = json.dumps(self.journal("codex:life", "2026-08-25"))
+        ended = json.dumps(event("codex:life", "session_ended"))
+        tail = serve.carry_forward([observed, ended], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(tail, [observed, ended])
+
+    def test_rotation_rejects_evicted_journal_replays_and_conflicts(self):
+        journals = [self.journal(f"codex:{index:02d}", "2026-08-24")
+                    for index in range(40)]
+        journals.append(self.journal("codex:new", "2026-08-25"))
+        replay = self.journal("codex:00", "2026-08-24")
+        conflict = self.journal("codex:00", "2026-08-24", routine="nightly")
+        lines = list(map(json.dumps, [*journals, replay, conflict, replay, conflict]))
+        retained = [json.loads(line) for line in serve.carry_forward(
+            lines, int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000))]
+        retained_journals = [item for item in retained
+                             if item["type"] == "journal_written"]
+        keys = {(item["agent_id"], item["payload"]["day"])
+                for item in retained_journals}
+        self.assertEqual(len(keys), 40)
+        self.assertNotIn(("codex:00", "2026-08-24"), keys)
+        self.assertIn(("codex:01", "2026-08-24"), keys)
+
+    def test_full_log_journal_authority_merges_with_clipped_ordinary_tail_and_browser_reset(self):
+        observed = self.journal("codex:life", "2026-08-25")
+        ordinary = [event("codex:life", "tool_called", 0, tool="Read", n=index)
+                    for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+        lines = list(map(json.dumps, [observed, *ordinary]))
+        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        decoded = [json.loads(line) for line in tail]
+        self.assertEqual(decoded[0], observed,
+                         "journal selected from full input keeps original append position")
+        self.assertEqual(sum(item["type"] == "journal_written" for item in decoded), 1)
+        self.assertEqual([item["payload"]["n"] for item in decoded[1:]],
+                         list(range(serve.VIEWER_LINE_LIMIT + 1 - serve.KEEP_PER_AGENT,
+                                    serve.VIEWER_LINE_LIMIT + 1)))
+
+        script = r"""
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const lines=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const cursor='v1:0123456789abcdef0123456789abcdef:1:2:3:99';
+const resident={file:'life.resident.json',valid:true,manifest_version:1,home:2,
+ match:{agent_id:'codex:life'},meta:{name:'Hob',char:'Monk',accent:'#a68a4f'}};
+const runtime=createBrowserRuntime({now:()=>Date.now(),EventSource:null,setTimeout:()=>1,
+ clearTimeout(){},fetch:async url=>url==='/villagers'?{ok:true,json:async()=>[resident]}:
+ ({ok:true,headers:{get:name=>name==='X-Burrow-Cursor'?cursor:
+   name==='X-Burrow-Reset'?'1':null},text:async()=>lines.join('\n')})});
+runtime.poll().then(()=>process.stdout.write(JSON.stringify({
+ journals:runtime.snapshot().journalState.records.size,
+ key:runtime.snapshot().journalState.records.has('codex:life\0'+'2026-08-25'),
+ villagers:runtime.snapshot().villagers.length,
+ last:runtime.snapshot().villagers[0]&&runtime.snapshot().villagers[0].events.at(-1).payload.n
+})));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps(tail), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        self.assertEqual(json.loads(completed.stdout), {
+            "journals": 1, "key": True, "villagers": 1,
+            "last": serve.VIEWER_LINE_LIMIT,
+        })
+
+    def test_full_log_journal_keeps_later_terminal_outside_ordinary_window(self):
+        observed = json.dumps(self.journal("codex:life", "2026-08-25"))
+        ended = json.dumps(event("codex:life", "session_ended"))
+        chatter = [json.dumps(event(f"codex:gone-{index}", "session_ended"))
+                   for index in range(serve.VIEWER_LINE_LIMIT)]
+        tail = serve.carry_forward([observed, ended, *chatter], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(tail, [observed, ended],
+                         "retained journal cannot resurrect a session whose terminal was clipped")
+
+    def test_journal_merge_never_exceeds_global_transport_window(self):
+        observed = json.dumps(self.journal("codex:journal", "2026-08-25"))
+        ordinary = [json.dumps(event(f"codex:live-{index}", "tool_called", 0,
+                                     tool="Read", n=index))
+                    for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+        tail = serve.carry_forward([observed, *ordinary], int(datetime.datetime.now(
+            datetime.timezone.utc).timestamp() * 1000))
+        self.assertEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+        self.assertEqual(tail[0], observed)
+        self.assertEqual(json.loads(tail[1])["payload"]["n"], 2)
+        self.assertEqual(json.loads(tail[-1])["payload"]["n"],
+                         serve.VIEWER_LINE_LIMIT)
+
+    def test_rotation_retains_each_journal_predecessor_and_restores_exact_expiry_state(self):
+        stale = event("codex:stale", "tool_called", 31, tool="Read")
+        dropped = event("codex:dropped", "tool_called", 13 * 60, tool="Bash")
+        stale_journal = self.journal("codex:stale", "2026-08-24")
+        dropped_journal = self.journal("codex:dropped", "2026-08-24")
+        second_predecessor = event("codex:stale", "tool_called", 31, tool="Bash")
+        second_journal = self.journal("codex:stale", "2026-08-25")
+        chatter = [event(f"codex:unrelated-{index}", "session_ended")
+                   for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+        source = [stale, stale_journal, dropped, dropped_journal,
+                  second_predecessor, second_journal, *chatter]
+        lines = list(map(json.dumps, source))
+        now_ms = serve.event_ms(second_journal)
+        rotated = serve.carry_forward(lines, now_ms)
+        decoded = [json.loads(line) for line in rotated]
+        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        for retained in [stale, stale_journal, dropped, dropped_journal,
+                         second_predecessor, second_journal]:
+            self.assertIn(retained, decoded)
+        self.assertEqual([source.index(item) for item in decoded
+                          if item in source[:6]], list(range(6)),
+                         "journal/predecessor merge preserves original append order")
+
+        script = r"""
+const projection=require('./viewer/projection.js');
+const journals=require('./viewer/journal-observations.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const parsed=projection.parseEvents(input.lines), state=journals.createState(), agents=new Map();
+journals.foldValidated(state,parsed,{isValidatedBatch:projection.isValidatedBatch,
+ rejections:projection.journalRejections(parsed)});
+projection.foldEvents(agents,parsed,state);
+const soul=id=>({valid:true,manifest_version:1,home:id==='codex:stale'?1:2,
+ match:{agent_id:id},meta:{name:id,char:'Monk',accent:'#fff'}});
+const souls=[soul('codex:stale'),soul('codex:dropped')];
+const view=at=>projection.reduce(agents,at,souls,null,state).map(item=>({
+ id:item.id,state:item.state,lastTs:item.lastTs,doing:item.doing,
+ day:item.journal&&item.journal.event.payload.day})).sort((a,b)=>a.id.localeCompare(b.id));
+process.stdout.write(JSON.stringify({active:view(input.now+59999),expired:view(input.now+60000)}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps({"lines": rotated, "now": now_ms}),
+            text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        result = json.loads(completed.stdout)
+        self.assertEqual([(item["id"], item["doing"]) for item in result["active"]],
+                         [("codex:dropped", "writing the journal"),
+                          ("codex:stale", "writing the journal")])
+        self.assertEqual(result["expired"], [{
+            "id": "codex:stale", "state": "stale",
+            "lastTs": serve.event_ms(second_predecessor), "doing": "",
+            "day": None,
+        }])
+
+    def test_rotation_reset_keeps_every_later_ordinary_authority_under_tail_pressure(self):
+        base = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+
+        def at(agent, kind, seconds, **payload):
+            item = event(agent, kind, 0, **payload)
+            item["ts"] = (base + datetime.timedelta(seconds=seconds)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            return item
+
+        def observed(agent, day, seconds):
+            item = self.journal(agent, day)
+            item["ts"] = (base + datetime.timedelta(seconds=seconds)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            return item
+
+        predecessor = {}
+        source = []
+        successors = {
+            "codex:tool": at("codex:tool", "tool_called", -10, tool="Bash"),
+            "codex:idle": at("codex:idle", "idle", 2),
+            "codex:plain": at("codex:plain", "needs_human", 3, message="Choose"),
+            "codex:ended": at("codex:ended", "session_ended", 4),
+            "codex:approval": self.approval("journal-approval", "codex:approval"),
+        }
+        successors["codex:approval"]["ts"] = (base + datetime.timedelta(
+            seconds=5)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        for offset, agent in enumerate([*successors, "codex:active"]):
+            predecessor[agent] = at(agent, "tool_called", -31 * 60 - offset,
+                                    tool="Read")
+            source.extend([predecessor[agent], observed(agent, "2026-08-24", 0)])
+            if agent in successors:
+                source.append(successors[agent])
+
+        multi_before = at("codex:multi", "tool_called", -60, tool="Read")
+        multi_first = observed("codex:multi", "2026-08-24", 0)
+        multi_middle = at("codex:multi", "idle", 1)
+        multi_second = observed("codex:multi", "2026-08-25", 2)
+        multi_after = at("codex:multi", "tool_called", -20, tool="Write")
+        source.extend([multi_before, multi_first, multi_middle, multi_second, multi_after])
+        resolved_knock = self.approval("resolved-before-journal", "codex:resolved-before")
+        resolved_knock["ts"] = at("unused", "idle", -3)["ts"]
+        resolved_close = self.resolution("resolved-before-journal", "codex:resolved-before")
+        resolved_close["ts"] = at("unused", "idle", -2)["ts"]
+        resolved_journal = observed("codex:resolved-before", "2026-08-25", 0)
+        source.extend([resolved_knock, resolved_close, resolved_journal])
+        source.extend(event(f"codex:unrelated-{index}", "session_ended")
+                      for index in range(serve.VIEWER_LINE_LIMIT + 1))
+        rotated = serve.carry_forward(list(map(json.dumps, source)),
+                                      int(base.timestamp() * 1000) + 30_000)
+        decoded = [json.loads(line) for line in rotated]
+        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        for retained in [*predecessor.values(), *successors.values(), multi_before,
+                         multi_first, multi_middle, multi_second, multi_after,
+                         resolved_knock, resolved_close, resolved_journal]:
+            self.assertIn(retained, decoded)
+        indexes = [source.index(item) for item in decoded if item in source]
+        self.assertEqual(indexes, sorted(set(indexes)),
+                         "the bounded merge preserves original order without duplicates")
+
+        script = r"""
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const resident=id=>({file:id+'.resident.json',valid:true,manifest_version:1,home:input.ids.indexOf(id),
+ match:{agent_id:id},meta:{name:id,char:'Monk',accent:'#fff'}});
+async function view(now){
+ const runtime=createBrowserRuntime({now:()=>now,EventSource:null,setTimeout:()=>1,clearTimeout(){},
+  fetch:async url=>url==='/residents'?{ok:true,json:async()=>({residents:input.ids.map(resident),diagnostics:[]})}:
+   ({ok:true,headers:{get:name=>name==='X-Burrow-Cursor'?'v1:0123456789abcdef0123456789abcdef:1:2:3:99':
+    name==='X-Burrow-Reset'?'1':null},text:async()=>input.lines.join('\n')})});
+ await runtime.refreshResidents(); await runtime.poll();
+ return runtime.snapshot().villagers.map(item=>({id:item.id,state:item.state,doing:item.doing,
+  lastTs:item.lastTs,day:item.journal&&item.journal.event.payload.day})).sort((a,b)=>a.id.localeCompare(b.id));
+}
+Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expired])=>
+ process.stdout.write(JSON.stringify({active,expired})));
+"""
+        ids = [*successors, "codex:active", "codex:multi", "codex:resolved-before"]
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps({"lines": rotated,
+                "base": int(base.timestamp() * 1000), "ids": ids}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        projected = json.loads(completed.stdout)
+        active = {item["id"]: item for item in projected["active"]}
+        expired = {item["id"]: item for item in projected["expired"]}
+        self.assertNotIn("codex:ended", active)
+        self.assertEqual(active["codex:tool"]["doing"], "tinkering")
+        self.assertEqual(active["codex:idle"]["state"], "resting")
+        self.assertEqual(active["codex:plain"]["state"], "knocking")
+        self.assertEqual(active["codex:approval"]["state"], "knocking")
+        self.assertEqual(active["codex:active"]["doing"], "writing the journal")
+        self.assertEqual(active["codex:multi"]["doing"], "crafting")
+        self.assertEqual(active["codex:resolved-before"]["doing"], "writing the journal")
+        self.assertEqual(expired["codex:active"]["state"], "stale")
+        self.assertEqual(expired["codex:active"]["lastTs"],
+                         serve.event_ms(predecessor["codex:active"]))
+        self.assertEqual(expired["codex:resolved-before"]["state"], "resting")
+        for agent in successors:
+            if agent != "codex:ended":
+                self.assertEqual(expired[agent], active[agent])
+
+    @staticmethod
     def approval(request_id, agent="approver", minutes_ago=0):
         return event(agent, "needs_human", minutes_ago, message="May I?",
                      request_id=request_id, action="send_email",
@@ -79,6 +351,240 @@ class CarryForwardTest(unittest.TestCase):
         tail = serve.carry_forward([pending], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, [pending])
+
+    def test_retained_journal_carries_distant_approval_truth_into_browser_reset(self):
+        """Rotation and grouped replay share pending/closed/collision truth."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        ancient_minutes = 13 * 60
+        journal = self.journal("codex:life", now.date().isoformat())
+        journal["ts"] = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        request = self.approval("journal-life", "codex:life", ancient_minutes)
+        intervening = event("codex:life", "tool_called", ancient_minutes,
+                            tool="Read")
+        close = self.resolution("journal-life", "codex:life", ancient_minutes)
+        collision = self.approval("journal-life", "codex:life", ancient_minutes)
+        collision["payload"]["message"] = "A different immutable question"
+        orphan = self.resolution("orphan", "codex:life", ancient_minutes)
+        chatter = [event(f"codex:other-{index}", "session_ended")
+                   for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+        variants = {
+            "pending": [request, intervening, orphan, journal],
+            "resolved": [request, intervening, close, orphan, journal],
+            "collided": [request, intervening, collision, orphan, journal],
+        }
+        rotated = {}
+        for name, prefix in variants.items():
+            tail = serve.carry_forward(
+                list(map(json.dumps, [*prefix, *chatter])), now_ms)
+            decoded = [json.loads(line) for line in tail]
+            rotated[name] = tail
+            self.assertLessEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+            self.assertIn(request, decoded, name)
+            self.assertIn(journal, decoded, name)
+            self.assertNotIn(orphan, decoded, name)
+            if name == "resolved":
+                self.assertIn(close, decoded)
+            if name == "collided":
+                self.assertIn(collision, decoded)
+            source = [*prefix, *chatter]
+            positions = [source.index(item) for item in decoded]
+            self.assertEqual(positions, sorted(set(positions)), name)
+
+        script = r"""
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const cursor='v1:0123456789abcdef0123456789abcdef:1:2:3:99';
+const resident={valid:true,manifest_version:1,home:0,match:{agent_id:'codex:life'},
+ meta:{name:'Life',char:'Monk',accent:'#fff'}};
+async function view(lines,now){
+ const runtime=createBrowserRuntime({now:()=>now,EventSource:null,setTimeout:()=>1,clearTimeout(){},
+  fetch:async url=>url==='/villagers'?{ok:true,json:async()=>[resident]}:
+   ({ok:true,headers:{get:name=>name==='X-Burrow-Cursor'?cursor:
+    name==='X-Burrow-Reset'?'1':null},text:async()=>lines.join('\n')})});
+ await runtime.poll();
+ const villager=runtime.snapshot().villagers.find(item=>item.id==='codex:life');
+ const approval=runtime.snapshot().approvalState.requests.get('journal-life');
+ return {villager:villager?{state:villager.state,doing:villager.doing,
+   request_id:villager.knock&&villager.knock.request_id}:null,
+   approval:approval&&{pending:!approval.resolution&&!approval.collided,
+    resolved:Boolean(approval.resolution),collided:approval.collided},
+   orphan:runtime.snapshot().approvalState.requests.has('orphan')};
+}
+Promise.all(Object.entries(input.lines).flatMap(([name,lines])=>[
+ view(lines,input.now).then(value=>[name,'active',value]),
+ view(lines,input.now+120000).then(value=>[name,'expired',value])
+])).then(rows=>process.stdout.write(JSON.stringify(rows)));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], input=json.dumps({"lines": rotated,
+                "now": now_ms}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        views = {(name, age): value for name, age, value
+                 in json.loads(completed.stdout)}
+        for age in ["active", "expired"]:
+            self.assertEqual(views[("pending", age)]["villager"]["state"],
+                             "knocking")
+            self.assertEqual(views[("pending", age)]["villager"]["request_id"],
+                             "journal-life")
+            self.assertTrue(views[("pending", age)]["approval"]["pending"])
+            self.assertTrue(views[("resolved", age)]["approval"]["resolved"])
+            self.assertTrue(views[("collided", age)]["approval"]["collided"])
+            for name in variants:
+                self.assertFalse(views[(name, age)]["orphan"])
+        self.assertEqual(views[("resolved", "active")]["villager"]["doing"],
+                         "writing the journal")
+        self.assertEqual(views[("collided", "active")]["villager"]["doing"],
+                         "writing the journal")
+        self.assertIsNone(views[("resolved", "expired")]["villager"])
+        self.assertIsNone(views[("collided", "expired")]["villager"])
+
+    def test_journal_retention_covers_both_approval_sides_and_independent_knocks(self):
+        """The actual rotated response is the browser's append authority."""
+        now = datetime.datetime.now(datetime.timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        ancient = 13 * 60
+        active_journal = self.journal("codex:life", now.date().isoformat())
+        active_journal["ts"] = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        expired_journal = copy.deepcopy(active_journal)
+        expired_journal["ts"] = (now - datetime.timedelta(minutes=ancient)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        request = self.approval("both-sides", "codex:life", ancient)
+        ordinary = event("codex:life", "tool_called", ancient, tool="Read")
+        close = self.resolution("both-sides", "codex:life", ancient)
+        collision = copy.deepcopy(request)
+        collision["payload"]["message"] = "Different immutable request"
+        orphan = self.resolution("orphan-both-sides", "codex:life", ancient)
+        chatter = [event(f"codex:pressure-{index}", "session_ended")
+                   for index in range(serve.VIEWER_LINE_LIMIT + 3)]
+
+        lifecycle_tails = {}
+        for age, journal in [("active", active_journal), ("expired", expired_journal)]:
+            for side, sequence in {
+                    "after": [journal, request, ordinary],
+                    "before": [request, ordinary, journal]}.items():
+                for lifecycle, suffix in {
+                        "pending": [orphan], "resolved": [close, orphan],
+                        "collided": [collision, orphan]}.items():
+                    source = [*sequence, *suffix, *chatter]
+                    tail = serve.carry_forward(list(map(json.dumps, source)), now_ms)
+                    retained = [json.loads(line) for line in tail]
+                    lifecycle_tails[f"{age}/{side}/{lifecycle}"] = tail
+                    self.assertLessEqual(len(retained), serve.VIEWER_LINE_LIMIT)
+                    self.assertEqual(len(retained), len({source.index(item) for item in retained}),
+                                     (age, side, lifecycle))
+                    positions = [source.index(item) for item in retained]
+                    self.assertEqual(positions, sorted(positions), (age, side, lifecycle))
+                    for required in [journal, request]:
+                        self.assertIn(required, retained, (age, side, lifecycle))
+                    if lifecycle != "collided":
+                        self.assertIn(ordinary, retained, (age, side, lifecycle))
+                    self.assertNotIn(orphan, retained, (age, side, lifecycle))
+                    if lifecycle == "resolved":
+                        self.assertIn(close, retained)
+                    if lifecycle == "collided":
+                        self.assertIn(collision, retained)
+
+        lifecycle_script = r"""
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const resident={file:'life.resident.json',valid:true,manifest_version:1,home:0,
+ match:{agent_id:'codex:life'},meta:{name:'Life',char:'Monk',accent:'#fff'}};
+const cursor='v1:0123456789abcdef0123456789abcdef:1:2:3:99';
+async function reset(lines){const runtime=createBrowserRuntime({now:()=>input.now,EventSource:null,
+ setTimeout:()=>1,clearTimeout(){},fetch:async url=>url==='/villagers'?
+ {ok:true,json:async()=>[resident]}:{ok:true,headers:{get:name=>name==='X-Burrow-Cursor'?cursor:
+ name==='X-Burrow-Reset'?'1':null},text:async()=>lines.join('\n')}});
+ await runtime.poll();const snapshot=runtime.snapshot(),record=snapshot.approvalState.requests.get('both-sides');
+ const villager=snapshot.villagers.find(item=>item.id==='codex:life');
+ return {pending:Boolean(record&&!record.resolution&&!record.collided),
+  resolved:Boolean(record&&record.resolution),collided:Boolean(record&&record.collided),
+  state:villager&&villager.state,request_id:villager&&villager.knock&&villager.knock.request_id};}
+Promise.all(Object.entries(input.lines).map(async ([name,lines])=>[name,await reset(lines)]))
+ .then(rows=>process.stdout.write(JSON.stringify(rows)));
+"""
+        completed = subprocess.run(["node", "-e", lifecycle_script], input=json.dumps({
+            "lines": lifecycle_tails, "now": now_ms}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        for name, view in json.loads(completed.stdout):
+            lifecycle = name.rsplit("/", 1)[-1]
+            if lifecycle == "pending":
+                self.assertEqual(view, {"pending": True, "resolved": False,
+                    "collided": False, "state": "knocking", "request_id": "both-sides"}, name)
+            else:
+                self.assertFalse(view["pending"], name)
+                self.assertEqual(view["resolved"], lifecycle == "resolved", name)
+                self.assertEqual(view["collided"], lifecycle == "collided", name)
+                self.assertNotEqual(view.get("state"), "knocking", name)
+
+        independent_tails = {}
+        for kind in ["plain", "malformed"]:
+            independent = copy.deepcopy(request)
+            independent["payload"] = {"message": f"Independent {kind} knock"}
+            if kind == "malformed":
+                independent["payload"].update({"request_id": "broken",
+                    "action": "Publish", "detail": None, "options": ["approve"]})
+            source = [request, active_journal, independent, *chatter]
+            tail = serve.carry_forward(list(map(json.dumps, source)), now_ms)
+            decoded = [json.loads(line) for line in tail]
+            self.assertIn(request, decoded); self.assertIn(active_journal, decoded)
+            self.assertIn(independent, decoded)
+            self.assertLessEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+            independent_tails[kind] = tail
+
+        script = r"""
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const BOOT='0123456789abcdef0123456789abcdef';
+const cursor=n=>`v1:${BOOT}:1:2:3:${n}`;
+const resident={file:'life.resident.json',valid:true,manifest_version:1,home:0,
+ match:{agent_id:'codex:life'},meta:{name:'Life',char:'Monk',accent:'#fff'}};
+const response=(body,n,reset=false)=>({ok:true,headers:{get:name=>name==='X-Burrow-Cursor'?cursor(n):
+ name==='X-Burrow-Reset'&&reset?'1':null},text:async()=>body});
+function summary(runtime){
+ const snapshot=runtime.snapshot(),villager=snapshot.villagers.find(item=>item.id==='codex:life');
+ const request=snapshot.approvalState.requests.get('both-sides');
+ const independent=villager&&villager.events.find(event=>event.payload&&
+   /^Independent /.test(event.payload.message||''));
+ const journal=snapshot.journalState.records.get(`codex:life\0${input.day}`);
+ return {state:villager&&villager.state,message:villager&&villager.knock&&villager.knock.message,
+  request_id:villager&&villager.knock&&villager.knock.request_id,
+  malformed:snapshot.approvalState.malformed,
+  requestOrdinal:request&&request.knockOrdinal,
+  journalOrdinal:journal&&journal.ordinal,
+  independentOrdinal:independent&&snapshot.approvalState.ordinalForEvent(independent)};
+}
+async function grouped(lines){let polls=0;const runtime=createBrowserRuntime({now:()=>input.now,
+ EventSource:null,setTimeout:()=>1,clearTimeout(){},fetch:async url=>url==='/villagers'?
+ {ok:true,json:async()=>[resident]}:response(lines.join('\n'),++polls*10,polls>1)});
+ await runtime.poll();const bootstrap=summary(runtime);await runtime.poll();
+ return {bootstrap,reset:summary(runtime)};}
+async function streamed(lines){let stream;class EventSource{constructor(){this.listeners={};stream=this}
+ addEventListener(n,f){this.listeners[n]=f}close(){}}
+ const runtime=createBrowserRuntime({now:()=>input.now,EventSource,setTimeout:()=>1,clearTimeout(){},
+ fetch:async url=>url==='/villagers'?{ok:true,json:async()=>[resident]}:response('',1)});
+ await runtime.poll();runtime.connectStream();lines.forEach((line,index)=>stream.onmessage({
+  lastEventId:cursor(index+2),data:line}));
+ await stream.listeners.ready({lastEventId:cursor(lines.length+1),
+  data:JSON.stringify({cursor:cursor(lines.length+1)})});return summary(runtime);}
+Promise.all(Object.entries(input.lines).map(async ([kind,lines])=>
+ [kind,await grouped(lines),await streamed(lines)])).then(value=>process.stdout.write(JSON.stringify(value)));
+"""
+        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+            "lines": independent_tails, "now": now_ms,
+            "day": now.date().isoformat()}), text=True,
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            check=True, capture_output=True)
+        for kind, grouped, streamed in json.loads(completed.stdout):
+            expected = {"state": "knocking", "message": f"Independent {kind} knock",
+                        "request_id": None, "malformed": 1 if kind == "malformed" else 0,
+                        "requestOrdinal": "1", "journalOrdinal": "2",
+                        "independentOrdinal": "3"}
+            self.assertEqual(grouped["bootstrap"], expected, kind)
+            self.assertEqual(grouped["reset"], expected, kind)
+            self.assertEqual(streamed, expected, kind)
 
     def test_resolution_is_retained_only_with_its_request_and_never_as_liveness(self):
         knock = json.dumps(self.approval("paired", minutes_ago=5))
