@@ -211,10 +211,11 @@ must make, the block grammar, and the guardrails are in
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
 before the parameter existed, so a panel that never passed it sees exactly what it saw.
-Approval reads opportunistically sweep requests past `expires_at` through the ordinary
-expiry transition. Thus an API-only steward records the deny, emits
-`needs_human_resolved`, makes the row visible under `resolved`, and leaves the decision
-ready for the resident's next wake-up. Polling remains idempotent.
+The API's lifespan runs the ordinary expiry transition in the background, including when
+no scheduler, dispatcher, or watchdog daemon is running. It records the deny, emits
+`needs_human_resolved`, and leaves the decision ready for the resident's next wake-up.
+GET routes remain read-only: a pending-list read hides a row already past its deadline,
+but neither polling nor looking up an unknown id causes a sweep.
 
 `GET /approvals/{request_id}` is the audit query: request, full detail, decision,
 decider, and every timestamp, in one call. `404` for an id steward has never seen.
@@ -233,8 +234,8 @@ Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
 changes nothing, and emits nothing. An unknown `request_id` is `404`. A request that has
 already **expired** is a `409` with `approval_expired` — distinct from the replay of an
-already-decided one. Deny-by-default has the last word; the same request opportunistically
-sweeps the row to `deny` and emits its resolution (steward #66, #143).
+already-decided one. Deny-by-default has the last word; the late POST explicitly sweeps
+the row to `deny` and emits its resolution (steward #66, #143).
 
 Requests are *created* by the session that reaches a gated action — through a
 `<needs-human>` block in its output or `steward approval raise`, both documented in

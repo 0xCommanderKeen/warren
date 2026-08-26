@@ -9,6 +9,7 @@ promises: not that a request returned 202, but that the matching protocol event 
 import copy
 import datetime as dt
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
@@ -31,6 +32,7 @@ from steward.nursery import raise_resident
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.scheduler import FireReport, ScheduledRoutine
 from steward.store import Store
+from steward.transitions.approval import ApprovalTransitions
 
 TOKEN = "a-shared-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -95,6 +97,8 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
         transport: LocalTransport | None = None,
+        approval_expiry_interval_s: float = 30.0,
+        now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> Harness:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -115,6 +119,8 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
             nursery=nursery,
             transport=transport,
+            approval_expiry_interval_s=approval_expiry_interval_s,
+            now=now,
         )
         harness = Harness(
             client=TestClient(app, headers=dict(AUTH) if token else {}),
@@ -512,26 +518,97 @@ def _expired_pending(harness: Harness) -> str:
     return record.request_id
 
 
-def test_an_expired_request_is_not_listed_as_pending(api: ApiFactory) -> None:
-    """The approval API realizes deadlines even when no dispatcher is running (#143)."""
+def test_approval_gets_are_read_only_even_for_unknown_ids(api: ApiFactory) -> None:
+    """Neither polling nor an attacker-chosen missing id may sweep the ledger."""
     harness = api()
     request_id = _expired_pending(harness)
 
     assert harness.client.get("/approvals").json()["approvals"] == []
-    assert harness.client.get("/approvals?status=pending").json()["approvals"] == []
-    # The same API visit resolved it through the transition seam and announced the deny.
+    assert harness.client.get("/approvals/never-existed").status_code == 404
     record = harness.store.approval(request_id)
     assert record is not None
+    assert record.pending
+    assert harness.events("needs_human_resolved") == []
+
+
+def test_api_lifespan_alone_expires_and_stops_cleanly(api: ApiFactory) -> None:
+    """Serve owns expiry even when none of steward's daemons are running (#143)."""
+    moment = dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC)
+    harness = api(now=lambda: moment, approval_expiry_interval_s=0.01)
+    request_id = _expired_pending(harness)
+
+    with harness.client:
+        task = harness.client.app.state.approval_expiry_task
+        for _ in range(100):
+            record = harness.store.approval(request_id)
+            if record is not None and not record.pending and harness.events("needs_human_resolved"):
+                break
+            threading.Event().wait(0.01)
+        assert record is not None
+        assert record.decision == "deny"
+        assert record.decided_by == "expiry"
+        assert len(harness.events("needs_human_resolved")) == 1
+        assert not task.done()
+
+    assert task.done()
+    assert harness.client.app.state.approval_expiry_task is None
+
+
+def test_expiry_loop_logs_a_failed_pass_and_keeps_running(
+    api: ApiFactory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    original = ApprovalTransitions.expire
+    calls = 0
+
+    def flaky(self: ApprovalTransitions, now: dt.datetime | None = None) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary expiry failure")
+        return original(self, now)
+
+    monkeypatch.setattr(ApprovalTransitions, "expire", flaky)
+    harness = api(
+        now=lambda: dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC),
+        approval_expiry_interval_s=0.01,
+    )
+    request_id = _expired_pending(harness)
+
+    with caplog.at_level(logging.ERROR, logger="steward.api"), harness.client:
+        for _ in range(100):
+            record = harness.store.approval(request_id)
+            if record is not None and not record.pending:
+                break
+            threading.Event().wait(0.01)
+
+    assert record is not None
     assert record.decision == "deny"
-    assert record.decided_by == "expiry"
-    assert len(harness.events("needs_human_resolved")) == 1
-    listed_all = harness.client.get("/approvals?status=all").json()["approvals"]
-    assert [record["request_id"] for record in listed_all] == [request_id]
-    assert listed_all[0]["status"] == "resolved"
-    listed_resolved = harness.client.get("/approvals?status=resolved").json()["approvals"]
-    assert [record["request_id"] for record in listed_resolved] == [request_id]
-    # Polling is idempotent: the conditional transition emits only once.
-    assert len(harness.events("needs_human_resolved")) == 1
+    assert calls >= 2
+    assert "approval expiry sweep failed; will retry" in caplog.text
+
+
+def test_expiry_loop_never_overlaps_a_slow_pass(
+    api: ApiFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def slow(_self: ApprovalTransitions, _now: dt.datetime | None = None) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        release.wait(timeout=10.0)
+        return []
+
+    monkeypatch.setattr(ApprovalTransitions, "expire", slow)
+    harness = api(approval_expiry_interval_s=0.001)
+
+    with harness.client:
+        assert entered.wait(timeout=10.0)
+        threading.Event().wait(0.03)
+        assert calls == 1
+        release.set()
 
 
 def test_an_expired_request_cannot_be_decided(api: ApiFactory) -> None:
@@ -582,12 +659,15 @@ def test_an_api_swept_deny_reaches_the_resident_on_its_next_wake(api: ApiFactory
         prompts.append(request.prompt)
         return RunResult(outcome=Outcome.OK, output="understood")
 
-    harness = api(behavior=record_prompt)
-    request_id = _expired_pending(harness)
-    harness.client.get(f"/approvals/{request_id}")
-
-    harness.client.post("/residents/test-agent/routines/daily-summary/run")
-    harness.settle()
+    harness = api(behavior=record_prompt, approval_expiry_interval_s=0.01)
+    _expired_pending(harness)
+    with harness.client:
+        for _ in range(100):
+            if harness.events("needs_human_resolved"):
+                break
+            threading.Event().wait(0.01)
+        harness.client.post("/residents/test-agent/routines/daily-summary/run")
+        harness.settle()
 
     assert any("send_email: deny" in prompt for prompt in prompts)
     assert harness.store.undelivered_decisions("test-agent") == []
