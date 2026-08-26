@@ -75,6 +75,383 @@ class CarryForwardTest(unittest.TestCase):
         observed["source"] = "steward"
         return observed
 
+    def test_routine_only_villager_and_history_are_identical_after_rotation(self):
+        agent_id = "codex:pip"
+        events = []
+        for index in range(serve.KEEP_PER_AGENT + 10):
+            item = event(agent_id, "routine_started", 10 - index / 100,
+                         routine="heartbeat", run_id=f"hourly-{index}",
+                         trigger="schedule")
+            item["source"] = "steward"
+            events.append(item)
+        events.append({**events[-1], "ts": ts(0), "type": "routine_finished",
+                       "payload": {"routine": "heartbeat", "run_id": "hourly-89",
+                                   "outcome": "ok", "artifacts": [],
+                                   "duration_s": 1.25}})
+        lines = list(map(json.dumps, events))
+        now_ms = serve.event_ms(events[-1])
+        rotated = serve.carry_forward(lines, now_ms)
+        script = r"""
+const fs=require('node:fs'),p=require('./viewer/projection.js');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+const shape=lines=>p.reduce(lines,input.now,[]).map(v=>({id:v.id,state:v.state,
+ lastTs:v.lastTs,lastLine:v.lastLine,events:v.events.map(e=>e.type)}));
+process.stdout.write(JSON.stringify(input.groups.map(shape)));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"groups": [lines, rotated],
+                                                          "now": now_ms}),
+            capture_output=True, text=True, check=True)
+        before, after = json.loads(completed.stdout)
+        self.assertEqual(after, before)
+        self.assertEqual(after[0]["state"], "resting")
+        self.assertEqual(after[0]["lastLine"], "finished heartbeat, ok in 1.25s")
+        self.assertEqual(len(after[0]["events"]), serve.KEEP_PER_AGENT)
+        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+
+    def test_rotated_invalid_and_non_steward_routines_never_create_villagers(self):
+        forged = event("codex:pip", "routine_started", routine="heartbeat",
+                       run_id="forged", trigger="schedule")
+        malformed = {**forged, "source": "steward",
+                     "payload": {"routine": "heartbeat", "run_id": "",
+                                 "trigger": "schedule"}}
+        rotated = serve.carry_forward(list(map(json.dumps, [forged, malformed])),
+                                      serve.event_ms(forged))
+        self.assertEqual(protocol_events(rotated), [])
+
+    def test_routine_after_journal_remains_the_visible_successor_after_rotation(self):
+        journal = self.journal("codex:pip", "2026-08-25")
+        started = event("codex:pip", "routine_started", routine="heartbeat",
+                        run_id="after-journal", trigger="schedule")
+        started["source"] = "steward"
+        chatter = [json.dumps(event(f"codex:gone-{index}", "session_ended"))
+                   for index in range(serve.VIEWER_LINE_LIMIT)]
+        lines = [json.dumps(journal), json.dumps(started), *chatter]
+        rotated = serve.carry_forward(lines, serve.event_ms(started))
+        retained = protocol_events(rotated)
+        pip = [item for item in retained if item["agent_id"] == "codex:pip"]
+        self.assertEqual([item["type"] for item in pip],
+                         ["journal_written", "routine_started"])
+
+    def test_live_routine_survives_exact_tail_noise_rotation_and_grouped_reset(self):
+        started = event("codex:pip", "routine_started", routine="heartbeat",
+                        run_id="boundary", trigger="schedule")
+        started["source"] = "steward"
+        noise = [event(f"codex:gone-{index}", "session_ended")
+                 for index in range(serve.VIEWER_LINE_LIMIT)]
+        lines = list(map(json.dumps, [started, *noise]))
+        now_ms = serve.event_ms(started)
+        rotated = serve.carry_forward(lines, now_ms)
+        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        retained = protocol_events(rotated)
+        self.assertEqual([(item["agent_id"], item["type"]) for item in retained],
+                         [("codex:pip", "routine_started")])
+        script = r"""
+const fs=require('node:fs');
+const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
+const input=JSON.parse(fs.readFileSync(0,'utf8'));
+let views=[];
+const runtime=createBrowserRuntime({now:()=>input.now,EventSource:null,
+ setTimeout:()=>1,clearTimeout(){},warn(){},onProjection:v=>views.push(v),
+ fetch:async url=>url==='/villagers'?{ok:false}:{ok:true,
+  headers:{get:n=>n==='X-Burrow-Cursor'?'v1:0123456789abcdef0123456789abcdef:1:2:3:9':null},
+  text:async()=>input.lines.join('\n')}});
+runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().villagers.map(v=>({
+ id:v.id,state:v.state,line:v.lastLine,history:v.events.map(e=>e.type)})))));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"lines": rotated, "now": now_ms}),
+            capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(completed.stdout), [{
+            "id": "codex:pip", "state": "working", "line": "woke for heartbeat",
+            "history": ["routine_started"],
+        }])
+
+    def test_python_and_javascript_projection_witnesses_match_at_cap(self):
+        events = []
+        for index in range(120):
+            started = event(f"codex:r-{index}", "routine_started",
+                            routine="heartbeat", run_id=f"run-{index}", trigger="schedule")
+            started["source"] = "steward"
+            events.append(started)
+            if index % 3 == 0:
+                events.append(event(f"codex:r-{index}", "idle"))
+            if index % 7 == 0:
+                events.append(event(f"codex:r-{index}", "session_ended"))
+        parsed = list(enumerate(events))
+        now_ms = max(serve.event_ms(item) for item in events)
+        python_indexes = sorted(serve._projection_keep_indexes(parsed, now_ms, 80))
+        script = r"""
+const fs=require('node:fs'),p=require('./viewer/projection.js');
+const x=JSON.parse(fs.readFileSync(0,'utf8')), parsed=p.parseEvents(x.events);
+const selected=new Set(p.projectionWitnesses(parsed,x.now,x.limit));
+process.stdout.write(JSON.stringify(parsed.map((e,i)=>selected.has(e)?i:null).filter(i=>i!==null)));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"events": events,
+                                                          "now": now_ms, "limit": 80}),
+            capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(completed.stdout), python_indexes)
+
+    def test_pending_knock_and_routines_share_one_exact_projection_cap(self):
+        anchor = datetime.datetime.now(datetime.timezone.utc)
+        events = []
+        for index in range(serve.VIEWER_LINE_LIMIT - 1):
+            started = event(f"codex:r{index:04d}", "routine_started",
+                            routine="heartbeat", run_id=f"run-{index}", trigger="schedule")
+            started["source"] = "steward"
+            started["ts"] = (anchor + datetime.timedelta(milliseconds=index)).isoformat(
+                timespec="milliseconds").replace("+00:00", "Z")
+            events.append(started)
+        pending = event("codex:doorstep", "needs_human", message="Approve deploy?",
+                        request_id="exact-cap", action="deploy", detail=None,
+                        options=["approve", "deny"])
+        pending["source"] = "codex"
+        pending["ts"] = (anchor + datetime.timedelta(milliseconds=4000)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        events.append(pending)
+        rotated = serve.carry_forward(list(map(json.dumps, events)),
+                                      int(anchor.timestamp() * 1000) + 4000)
+        retained = protocol_events(rotated)
+        self.assertEqual(len(retained), serve.VIEWER_LINE_LIMIT)
+        self.assertEqual(retained[0]["agent_id"], "codex:r0000")
+        self.assertEqual(retained[-1]["agent_id"], "codex:doorstep")
+        self.assertEqual(sum(item["type"] == "routine_started" for item in retained), 3999)
+
+        script = r"""
+const fs=require('node:fs'),p=require('./viewer/projection.js');
+const batches=JSON.parse(fs.readFileSync(0,'utf8')),shape=lines=>p.reduce(lines,batches.now,[])
+ .map(v=>[v.id,v.state,v.lastLine]);
+process.stdout.write(JSON.stringify([shape(batches.full),shape(batches.rotated)]));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, events)),
+                "rotated": rotated, "now": int(anchor.timestamp() * 1000) + 4000}),
+            capture_output=True, text=True, check=True)
+        full, after = json.loads(completed.stdout)
+        self.assertEqual(after, full)
+
+    def test_rotation_keeps_canonical_routine_lifecycle_conflicts(self):
+        base = datetime.datetime.now(datetime.timezone.utc)
+        stamp = lambda seconds: (base + datetime.timedelta(seconds=seconds)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        def fact(agent_id, kind, seconds, **payload):
+            item = event(agent_id, kind, routine="heartbeat", run_id="ordered", **payload)
+            item["source"] = "steward"; item["ts"] = stamp(seconds)
+            return item
+        source = [
+            fact("codex:delayed", "routine_started", 0, trigger="schedule"),
+            fact("codex:delayed", "routine_finished", 60, outcome="ok",
+                 duration_s=8, artifacts=[]),
+            fact("codex:delayed", "routine_started", 0, trigger="schedule"),
+            fact("codex:preclose", "routine_finished", -60, outcome="ok",
+                 duration_s=8, artifacts=[]),
+            fact("codex:preclose", "routine_started", 0, trigger="schedule"),
+            fact("codex:conflict", "routine_started", 0, trigger="schedule"),
+            fact("codex:conflict", "routine_failed", 60, error="boom"),
+            fact("codex:conflict", "routine_finished", 60, outcome="ok",
+                 duration_s=8, artifacts=[]),
+        ]
+        source.extend(event(f"codex:gone-{index}", "session_ended")
+                      for index in range(serve.VIEWER_LINE_LIMIT))
+        rotated = serve.carry_forward(list(map(json.dumps, source)),
+                                      int(base.timestamp() * 1000) + 120_000)
+        script = r"""
+const fs=require('node:fs'),p=require('./viewer/projection.js'),x=JSON.parse(fs.readFileSync(0,'utf8'));
+const shape=lines=>Object.fromEntries(p.reduce(lines,x.now,[]).filter(v=>v.id.startsWith('codex:')&&!v.id.includes('gone-'))
+ .map(v=>[v.id,[v.state,v.lastLine,v.events.map(e=>e.type)]]));
+process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
+                "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
+            capture_output=True, text=True, check=True)
+        full, after = json.loads(completed.stdout)
+        self.assertEqual(after, full)
+        self.assertEqual(full["codex:delayed"][:2],
+                         ["resting", "finished heartbeat, ok in 8s"])
+        self.assertEqual(full["codex:preclose"][:2], ["working", "woke for heartbeat"])
+        self.assertEqual(full["codex:conflict"][:2], ["failed", "heartbeat failed — boom"])
+
+    def test_rotation_keeps_bounded_routine_authority_at_79_80_81_and_hides_orphans(self):
+        base = datetime.datetime.now(datetime.timezone.utc)
+        stamp = lambda seconds: (base + datetime.timedelta(seconds=seconds)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        def fact(kind, seconds, **payload):
+            item = event("codex:bounded", kind, routine="heartbeat", run_id="bounded", **payload)
+            item["source"] = "steward"; item["ts"] = stamp(seconds)
+            return item
+        started = fact("routine_started", 0, trigger="schedule")
+        finished = fact("routine_finished", 60, outcome="ok", duration_s=8, artifacts=[])
+        noise = [event(f"codex:gone-cap-{index}", "session_ended")
+                 for index in range(serve.VIEWER_LINE_LIMIT)]
+        script = r"""
+const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const shape=records=>{const v=p.reduce(records,x.now,[]).find(v=>v.id==='codex:bounded');
+ return v?[v.state,v.lastLine,v.events.length,v.stateEvent.type]:null};
+process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
+"""
+        for count in (79, 80, 81):
+            source = [started, finished] + [started] * count + noise
+            rotated = serve.carry_forward(list(map(json.dumps, source)),
+                                          int(base.timestamp() * 1000) + 120_000)
+            completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+                os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
+                    "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
+                capture_output=True, text=True, check=True)
+            full, after = json.loads(completed.stdout)
+            self.assertEqual(after, full)
+            self.assertEqual(full, ["resting", "finished heartbeat, ok in 8s", 80,
+                                    "routine_finished"])
+            retained = [json.loads(line) for line in rotated
+                        if not json.loads(line).get("_burrow_internal")]
+            self.assertLessEqual(sum(item.get("agent_id") == "codex:bounded"
+                                     for item in retained), 80)
+
+        orphan = fact("routine_failed", 60, error="must stay hidden")
+        rotated = serve.carry_forward(list(map(json.dumps, [orphan] + noise)),
+                                      int(base.timestamp() * 1000) + 120_000)
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": [json.dumps(orphan)],
+                "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
+            capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(completed.stdout), [None, None])
+
+    def test_python_and_javascript_routine_unicode_ties_match_at_transport_cap(self):
+        base = datetime.datetime.now(datetime.timezone.utc)
+        stamp = base.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        def started(agent_id, project, run_id):
+            item = event(agent_id, "routine_started", routine="heartbeat", run_id=run_id,
+                         trigger="schedule")
+            item.update(source="steward", project=project, ts=stamp)
+            return item
+        source = [started(f"codex:scalar-{index}", "life", str(index))
+                  for index in range(3999)]
+        source += [started("codex:unicode", "😀", "same"),
+                   started("codex:unicode", "\ue000", "same")]
+        parsed = list(enumerate(source))
+        kept = serve._projection_keep_indexes(parsed, int(base.timestamp() * 1000), 4000)
+        self.assertEqual(len(kept), 4000)
+        rotated = serve.carry_forward(list(map(json.dumps, source)),
+                                      int(base.timestamp() * 1000))
+        script = r"""
+const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const shape=records=>{const all=p.reduce(records,x.now,[]),v=all.find(v=>v.id==='codex:unicode');
+ return [all.length,v&&v.project,p.projectionWitnesses(records,x.now,4000).length]};
+process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
+                "rotated": rotated, "now": int(base.timestamp() * 1000)}),
+            capture_output=True, text=True, check=True)
+        full, after = json.loads(completed.stdout)
+        self.assertEqual(after, full)
+        self.assertEqual(full, [4000, "\ue000", 4000])
+
+        terminal_source = [started(f"codex:terminal-{index}", "life", str(index))
+                           for index in range(3997)]
+        terminal_start = started("codex:unicode", "life", "terminal")
+        terminal_at = (base + datetime.timedelta(seconds=1)).isoformat(
+            timespec="milliseconds").replace("+00:00", "Z")
+        def terminal(outcome):
+            item = event("codex:unicode", "routine_finished", routine="heartbeat",
+                         run_id="terminal", outcome=outcome, duration_s=1, artifacts=[])
+            item.update(source="steward", project="life", ts=terminal_at)
+            return item
+        idle = event("codex:ordinary", "idle")
+        idle["ts"] = terminal_at
+        terminal_source += [terminal_start, terminal("\ue000"), terminal("😀"), idle]
+        rotated_terminal = serve.carry_forward(list(map(json.dumps, terminal_source)),
+                                               int(base.timestamp() * 1000) + 1000)
+        terminal_script = r"""
+const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const shape=records=>{const all=p.reduce(records,x.now,[]),v=all.find(v=>v.id==='codex:unicode');
+ return [all.length,v&&v.lastLine,p.projectionWitnesses(records,x.now,4000).length]};
+process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
+"""
+        completed = subprocess.run(["node", "-e", terminal_script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, terminal_source)),
+                "rotated": rotated_terminal, "now": int(base.timestamp() * 1000) + 1000}),
+            capture_output=True, text=True, check=True)
+        full, after = json.loads(completed.stdout)
+        self.assertEqual(after, full)
+        self.assertEqual(full, [3999, "finished heartbeat, 😀 in 1s", 4000])
+
+        collision_source = [started(f"codex:nul-{index}", "life", str(index))
+                            for index in range(3998)]
+        collision_source += [
+            {**started("codex:nul", "one", "c"),
+             "payload": {"routine": "a\0b", "run_id": "c", "trigger": "schedule"}},
+            {**started("codex:nul", "two", "b\0c"),
+             "payload": {"routine": "a", "run_id": "b\0c", "trigger": "schedule"}},
+        ]
+        rotated_collision = serve.carry_forward(list(map(json.dumps, collision_source)),
+                                                int(base.timestamp() * 1000))
+        collision_script = r"""
+const r=require('./viewer/routine-ledger.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
+const count=records=>r.project(records.map(JSON.parse),x.now).byRoutine.size;
+process.stdout.write(JSON.stringify([count(x.full),count(x.rotated)]));
+"""
+        completed = subprocess.run(["node", "-e", collision_script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, collision_source)),
+                "rotated": rotated_collision, "now": int(base.timestamp() * 1000)}),
+            capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(completed.stdout), [4000, 4000])
+
+    def test_heartbeat_support_matches_reducer_at_exact_projection_limits(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        stamp = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+        def observed(agent_id, kind, payload=None, source="test"):
+            return {"v": 0, "ts": stamp, "source": source, "agent_id": agent_id,
+                    "project": "burrow", "type": kind, "payload": payload or {}}
+
+        cases = []
+        for prior_type in ["idle", "routine_finished", "tool_called", "tool_called/idle"]:
+            kind = prior_type.split("/")[0]
+            if kind == "routine_finished":
+                prior = observed("codex:boundary", kind,
+                    {"routine": "heartbeat", "run_id": "boundary", "outcome": "ok",
+                     "artifacts": [], "duration_s": 1}, "steward")
+            elif kind == "tool_called":
+                prior = observed("codex:boundary", kind, {"tool": "Read"})
+            else:
+                prior = observed("codex:boundary", kind)
+            heartbeat = observed("codex:boundary", "heartbeat")
+            for limit, noise_count in [(1, 0), (serve.VIEWER_LINE_LIMIT,
+                                                serve.VIEWER_LINE_LIMIT - 1)]:
+                noise = [observed(f"codex:live-{index}", "idle")
+                         for index in range(noise_count)]
+                events = [prior]
+                if prior_type == "tool_called/idle":
+                    events.append(observed("codex:boundary", "idle"))
+                events.extend([heartbeat, *noise])
+                parsed = list(enumerate(events))
+                python_indexes = sorted(serve._projection_keep_indexes(
+                    parsed, int(now.timestamp() * 1000), limit))
+                cases.append({"name": f"{prior_type}/{limit}", "events": events,
+                              "now": int(now.timestamp() * 1000), "limit": limit,
+                              "python": python_indexes})
+                boundary_types = [events[index]["type"] for index in python_indexes
+                                  if events[index]["agent_id"] == "codex:boundary"]
+                expected = [] if prior_type == "tool_called" else ["heartbeat"]
+                self.assertEqual(boundary_types, expected, cases[-1]["name"])
+
+        script = r"""
+const fs=require('node:fs'),p=require('./viewer/projection.js');
+const cases=JSON.parse(fs.readFileSync(0,'utf8'));
+process.stdout.write(JSON.stringify(cases.map(item=>{
+ const parsed=p.parseEvents(item.events),selected=new Set(
+  p.projectionWitnesses(parsed,item.now,item.limit));
+ return parsed.map((event,index)=>selected.has(event)?index:null).filter(index=>index!==null);
+})));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            os.path.dirname(__file__)), input=json.dumps(cases), capture_output=True,
+            text=True, check=True)
+        self.assertEqual(json.loads(completed.stdout),
+                         [case["python"] for case in cases])
+
     def test_shared_mood_fixture_is_byte_equivalent_after_python_rotation(self):
         fixture_path = os.path.join(os.path.dirname(__file__), "fixtures",
                                     "mood-rotation.json")

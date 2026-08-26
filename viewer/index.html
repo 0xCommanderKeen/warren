@@ -1681,7 +1681,8 @@ function routineRows(now) {
     BurrowRoutines.project(events, now, { validateEvent }));
 }
 function stewardDeclaration(routine) {
-  return stewardDeclarations.byRoutine.get(`${routine.steward_resident}\0${routine.id}`) || null;
+  return stewardDeclarations.byRoutine.get(JSON.stringify(
+    [routine.steward_resident, routine.id])) || null;
 }
 function nextFireText(routine) {
   const declaration = stewardDeclaration(routine);
@@ -2165,7 +2166,7 @@ function renderPanelContent(now) {
       ${meta.role ? `<div class="meta role">${esc(meta.role)}</div>` : ""}
       <div class="meta">${esc(identity)}</div>
       <div class="state-line">inactive · no current signal</div>
-      ${routineOwner && !latest ? `<div class="meta">Routine ownership observed from Steward; routine events do not manufacture interactive activity.</div>` : ""}
+      ${routineOwner && !latest ? `<div class="meta">Routine ownership observed from Steward; its current villager signal has expired.</div>` : ""}
       ${resident && resident.body ? `<div class="soul">${esc(resident.body)}</div>` : ""}
       ${resident && resident.valid === true ? identityMarkup(resident) : visitorIdentityMarkup(resident)}
       ${renderResidentRoutines(resident, now)}
@@ -2178,7 +2179,8 @@ function renderPanelContent(now) {
   const at = placeLabel(v);
   const stateText =
     v.state === "knocking" ? "at your door — needs you" :
-    v.state === "failed"   ? "a tool failed" :
+    v.state === "failed"   ? (v.stateEvent && v.stateEvent.type === "routine_failed" ?
+      "routine failed" : "a tool failed") :
     v.state === "working"  ? (v.doing || "working") + at :
     v.state === "stale"    ? "no signal for a while" + at : "resting";
   const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
@@ -2585,7 +2587,8 @@ panelBody.addEventListener("click", async event => {
     stewardConfig = config;
     await refreshStewardDeclarations();
   }
-  const declaration = stewardDeclarations.byRoutine.get(`${request.resident}\0${request.routine}`);
+  const declaration = stewardDeclarations.byRoutine.get(JSON.stringify(
+    [request.resident, request.routine]));
   if (!BurrowRoutines.canRunAuthoritatively(
       request.local, declaration, stewardDeclarations.state)) return;
   // Credentials and declaration reads may leave a cached cursor behind after

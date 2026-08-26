@@ -14,7 +14,8 @@ const path = require("node:path");
 
 const {
   reduce, NAMES, CHARS, ACCENTS, STALE_MS, DROP_MS, MAX_EVENTS, PLACE_OF_VERB,
-  MAX_ARTIFACTS, parseEvents, parseEventWindows, validatedSelection, routineRejections,
+  MAX_ARTIFACTS, parseEvents, parseEventWindows, validatedSelection, projectionWitnesses,
+  routineRejections,
   foldEvents, foldArtifacts, nameArtifacts,
   describe: describeEvent, doingLabel, ago, esc, hashCode, workPlace,
 } = require("../viewer/projection.js");
@@ -102,6 +103,99 @@ describe("grouped event windows", () => {
       "bounded selectors cannot use the marker to smuggle unchecked events into folds");
     assert.throws(()=>validatedSelection(windows.full,[windows.full[0],windows.full[0]]),
       /distinct source records/,"validated selections cannot replay one append twice");
+  });
+});
+
+describe("routine lifecycle authority", () => {
+  const routine = (type, stamp, payload) => protocolLine({source:"steward", agent_id:"codex:pip",
+    project:"burrow", ts:stamp, type, payload:{routine:"heartbeat",run_id:"run-1",...payload}});
+  const start = stamp => routine("routine_started", stamp, {trigger:"schedule"});
+  const finish = stamp => routine("routine_finished", stamp,
+    {outcome:"ok",duration_s:8,artifacts:[]});
+  const failed = stamp => routine("routine_failed", stamp, {error:"boom"});
+  const view = records => reduce(records, Date.parse("2026-08-24T12:02:00.000Z"), [])[0];
+
+  it("uses canonical lifecycle truth without erasing append-ordered history", () => {
+    const begun = "2026-08-24T12:00:00.000Z", closed = "2026-08-24T12:01:00.000Z";
+    const delayed = view([start(begun), finish(closed), start(begun)]);
+    assert.deepEqual([delayed.state, delayed.lastLine], ["resting", "finished heartbeat, ok in 8s"]);
+    assert.deepEqual(delayed.events.map(event => event.type),
+      ["routine_started", "routine_finished", "routine_started"]);
+
+    const preclosed = view([finish("2026-08-24T11:59:00.000Z"), start(begun)]);
+    assert.deepEqual([preclosed.state, preclosed.lastLine], ["working", "woke for heartbeat"]);
+
+    const conflict = view([start(begun), failed(closed), finish(closed)]);
+    assert.deepEqual([conflict.state, conflict.lastLine], ["failed", "heartbeat failed — boom"]);
+  });
+
+  it("keeps canonical truth beyond visible-history eviction and charges support inside 80", () => {
+    const begun = "2026-08-24T12:00:00.000Z", closed = "2026-08-24T12:01:00.000Z";
+    const canonical = [start(begun), finish(closed)];
+    const delayed = Array.from({length:81}, () => start(begun));
+    for (const count of [79, 80, 81]) {
+      const records = [...canonical, ...delayed.slice(0, count)];
+      const direct = view(records);
+      assert.deepEqual([direct.state, direct.lastLine],
+        ["resting", "finished heartbeat, ok in 8s"]);
+      assert.equal(direct.events.length, Math.min(MAX_EVENTS, records.length));
+      const selected = projectionWitnesses(records, Date.parse("2026-08-24T12:02:00.000Z"), 4000);
+      assert.ok(selected.length <= MAX_EVENTS, `selector cap at ${count}`);
+      const reset = view(selected);
+      assert.deepEqual([reset.state, reset.lastLine], [direct.state, direct.lastLine]);
+
+      const agents = new Map();
+      for (const record of records) foldEvents(agents, [record]);
+      const incremental = reduce(agents, Date.parse("2026-08-24T12:02:00.000Z"), [])[0];
+      assert.deepEqual([incremental.state, incremental.lastLine], [direct.state, direct.lastLine]);
+    }
+  });
+
+  it("uses collision-free identities and Unicode-scalar lifecycle ties", () => {
+    const at = "2026-08-24T12:00:00.000Z", later = "2026-08-24T12:01:00.000Z";
+    const fact = (type, routineName, runId, project, payload) => protocolLine({source:"steward",
+      agent_id:"codex:unicode",project,ts:type === "routine_started" ? at : later,type,
+      payload:{routine:routineName,run_id:runId,...payload}});
+    const collision = [
+      fact("routine_started", "a\0b", "c", "one", {trigger:"schedule"}),
+      fact("routine_started", "a", "b\0c", "two", {trigger:"schedule"}),
+    ];
+    assert.equal(require("../viewer/routine-ledger.js").project(collision.map(JSON.parse)).byRoutine.size, 2);
+
+    const tiedStarts = [
+      fact("routine_started", "tie", "same", "😀", {trigger:"schedule"}),
+      fact("routine_started", "tie", "same", "\uE000", {trigger:"schedule"}),
+    ];
+    assert.equal(view(tiedStarts).project, "\uE000", "lower Unicode scalar wins a start tie");
+    const terminals = [tiedStarts[1],
+      fact("routine_finished", "tie", "same", "\uE000",
+        {outcome:"\uE000",duration_s:1,artifacts:[]}),
+      fact("routine_finished", "tie", "same", "\uE000",
+        {outcome:"😀",duration_s:1,artifacts:[]})];
+    assert.equal(view(terminals).lastLine, "finished tie, 😀 in 1s",
+      "higher Unicode scalar wins a terminal tie");
+  });
+});
+
+describe("projection witness API", () => {
+  it("rejects explicit raw baselines and accepts duplicate-safe same-source selections", () => {
+    const raw = [protocolLine({ts:"2026-08-24T11:59:00.000Z",agent_id:"codex:old",
+      type:"idle",payload:{}}), protocolLine({ts:"2026-08-24T11:59:01.000Z",
+      agent_id:"codex:new",type:"idle",payload:{}})];
+    assert.throws(() => projectionWitnesses(raw, NOW, 1, raw.slice(-1)),
+      /baseline must be a validated selection of source/);
+    const source = parseEvents(raw), baseline = validatedSelection(source, source.slice(-1));
+    assert.deepEqual(projectionWitnesses(source, NOW, 1, baseline).map(event => event.agent_id),
+      ["codex:new"]);
+  });
+
+  it("rejects direct append aliases while supporting repeated raw JSON records", () => {
+    const raw = protocolLine({ts:"2026-08-24T11:59:00.000Z",agent_id:"codex:alias",
+      type:"idle",payload:{}});
+    assert.equal(projectionWitnesses([raw, raw], NOW, 2).length, 2);
+    const direct = JSON.parse(raw);
+    assert.throws(() => projectionWitnesses([direct, direct], NOW, 2),
+      /source must not alias direct event objects/);
   });
 });
 
@@ -255,18 +349,80 @@ describe("state mapping (docs/protocol.md, projection rules v0)", () => {
   });
 });
 
-describe("routine isolation", () => {
-  it("terminal routine events do not create or refresh ordinary villagers", () => {
+describe("routine villager visibility", () => {
+  const routine = (type, ts, payload, agent_id = "resident") => protocolLine({
+    ts, agent_id, project:"life", source:"steward", type, payload,
+  });
+
+  it("creates a routine-only villager and maps the full lifecycle truthfully", () => {
+    const started = routine("routine_started", "2026-08-24T11:58:00.000Z",
+      {routine:"heartbeat",run_id:"run-1",trigger:"schedule"});
+    const agents = new Map();
+    foldEvents(agents, [started]);
+    const [working] = reduce(agents, NOW, []);
+    assert.deepEqual({id:working.id,state:working.state,doing:working.doing,
+      lastLine:working.lastLine}, {id:"resident",state:"working",
+      doing:"running heartbeat",lastLine:"woke for heartbeat"});
+
+    const finished = routine("routine_finished", "2026-08-24T11:59:00.000Z",
+      {routine:"heartbeat",run_id:"run-1",outcome:"ok",artifacts:[],duration_s:8.1254});
+    foldEvents(agents, [finished]);
+    const [resting] = reduce(agents, NOW, []);
+    assert.equal(resting.state, "resting");
+    assert.equal(resting.lastLine, "finished heartbeat, ok in 8.125s");
+    assert.deepEqual(resting.events.map(event => event.type),
+      ["routine_started", "routine_finished"]);
+    assert.deepEqual(reduce([started, finished], NOW, []), [resting],
+      "full and incremental folds expose the same routine-only villager");
+  });
+
+  it("refreshes ordinary state and renders failure with optional deterministic duration", () => {
     const idle = protocolLine({ts:"2026-08-24T11:50:00.000Z",agent_id:"resident",
       project:"life",type:"idle",payload:{}});
-    const terminal = protocolLine({ts:"2026-08-24T11:59:00.000Z",agent_id:"resident",
-      project:"life",source:"steward",type:"routine_finished",
-      payload:{routine:"summary",run_id:"run-1",outcome:"ok",artifacts:[],duration_s:2}});
-    const [resident] = reduce([idle, terminal], NOW, []);
-    assert.equal(resident.state, "resting");
-    assert.equal(resident.lastTs, Date.parse("2026-08-24T11:50:00.000Z"));
-    assert.deepEqual(resident.events.map(event => event.type), ["idle"]);
-    assert.deepEqual(reduce([terminal], NOW, []), []);
+    const begun = routine("routine_started", "2026-08-24T11:58:00.000Z",
+      {routine:"inbox",run_id:"run-2",trigger:"schedule"});
+    const failed = routine("routine_failed", "2026-08-24T11:59:00.000Z",
+      {routine:"inbox",run_id:"run-2",error:"  mail\nservice   unavailable  ",duration_s:0.3336});
+    const [resident] = reduce([idle, begun, failed], NOW, []);
+    assert.equal(resident.state, "failed");
+    assert.equal(resident.lastTs, Date.parse("2026-08-24T11:59:00.000Z"));
+    assert.equal(resident.lastLine, "inbox failed — mail service unavailable after 0.334s");
+    assert.deepEqual(resident.events.map(event => event.type),
+      ["idle", "routine_started", "routine_failed"]);
+
+    const noDurationStart = routine("routine_started", "2026-08-24T11:58:01.000Z",
+      {routine:"watchdog",run_id:"run-3",trigger:"schedule"});
+    const noDuration = routine("routine_failed", "2026-08-24T11:59:01.000Z",
+      {routine:"watchdog",run_id:"run-3",error:"run never reported back"});
+    assert.equal(reduce([noDurationStart, noDuration], NOW, [])[0].lastLine,
+      "watchdog failed — run never reported back");
+  });
+
+  it("hides orphan terminals but lets bounded authority match a later start", () => {
+    for (const terminal of [
+      routine("routine_finished", "2026-08-24T11:59:00.000Z",
+        {routine:"heartbeat",run_id:"late",outcome:"ok",artifacts:[],duration_s:1}),
+      routine("routine_failed", "2026-08-24T11:59:00.000Z",
+        {routine:"heartbeat",run_id:"late",error:"boom"}),
+    ]) assert.deepEqual(reduce([terminal], NOW, []), []);
+
+    const terminal = routine("routine_finished", "2026-08-24T11:59:00.000Z",
+      {routine:"heartbeat",run_id:"late",outcome:"ok",artifacts:[],duration_s:1});
+    const start = routine("routine_started", "2026-08-24T11:58:00.000Z",
+      {routine:"heartbeat",run_id:"late",trigger:"schedule"});
+    const agents = new Map();
+    foldEvents(agents, [terminal]);
+    assert.deepEqual(reduce(agents, NOW, []), []);
+    foldEvents(agents, [start]);
+    assert.deepEqual([reduce(agents, NOW, [])[0].state,
+      reduce(agents, NOW, [])[0].lastLine], ["resting", "finished heartbeat, ok in 1s"]);
+  });
+
+  it("cannot manufacture activity from invalid or non-Steward routine claims", () => {
+    const valid = JSON.parse(routine("routine_started", "2026-08-24T11:59:00.000Z",
+      {routine:"heartbeat",run_id:"run-1",trigger:"schedule"}));
+    assert.deepEqual(reduce([{...valid,source:"codex"},
+      {...valid,payload:{...valid.payload,run_id:""}}], NOW, []), []);
   });
 });
 
@@ -502,6 +658,11 @@ describe("presentation helpers shared with the viewer", () => {
     assert.equal(say("idle", {}), "finished, resting");
     assert.equal(say("session_ended", {}), "went home");
     assert.equal(say("heartbeat", {}), "finished a tool");
+    assert.equal(say("routine_started", {routine:"heartbeat"}), "woke for heartbeat");
+    assert.equal(say("routine_finished", {routine:"heartbeat",outcome:"ok",duration_s:8}),
+      "finished heartbeat, ok in 8s");
+    assert.equal(say("routine_failed", {routine:"heartbeat",error:"boom"}),
+      "heartbeat failed — boom");
     assert.equal(doingLabel({ type: "idle", payload: {} }), "");
   });
 

@@ -699,11 +699,16 @@ test("production fleet browser fixture runs isolated interaction and visual phas
       const routineFailed = { ...routineStarted, ts:new Date(frozenNow - 30_000).toISOString(),
         type:"routine_failed", payload:{routine:"daily-summary",run_id:"watchdog",
           error:"run never reported back"} };
+      const routineFinished = { ...routineStarted, ts:routineFailed.ts,
+        type:"routine_finished", payload:{routine:"daily-summary",run_id:"watchdog",
+          outcome:"late finish",duration_s:30,artifacts:[]} };
+      const delayedStarted = {...routineStarted};
       const olderStarted = { ...routineStarted, ts:new Date(frozenNow - 120_000).toISOString(),
         payload:{routine:"daily-summary",run_id:"older",trigger:"schedule"} };
       const olderFailed = { ...routineFailed, ts:new Date(frozenNow - 90_000).toISOString(),
         payload:{routine:"daily-summary",run_id:"older",error:"<img src=x onerror=window.__unsafe=1>"} };
-      fs.appendFileSync(events, [olderStarted, olderFailed, routineStarted, routineFailed]
+      fs.appendFileSync(events, [olderStarted, olderFailed, routineStarted, routineFailed,
+        routineFinished, delayedStarted]
         .map(value => JSON.stringify(value)).join("\n") + "\n");
       await resetPage();
       const evidence = await eventually(send, `(async () => {
@@ -715,19 +720,19 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         if (!row) return false;
         row.querySelector('[data-agent]').click();
         await new Promise(resolve => requestAnimationFrame(resolve));
-        const inactive = document.querySelector('#panel-body').textContent.includes('inactive · no current signal');
+        const routineVisibleState = document.querySelector('#panel-body').textContent.includes('routine failed');
         const linkedObservedOwner = document.querySelector('#panel-body').textContent.includes('layout-routine');
         const routineVisible = document.querySelector('#panel-body').textContent.includes('Routine ledger');
         // Opening the panel and the SSE/poll publication are independent. Keep
         // this whole scenario behind the production DOM's eventual owner fact
         // so slower Linux runners cannot capture an intermediate resident link.
-        if (!inactive || !linkedObservedOwner || !routineVisible) return false;
+        if (!routineVisibleState || !linkedObservedOwner || !routineVisible) return false;
         let promptCalls = 0; window.prompt = () => { promptCalls++; return null; };
         const firstCredentialRequest = requestStewardConfig();
         const secondCredentialRequest = requestStewardConfig();
         await new Promise(resolve => requestAnimationFrame(resolve));
         const dialog = document.querySelector('#steward-auth'), token = document.querySelector('#steward-token');
-        const result = { inactive, linkedObservedOwner, routineVisible, open: dialog.open, type: token.type,
+        const result = { routineVisibleState, linkedObservedOwner, routineVisible, open: dialog.open, type: token.type,
           autocomplete: token.autocomplete, promptCalls,
           singleFlight: firstCredentialRequest === secondCredentialRequest,
           secretInPanel: document.querySelector('#panel-body').textContent.includes('browser-secret') };
@@ -788,15 +793,15 @@ test("production fleet browser fixture runs isolated interaction and visual phas
           routine:'daily-summary',next_fire:null,enabled:false,retired:false}]})});
         await olderRefresh;
         result.latestDeclarationWins = stewardDeclarations.state === 'loaded' &&
-          stewardDeclarations.byRoutine.get('life-agent\\0daily-summary').enabled === true &&
-          stewardDeclarations.byRoutine.get('life-agent\\0daily-summary').next_fire ===
+          stewardDeclarations.byRoutine.get(JSON.stringify(['life-agent','daily-summary'])).enabled === true &&
+          stewardDeclarations.byRoutine.get(JSON.stringify(['life-agent','daily-summary'])).next_fire ===
             '2026-08-28T07:00:00Z' &&
           !document.querySelector('[data-run-routine]').disabled;
         return result;
       })()`, signal, "inactive routine and Steward credential dialog");
       fs.writeFileSync(events, [currentEvent, agedEvent, agedAttention]
         .map(value => JSON.stringify(value)).join("\n") + "\n");
-      assert.deepEqual(evidence, { inactive: true, linkedObservedOwner: true, routineVisible: true, open: true,
+      assert.deepEqual(evidence, { routineVisibleState: true, linkedObservedOwner: true, routineVisible: true, open: true,
         type: "password", autocomplete: "off", promptCalls: 0, singleFlight: true,
         secretInPanel: false, cancelledTogether: true, closed: true, cleared: true,
         directFetch: { url: "http://127.0.0.1:8801/routines", authorization: "Bearer fetch-only-secret",
@@ -2269,7 +2274,7 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         await runtime.refreshResidents();
         stewardConfig = {url:'http://127.0.0.1:8801',token:'ephemeral'};
         stewardDeclarations = {state:'loaded',error:null,byRoutine:new Map([[
-          'life-agent\\0daily-summary', {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
+          JSON.stringify(['life-agent','daily-summary']), {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
         ]])};
         document.querySelector('#fleet-open').click();
         document.querySelector('[data-fleet-tab="routines"]').click();
@@ -2341,7 +2346,7 @@ test("production fleet browser fixture runs isolated interaction and visual phas
         await runtime.refreshResidents();
         stewardConfig = {url:'http://127.0.0.1:8801',token:'ephemeral'};
         stewardDeclarations = {state:'loaded',error:null,byRoutine:new Map([[
-          'life-agent\\0daily-summary', {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
+          JSON.stringify(['life-agent','daily-summary']), {next_fire:'2026-08-26T07:00:00Z',enabled:true,retired:false}
         ]])};
         const originalFetch = window.fetch.bind(window);
         window.fetch = async (url, options) => String(url).startsWith('http://127.0.0.1:8801/') ?

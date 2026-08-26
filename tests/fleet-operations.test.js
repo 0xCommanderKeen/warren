@@ -6,6 +6,7 @@ const fleet = require("../viewer/fleet-operations.js");
 const routines = require("../viewer/routine-ledger.js");
 
 const BASE = Date.parse("2026-08-25T12:00:00.000Z");
+const routineKey = (agent, routine) => JSON.stringify([agent, routine]);
 function event(index, overrides = {}) {
   return { v: 0, ts: new Date(BASE + index).toISOString(), source: "claude-code",
     agent_id: "agent-a", project: "burrow", type: "tool_called",
@@ -166,7 +167,7 @@ test("a saturated ledger stages a close and promotes its later start atomically"
   assert.deepEqual(retained.map(entry => entry.event.type).sort(),
     ["routine_finished", "routine_started"]);
   assert.equal(routines.project(retained.map(entry => entry.event), BASE + 20_000)
-    .byRoutine.get("new-agent\0new-routine")[0].state, "finished");
+    .byRoutine.get(routineKey("new-agent", "new-routine"))[0].state, "finished");
   assert.equal(state.routineKeys.length, fleet.MAX_ROUTINE_KEYS);
   assert.equal(state.routineOrphans.length, 0);
   assert.equal(state.routineMalformed, 0);
@@ -316,7 +317,7 @@ test("retention and projection keep the newest terminal truth despite delayed co
   assert.deepEqual(retained.map(entry => entry.event.type).sort(),
     ["routine_failed", "routine_started"]);
   const projected = routines.project(retained.slice().reverse().map(entry => entry.event),
-    BASE + 40).byRoutine.get("agent-a\0summary")[0];
+    BASE + 40).byRoutine.get(routineKey("agent-a", "summary"))[0];
   assert.deepEqual({state:projected.state,error:projected.error,artifacts:projected.artifacts},
     {state:"failed",error:"newest truth",artifacts:[]});
 });
@@ -328,14 +329,14 @@ test("retention and projection share earliest-start truth for delayed duplicates
   const delayedEarlierStart = routine(10, "routine_started", "delayed-start");
   fleet.foldFleet(state, [laterStart, finish]);
   assert.equal(routines.project(state.routineRecent.map(entry => entry.event), BASE + 40)
-    .byRoutine.get("agent-a\0summary")[0].state, "running");
+    .byRoutine.get(routineKey("agent-a", "summary"))[0].state, "running");
   fleet.foldFleet(state, [delayedEarlierStart]);
   const retained = state.routineRecent.filter(entry =>
     entry.event.payload.run_id === "delayed-start").map(entry => entry.event);
   assert.deepEqual(retained.map(event => event.ts).sort(),
     [delayedEarlierStart.ts, finish.ts].sort());
   const projected = routines.project(retained, BASE + 40)
-    .byRoutine.get("agent-a\0summary")[0];
+    .byRoutine.get(routineKey("agent-a", "summary"))[0];
   assert.deepEqual({state:projected.state,started_at:projected.started_at,
     closed_at:projected.closed_at},
   {state:"finished",started_at:BASE + 10,closed_at:BASE + 20});
@@ -351,7 +352,7 @@ test("equal-time duplicate starts use the same deterministic tie-break", () => {
     assert.equal(retained.length, 1);
     assert.equal(retained[0].payload.trigger, "manual");
     assert.equal(routines.project(retained, BASE + 20)
-      .byRoutine.get("agent-a\0summary")[0].trigger, "manual");
+      .byRoutine.get(routineKey("agent-a", "summary"))[0].trigger, "manual");
   }
 });
 
@@ -368,7 +369,7 @@ test("equal-time terminal conflicts use the same deterministic failure tie-break
     assert.equal(retained.find(event => event.type !== "routine_started").type,
       "routine_failed");
     const projected = routines.project(retained, BASE + 30)
-      .byRoutine.get("agent-a\0summary")[0];
+      .byRoutine.get(routineKey("agent-a", "summary"))[0];
     assert.equal(projected.state, "failed");
     assert.equal(projected.error, "conservative truth");
   }

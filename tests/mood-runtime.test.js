@@ -76,6 +76,68 @@ test("incremental, grouped bootstrap and reset publish byte-identical shared Moo
   assert.equal(groupedMood.status, "blocked");
 });
 
+test("pre-ready routine failures flush Mood once on ready and failed recovery", async t => {
+  const at = Date.parse("2026-08-25T10:00:00.000Z"), agentId = "codex:pip";
+  const baseline = JSON.stringify({v:0,ts:new Date(at).toISOString(),source:"codex",
+    agent_id:agentId,project:"burrow",type:"tool_called",payload:{tool:"Read"}});
+  const started = JSON.stringify({v:0,ts:new Date(at + 1).toISOString(),source:"steward",
+    agent_id:agentId,project:"burrow",type:"routine_started",
+    payload:{routine:"heartbeat",run_id:"failed",trigger:"schedule"}});
+  const failures = Array.from({length:3}, (_, index) => JSON.stringify({v:0,
+    ts:new Date(at + index + 2).toISOString(),source:"steward",agent_id:agentId,
+    project:"burrow",type:"routine_failed",
+    payload:{routine:"heartbeat",run_id:"failed",error:`boom ${index}`}}));
+  const lifecycle = [started, ...failures];
+
+  async function scenario(mode) {
+    const streams = [], projections = [];
+    class EventSource {
+      constructor() { this.listeners={}; streams.push(this); }
+      addEventListener(name, fn) { this.listeners[name]=fn; }
+      close() { this.closed=true; }
+    }
+    let eventReads = 0;
+    const runtime = createBrowserRuntime({now:()=>at + 1000,EventSource,
+      setTimeout:()=>1,clearTimeout(){},onProjection:view=>projections.push(view),
+      fetch:async url => {
+        if (url === "/villagers") return {ok:false};
+        eventReads += 1;
+        if (eventReads === 1) return eventResponse([baseline], 10);
+        throw new Error("offline");
+      },
+    });
+    await runtime.poll();
+    runtime.connectStream();
+    const stream = streams[0];
+    lifecycle.forEach((data, index) => stream.onmessage({
+      lastEventId:cursor(11 + index),data,
+    }));
+    const beforeBoundary = projections.length;
+    if (mode === "ready") {
+      const end = cursor(14);
+      await stream.listeners.ready({lastEventId:end,data:JSON.stringify({cursor:end})});
+    } else {
+      await stream.onerror();
+    }
+    const villager = runtime.snapshot().villagers.find(item => item.id === agentId);
+    return {runtime,villager,boundaryRenders:projections.length - beforeBoundary};
+  }
+
+  for (const mode of ["ready", "failed recovery"]) await t.test(mode, async () => {
+    const result = await scenario(mode === "ready" ? "ready" : "error");
+    assert.deepEqual({state:result.villager.state,
+      history:result.villager.events.map(event => event.type),
+      glyph:result.villager.mood.glyph,anchor:result.villager.mood.anchor}, {
+      state:"failed",history:["tool_called","routine_started","routine_failed",
+        "routine_failed","routine_failed"],glyph:"×",anchor:new Date(at + 4).toISOString(),
+    });
+    assert.equal(result.boundaryRenders, 1,
+      "the readiness/recovery boundary recomputes and renders deferred Mood exactly once");
+    assert.equal(result.runtime.snapshot().transport,
+      mode === "ready" ? "live" : "disconnected");
+  });
+});
+
 test("actual sufficiency contributors survive incremental runtime retention", async () => {
   const adversarial = JSON.parse(fs.readFileSync(path.join(__dirname,
     "fixtures/mood-rotation-adversarial.json")));

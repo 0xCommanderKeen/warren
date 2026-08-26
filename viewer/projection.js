@@ -28,6 +28,11 @@ const JOURNALS = typeof module === "object" && module.exports ?
   require("./journal-observations.js") : null;
 const TYPED_JSON = typeof module === "object" && module.exports ?
   require("./typed-json.js") : BurrowTypedJSON;
+const ROUTINE_LIFECYCLE = typeof module === "object" && module.exports ?
+  require("./routine-lifecycle.js") : null;
+function routineLifecycle() {
+  return ROUTINE_LIFECYCLE || globalThis.BurrowRoutineLifecycle;
+}
 const VERBS = {
   Read: "reading", Grep: "searching", Glob: "searching", WebSearch: "researching",
   WebFetch: "researching", Bash: "tinkering", Write: "crafting", Edit: "crafting",
@@ -77,6 +82,20 @@ function ago(ts, now) {
   if (s < 3600) return Math.round(s / 60) + "m ago";
   return (s / 3600).toFixed(1) + "h ago";
 }
+function routineDescriptionText(value, fallback, maximum = 120) {
+  const normalized = typeof value === "string" ? value.trim().replace(/\s+/gu, " ") : "";
+  if (!normalized) return fallback;
+  const characters = Array.from(normalized);
+  return characters.length <= maximum ? normalized : characters.slice(0, maximum - 1).join("") + "…";
+}
+function formatRoutineDuration(seconds) {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0) return null;
+  // Steward reports seconds and the existing routine UI uses seconds too.
+  // Keep millisecond precision for useful fractional durations without
+  // exposing floating-point noise; very large finite values remain finite.
+  const rounded = seconds < 1e21 ? Number(seconds.toFixed(3)) : seconds;
+  return String(Object.is(rounded, -0) ? 0 : rounded) + "s";
+}
 function describe(ev) {
   const p = ev.payload || {};
   switch (ev.type) {
@@ -90,6 +109,19 @@ function describe(ev) {
     case "needs_human":       return "needs you: " + (p.message || "(no message)");
     case "idle":              return "finished, resting";
     case "session_ended":     return "went home";
+    case "routine_started":   return "woke for " +
+                                     routineDescriptionText(p.routine, "a routine", 80);
+    case "routine_finished": {
+      const duration = formatRoutineDuration(p.duration_s);
+      return "finished " + routineDescriptionText(p.routine, "a routine", 80) + ", " +
+        routineDescriptionText(p.outcome, "unknown outcome", 80) +
+        (duration ? " in " + duration : "");
+    }
+    case "routine_failed": {
+      const duration = formatRoutineDuration(p.duration_s);
+      return routineDescriptionText(p.routine, "routine", 80) + " failed — " +
+        routineDescriptionText(p.error, "unknown error") + (duration ? " after " + duration : "");
+    }
     case "journal_written":   return "wrote the journal for " + p.day + " after " + p.routine;
     default:                  return ev.type;
   }
@@ -100,6 +132,8 @@ function doingLabel(ev) {
     case "task_started":      return "starting a task";
     case "tool_called":       return VERBS[p.tool] || ("using " + p.tool);
     case "artifact_produced": return "crafting";
+    case "routine_started":   return "running " +
+                                     routineDescriptionText(p.routine, "a routine", 80);
     default:                  return "";
   }
 }
@@ -628,6 +662,175 @@ function validatedSelection(source, selection) {
   return selection;
 }
 
+/* Select the bounded ordinary authority needed to reconstruct the village.
+ *
+ * This is deliberately not a raw tail. Terminal/expired agents do not need a
+ * replay witness, while a live routine-only resident may sit before thousands
+ * of such records. When routine identities alone overflow the cap, their
+ * newest routine append chooses the bounded candidate set; newest live
+ * candidates are then admitted first. Their latest state,
+ * latest lineage declaration, and (when the latest fact is a heartbeat) the
+ * action it decorates are indivisible support; remaining capacity is filled
+ * by newest visible history, capped exactly as foldEvents caps it. The result
+ * stays in append order and is therefore safe to compose with journal and
+ * approval witnesses before one fold. `baseline` and `preselected` are
+ * duplicate-safe append identities, so explicit values must be selections
+ * marked by validatedSelection from this exact validated `source`. Raw inputs
+ * are supported only through the default baseline.
+ */
+function projectionWitnesses(source, now, limit, baseline = source, forcedAgents = [],
+  preselected = null) {
+  if (Array.isArray(source)) {
+    const direct = new WeakSet();
+    for (const item of source) {
+      if (item && typeof item === "object") {
+        if (direct.has(item)) {
+          throw new TypeError("projectionWitnesses source must not alias direct event objects");
+        }
+        direct.add(item);
+      }
+    }
+  }
+  const parsed = parseEvents(source);
+  if (typeof now !== "number" || !Number.isFinite(now) ||
+      !Number.isInteger(limit) || limit < 0) {
+    throw new TypeError("projectionWitnesses requires finite now and a non-negative limit");
+  }
+  const sameSourceSelection = (selection, label) => {
+    if (!isValidatedBatch(source) || !isValidatedBatch(selection)) {
+      throw new TypeError(`${label} must be a validated selection of source`);
+    }
+    const available = new Set(parsed);
+    if (selection.some(event => !available.has(event))) {
+      throw new TypeError(`${label} must be a validated selection of source`);
+    }
+    return selection;
+  };
+  // Raw values are parsed independently and therefore have no duplicate-safe
+  // append identity. The default means the parsed source itself; an explicit
+  // baseline must carry the validated same-source identity contract.
+  const baselineSelection = baseline === source ? parsed : sameSourceSelection(baseline, "baseline");
+  const baselineEvents = new Set(baselineSelection);
+  const protectedSelection = preselected === null ? [] :
+    sameSourceSelection(preselected, "preselected witnesses");
+  if (protectedSelection.length > limit) {
+    throw new RangeError("preselected witnesses exceed the projection limit");
+  }
+  if (!limit || !parsed.length) return validatedSelection(parsed, []);
+  const indexByEvent = new Map(parsed.map((event, index) => [event, index]));
+  const forced = new Set(forcedAgents);
+  const routineAgents = new Set();
+  for (let index = parsed.length - 1; index >= 0 && routineAgents.size < limit; index--) {
+    const event = parsed[index];
+    if (event.type.startsWith("routine_")) routineAgents.add(event.agent_id);
+  }
+  const ignored = new Set(["needs_human_resolved", "journal_written",
+    "task_posted", "task_claimed", "task_done", "task_failed"]);
+  const latestRaw = new Map(), lastNonRoutine = new Map(), allRoutineFacts = new Map();
+  for (let index = 0; index < parsed.length; index++) {
+    const event = parsed[index];
+    if (!ignored.has(event.type) &&
+        (baselineEvents.has(event) || routineAgents.has(event.agent_id))) {
+      latestRaw.set(event.agent_id, { index, event });
+      if (event.type.startsWith("routine_")) {
+        const facts = allRoutineFacts.get(event.agent_id) || [];
+        facts.push(event); allRoutineFacts.set(event.agent_id, facts);
+      } else lastNonRoutine.set(event.agent_id, { index, event });
+    }
+  }
+  const latest = new Map(), orphanRoutineAgents = new Set();
+  for (const [agentId, raw] of latestRaw) {
+    if (!raw.event.type.startsWith("routine_")) {
+      latest.set(agentId, { ...raw, rankIndex: raw.index }); continue;
+    }
+    const current = routineLifecycle().selectCurrent(allRoutineFacts.get(agentId));
+    if (current) latest.set(agentId, { index: indexByEvent.get(current.event),
+      event: current.event, rankIndex: raw.index });
+    else {
+      orphanRoutineAgents.add(agentId);
+      if (lastNonRoutine.has(agentId)) latest.set(agentId,
+        { ...lastNonRoutine.get(agentId), rankIndex: raw.index });
+    }
+  }
+  const live = [...latest.entries()].filter(([, item]) =>
+    item.event.type !== "session_ended" &&
+      (forced.has(item.event.agent_id) || now - (Date.parse(item.event.ts) || 0) <= DROP_MS))
+    .sort((left, right) => right[1].rankIndex - left[1].rankIndex);
+  const candidates = new Set(live.map(([agentId]) => agentId));
+  const history = new Map(), lineage = new Map(), previousAction = new Map();
+  const previousOrdinarySeen = new Set();
+  for (let index = parsed.length - 1; index >= 0; index--) {
+    const event = parsed[index], agentId = event.agent_id;
+    if (!candidates.has(agentId) || ignored.has(event.type) ||
+        (!baselineEvents.has(event) && !routineAgents.has(agentId))) continue;
+    const payload = event.payload || {};
+    if (!lineage.has(agentId) && payload.parent_agent_id) lineage.set(agentId, index);
+    if (event.type !== "heartbeat") {
+      const events = history.get(agentId) || [];
+      if (events.length < MAX_EVENTS) events.push(index);
+      history.set(agentId, events);
+      // Heartbeat decorates only the immediately preceding retained ordinary
+      // event. Once that predecessor is known, an older action is irrelevant.
+      if (!previousOrdinarySeen.has(agentId)) {
+        previousOrdinarySeen.add(agentId);
+        if (ACTION_TYPES.has(event.type)) previousAction.set(agentId, index);
+      }
+    }
+  }
+  const keep = new Set(protectedSelection.map(event => indexByEvent.get(event))), admitted = [];
+  const keptPerAgent = new Map();
+  for (const index of keep) {
+    const event = parsed[index];
+    if (event) keptPerAgent.set(event.agent_id, (keptPerAgent.get(event.agent_id) || 0) + 1);
+  }
+  for (const [agentId, item] of live) {
+    const support = new Set([item.index]);
+    if (lineage.has(agentId)) support.add(lineage.get(agentId));
+    if (item.event.type === "heartbeat" && previousAction.has(agentId)) {
+      support.add(previousAction.get(agentId));
+    }
+    if (item.event.type.startsWith("routine_")) {
+      const current = routineLifecycle().selectCurrent(allRoutineFacts.get(agentId));
+      if (current) {
+        support.add(indexByEvent.get(current.start));
+        if (current.terminal) support.add(indexByEvent.get(current.terminal));
+      }
+    }
+    const added = [...support].filter(index => index !== undefined && !keep.has(index));
+    if (keep.size + added.length > limit ||
+        (allRoutineFacts.has(agentId) &&
+         (keptPerAgent.get(agentId) || 0) + added.length > MAX_EVENTS)) continue;
+    for (const index of added) keep.add(index);
+    keptPerAgent.set(agentId, (keptPerAgent.get(agentId) || 0) + added.length);
+    admitted.push(agentId);
+  }
+  const optional = [];
+  for (const agentId of admitted) {
+    for (const index of history.get(agentId) || []) if (!keep.has(index)) optional.push(index);
+  }
+  optional.sort((left, right) => right - left);
+  for (const index of optional) {
+    if (keep.size === limit) break;
+    const agentId = parsed[index].agent_id;
+    if (allRoutineFacts.has(agentId) &&
+        (keptPerAgent.get(agentId) || 0) >= MAX_EVENTS) continue;
+    keep.add(index);
+    keptPerAgent.set(agentId, (keptPerAgent.get(agentId) || 0) + 1);
+  }
+  // Close-only facts are bounded future correlation evidence, not liveness.
+  // Admit them only after every reconstructible villager and its history, so
+  // terminal spam cannot displace visible truth or refresh an expired agent.
+  for (let index = parsed.length - 1; index >= 0 && keep.size < limit; index--) {
+    const event = parsed[index], agentId = event.agent_id;
+    if (!orphanRoutineAgents.has(agentId) || event.type === "routine_started" || keep.has(index) ||
+        (keptPerAgent.get(agentId) || 0) >= MAX_EVENTS) continue;
+    keep.add(index);
+    keptPerAgent.set(agentId, (keptPerAgent.get(agentId) || 0) + 1);
+  }
+  return validatedSelection(parsed, [...keep].sort((left, right) => left - right)
+    .map(index => parsed[index]));
+}
+
 function moodAuthority(batch) {
   return parseEvents(batch)[MOOD_AUTHORITY] || [];
 }
@@ -689,9 +892,10 @@ function moodAuthorityCapsuleByteLength(authority, copies = [], options = {}) {
 
 function foldEvents(agents, batch, journalState = null) {
   for (const ev of parseEvents(batch)) {
-    // Routines have their own run ledger. They neither create an ordinary
-    // villager nor refresh/change one whose last interactive state is known.
-    if (ev.type.startsWith("routine_") || ev.type === "needs_human_resolved" ||
+    // Job and resolution events have independent projections. Routine facts
+    // retain their independent ledger too, but are also direct evidence that
+    // their resident is working, resting, or failed in the village.
+    if (ev.type === "needs_human_resolved" ||
         ["task_posted", "task_claimed", "task_done", "task_failed"].includes(ev.type)) continue;
     if (ev.type === "journal_written" && (!journalState ||
         typeof journalState.recordForEvent !== "function" ||
@@ -699,11 +903,15 @@ function foldEvents(agents, batch, journalState = null) {
     let a = agents.get(ev.agent_id);
     if (!a) {
       a = { id: ev.agent_id, events: [], lastAny: null, lastOrdinaryAny: null,
-        parentAgentId: null };
+        lastNonRoutineAny: null, parentAgentId: null, currentRoutineEvent: null,
+        routineAuthority: routineLifecycle().createAuthority(), routineAuthorityKnown: true };
       agents.set(ev.agent_id, a);
     }
     a.lastAny = ev;
     if (ev.type !== "journal_written") a.lastOrdinaryAny = ev;
+    if (ev.type !== "journal_written" && !ev.type.startsWith("routine_")) {
+      a.lastNonRoutineAny = ev;
+    }
     const payload = ev.payload || {};
     // A retained journal carries its own direct lineage for ownership checks;
     // it must not make that lineage permanent after the journal is evicted.
@@ -713,6 +921,13 @@ function foldEvents(agents, batch, journalState = null) {
     if (ev.type === "heartbeat") continue;
     a.events.push(ev);
     if (a.events.length > MAX_EVENTS) a.events.shift();
+    if (ev.type.startsWith("routine_")) {
+      a.routineAuthority = routineLifecycle().foldAuthority(
+        a.routineAuthority, ev, MAX_EVENTS);
+      const current = routineLifecycle().selectCurrentAuthority(a.routineAuthority);
+      a.currentRoutineEvent = current ? current.event : null;
+      a.routineAuthorityKnown = true;
+    }
   }
   if (journalState && typeof journalState.recordForEvent === "function") {
     const journalApi = JOURNALS || globalThis.BurrowJournals;
@@ -796,19 +1011,36 @@ function reduce(input, now, souls, approvalState = null, journalState = null) {
   if (journalState && journalApi && typeof journalApi.resolveOwnership === "function") {
     journalApi.resolveOwnership(journalState, souls, agents);
   }
+  const effectiveLastCache = new Map();
   const effectiveLast = agent => {
-    const ordinary = agent.lastOrdinaryAny || agent.events.slice().reverse()
+    if (effectiveLastCache.has(agent)) return effectiveLastCache.get(agent);
+    let ordinary = agent.lastOrdinaryAny || agent.events.slice().reverse()
       .find(event => event.type !== "journal_written") || null;
+    // Append order decides which independent projection owns the doorstep,
+    // but it must not rewrite truth *within* a routine lifecycle. A delayed
+    // start replay, pre-start close, or equal-time finish cannot beat the
+    // protocol's canonical routine authority.
+    if (ordinary && ordinary.type.startsWith("routine_")) {
+      const current = agent.routineAuthorityKnown ? agent.currentRoutineEvent :
+        (routineLifecycle().selectCurrent(agent.events) || {}).event;
+      ordinary = current || agent.lastNonRoutineAny || agent.events.slice().reverse()
+        .find(event => !event.type.startsWith("routine_") && event.type !== "journal_written") || null;
+    }
     const retained = journalState && journalApi &&
       typeof journalApi.latestOwnedActiveForAgent === "function" ?
       journalApi.latestOwnedActiveForAgent(journalState, agent.id, now) : null;
-    if (!retained) return ordinary;
-    if (!ordinary) return retained.event;
-    const ordinaryOrdinal = typeof journalState.ordinalForEvent === "function" ?
-      journalState.ordinalForEvent(ordinary) : null;
-    return typeof ordinaryOrdinal === "string" &&
+    let selected = ordinary;
+    if (!retained) selected = ordinary;
+    else if (!ordinary) selected = retained.event;
+    else {
+      const ordinaryOrdinal = typeof journalState.ordinalForEvent === "function" ?
+        journalState.ordinalForEvent(ordinary) : null;
+      selected = typeof ordinaryOrdinal === "string" &&
       journalApi.compareOrdinal(retained.ordinal, ordinaryOrdinal) > 0 ?
       retained.event : ordinary;
+    }
+    effectiveLastCache.set(agent, selected);
+    return selected;
   };
   const approvalRecordFor = event => {
     if (!approvalState || !(approvalState.requests instanceof Map) ||
@@ -941,8 +1173,8 @@ function reduce(input, now, souls, approvalState = null, journalState = null) {
     let state =
       pendingApproval || last.type === "needs_human" ? "knocking" :
       last.type === "needs_human_resolved" ? "resting" :
-      last.type === "idle"        ? "resting"  : "working";
-    if (last.type === "tool_failed") state = "failed";
+      last.type === "idle" || last.type === "routine_finished" ? "resting" : "working";
+    if (last.type === "tool_failed" || last.type === "routine_failed") state = "failed";
     if (state === "working" && now - lastTs > STALE_MS) state = "stale";
     const prev = a.events.slice().reverse().find(event => event.type !== "journal_written");
     const shown = last.type === "heartbeat" && prev && ACTION_TYPES.has(prev.type) ? prev : last;
@@ -969,7 +1201,7 @@ function reduce(input, now, souls, approvalState = null, journalState = null) {
     const journalRecord = last.type === "journal_written" && journalState &&
       typeof journalState.recordForEvent === "function" ? journalState.recordForEvent(last) : null;
     out.push({
-      id: a.id, state, lastTs, events: a.events,
+      id: a.id, state, lastTs, stateEvent: last, events: a.events,
       name, char, accent, soul,
       residency: resident ? "resident" : "visitor",
       home: resident ? soul.home : null,
@@ -1001,7 +1233,9 @@ if (typeof module === "object" && module.exports) {
     NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, MAX_EVENTS, MAX_ARTIFACTS,
     VERBS, EVENT_TYPES, ACTION_TYPES, PLACE_OF_VERB,
     hashCode, esc, ago, describe, doingLabel, workPlace,
+    routineDescriptionText, formatRoutineDuration,
     validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+    projectionWitnesses,
     moodAuthority, moodAuthorityCopies, moodAuthorityState, withMoodAuthority,
     canonicalIdentity, canonicalJSONStringify, capsuleIdentityEqual,
     MOOD_AUTHORITY_KIND, MOOD_AUTHORITY_ENCODING, MOOD_AUTHORITY_MAX_BYTES,

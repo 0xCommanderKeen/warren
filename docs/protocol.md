@@ -315,9 +315,27 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
-and run id. They do not by themselves rewrite ordinary tool/activity history. A start
-without a matching close becomes stale after 30 minutes; malformed routine payloads
-are diagnosed and skipped instead of partially rendered.
+and run id, and are also first-class villager activity. A valid start can create or
+refresh a villager and reads as working; a finish reads as resting; a failure reads as
+failed. All three remain in the villager's bounded visible history, including for a
+scheduled resident that emits no runner-authored session events. Human descriptions
+name the routine and terminal outcome or error, with deterministic seconds when a
+duration is present. A ledger start without a matching close becomes stale after 30
+minutes; malformed routine payloads are diagnosed and skipped instead of partially
+rendered.
+Within a run, the canonical start is the earliest producer timestamp (with a stable
+field tie-break), and the canonical terminal is the latest producer timestamp. A
+failure beats a finish at the same timestamp. A terminal before the canonical start
+does not close the run. The newest canonical start selects the current run, so delayed
+append replay cannot roll the ledger or villager back; append order is retained only
+for visible history and for ordering independent kinds of activity. Lifecycle identities
+are structured `(agent_id, routine, run_id)` tuples, never delimiter-concatenated text.
+All string tie-break fields are compared fieldwise by Unicode scalar value; optional
+numeric duration fields compare by presence and then numeric value. The village keeps
+at most 80 canonical run identities per agent independently of its at-most-80 visible
+events. A close without a retained matching start remains hidden (while bounded close
+authority may match a later start), and canonical start/terminal witnesses consume
+slots inside the visible 80-record transport allowance rather than extending it.
 Only events whose source is exactly `steward` are routine lifecycle evidence. This is
 Steward's `EVENT_SOURCE` contract; a `routine_*` event from any other producer is
 diagnosed and ignored, including for run-now acknowledgement.
@@ -362,6 +380,25 @@ Reset discards the authority and rebuilds it from empty. Rotation derives this
 bounded journal authority from the full pre-rotation log before allocating the
 remaining ordinary evidence inside the viewer's global 4,000-line transport
 window, then preserves original append order while merging the retained records.
+Village rotation and grouped bootstrap use the same bounded projection-witness
+rule over the complete validated segment. Ordinary agents still enter through the
+newest 4,000 raw-record window; an agent with valid Steward routine evidence also
+brings its later ordinary superseders from before that window. Terminal and expired
+agents consume no ordinary witness capacity. If routine identities alone exceed
+the cap, their newest routine append chooses the candidate set. Newest live
+candidates are admitted first
+with their latest state, latest lineage declaration, and heartbeat action support;
+remaining capacity keeps newest visible history, at most 80 events per agent. The
+composed projection has at most 4,000 witnesses. At the boundary, an agent whose
+indivisible support does not fit is omitted, then older optional history is
+truncated. Preselected journal and approval facts participate in the same set union,
+so an overlapping pending knock is charged once rather than reserved and selected
+again. All retained facts preserve append order.
+
+The public JavaScript projection selector accepts repeated raw JSON records because
+each parse has a distinct append position. A direct-object source may not repeat the
+same object identity; such aliases are rejected deterministically at the selector
+boundary instead of being mistaken for one append position.
 
 For 60 seconds after the canonical event timestamp, a matching valid Resident works
 at its own home, “writing the journal.” One ownership resolver serves projection,

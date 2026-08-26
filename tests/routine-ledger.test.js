@@ -10,15 +10,16 @@ const NOW = Date.parse("2026-08-25T12:00:00Z");
 const BOOT_ID = "0123456789abcdef0123456789abcdef";
 const eventCursor = (offset, generation = 3) =>
   `v1:${BOOT_ID}:1:2:${generation}:${offset}`;
+const key = (...fields) => JSON.stringify(fields);
 
 test("fixture projects finished, failed, stale and malformed runs truthfully", () => {
   const result = routines.project(lines, NOW, { staleMs: 60_000, validateEvent });
-  assert.equal(result.byRoutine.get("steward:life-agent\0summary")[0].state, "finished");
-  assert.equal(result.byRoutine.get("steward:life-agent\0summary")[0].outcome, "ok");
-  assert.deepEqual(result.byRoutine.get("steward:life-agent\0summary")[0].artifacts, ["summary.md"]);
-  assert.equal(result.byRoutine.get("steward:life-agent\0inbox")[0].state, "failed");
-  assert.equal(result.byRoutine.get("steward:life-agent\0inbox")[0].error, "mail service unavailable");
-  assert.equal(result.byRoutine.get("steward:life-agent\0stuck")[0].state, "stale");
+  assert.equal(result.byRoutine.get(key("steward:life-agent", "summary"))[0].state, "finished");
+  assert.equal(result.byRoutine.get(key("steward:life-agent", "summary"))[0].outcome, "ok");
+  assert.deepEqual(result.byRoutine.get(key("steward:life-agent", "summary"))[0].artifacts, ["summary.md"]);
+  assert.equal(result.byRoutine.get(key("steward:life-agent", "inbox"))[0].state, "failed");
+  assert.equal(result.byRoutine.get(key("steward:life-agent", "inbox"))[0].error, "mail service unavailable");
+  assert.equal(result.byRoutine.get(key("steward:life-agent", "stuck"))[0].state, "stale");
   assert.ok(result.diagnostics.some(x => x.reason.includes("malformed")));
 });
 
@@ -33,7 +34,7 @@ test("watchdog failure without unknowable duration is a valid closed run", () =>
     {v:0,ts:"2026-08-25T11:40:00.000Z",source:"steward",agent_id:"a",project:"life",type:"routine_failed",payload:{routine:"r",run_id:"lost",error:"run never reported back"}},
   ];
   assert.equal(events.map(validateEvent).filter(Boolean).length, 0);
-  const [run] = routines.project(events, NOW, { validateEvent }).byRoutine.get("a\0r");
+  const [run] = routines.project(events, NOW, { validateEvent }).byRoutine.get(key("a", "r"));
   assert.equal(run.state, "failed"); assert.equal(run.duration_s, null);
 });
 
@@ -44,13 +45,13 @@ test("a finish without an explicit artifacts array is skipped, never synthesized
     payload:{routine:"r",run_id:"missing",outcome:"ok",duration_s:60}};
   assert.equal(validateEvent(finish), "invalid payload.artifacts");
   const result = routines.project([start, finish], NOW, {validateEvent, staleMs:1});
-  assert.equal(result.byRoutine.get("a\0r")[0].state, "stale");
+  assert.equal(result.byRoutine.get(key("a", "r"))[0].state, "stale");
   assert.equal(result.diagnostics.length, 1);
 });
 
 test("out-of-order close is paired by run id, while a close before start cannot manufacture completion", () => {
   const result = routines.project(lines, NOW, { staleMs: 1 });
-  const history = result.byRoutine.get("steward:life-agent\0out-of-order");
+  const history = result.byRoutine.get(key("steward:life-agent", "out-of-order"));
   assert.equal(history[0].state, "stale");
   assert.ok(result.diagnostics.some(x => x.reason.includes("predates")));
 });
@@ -59,7 +60,7 @@ test("histories are newest first and bounded", () => {
   const events = [];
   for (let i = 0; i < 30; i++) events.push({ v:0, source:"steward", agent_id:"a", project:"p",
     ts:new Date(NOW+i).toISOString(), type:"routine_started", payload:{routine:"r",run_id:String(i),trigger:"schedule"} });
-  const history = routines.project(events, NOW + 100).byRoutine.get("a\0r");
+  const history = routines.project(events, NOW + 100).byRoutine.get(key("a", "r"));
   assert.equal(history.length, routines.MAX_RUNS); assert.equal(history[0].run_id, "29");
 });
 
@@ -621,8 +622,8 @@ test("Steward declarations supply authoritative next fires without a Burrow prox
   });
   assert.equal(call.url, "http://steward:8801/routines");
   assert.equal(call.options.headers.Authorization, "Bearer secret"); assert.equal(call.options.credentials, "omit");
-  assert.equal(declared.get("life-agent\0summary").next_fire, "2026-08-26T07:00:00+02:00");
-  assert.equal(declared.get("life-agent\0off").next_fire, null);
+  assert.equal(declared.get(key("life-agent", "summary")).next_fire, "2026-08-26T07:00:00+02:00");
+  assert.equal(declared.get(key("life-agent", "off")).next_fire, null);
 });
 
 test("authoritative disabled and retired declarations disable run now", () => {
@@ -712,7 +713,7 @@ test("Steward declaration and run keys enforce the lowercase slug contract", asy
       {resident:"Life-Agent",routine:"daily-summary",next_fire:null,enabled:true,retired:false},
       {resident:"life-agent",routine:"daily_summary",next_fire:null,enabled:true,retired:false},
     ]})}));
-  assert.deepEqual([...declarations.keys()], ["life-agent\0daily-summary"]);
+  assert.deepEqual([...declarations.keys()], [key("life-agent", "daily-summary")]);
   for (const [resident, routine] of [["Life-Agent", "daily-summary"],
     ["life-agent", "daily_summary"]]) {
     await assert.rejects(routines.runNow({url:"http://steward",token:"secret"}, resident, routine,

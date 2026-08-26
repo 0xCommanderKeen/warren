@@ -105,6 +105,10 @@ const runtime = createBrowserRuntime({
   assert.equal(runtime.snapshot().fleetState.routineRecent.filter(entry =>
     entry.event.payload.run_id === "queued").length, 1,
   "republishing acknowledgement evidence does not fold it into the ledger twice");
+  assert.deepEqual({state:runtime.snapshot().villagers[0].state,
+    lastLine:runtime.snapshot().villagers[0].lastLine},
+  {state:"working",lastLine:"woke for summary"},
+  "validated staged routine evidence refreshes the villager after readiness");
 
   stream.onmessage({ data: JSON.stringify({
     v:0, ts:new Date(BASE + 1).toISOString(), source:"steward", agent_id:"agent-1",
@@ -112,16 +116,17 @@ const runtime = createBrowserRuntime({
   }) });
   assert.equal(runtime.snapshot().fleetState.routineMalformed, 1,
     "malformed routine evidence survives the production parse/runtime seam");
-  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE,
-    "a rejected routine does not refresh ordinary activity");
+  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE + 1,
+    "a rejected routine does not refresh the last valid activity");
   stream.onmessage({ data: JSON.stringify({
     v:0, ts:new Date(BASE + 2).toISOString(), source:"steward", agent_id:"agent-1",
     project:"burrow", type:"routine_finished",
     payload:{routine:"summary",run_id:"run-1",outcome:"ok",artifacts:[],duration_s:2},
   }) });
-  assert.equal(runtime.snapshot().villagers[0].state, "working");
-  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE,
-    "a valid routine terminal event remains isolated from ordinary activity");
+  assert.equal(runtime.snapshot().villagers[0].state, "working",
+    "an unmatched close for another run cannot rewrite the current routine");
+  assert.equal(runtime.snapshot().villagers[0].lastTs, BASE + 1);
+  assert.equal(runtime.snapshot().villagers[0].lastLine, "woke for summary");
   stream.onmessage({ lastEventId:`v1:${BOOT_ID}:1:2:3:200`, data: JSON.stringify({
     v:0, ts:new Date(BASE + 3).toISOString(), source:"steward", agent_id:"agent-1",
     project:"burrow", type:"routine_started",
@@ -130,6 +135,8 @@ const runtime = createBrowserRuntime({
   assert.equal(fleetViews.at(-1).cursor, `v1:${BOOT_ID}:1:2:3:200`);
   assert.equal(fleetViews.at(-1).routineBatch[0].payload.run_id, "run-2",
     "acknowledgements receive only the newly ingested cursor batch");
+  assert.equal(runtime.snapshot().villagers[0].state, "working");
+  assert.equal(runtime.snapshot().villagers[0].lastLine, "woke for summary");
 
   // Production SSE publishes one message/fold at a time. Saturate renderable
   // keys, then prove a terminal survives its own publication without stealing
@@ -165,7 +172,7 @@ const runtime = createBrowserRuntime({
   assert.equal(runtime.snapshot().fleetState.routineMalformed, 1,
     "valid orphan staging and promotion do not add malformed diagnostics");
 
-  now = BASE + STALE_MS + 1;
+  now = BASE + STALE_MS + 4;
   runtime.tick();
   assert.deepEqual(fleetViews.at(-1).routineBatch, [],
     "clock publications cannot replay retained routine evidence as a fresh acknowledgement");
@@ -195,7 +202,7 @@ const runtime = createBrowserRuntime({
   assert.equal(runtime.snapshot().transportStatus.notifications.queued, 3,
     "server delivery pressure is consumable through the live runtime seam");
 
-  now = BASE + DROP_MS + 1;
+  now = BASE + DROP_MS + 10_002;
   runtime.tick();
   assert.equal(runtime.snapshot().villagers.length, 0,
     "the same page drops a villager once the event expires");

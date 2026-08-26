@@ -6,6 +6,7 @@
   const projection = typeof module === "object" && module.exports
     ? require("./projection.js")
     : { validateEvent, parseEvents, parseEventWindows, isValidatedBatch, validatedSelection,
+      projectionWitnesses,
       moodAuthority, moodAuthorityCopies, moodAuthorityState, withMoodAuthority, canonicalIdentity,
       capsuleIdentityEqual,
       moodAuthorityCapsuleByteLength,
@@ -90,7 +91,8 @@
       souls = residentSouls.concat(legacySouls);
     }
 
-    function project(lines, reset = false, publishRoutineEvidence = true, grouped = false) {
+    function project(lines, reset = false, publishRoutineEvidence = true, grouped = false,
+        deriveMood = true) {
       if (reset) { agents = new Map(); artifacts = []; fleetState = fleet.createFleetState();
         jobState = jobs.createState(); approvalState = approvals.createState();
         journalState = journals.createState(); moodSequence = 0; moodOrdinals = new Map();
@@ -124,41 +126,56 @@
         sequence: windows ? journalState.sequence : null,
       });
       if (windows) {
-        const inTail = new Set(batch);
         const retainedBeforeWindow = new Set(journals.records(journalState)
-          .map(record => record.event).filter(event => !inTail.has(event)));
+          .map(record => record.event));
         for (const event of approvalBatch) {
           const record = event.type === "needs_human" ?
             approvalState.recordForEvent(event) : null;
-          if (!inTail.has(event) && record && !record.resolution && !record.collided) {
+          if (record && !record.resolution && !record.collided) {
             retainedBeforeWindow.add(event);
           }
         }
-        const positions = new Map(journalBatch.map((event, index) => [event, index]));
-        const retainedEvidence = [...retainedBeforeWindow]
-          .sort((left, right) => positions.get(left) - positions.get(right));
-        // Only bounded canonical journals and still-pending exact requests for
-        // those journal residents bypass the ordinary transport tail. They
-        // establish village identity without leaking other early evidence into
-        // boards, Fleet activity, or acknowledgement publications.
+        // A retained journal/knock must carry a later terminal ordinary fact:
+        // after an incremental close it is what prevents resurrection.
+        const specialAgents = new Set([...retainedBeforeWindow].map(event => event.agent_id));
+        const latestOrdinary = new Map();
+        for (const event of journalBatch) {
+          if (specialAgents.has(event.agent_id) && event.type !== "journal_written" &&
+              event.type !== "needs_human_resolved" &&
+              !["task_posted", "task_claimed", "task_done", "task_failed"].includes(event.type)) {
+            latestOrdinary.set(event.agent_id, event);
+          }
+        }
+        for (const event of latestOrdinary.values()) {
+          if (event.type === "session_ended") retainedBeforeWindow.add(event);
+        }
+        const protectedEvidence = projection.validatedSelection(journalBatch,
+          journalBatch.filter(event => retainedBeforeWindow.has(event)));
+        const retainedEvidence = projection.projectionWitnesses(
+          journalBatch, now(), MAX_TRANSPORT_EVENTS, batch, specialAgents,
+          protectedEvidence);
+        // One bounded append-ordered projection composes canonical journals,
+        // their pending exact requests, and ordinary/routine villager state.
         projection.foldEvents(agents, retainedEvidence, journalState);
-      }
-      projection.foldEvents(agents, batch, journalState);
+      } else projection.foldEvents(agents, batch, journalState);
       projection.foldArtifacts(artifacts, batch);
       const at = now();
       fleet.foldFleet(fleetState, batch, windows ? windows.rejected : lines.length - batch.length,
         projection.routineRejections(journalBatch).length, at,
         event => journalState.ordinalForEvent(event));
+      const previousMoodByAgent = deriveMood ? null :
+        new Map(villagers.map(villager => [villager.id, villager.mood || null]));
       villagers = projection.reduce(agents, at, souls, approvalState, journalState);
       let moodByAgent = new Map();
-      if (villagers.length) {
+      if (deriveMood && villagers.length) {
         // Derive from the complete retained authority. In particular, a
         // projected collision owner may depend on a canonical knock emitted by
         // a different, currently invisible agent.
         moodByAgent = moods.deriveMoods(moodEvidenceFor(
           new Set(villagers.map(villager => villager.id))));
       }
-      for (const villager of villagers) villager.mood = moodByAgent.get(villager.id) || null;
+      for (const villager of villagers) villager.mood = deriveMood ?
+        moodByAgent.get(villager.id) || null : previousMoodByAgent.get(villager.id) || null;
       onProjection({ villagers, artifacts, souls, approvalState, journalState, now: at });
       const taskEvents = batch.filter(event => jobs.TYPES.has(event.type));
       const approvalEvents = batch.filter(event => event.type === "needs_human_resolved");
@@ -445,6 +462,7 @@
       let stagedPublications = [];
       let stagedRecordCount = 0;
       let stagingOverflowed = false;
+      let moodDeferred = false;
       function clearStaging() {
         stagedPublications = [];
         stagedRecordCount = 0;
@@ -471,7 +489,16 @@
         if (!publishStaging()) publishFleet(now(), [], true, eventCursor);
         clearStaging();
       }
+      function flushDeferredMood() {
+        if (!moodDeferred) return;
+        // Queued records already changed the core projection. Decorate that
+        // exact retained state once before any ready-less transport status can
+        // publish it, and once at a successful ready boundary.
+        moodDeferred = false;
+        project([], false, false);
+      }
       async function recoverStream() {
+        flushDeferredMood();
         publishOrConservativeRebase();
         stream.close();
         eventStream = null;
@@ -492,7 +519,12 @@
       stream.onmessage = message => {
         if (eventStream !== stream) return;
         if (message.lastEventId) eventCursor = message.lastEventId;
-        const batch = project([message.data], false, streamReady);
+        // Projection remains immediate: a real queued close can release a
+        // knock before readiness even though acknowledgement publication is
+        // staged. Mood is the expensive whole-history calculation, so defer
+        // only that decoration until the ready marker closes the catch-up.
+        const batch = project([message.data], false, streamReady, false, streamReady);
+        if (!streamReady && batch.length) moodDeferred = true;
         if (streamReady || !stageEligible || stagingOverflowed) return;
         if (!batch.length) return;
         if (stagedRecordCount + batch.length > MAX_TRANSPORT_EVENTS) {
@@ -518,6 +550,9 @@
           return;
         }
         eventCursor = declared;
+        // Recompute the whole retained Mood once at the exact boundary. Queued
+        // records already updated core villager state as they arrived.
+        flushDeferredMood();
         if (!stageEligible || stagingOverflowed) {
           // Bootstrap/reset-like catch-up and bounded-stage overflow cannot be
           // attributed safely. Rebase pending correlations at the validated
@@ -532,6 +567,7 @@
       });
       stream.addEventListener("reset", async () => {
         if (eventStream !== stream) return;
+        flushDeferredMood();
         clearStaging();
         // An SSE reset deliberately has no id: the stream cannot describe the
         // end of the replay that follows it. Close it and use the grouped poll

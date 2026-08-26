@@ -57,49 +57,47 @@
         diagnostics.push({ type: event && event.type || "routine", reason: "malformed routine payload skipped" });
         continue;
       }
-      const key = `${event.agent_id}\0${event.payload.routine}\0${event.payload.run_id}`;
+      const key = lifecycle.agentRunKey(event);
       let run = runs.get(key);
       if (!run) {
         run = { agent_id: event.agent_id, project: event.project, routine: event.payload.routine,
           run_id: event.payload.run_id, started_at: null, trigger: null, lifecycle: null,
-          outcome: null, duration_s: null, artifacts: [], error: null, closed_at: null };
+          outcome: null, duration_s: null, artifacts: [], error: null, closed_at: null,
+          facts: [] };
         runs.set(key, run);
       }
-      const at = Date.parse(event.ts);
-      if (event.type === "routine_started") {
-        if (!run.start_event || lifecycle.preferStart(event, run.start_event)) {
-          run.start_event = event;
-          run.started_at = at; run.trigger = event.payload.trigger; run.project = event.project;
-        }
-      } else if (!run.terminal_event || lifecycle.preferTerminal(event, run.terminal_event)) {
-        run.terminal_event = event;
-        run.closed_at = at;
-        run.lifecycle = event.type === "routine_failed" ? "failed" : "finished";
-        run.outcome = event.payload.outcome || null;
-        run.duration_s = event.payload.duration_s ?? null;
-        run.artifacts = event.payload.artifacts || [];
-        run.error = event.payload.error || null;
-      }
+      run.facts.push(event);
     }
     const byRoutine = new Map();
     for (const run of runs.values()) {
-      if (run.started_at === null) {
+      const resolved = lifecycle.resolveRun(run.facts);
+      if (!resolved) {
         diagnostics.push({ type: "routine", reason: "closing event without matching start skipped" });
         continue;
       }
-      if (run.closed_at !== null && run.closed_at < run.started_at) {
+      const start = resolved.start, terminal = resolved.terminal;
+      run.started_at = Date.parse(start.ts); run.trigger = start.payload.trigger;
+      run.project = start.project;
+      if (!terminal && lifecycle.selectTerminal(run.facts)) {
         diagnostics.push({ type: "routine", reason: "closing event predates matching start; run left open" });
-        run.closed_at = null; run.lifecycle = null; run.outcome = null; run.duration_s = null;
-        run.artifacts = []; run.error = null;
+      }
+      if (terminal) {
+        run.closed_at = Date.parse(terminal.ts);
+        run.lifecycle = terminal.type === "routine_failed" ? "failed" : "finished";
+        run.outcome = terminal.payload.outcome || null;
+        run.duration_s = terminal.payload.duration_s ?? null;
+        run.artifacts = terminal.payload.artifacts || [];
+        run.error = terminal.payload.error || null;
       }
       run.state = run.lifecycle || (now - run.started_at > staleMs ? "stale" : "running");
-      delete run.start_event; delete run.terminal_event;
-      const key = `${run.agent_id}\0${run.routine}`;
+      delete run.facts;
+      const key = lifecycle.agentRoutineKey(run.agent_id, run.routine);
       const list = byRoutine.get(key) || [];
       list.push(run); byRoutine.set(key, list);
     }
     for (const list of byRoutine.values()) {
-      list.sort((a, b) => b.started_at - a.started_at || b.run_id.localeCompare(a.run_id));
+      list.sort((a, b) => b.started_at - a.started_at ||
+        lifecycle.compareText(b.run_id, a.run_id));
       list.splice(MAX_RUNS);
     }
     return { byRoutine, diagnostics };
@@ -107,12 +105,14 @@
 
   function historyFor(resident, routine, projection) {
     const match = resident.match || {};
-    if (match.agent_id) return projection.byRoutine.get(`${match.agent_id}\0${routine.id}`) || [];
+    if (match.agent_id) return projection.byRoutine.get(
+      lifecycle.agentRoutineKey(match.agent_id, routine.id)) || [];
     const history = [];
     for (const runs of projection.byRoutine.values()) for (const run of runs) {
       if (run.project === match.project && run.routine === routine.id) history.push(run);
     }
-    history.sort((a, b) => b.started_at - a.started_at || b.run_id.localeCompare(a.run_id));
+    history.sort((a, b) => b.started_at - a.started_at ||
+      lifecycle.compareText(b.run_id, a.run_id));
     return history.slice(0, MAX_RUNS);
   }
 
@@ -132,13 +132,15 @@
 
   function correlationKey(correlation, routine) {
     const match = typeof correlation === "string" ? { agent_id: correlation } : correlation || {};
-    return `${match.agent_id ? "agent:" + match.agent_id : "project:" + (match.project || "")}\0${routine}`;
+    return lifecycle.identity([match.agent_id ? "agent" : "project",
+      match.agent_id || match.project || "", routine]);
   }
 
   function startIdentity(event) {
     const payload = event && event.payload || {};
-    return [event && event.source, event && event.agent_id, event && event.project, payload.routine,
-      payload.run_id].map(value => String(value ?? "")).join("\0");
+    return lifecycle.identity([event && event.source, event && event.agent_id,
+      event && event.project, payload.routine, payload.run_id]
+      .map(value => String(value ?? "")));
   }
 
   function canRun(routine, stewardDeclaration) {
@@ -278,8 +280,8 @@
     }
     function terminalIdentity(event) {
       const payload = event && event.payload || {};
-      return [event && event.agent_id, payload.routine, payload.run_id]
-        .map(value => String(value ?? "")).join("\0");
+      return lifecycle.identity([event && event.agent_id, payload.routine, payload.run_id]
+        .map(value => String(value ?? "")));
     }
     function rememberTerminals(item, events) {
       if (!item.terminalCandidates) item.terminalCandidates = new Map();
@@ -554,7 +556,7 @@
     for (const item of body.routines) {
       if (!item || !stewardSlug(item.resident) || !stewardSlug(item.routine) ||
           (item.next_fire !== null && (!text(item.next_fire) || !Number.isFinite(Date.parse(item.next_fire))))) continue;
-      byRoutine.set(`${item.resident}\0${item.routine}`, {
+      byRoutine.set(lifecycle.identity([item.resident, item.routine]), {
         next_fire: item.next_fire, enabled: item.enabled === true, retired: item.retired === true,
       });
     }

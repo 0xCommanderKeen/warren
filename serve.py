@@ -69,6 +69,7 @@ DROP_MS = 12 * 60 * 60 * 1000        # villagers quiet longer than this are gone
 KEEP_TASKS = 24                       # viewer/job-board.js MAX_TASKS
 KEEP_APPROVALS = 40                   # viewer/approval-knocks.js MAX_REQUESTS
 TASK_EVENT_TYPES = {"task_posted", "task_claimed", "task_done", "task_failed"}
+PROJECTION_ACTION_TYPES = {"task_started", "tool_called", "artifact_produced"}
 MOOD_TERMINAL_TYPES = {"tool_failed", "routine_failed", "task_failed",
                        "heartbeat", "routine_finished", "task_done"}
 MOOD_FAILURE_TYPES = {"tool_failed", "routine_failed", "task_failed"}
@@ -1596,6 +1597,177 @@ def _exact_capsule_authority(capsule, raw_events):
                         (right_ordinal, right_event) in zip(folded, expected)))
 
 
+def _routine_start_tie(event):
+    payload = event["payload"]
+    # Python strings compare by Unicode scalar value. This fieldwise tuple is
+    # mirrored explicitly by routine-lifecycle.js (never delimiter encoded).
+    return (event["source"], event["agent_id"], event["project"],
+            payload["routine"], payload["run_id"], payload["trigger"])
+
+
+def _routine_terminal_tie(event):
+    payload = event["payload"]
+    if event["type"] == "routine_failed":
+        present = "duration_s" in payload
+        return (1, payload["error"], present, payload.get("duration_s", 0))
+    return (0, payload["outcome"], payload["duration_s"], tuple(payload["artifacts"]))
+
+
+def _current_routine(indexed_events):
+    """Mirror routine-lifecycle.js canonical current-run authority."""
+    runs = collections.defaultdict(list)
+    for index, event in indexed_events:
+        if event["type"].startswith("routine_"):
+            payload = event["payload"]
+            runs[(payload["routine"], payload["run_id"])].append((index, event))
+    selected = None
+    for key, facts in runs.items():
+        starts = [(index, event) for index, event in facts
+                  if event["type"] == "routine_started"]
+        if not starts:
+            continue
+        start = min(starts, key=lambda item: (event_ms(item[1]),
+                                              _routine_start_tie(item[1])))
+        terminals = [(index, event) for index, event in facts
+                     if event["type"] in {"routine_finished", "routine_failed"}]
+        terminal = max(terminals, key=lambda item: (event_ms(item[1]),
+                                                    _routine_terminal_tie(item[1]))) \
+            if terminals else None
+        if terminal and event_ms(terminal[1]) < event_ms(start[1]):
+            terminal = None
+        candidate = (event_ms(start[1]), key, start, terminal)
+        if selected is None or candidate[:2] > selected[:2]:
+            selected = candidate
+    return {"start": selected[2], "terminal": selected[3],
+            "event": selected[3] or selected[2]} if selected else None
+
+
+def _projection_keep_indexes(parsed, now_ms, limit, live_agents=None,
+                             baseline_start=None, preselected=None):
+    """Bounded append-ordered authority for the ordinary village reducer.
+
+    Terminal/expired agents need no reset witness. Routine identity overflow is
+    first bounded by newest routine append; newest live candidates are then
+    admitted with indivisible state, lineage, and heartbeat-action support.
+    Remaining capacity retains newest visible history up to the reducer's
+    per-agent cap. This mirrors projectionWitnesses in JavaScript.
+    """
+    if limit <= 0:
+        return set()
+    preselected = set(preselected or ())
+    if len(preselected) > limit:
+        raise ValueError("preselected projection witnesses exceed limit")
+    ignored = TASK_EVENT_TYPES | {"needs_human_resolved", "journal_written"}
+    routine_agents = set()
+    for _, event in reversed(parsed):
+        if event["type"].startswith("routine_"):
+            routine_agents.add(event["agent_id"])
+            if len(routine_agents) == limit:
+                break
+    if baseline_start is None:
+        baseline_start = -1
+    latest_raw = {}
+    last_nonroutine = {}
+    all_routine_facts = collections.defaultdict(list)
+    for index, event in parsed:
+        if (event["type"] not in ignored
+                and (index >= baseline_start
+                     or event["agent_id"] in routine_agents)):
+            agent_id = event["agent_id"]
+            latest_raw[agent_id] = (index, event)
+            if event["type"].startswith("routine_"):
+                all_routine_facts[agent_id].append((index, event))
+            else:
+                last_nonroutine[agent_id] = (index, event)
+    latest = {}
+    orphan_routine_agents = set()
+    for agent_id, raw in latest_raw.items():
+        if not raw[1]["type"].startswith("routine_"):
+            latest[agent_id] = (*raw, raw[0])
+            continue
+        current = _current_routine(all_routine_facts[agent_id])
+        if current:
+            latest[agent_id] = (*current["event"], raw[0])
+        else:
+            orphan_routine_agents.add(agent_id)
+            if agent_id in last_nonroutine:
+                latest[agent_id] = (*last_nonroutine[agent_id], raw[0])
+    live = [(agent_id, item) for agent_id, item in latest.items()
+            if item[1]["type"] != "session_ended"
+            and now_ms - event_ms(item[1]) <= DROP_MS]
+    live.sort(key=lambda item: item[1][2], reverse=True)
+    candidates = {agent_id for agent_id, _ in live}
+    history = collections.defaultdict(list)
+    lineage = {}
+    previous_action = {}
+    previous_ordinary_seen = set()
+    for index, event in reversed(parsed):
+        agent_id = event["agent_id"]
+        if (agent_id not in candidates or event["type"] in ignored
+                or (index < baseline_start and agent_id not in routine_agents)):
+            continue
+        payload = event.get("payload") or {}
+        if agent_id not in lineage and payload.get("parent_agent_id"):
+            lineage[agent_id] = index
+        if event["type"] != "heartbeat":
+            if len(history[agent_id]) < KEEP_PER_AGENT:
+                history[agent_id].append(index)
+            if agent_id not in previous_ordinary_seen:
+                previous_ordinary_seen.add(agent_id)
+                if event["type"] in PROJECTION_ACTION_TYPES:
+                    previous_action[agent_id] = index
+    event_by_index = dict(parsed)
+    keep = set(preselected)
+    kept_per_agent = collections.Counter(
+        event["agent_id"] for index, event in parsed if index in keep)
+    admitted = []
+    for agent_id, (index, event, _rank_index) in live:
+        support = {index}
+        if agent_id in lineage:
+            support.add(lineage[agent_id])
+        if event["type"] == "heartbeat" and agent_id in previous_action:
+            support.add(previous_action[agent_id])
+        if event["type"].startswith("routine_"):
+            current = _current_routine(all_routine_facts[agent_id])
+            if current:
+                support.add(current["start"][0])
+                if current["terminal"]:
+                    support.add(current["terminal"][0])
+        added = support - keep
+        if (len(keep) + len(added) > limit or
+                (agent_id in all_routine_facts and
+                 kept_per_agent[agent_id] + len(added) > KEEP_PER_AGENT)):
+            continue
+        keep.update(added)
+        kept_per_agent[agent_id] += len(added)
+        admitted.append(agent_id)
+        if live_agents is not None:
+            live_agents.add(agent_id)
+    optional = sorted((index for agent_id in admitted
+                       for index in history[agent_id] if index not in keep),
+                      reverse=True)
+    for index in optional:
+        if len(keep) == limit:
+            break
+        event = event_by_index[index]
+        if (event["agent_id"] in all_routine_facts and
+                kept_per_agent[event["agent_id"]] >= KEEP_PER_AGENT):
+            continue
+        keep.add(index)
+        kept_per_agent[event["agent_id"]] += 1
+    for index, event in reversed(parsed):
+        if len(keep) == limit:
+            break
+        agent_id = event["agent_id"]
+        if (agent_id not in orphan_routine_agents
+                or event["type"] == "routine_started" or index in keep
+                or kept_per_agent[agent_id] >= KEEP_PER_AGENT):
+            continue
+        keep.add(index)
+        kept_per_agent[agent_id] += 1
+    return keep
+
+
 def carry_forward(lines, now_ms):
     """The bounded tail that preserves both village and job-board projections.
 
@@ -1756,8 +1928,7 @@ def carry_forward(lines, now_ms):
         event_type = event.get("type", "")
         return (event_type not in TASK_EVENT_TYPES
                 and event_type != "journal_written"
-                and event_type != "needs_human_resolved"
-                and not event_type.startswith("routine_"))
+                and event_type != "needs_human_resolved")
 
     latest_ordinary = {}
     journal_predecessor_keep = set()
@@ -1820,10 +1991,35 @@ def carry_forward(lines, now_ms):
     protected_journal_indexes = (journal_keep | journal_predecessor_keep |
                                  journal_successor_keep | journal_support_keep |
                                  journal_approval_keep)
+    special_agents = {event["agent_id"] for index, event in full_parsed
+                      if index in protected_journal_indexes}
+    latest_special_ordinary = {}
+    for index, event in full_parsed:
+        if (event["agent_id"] in special_agents
+                and projection_ordinary(event)):
+            latest_special_ordinary[event["agent_id"]] = (index, event)
+    protected_journal_indexes.update(
+        index for index, event in latest_special_ordinary.values()
+        if event["type"] == "session_ended")
+    projection_live_agents = set()
+    raw_tail_start = max(0, len(lines) - VIEWER_LINE_LIMIT)
+    # Without routine authority before the transport tail, every ordinary
+    # villager fact is already carried by that tail. Avoid several complete-log
+    # selector passes on the common (and approval-heavy) rotation path.
+    has_pre_tail_routine = any(index < raw_tail_start and
+                               event["type"].startswith("routine_")
+                               for index, event in full_parsed)
+    projection_source = (full_parsed if has_pre_tail_routine else
+                         [(index, event) for index, event in full_parsed
+                          if index >= raw_tail_start])
+    projection_keep = _projection_keep_indexes(
+        projection_source, now_ms, VIEWER_LINE_LIMIT, projection_live_agents,
+        raw_tail_start, protected_journal_indexes)
+    protected_projection_indexes = protected_journal_indexes | projection_keep
     tail_start = max(0, len(lines) - VIEWER_LINE_LIMIT)
     while True:
         protected_before_tail = sum(
-            index < tail_start for index in protected_journal_indexes)
+            index < tail_start for index in protected_projection_indexes)
         adjusted = max(0, len(lines) -
                        (VIEWER_LINE_LIMIT - protected_before_tail))
         if adjusted == tail_start:
@@ -1843,74 +2039,34 @@ def carry_forward(lines, now_ms):
         if event.get("type") not in EVENT_TYPES or validate_event(event):
             continue
         parsed.append((i, event))
-    approval_keep, approval_isolated = _approval_keep_indexes(parsed)
-    journal_isolated = {i for i, event in parsed
-                        if event.get("type") == "journal_written"}
+    approval_keep, _ = _approval_keep_indexes(parsed)
     retained_approval_knocks = collections.defaultdict(list)
-    retained_journals = collections.defaultdict(list)
-    for i, event in journal_parsed:
-        if i in journal_keep:
-            retained_journals[event["agent_id"]].append(i)
     for i, event in parsed:
         if i in approval_keep and structured_approval(event) is not None:
             retained_approval_knocks[event["agent_id"]].append(i)
-    per_agent = {}
-    for i, event in parsed:
-        # Task events have their own cross-agent projection below. They never
-        # create or refresh a villager in viewer/projection.js, and allowing
-        # central posts back through per-agent retention could resurrect a task
-        # whose terminal transition was correctly dropped by board capacity.
-        # Structured approvals have their own request-ID projection too. That
-        # keeps an unresolved old knock without allowing an orphan close to
-        # manufacture liveness or a capacity-evicted close to leave a ghost.
-        if (event["type"] in TASK_EVENT_TYPES or i in approval_isolated
-                or i in journal_isolated):
-            continue
-        agent = per_agent.setdefault(
-            event["agent_id"], {"events": [], "last": None, "lineage": None})
-        agent["last"] = (i, event)
-        payload = event.get("payload")
-        if isinstance(payload, dict) and payload.get("parent_agent_id"):
-            agent["lineage"] = (i, event)
-        # Heartbeat is liveness-only in the projection. It must survive when it
-        # is latest, but must not consume one of the 80 visible-history slots.
-        if event["type"] != "heartbeat":
-            agent["events"].append((i, event))
-            if len(agent["events"]) > KEEP_PER_AGENT:
-                agent["events"].pop(0)
+    latest_projection = {}
+    for i, event in full_parsed:
+        if projection_ordinary(event):
+            latest_projection[event["agent_id"]] = (i, event)
+    approval_terminal_keep = {
+        index for agent_id, (index, event) in latest_projection.items()
+        if event["type"] == "session_ended"
+        and any(knock_i < index for knock_i in retained_approval_knocks[agent_id])
+    }
     keep = list(_task_keep_indexes(parsed) | approval_keep | journal_keep
                 | journal_predecessor_keep | journal_successor_keep
-                | journal_support_keep | journal_approval_keep)
-    for agent_id, agent in per_agent.items():
-        last_i, last = agent["last"]
-        if last["type"] == "session_ended":
-            # A parked approval deliberately keeps its knock after the hosting
-            # session exits. Keep the later terminal too, so a reset followed by
-            # the close cannot resurrect that resident as merely "resting".
-            if (any(knock_i < last_i for knock_i in retained_approval_knocks[agent_id])
-                    or any(journal_i < last_i for journal_i in retained_journals[agent_id])):
-                keep.append(last_i)
-            continue
-        if now_ms - event_ms(last) > DROP_MS:
-            continue
-        keep.extend(i for i, _ in agent["events"])
-        if agent["lineage"]:
-            lineage_i, _ = agent["lineage"]
-            if lineage_i not in keep:
-                keep.append(lineage_i)
-        if last["type"] == "heartbeat":
-            keep.append(last_i)
+                | journal_support_keep | journal_approval_keep | projection_keep
+                | approval_terminal_keep)
     # Mood authority comes from the complete pre-rotation segment, but only
-    # for agents whose ordinary projection above remains live. It therefore
-    # cannot turn task/routine evidence into villager liveness.
-    mood_agents = {agent_id for agent_id, agent in per_agent.items()
-                   if agent["last"][1]["type"] != "session_ended"
-                   and now_ms - event_ms(agent["last"][1]) <= DROP_MS}
+    # for agents whose villager projection above remains live. Task evidence
+    # alone still cannot manufacture liveness; routine evidence can because it
+    # is now a first-class Steward-authored villager lifecycle.
+    mood_agents = set(projection_live_agents)
     mood_agents.update(event["agent_id"] for index, event in full_parsed
                        if index in approval_keep and
                        structured_approval(event) is not None and
-                        (event["agent_id"] not in per_agent or
-                         per_agent[event["agent_id"]]["last"][1]["type"] != "session_ended"))
+                       (event["agent_id"] not in latest_projection or
+                        latest_projection[event["agent_id"]][1]["type"] != "session_ended"))
     compacted_authority = ([] if authority_overflow else
                            _compact_mood_authority(authority_events))
     authority_overflow = (authority_overflow or

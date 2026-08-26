@@ -27,9 +27,15 @@
       activitySequence: "0" };
   }
   function routineKey(event) {
-    return `${event.source}\0${event.agent_id}\0${event.payload.routine}`;
+    return lifecycle.identity([event.source, event.agent_id, event.payload.routine]);
   }
-  function runKey(event) { return `${routineKey(event)}\0${event.payload.run_id}`; }
+  function runKey(event) {
+    return lifecycle.identity([event.source, event.agent_id, event.payload.routine,
+      event.payload.run_id]);
+  }
+  function compareKeys(left, right) {
+    return lifecycle.compareFields(JSON.parse(left), JSON.parse(right));
+  }
   function nextRoutineSequence(state) {
     if (!Number.isSafeInteger(state.routineSequence) ||
         state.routineSequence >= Number.MAX_SAFE_INTEGER) {
@@ -95,7 +101,7 @@
     // has crossed the same 30-minute stale window used by the ledger. Some
     // stale groups remain as bounded staging so a late close can still pair.
     candidates.sort((a, b) => b.rank - a.rank || b.newest - a.newest ||
-      a.key.localeCompare(b.key));
+      compareKeys(a.key, b.key));
     const selected = candidates.slice(0, MAX_ROUTINE_KEYS), kept = [];
     let dropped = candidates.slice(MAX_ROUTINE_KEYS)
       .reduce((count, item) => count + item.groups.length, 0);
@@ -119,8 +125,8 @@
     // them in a separate globally bounded recency stage so they neither consume
     // nor displace any of the 200 renderable routine keys. lifecycleGroups has
     // already deduplicated conflicts with the shared terminal comparator.
-    orphan.sort((a, b) => b.newestSequence - a.newestSequence ||
-      runKey((a.close || a.start).event).localeCompare(runKey((b.close || b.start).event)));
+    orphan.sort((a, b) => b.newestSequence - a.newestSequence || compareKeys(
+      runKey((a.close || a.start).event), runKey((b.close || b.start).event)));
     dropped += Math.max(0, orphan.length - MAX_ROUTINE_ORPHANS);
     const orphans = orphan.slice(0, MAX_ROUTINE_ORPHANS).map(group => group.close);
     return { entries: kept, orphans, dropped };
