@@ -21,7 +21,7 @@ function descendants(node) {
   return [node, ...node.children.filter((child) => child instanceof FakeNode).flatMap(descendants)];
 }
 
-function loadTicket() {
+function loadTicket({ schedulerLiveness = async () => ({}) } = {}) {
   const source = readFileSync(new URL("../ui/app.js", import.meta.url), "utf8");
   const start = source.indexOf('const ledger = document.getElementById("ledger");');
   const end = source.indexOf("/** Confirm a run-now", start);
@@ -52,7 +52,7 @@ function loadTicket() {
     parseHash: () => ({ view: "residents" }),
     render: () => { renders += 1; },
     schedulerBlame: () => "scheduler detail",
-    schedulerLiveness: async () => ({}),
+    schedulerLiveness,
     REPROMPT: Symbol("reprompt"),
   };
   const names = Object.keys(context);
@@ -127,6 +127,29 @@ test("a late result cannot mutate or render after dismissal", async () => {
 
   assert.equal(state.textContent, "accepted");
   assert.equal(reason.textContent, "accepted, not yet confirmed.");
+  assert.equal(harness.timers.size, 0);
+  assert.equal(harness.renders(), 0);
+});
+
+test("dismissal aborts the terminal scheduler heartbeat read", async () => {
+  let seenSignal;
+  let finishHeartbeat;
+  const harness = loadTicket({
+    schedulerLiveness: (signal) => new Promise((resolve) => {
+      seenSignal = signal;
+      finishHeartbeat = resolve;
+    }),
+  });
+  const node = harness.ticket({ what: "run", confirm: async () => null });
+
+  for (let poll = 1; poll < 90; poll += 1) await harness.runNextTimer();
+  const terminalPoll = harness.runNextTimer();
+  await Promise.resolve();
+  dismiss(node);
+
+  assert.equal(seenSignal.aborted, true);
+  finishHeartbeat({ alive: true });
+  await terminalPoll;
   assert.equal(harness.timers.size, 0);
   assert.equal(harness.renders(), 0);
 });

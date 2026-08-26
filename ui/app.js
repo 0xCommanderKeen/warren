@@ -350,9 +350,9 @@ setInterval(() => document.querySelectorAll("time[data-clock]").forEach(tickCloc
  * ticked — is a third answer, not a missing one. A read that fails is `null` here, which
  * every caller below renders as "unknown" rather than as bad news.
  */
-async function schedulerLiveness() {
+async function schedulerLiveness(signal) {
   try {
-    return (await call("routines")).scheduler || null;
+    return (await call("routines", { signal })).scheduler || null;
   } catch {
     return null;
   }
@@ -465,31 +465,34 @@ function ticket({ what, requestId, why, confirm, refused }) {
     if (cancelled) return;
     tries += 1;
     let verdict = null;
-    controller = new AbortController();
+    const activeController = new AbortController();
+    controller = activeController;
     try {
-      verdict = await confirm(controller.signal);
-    } catch (error) {
-      if (cancelled) return;
-      if (error === REPROMPT) return;
-      settle({ state: "failed", why: `could not read back what happened: ${error.message}` });
-      return;
-    } finally {
-      controller = null;
-    }
-    if (cancelled) return;
-    if (verdict) { settle(verdict); return; }
-    if (tries >= POLL_LIMIT) {
-      // Three minutes of silence used to be explained with a guess. Ask steward instead:
-      // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
-      // are very different reasons for the same silence.
-      const scheduler = await schedulerLiveness();
-      if (!cancelled && node.isConnected) {
-        reason.textContent = "accepted, and steward has recorded no outcome in three " +
-          "minutes. " + schedulerBlame(scheduler);
+      try {
+        verdict = await confirm(activeController.signal);
+      } catch (error) {
+        if (cancelled) return;
+        if (error === REPROMPT) return;
+        settle({ state: "failed", why: `could not read back what happened: ${error.message}` });
+        return;
       }
-      return;
+      if (cancelled) return;
+      if (verdict) { settle(verdict); return; }
+      if (tries >= POLL_LIMIT) {
+        // Three minutes of silence used to be explained with a guess. Ask steward instead:
+        // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
+        // are very different reasons for the same silence.
+        const scheduler = await schedulerLiveness(activeController.signal);
+        if (!cancelled && node.isConnected) {
+          reason.textContent = "accepted, and steward has recorded no outcome in three " +
+            "minutes. " + schedulerBlame(scheduler);
+        }
+        return;
+      }
+      pollTimer = setTimeout(poll, POLL_MS);
+    } finally {
+      if (controller === activeController) controller = null;
     }
-    pollTimer = setTimeout(poll, POLL_MS);
   };
   pollTimer = setTimeout(poll, 600);
   return node;

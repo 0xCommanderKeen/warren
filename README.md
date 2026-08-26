@@ -473,7 +473,8 @@ only fail should look like one before it is pressed.
 
 ## Development
 
-Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
+Python 3.14, Node.js 22, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest. Node runs the
+browser-free UI behavior tests as part of pytest; `.node-version` is the supported major.
 
 ```console
 make dev       # uv sync --all-groups
