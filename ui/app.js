@@ -140,8 +140,10 @@ async function call(name, options = {}) {
       method: options.method || "GET",
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: options.signal,
     });
   } catch (cause) {
+    if (options.signal && options.signal.aborted) throw cause;
     setLink("bad", "unreachable");
     throw new ApiError(0, "unreachable", `the API did not answer: ${cause.message}`, null);
   }
@@ -415,20 +417,30 @@ const POLL_MS = 2000;
 const POLL_LIMIT = 90;      // three minutes of asking, then it says so and stops
 
 function ticket({ what, requestId, why, confirm, refused }) {
+  let cancelled = false;
+  let pollTimer = null;
+  let controller = null;
   const state = el("span", { class: "state" }, "asked");
   const reason = el("div", { class: "why" }, why || "steward accepted the request.");
+  const dismiss = () => {
+    cancelled = true;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    if (controller !== null) controller.abort();
+    node.remove();
+  };
   const node = el("div", { class: "tick", "data-state": "asked" },
     el("div", { class: "top" },
       el("span", { class: "what" }, what),
       el("span", { class: "actions" }, state,
         el("button", { class: "dismiss", type: "button", title: "dismiss",
-          on: { click: () => node.remove() } }, "×"))),
+          on: { click: dismiss } }, "×"))),
     reason,
     requestId ? el("div", { class: "rid" }, `request ${requestId}`) : null
   );
   ledger.append(node);
 
   const settle = (verdict) => {
+    if (cancelled || !node.isConnected) return;
     node.dataset.state = verdict.state;
     state.textContent = verdict.state;
     reason.textContent = verdict.why;
@@ -450,34 +462,43 @@ function ticket({ what, requestId, why, confirm, refused }) {
 
   let tries = 0;
   const poll = async () => {
+    if (cancelled) return;
     tries += 1;
     let verdict = null;
+    controller = new AbortController();
     try {
-      verdict = await confirm();
+      verdict = await confirm(controller.signal);
     } catch (error) {
+      if (cancelled) return;
       if (error === REPROMPT) return;
       settle({ state: "failed", why: `could not read back what happened: ${error.message}` });
       return;
+    } finally {
+      controller = null;
     }
+    if (cancelled) return;
     if (verdict) { settle(verdict); return; }
     if (tries >= POLL_LIMIT) {
       // Three minutes of silence used to be explained with a guess. Ask steward instead:
       // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
       // are very different reasons for the same silence.
-      reason.textContent = "accepted, and steward has recorded no outcome in three " +
-        "minutes. " + schedulerBlame(await schedulerLiveness());
+      const scheduler = await schedulerLiveness();
+      if (!cancelled && node.isConnected) {
+        reason.textContent = "accepted, and steward has recorded no outcome in three " +
+          "minutes. " + schedulerBlame(scheduler);
+      }
       return;
     }
-    setTimeout(poll, POLL_MS);
+    pollTimer = setTimeout(poll, POLL_MS);
   };
-  setTimeout(poll, 600);
+  pollTimer = setTimeout(poll, 600);
   return node;
 }
 
 /** Confirm a run-now the only honest way: read the request log steward wrote it into. */
 function confirmRun(requestId) {
-  return async () => {
-    const record = await call("request", { params: { request_id: requestId } });
+  return async (signal) => {
+    const record = await call("request", { params: { request_id: requestId }, signal });
     if (record.outcome === "queued") return null;
     const detail = record.detail || {};
     if (record.outcome === "ran") {
@@ -492,8 +513,8 @@ function confirmRun(requestId) {
 
 /** Confirm a posted job by finding it on the board steward keeps. */
 function confirmJob(taskId) {
-  return async () => {
-    const board = await call("jobs");
+  return async (signal) => {
+    const board = await call("jobs", { signal });
     const job = (board.jobs || []).find((item) => item.task_id === taskId);
     if (!job) return null;
     return {
@@ -506,8 +527,8 @@ function confirmJob(taskId) {
 
 /** Confirm a decision by reading the approval record back. */
 function confirmApproval(requestId) {
-  return async () => {
-    const record = await call("approval", { params: { request_id: requestId } });
+  return async (signal) => {
+    const record = await call("approval", { params: { request_id: requestId }, signal });
     if (record.status === "pending") return null;
     return {
       state: "confirmed",
@@ -524,8 +545,8 @@ function confirmApproval(requestId) {
  * report rather than assumed from the status code.
  */
 function confirmDeclared(answer) {
-  return async () => {
-    const listing = await call("residents");
+  return async (signal) => {
+    const listing = await call("residents", { signal });
     const found = (listing.residents || []).some((item) => item.id === answer.id);
     if (!found) return null;
 
