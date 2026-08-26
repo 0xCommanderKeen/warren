@@ -1411,10 +1411,12 @@ async function viewRoutines() {
  * ---------------------------------------------------------------------------------- */
 
 async function viewApprovals() {
-  const data = await call("approvals", { query: { status: "all" } });
-  const all = data.approvals || [];
-  const pending = all.filter((item) => item.status === "pending");
-  const decided = all.filter((item) => item.status !== "pending").reverse();
+  const [waiting, history] = await Promise.all([
+    call("approvals", { query: { status: "pending" } }),
+    call("approvals", { query: { status: "resolved" } }),
+  ]);
+  const pending = waiting.approvals || [];
+  const decided = (history.approvals || []).reverse();
 
   const out = frag(
     head("Approvals",
