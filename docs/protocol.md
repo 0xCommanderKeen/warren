@@ -1,10 +1,30 @@
-# burrow event protocol — v0
+# Burrow ingestion and Village State protocols
 
-Everything in burrow consumes this. Agents (or adapters wrapping them) append one JSON
-object per line to the event log. The projection layer never reads agent internals —
-only this log.
+Agents (or adapters wrapping them) append one JSON object per line to the event
+log. This v0 event protocol is the ingestion and audit contract only. Python
+validates and projects that evidence; the production browser never consumes it.
 
-## Transport (v0.6)
+## Projected-state delivery — v1
+
+`GET /state` returns an envelope containing one complete, bounded Village State.
+The snapshot carries `schema_version`, `generation`, `cursor`, `evaluated_at`,
+Villagers, Resident declarations, tasks, approvals, journals, routines, moods,
+diagnostics, capacity declarations, and control capabilities. It contains JSON
+values only and is atomically replaceable.
+
+Clients may send `generation` and `cursor` query parameters. An unchanged state
+returns 204. A cursor from another log/server generation returns a `reset`
+envelope containing the complete current snapshot; otherwise a newer state is a
+`snapshot` envelope. `GET /state/stream?generation=N` publishes those same full
+envelopes as snapshot SSE messages. Full snapshots are intentional; there is no
+delta language.
+
+Clock-dependent transitions are evaluated by Python during polling and snapshot
+stream publication, so stale/absent state changes without synthetic events.
+Write controls remain non-optimistic: their HTTP result is not village truth;
+only a later authoritative snapshot changes visible state.
+
+## Event ingestion transport (v0.6)
 
 Two transports; the event shape is the contract, not the pipe:
 
@@ -119,14 +139,10 @@ back to local logs and the village looks emptier than the fleet is.
 
 Rotating the secret runs the same loop in reverse: unset on the server, re-issue to
 emitters, set again.
-The viewer bootstraps and falls back through `GET /events?since=<cursor>`. The
-response body contains only complete JSONL lines after that position, and
-`X-Burrow-Cursor` supplies the cursor for the next request. Omit `since` for an
-initial full bootstrap. An explicit cursor, including legacy numeric `0`, is a
-client resume request. If it cannot prove that it belongs to the current log, or if
-the log is truncated or rotated, the server starts again at byte zero and includes
-`X-Burrow-Reset: 1`; consumers must discard their reduced state before folding in
-that response.
+`GET /events?since=<cursor>` remains available for internal audit and diagnostics.
+It returns complete JSONL records after that position and supplies the next cursor
+in `X-Burrow-Cursor`. It is not a production viewer transport; the viewer uses the
+projected-state endpoints described above.
 
 Server-issued cursors are opaque, versioned values with four explicit identity layers:
 `v1:<boot-id>:<device>:<inode>:<generation>:<offset>`. The random boot ID changes
@@ -147,40 +163,10 @@ the parent retains its namespace while every child refreshes to a distinct,
 process-bound boot ID before serving. That child ID then remains stable across its
 requests and in-process log rotations.
 
-Live updates use `GET /events/stream?since=<cursor>` with `text/event-stream`. Each
-JSON event is one SSE `data` message and its `id` is the cursor immediately after
-that event. Reconnect with that value in `Last-Event-ID` (preferred automatically by
-`EventSource`) or `since`; both transports use the same cursor, so switching between
-SSE and polling neither duplicates nor skips an event. A rotation emits an SSE
-`reset` event before replaying the new live log. The stream sends keepalive comments
-and `X-Accel-Buffering: no` so the NAS reverse proxy does not hold events in a
-buffer.
-
-Opening the HTTP stream is not a live-data boundary: an `EventSource` may still have
-queued catch-up messages to deliver. After writing the complete backlog, the server
-emits an ordered `ready` control event whose `id` and JSON `cursor` are the same exact
-current v1 cursor. The server captures the final catch-up records and cursor under the
-event-log lock, then releases it before any socket write or flush. An append is either
-included in that snapshot before the marker or tailed from its cursor after the marker;
-a slow stream cannot block ingestion, polling, or rotation. The viewer projects
-pre-marker records but keeps transport `recovering`. During a normal cursor resume it
-stages at most the same 4,000-record transport window of routine and task evidence and
-publishes that evidence once, with its original order and cursors, after validating
-`ready`. If that resumed stream errors before the marker, the already strictly validated,
-cursor-bearing stage is published once before polling continues from its ending cursor;
-this neither rereads it nor loses exact write acknowledgement evidence.
-Bootstrap/reset evidence and overflowed staging are conservatively suppressed and only
-rebase the acknowledgement boundary. If an overflowed pre-ready stream errors, Burrow
-publishes that conservative rebase before polling from the already-advanced cursor, so
-an unresolved write becomes explicitly ambiguous instead of silently losing possible
-exact evidence. Malformed readiness and explicit reset clear
-staging. Only a valid marker in the
-current cursor namespace makes the transport `live`; a missing marker remains
-non-observable, while a malformed or mismatched marker closes the stream and enters
-the conservative polling/reconnect path. `ready` is transport control only and is
-never appended to or interpreted as a protocol-log event. A `reset` closes the
-ambiguous stream, obtains one grouped polling baseline, and requires a fresh `ready`
-marker on the following connection.
+`GET /events/stream?since=<cursor>` likewise remains an internal raw-event diagnostic
+stream. Production live updates use `GET /state/stream`, which sends complete
+`snapshot` envelopes. A cursor-namespace change is represented by a complete `reset`
+envelope, allowing the viewer to replace all rendered state atomically.
 
 Closing a browser tab, navigating away, or a proxy closing an SSE socket is an
 expected lifecycle event: broken-pipe, connection-reset, and connection-aborted

@@ -289,7 +289,7 @@
 <script src="/retention-policy.js"></script>
 <script src="/journal-observations.js"></script>
 <script src="/typed-json.js"></script>
-<script src="/projection.js"></script>
+<script src="/presentation.js"></script>
 </head>
 <body>
 <div id="game"></div>
@@ -340,14 +340,13 @@
 <script src="/mood-glyph.js"></script>
 <script src="/nursery.js"></script>
 <script src="/charter-journal.js"></script>
+<script src="/state-transport.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
 
-/* projection logic (event filtering, state mapping, souls, identities) lives in
-   /projection.js — same file the test suite in tests/ runs under node. It gives
-   this script: NAMES, ACCENTS, CHARS, STALE_MS, DROP_MS, VERBS, hashCode, esc,
-   ago, describe, doingLabel, parseEvents, foldEvents, reduce. */
+/* Village domain state arrives as authoritative snapshots. This page owns only
+   rendering, map routing, focus, dialogs, and transient interaction state. */
 
 /* ————— the village scene ————— */
 

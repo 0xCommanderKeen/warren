@@ -137,6 +137,11 @@
       rejections: [...(options.rejections || []), ...rejections] });
   }
   function rows(state, now = Date.now(), doneRecencyMs = DONE_RECENCY_MS) {
+    if (Array.isArray(state.authoritativeRows)) return state.authoritativeRows.map(task => ({
+      id: task.id, title: task.title, required_skills: task.required_skills,
+      posted_at: null, updated_at: Date.parse(task.updated_at), state: task.state,
+      claimant: task.claimant, previous_claimant: null, reason: task.reason || null,
+    }));
     const result = [];
     for (const task of state.tasks.values()) {
       const event = task.transition || task.posted;

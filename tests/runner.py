@@ -19,6 +19,10 @@ def discover_tests():
         if not raw_path:
             continue
         path = os.fsdecode(raw_path)
+        # A worktree implementation may intentionally remove obsolete tests
+        # before its commit is staged; discovery follows the current tree.
+        if not (ROOT / path).is_file():
+            continue
         name = pathlib.PurePosixPath(path).name
         if (name.startswith("test_") and name.endswith((".py", ".js"))) or name.endswith(
             ".test.js"

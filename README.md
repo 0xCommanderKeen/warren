@@ -132,8 +132,8 @@ map of everything the fleet does.
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
   `python:3.14-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
-  and all runtime support, resident manifests, and legacy souls with the
-  authoritative tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py retention.py
+  and all runtime support and resident manifests with the authoritative
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py hooks viewer villagers | ssh
@@ -141,14 +141,15 @@ map of everything the fleet does.
   `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying.
-  The viewer's live feed is SSE at `/events/stream`; the response disables nginx
+  The viewer consumes complete authoritative Village State snapshots from
+  `/state` and the live snapshot feed at `/state/stream`; the response disables nginx
   buffering itself. If another reverse proxy is placed in front, keep streaming
   responses unbuffered and give them an idle timeout longer than the 15-second
   keepalive interval. Polling automatically carries the same cursor while a stream
   is unavailable and retries SSE every two seconds.
-  Cursors are restart-safe: each HTTP server instance has a new identity (including
-  its empty-log offset-zero cursor), so clients holding an older cursor receive an
-  explicit reset and replay instead of resuming into unrelated live-log bytes.
+  Snapshot generations and cursors are explicit. A stale cursor receives one
+  atomic reset snapshot; the browser never folds raw events. Raw `/events`
+  retrieval remains an internal diagnostic and audit interface.
 - **Mac emitter** — the installed `burrow-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
   `~/.claude/settings.json` hooks
@@ -356,33 +357,19 @@ sh tests/run.sh
 sh tests/run.sh --list  # show the tests that would run
 ```
 
-The projection — the rules from [docs/protocol.md](docs/protocol.md) that turn an
-event log into villagers — lives in `viewer/projection.js`. The viewer loads it as
-a plain `<script>`; the tests `require()` the same file. No build step, no
-framework, no install:
+The authoritative projection lives in `village_state.py`; `state_coordinator.py`
+publishes complete snapshots, and `viewer/state-transport.js` validates and swaps
+them for rendering. There is no browser domain reducer and no build step:
 
 ```sh
-node --test                      # from the repo root: everything under tests/
-node tests/projection.test.js    # or just this one file
+python3 -m unittest tests.test_village_state tests.test_state_coordinator
+node tests/state-transport.test.js
+node tests/browser-state-runtime.test.js
 ```
 
-Cases are driven by fixture event logs in `tests/fixtures/*.jsonl`, all written
-against a fixed `now` (`2026-08-24T12:00:00Z`) so the 30-minute stale and 12-hour
-drop windows land exactly on their edges. Change a projection rule and a fixture
-should have to change with it.
-
-The fleet layout browser test uses reviewed, platform-specific visual baselines:
-`<viewport>.darwin.png` and `<viewport>.linux.png`. Only macOS and Linux are
-supported; a missing baseline fails and preserves the captured `actual.png` under
-`/tmp/burrow-visual-*` instead of accepting new pixels. To intentionally update
-baselines, run the focused test on the target platform and opt in explicitly:
-
-```sh
-BURROW_UPDATE_VISUAL_BASELINES=1 node --test tests/fleet-layout.browser.test.js
-```
-
-Review the resulting platform-named PNGs before committing them. Never set update
-mode in normal CI; the test refuses baseline updates when `CI=true`.
+Projection tests use fixed evaluation times so stale and absent clock boundaries
+remain deterministic. Browser tests consume representative Village State fixtures;
+they do not replay raw events through a second reducer.
 
 ## Not this project
 

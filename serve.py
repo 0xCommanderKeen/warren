@@ -41,6 +41,7 @@ import weakref
 import notification_persistence
 import residents as resident_manifests
 import retention
+from state_coordinator import StateCoordinator
 from approval_protocol import structured_approval, thaw_json
 from hooks import durable
 from protocol import validate_event
@@ -614,6 +615,13 @@ class BurrowHTTPServer(http.server.ThreadingHTTPServer):
         self._boot_id_pid = os.getpid()
         self._boot_id = secrets.token_hex(16)
         super().__init__(*args, **kwargs)
+        self.state_coordinator = StateCoordinator(
+            self._projection_inputs,
+            read_residents,
+            capabilities={"ingest": True, "approvals": True, "jobs": True,
+                          "routines": True},
+        )
+        self.state_coordinator.evaluate()
         if hasattr(os, "register_at_fork"):
             server_ref = weakref.ref(self)
 
@@ -626,6 +634,26 @@ class BurrowHTTPServer(http.server.ThreadingHTTPServer):
             # this closure and the closure retains the server weakly.
             self._refresh_in_child = refresh_in_child
             os.register_at_fork(after_in_child=refresh_in_child)
+
+    def _projection_inputs(self):
+        """Return one log/cursor boundary for the pure projection seam."""
+        with LOG_LOCK:
+            maybe_rotate()
+            events = []
+            try:
+                with open(EVENTS, "rb") as stream:
+                    stat = os.fstat(stream.fileno())
+                    for line in stream:
+                        try:
+                            events.append(json.loads(line, parse_constant=_reject_json_constant))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            events.append(None)
+                    cursor = EventCursor.issued(
+                        self.boot_id, stat, _log_generation, stat.st_size).format()
+            except FileNotFoundError:
+                cursor = EventCursor.issued(
+                    self.boot_id, None, _log_generation, 0).format()
+            return events, cursor, _log_generation
 
     def _refresh_process_identity(self):
         # Never acquire a lock copied from a multi-threaded parent: its owner no
@@ -940,6 +968,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
+        if path == "/state":
+            params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            try:
+                generation = int(params["generation"][0]) if "generation" in params else None
+                cursor = params["cursor"][0] if "cursor" in params else None
+                if generation is not None and generation < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                self._send(400, b"invalid state position", "text/plain")
+                return
+            snapshot = self.server.state_coordinator.evaluate()
+            delivery = self.server.state_coordinator.delivery(generation, cursor)
+            if delivery["kind"] == "unchanged":
+                self._send(204, b"", "application/json", {
+                    "X-Burrow-State-Generation": str(snapshot["generation"]),
+                    "X-Burrow-State-Cursor": snapshot["cursor"],
+                })
+                return
+            self._send(200, json.dumps(delivery, ensure_ascii=False,
+                       separators=(",", ":"), allow_nan=False).encode("utf-8"),
+                       "application/json")
+            return
+        if path == "/state/stream":
+            self._stream_state(parsed)
+            return
         if path == "/villagers":
             self._send(200, json.dumps(read_villagers()).encode("utf-8"),
                        "application/json")
@@ -1031,7 +1084,41 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if claim_knock(event):
             notify_async(event)
+        coordinator = getattr(self.server, "state_coordinator", None)
+        if coordinator is not None:
+            coordinator.evaluate()
         self._send(204, b"", "text/plain")
+
+    def _stream_state(self, parsed):
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        try:
+            generation = int(params.get("generation", ["0"])[0])
+            cursor = params.get("cursor", [None])[0]
+        except ValueError:
+            self._send(400, b"invalid state generation", "text/plain")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        try:
+            while True:
+                snapshot = self.server.state_coordinator.evaluate()
+                delivery = self.server.state_coordinator.delivery(generation, cursor)
+                if delivery["kind"] in {"snapshot", "reset"}:
+                    payload = json.dumps(delivery,
+                                         ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                    self.wfile.write(f"id: {snapshot['generation']}\nevent: snapshot\ndata: {payload}\n\n".encode())
+                    self.wfile.flush()
+                    generation = snapshot["generation"]
+                    cursor = snapshot["cursor"]
+                self.server.state_coordinator.wait_for_newer(generation, 15)
+                self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except OSError as error:
+            if not self._expected_disconnect(error):
+                raise
 
     def _event_content_length(self, send_error=False):
         """Parse one unambiguous request length or close the connection.
