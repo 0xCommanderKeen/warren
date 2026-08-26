@@ -602,11 +602,12 @@ class SkillGrant(_Model):
 # The model validator above preserves ``SkillGrant.model_validate("name")`` as part of
 # the public parsing API. The annotated input type makes that same pre-validation rule
 # visible to Pydantic's schema generator while the stored/runtime type stays SkillGrant.
+SkillGrantShorthand = Annotated[str, Field(pattern=SLUG_PATTERN)]
 SkillGrantInput = Annotated[
     SkillGrant,
     BeforeValidator(
         _normalize_skill_grant,
-        json_schema_input_type=SkillGrant | str,
+        json_schema_input_type=SkillGrant | SkillGrantShorthand,
     ),
 ]
 

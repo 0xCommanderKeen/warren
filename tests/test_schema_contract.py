@@ -77,8 +77,26 @@ def test_the_committed_schema_is_the_shape_burrow_reads() -> None:
 
 @pytest.mark.parametrize(
     "grant",
-    ["daily-summary", {"id": "daily-summary"}],
-    ids=["bare-string", "object"],
+    [
+        "a",
+        "0",
+        "daily-summary",
+        "daily-summary-",
+        {"id": "a"},
+        {"id": "0"},
+        {"id": "daily-summary"},
+        {"id": "daily-summary-"},
+    ],
+    ids=[
+        "bare-letter-boundary",
+        "bare-digit-boundary",
+        "bare-slug",
+        "bare-trailing-hyphen-boundary",
+        "object-letter-boundary",
+        "object-digit-boundary",
+        "object-slug",
+        "object-trailing-hyphen-boundary",
+    ],
 )
 def test_skill_grant_inputs_have_schema_model_parity(grant: object) -> None:
     """Both documented spellings pass the artifact and normalize to SkillGrant."""
@@ -87,15 +105,43 @@ def test_skill_grant_inputs_have_schema_model_parity(grant: object) -> None:
 
     jsonschema.Draft202012Validator(json.loads(SCHEMA_FILE.read_text())).validate(document)
     manifest = ResidentManifest.model_validate(document)
+    expected = SkillGrant.model_validate(grant)
 
-    assert manifest.skills == [SkillGrant(id="daily-summary")]
-    assert SkillGrant.model_validate(grant) == SkillGrant(id="daily-summary")
+    assert manifest.skills == [expected]
 
 
 @pytest.mark.parametrize(
     "grant",
-    [42, {"source": "library"}, {"id": "not a slug"}, {"id": "ok", "extra": True}],
-    ids=["wrong-type", "missing-id", "invalid-id", "extra-field"],
+    [
+        42,
+        {"source": "library"},
+        "",
+        "   ",
+        "Daily-summary",
+        "-daily-summary",
+        "daily-summary_",
+        {"id": ""},
+        {"id": "   "},
+        {"id": "Daily-summary"},
+        {"id": "-daily-summary"},
+        {"id": "daily-summary_"},
+        {"id": "ok", "extra": True},
+    ],
+    ids=[
+        "wrong-type",
+        "missing-id",
+        "bare-empty",
+        "bare-spaces",
+        "bare-uppercase",
+        "bare-invalid-leading-character",
+        "bare-invalid-trailing-character",
+        "object-empty",
+        "object-spaces",
+        "object-uppercase",
+        "object-invalid-leading-character",
+        "object-invalid-trailing-character",
+        "extra-field",
+    ],
 )
 def test_skill_grant_rejections_have_schema_model_parity(grant: object) -> None:
     """The artifact and model reject the same representative malformed grants."""
