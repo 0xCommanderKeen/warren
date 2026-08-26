@@ -423,6 +423,24 @@ not report is written as **zero and flagged**, never guessed — a `codex` or `c
 has no cost to give, so the gauge says "0.00 spent, 3 of today's 4 runs did not report
 what they cost" rather than a comfortable "0.00 spent".
 
+**A cap has to be enforceable.** The two daily caps are computed from what the runner
+reported, so a runner that reports nothing can never trip one — the ledger fills with
+zeros, the pause machinery never fires, and the gauge reads green while the resident
+spends. `steward validate` therefore **refuses** a manifest that declares `daily_cost_usd`
+or `daily_tokens` alongside `runner.kind: codex` or `runner.kind: command`:
+
+```
+budgets.daily_cost_usd
+    problem: runner kind 'codex' does not report usage, so this cap can never trip:
+             every run is ledgered as costing zero and the budget gauge reads green
+             while the resident spends
+```
+
+Either run it on `claude`, which reports usage, or cap the session instead —
+`max_run_seconds` is enforceable under any runner, because steward times the run itself
+rather than reading a number the brain supplied. `kind: mock` is exempt: it spawns nothing
+and spends nothing, so a cap over it is inert without being untruthful.
+
 **What happens when a cap trips.** The resident is *paused*: steward refuses its scheduled
 fires, refuses its board claims, answers run-now with `409 paused: budget exceeded`, and
 raises **one** structured `needs_human` naming the budget and the number — not one per

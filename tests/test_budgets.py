@@ -874,6 +874,76 @@ def test_budgets_must_be_positive(write_resident: ResidentWriter) -> None:
         assert any(field in d.field_path for d in result.errors)
 
 
+@pytest.mark.parametrize("kind", ["codex", "command"])
+@pytest.mark.parametrize("field", ["daily_cost_usd", "daily_tokens"])
+def test_a_cap_a_runner_can_never_report_against_is_refused(
+    write_resident: ResidentWriter, kind: str, field: str
+) -> None:
+    """A declared cap that cannot trip must not be declarable (steward #125).
+
+    ``Gauge.exhausted`` is ``spent >= limit`` and ``spent`` sums ``run_ledger`` rows that
+    ``BudgetGuard.record`` writes as zeros whenever the runner reported nothing. Only
+    ``ClaudeRunner`` parses ``--output-format json`` for usage; ``runners.py`` says of the
+    codex runner, out loud, "Plain text out; usage is not available", and a ``command``
+    is whatever argv the manifest supplied.
+
+    So such a resident accumulates ``cost_usd = 0.0`` for ever: the cap never trips, the
+    pause machinery never fires, and the budget endpoint reports green while real money
+    goes out. Refused at validation because nothing at run time can notice a number that
+    stayed zero.
+    """
+    data = budget_manifest(**{field: 5 if field == "daily_cost_usd" else 5000})
+    runner: dict[str, Any] = {"kind": kind}
+    if kind == "command":
+        runner["command"] = ["tool", "{prompt}"]
+    data["runner"] = runner
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == f"budgets.{field}"]
+    assert len(complaints) == 1
+    assert "does not report usage" in complaints[0].problem
+    assert "claude" in complaints[0].example
+
+
+@pytest.mark.parametrize("kind", ["codex", "command"])
+def test_a_runner_that_reports_nothing_may_still_cap_the_session(
+    write_resident: ResidentWriter, kind: str
+) -> None:
+    """``max_run_seconds`` is enforceable whatever the brain is.
+
+    Steward times the run itself rather than reading a number the child supplied, so this
+    cap is real under any runner — and it is the answer the refusal above points at.
+    """
+    data = budget_manifest(max_run_seconds=900)
+    runner: dict[str, Any] = {"kind": kind}
+    if kind == "command":
+        runner["command"] = ["tool", "{prompt}"]
+    data["runner"] = runner
+
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_a_claude_resident_may_declare_the_caps_it_can_report_against(
+    write_resident: ResidentWriter,
+) -> None:
+    """The non-regression: the runner every shipped resident uses is unaffected."""
+    data = budget_manifest(daily_cost_usd=5.0, daily_tokens=100_000)
+    data["runner"] = {"kind": "claude"}
+
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_a_mock_resident_may_still_declare_a_cap(write_resident: ResidentWriter) -> None:
+    """``mock`` reports no usage either, and is deliberately exempt.
+
+    It spawns nothing and spends nothing, so a cap over it is inert without being
+    untruthful — and this refusal is about gauges that read green while money goes out.
+    """
+    assert m.validate_manifest(write_resident(budget_manifest(daily_cost_usd=5.0))).ok
+
+
 def test_a_timeout_over_the_cap_is_a_warning_not_an_error(
     write_resident: ResidentWriter,
 ) -> None:
