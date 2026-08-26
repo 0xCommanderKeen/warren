@@ -171,6 +171,60 @@ def test_a_cost_steward_cannot_believe_is_recorded_as_unknown(
     assert result.cost_usd is None, why
 
 
+def test_one_refused_number_discredits_the_whole_usage_report(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """Refusing only the bad field would leave the run flagged as usage-known.
+
+    ``BudgetGuard.record`` derives ``usage_known`` by OR-ing the three usage fields, and
+    the ledger writes ``cost_usd or 0.0``. So a payload carrying a NaN cost *and* honest
+    token counts would land as ``cost_usd=0.0, usage_known=1``: not counted toward the
+    daily cap, and not counted in ``Spend.unreported`` either — invisible in both
+    directions, which is a worse place to be than the NaN was.
+
+    A number steward will not believe discredits the report it arrived in.
+    """
+    stub_bin(
+        "claude",
+        r"""
+cat <<'JSON'
+{"type":"result","is_error":false,"result":"the summary",
+ "usage":{"input_tokens":120,"output_tokens":34},"total_cost_usd":NaN}
+JSON
+""",
+    )
+
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert (result.cost_usd, result.input_tokens, result.output_tokens) == (None, None, None)
+    assert result.output == "the summary", "the run itself still happened"
+    assert result.outcome is r.Outcome.OK
+
+
+def test_a_cost_too_large_to_be_a_float_is_refused_not_raised(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """``json`` hands back unbounded ints, and ``float()`` on one raises.
+
+    A JSON integer literal past ~1e308 clears the ``isinstance(value, (int, float))`` gate
+    and then cannot be converted at all. Unguarded, the ``OverflowError`` escaped
+    ``parse`` into the blanket handler in ``sessions.run`` — turning a session that
+    finished into a FAILED one with its output thrown away, which is precisely what
+    bounding the value at the boundary was supposed to avoid.
+    """
+    stub_bin(
+        "claude",
+        'cat <<\'JSON\'\n{"type":"result","is_error":false,"result":"the summary",'
+        '"total_cost_usd":' + "9" * 400 + "}\nJSON\n",
+    )
+
+    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+
+    assert result.outcome is r.Outcome.OK, "an unbelievable number is not a failed run"
+    assert result.output == "the summary"
+    assert result.cost_usd is None
+
+
 def test_a_plausible_cost_still_gets_through(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -187,7 +241,12 @@ def test_a_plausible_cost_still_gets_through(
 def test_a_token_count_steward_cannot_believe_is_recorded_as_unknown(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: str
 ) -> None:
-    """Token counts are summed into an 8-byte column, so they are bounded too."""
+    """Token counts are summed into an 8-byte column, so they are bounded too.
+
+    And a refused count discredits the cost that arrived with it, for the same reason a
+    refused cost discredits the counts: ``usage_known`` is one flag over all three, so a
+    partially-believed report would be recorded as a fully-trusted one.
+    """
     stub_bin(
         "claude",
         r"""
@@ -202,7 +261,8 @@ JSON
     result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
 
     assert (result.input_tokens, result.output_tokens) == (None, None)
-    assert result.cost_usd == pytest.approx(0.01), "the cost it did report is still believed"
+    assert result.cost_usd is None, "and the cost that came with it is not believed either"
+    assert result.output == "the summary", "the run itself still happened"
 
 
 def test_claude_reporting_its_own_error_is_a_failed_run(
