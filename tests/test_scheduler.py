@@ -964,6 +964,30 @@ def test_a_routine_that_fires_hourly_may_not_close_the_day(write_resident: Resid
         s.load_scheduled(path.parent)
 
 
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 * * 1",  # weekly, including the Monday the old probe happened to use
+        "30 22 31 * *",  # month-end
+        "30 22 * 6 *",  # every day, but only in June
+    ],
+)
+def test_a_close_of_day_routine_must_fire_every_day(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match="does not fire every day"):
+        s.load_scheduled(path.parent)
+
+
+def test_a_routine_that_fires_once_each_day_may_close_it(
+    write_resident: ResidentWriter,
+) -> None:
+    path = write_resident(manifest_with(CLOSER))
+    scheduled = s.load_scheduled(path.parent)
+    assert scheduled[0].routine.journal == "close_of_day"
+
+
 def test_an_edited_voice_takes_effect_on_the_next_load(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:

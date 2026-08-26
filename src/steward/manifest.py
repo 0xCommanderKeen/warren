@@ -22,7 +22,7 @@ import re
 import zoneinfo
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Self
@@ -1400,18 +1400,29 @@ def _check_routine_requirements(
     return diagnostics
 
 
-def _fires_per_day(routine: Routine) -> int:
-    """Count a routine's occurrences in one ordinary local day, capped so it terminates."""
-    zone = zoneinfo.ZoneInfo(routine.schedule_tz)
-    start = datetime(2026, 6, 15, 0, 0, tzinfo=zone)  # mid-year: no DST seam either side
-    end = start + timedelta(days=1)
-    cursor = croniter(routine.schedule, start - timedelta(seconds=1))
-    fires = 0
-    while fires <= MAX_CLOSER_FIRES:
-        if cursor.get_next(datetime) >= end:
-            break
-        fires += 1
-    return fires
+def _daily_fire_range(routine: Routine) -> tuple[int, int]:
+    """Return the least and most fires on any day in a complete leap year.
+
+    Five-field cron has no year field.  A leap year therefore contains every month and
+    day-of-month it can name, as well as every weekday.  Fixed-offset datetimes are
+    deliberate: the expression names local wall-clock occurrences, while DST resolution
+    belongs to the scheduler after the manifest's daily cadence has been established.
+    """
+    year_start = datetime(2024, 1, 1, tzinfo=UTC)
+    least = MAX_CLOSER_FIRES + 1
+    most = 0
+    for offset in range(366):
+        start = year_start + timedelta(days=offset)
+        end = start + timedelta(days=1)
+        cursor = croniter(routine.schedule, start - timedelta(seconds=1))
+        fires = 0
+        while fires <= MAX_CLOSER_FIRES:
+            if cursor.get_next(datetime) >= end:
+                break
+            fires += 1
+        least = min(least, fires)
+        most = max(most, fires)
+    return least, most
 
 
 def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
@@ -1440,18 +1451,24 @@ def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagno
         for index, routine in closers[1:]
     ]
     for index, routine in closers:
-        fires = _fires_per_day(routine)
-        if fires == 1:
+        least, most = _daily_fire_range(routine)
+        if least == most == 1:
             continue
-        many = f"{MAX_CLOSER_FIRES}+" if fires > MAX_CLOSER_FIRES else str(fires)
+        if least == 0:
+            cadence = "does not fire every day"
+        elif least == most:
+            many = f"{MAX_CLOSER_FIRES}+" if most > MAX_CLOSER_FIRES else str(most)
+            cadence = f"fires {many} times a day"
+        else:
+            cadence = "fires more than once on some days"
         diagnostics.append(
             Diagnostic(
                 file=source,
                 field_path=f"routines[{index}].schedule",
                 problem=(
-                    f"routine {routine.id!r} closes the day but fires {many} times a day "
-                    f"in {routine.schedule_tz}; the journal is one entry per day, so the "
-                    f"closing routine has to run once"
+                    f"routine {routine.id!r} closes the day but {cadence} in "
+                    f"{routine.schedule_tz}; the journal is one entry per day, so the "
+                    f"closing routine has to run exactly once every day"
                 ),
                 example="schedule: '30 22 * * *'  (once, late)",
             )
