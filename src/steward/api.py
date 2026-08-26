@@ -1035,6 +1035,16 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
     # -- approvals -------------------------------------------------------------------
 
+    def expire_approvals() -> None:
+        """Close overdue approvals before an approval route reports on them.
+
+        The API can be steward's only running process. Keep this opportunistic sweep at
+        the approval boundary rather than mutating unrelated reads, and cross the same
+        transition seam as the scheduler/dispatcher so the durable deny and its event
+        retain their exactly-once semantics.
+        """
+        approvals.expire()
+
     @app.get("/approvals")
     def list_approvals(status: str | None = None) -> dict[str, Any]:
         """List gated actions. Pending by default; ``?status=resolved|all`` for the rest.
@@ -1043,10 +1053,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         exactly what it saw before. ``all`` is the audit view: request and decision in one
         row, which is how "what did I approve, and when" gets answered.
 
-        A request past its ``expires_at`` but not yet swept is **not** pending here (steward
-        #66): it denies by default, and a panel that listed it as still answerable would let
-        a human click *approve* on something the deny-by-default sweep is about to close. It
-        reappears under ``resolved`` once the approval sweep records the deny.
+        Reading the approval ledger first sweeps overdue requests. That makes them
+        resolved, visible in the audit views, and deliverable even when this API is the
+        only steward process running.
         """
         wanted = status or APPROVAL_STATUS_PENDING
         if wanted not in APPROVAL_STATUSES:
@@ -1056,15 +1065,14 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"status {status!r} is not an approval status; use one of: "
                 f"{', '.join(APPROVAL_STATUSES)}",
             )
+        expire_approvals()
         records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
-        if wanted == APPROVAL_STATUS_PENDING:
-            now = ev.utc_now_iso()
-            records = [r for r in records if r.expires_at is None or r.expires_at > now]
         return {"status": wanted, "approvals": [record.to_dict() for record in records]}
 
     @app.get("/approvals/{request_id}")
     def get_approval(request_id: str) -> dict[str, Any]:
         """Return one request with its decision, decider, and timestamps. The audit query."""
+        expire_approvals()
         record = db.approval(request_id)
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
@@ -1082,8 +1090,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         if decided.expired:
             # Deny-by-default has the last word — a click a minute past the deadline must
             # not slip an action through ahead of the sweep, which denies it and closes the
-            # loop in the log (steward #66). Distinct from an already-decided request, which
-            # comes back resolved and reads as a replay below.
+            # loop in the log (steward #66). Do that sweep here too: an API-only steward
+            # must not leave the refused request pending forever.
+            expire_approvals()
             _refuse(
                 409,
                 "approval_expired",

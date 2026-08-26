@@ -23,14 +23,15 @@ transition by transition in `docs/transitions.md`.
 **Deny by default.** Every request a *session* raises carries an `expires_at`. Past it,
 steward resolves the request as `deny` with `decided_by: "expiry"` and emits
 `needs_human_resolved`. A gated action never proceeds because a person went to sleep. The
-sweep runs on every scheduler tick, every board dispatch, and every watchdog pass, which
-is what makes the deadline real rather than decorative — nothing sweeps a queue nobody
-visits. A session's chosen `expires-in` is clamped to a fleet maximum of 30 days, so a
+sweep runs on every scheduler tick, every board dispatch, every watchdog pass, and
+opportunistically when the API approval ledger is read or a late decision is refused.
+That last path keeps deadlines real when `steward serve` is the only running process. A
+session's chosen `expires-in` is clamped to a fleet maximum of 30 days, so a
 block asking for `expires-in="9999999d"` cannot push its own deadline past the reach of
 deny-by-default (steward #66). Between the deadline and the sweep, the request is already
-past due: it is not listed as pending (`GET /approvals?status=pending` omits it) and it can
-no longer be decided — `POST /approvals/{id}` on it is a `409 approval_expired`, distinct
-from the replay a request someone already answered reads back.
+past due: an approval API visit resolves it as deny, so it is not listed as pending and is
+available under `resolved`; `POST /approvals/{id}` on it is a `409 approval_expired`,
+distinct from the replay a request someone already answered reads back.
 
 Two request shapes steward raises *for itself* have no `expires_at` at all: a budget pause
 (`budget_unpause`) and a crash loop (`resident_restart_failed`). The grammar cannot
