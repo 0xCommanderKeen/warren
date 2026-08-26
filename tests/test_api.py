@@ -630,6 +630,44 @@ def test_edit_serialized_byte_boundary_is_exact(api: ApiFactory) -> None:
     )
 
 
+def test_wire_cap_accepts_near_maximum_edit_with_ascii_content_unicode_escaped(
+    api: ApiFactory,
+) -> None:
+    # Every content byte is legally written as a six-byte escape. This is the wire
+    # expansion that a ratio based only on non-ASCII UTF-8 misses.
+    edit = {"a": "a" * 8_000, "b": "a" * 8_000, "c": "a" * (EDIT_MAX_BYTES - 16_022)}
+    compact = json.dumps(edit, ensure_ascii=False, separators=(",", ":"))
+    assert len(compact.encode()) == EDIT_MAX_BYTES
+    escaped_edit = compact.replace("a", r"\u0061")
+    raw = f'{{"decision":"edit","edit":{escaped_edit}}}'.encode()
+    assert 98_000 < len(raw) <= APPROVAL_BODY_MAX_BYTES
+
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 202
+    assert harness.store.approval(request_id).edit == edit  # ty: ignore[unresolved-attribute]
+
+
+def test_unicode_escaped_wire_form_does_not_bypass_semantic_edit_limit(api: ApiFactory) -> None:
+    edit = {"a": "a" * 8_000, "b": "a" * 8_000, "c": "a" * (EDIT_MAX_BYTES - 16_021)}
+    compact = json.dumps(edit, ensure_ascii=False, separators=(",", ":"))
+    assert len(compact.encode()) == EDIT_MAX_BYTES + 1
+    escaped_edit = compact.replace("a", r"\u0061")
+    raw = f'{{"decision":"edit","edit":{escaped_edit}}}'.encode()
+    assert len(raw) <= APPROVAL_BODY_MAX_BYTES
+
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+
+
 @pytest.mark.parametrize(
     ("character", "counts"),
     [

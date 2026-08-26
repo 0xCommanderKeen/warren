@@ -91,11 +91,14 @@ One shared token, exactly like burrow's ingest auth.
   one or both values contain the right token, so intermediaries cannot disagree about
   which credential wins.
 
-Approval-decision request bodies have a 20 KiB wire limit, enforced while ASGI chunks
-arrive and before JSON parsing. This leaves 4 KiB of envelope room around the 16 KiB
-compact serialized-edit limit while bounding whitespace, malformed JSON, and oversized
-strings. Crossing the wire limit returns `413 approval_body_too_large`; structurally or
-semantically invalid bodies within it return `422`. Neither refusal has side effects.
+Approval-decision request bodies have a 128 KiB wire limit, enforced while ASGI chunks
+arrive and before JSON parsing. Six times the 16 KiB semantic edit budget admits the
+worst legal JSON spelling, where each ASCII content byte is written as a six-byte
+`\uXXXX` escape; two further edit budgets cover the escaped decision/envelope and
+bounded formatting slack. Arbitrary whitespace, duplicate-key padding, malformed JSON,
+and oversized strings remain bounded. Crossing the wire limit returns
+`413 approval_body_too_large`; structurally or semantically invalid bodies within it
+return `422`. Neither refusal has side effects.
 
 Reads are gated too. Every endpoint here is a write path except the resident views and
 the skills listing, and gating those as well is simpler than explaining which is which
