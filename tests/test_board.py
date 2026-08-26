@@ -1107,6 +1107,65 @@ def test_a_task_whose_session_vanishes_leaves_its_row_open(
     assert open_run.timeout_s == pytest.approx(900.0)
 
 
+def test_the_ledger_row_names_the_session_the_registry_opened(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """One session, one id, in both tables (steward #124).
+
+    The ledger used to key ``run_id`` on the *task* while the registry keyed it on the
+    session, so the two tables named the same session two different things: correlating
+    spend to session joined on a word that meant something else in each. ``run_ledger``
+    has no uniqueness constraint on ``run_id``, so nothing surfaced the collision.
+
+    The task linkage was never the thing at risk — it travels on ``ref``, which is what
+    ``spend_by_origin`` actually joins — so this pins both halves: the ledger names the
+    session, and ``ref`` still names the task.
+    """
+    seen: list[str] = []
+    recorded: list[dict[str, object]] = []
+
+    class Peeking(Runner):
+        """Read the registry row while it is open, which is only during the run."""
+
+        def run(self, request: RunRequest) -> RunResult:
+            del request
+            seen.extend(run.run_id for run in store.open_runs())
+            return RunResult(outcome=Outcome.OK, output="did the thing", exit_status=0)
+
+    class Recording:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest
+            recorded.append(facts)
+            return None
+
+    posted = store.post_job(title="Read the mail")
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(board_manifest()))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: Peeking(),
+        guard=Recording(),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.done
+    (registry_run_id,) = seen
+    (facts,) = recorded
+    assert registry_run_id != posted.task_id, "the registry already knew a session from a task"
+    assert facts["run_id"] == registry_run_id, "and now the ledger agrees with it"
+    assert facts["ref"] == posted.task_id, "the task travels on ref, where the join reads it"
+
+
 def test_a_re_claimed_task_opens_a_second_row_of_its_own(
     make_dispatcher: Dispatch, store: Store
 ) -> None:

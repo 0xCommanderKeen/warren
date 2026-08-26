@@ -768,6 +768,7 @@ class Dispatcher:
                 detail=job.detail,
                 timeout_s=declared_s,
                 origin=job.origin or f"task:{job.task_id}",
+                run_id=run_id,
                 delegated_by=job.delegated_by,
                 route=job.route or "delegation",
                 parent_task_id=job.parent_task_id,
@@ -780,6 +781,7 @@ class Dispatcher:
                 required_skills=job.required_skills,
                 timeout_s=declared_s,
                 origin=job.origin or f"task:{job.task_id}",
+                run_id=run_id,
                 parent_task_id=job.parent_task_id,
             )
         # The deadline this session actually gets, read once: the run registry is judged

@@ -195,12 +195,13 @@ class _BoardWake:
     detail: str
     timeout_s: int
     origin: str
+    #: This session's own id, minted per attempt, and not the task's. A task claimed,
+    #: dropped on a dead lease and claimed again is *two* sessions spending money twice,
+    #: and the ledger has to be able to tell them apart — the run registry already can
+    #: (steward #39). The task travels on ``ref`` instead, which is what the spend-by-
+    #: origin join reads (steward #124).
+    run_id: str
     parent_task_id: str | None = None
-
-    @property
-    def run_id(self) -> str:
-        """Retain the task id used by existing ledger rows."""
-        return self.task_id
 
     @property
     def ref(self) -> str:

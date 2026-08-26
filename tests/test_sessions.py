@@ -166,6 +166,7 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
             required_skills=("research",),
             timeout_s=900,
             origin="task:task-1",
+            run_id="run-task-1",
         ),
     )
 
@@ -395,6 +396,7 @@ def test_board_runner_exceptions_preserve_their_zero_duration_result(
             required_skills=(),
             timeout_s=900,
             origin="task:task-1",
+            run_id="run-task-1",
         ),
     )
 
@@ -435,6 +437,7 @@ def test_a_delegated_letter_and_a_rehearsal_use_the_same_seam_without_dry_run_wr
         detail="The long version.",
         timeout_s=600,
         origin="task:root",
+        run_id="run-letter-1",
         delegated_by="gone-agent",
         route="inbox",
         parent_task_id="root",
