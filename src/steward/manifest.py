@@ -34,6 +34,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    StringConstraints,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -577,6 +578,14 @@ def _normalize_skill_grant(value: object) -> object:
     return value
 
 
+# A field-level string constraint overrides _Model's inherited stripping before the
+# pattern runs. Skill IDs therefore keep the schema's exact, untrimmed contract.
+SkillId = Annotated[
+    str,
+    StringConstraints(strip_whitespace=False, pattern=SLUG_PATTERN),
+]
+
+
 class SkillGrant(_Model):
     """A named, reusable capability granted to a resident.
 
@@ -586,7 +595,7 @@ class SkillGrant(_Model):
     *on top* of them.
     """
 
-    id: str = Field(pattern=SLUG_PATTERN, description="Skill name in the library.")
+    id: SkillId = Field(description="Skill name in the library; surrounding whitespace is invalid.")
     source: Literal["library", "local"] = Field(
         default="library",
         description="Where the skill body comes from.",
@@ -602,7 +611,7 @@ class SkillGrant(_Model):
 # The model validator above preserves ``SkillGrant.model_validate("name")`` as part of
 # the public parsing API. The annotated input type makes that same pre-validation rule
 # visible to Pydantic's schema generator while the stored/runtime type stays SkillGrant.
-SkillGrantShorthand = Annotated[str, Field(pattern=SLUG_PATTERN)]
+SkillGrantShorthand = SkillId
 SkillGrantInput = Annotated[
     SkillGrant,
     BeforeValidator(

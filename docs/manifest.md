@@ -88,6 +88,7 @@ charter:
 
 Each entry names a skill in the [skills library](#the-skills-library)
 (`skills/<id>/SKILL.md`). A bare string is shorthand for `{id: <string>}`.
+Skill IDs are exact: surrounding whitespace is invalid rather than silently removed.
 
 ```yaml
 skills:

@@ -125,6 +125,12 @@ def test_skill_grant_inputs_have_schema_model_parity(grant: object) -> None:
         {"id": "Daily-summary"},
         {"id": "-daily-summary"},
         {"id": "daily-summary_"},
+        {"id": " daily-summary "},
+        {"id": "\tdaily-summary\t"},
+        {"id": "\ndaily-summary\n"},
+        " daily-summary ",
+        "\tdaily-summary\t",
+        "\ndaily-summary\n",
         {"id": "ok", "extra": True},
     ],
     ids=[
@@ -140,6 +146,12 @@ def test_skill_grant_inputs_have_schema_model_parity(grant: object) -> None:
         "object-uppercase",
         "object-invalid-leading-character",
         "object-invalid-trailing-character",
+        "object-padded-with-spaces",
+        "object-padded-with-tabs",
+        "object-padded-with-newlines",
+        "bare-padded-with-spaces",
+        "bare-padded-with-tabs",
+        "bare-padded-with-newlines",
         "extra-field",
     ],
 )
@@ -152,3 +164,5 @@ def test_skill_grant_rejections_have_schema_model_parity(grant: object) -> None:
     assert not validator.is_valid(document)
     with pytest.raises(ValidationError):
         ResidentManifest.model_validate(document)
+    with pytest.raises(ValidationError):
+        SkillGrant.model_validate(grant)
