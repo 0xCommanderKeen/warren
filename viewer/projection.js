@@ -18,9 +18,11 @@ const ACCENTS = ["#7d5ba6","#4f7d5b","#a65b5b","#5b7da6","#a68a4f","#5ba69b",
 const SPRITES = typeof module === "object" && module.exports ?
   require("./sprites.js") : BurrowSprites;
 const CHARS = SPRITES.CHARS;
+const RETENTION_POLICY = typeof module === "object" && module.exports ?
+  require("./retention-policy.js") : BurrowRetentionPolicy;
 const STALE_MS = 30 * 60 * 1000;
-const DROP_MS  = 12 * 60 * 60 * 1000;
-const MAX_EVENTS = 80;
+const DROP_MS = RETENTION_POLICY.drop_ms;
+const MAX_EVENTS = RETENTION_POLICY.events_per_agent;
 const MAX_ARTIFACTS = 30;
 const APPROVAL_ORDINALS = typeof module === "object" && module.exports ?
   require("./approval-knocks.js") : null;
@@ -292,13 +294,13 @@ const MOOD_AUTHORITY_RAW_INDEXES = Symbol("burrow internal mood authority raw in
 const MOOD_AUTHORITY_RAW_COUNT = Symbol("burrow internal mood authority raw count");
 const MOOD_AUTHORITY_OVERFLOW = Symbol("burrow internal mood authority overflow");
 const MOOD_AUTHORITY_OBSERVED = Symbol("burrow internal mood authority observed");
-const MOOD_AUTHORITY_KIND = "mood-authority-v1";
-const MOOD_AUTHORITY_ENCODING = "typed-binary64-v1";
-const MOOD_AUTHORITY_MAX_BYTES = 32 * 1024;
+const MOOD_AUTHORITY_KIND = RETENTION_POLICY.mood_authority_kind;
+const MOOD_AUTHORITY_ENCODING = RETENTION_POLICY.mood_authority_encoding;
+const MOOD_AUTHORITY_MAX_BYTES = RETENTION_POLICY.mood_authority_bytes;
 // Capsule metadata is recursively canonicalized, so bound its container depth
 // before that traversal. The capsule object itself is depth one; 64 leaves 60
 // nested containers for a valid v0 needs_human detail value.
-const MOOD_AUTHORITY_MAX_DEPTH = 64;
+const MOOD_AUTHORITY_MAX_DEPTH = RETENTION_POLICY.mood_authority_depth;
 function exactDenseArray(value) {
   return TYPED_JSON.exactDenseArray(value);
 }

@@ -715,7 +715,7 @@ lower-risk range. Precedence is insufficient `?`, need older than 6h `!`,
 failure streak 3 `×`, saturated work `▲`, then total `≥4` steady `●`, `1..3`
 active `◆`, or `≤0` watchful `◇`.
 
-`retainMoodWitnesses()` and `serve._mood_keep_indexes()` independently preserve
+`retainMoodWitnesses()` and `retention.carry_forward(...).witnesses["moods"]` independently preserve
 the anchor, the complete append-ordered terminal frontier currently in
 `(A-24h,A]`, one maximum-weight event per relevant bucket, latest interaction,
 approval/plain-knock authority, and six threshold witnesses selected from the

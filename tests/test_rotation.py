@@ -3,6 +3,7 @@ village the viewer reduces to is identical before and after the roll.
 
     python3 tests/test_rotation.py        (from the repo root)
 """
+import atexit
 import copy
 import datetime
 import http.client
@@ -14,13 +15,55 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import serve
 import approval_protocol
+import retention
+import serve
 from tests.http_test_support import RunningServer
+
+_node_worker = None
+_node_worker_cwd = None
+
+
+def run_node_parity_script(args, *, input="", cwd=None, check=False,
+                           text=True, capture_output=True):
+    """Evaluate one isolated viewer parity script in the shared Node worker."""
+    global _node_worker, _node_worker_cwd
+    if args[:2] != ["node", "-e"] or not text or not capture_output:
+        raise ValueError("node parity scripts require text capture")
+    if _node_worker is None:
+        _node_worker_cwd = os.path.realpath(cwd)
+        _node_worker = subprocess.Popen(
+            ["node", "tests/node-eval-worker.js"], cwd=cwd,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    elif os.path.realpath(cwd) != _node_worker_cwd:
+        raise ValueError("node parity worker requires one repository cwd")
+    request = {"script": args[2], "input": input or ""}
+    _node_worker.stdin.write(json.dumps(request) + "\n")
+    _node_worker.stdin.flush()
+    response = json.loads(_node_worker.stdout.readline())
+    completed = SimpleNamespace(args=args, **response)
+    if check and completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode, args, completed.stdout, completed.stderr)
+    return completed
+
+
+def _stop_node_worker():
+    if _node_worker is not None:
+        _node_worker.terminate()
+        _node_worker.wait(timeout=5)
+
+
+atexit.register(_stop_node_worker)
+
+
+def carry_forward(lines, now_ms):
+    return list(retention.carry_forward(lines, now_ms, retention.POLICY).lines)
 
 
 def ts(minutes_ago=0):
@@ -44,18 +87,18 @@ def village(lines, now_ms=None):
             ev = json.loads(line)
         except ValueError:
             continue
-        if not ev.get("agent_id") or ev.get("type") not in serve.EVENT_TYPES:
+        if not ev.get("agent_id") or ev.get("type") not in retention.EVENT_TYPES:
             continue
         kept = per_agent.setdefault(ev["agent_id"], [])
         kept.append(ev)
-        if len(kept) > serve.KEEP_PER_AGENT:
+        if len(kept) > retention.KEEP_PER_AGENT:
             kept.pop(0)
     out = {}
     for agent, kept in per_agent.items():
         last = kept[-1]
         if last["type"] == "session_ended":
             continue
-        if now_ms - serve.event_ms(last) > serve.DROP_MS:
+        if now_ms - retention.event_ms(last) > retention.DROP_MS:
             continue
         out[agent] = {"last": last, "history": [json.dumps(e, sort_keys=True) for e in kept]}
     return out
@@ -64,10 +107,34 @@ def village(lines, now_ms=None):
 def protocol_events(lines):
     """Decode public v0 events while excluding reserved transport metadata."""
     return [item for item in map(json.loads, lines)
-            if item.get("_burrow_internal") != serve.MOOD_AUTHORITY_KIND]
+            if item.get("_burrow_internal") != retention.MOOD_AUTHORITY_KIND]
 
 
 class CarryForwardTest(unittest.TestCase):
+    def test_shared_retention_fixture_selects_projection_witnesses(self):
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures",
+                               "retention-parity.json")
+        with open(fixture, encoding="utf-8") as stream:
+            matrix = json.load(stream)
+        for item in matrix:
+            lines = [json.dumps(event) for event in item["events"]]
+            result = retention.carry_forward(lines, item["now"], retention.POLICY)
+            self.assertEqual(sorted(result.witnesses["projection"]),
+                             item["projection_witnesses"], item["name"])
+
+    def test_public_result_names_retained_lines_capsule_and_panel_witnesses(self):
+        source = [json.dumps(event("codex:pip", "tool_called", tool="Read"))]
+
+        result = retention.carry_forward(
+            source, retention.event_ms(json.loads(source[0])), retention.POLICY)
+
+        self.assertIsInstance(result, retention.Retention)
+        self.assertEqual(list(result.lines), source)
+        self.assertIsNone(result.capsule)
+        self.assertEqual(set(result.witnesses),
+                         {"tasks", "approvals", "journal", "projection", "moods"})
+        self.assertEqual(result.witnesses["projection"], frozenset({0}))
+
     @staticmethod
     def journal(agent, day, routine="close-of-day", path=None, minutes_ago=0):
         observed = event(agent, "journal_written", minutes_ago, routine=routine,
@@ -78,7 +145,7 @@ class CarryForwardTest(unittest.TestCase):
     def test_routine_only_villager_and_history_are_identical_after_rotation(self):
         agent_id = "codex:pip"
         events = []
-        for index in range(serve.KEEP_PER_AGENT + 10):
+        for index in range(retention.KEEP_PER_AGENT + 10):
             item = event(agent_id, "routine_started", 10 - index / 100,
                          routine="heartbeat", run_id=f"hourly-{index}",
                          trigger="schedule")
@@ -89,8 +156,8 @@ class CarryForwardTest(unittest.TestCase):
                                    "outcome": "ok", "artifacts": [],
                                    "duration_s": 1.25}})
         lines = list(map(json.dumps, events))
-        now_ms = serve.event_ms(events[-1])
-        rotated = serve.carry_forward(lines, now_ms)
+        now_ms = retention.event_ms(events[-1])
+        rotated = carry_forward(lines, now_ms)
         script = r"""
 const fs=require('node:fs'),p=require('./viewer/projection.js');
 const input=JSON.parse(fs.readFileSync(0,'utf8'));
@@ -98,7 +165,7 @@ const shape=lines=>p.reduce(lines,input.now,[]).map(v=>({id:v.id,state:v.state,
  lastTs:v.lastTs,lastLine:v.lastLine,events:v.events.map(e=>e.type)}));
 process.stdout.write(JSON.stringify(input.groups.map(shape)));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"groups": [lines, rotated],
                                                           "now": now_ms}),
             capture_output=True, text=True, check=True)
@@ -106,8 +173,8 @@ process.stdout.write(JSON.stringify(input.groups.map(shape)));
         self.assertEqual(after, before)
         self.assertEqual(after[0]["state"], "resting")
         self.assertEqual(after[0]["lastLine"], "finished heartbeat, ok in 1.25s")
-        self.assertEqual(len(after[0]["events"]), serve.KEEP_PER_AGENT)
-        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        self.assertEqual(len(after[0]["events"]), retention.KEEP_PER_AGENT)
+        self.assertLessEqual(len(rotated), retention.VIEWER_LINE_LIMIT)
 
     def test_rotated_invalid_and_non_steward_routines_never_create_villagers(self):
         forged = event("codex:pip", "routine_started", routine="heartbeat",
@@ -115,8 +182,8 @@ process.stdout.write(JSON.stringify(input.groups.map(shape)));
         malformed = {**forged, "source": "steward",
                      "payload": {"routine": "heartbeat", "run_id": "",
                                  "trigger": "schedule"}}
-        rotated = serve.carry_forward(list(map(json.dumps, [forged, malformed])),
-                                      serve.event_ms(forged))
+        rotated = carry_forward(list(map(json.dumps, [forged, malformed])),
+                                      retention.event_ms(forged))
         self.assertEqual(protocol_events(rotated), [])
 
     def test_routine_after_journal_remains_the_visible_successor_after_rotation(self):
@@ -125,9 +192,9 @@ process.stdout.write(JSON.stringify(input.groups.map(shape)));
                         run_id="after-journal", trigger="schedule")
         started["source"] = "steward"
         chatter = [json.dumps(event(f"codex:gone-{index}", "session_ended"))
-                   for index in range(serve.VIEWER_LINE_LIMIT)]
+                   for index in range(retention.VIEWER_LINE_LIMIT)]
         lines = [json.dumps(journal), json.dumps(started), *chatter]
-        rotated = serve.carry_forward(lines, serve.event_ms(started))
+        rotated = carry_forward(lines, retention.event_ms(started))
         retained = protocol_events(rotated)
         pip = [item for item in retained if item["agent_id"] == "codex:pip"]
         self.assertEqual([item["type"] for item in pip],
@@ -138,11 +205,11 @@ process.stdout.write(JSON.stringify(input.groups.map(shape)));
                         run_id="boundary", trigger="schedule")
         started["source"] = "steward"
         noise = [event(f"codex:gone-{index}", "session_ended")
-                 for index in range(serve.VIEWER_LINE_LIMIT)]
+                 for index in range(retention.VIEWER_LINE_LIMIT)]
         lines = list(map(json.dumps, [started, *noise]))
-        now_ms = serve.event_ms(started)
-        rotated = serve.carry_forward(lines, now_ms)
-        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        now_ms = retention.event_ms(started)
+        rotated = carry_forward(lines, now_ms)
+        self.assertLessEqual(len(rotated), retention.VIEWER_LINE_LIMIT)
         retained = protocol_events(rotated)
         self.assertEqual([(item["agent_id"], item["type"]) for item in retained],
                          [("codex:pip", "routine_started")])
@@ -159,7 +226,7 @@ const runtime=createBrowserRuntime({now:()=>input.now,EventSource:null,
 runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().villagers.map(v=>({
  id:v.id,state:v.state,line:v.lastLine,history:v.events.map(e=>e.type)})))));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"lines": rotated, "now": now_ms}),
             capture_output=True, text=True, check=True)
         self.assertEqual(json.loads(completed.stdout), [{
@@ -179,15 +246,15 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
             if index % 7 == 0:
                 events.append(event(f"codex:r-{index}", "session_ended"))
         parsed = list(enumerate(events))
-        now_ms = max(serve.event_ms(item) for item in events)
-        python_indexes = sorted(serve._projection_keep_indexes(parsed, now_ms, 80))
+        now_ms = max(retention.event_ms(item) for item in events)
+        python_indexes = sorted(retention._projection_keep_indexes(parsed, now_ms, 80))
         script = r"""
 const fs=require('node:fs'),p=require('./viewer/projection.js');
 const x=JSON.parse(fs.readFileSync(0,'utf8')), parsed=p.parseEvents(x.events);
 const selected=new Set(p.projectionWitnesses(parsed,x.now,x.limit));
 process.stdout.write(JSON.stringify(parsed.map((e,i)=>selected.has(e)?i:null).filter(i=>i!==null)));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"events": events,
                                                           "now": now_ms, "limit": 80}),
             capture_output=True, text=True, check=True)
@@ -196,7 +263,7 @@ process.stdout.write(JSON.stringify(parsed.map((e,i)=>selected.has(e)?i:null).fi
     def test_pending_knock_and_routines_share_one_exact_projection_cap(self):
         anchor = datetime.datetime.now(datetime.timezone.utc)
         events = []
-        for index in range(serve.VIEWER_LINE_LIMIT - 1):
+        for index in range(retention.VIEWER_LINE_LIMIT - 1):
             started = event(f"codex:r{index:04d}", "routine_started",
                             routine="heartbeat", run_id=f"run-{index}", trigger="schedule")
             started["source"] = "steward"
@@ -210,10 +277,10 @@ process.stdout.write(JSON.stringify(parsed.map((e,i)=>selected.has(e)?i:null).fi
         pending["ts"] = (anchor + datetime.timedelta(milliseconds=4000)).isoformat(
             timespec="milliseconds").replace("+00:00", "Z")
         events.append(pending)
-        rotated = serve.carry_forward(list(map(json.dumps, events)),
+        rotated = carry_forward(list(map(json.dumps, events)),
                                       int(anchor.timestamp() * 1000) + 4000)
         retained = protocol_events(rotated)
-        self.assertEqual(len(retained), serve.VIEWER_LINE_LIMIT)
+        self.assertEqual(len(retained), retention.VIEWER_LINE_LIMIT)
         self.assertEqual(retained[0]["agent_id"], "codex:r0000")
         self.assertEqual(retained[-1]["agent_id"], "codex:doorstep")
         self.assertEqual(sum(item["type"] == "routine_started" for item in retained), 3999)
@@ -224,7 +291,7 @@ const batches=JSON.parse(fs.readFileSync(0,'utf8')),shape=lines=>p.reduce(lines,
  .map(v=>[v.id,v.state,v.lastLine]);
 process.stdout.write(JSON.stringify([shape(batches.full),shape(batches.rotated)]));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, events)),
                 "rotated": rotated, "now": int(anchor.timestamp() * 1000) + 4000}),
             capture_output=True, text=True, check=True)
@@ -253,8 +320,8 @@ process.stdout.write(JSON.stringify([shape(batches.full),shape(batches.rotated)]
                  duration_s=8, artifacts=[]),
         ]
         source.extend(event(f"codex:gone-{index}", "session_ended")
-                      for index in range(serve.VIEWER_LINE_LIMIT))
-        rotated = serve.carry_forward(list(map(json.dumps, source)),
+                      for index in range(retention.VIEWER_LINE_LIMIT))
+        rotated = carry_forward(list(map(json.dumps, source)),
                                       int(base.timestamp() * 1000) + 120_000)
         script = r"""
 const fs=require('node:fs'),p=require('./viewer/projection.js'),x=JSON.parse(fs.readFileSync(0,'utf8'));
@@ -262,7 +329,7 @@ const shape=lines=>Object.fromEntries(p.reduce(lines,x.now,[]).filter(v=>v.id.st
  .map(v=>[v.id,[v.state,v.lastLine,v.events.map(e=>e.type)]]));
 process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
                 "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
             capture_output=True, text=True, check=True)
@@ -284,7 +351,7 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
         started = fact("routine_started", 0, trigger="schedule")
         finished = fact("routine_finished", 60, outcome="ok", duration_s=8, artifacts=[])
         noise = [event(f"codex:gone-cap-{index}", "session_ended")
-                 for index in range(serve.VIEWER_LINE_LIMIT)]
+                 for index in range(retention.VIEWER_LINE_LIMIT)]
         script = r"""
 const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const shape=records=>{const v=p.reduce(records,x.now,[]).find(v=>v.id==='codex:bounded');
@@ -293,9 +360,9 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
 """
         for count in (79, 80, 81):
             source = [started, finished] + [started] * count + noise
-            rotated = serve.carry_forward(list(map(json.dumps, source)),
+            rotated = carry_forward(list(map(json.dumps, source)),
                                           int(base.timestamp() * 1000) + 120_000)
-            completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+            completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
                 os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
                     "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
                 capture_output=True, text=True, check=True)
@@ -309,9 +376,9 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
                                      for item in retained), 80)
 
         orphan = fact("routine_failed", 60, error="must stay hidden")
-        rotated = serve.carry_forward(list(map(json.dumps, [orphan] + noise)),
+        rotated = carry_forward(list(map(json.dumps, [orphan] + noise)),
                                       int(base.timestamp() * 1000) + 120_000)
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": [json.dumps(orphan)],
                 "rotated": rotated, "now": int(base.timestamp() * 1000) + 120_000}),
             capture_output=True, text=True, check=True)
@@ -330,9 +397,9 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
         source += [started("codex:unicode", "😀", "same"),
                    started("codex:unicode", "\ue000", "same")]
         parsed = list(enumerate(source))
-        kept = serve._projection_keep_indexes(parsed, int(base.timestamp() * 1000), 4000)
+        kept = retention._projection_keep_indexes(parsed, int(base.timestamp() * 1000), 4000)
         self.assertEqual(len(kept), 4000)
-        rotated = serve.carry_forward(list(map(json.dumps, source)),
+        rotated = carry_forward(list(map(json.dumps, source)),
                                       int(base.timestamp() * 1000))
         script = r"""
 const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -340,7 +407,7 @@ const shape=records=>{const all=p.reduce(records,x.now,[]),v=all.find(v=>v.id===
  return [all.length,v&&v.project,p.projectionWitnesses(records,x.now,4000).length]};
 process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, source)),
                 "rotated": rotated, "now": int(base.timestamp() * 1000)}),
             capture_output=True, text=True, check=True)
@@ -361,7 +428,7 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
         idle = event("codex:ordinary", "idle")
         idle["ts"] = terminal_at
         terminal_source += [terminal_start, terminal("\ue000"), terminal("😀"), idle]
-        rotated_terminal = serve.carry_forward(list(map(json.dumps, terminal_source)),
+        rotated_terminal = carry_forward(list(map(json.dumps, terminal_source)),
                                                int(base.timestamp() * 1000) + 1000)
         terminal_script = r"""
 const p=require('./viewer/projection.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -369,7 +436,7 @@ const shape=records=>{const all=p.reduce(records,x.now,[]),v=all.find(v=>v.id===
  return [all.length,v&&v.lastLine,p.projectionWitnesses(records,x.now,4000).length]};
 process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
 """
-        completed = subprocess.run(["node", "-e", terminal_script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", terminal_script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, terminal_source)),
                 "rotated": rotated_terminal, "now": int(base.timestamp() * 1000) + 1000}),
             capture_output=True, text=True, check=True)
@@ -385,14 +452,14 @@ process.stdout.write(JSON.stringify([shape(x.full),shape(x.rotated)]));
             {**started("codex:nul", "two", "b\0c"),
              "payload": {"routine": "a", "run_id": "b\0c", "trigger": "schedule"}},
         ]
-        rotated_collision = serve.carry_forward(list(map(json.dumps, collision_source)),
+        rotated_collision = carry_forward(list(map(json.dumps, collision_source)),
                                                 int(base.timestamp() * 1000))
         collision_script = r"""
 const r=require('./viewer/routine-ledger.js'),x=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const count=records=>r.project(records.map(JSON.parse),x.now).byRoutine.size;
 process.stdout.write(JSON.stringify([count(x.full),count(x.rotated)]));
 """
-        completed = subprocess.run(["node", "-e", collision_script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", collision_script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps({"full": list(map(json.dumps, collision_source)),
                 "rotated": rotated_collision, "now": int(base.timestamp() * 1000)}),
             capture_output=True, text=True, check=True)
@@ -418,8 +485,8 @@ process.stdout.write(JSON.stringify([count(x.full),count(x.rotated)]));
             else:
                 prior = observed("codex:boundary", kind)
             heartbeat = observed("codex:boundary", "heartbeat")
-            for limit, noise_count in [(1, 0), (serve.VIEWER_LINE_LIMIT,
-                                                serve.VIEWER_LINE_LIMIT - 1)]:
+            for limit, noise_count in [(1, 0), (retention.VIEWER_LINE_LIMIT,
+                                                retention.VIEWER_LINE_LIMIT - 1)]:
                 noise = [observed(f"codex:live-{index}", "idle")
                          for index in range(noise_count)]
                 events = [prior]
@@ -427,7 +494,7 @@ process.stdout.write(JSON.stringify([count(x.full),count(x.rotated)]));
                     events.append(observed("codex:boundary", "idle"))
                 events.extend([heartbeat, *noise])
                 parsed = list(enumerate(events))
-                python_indexes = sorted(serve._projection_keep_indexes(
+                python_indexes = sorted(retention._projection_keep_indexes(
                     parsed, int(now.timestamp() * 1000), limit))
                 cases.append({"name": f"{prior_type}/{limit}", "events": events,
                               "now": int(now.timestamp() * 1000), "limit": limit,
@@ -446,7 +513,7 @@ process.stdout.write(JSON.stringify(cases.map(item=>{
  return parsed.map((event,index)=>selected.has(event)?index:null).filter(index=>index!==null);
 })));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps(cases), capture_output=True,
             text=True, check=True)
         self.assertEqual(json.loads(completed.stdout),
@@ -461,7 +528,7 @@ process.stdout.write(JSON.stringify(cases.map(item=>{
                  for item in fixture["events"]]
         now_ms = int(datetime.datetime.fromisoformat(
             fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
-        rotated = serve.carry_forward(lines, now_ms)
+        rotated = carry_forward(lines, now_ms)
         script = r"""
 const fs=require('fs');
 const projection=require('./viewer/projection.js');
@@ -470,7 +537,7 @@ const batches=JSON.parse(fs.readFileSync(0,'utf8'));
 const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
             capture_output=True, text=True, check=True)
         before, after = json.loads(completed.stdout)
@@ -494,11 +561,11 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
                         observed(0, "idle")])
         appended = observed(2, "idle")
         initial_lines = [json.dumps(item, separators=(",", ":")) for item in initial]
-        once = serve.carry_forward(initial_lines, serve.event_ms(initial[-1]))
-        twice = serve.carry_forward(
+        once = carry_forward(initial_lines, retention.event_ms(initial[-1]))
+        twice = carry_forward(
             [*once, json.dumps(appended, separators=(",", ":"))],
-            serve.event_ms(appended))
-        thrice = serve.carry_forward(twice, serve.event_ms(appended))
+            retention.event_ms(appended))
+        thrice = carry_forward(twice, retention.event_ms(appended))
         self.assertEqual(thrice, twice, "repeated Python rotation is byte stable")
 
         script = r"""
@@ -508,7 +575,7 @@ const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify({full:read([...input.initial,input.append]),
   grouped:read([...input.once,input.append]),rotated:read(input.twice)}));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps({
             "initial": initial_lines, "append": json.dumps(appended, separators=(",", ":")),
             "once": once, "twice": twice}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -541,18 +608,18 @@ process.stdout.write(JSON.stringify({full:read([...input.initial,input.append]),
         for count in (160, 161):
             events = frontier(count)
             lines = [json.dumps(item, separators=(",", ":")) for item in events]
-            rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
-            repeated = serve.carry_forward(rotated, int(anchor.timestamp() * 1000))
+            rotated = carry_forward(lines, int(anchor.timestamp() * 1000))
+            repeated = carry_forward(rotated, int(anchor.timestamp() * 1000))
             self.assertEqual(repeated, rotated)
-            capsule = serve._mood_authority_from_line(rotated[0])
+            capsule = retention._mood_authority_from_line(rotated[0])
             self.assertEqual(bool(capsule and capsule["overflow"]), count == 161)
             groups.append({"full": lines, "rotated": rotated})
 
         fresh = frontier(1)
-        fresh_lines = serve.carry_forward(
+        fresh_lines = carry_forward(
             [json.dumps(fresh[0], separators=(",", ":"))],
             int(anchor.timestamp() * 1000))
-        self.assertIsNone(serve._mood_authority_from_line(fresh_lines[0]))
+        self.assertIsNone(retention._mood_authority_from_line(fresh_lines[0]))
 
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
@@ -564,7 +631,7 @@ const inspect=lines=>{const batch=p.parseEvents(lines),
 process.stdout.write(JSON.stringify(groups.map(group=>({full:inspect(group.full),
   rotated:inspect(group.rotated)}))));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(groups),
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(groups),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         results = json.loads(completed.stdout)
@@ -593,7 +660,7 @@ process.stdout.write(JSON.stringify(groups.map(group=>({full:inspect(group.full)
                 "type": "task_started", "payload": {"prompt": "old root"}}
         raw = [*heartbeats, root]
         indexes = [*range(159), 161]
-        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        capsule = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                    "events": [root], "ordinals": ["161"], "copies": ["161"],
                    "raw_ordinals": list(map(str, indexes)),
                    "raw_indexes": [str(index).zfill(16) for index in indexes],
@@ -601,14 +668,14 @@ process.stdout.write(JSON.stringify(groups.map(group=>({full:inspect(group.full)
                    "overflow": False, "observed": 1}
         lines = [json.dumps(capsule, separators=(",", ":")),
                  *[json.dumps(item, separators=(",", ":")) for item in raw]]
-        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
-        rerotated = serve.carry_forward(rotated, int(anchor.timestamp() * 1000))
-        rebuilt = serve._mood_authority_from_line(rotated[0])
+        rotated = carry_forward(lines, int(anchor.timestamp() * 1000))
+        rerotated = carry_forward(rotated, int(anchor.timestamp() * 1000))
+        rebuilt = retention._mood_authority_from_line(rotated[0])
         self.assertTrue(rebuilt and rebuilt["overflow"],
                         "semantic rejection must rebuild canonical durable overflow")
         self.assertEqual(rerotated, rotated)
         self.assertLessEqual(len(protocol_events(rotated)),
-                             serve.MAX_MOOD_RETAINED_PER_AGENT)
+                             retention.MAX_MOOD_RETAINED_PER_AGENT)
 
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
@@ -616,7 +683,7 @@ const batches=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const read=lines=>m.deriveMoods(p.parseEvents(lines)).get('codex:forged-frontier');
 process.stdout.write(JSON.stringify(batches.map(read)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps([
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps([
             [json.dumps(item, separators=(",", ":")) for item in raw], lines,
             rotated, [*rotated, json.dumps({**root,
                 "ts": (anchor + datetime.timedelta(minutes=1))
@@ -637,10 +704,10 @@ process.stdout.write(JSON.stringify(batches.map(read)));
         initial = [json.dumps(item, separators=(",", ":"))
                    for item in fixture["initial"]]
         appended = json.dumps(fixture["append"], separators=(",", ":"))
-        now_ms = serve.event_ms(fixture["initial"][3])
-        grouped = serve.carry_forward(initial, now_ms)
-        once = serve.carry_forward([*grouped, appended], now_ms)
-        twice = serve.carry_forward(once, now_ms)
+        now_ms = retention.event_ms(fixture["initial"][3])
+        grouped = carry_forward(initial, now_ms)
+        once = carry_forward([*grouped, appended], now_ms)
+        twice = carry_forward(once, now_ms)
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
 const batches=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -648,7 +715,7 @@ const derive=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
         full = [*initial, appended]
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps([full, once, twice]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -679,15 +746,15 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
                         "request_id": f"shared-{index}", "action": action,
                         "detail": None, "options": ["approve"]}})
         lines = [json.dumps(item, separators=(",", ":")) for item in events]
-        rotated = serve.carry_forward(
+        rotated = carry_forward(
             lines, int((anchor + datetime.timedelta(minutes=5)).timestamp() * 1000))
-        capsule = serve._mood_authority_from_line(rotated[0])
+        capsule = retention._mood_authority_from_line(rotated[0])
         self.assertTrue(capsule["overflow"])
         counts = {}
         for item in protocol_events(rotated):
             counts[item["agent_id"]] = counts.get(item["agent_id"], 0) + 1
         self.assertLessEqual(max(counts.values()),
-                             serve.MAX_MOOD_RETAINED_PER_AGENT)
+                             retention.MAX_MOOD_RETAINED_PER_AGENT)
 
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
@@ -695,7 +762,7 @@ const lines=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const mood=m.deriveMoods(p.parseEvents(lines)).get('codex:hub');
 process.stdout.write(JSON.stringify(mood));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(rotated), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -711,7 +778,7 @@ process.stdout.write(JSON.stringify(mood));
                  for item in fixture["events"]]
         now_ms = int(datetime.datetime.fromisoformat(
             fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
-        rotated = serve.carry_forward(lines, now_ms)
+        rotated = carry_forward(lines, now_ms)
         script = r"""
 const projection=require('./viewer/projection.js');
 const moods=require('./viewer/moods.js');
@@ -719,7 +786,7 @@ const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
             capture_output=True, text=True, check=True)
         before, after = json.loads(completed.stdout)
@@ -765,7 +832,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
                             "options": ["approve", "deny"]}})
         events = [*plain_events, *capacity_events]
         parsed = list(enumerate(events))
-        selected_indexes = serve._mood_keep_indexes(
+        selected_indexes = retention._mood_keep_indexes(
             parsed, {plain["agent_id"], capacity["agent_id"]})
         mood_selected = [events[index] for index in sorted(selected_indexes)]
         self.assertIn(2, selected_indexes,
@@ -775,7 +842,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
 
         lines = [json.dumps(item, separators=(",", ":")) for item in events]
         now_ms = int(newest.timestamp() * 1000)
-        rotated = serve.carry_forward(lines, now_ms)
+        rotated = carry_forward(lines, now_ms)
         script = r"""
 const projection=require('./viewer/projection.js');
 const moods=require('./viewer/moods.js');
@@ -783,7 +850,7 @@ const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
-        completed = subprocess.run(["node", "-e", script], cwd=os.path.dirname(
+        completed = run_node_parity_script(["node", "-e", script], cwd=os.path.dirname(
             os.path.dirname(__file__)), input=json.dumps([lines, rotated]),
             capture_output=True, text=True, check=True)
         before, after = json.loads(completed.stdout)
@@ -805,7 +872,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
         second_close = self.resolution("r2", agent)
         second_close["ts"] = "2026-08-25T12:12:00.000Z"
         closed = [first, first_close, second, second_close]
-        closed_indexes = serve._mood_keep_indexes(
+        closed_indexes = retention._mood_keep_indexes(
             list(enumerate(closed)), {agent})
         self.assertIn(1, closed_indexes,
                       "the timestamp-anchor request carries its exact close")
@@ -815,7 +882,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
         collision["payload"]["message"] = "Owner's incompatible question"
         owner_idle = event("codex:owner", "idle")
         collided = [canonical, collision, owner_idle]
-        collided_indexes = serve._mood_keep_indexes(
+        collided_indexes = retention._mood_keep_indexes(
             list(enumerate(collided)), {"codex:owner"})
         self.assertIn(0, collided_indexes,
                       "canonical cross-agent authority survives for the projected owner")
@@ -832,7 +899,7 @@ process.stdout.write(JSON.stringify(groups.map(group=>[derive(group.full),derive
                    "kept": [closed[index] for index in sorted(closed_indexes)]},
                   {"full": collided,
                    "kept": [collided[index] for index in sorted(collided_indexes)]}]
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(groups), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -873,7 +940,7 @@ process.stdout.write(JSON.stringify(groups.map(group=>[derive(group.full),derive
         first_idle = {**base, "ts": when(163), "type": "idle", "payload": {}}
         first.append(first_idle)
         first_lines = list(map(lambda item: json.dumps(item, separators=(",", ":")), first))
-        once = serve.carry_forward(first_lines, serve.event_ms(first_idle))
+        once = carry_forward(first_lines, retention.event_ms(first_idle))
         self.assertEqual(sum("mood-authority-v1" in line for line in once), 1)
 
         later = [knock(200 + index, f"q{index}", action="erase")
@@ -881,15 +948,15 @@ process.stdout.write(JSON.stringify(groups.map(group=>[derive(group.full),derive
         second_idle = {**base, "ts": when(300), "type": "idle", "payload": {}}
         later.append(second_idle)
         later_lines = list(map(lambda item: json.dumps(item, separators=(",", ":")), later))
-        twice = serve.carry_forward([*once, *later_lines], serve.event_ms(second_idle))
+        twice = carry_forward([*once, *later_lines], retention.event_ms(second_idle))
 
         other = "codex:capsule-other"
         reuse = knock(301, "q0", owner=other, action="erase")
         other_idle = {**base, "agent_id": other, "ts": when(302),
                       "type": "idle", "payload": {}}
-        thrice = serve.carry_forward([*twice, json.dumps(reuse, separators=(",", ":")),
+        thrice = carry_forward([*twice, json.dumps(reuse, separators=(",", ":")),
                                       json.dumps(other_idle, separators=(",", ":"))],
-                                     serve.event_ms(other_idle))
+                                     retention.event_ms(other_idle))
         script = r"""
 const projection=require('./viewer/projection.js');
 const moods=require('./viewer/moods.js');
@@ -900,7 +967,7 @@ process.stdout.write(JSON.stringify(groups.map(derive)));
         full_second = [*first_lines, *later_lines]
         full_third = [*full_second, json.dumps(reuse, separators=(",", ":")),
                       json.dumps(other_idle, separators=(",", ":"))]
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(
             [full_second, twice, full_third, thrice]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -926,17 +993,17 @@ process.stdout.write(JSON.stringify(groups.map(derive)));
             for index in range(count)]
         lines = list(map(json.dumps, events))
         started = time.monotonic()
-        once = serve.carry_forward(lines, int(anchor.timestamp() * 1000) + count)
+        once = carry_forward(lines, int(anchor.timestamp() * 1000) + count)
         elapsed = time.monotonic() - started
         self.assertLess(elapsed, 5, f"bounded rotation took {elapsed:.2f}s")
-        self.assertLessEqual(len(once), serve.VIEWER_LINE_LIMIT)
-        capsule = serve._mood_authority_from_line(once[0])
+        self.assertLessEqual(len(once), retention.VIEWER_LINE_LIMIT)
+        capsule = retention._mood_authority_from_line(once[0])
         self.assertTrue(capsule["overflow"])
         self.assertEqual(capsule["events"], [])
         self.assertEqual([capsule["ordinals"], capsule["copies"],
                           capsule["raw_ordinals"]], [[], [], []])
         self.assertLess(len(once[0].encode()), 32 * 1024)
-        twice = serve.carry_forward(once, int(anchor.timestamp() * 1000) + count)
+        twice = carry_forward(once, int(anchor.timestamp() * 1000) + count)
         self.assertEqual(twice, once, "a second rotation reclaims no extra authority")
 
         script = r"""
@@ -945,7 +1012,7 @@ const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify([read(input.full),read(input.retained)]));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps({
             "full": lines, "retained": once}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -983,20 +1050,20 @@ process.stdout.write(JSON.stringify([read(input.full),read(input.retained)]));
             return result
 
         boundary = next(count for count in range(1, 200)
-                        if serve._mood_authority_from_line(serve.carry_forward(
+                        if retention._mood_authority_from_line(carry_forward(
                             lines(count), int(anchor.timestamp() * 1000) + 1000)[0])["overflow"])
         below = lines(boundary - 1)
-        rotated_below = serve.carry_forward(below, int(anchor.timestamp() * 1000) + 1000)
-        capsule_below = serve._mood_authority_from_line(rotated_below[0])
+        rotated_below = carry_forward(below, int(anchor.timestamp() * 1000) + 1000)
+        capsule_below = retention._mood_authority_from_line(rotated_below[0])
         self.assertFalse(capsule_below["overflow"])
         self.assertLessEqual(len(rotated_below[0].encode()),
-                             serve.MOOD_AUTHORITY_MAX_BYTES)
+                             retention.MOOD_AUTHORITY_MAX_BYTES)
         self.assertGreater(len(rotated_below[0].encode()), 32_000,
                            "exercise the actual near-ceiling capsule")
 
         above = lines(boundary)
-        rotated_above = serve.carry_forward(above, int(anchor.timestamp() * 1000) + 1000)
-        capsule_above = serve._mood_authority_from_line(rotated_above[0])
+        rotated_above = carry_forward(above, int(anchor.timestamp() * 1000) + 1000)
+        capsule_above = retention._mood_authority_from_line(rotated_above[0])
         self.assertTrue(capsule_above["overflow"])
         self.assertEqual([capsule_above["events"], capsule_above["ordinals"],
                           capsule_above["copies"], capsule_above["raw_ordinals"]],
@@ -1011,20 +1078,20 @@ process.stdout.write(JSON.stringify([read(input.full),read(input.retained)]));
             bits = json.load(stream)["finite_binary64_bits"]
         import struct
         values = [struct.unpack(">d", bytes.fromhex(token))[0] for token in bits]
-        python = [serve._canonical_identity(value) for value in values]
+        python = [retention._canonical_identity(value) for value in values]
         script = r"""
 const t=require('./viewer/typed-json.js'),bits=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const values=bits.map(hex=>new DataView(Uint8Array.from(hex.match(/../g),x=>parseInt(x,16)).buffer).getFloat64(0,false));
 process.stdout.write(JSON.stringify(values.map(t.identity)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(bits),
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(bits),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         self.assertEqual(json.loads(completed.stdout), python)
-        self.assertEqual(serve._canonical_identity(-0.0),
-                         serve._canonical_identity(0.0))
-        self.assertEqual(serve._canonical_identity(float("inf")),
-                         serve._canonical_identity(float("-inf")))
+        self.assertEqual(retention._canonical_identity(-0.0),
+                         retention._canonical_identity(0.0))
+        self.assertEqual(retention._canonical_identity(float("inf")),
+                         retention._canonical_identity(float("-inf")))
 
     def test_deep_approval_authority_rotates_iteratively_and_preserves_raw(self):
         depth = 600
@@ -1037,13 +1104,13 @@ process.stdout.write(JSON.stringify(values.map(t.identity)));
                  '"agent_id":"codex:deep","project":"burrow",'
                  '"type":"needs_human_resolved","payload":{"request_id":"deep",'
                  '"decision":"approve","decided_by":"api","action":"deploy"}}')
-        now_ms = serve.event_ms(json.loads(close))
-        once = serve.carry_forward([request, close], now_ms)
-        capsule = serve._mood_authority_from_line(once[0])
+        now_ms = retention.event_ms(json.loads(close))
+        once = carry_forward([request, close], now_ms)
+        capsule = retention._mood_authority_from_line(once[0])
         self.assertIsNotNone(capsule)
         self.assertFalse(capsule["overflow"])
         self.assertEqual([line for line in once if line in {request, close}], [request, close])
-        self.assertEqual(serve.carry_forward(once, now_ms), once)
+        self.assertEqual(carry_forward(once, now_ms), once)
 
     def test_every_carry_forward_rescan_rejects_nonstandard_json_constants(self):
         root = event("codex:strict", "task_started", prompt="kept")
@@ -1051,10 +1118,10 @@ process.stdout.write(JSON.stringify(values.map(t.identity)));
         valid = json.dumps(root, separators=(",", ":"))
         malformed = valid.replace('"v":0', '"v":NaN')
         for lines in ([malformed, valid], [valid, malformed, valid], [valid, malformed]):
-            rotated = serve.carry_forward(lines, serve.event_ms(root))
+            rotated = carry_forward(lines, retention.event_ms(root))
             self.assertEqual(protocol_events(rotated), [root] * lines.count(valid))
             self.assertFalse(any("NaN" in line or "Infinity" in line for line in rotated))
-            self.assertEqual(serve.carry_forward(rotated, serve.event_ms(root)), rotated)
+            self.assertEqual(carry_forward(rotated, retention.event_ms(root)), rotated)
 
     def test_overflowing_exponent_identity_survives_future_reuse_and_two_rotations(self):
         def request(ts):
@@ -1067,10 +1134,10 @@ process.stdout.write(JSON.stringify(values.map(t.identity)));
                  '"agent_id":"codex:exponent","project":"burrow",'
                  '"type":"needs_human_resolved","payload":{"request_id":"exponent",'
                  '"decision":"approve","decided_by":"api","action":"deploy"}}')
-        now_ms = serve.event_ms(json.loads(close))
-        once = serve.carry_forward([request("2026-08-25T10:00:00.000Z"), close], now_ms)
-        twice = serve.carry_forward([*once, request("2026-08-25T10:02:00.000Z")], now_ms + 60_000)
-        thrice = serve.carry_forward(twice, now_ms + 60_000)
+        now_ms = retention.event_ms(json.loads(close))
+        once = carry_forward([request("2026-08-25T10:00:00.000Z"), close], now_ms)
+        twice = carry_forward([*once, request("2026-08-25T10:02:00.000Z")], now_ms + 60_000)
+        thrice = carry_forward(twice, now_ms + 60_000)
         self.assertEqual(thrice, twice)
         script = r"""
 const p=require('./viewer/projection.js'),a=require('./viewer/approval-knocks.js');
@@ -1078,7 +1145,7 @@ const lines=JSON.parse(require('fs').readFileSync(0,'utf8')),batch=p.parseEvents
 a.foldValidated(state,batch,{isValidatedBatch:p.isValidatedBatch,rejections:p.approvalRejections(batch)});
 const record=state.requests.get('exponent');process.stdout.write(JSON.stringify({collision:record.collided,resolved:!!record.resolution}));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(thrice),
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(thrice),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         self.assertEqual(json.loads(completed.stdout), {"collision": False, "resolved": True})
@@ -1109,14 +1176,14 @@ const record=state.requests.get('exponent');process.stdout.write(JSON.stringify(
 
         groups = []
         boundary = next(count for count in range(1, 150)
-                        if serve._mood_authority_from_line(serve.carry_forward(
+                        if retention._mood_authority_from_line(carry_forward(
                             [json.dumps(item, separators=(",", ":"))
                              for index in range(count) for item in lifecycle(index)],
                             int(anchor.timestamp() * 1000) + 1000)[0])["overflow"])
         for count in (boundary - 1, boundary):
             events = [item for index in range(count) for item in lifecycle(index)]
             lines = [json.dumps(item, separators=(",", ":")) for item in events]
-            groups.append({"full": lines, "rotated": serve.carry_forward(
+            groups.append({"full": lines, "rotated": carry_forward(
                 lines, int(anchor.timestamp() * 1000) + 1000)})
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
@@ -1127,7 +1194,7 @@ const inspect=lines=>{const parsed=p.parseEvents(lines),kept=m.retainMoodWitness
 process.stdout.write(JSON.stringify(groups.map(group=>({js:inspect(group.full),
   rotated:inspect(group.rotated)}))));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(groups),
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(groups),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         results = json.loads(completed.stdout)
@@ -1173,7 +1240,7 @@ process.stdout.write(JSON.stringify(groups.map(group=>({js:inspect(group.full),
                 "subject": "Retained task", "description": "not Mood authority"}},
         ])
         lines = [json.dumps(item, separators=(",", ":")) for item in events]
-        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000) + 3000)
+        rotated = carry_forward(lines, int(anchor.timestamp() * 1000) + 3000)
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
 const input=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
@@ -1184,7 +1251,7 @@ process.stdout.write(JSON.stringify({before:read(input.full),after:read(input.ro
   js:{overflow:js.overflow,raw:js.rawOrdinals.length,bytes:p.moodAuthorityCapsuleByteLength(js.events,js.copies,js)},
   py:{overflow:py.overflow,raw:py.rawOrdinals.length,bytes:p.moodAuthorityCapsuleByteLength(py.events,py.copies,py)}}));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(
             {"full": lines, "rotated": rotated}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1206,7 +1273,7 @@ process.stdout.write(JSON.stringify({before:read(input.full),after:read(input.ro
                      "payload": payload}
             lines.append(json.dumps(event, separators=(",", ":")))
         started = time.monotonic()
-        serve.carry_forward(lines, int(anchor.timestamp() * 1000) + 7000)
+        carry_forward(lines, int(anchor.timestamp() * 1000) + 7000)
         self.assertLess(time.monotonic() - started, 2.5)
 
     def test_shared_adversarial_mood_lifecycles_survive_python_rotation(self):
@@ -1215,7 +1282,7 @@ process.stdout.write(JSON.stringify({before:read(input.full),after:read(input.ro
         with open(fixture_path, encoding="utf-8") as stream:
             fixture = json.load(stream)
         events = fixture["events"]
-        mood_indexes = serve._mood_keep_indexes(
+        mood_indexes = retention._mood_keep_indexes(
             list(enumerate(events)), {"codex:close", "codex:owner"})
         self.assertIn(0, mood_indexes,
                       "Mood's exact q1 close independently carries its canonical knock")
@@ -1224,7 +1291,7 @@ process.stdout.write(JSON.stringify({before:read(input.full),after:read(input.ro
         lines = [json.dumps(item, separators=(",", ":")) for item in events]
         now_ms = int(datetime.datetime.fromisoformat(
             fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
-        rotated = serve.carry_forward(lines, now_ms)
+        rotated = carry_forward(lines, now_ms)
         decoded = [json.loads(line) for line in rotated]
         self.assertIn(events[0], decoded,
                       "the retained q1 close carries its displaced canonical knock")
@@ -1238,7 +1305,7 @@ const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps([events, decoded]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1258,15 +1325,15 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
         lines = list(map(json.dumps, fixture["events"]))
         now_ms = int(datetime.datetime.fromisoformat(
             fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
-        once = serve.carry_forward(lines, now_ms)
-        twice = serve.carry_forward(once, now_ms)
+        once = carry_forward(lines, now_ms)
+        twice = carry_forward(once, now_ms)
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
 const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify(groups.map(read)));
 """
-        completed = subprocess.run(["node", "-e", script],
+        completed = run_node_parity_script(["node", "-e", script],
             input=json.dumps([lines, once, twice]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1285,7 +1352,7 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         other = copy.deepcopy(root); other["agent_id"] = "codex:other"
 
         def capsule(**changes):
-            value = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            value = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                      "events": [root], "ordinals": ["7"],
                      "copies": ["7"], "raw_ordinals": ["7"],
                      "raw_indexes": ["0000000000000000"],
@@ -1302,45 +1369,45 @@ process.stdout.write(JSON.stringify(groups.map(read)));
             capsule(raw_count="1"),
         ]
         for unsafe in bad:
-            retained = serve.carry_forward([unsafe, json.dumps(root)], serve.event_ms(root))
+            retained = carry_forward([unsafe, json.dumps(root)], retention.event_ms(root))
             self.assertEqual(protocol_events(retained).count(root), 1)
-            rebuilt = serve._mood_authority_from_line(retained[0])
+            rebuilt = retention._mood_authority_from_line(retained[0])
             self.assertNotEqual(rebuilt.get("copies"), json.loads(unsafe).get("copies"))
-        cross = serve.carry_forward([capsule(), json.dumps(other)], serve.event_ms(other))
+        cross = carry_forward([capsule(), json.dumps(other)], retention.event_ms(other))
         self.assertEqual(protocol_events(cross).count(other), 1)
-        retained = serve.carry_forward([capsule(copies=[], raw_ordinals=[]),
-            capsule(copies=[], raw_ordinals=[]), json.dumps(root)], serve.event_ms(root))
+        retained = carry_forward([capsule(copies=[], raw_ordinals=[]),
+            capsule(copies=[], raw_ordinals=[]), json.dumps(root)], retention.event_ms(root))
         self.assertEqual(protocol_events(retained).count(root), 1)
-        malformed = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        malformed = json.dumps({"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                                 "events": "broken"})
         for records in (["not-json", capsule(), json.dumps(root)],
                         [malformed, json.dumps(root)],
                         [capsule(copies=[], raw_ordinals=[]), malformed,
                          json.dumps(root)]):
-            rotated = serve.carry_forward(records, serve.event_ms(root))
-            rebuilt = serve._mood_authority_from_line(rotated[0])
+            rotated = carry_forward(records, retention.event_ms(root))
+            rebuilt = retention._mood_authority_from_line(rotated[0])
             self.assertEqual(rebuilt.get("ordinals"), ["0"],
                              "invalid physical placement/marker rebuilds only raw authority")
             self.assertEqual(protocol_events(rotated).count(root), 1)
         for field in ("events", "ordinals", "copies", "raw_ordinals", "raw_indexes"):
-            nonempty = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            nonempty = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                         "events": [], "ordinals": [], "copies": [],
                         "raw_ordinals": [], "raw_indexes": [],
                         "raw_count": "0000000000000000",
                         "overflow": True, "observed": 257}
             nonempty[field] = [root] if field == "events" else ["7"]
-            self.assertIsNone(serve._mood_authority_from_line(json.dumps(nonempty)))
-        self.assertIsNone(serve._mood_authority_from_line(json.dumps({
-            "_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            self.assertIsNone(retention._mood_authority_from_line(json.dumps(nonempty)))
+        self.assertIsNone(retention._mood_authority_from_line(json.dumps({
+            "_burrow_internal": retention.MOOD_AUTHORITY_KIND,
             "events": [], "ordinals": [], "copies": [], "raw_ordinals": [],
             "raw_indexes": [], "raw_count": "0000000000000001",
             "overflow": True, "observed": 257})))
-        oversized = capsule(pad="x" * serve.MOOD_AUTHORITY_MAX_BYTES)
-        self.assertIsNone(serve._mood_authority_from_line(oversized))
+        oversized = capsule(pad="x" * retention.MOOD_AUTHORITY_MAX_BYTES)
+        self.assertIsNone(retention._mood_authority_from_line(oversized))
         numeric = copy.deepcopy(root); numeric["payload"]["n"] = 1.0
         integer = copy.deepcopy(root); integer["payload"]["n"] = 1
-        self.assertEqual(serve._canonical_identity(numeric),
-                         serve._canonical_identity(integer))
+        self.assertEqual(retention._canonical_identity(numeric),
+                         retention._canonical_identity(integer))
 
     def test_capsule_authority_is_the_exact_canonical_source_epoch_fold(self):
         agent = "codex:exact-authority"
@@ -1351,27 +1418,27 @@ process.stdout.write(JSON.stringify(groups.map(read)));
                            request_id="exact", decision="approve",
                            decided_by="human", action="deploy")
         resolution["source"] = "steward"
-        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        capsule = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                    "events": [request], "ordinals": ["5"], "copies": [],
                    "raw_ordinals": ["10"],
                    "raw_indexes": ["0000000000000000"],
                    "raw_count": "0000000000000001", "overflow": False,
                    "observed": 1}
-        self.assertFalse(serve._exact_capsule_authority(capsule, [resolution]),
+        self.assertFalse(retention._exact_capsule_authority(capsule, [resolution]),
                          "an injected later close cannot be omitted from authority")
-        rotated = serve.carry_forward([serve._encode_mood_authority(capsule),
+        rotated = carry_forward([retention._encode_mood_authority(capsule),
                                        json.dumps(resolution)],
-                                      serve.event_ms(resolution))
-        rebuilt = (serve._mood_authority_from_line(rotated[0])
-                   if rotated and serve.MOOD_AUTHORITY_KIND in rotated[0] else None)
+                                      retention.event_ms(resolution))
+        rebuilt = (retention._mood_authority_from_line(rotated[0])
+                   if rotated and retention.MOOD_AUTHORITY_KIND in rotated[0] else None)
         self.assertFalse(rebuilt and any(item == request
                                         for item in rebuilt["events"]))
 
         omitted_copy = dict(capsule, raw_ordinals=[], raw_indexes=[])
-        omitted_rotated = serve.carry_forward([
-            serve._encode_mood_authority(omitted_copy), json.dumps(request)],
-            serve.event_ms(request))
-        omitted_rebuilt = serve._mood_authority_from_line(omitted_rotated[0])
+        omitted_rotated = carry_forward([
+            retention._encode_mood_authority(omitted_copy), json.dumps(request)],
+            retention.event_ms(request))
+        omitted_rebuilt = retention._mood_authority_from_line(omitted_rotated[0])
         self.assertEqual(omitted_rebuilt["copies"], ["0"],
                          "omitted raw authority copy is rebuilt from raw truth")
 
@@ -1382,17 +1449,17 @@ process.stdout.write(JSON.stringify(groups.map(read)));
             claimed = dict(capsule, events=[item], ordinals=["5"], copies=[],
                            raw_ordinals=[], raw_indexes=[],
                            raw_count="0000000000000000")
-            self.assertFalse(serve._exact_capsule_authority(claimed, []))
+            self.assertFalse(retention._exact_capsule_authority(claimed, []))
 
         valid = dict(capsule, events=[request, resolution],
                      ordinals=["5", "10"], copies=["5"],
                      raw_ordinals=["5"], observed=2)
-        self.assertTrue(serve._exact_capsule_authority(valid, [request]),
+        self.assertTrue(retention._exact_capsule_authority(valid, [request]),
                         "a valid co-retained authority copy stays accepted")
         reordered = dict(valid, events=[orphan, request], ordinals=["4", "5"],
                          copies=[], raw_ordinals=[], raw_indexes=[],
                          raw_count="0000000000000000")
-        self.assertFalse(serve._exact_capsule_authority(reordered, []))
+        self.assertFalse(retention._exact_capsule_authority(reordered, []))
 
     def test_sparse_capsule_completeness_preserves_every_mood_witness(self):
         authority = event("codex:authority", "task_started", 200,
@@ -1410,26 +1477,26 @@ process.stdout.write(JSON.stringify(groups.map(read)));
                         title="Task", claimant="codex:proof")
         claimed["source"] = "steward"
         for witness in (failure, root, knock, claimed):
-            capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            capsule = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                        "events": [authority], "ordinals": ["0"], "copies": [],
                        "raw_ordinals": ["2"],
                        "raw_indexes": ["0000000000000001"],
                        "raw_count": "0000000000000002", "overflow": False,
                        "observed": 1}
-            rotated = serve.carry_forward(
-                [serve._encode_mood_authority(capsule), json.dumps(witness),
-                 json.dumps(anchor)], serve.event_ms(anchor))
+            rotated = carry_forward(
+                [retention._encode_mood_authority(capsule), json.dumps(witness),
+                 json.dumps(anchor)], retention.event_ms(anchor))
             self.assertIn(witness, protocol_events(rotated), witness["type"])
 
         irrelevant = event("codex:proof", "idle", 120)
-        safe = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        safe = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                 "events": [authority], "ordinals": ["0"], "copies": [],
                 "raw_ordinals": ["2"], "raw_indexes": ["0000000000000001"],
                 "raw_count": "0000000000000002", "overflow": False,
                 "observed": 1}
-        rotated = serve.carry_forward([serve._encode_mood_authority(safe),
-            json.dumps(irrelevant), json.dumps(anchor)], serve.event_ms(anchor))
-        self.assertIsNotNone(serve._mood_authority_from_line(rotated[0]))
+        rotated = carry_forward([retention._encode_mood_authority(safe),
+            json.dumps(irrelevant), json.dumps(anchor)], retention.event_ms(anchor))
+        self.assertIsNotNone(retention._mood_authority_from_line(rotated[0]))
 
     def test_sparse_capsule_manifest_rejects_surplus_indexes_exactly(self):
         authority = event("codex:authority", "task_started", 240,
@@ -1440,32 +1507,32 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         terminal = event("codex:proof", "routine_finished", routine="r",
                          run_id="r-surplus", outcome="ok", artifacts=[], duration_s=1)
         terminal["source"] = "steward"
-        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        capsule = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                    "events": [authority], "ordinals": ["0"], "copies": [],
                    "raw_ordinals": ["1", "3"],
                    "raw_indexes": ["0000000000000000", "0000000000000002"],
                    "raw_count": "0000000000000003", "overflow": False,
                    "observed": 1}
         raw_lines = [json.dumps(plain), json.dumps(idle), json.dumps(terminal)]
-        attacked = serve.carry_forward(
-            [serve._encode_mood_authority(capsule), *raw_lines],
-            serve.event_ms(terminal))
-        expected = serve.carry_forward(raw_lines, serve.event_ms(terminal))
+        attacked = carry_forward(
+            [retention._encode_mood_authority(capsule), *raw_lines],
+            retention.event_ms(terminal))
+        expected = carry_forward(raw_lines, retention.event_ms(terminal))
         self.assertEqual(attacked, expected,
                          "surplus manifest is discarded atomically before rotation")
 
         accepted = {**capsule, "raw_ordinals": ["3"],
                     "raw_indexes": ["0000000000000002"]}
-        accepted_lines = serve.carry_forward(
-            [serve._encode_mood_authority(accepted), *raw_lines],
-            serve.event_ms(terminal))
-        self.assertIsNotNone(serve._mood_authority_from_line(accepted_lines[0]),
+        accepted_lines = carry_forward(
+            [retention._encode_mood_authority(accepted), *raw_lines],
+            retention.event_ms(terminal))
+        self.assertIsNotNone(retention._mood_authority_from_line(accepted_lines[0]),
                              "exact sparse manifest remains valid with irrelevant co-retained records")
 
     def test_capsule_duplicate_wire_keys_reject_atomically(self):
         root = event("codex:duplicate", "task_started", prompt="raw")
         root["source"] = "codex"
-        base = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        base = json.dumps({"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
             "events": [root], "ordinals": ["0"], "copies": ["0"],
             "raw_ordinals": ["0"], "raw_indexes": ["0000000000000000"],
             "raw_count": "0000000000000001", "overflow": False,
@@ -1478,9 +1545,9 @@ process.stdout.write(JSON.stringify(groups.map(read)));
                          '"type":"idle","type":"task_started"'),
         ]
         for line in attacks:
-            self.assertIsNone(serve._mood_authority_from_line(line))
-            rotated = serve.carry_forward([line, json.dumps(root)],
-                                          serve.event_ms(root))
+            self.assertIsNone(retention._mood_authority_from_line(line))
+            rotated = carry_forward([line, json.dumps(root)],
+                                          retention.event_ms(root))
             self.assertIn(root, protocol_events(rotated))
 
     def test_safe_ordinal_exhaustion_and_capsule_only_two_rotation_boundary(self):
@@ -1491,22 +1558,22 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         close = event(agent, "needs_human_resolved", 10, request_id="max",
                       decision="approve", decided_by="human", action="deploy")
         close["source"] = "steward"
-        capsule = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        capsule = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                    "events": [knock, close],
                    "ordinals": ["9007199254740990", "9007199254740991"],
                    "copies": [], "raw_ordinals": [], "raw_indexes": [],
                    "raw_count": "0000000000000000", "overflow": False,
                    "observed": 2}
-        once = serve.carry_forward([serve._encode_mood_authority(capsule)],
-                                   serve.event_ms(close))
-        twice = serve.carry_forward(once, serve.event_ms(close))
-        self.assertFalse(serve._mood_authority_from_line(once[0])["overflow"])
-        self.assertFalse(serve._mood_authority_from_line(twice[0])["overflow"])
+        once = carry_forward([retention._encode_mood_authority(capsule)],
+                                   retention.event_ms(close))
+        twice = carry_forward(once, retention.event_ms(close))
+        self.assertFalse(retention._mood_authority_from_line(once[0])["overflow"])
+        self.assertFalse(retention._mood_authority_from_line(twice[0])["overflow"])
         appended = event(agent, "idle")
-        exhausted = serve.carry_forward(
-            [serve._encode_mood_authority(capsule), json.dumps(appended)],
-            serve.event_ms(appended))
-        rebuilt = serve._mood_authority_from_line(exhausted[0])
+        exhausted = carry_forward(
+            [retention._encode_mood_authority(capsule), json.dumps(appended)],
+            retention.event_ms(appended))
+        rebuilt = retention._mood_authority_from_line(exhausted[0])
         self.assertTrue(rebuilt["overflow"])
         self.assertEqual([rebuilt["events"], rebuilt["ordinals"],
                           rebuilt["copies"], rebuilt["raw_ordinals"],
@@ -1518,7 +1585,7 @@ process.stdout.write(JSON.stringify(groups.map(read)));
                                     "mood-capsule-malformed.json")
         with open(fixture_path, encoding="utf-8") as stream:
             matrix = json.load(stream)
-        base = {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+        base = {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                 "events": [matrix["authority_event"]], "ordinals": ["0"],
                 "copies": [], "raw_ordinals": [], "raw_indexes": [],
                 "raw_count": "0000000000000000", "overflow": False,
@@ -1526,10 +1593,10 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         raw = json.dumps(matrix["raw_event"], separators=(",", ":"))
 
         def assert_ignored(line):
-            rotated = serve.carry_forward([line, raw],
-                                          serve.event_ms(matrix["raw_event"]))
+            rotated = carry_forward([line, raw],
+                                          retention.event_ms(matrix["raw_event"]))
             self.assertEqual(protocol_events(rotated), [matrix["raw_event"]])
-            self.assertFalse(any(serve._mood_authority_marker(json.loads(item))
+            self.assertFalse(any(retention._mood_authority_marker(json.loads(item))
                                  for item in rotated))
 
         for field, value in matrix["invalid_mutations"]:
@@ -1540,12 +1607,12 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         for token in matrix["nonstandard_observed_tokens"]:
             assert_ignored(encoded.replace('"observed":1', f'"observed":{token}'))
         integral = encoded.replace('"observed":1', '"observed":1.0')
-        rotated = serve.carry_forward([integral, raw],
-                                      serve.event_ms(matrix["raw_event"]))
-        self.assertEqual(serve._mood_authority_from_line(rotated[0])["events"],
+        rotated = carry_forward([integral, raw],
+                                      retention.event_ms(matrix["raw_event"]))
+        self.assertEqual(retention._mood_authority_from_line(rotated[0])["events"],
                          [matrix["authority_event"]])
-        assert_ignored_multi = serve.carry_forward([encoded, encoded, raw],
-                                                   serve.event_ms(matrix["raw_event"]))
+        assert_ignored_multi = carry_forward([encoded, encoded, raw],
+                                                   retention.event_ms(matrix["raw_event"]))
         self.assertEqual(protocol_events(assert_ignored_multi), [matrix["raw_event"]])
 
     def test_shared_capsule_schema_and_typed_graph_attacks_preserve_raw_moods(self):
@@ -1567,25 +1634,25 @@ process.stdout.write(JSON.stringify(groups.map(read)));
                    "observed": 2}
 
         def direct(value):
-            return json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND, **value},
+            return json.dumps({"_burrow_internal": retention.MOOD_AUTHORITY_KIND, **value},
                               separators=(",", ":"))
 
         def envelope(value, outer=None):
-            record = json.loads(serve._encode_mood_authority(
-                {"_burrow_internal": serve.MOOD_AUTHORITY_KIND, **value}))
+            record = json.loads(retention._encode_mood_authority(
+                {"_burrow_internal": retention.MOOD_AUTHORITY_KIND, **value}))
             record.update(outer or {})
             return json.dumps(record, separators=(",", ":"))
 
         cases = []
 
         def ignored(line, name):
-            self.assertIsNone(serve._mood_authority_from_line(line), name)
-            rotated = serve.carry_forward([line, *raw], serve.event_ms(raw_events[-1]))
+            self.assertIsNone(retention._mood_authority_from_line(line), name)
+            rotated = carry_forward([line, *raw], retention.event_ms(raw_events[-1]))
             self.assertCountEqual(protocol_events(rotated), raw_events,
                                   f"{name}: all raw public evidence survives")
             cases.append(rotated)
 
-        self.assertEqual(len(serve._mood_authority_from_line(envelope(logical))["events"]), 2)
+        self.assertEqual(len(retention._mood_authority_from_line(envelope(logical))["events"]), 2)
         for mutation in matrix["canonical_schema_mutations"]:
             changed = copy.deepcopy(logical)
             changed[mutation["field"]] = mutation["value"]
@@ -1661,16 +1728,16 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         for _ in range(depth):
             expanded = [copy.deepcopy(expanded), copy.deepcopy(expanded)]
         self.assertGreater(len(approval_protocol.json_semantic_key(expanded).encode("utf-8")),
-                           serve.MOOD_AUTHORITY_MAX_BYTES)
+                           retention.MOOD_AUTHORITY_MAX_BYTES)
         shared_leaf = {"bounded": True}
-        self.assertFalse(serve._json_domain_within([shared_leaf, shared_leaf]))
+        self.assertFalse(retention._json_domain_within([shared_leaf, shared_leaf]))
         with self.assertRaisesRegex(ValueError, "aliased JSON value"):
             approval_protocol.json_typed_graph([shared_leaf, shared_leaf])
         for name in matrix["typed_graph_attacks"]:
-            line = json.dumps({"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
-                               "encoding": serve.MOOD_AUTHORITY_ENCODING,
+            line = json.dumps({"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
+                               "encoding": retention.MOOD_AUTHORITY_ENCODING,
                                "graph": attacks[name]}, separators=(",", ":"))
-            self.assertLess(len(line.encode("utf-8")), serve.MOOD_AUTHORITY_MAX_BYTES)
+            self.assertLess(len(line.encode("utf-8")), retention.MOOD_AUTHORITY_MAX_BYTES)
             with self.assertRaisesRegex(ValueError, "noncanonical"):
                 approval_protocol.decode_json_typed_graph(attacks[name])
             ignored(line, name)
@@ -1681,7 +1748,7 @@ const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const view=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify(groups.map(view)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps([raw, *cases]),
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps([raw, *cases]),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         views = json.loads(completed.stdout)
@@ -1693,7 +1760,7 @@ process.stdout.write(JSON.stringify(groups.map(view)));
                                     "mood-capsule-malformed.json")
         with open(fixture_path, encoding="utf-8") as stream:
             matrix = json.load(stream)
-        self.assertEqual(serve.MOOD_AUTHORITY_MAX_DEPTH,
+        self.assertEqual(retention.MOOD_AUTHORITY_MAX_DEPTH,
                          matrix["max_structural_depth"])
 
         def nested(containers):
@@ -1707,7 +1774,7 @@ process.stdout.write(JSON.stringify(groups.map(view)));
             authority["type"] = "needs_human"
             authority["payload"] = {"message": "Deep request",
                                     "detail": nested(containers)}
-            return {"_burrow_internal": serve.MOOD_AUTHORITY_KIND,
+            return {"_burrow_internal": retention.MOOD_AUTHORITY_KIND,
                     "events": [authority], "ordinals": ["0"], "copies": [],
                     "raw_ordinals": [], "raw_indexes": [],
                     "raw_count": "0000000000000000", "overflow": False,
@@ -1715,20 +1782,20 @@ process.stdout.write(JSON.stringify(groups.map(view)));
 
         accepted = capsule(matrix["accepted_detail_containers"])
         accepted_line = json.dumps(accepted, separators=(",", ":"))
-        self.assertIsNotNone(serve._mood_authority_from_line(accepted_line))
+        self.assertIsNotNone(retention._mood_authority_from_line(accepted_line))
         over_depth = json.dumps(capsule(matrix["rejected_detail_containers"]),
                                 separators=(",", ":"))
-        self.assertIsNone(serve._mood_authority_from_line(over_depth))
+        self.assertIsNone(retention._mood_authority_from_line(over_depth))
         raw = json.dumps(matrix["raw_event"], separators=(",", ":"))
-        self.assertEqual(protocol_events(serve.carry_forward([over_depth, raw],
-            serve.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
+        self.assertEqual(protocol_events(carry_forward([over_depth, raw],
+            retention.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
         parser_overflow = ('{"_burrow_internal":"mood-authority-v1","events":' +
                            '[' * 1100 + '0' + ']' * 1100 + '}')
         self.assertLess(len(parser_overflow.encode("utf-8")),
-                        serve.MOOD_AUTHORITY_MAX_BYTES)
-        self.assertIsNone(serve._mood_authority_from_line(parser_overflow))
-        self.assertEqual(protocol_events(serve.carry_forward([parser_overflow, raw],
-            serve.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
+                        retention.MOOD_AUTHORITY_MAX_BYTES)
+        self.assertIsNone(retention._mood_authority_from_line(parser_overflow))
+        self.assertEqual(protocol_events(carry_forward([parser_overflow, raw],
+            retention.event_ms(matrix["raw_event"]))), [matrix["raw_event"]])
 
     def test_invalid_tail_records_never_affect_rotation_coordinates_or_mood(self):
         root = event("codex:strict-tail", "task_started", 50, prompt="Root")
@@ -1743,19 +1810,19 @@ process.stdout.write(JSON.stringify(groups.map(view)));
         original = [json.dumps(item, separators=(",", ":")) for item in original_events]
         clean = [json.dumps(item, separators=(",", ":"))
                  for item in [root, *work]]
-        now_ms = serve.event_ms(work[-1])
-        once = serve.carry_forward(original, now_ms)
-        clean_once = serve.carry_forward(clean, now_ms)
+        now_ms = retention.event_ms(work[-1])
+        once = carry_forward(original, now_ms)
+        clean_once = carry_forward(clean, now_ms)
         self.assertEqual(once, clean_once,
                          "invalid records cannot consume retained/capsule coordinates")
         self.assertNotIn(invalid_before, protocol_events(once))
         self.assertNotIn(invalid_among, protocol_events(once))
         appended = event("codex:strict-tail", "heartbeat", 0)
-        twice = serve.carry_forward([*once, json.dumps(appended, separators=(",", ":"))],
-                                    serve.event_ms(appended))
-        clean_twice = serve.carry_forward(
+        twice = carry_forward([*once, json.dumps(appended, separators=(",", ":"))],
+                                    retention.event_ms(appended))
+        clean_twice = carry_forward(
             [*clean_once, json.dumps(appended, separators=(",", ":"))],
-            serve.event_ms(appended))
+            retention.event_ms(appended))
         self.assertEqual(twice, clean_twice)
         self.assertNotIn(invalid_before, protocol_events(twice))
         self.assertNotIn(invalid_among, protocol_events(twice))
@@ -1766,7 +1833,7 @@ const view=lines=>({moods:Object.fromEntries(m.deriveMoods(p.parseEvents(lines))
   state:p.moodAuthorityState(p.parseEvents(lines))});
 process.stdout.write(JSON.stringify(groups.map(view)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps([
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps([
             [*original, json.dumps(appended, separators=(",", ":"))],
             [*once, json.dumps(appended, separators=(",", ":"))], twice]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -1783,17 +1850,17 @@ process.stdout.write(JSON.stringify(groups.map(view)));
         initial = [json.dumps(item, separators=(",", ":")) for item in fixture["initial"]]
         unrelated = [json.dumps(item, separators=(",", ":"))
                      for item in fixture["unrelated"]]
-        now_ms = serve.event_ms(fixture["unrelated"][-1])
-        once = serve.carry_forward(initial, now_ms)
-        twice = serve.carry_forward([*once, unrelated[0]], now_ms)
-        thrice = serve.carry_forward([*twice, unrelated[1]], now_ms)
+        now_ms = retention.event_ms(fixture["unrelated"][-1])
+        once = carry_forward(initial, now_ms)
+        twice = carry_forward([*once, unrelated[0]], now_ms)
+        thrice = carry_forward([*twice, unrelated[1]], now_ms)
         script = r"""
 const p=require('./viewer/projection.js'),m=require('./viewer/moods.js');
 const groups=JSON.parse(require('node:fs').readFileSync(0,'utf8'));
 const read=lines=>Object.fromEntries(m.deriveMoods(p.parseEvents(lines)));
 process.stdout.write(JSON.stringify(groups.map(read)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps(
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps(
             [initial, once, twice, thrice]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1832,7 +1899,7 @@ process.stdout.write(JSON.stringify(groups.map(read)));
         ]
         rotated_batches = []
         for events, eligible in scenarios:
-            indexes = serve._mood_keep_indexes(list(enumerate(events)), eligible)
+            indexes = retention._mood_keep_indexes(list(enumerate(events)), eligible)
             selected = [events[index] for index in sorted(indexes)]
             if events is ambiguous:
                 self.assertTrue({0, 1}.issubset(indexes),
@@ -1843,7 +1910,7 @@ process.stdout.write(JSON.stringify(groups.map(read)));
             lines = [json.dumps(item, separators=(",", ":")) for item in events]
             now_ms = int(datetime.datetime.fromisoformat(
                 fixture["now"].replace("Z", "+00:00")).timestamp() * 1000)
-            rotated = serve.carry_forward(lines, now_ms)
+            rotated = carry_forward(lines, now_ms)
             rotated_batches.append((events, selected, [json.loads(line) for line in rotated]))
 
         script = r"""
@@ -1853,7 +1920,7 @@ const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const derive=events=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(events)));
 process.stdout.write(JSON.stringify(batches.map(group=>group.map(derive))));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(rotated_batches), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1886,7 +1953,7 @@ process.stdout.write(JSON.stringify(batches.map(group=>group.map(derive))));
             timespec="milliseconds").replace("+00:00", "Z")
         events.append(idle)
         lines = [json.dumps(item, separators=(",", ":")) for item in events]
-        rotated = serve.carry_forward(lines, int(anchor.timestamp() * 1000))
+        rotated = carry_forward(lines, int(anchor.timestamp() * 1000))
 
         script = r"""
 const projection=require('./viewer/projection.js');
@@ -1895,7 +1962,7 @@ const batches=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const derive=lines=>Object.fromEntries(moods.deriveMoods(projection.parseEvents(lines)));
 process.stdout.write(JSON.stringify(batches.map(derive)));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps([lines, rotated]), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -1905,7 +1972,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
                          anchor.isoformat(timespec="milliseconds").replace("+00:00", "Z"))
         self.assertEqual(after[agent_id]["status"], "authority history uncertain")
         self.assertEqual(after[agent_id]["evidence"], {"count": 0, "spanMs": 0})
-        self.assertTrue(serve._mood_authority_from_line(rotated[0])["overflow"])
+        self.assertTrue(retention._mood_authority_from_line(rotated[0])["overflow"])
 
     def test_rotation_keeps_bounded_canonical_journal_authority_and_one_conflict(self):
         lines = []
@@ -1919,7 +1986,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
         second_conflict = self.journal("codex:41", "2026-08-11",
                                        path="/else/2026-08-11.md")
         lines.extend(map(json.dumps, [replay, conflict, second_conflict]))
-        tail = [json.loads(line) for line in serve.carry_forward(lines, serve.event_ms(canonical))]
+        tail = [json.loads(line) for line in carry_forward(lines, retention.event_ms(canonical))]
         journals = [item for item in tail if item["type"] == "journal_written"]
         canonical_days = {(item["agent_id"], item["payload"]["day"])
                           for item in journals}
@@ -1932,7 +1999,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
     def test_rotation_preserves_later_session_end_without_erasing_journal_recency(self):
         observed = json.dumps(self.journal("codex:life", "2026-08-25"))
         ended = json.dumps(event("codex:life", "session_ended"))
-        tail = serve.carry_forward([observed, ended], int(datetime.datetime.now(
+        tail = carry_forward([observed, ended], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, [observed, ended])
 
@@ -1943,7 +2010,7 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
         replay = self.journal("codex:00", "2026-08-24")
         conflict = self.journal("codex:00", "2026-08-24", routine="nightly")
         lines = list(map(json.dumps, [*journals, replay, conflict, replay, conflict]))
-        retained = [json.loads(line) for line in serve.carry_forward(
+        retained = [json.loads(line) for line in carry_forward(
             lines, int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000))]
         retained_journals = [item for item in retained
                              if item["type"] == "journal_written"]
@@ -1956,17 +2023,17 @@ process.stdout.write(JSON.stringify(batches.map(derive)));
     def test_full_log_journal_authority_merges_with_clipped_ordinary_tail_and_browser_reset(self):
         observed = self.journal("codex:life", "2026-08-25")
         ordinary = [event("codex:life", "tool_called", 0, tool="Read", n=index)
-                    for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+                    for index in range(retention.VIEWER_LINE_LIMIT + 1)]
         lines = list(map(json.dumps, [observed, *ordinary]))
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         decoded = [json.loads(line) for line in tail]
         self.assertEqual(decoded[0], observed,
                          "journal selected from full input keeps original append position")
         self.assertEqual(sum(item["type"] == "journal_written" for item in decoded), 1)
         self.assertEqual([item["payload"]["n"] for item in decoded[1:]],
-                         list(range(serve.VIEWER_LINE_LIMIT + 1 - serve.KEEP_PER_AGENT,
-                                    serve.VIEWER_LINE_LIMIT + 1)))
+                         list(range(retention.VIEWER_LINE_LIMIT + 1 - retention.KEEP_PER_AGENT,
+                                    retention.VIEWER_LINE_LIMIT + 1)))
 
         script = r"""
 const {createBrowserRuntime}=require('./viewer/browser-runtime.js');
@@ -1985,21 +2052,21 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify({
  last:runtime.snapshot().villagers[0]&&runtime.snapshot().villagers[0].events.at(-1).payload.n
 })));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(tail), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         self.assertEqual(json.loads(completed.stdout), {
             "journals": 1, "key": True, "villagers": 1,
-            "last": serve.VIEWER_LINE_LIMIT,
+            "last": retention.VIEWER_LINE_LIMIT,
         })
 
     def test_full_log_journal_keeps_later_terminal_outside_ordinary_window(self):
         observed = json.dumps(self.journal("codex:life", "2026-08-25"))
         ended = json.dumps(event("codex:life", "session_ended"))
         chatter = [json.dumps(event(f"codex:gone-{index}", "session_ended"))
-                   for index in range(serve.VIEWER_LINE_LIMIT)]
-        tail = serve.carry_forward([observed, ended, *chatter], int(datetime.datetime.now(
+                   for index in range(retention.VIEWER_LINE_LIMIT)]
+        tail = carry_forward([observed, ended, *chatter], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, [observed, ended],
                          "retained journal cannot resurrect a session whose terminal was clipped")
@@ -2008,14 +2075,14 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify({
         observed = json.dumps(self.journal("codex:journal", "2026-08-25"))
         ordinary = [json.dumps(event(f"codex:live-{index}", "tool_called", 0,
                                      tool="Read", n=index))
-                    for index in range(serve.VIEWER_LINE_LIMIT + 1)]
-        tail = serve.carry_forward([observed, *ordinary], int(datetime.datetime.now(
+                    for index in range(retention.VIEWER_LINE_LIMIT + 1)]
+        tail = carry_forward([observed, *ordinary], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
-        self.assertEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+        self.assertEqual(len(tail), retention.VIEWER_LINE_LIMIT)
         self.assertEqual(tail[0], observed)
         self.assertEqual(json.loads(tail[1])["payload"]["n"], 2)
         self.assertEqual(json.loads(tail[-1])["payload"]["n"],
-                         serve.VIEWER_LINE_LIMIT)
+                         retention.VIEWER_LINE_LIMIT)
 
     def test_rotation_retains_each_journal_predecessor_and_restores_exact_expiry_state(self):
         stale = event("codex:stale", "tool_called", 31, tool="Read")
@@ -2025,14 +2092,14 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify({
         second_predecessor = event("codex:stale", "tool_called", 31, tool="Bash")
         second_journal = self.journal("codex:stale", "2026-08-25")
         chatter = [event(f"codex:unrelated-{index}", "session_ended")
-                   for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+                   for index in range(retention.VIEWER_LINE_LIMIT + 1)]
         source = [stale, stale_journal, dropped, dropped_journal,
                   second_predecessor, second_journal, *chatter]
         lines = list(map(json.dumps, source))
-        now_ms = serve.event_ms(second_journal)
-        rotated = serve.carry_forward(lines, now_ms)
+        now_ms = retention.event_ms(second_journal)
+        rotated = carry_forward(lines, now_ms)
         decoded = [json.loads(line) for line in rotated]
-        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        self.assertLessEqual(len(rotated), retention.VIEWER_LINE_LIMIT)
         for retained in [stale, stale_journal, dropped, dropped_journal,
                          second_predecessor, second_journal]:
             self.assertIn(retained, decoded)
@@ -2056,7 +2123,7 @@ const view=at=>projection.reduce(agents,at,souls,null,state).map(item=>({
  day:item.journal&&item.journal.event.payload.day})).sort((a,b)=>a.id.localeCompare(b.id));
 process.stdout.write(JSON.stringify({active:view(input.now+59999),expired:view(input.now+60000)}));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps({"lines": rotated, "now": now_ms}),
             text=True, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -2066,7 +2133,7 @@ process.stdout.write(JSON.stringify({active:view(input.now+59999),expired:view(i
                           ("codex:stale", "writing the journal")])
         self.assertEqual(result["expired"], [{
             "id": "codex:stale", "state": "stale",
-            "lastTs": serve.event_ms(second_predecessor), "doing": "",
+            "lastTs": retention.event_ms(second_predecessor), "doing": "",
             "day": None,
         }])
 
@@ -2116,11 +2183,11 @@ process.stdout.write(JSON.stringify({active:view(input.now+59999),expired:view(i
         resolved_journal = observed("codex:resolved-before", "2026-08-25", 0)
         source.extend([resolved_knock, resolved_close, resolved_journal])
         source.extend(event(f"codex:unrelated-{index}", "session_ended")
-                      for index in range(serve.VIEWER_LINE_LIMIT + 1))
-        rotated = serve.carry_forward(list(map(json.dumps, source)),
+                      for index in range(retention.VIEWER_LINE_LIMIT + 1))
+        rotated = carry_forward(list(map(json.dumps, source)),
                                       int(base.timestamp() * 1000) + 30_000)
         decoded = [json.loads(line) for line in rotated]
-        self.assertLessEqual(len(rotated), serve.VIEWER_LINE_LIMIT)
+        self.assertLessEqual(len(rotated), retention.VIEWER_LINE_LIMIT)
         for retained in [*predecessor.values(), *successors.values(), multi_before,
                          multi_first, multi_middle, multi_second, multi_after,
                          resolved_knock, resolved_close, resolved_journal]:
@@ -2147,7 +2214,7 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
  process.stdout.write(JSON.stringify({active,expired})));
 """
         ids = [*successors, "codex:active", "codex:multi", "codex:resolved-before"]
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps({"lines": rotated,
                 "base": int(base.timestamp() * 1000), "ids": ids}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -2165,7 +2232,7 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
         self.assertEqual(active["codex:resolved-before"]["doing"], "writing the journal")
         self.assertEqual(expired["codex:active"]["state"], "stale")
         self.assertEqual(expired["codex:active"]["lastTs"],
-                         serve.event_ms(predecessor["codex:active"]))
+                         retention.event_ms(predecessor["codex:active"]))
         self.assertEqual(expired["codex:resolved-before"]["state"], "resting")
         for agent in successors:
             if agent != "codex:ended":
@@ -2188,7 +2255,7 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
 
     def test_unresolved_structured_knock_survives_the_ordinary_drop_window(self):
         pending = json.dumps(self.approval("old-pending", minutes_ago=13 * 60))
-        tail = serve.carry_forward([pending], int(datetime.datetime.now(
+        tail = carry_forward([pending], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(protocol_events(tail), [json.loads(pending)])
         self.assertEqual(sum("mood-authority-v1" in line for line in tail), 1)
@@ -2208,7 +2275,7 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
         collision["payload"]["message"] = "A different immutable question"
         orphan = self.resolution("orphan", "codex:life", ancient_minutes)
         chatter = [event(f"codex:other-{index}", "session_ended")
-                   for index in range(serve.VIEWER_LINE_LIMIT + 1)]
+                   for index in range(retention.VIEWER_LINE_LIMIT + 1)]
         variants = {
             "pending": [request, intervening, orphan, journal],
             "resolved": [request, intervening, close, orphan, journal],
@@ -2216,11 +2283,11 @@ Promise.all([view(input.base+30000),view(input.base+60000)]).then(([active,expir
         }
         rotated = {}
         for name, prefix in variants.items():
-            tail = serve.carry_forward(
+            tail = carry_forward(
                 list(map(json.dumps, [*prefix, *chatter])), now_ms)
             decoded = protocol_events(tail)
             rotated[name] = tail
-            self.assertLessEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+            self.assertLessEqual(len(tail), retention.VIEWER_LINE_LIMIT)
             self.assertIn(request, decoded, name)
             self.assertIn(journal, decoded, name)
             self.assertNotIn(orphan, decoded, name)
@@ -2257,7 +2324,7 @@ Promise.all(Object.entries(input.lines).flatMap(([name,lines])=>[
  view(lines,input.now+120000).then(value=>[name,'expired',value])
 ])).then(rows=>process.stdout.write(JSON.stringify(rows)));
 """
-        completed = subprocess.run(
+        completed = run_node_parity_script(
             ["node", "-e", script], input=json.dumps({"lines": rotated,
                 "now": now_ms}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -2298,7 +2365,7 @@ Promise.all(Object.entries(input.lines).flatMap(([name,lines])=>[
         collision["payload"]["message"] = "Different immutable request"
         orphan = self.resolution("orphan-both-sides", "codex:life", ancient)
         chatter = [event(f"codex:pressure-{index}", "session_ended")
-                   for index in range(serve.VIEWER_LINE_LIMIT + 3)]
+                   for index in range(retention.VIEWER_LINE_LIMIT + 3)]
 
         lifecycle_tails = {}
         for age, journal in [("active", active_journal), ("expired", expired_journal)]:
@@ -2309,10 +2376,10 @@ Promise.all(Object.entries(input.lines).flatMap(([name,lines])=>[
                         "pending": [orphan], "resolved": [close, orphan],
                         "collided": [collision, orphan]}.items():
                     source = [*sequence, *suffix, *chatter]
-                    tail = serve.carry_forward(list(map(json.dumps, source)), now_ms)
+                    tail = carry_forward(list(map(json.dumps, source)), now_ms)
                     retained = protocol_events(tail)
                     lifecycle_tails[f"{age}/{side}/{lifecycle}"] = tail
-                    self.assertLessEqual(len(retained), serve.VIEWER_LINE_LIMIT)
+                    self.assertLessEqual(len(retained), retention.VIEWER_LINE_LIMIT)
                     self.assertEqual(len(retained), len({source.index(item) for item in retained}),
                                      (age, side, lifecycle))
                     positions = [source.index(item) for item in retained]
@@ -2345,7 +2412,7 @@ async function reset(lines){const runtime=createBrowserRuntime({now:()=>input.no
 Promise.all(Object.entries(input.lines).map(async ([name,lines])=>[name,await reset(lines)]))
  .then(rows=>process.stdout.write(JSON.stringify(rows)));
 """
-        completed = subprocess.run(["node", "-e", lifecycle_script], input=json.dumps({
+        completed = run_node_parity_script(["node", "-e", lifecycle_script], input=json.dumps({
             "lines": lifecycle_tails, "now": now_ms}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -2368,11 +2435,11 @@ Promise.all(Object.entries(input.lines).map(async ([name,lines])=>[name,await re
                 independent["payload"].update({"request_id": "broken",
                     "action": "Publish", "detail": None, "options": ["approve"]})
             source = [request, active_journal, independent, *chatter]
-            tail = serve.carry_forward(list(map(json.dumps, source)), now_ms)
+            tail = carry_forward(list(map(json.dumps, source)), now_ms)
             decoded = [json.loads(line) for line in tail]
             self.assertIn(request, decoded); self.assertIn(active_journal, decoded)
             self.assertIn(independent, decoded)
-            self.assertLessEqual(len(tail), serve.VIEWER_LINE_LIMIT)
+            self.assertLessEqual(len(tail), retention.VIEWER_LINE_LIMIT)
             independent_tails[kind] = tail
 
         script = r"""
@@ -2413,7 +2480,7 @@ async function streamed(lines){let stream;class EventSource{constructor(){this.l
 Promise.all(Object.entries(input.lines).map(async ([kind,lines])=>
  [kind,await grouped(lines),await streamed(lines)])).then(value=>process.stdout.write(JSON.stringify(value)));
 """
-        completed = subprocess.run(["node", "-e", script], input=json.dumps({
+        completed = run_node_parity_script(["node", "-e", script], input=json.dumps({
             "lines": independent_tails, "now": now_ms,
             "day": now.date().isoformat()}), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -2432,7 +2499,7 @@ Promise.all(Object.entries(input.lines).map(async ([kind,lines])=>
         close = json.dumps(self.resolution("paired", minutes_ago=4))
         orphan = json.dumps(self.resolution("orphan", agent="nobody", minutes_ago=3))
         ended = json.dumps(event("nobody", "session_ended", 2))
-        tail = serve.carry_forward([knock, close, orphan, ended], int(datetime.datetime.now(
+        tail = carry_forward([knock, close, orphan, ended], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertIn(knock, tail)
         self.assertIn(close, tail)
@@ -2448,7 +2515,7 @@ const runtime=createBrowserRuntime({now:()=>Date.now(),EventSource:null,
  ({ok:true,headers:{get:n=>n==='X-Burrow-Cursor'?cursor:null},text:async()=>lines.join('\\n')})});
 runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().villagers.map(v=>v.id))));
 """
-        projected = subprocess.run(["node", "-e", script], input=json.dumps(tail), text=True,
+        projected = run_node_parity_script(["node", "-e", script], input=json.dumps(tail), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
         self.assertEqual(json.loads(projected.stdout), ["approver"],
@@ -2456,15 +2523,15 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
 
     def test_approval_rotation_capacity_drops_whole_pairs_without_ghost_knocks(self):
         events = []
-        for index in range(serve.KEEP_APPROVALS + 3):
+        for index in range(retention.KEEP_APPROVALS + 3):
             events.extend([self.approval(f"r-{index}", minutes_ago=10 - index / 10),
                            self.resolution(f"r-{index}", minutes_ago=9 - index / 10)])
-        keep, isolated = serve._approval_keep_indexes(list(enumerate(events)))
+        keep, isolated = retention._approval_keep_indexes(list(enumerate(events)))
         retained = [events[index] for index in keep]
         request_ids = {}
         for item in retained:
             request_ids.setdefault(item["payload"]["request_id"], set()).add(item["type"])
-        self.assertLessEqual(len(request_ids), serve.KEEP_APPROVALS)
+        self.assertLessEqual(len(request_ids), retention.KEEP_APPROVALS)
         self.assertTrue(all(types == {"needs_human", "needs_human_resolved"}
                             for types in request_ids.values()))
         self.assertEqual(isolated, set(range(len(events))))
@@ -2478,7 +2545,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         request_b = self.approval("reused", agent="agent-b", minutes_ago=2)
         request_b["payload"]["action"] = "publish_note"
         ordered = [request_a, early, late, request_b]
-        keep, isolated = serve._approval_keep_indexes(list(enumerate(ordered)))
+        keep, isolated = retention._approval_keep_indexes(list(enumerate(ordered)))
         retained = [ordered[index] for index in sorted(keep)]
         self.assertEqual({item["agent_id"] for item in retained
                           if item["type"] == "needs_human"},
@@ -2488,7 +2555,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         self.assertEqual(isolated, set(range(len(ordered))))
 
         collided_first = [request_a, request_b, early]
-        keep, _ = serve._approval_keep_indexes(list(enumerate(collided_first)))
+        keep, _ = retention._approval_keep_indexes(list(enumerate(collided_first)))
         retained = [collided_first[index] for index in sorted(keep)]
         self.assertFalse(any(item["type"] == "needs_human_resolved"
                              for item in retained),
@@ -2501,7 +2568,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
             cases = json.load(stream)
         for case in cases:
             events = case["events"]
-            keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+            keep, _ = retention._approval_keep_indexes(list(enumerate(events)))
             retained = [events[index] for index in sorted(keep)]
             requests = [item for item in retained if item["type"] == "needs_human"]
             closes = [item for item in retained
@@ -2525,8 +2592,8 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
             right["payload"].update(case["right"])
             with self.subTest(case["name"]):
                 self.assertEqual(
-                    serve._approval_lifecycle_identity(left) ==
-                    serve._approval_lifecycle_identity(right),
+                    retention._approval_lifecycle_identity(left) ==
+                    retention._approval_lifecycle_identity(right),
                     case["compatible"],
                 )
 
@@ -2542,7 +2609,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         wrong = self.resolution("request", agent="agent", decision="deny")
         wrong["project"] = "life"
         events = [request, first, second, wrong]
-        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        keep, _ = retention._approval_keep_indexes(list(enumerate(events)))
         retained = [events[index] for index in sorted(keep)]
         closes = [item for item in retained if item["type"] == "needs_human_resolved"]
         self.assertEqual([item["payload"]["decision"] for item in closes],
@@ -2555,7 +2622,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         ended = event("parked-agent", "session_ended")
         close = self.resolution("parked", agent="parked-agent", decision="approve")
         lines = [json.dumps(item) for item in [knock, activity, ended, close]]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         retained = protocol_events(tail)
         self.assertEqual([item["type"] for item in retained],
@@ -2574,7 +2641,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         valid = self.resolution("bounded", decision="approve")
         valid["ts"] = "2026-08-25T10:11:00.000Z"
         events = [request, valid, *closes]
-        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        keep, _ = retention._approval_keep_indexes(list(enumerate(events)))
         retained = [events[index] for index in sorted(keep)]
         retained_closes = [item for item in retained
                            if item["type"] == "needs_human_resolved"]
@@ -2593,7 +2660,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
             item["payload"]["extension"] = {"index": index}
             closer.append(item)
         events = [request, first, second, *closer]
-        keep, _ = serve._approval_keep_indexes(list(enumerate(events)))
+        keep, _ = retention._approval_keep_indexes(list(enumerate(events)))
         retained = [events[index] for index in sorted(keep)]
         closes = [item for item in retained if item["type"] == "needs_human_resolved"]
         self.assertEqual([item["payload"]["decision"] for item in closes], ["approve"])
@@ -2628,11 +2695,11 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
                                        tzinfo=datetime.timezone.utc).timestamp() * 1000)
         for events in cases:
             original = [json.dumps(item) for item in events]
-            rotated = serve.carry_forward(original, now_ms)
+            rotated = carry_forward(original, now_ms)
             with self.subTest(types=[item["type"] for item in events]):
                 projections = []
                 for lines in (original, rotated):
-                    completed = subprocess.run(
+                    completed = run_node_parity_script(
                         ["node", "-e", script], input=json.dumps(lines), text=True,
                         cwd=root, check=True, capture_output=True)
                     projections.append(json.loads(completed.stdout))
@@ -2654,43 +2721,43 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
                                     "claimant": claimant}})
 
         ordered = [post, *transitions, transitions[0], transitions[-1]]
-        keep = serve._task_keep_indexes(list(enumerate(ordered)))
+        keep = retention._task_keep_indexes(list(enumerate(ordered)))
         retained = [ordered[index] for index in sorted(keep)]
         self.assertLessEqual(len(retained), 2,
                              "rotation retains only canonical post and transition")
         self.assertEqual(retained[-1]["payload"]["claimant"], "codex:holder-09999")
 
         reversed_input = [post, *reversed(transitions), transitions[-1], transitions[0]]
-        reverse_keep = serve._task_keep_indexes(list(enumerate(reversed_input)))
+        reverse_keep = retention._task_keep_indexes(list(enumerate(reversed_input)))
         reverse_retained = [reversed_input[index] for index in sorted(reverse_keep)]
         self.assertEqual(
-            [serve._task_event_identity(item) for item in retained],
-            [serve._task_event_identity(item) for item in reverse_retained],
+            [retention._task_event_identity(item) for item in retained],
+            [retention._task_event_identity(item) for item in reverse_retained],
             "equal-time selection is independent of grouping, order, and exact replay")
 
     def test_matches_viewers_global_4000_line_window(self):
         sparse = json.dumps(event("sparse", "idle", 1))
         lines = [sparse] + [json.dumps(event("gone", "session_ended", 1, n=i))
                             for i in range(4000)]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertNotIn(sparse, tail)
 
     def test_latest_heartbeat_keeps_agent_live_without_consuming_history(self):
         actions = [json.dumps(event("a", "tool_called", 60 * 13,
                                     tool="Read", n=i))
-                   for i in range(serve.KEEP_PER_AGENT + 10)]
+                   for i in range(retention.KEEP_PER_AGENT + 10)]
         heartbeat = json.dumps(event("a", "heartbeat", 1, tool="Read"))
-        tail = serve.carry_forward(actions + [heartbeat], int(datetime.datetime.now(
+        tail = carry_forward(actions + [heartbeat], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
-        self.assertEqual(len(tail), serve.KEEP_PER_AGENT + 1)
+        self.assertEqual(len(tail), retention.KEEP_PER_AGENT + 1)
         self.assertEqual(tail[-1], heartbeat)
         self.assertEqual(json.loads(tail[0])["payload"]["n"], 10)
 
     def test_heartbeat_after_session_end_revives_agent(self):
         ended = json.dumps(event("a", "session_ended", 2))
         heartbeat = json.dumps(event("a", "heartbeat", 1, tool="Read"))
-        tail = serve.carry_forward([ended, heartbeat], int(datetime.datetime.now(
+        tail = carry_forward([ended, heartbeat], int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, [ended, heartbeat])
 
@@ -2702,7 +2769,7 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
             event("gone", "session_ended", 4),
             event("a", "tool_called", 1, tool="Read"),
         ]]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         agents = {json.loads(line)["agent_id"] for line in tail}
         self.assertEqual(agents, {"a"})
@@ -2712,17 +2779,17 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         lines = [json.dumps(event("a", "task_started", 3, prompt="one")),
                  json.dumps(event("b", "tool_called", 2, tool="Read")),
                  json.dumps(event("a", "idle", 1))]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, lines)
 
     def test_caps_history_per_agent(self):
         lines = [json.dumps(event("a", "tool_called", 1, tool="Read", n=i))
-                 for i in range(serve.KEEP_PER_AGENT + 40)]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+                 for i in range(retention.KEEP_PER_AGENT + 40)]
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
-        self.assertEqual(len(tail), serve.KEEP_PER_AGENT)
-        self.assertEqual(tail, lines[-serve.KEEP_PER_AGENT:])
+        self.assertEqual(len(tail), retention.KEEP_PER_AGENT)
+        self.assertEqual(tail, lines[-retention.KEEP_PER_AGENT:])
 
     def test_compaction_reload_keeps_child_lineage_outside_display_history(self):
         lineage = event("a-child", "task_started", 3,
@@ -2731,9 +2798,9 @@ runtime.poll().then(()=>process.stdout.write(JSON.stringify(runtime.snapshot().v
         lines = [json.dumps(lineage), json.dumps(event("z-parent", "idle", 2))]
         lines.extend(json.dumps(event("a-child", "tool_called", 1,
                                              tool="Read", n=index))
-                     for index in range(serve.KEEP_PER_AGENT + 1))
+                     for index in range(retention.KEEP_PER_AGENT + 1))
 
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         script = """
 const fs = require('node:fs');
@@ -2751,7 +2818,7 @@ const village = reduce(lines, Date.now(), [resident]);
 process.stdout.write(JSON.stringify(Object.fromEntries(
   village.map(v => [v.id, v.residency]))));
 """
-        projected = subprocess.run(
+        projected = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(tail), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -2764,7 +2831,7 @@ process.stdout.write(JSON.stringify(Object.fromEntries(
     def test_ignores_junk_lines(self):
         lines = ["not json", json.dumps({"type": "tool_called"}),
                  json.dumps(event("a", "idle", 1))]
-        tail = serve.carry_forward(lines, int(datetime.datetime.now(
+        tail = carry_forward(lines, int(datetime.datetime.now(
             datetime.timezone.utc).timestamp() * 1000))
         self.assertEqual(tail, [lines[-1]])
 
@@ -2913,7 +2980,7 @@ class RotationTest(unittest.TestCase):
         nothing to reclaim, so we must not archive a copy on every append."""
         serve.MAX_LOG_BYTES = 512
         self.write([event("busy", "tool_called", 1, tool="Read", detail="z" * 100)
-                    for _ in range(serve.KEEP_PER_AGENT)])
+                    for _ in range(retention.KEEP_PER_AGENT)])
         for _ in range(5):
             with serve.LOG_LOCK:
                 serve.maybe_rotate()
@@ -2980,7 +3047,7 @@ const state = jobs.createState();
 jobs.fold(state, input, { validateEvent });
 process.stdout.write(JSON.stringify(jobs.rows(state, Date.now())));
 """
-        projected = subprocess.run(
+        projected = run_node_parity_script(
             ["node", "-e", script], input=json.dumps(lines), text=True,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             check=True, capture_output=True)
@@ -3093,7 +3160,7 @@ process.stdout.write(JSON.stringify(jobs.rows(state, Date.now())));
         serve.MAX_LOG_BYTES = 0
         start = datetime.datetime(2026, 8, 25, 10, 0, tzinfo=datetime.timezone.utc)
         posts = []
-        for index in range(serve.KEEP_TASKS + 1):
+        for index in range(retention.KEEP_TASKS + 1):
             item = self.task_event("task-%02d" % index, "task_posted", 1)
             item["ts"] = (start + datetime.timedelta(milliseconds=index)).isoformat(
                 timespec="milliseconds").replace("+00:00", "Z")

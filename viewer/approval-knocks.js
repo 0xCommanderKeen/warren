@@ -12,10 +12,12 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowApprovals = api;
 })(typeof globalThis === "object" ? globalThis : this, function (transport, typedJSON) {
+  const retention = typeof module === "object" && module.exports
+    ? require("./retention-policy.js") : BurrowRetentionPolicy;
   const TYPES = new Set(["needs_human", "needs_human_resolved"]);
   const DECISIONS = new Set(["approve", "deny", "edit"]);
   const ACTION = /^[a-z0-9][a-z0-9_-]*$/;
-  const MAX_REQUESTS = 40;
+  const MAX_REQUESTS = retention.approvals;
   const MAX_DIAGNOSTICS = 40;
   const DEFAULT_ACK_MS = 15 * 1000;
   const MAX_ACKNOWLEDGEMENTS = 40;

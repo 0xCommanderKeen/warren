@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import collections
 import datetime
+import json
 import re
+from pathlib import Path
 
-
-MAX_DAYS = 40
+MAX_DAYS = json.loads(
+    Path(__file__).with_name("retention-policy.json").read_text(encoding="utf-8")
+)["journal_days"]
 MAX_DIAGNOSTICS = 40
 _ROUTINE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")

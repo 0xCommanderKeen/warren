@@ -7,8 +7,10 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowJobs = api;
 })(typeof globalThis === "object" ? globalThis : this, function (transport) {
+  const retention = typeof module === "object" && module.exports
+    ? require("./retention-policy.js") : BurrowRetentionPolicy;
   const TYPES = new Set(["task_posted", "task_claimed", "task_done", "task_failed"]);
-  const MAX_TASKS = 24;
+  const MAX_TASKS = retention.tasks;
   const MAX_DIAGNOSTICS = 40;
   const DONE_RECENCY_MS = 15 * 60 * 1000;
   const DEFAULT_ACK_MS = 15 * 1000;

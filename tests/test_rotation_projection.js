@@ -40,10 +40,11 @@ const python = process.env.PYTHON || "python3";
 const tail = execFileSync(python, ["-c", `
 import json, sys
 sys.path.insert(0, ".")
-import serve
+import retention
 with open(sys.argv[1], encoding="utf-8") as f:
     lines = f.read().splitlines()
-sys.stdout.write("\\n".join(serve.carry_forward(lines, int(sys.argv[2]))))
+sys.stdout.write("\\n".join(retention.carry_forward(
+    lines, int(sys.argv[2]), retention.POLICY).lines))
 `, logPath, String(NOW)], { encoding: "utf8" }).split("\n").filter(Boolean);
 
 assert.ok(tail.length > 0, "carry_forward returned nothing");

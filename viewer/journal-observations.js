@@ -8,7 +8,9 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowJournals = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
-  const MAX_DAYS = 40;
+  const retention = typeof module === "object" && module.exports
+    ? require("./retention-policy.js") : BurrowRetentionPolicy;
+  const MAX_DAYS = retention.journal_days;
   const MAX_MALFORMED_DIAGNOSTICS = 40;
   // Kept as a compatibility alias for callers that used the old shared bound.
   const MAX_DIAGNOSTICS = MAX_MALFORMED_DIAGNOSTICS;

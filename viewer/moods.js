@@ -14,6 +14,8 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowMoods = api;
 })(typeof globalThis === "object" ? globalThis : this, function (projection, approvals) {
+  const retention = typeof module === "object" && module.exports
+    ? require("./retention-policy.js") : BurrowRetentionPolicy;
   const HOUR = 60 * 60 * 1000;
   const QUARTER = 15 * 60 * 1000;
   const TERMINAL = new Set(["tool_failed", "routine_failed", "task_failed",
@@ -25,13 +27,13 @@
   const WORK = new Map([["task_started", 3], ["task_claimed", 3],
     ["routine_started", 3], ["artifact_produced", 2], ["journal_written", 2],
     ["tool_called", 1], ["heartbeat", 1]]);
-  const MAX_RETAINED_PER_AGENT = 160;
+  const MAX_RETAINED_PER_AGENT = retention.mood_retained_per_agent;
   // Fixed-space authority is deliberately conservative. Once more distinct
   // immutable approval/root facts exist than can be represented, exact future
   // invalidation is unknowable; the reducer reports uncertainty instead of
   // silently choosing a suffix and presenting it as truth.
-  const MAX_AUTHORITY_EVENTS = 256;
-  const MAX_AUTHORITY_BYTES = 32 * 1024;
+  const MAX_AUTHORITY_EVENTS = retention.mood_authority_events;
+  const MAX_AUTHORITY_BYTES = retention.mood_authority_bytes;
   const EFFECTIVE_BATCHES = new WeakSet();
 
   function emptyOverflow(events) {

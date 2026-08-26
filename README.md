@@ -130,10 +130,11 @@ One village for the whole fleet, served from the NAS over Tailscale:
 map of everything the fleet does.
 
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
-  `python:3.12-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
+  `python:3.14-slim` running `serve.py` with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
   and all runtime support, resident manifests, and legacy souls with the
-  authoritative tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py
+  authoritative tar-over-ssh recipe (UGOS scp is broken): `tar -cf - serve.py retention.py
+  retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py hooks viewer villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
