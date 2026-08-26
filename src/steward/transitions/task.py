@@ -224,11 +224,11 @@ class TaskTransitions:
             now=ev.utc_now_iso(now),
         )
         if closed is None:
-            log.warning(
-                "%s finished task %s but no longer held the claim — the board keeps its own record",
-                claimant,
-                job.task_id,
-            )
+            # Nothing is logged here on purpose. This seam knows the *claimant* — a burrow
+            # agent id — and the line the board has always written names the resident, so
+            # it stays with the caller that has one (:meth:`steward.board.Dispatcher._record`).
+            # A superseded close comes back carrying its reason and no record; what an
+            # operator reads about it is the board's sentence to write.
             return superseded(LEASE_LOST)
         if result.ok:
             fact = ev.task_done_event(
@@ -254,16 +254,22 @@ class TaskTransitions:
 
     # -- the deadline --------------------------------------------------------------------
 
-    def expire_leases(self, *, now: datetime) -> list[JobRecord]:
+    def expire_leases(self, *, now: datetime) -> list[Transition[JobRecord]]:
         """Return every task whose lease ran out to the board, loudly.
 
-        Returns the rows *as they were when the lease died* — still ``claimed``, claimant
-        still named — because that is what the ``task_failed`` has to carry, and because
-        the caller reports what was reopened rather than what is open now.
+        Returns one **applied** transition per lease swept, each carrying the row *as it
+        was when the lease died* — still ``claimed``, claimant still named — because that
+        is what the ``task_failed`` has to carry, and because the caller reports what was
+        reopened rather than what is open now.
 
-        Every record returned had both its durable change and its fact. A row that changed
-        under the sweep is simply absent: the store's per-row conditional update refused
-        it, so nothing was written here and nothing is said about it.
+        Transitions rather than bare rows, like :meth:`ApprovalTransitions.expire`: a
+        sweep is a batch of transitions and this says so. Building one per row and
+        dropping it would make :func:`steward.transitions.outcome.applied` a conduit for a
+        fire-and-forget emit, which is the shape this package exists to not have.
+
+        A row that changed under the sweep is simply absent: the store's per-row
+        conditional update refused it, so nothing was written here and nothing is said
+        about it.
 
         The event carries no ``run_id`` on purpose. This is the board mourning a claim,
         not a session reporting back: steward does not know which session dropped it, and
@@ -271,8 +277,8 @@ class TaskTransitions:
         registry exists to catch — while the retry claimed moments later in this same pass
         is exactly the row a guess would land on (steward #39).
         """
-        expired = self.store.expire_leases(ev.utc_now_iso(now))
-        for job in expired:
+        swept: list[Transition[JobRecord]] = []
+        for job in self.store.expire_leases(ev.utc_now_iso(now)):
             claimant = job.claimant or ev.API_AGENT_ID
             log.warning(
                 "task %s (%s): lease held by %s expired at %s — back on the board",
@@ -281,16 +287,18 @@ class TaskTransitions:
                 claimant,
                 job.lease_expires_at,
             )
-            applied(
-                self.emitter,
-                job,
-                ev.task_failed_event(
-                    task_id=job.task_id,
-                    title=job.title,
-                    claimant=claimant,
-                    project=self.project_of(claimant),
-                    reason=LEASE_EXPIRED,
-                    parent_task_id=job.parent_task_id,
-                ),
+            swept.append(
+                applied(
+                    self.emitter,
+                    job,
+                    ev.task_failed_event(
+                        task_id=job.task_id,
+                        title=job.title,
+                        claimant=claimant,
+                        project=self.project_of(claimant),
+                        reason=LEASE_EXPIRED,
+                        parent_task_id=job.parent_task_id,
+                    ),
+                )
             )
-        return expired
+        return swept

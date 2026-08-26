@@ -50,10 +50,12 @@ happened.
 resident raises the same action again within :data:`DEFAULT_REPEAT_DENY_WINDOW_H` hours of
 being told no, the ask is recorded as an auto-deny (``decided_by: "repeat"``) and nobody's
 phone buzzes. A looping resident cannot knock on every wake-up. The guard answers only for
-actions a *session chose*: steward's own knocks — a budget pause, a watchdog give-up —
-pass ``repeat_guard=False``, and the slugs steward assigns itself
-(:data:`REPEAT_GUARD_EXEMPT_ACTIONS`) are never swallowed, because one deny of a catch-all
-would stand in for every future ask that lands under it.
+actions a *session chose*, which is why raising one is a different act from knocking with
+one: steward's own knocks — a budget pause, a watchdog give-up — go through
+:meth:`steward.transitions.approval.ApprovalTransitions.knock`, which never applies the
+guard, and the slugs steward assigns itself (:data:`REPEAT_GUARD_EXEMPT_ACTIONS`) are
+never swallowed either way, because one deny of a catch-all would stand in for every
+future ask that lands under it.
 
 **A malformed block still knocks.** An escalation steward cannot parse is not dropped
 and is not silently ignored: it becomes a request with the action
@@ -135,8 +137,8 @@ REPEAT_DENY_WINDOW_ENV = "STEWARD_REPEAT_DENY_WINDOW_H"
 #: to every escalation it could not read, so a deny of one malformed block would stand in
 #: for the next malformed block too — a different intended action, swallowed unheard, in
 #: exactly the case this module promises never to swallow. :mod:`steward.delegation` has
-#: two catch-alls of its own and keeps them out of the guard the other way, by passing
-#: ``repeat_guard=False``, because approvals cannot import it.
+#: two catch-alls of its own and keeps them out of the guard the other way, by knocking
+#: rather than raising, because approvals cannot import it.
 REPEAT_GUARD_EXEMPT_ACTIONS = frozenset({UNREADABLE_ACTION})
 
 ACTION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")

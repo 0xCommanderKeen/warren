@@ -974,6 +974,23 @@ class ResidentManifest(_Model):
             )
         return self
 
+    @property
+    def burrow_agent_id(self) -> str:
+        """The burrow identity this resident's events are filed under.
+
+        The declared ``agent_id`` when there is one, and a derived ``steward:<id>`` when
+        the resident is project-scoped instead. Spelled once, here, because a resident
+        whose events arrive under two identities is two villagers as far as burrow is
+        concerned — and nothing fails loudly when that happens, it just silently splits
+        one resident's history in half.
+        """
+        return self.agent_id or f"steward:{self.id}"
+
+    @property
+    def burrow_project(self) -> str:
+        """The burrow project label: the declared project, else the resident id."""
+        return self.project or self.id
+
 
 # --------------------------------------------------------------------------------------
 # soul document
@@ -1100,12 +1117,12 @@ class Resident:
     @property
     def agent_id(self) -> str:
         """The burrow identity this resident's events are emitted under."""
-        return self.manifest.agent_id or f"steward:{self.manifest.id}"
+        return self.manifest.burrow_agent_id
 
     @property
     def project(self) -> str:
         """The burrow project label: the manifest's project, else the resident id."""
-        return self.manifest.project or self.manifest.id
+        return self.manifest.burrow_project
 
     @property
     def retired(self) -> bool:

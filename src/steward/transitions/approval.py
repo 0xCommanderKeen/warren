@@ -15,8 +15,11 @@ here rather than in each caller:
   is raised like any other request, carrying its complaint.
 
 The grammar stays in :mod:`steward.approvals`: what a ``<needs-human>`` block may say,
-what a duration parses to, how a decision reads back to a resident. This module never
-parses and never renders. It writes, and it says what it wrote.
+what a duration parses to, how a decision reads back to a resident. Nothing here
+implements any of it — :meth:`ApprovalTransitions.harvest` calls
+:func:`steward.approvals.extract_requests` to read a session's blocks, and the rules that
+function applies are that module's, not this one's. This module writes, and it says what
+it wrote.
 """
 
 import logging
@@ -70,17 +73,14 @@ class ApprovalTransitions:
 
     # -- raising -------------------------------------------------------------------------
 
-    def raise_request(  # noqa: PLR0913 — the request plus the knobs steward's own callers need
+    def raise_request(
         self,
         *,
         manifest: ResidentManifest,
         request: NeedsHuman,
-        message: str | None = None,
         now: datetime | None = None,
-        request_id: str | None = None,
-        repeat_guard: bool = True,
     ) -> Transition[ApprovalRecord]:
-        """Persist one request and knock. The record is the thing a human will answer.
+        """Persist what a *session* asked for, and knock. The record is what a human answers.
 
         A request that could not be parsed is persisted too, under
         :data:`steward.approvals.UNREADABLE_ACTION`, with the raw block and the complaint
@@ -88,28 +88,82 @@ class ApprovalTransitions:
         rather than an action string: an escalation steward failed to read still has to
         reach a person.
 
-        ``message`` overrides the derived one-liner, and only steward itself passes it. A
-        *session* never gets to write its own knock — :func:`steward.approvals.human_message`
-        derives that from the action, so the message can never disagree with what the
-        decision is recorded against — but steward raising a request on a resident's
-        behalf knows something the action name cannot carry: a budget pause names the
-        number that tripped a cap, and a refused handoff says "steward refused this" in
-        words the action slug has no room for.
+        A session never gets to write its own knock: the one-liner is derived by
+        :func:`steward.approvals.human_message` from the action, so the message can never
+        disagree with what the decision is recorded against.
 
-        ``repeat_guard`` is on for everything a *session* chose to ask, and off for the
-        knocks steward raises about a resident rather than for it: a budget pause and a
-        watchdog give-up are one-per-condition by their own conditional insert, they never
-        expire, and the deny a human gives them answers a *different* question.
+        The repeat-deny guard is always on here, because a session is exactly what it
+        exists to stop. Two outcomes, and the second is the interesting one. **applied**
+        is a pending row and a ``needs_human``. **answered** is the guard: the row is
+        written already resolved, so the ledger still shows the resident asked and what it
+        was told and the resident still hears the answer in its next preamble — but
+        nothing is emitted, because a looping resident must not be able to knock on every
+        wake-up.
+        """
+        return self._raise(manifest=manifest, request=request, now=now, repeat_guard=True)
 
-        Two outcomes, and the second is the interesting one. **applied** is a pending row
-        and a ``needs_human``. **answered** is the repeat-deny guard: the row is written
-        already resolved, so the ledger still shows the resident asked and what it was
-        told and the resident still hears the answer in its next preamble — but nothing is
-        emitted, because a looping resident must not be able to knock on every wake-up.
+    def knock(
+        self,
+        *,
+        manifest: ResidentManifest,
+        request: NeedsHuman,
+        message: str,
+        now: datetime | None = None,
+        request_id: str | None = None,
+    ) -> Transition[ApprovalRecord]:
+        """Persist a request steward raises *about* a resident, and knock. Always applied.
+
+        The other half of :meth:`raise_request`, named rather than spelled as a flag,
+        because the two differ in every way that matters and a caller reaching for the
+        wrong one gets no error. A budget pause, a watchdog give-up and a refused handoff
+        are steward's own knocks: steward noticed, steward wrote the message, and the
+        resident is the subject rather than the asker.
+
+        Two consequences follow, and both are structural here rather than remembered at
+        five call sites:
+
+        - ``message`` is required, because steward knows what the action slug cannot
+          carry — the number that tripped a cap, the recipient a handoff was refused for.
+        - the repeat-deny guard is **off**, because these knocks are one-per-condition by
+          their own conditional insert, they never expire, and the deny a human gave
+          yesterday answers a *different* question. A knock that inherited the guard
+          would be auto-denied on arrival with nobody's phone buzzing, which for a paused
+          resident or a crash-looping one is exactly the news that must not go missing.
+
+        With the guard off there is no auto-deny branch to take, so this always applies:
+        a pending row and a ``needs_human``.
+
+        ``request_id`` mints the row under an id the caller already threaded elsewhere —
+        a budget pause names the request that can lift it, in the pause row itself.
+        """
+        return self._raise(
+            manifest=manifest,
+            request=request,
+            message=message,
+            now=now,
+            request_id=request_id,
+            repeat_guard=False,
+        )
+
+    def _raise(  # noqa: PLR0913 — the request plus everything the two public acts differ in
+        self,
+        *,
+        manifest: ResidentManifest,
+        request: NeedsHuman,
+        message: str | None = None,
+        now: datetime | None = None,
+        request_id: str | None = None,
+        repeat_guard: bool,
+    ) -> Transition[ApprovalRecord]:
+        """Write one request and, unless the guard already answered it, knock.
+
+        The shared body of :meth:`raise_request` and :meth:`knock`. Private on purpose:
+        ``repeat_guard`` is a fact about *which act this is*, not a knob a caller should
+        be picking, and every choice of it is made by one of the two public methods above.
         """
         moment = now or datetime.now(UTC)
-        agent_id = manifest.agent_id or f"steward:{manifest.id}"
-        project = manifest.project or manifest.id
+        agent_id = manifest.burrow_agent_id
+        project = manifest.burrow_project
         detail: dict[str, Any] = dict(request.detail)
         if request.problem is not None:
             log.warning(
@@ -201,13 +255,15 @@ class ApprovalTransitions:
 
         Returns the records, raised and auto-denied alike: the caller is reporting what
         this session asked for, and an ask steward answered itself was still an ask.
+        ``require`` rather than a ``None`` check because both outcomes a raise can come
+        back as wrote a row — see
+        :attr:`steward.transitions.outcome.Transition.wrote` — so a missing record here
+        would be a bug worth surfacing rather than a request to skip quietly.
         """
-        raised: list[ApprovalRecord] = []
-        for request in extract_requests(prompt.harvestable(output)):
-            transition = self.raise_request(manifest=manifest, request=request, now=now)
-            if transition.record is not None:
-                raised.append(transition.record)
-        return raised
+        return [
+            self.raise_request(manifest=manifest, request=request, now=now).require()
+            for request in extract_requests(prompt.harvestable(output))
+        ]
 
     # -- deciding ------------------------------------------------------------------------
 
@@ -225,8 +281,8 @@ class ApprovalTransitions:
         Four outcomes, and only the first says anything:
 
         - **applied** — this call recorded the answer, and ``needs_human_resolved`` was
-          emitted under the *resident's* identity, because the villager burrow has to walk
-          away from your door is the one who knocked;
+          emitted under the *resident's* identity, because the villager walking away from
+          your door is the one who knocked;
         - **refused** — there is no such request, and ``record`` is ``None``;
         - **expired** — the request exists and is *still pending*, which after a refused
           conditional write can only mean its deadline had passed. Deny-by-default has the
@@ -266,18 +322,26 @@ class ApprovalTransitions:
 
     # -- the deadline --------------------------------------------------------------------
 
-    def expire(self, now: datetime | None = None) -> list[ApprovalRecord]:
+    def expire(self, now: datetime | None = None) -> list[Transition[ApprovalRecord]]:
         """Deny every request whose deadline has passed, and close the loop in the log.
 
         Called on every board dispatch — which the scheduler tick, ``steward board
         dispatch`` and every watchdog pass all reach — and that is what makes the deadline
         real rather than decorative: nothing sweeps a queue that nobody visits.
 
-        Every record returned had both its durable deny and its fact. A request a human
-        answered in the same instant is simply absent: their answer won the store's
-        conditional write, so this call wrote nothing about it and says nothing about it.
+        Returns one **applied** transition per request denied, rather than bare records.
+        A sweep is a batch of transitions and this says so: each one carries the row that
+        was denied and the ``needs_human_resolved`` that announced it, and a caller that
+        only wants the rows reads them off. Building a transition and dropping it would
+        make :func:`steward.transitions.outcome.applied` a conduit for a fire-and-forget
+        emit, which is the shape this package exists to not have.
+
+        A request a human answered in the same instant is simply absent: their answer won
+        the store's conditional write, so this call wrote nothing about it and says
+        nothing about it.
         """
         expired_records = self.store.expire_approvals(ev.utc_now_iso(now or datetime.now(UTC)))
+        swept: list[Transition[ApprovalRecord]] = []
         for record in expired_records:
             log.info(
                 "approval %s (%s) expired at %s — denied by default",
@@ -285,16 +349,18 @@ class ApprovalTransitions:
                 record.action,
                 record.expires_at,
             )
-            applied(
-                self.emitter,
-                record,
-                ev.needs_human_resolved_event(
-                    request_id=record.request_id,
-                    decision="deny",
-                    action=record.action,
-                    agent_id=record.agent_id,
-                    project=record.project,
-                    decided_by=record.decided_by or "expiry",
-                ),
+            swept.append(
+                applied(
+                    self.emitter,
+                    record,
+                    ev.needs_human_resolved_event(
+                        request_id=record.request_id,
+                        decision="deny",
+                        action=record.action,
+                        agent_id=record.agent_id,
+                        project=record.project,
+                        decided_by=record.decided_by or "expiry",
+                    ),
+                )
             )
-        return expired_records
+        return swept

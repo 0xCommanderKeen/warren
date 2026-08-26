@@ -263,7 +263,7 @@ old bare form keeps working.
 ```
 
 `needs_human_resolved` — `{request_id, decision, decided_by, action}`, emitted under the
-resident's own agent id, because the villager burrow has to walk away from your door is
+resident's own agent id, because the villager walking away from your door is
 the one who knocked.
 
 The message is **derived** from the resident's name and the action (`"<name> wants to

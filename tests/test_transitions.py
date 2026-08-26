@@ -35,6 +35,10 @@ from steward.transitions import task as tt
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 CLAIMANT = "claude-code:test-agent"
 PROJECT = "test-agent"
+#: The end of the budget window a pause was tripped in. Required at the seam, because a
+#: pause written without one is lifted into an allowance of nothing and re-trips on the
+#: very next fire.
+WINDOW_END = "2026-08-25T00:00:00.000Z"
 
 
 @pytest.fixture
@@ -147,6 +151,27 @@ def test_a_carried_fact_is_the_inner_ones_and_is_not_sent_twice(sink: ev.NullEmi
     assert outer.record == "outer-row"
     assert outer.fact is event
     assert sink.events == [event]
+
+
+def test_a_carried_transition_keeps_the_inner_one_whole_rather_than_only_its_fact() -> None:
+    """Applied-and-silent is true of two different stories; ``via`` tells them apart."""
+    already = to.replayed("inner-row", "this request was already decided")
+    outer = to.carried("outer-row", already)
+
+    assert outer.applied, "the outer durable change happened here"
+    assert outer.silent, "and it said nothing, because the inner act had nothing to say"
+    assert outer.via is already
+    assert outer.via.replayed, "and the reason it said nothing is still answerable"
+
+
+def test_both_row_writing_outcomes_answer_to_wrote_and_only_one_to_applied() -> None:
+    """The trap ``wrote`` closes: ``applied`` is not the test for "is there a record"."""
+    wrote = (to.Transition(to.APPLIED, record="row"), to.answered("row"))
+    wrote_nothing = (to.refused(""), to.superseded(), to.replayed("row"), to.expired("row"))
+
+    assert all(transition.wrote for transition in wrote)
+    assert [transition.applied for transition in wrote] == [True, False]
+    assert not any(transition.wrote for transition in wrote_nothing)
 
 
 # ----------------------------------------------------------------------- task transitions
@@ -345,8 +370,9 @@ def test_an_expired_lease_goes_back_to_the_board_loudly_and_names_no_session(
 
     expired = tasks.expire_leases(now=NOW + timedelta(hours=2))
 
-    assert [record.task_id for record in expired] == [job.task_id]
-    assert expired[0].claimant == CLAIMANT, "the row is reported as it was when it died"
+    assert [swept.require().task_id for swept in expired] == [job.task_id]
+    assert all(swept.applied for swept in expired), "every swept lease was written and mourned"
+    assert expired[0].require().claimant == CLAIMANT, "the row is reported as it was when it died"
     row = store.job(job.task_id)
     assert row is not None
     assert (row.status, row.claimant) == (STATUS_OPEN, None)
@@ -578,7 +604,8 @@ def test_the_sweep_denies_a_passed_deadline_and_says_who_decided(
 
     swept = approvals.expire(NOW + timedelta(hours=1))
 
-    assert [record.request_id for record in swept] == [raised.record.request_id]
+    assert [denied.require().request_id for denied in swept] == [raised.record.request_id]
+    assert all(denied.applied for denied in swept), "every swept request was denied and announced"
     row = store.approval(raised.record.request_id)
     assert row is not None
     assert (row.decision, row.decided_by) == ("deny", "expiry")
@@ -669,7 +696,7 @@ def test_pausing_stops_the_resident_and_knocks_once(
         reason="spent 5.20 of 5.00",
         knock=knock(),
         message="Testy has spent 5.20 of 5.00 daily_cost_usd today and is paused",
-        window_end="2026-08-25T00:00:00.000Z",
+        window_end=WINDOW_END,
         now=NOW,
     )
 
@@ -701,6 +728,7 @@ def test_a_second_pause_of_the_same_budget_adds_nothing_and_knocks_on_nobody(
         "reason": "spent 5.20 of 5.00",
         "knock": knock(),
         "message": "paused",
+        "window_end": WINDOW_END,
         "now": NOW,
     }
     first = budgets.pause(**common)
@@ -728,7 +756,7 @@ def test_resuming_from_a_terminal_answers_the_request_that_was_waiting(
         reason="spent 5.20 of 5.00",
         knock=knock(),
         message="paused",
-        window_end="2026-08-25T00:00:00.000Z",
+        window_end=WINDOW_END,
         now=NOW,
     )
     assert paused.record is not None
@@ -761,6 +789,7 @@ def test_resuming_from_the_api_lifts_the_pause_without_answering_twice(
         reason="spent 5.20 of 5.00",
         knock=knock(),
         message="paused",
+        window_end=WINDOW_END,
         now=NOW,
     )
     sink.events.clear()
@@ -771,6 +800,40 @@ def test_resuming_from_the_api_lifts_the_pause_without_answering_twice(
     assert outcome.silent, "the decision endpoint already said this"
     assert store.budget_pause("test-agent") is None
     assert sink.events == []
+
+
+def test_resuming_against_a_request_a_person_already_denied_lifts_the_pause_and_keeps_the_deny(
+    budgets: tr.BudgetTransitions, store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    """A terminal is a person too, but the first decision still wins in the log."""
+    paused = budgets.pause(
+        manifest=manifest,
+        agent_id=CLAIMANT,
+        budget="daily_cost_usd",
+        spent=5.2,
+        cap=5.0,
+        reason="spent 5.20 of 5.00",
+        knock=knock(),
+        message="paused",
+        window_end=WINDOW_END,
+        now=NOW,
+    )
+    request_id = paused.require().request_id
+    assert request_id is not None
+    budgets.approvals.decide(request_id, "deny", decided_by="api", now=NOW)
+    sink.events.clear()
+
+    outcome = budgets.resume("test-agent", decided_by="cli")
+
+    assert outcome.applied, "the unpause is this call's own durable change"
+    assert store.budget_pause("test-agent") is None
+    assert outcome.silent, "the deny was already answered; two answers is one too many"
+    assert sink.events == []
+    assert outcome.via is not None, "the inner decision is carried, not erased"
+    assert outcome.via.replayed, "and the caller can see why nothing was emitted"
+    request = store.approval(request_id)
+    assert request is not None
+    assert request.decision == "deny", "the first decision keeps the last word"
 
 
 def test_resuming_a_resident_that_was_never_paused_is_refused(
@@ -784,14 +847,25 @@ def test_resuming_a_resident_that_was_never_paused_is_refused(
 
 
 def test_the_transitions_package_has_exactly_one_place_that_emits() -> None:
-    """The structural half of the pairing invariant, asserted rather than trusted."""
+    """The structural half of the pairing invariant, asserted rather than trusted.
+
+    Deliberately a source scan and deliberately a narrow one. It cannot see through an
+    alias (``send = emitter.emit``) and it would not catch an emit reached by getattr —
+    what it does catch is the ordinary way a second emit site gets added, which is
+    somebody writing ``.emit(`` in a new branch. Counting first, and only then naming the
+    file, so a scan that finds nothing fails with the sentence rather than an IndexError
+    from the assertion trying to describe an empty list.
+    """
     package = Path(__file__).resolve().parents[1] / "src" / "steward" / "transitions"
     emitting = [
         f"{path.name}:{number}"
         for path in sorted(package.glob("*.py"))
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
-        if ".emit(" in line
+        if ".emit(" in line and not line.lstrip().startswith("#")
     ]
-    assert emitting == ["outcome.py:" + emitting[0].split(":")[1]], (
-        f"only outcome.applied may reach an emitter; found {emitting}"
+    assert len(emitting) == 1, (
+        f"exactly one line in steward.transitions may reach an emitter; found {emitting}"
+    )
+    assert emitting[0].startswith("outcome.py:"), (
+        f"the one line that emits must be the one in outcome.applied; found {emitting[0]}"
     )

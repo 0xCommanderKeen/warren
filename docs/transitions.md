@@ -100,7 +100,7 @@ the way it learns of any other.
 | **outcomes** | applied · superseded (`rowcount==0`: the lease died mid-session and the task is somebody else's now — **nothing is emitted**, and the caller reports `status=failed, reason="lease lost while the session was running"` carrying the *pre-close* row) |
 | **fact (done)** | `task_done`, `agent_id=<claimant>`, `project=<resident project>`, payload `{task_id, title, claimant, artifacts}` + `run_id` **when set** + `parent_task_id` **when set** |
 | **fact (failed)** | `task_failed`, same identity, payload `{task_id, title, claimant, reason}` + `run_id` + `parent_task_id`, `reason` truncated to 500 chars |
-| **status/reason derivation** | `done` iff `RunResult.ok`; otherwise `failed` with `reason = f"{outcome}: {summary()}"` — one rule, currently written in the board |
+| **status/reason derivation** | `done` iff `RunResult.ok`; otherwise `failed` with `reason = f"{outcome}: {summary()}"` — one rule, written in `TaskTransitions.finish` and nowhere else, so a caller cannot decide two of {status, reason, event type} and disagree with the third |
 | **run_id** | this attempt's registry row, never the task id: a task claimed, dropped and re-claimed is two sessions (#39) |
 | **callers** | `Dispatcher.work` (both the admitted path and the admission-refused path) |
 
@@ -113,6 +113,7 @@ the way it learns of any other.
 | **guard** | per row, `UPDATE … WHERE task_id=? AND status='claimed'`; `rowcount!=1` → skipped silently |
 | **before → after** | `claimed` → `open`, `claimant=NULL`, `claimed_at=NULL`, `lease_expires_at=NULL` |
 | **outcomes** | applied per swept row · superseded per row that changed under the sweep (no fact) |
+| **returns** | `list[Transition[JobRecord]]`, one per lease swept — a sweep is a batch of transitions and says so; `Dispatcher.expire_leases` reads the rows off. Building a transition and dropping it would make `outcome.applied` a fire-and-forget emit conduit |
 | **fact** | `task_failed` with `reason='lease_expired'`, `agent_id = job.claimant or steward:api`, `project` resolved from the fleet or `steward`, `parent_task_id` when set, and **no `run_id`** — this is the board mourning a claim, not a session reporting back, and naming a session would answer a registry row this sweep knows nothing about (#39) |
 | **row shape emitted from** | the row *as it was when the lease died* (claimant still named), not the reopened row |
 | **callers** | `Dispatcher.dispatch`, including `sweep_only` (scheduler tick, watchdog pass) |
@@ -135,15 +136,16 @@ the way it learns of any other.
 
 | | |
 |---|---|
-| **owner** | `ApprovalTransitions.raise_request` |
+| **owner** | `ApprovalTransitions.raise_request` (a session's ask) and `ApprovalTransitions.knock` (steward's own news about a resident) — two named acts over one private body, because the difference between them is not a knob |
 | **precondition** | none — an escalation steward could not even parse is still raised, under `unreadable_escalation`, carrying the raw block and the complaint |
 | **guard** | unconditional `INSERT`; the repeat-deny lookup decides *how* the row is filed |
 | **before → after** | (no row) → `status=pending` … **or** `status=resolved, decision=deny, decided_by='repeat'` when the same resident was denied the same action inside the window |
-| **outcomes** | applied (pending row + knock) · answered (repeat auto-deny: row written, **no fact**, nobody's phone buzzes) |
+| **outcomes** | `raise_request`: applied (pending row + knock) · answered (repeat auto-deny: row written, **no fact**, nobody's phone buzzes). `knock`: applied only — with the guard off there is no auto-deny branch to take |
 | **fact** | `needs_human`, `agent_id = manifest.agent_id or steward:<id>`, `project = manifest.project or <id>`, payload `{message, request_id, action, detail, options, expires_at}` |
-| **redaction** | `message` and every `detail` value are scrubbed of inline secrets **before** they are length-capped, so a secret cut in half can never surface a live prefix (#65); capping is `2 000` chars per string and `8 000` for the serialized map |
-| **repeat guard** | on for what a session chose; off for steward's own knocks (budget pause, watchdog give-up, delegation refusals); never applied to `unreadable_escalation` |
-| **callers** | `ApprovalTransitions.harvest` (session output), `BudgetTransitions.pause`, `Delegator._knock`, `Watchdog._give_up`, `steward approval raise` |
+| **redaction** | `message` and every `detail` value are scrubbed of inline secrets **before** they are length-capped, so a secret cut in half can never surface a live prefix (#65); capping is `500` chars for `message` (`ERROR_MAX_CHARS`, via `truncate_error`) and `2 000` chars per `detail` string with `8 000` for the serialized map (`DETAIL_FIELD_MAX_CHARS` / `DETAIL_MAX_CHARS`) — a steward-authored knock composed against the wrong number is a question cut off mid-sentence at the panel |
+| **repeat guard** | a property of *which act was called*, not a flag: `raise_request` is a session's own ask and the guard is always on; `knock` is steward's own news about a resident (budget pause, watchdog give-up, delegation refusals) and the guard is always off. Never applied to `unreadable_escalation` either way |
+| **callers of `raise_request`** | `ApprovalTransitions.harvest` (session output), `steward approval raise` |
+| **callers of `knock`** | `BudgetTransitions.pause`, `Delegator._knock`, `Watchdog._give_up` |
 
 #### A2 — decide
 
@@ -163,6 +165,7 @@ the way it learns of any other.
 | **owner** | `ApprovalTransitions.expire`, called by `Dispatcher.dispatch` |
 | **guard** | per row, `UPDATE … WHERE request_id=? AND status='pending'`; `rowcount!=1` → skipped (a human answered in the same instant, and their answer wins) |
 | **outcomes** | applied per row · superseded per row a human won (no fact) |
+| **returns** | `list[Transition[ApprovalRecord]]`, one per request denied, for the same reason `expire_leases` does |
 | **fact** | `needs_human_resolved`, `decision='deny'`, `decided_by = record.decided_by or 'expiry'` |
 | **callers** | one: `Dispatcher.dispatch`, which the scheduler tick, `steward board dispatch`, and every watchdog pass all reach |
 
@@ -177,7 +180,8 @@ the way it learns of any other.
 | **guard** | conditional insert; `created=False` means somebody tripped the same budget in the same instant and already knocked |
 | **before → after** | (no pause) → a pause row naming budget, spent, cap, reason, `request_id`, `window_end` |
 | **outcomes** | applied (pause row + one knock) · superseded (`created=False`: the existing row is read back, **nothing emitted**) |
-| **fact** | none of its own; the pause's visible fact is the `needs_human` that A1 emits for `budget_unpause`, with `expires_at=None` — deny-by-default protects nothing here, because the safe state *is* the current one |
+| **`window_end`** | required at this seam, not defaulted. It is what B2 scopes the "carry on" allowance to, and a pause written without one is lifted into an allowance of nothing — so the next fire re-trips the still-exhausted cap and knocks again, every fire. The store column still defaults to empty for rows written before it existed; the *act* does not, because no caller genuinely does not know which window it just ran out of |
+| **fact** | none of its own; the pause's visible fact is the `needs_human` that A1's `knock` emits for `budget_unpause`, with `expires_at=None` — deny-by-default protects nothing here, because the safe state *is* the current one |
 | **callers** | `BudgetGuard.allow` (before a run) and `BudgetGuard._pause_if_over` (after one, #68) |
 
 #### B2 — resume
@@ -188,7 +192,8 @@ the way it learns of any other.
 | **guard** | `unpause_resident` returns `None` when nothing was paused |
 | **before → after** | pause row cleared; when the pause named a `window_end`, an allowance is granted until it, so the next fire does not re-trip the same cap and knock into a loop |
 | **outcomes** | applied · refused (nothing was paused: nothing written, nothing emitted) |
-| **fact** | `needs_human_resolved` with `decision='approve'` — **only** on the CLI path (`decide=True`). The API path passes `decide=False` because `POST /approvals/{id}` already recorded the decision and emitted the fact; recording it twice would put two answers in the log for one question |
+| **fact** | `needs_human_resolved` with `decision='approve'` — **only** on the CLI path (`decide=True`), and only when that decision was this call's to record. The API path passes `decide=False` because `POST /approvals/{id}` already recorded the decision and emitted the fact; recording it twice would put two answers in the log for one question |
+| **already answered** | a person may have denied the unpause from a panel and somebody may then lift the same pause from a terminal. The pause still lifts — a terminal is a person too — but the inner A2 comes back **replayed**, the approval log keeps the deny, and nothing new is emitted. That is logged at `WARNING`, and the inner transition is kept on `Transition.via` so a caller can render it rather than seeing only "applied, silently" |
 | **callers** | `steward budget unpause` (`decide=True`), `POST /approvals/{id}` via `_resume_if_budget` (`decide=False`) |
 
 ### 1.4 What is deliberately *not* in the matrix
@@ -216,7 +221,7 @@ an emitter:
 steward/transitions/__init__.py    # the vocabulary, re-exported
 steward/transitions/outcome.py     # Transition[T] and the six outcomes
 steward/transitions/task.py        # TaskTransitions: post claim take_delivery finish expire_leases
-steward/transitions/approval.py    # ApprovalTransitions: raise_request decide expire harvest
+steward/transitions/approval.py    # ApprovalTransitions: raise_request knock decide expire harvest
 steward/transitions/delegation.py  # DelegationTransitions: deliver
 steward/transitions/budget.py      # BudgetTransitions: pause resume
 ```
@@ -224,8 +229,8 @@ steward/transitions/budget.py      # BudgetTransitions: pause resume
 ```python
 outcome = tasks.finish(job, claimant=..., project=..., result=result, run_id=run_id, now=moment)
 if outcome.superseded:
-    ...                     # the lease died; nothing was written and nothing was emitted
-report = BoardReport(task=outcome.record or job, ...)
+    ...                     # the lease died; nothing was written, emitted, or read back
+report = BoardReport(task=job, ...)          # the pre-close row is the honest one to report
 ```
 
 Each method takes the domain act's own vocabulary, performs the conditional write,
@@ -332,6 +337,22 @@ constructor is not given one, so a refusal, a replay, an expiry, a lost race and
 self-answered request cannot emit rather than merely not doing so. The seam's own contract
 is tested in `tests/test_transitions.py`; the approval, board, delegation and budget suites
 now drive their durable behaviour through it.
+
+**One observable surface did move, and it is not a payload.** Log lines that moved into
+the package log under the module that now holds them, so an operator grepping journald by
+logger name has to follow them:
+
+| line | before | after |
+|---|---|---|
+| lease expired, back on the board | `steward.board` | `steward.transitions.task` |
+| budget pause warning, pause-lifted info | `steward.budgets` | `steward.transitions.budget` |
+| approval raised unreadable, repeat auto-denied, expired by default | `steward.approvals` | `steward.transitions.approval` |
+
+Nothing in the repo keys on these names — no handler, no test, no alert — and the message
+text is unchanged, so this is a grep habit to update rather than a breakage. The one line
+that did **not** move is the superseded-close warning: it names the *resident*, the seam
+knows only the claimant's burrow agent id, so it stays in `Dispatcher._record` on
+`steward.board` exactly as before.
 
 **The honest limit, restated where the code will read it:** a transition is not atomic
 across the store and the village. It orders them, and it refuses to emit a fact for a

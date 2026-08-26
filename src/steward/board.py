@@ -51,6 +51,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import cached_property
 from pathlib import Path
 from typing import cast
 
@@ -521,22 +522,24 @@ class Dispatcher:
             ),
         )
 
-    @property
+    @cached_property
     def tasks(self) -> TaskTransitions:
         """The seam every board write crosses, paired with the fact that announces it.
 
-        Built per access from this dispatcher's own store and emitter, exactly as
-        :attr:`delegator` is, so a dispatcher that was handed a mock emitter announces
-        into that mock and nowhere else.
+        Built once, from this dispatcher's own store and emitter, so a dispatcher that was
+        handed a mock emitter announces into that mock and nowhere else. Cached rather
+        than rebuilt per access because a dataclass's fields are settled by the time the
+        first access happens and nothing in steward swaps a dispatcher's emitter after
+        construction — tests inject at construction too.
         """
         return TaskTransitions(store=self.store, emitter=self.emitter, project_of=self._project_of)
 
-    @property
+    @cached_property
     def approvals(self) -> ApprovalTransitions:
         """The seam a session's escalations and the deadline sweep both cross."""
         return ApprovalTransitions(store=self.store, emitter=self.emitter)
 
-    @property
+    @cached_property
     def delegator(self) -> dg.Delegator:
         """The arbiter this dispatch validates handoffs through.
 
@@ -558,8 +561,10 @@ class Dispatcher:
         The reopened row is announced as ``task_failed`` with reason ``lease_expired``,
         under the agent id of the resident that dropped it. A task silently returning to
         ``open`` would let the village show unattended work as work in progress.
+
+        The seam returns a transition per lease swept; a dispatch reports the rows.
         """
-        return self.tasks.expire_leases(now=now)
+        return [swept.require() for swept in self.tasks.expire_leases(now=now)]
 
     def _project_of(self, claimant: str) -> str:
         """Name the burrow project a claimant belongs to, falling back to steward's own."""
@@ -868,14 +873,21 @@ class Dispatcher:
         )
         if closed.superseded:
             # The lease died while the session ran and the task is somebody else's now.
-            # The transition wrote nothing and said nothing; the board keeps its own record.
-            # Branching on the *outcome* rather than on a missing record on purpose: a
-            # superseded close is allowed to carry the row that won, and reading "no record"
-            # as "it worked" would report a refused close as a finished task.
+            # The transition wrote nothing and said nothing, and it carries no record —
+            # the conditional update matched no row — so the pre-close row this dispatch
+            # is already holding is the only honest thing to report. Branching on the
+            # *outcome* rather than on a missing record keeps that true if the seam ever
+            # learns to read the winning row back: "no record" would then mean "it worked"
+            # and a refused close would be reported as a finished task.
+            log.warning(
+                "%s finished task %s but no longer held the claim — the board keeps its own record",
+                resident.id,
+                job.task_id,
+            )
             return BoardReport(
                 resident_id=resident.id,
                 claimant=resident.agent_id,
-                task=closed.record or job,
+                task=job,
                 status=STATUS_FAILED,
                 result=result,
                 reason=closed.reason,
@@ -922,7 +934,7 @@ class Dispatcher:
         if self.dry_run:
             return self._rehearse(moment)
         reopened = self.expire_leases(moment)
-        expired_approvals = self.approvals.expire(moment)
+        expired_approvals = [swept.require() for swept in self.approvals.expire(moment)]
 
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))

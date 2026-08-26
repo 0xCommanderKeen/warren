@@ -19,7 +19,7 @@ asked to stop a resident, or to start it again.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from steward import events as ev
@@ -48,10 +48,16 @@ class BudgetTransitions:
     store: Store
     emitter: ev.Emitter
 
-    @property
-    def approvals(self) -> ApprovalTransitions:
-        """The approval seam a pause knocks through and a resume answers through."""
-        return ApprovalTransitions(store=self.store, emitter=self.emitter)
+    #: The approval seam a pause knocks through and a resume answers through. Built once
+    #: in ``__post_init__`` from this instance's own store and emitter, like every other
+    #: owner of a transitions seam.
+    approvals: ApprovalTransitions = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Wire the approval seam this one delegates both of its acts' facts to."""
+        object.__setattr__(
+            self, "approvals", ApprovalTransitions(store=self.store, emitter=self.emitter)
+        )
 
     def pause(  # noqa: PLR0913 — one keyword per column of the pause or field of the knock
         self,
@@ -64,7 +70,7 @@ class BudgetTransitions:
         reason: str,
         knock: NeedsHuman,
         message: str,
-        window_end: str = "",
+        window_end: str,
         now: datetime | None = None,
     ) -> Transition[PauseRecord]:
         """Stop this resident and knock once. The conditional insert decides who knocks.
@@ -79,9 +85,18 @@ class BudgetTransitions:
         nobody is knocked on twice for one stop. The existing record still comes back, so
         the caller can render the refusal it was going to render anyway.
 
-        The knock is raised with ``repeat_guard=False`` deliberately. A human denying
-        yesterday's unpause must not swallow today's pause: that deny answered "may this
-        resident run again", not "has it stopped again".
+        It knocks rather than raises (:meth:`ApprovalTransitions.knock`), which is what
+        keeps the repeat-deny guard off it. A human denying yesterday's unpause must not
+        swallow today's pause: that deny answered "may this resident run again", not "has
+        it stopped again".
+
+        ``window_end`` is required rather than defaulted, and it is the field this act
+        cannot be trusted to guess. It is what :meth:`resume` scopes the "carry on"
+        allowance to; a pause written without one is lifted into an allowance of nothing,
+        so the very next fire re-trips the still-exhausted cap and knocks again, every
+        fire, forever. The store's column defaults to empty for rows written before this
+        existed — the *act* does not, because there is no caller who genuinely does not
+        know which window it just ran out of.
         """
         request_id = new_id()
         record, created = self.store.pause_resident(
@@ -98,13 +113,12 @@ class BudgetTransitions:
         if not created:
             return superseded(ALREADY_PAUSED, record=record)
         log.warning("%s: %s — pausing this resident and knocking at the door", manifest.id, reason)
-        knocked = self.approvals.raise_request(
+        knocked = self.approvals.knock(
             manifest=manifest,
             request=knock,
             message=message,
             now=now,
             request_id=request_id,
-            repeat_guard=False,
         )
         return carried(record, knocked)
 
@@ -127,6 +141,15 @@ class BudgetTransitions:
         The unpause is the durable change either way; on the API path it simply has no fact
         of its own to carry. **refused** means there was no pause to lift, and then nothing
         is written and no allowance is granted.
+
+        On the ``decide=True`` path the request may already have been answered — a person
+        denied the unpause from a panel, and somebody is now lifting the same pause from a
+        terminal anyway. The pause still lifts, because the terminal is a person too and
+        the durable act is theirs, but the approval log keeps the deny and the village
+        hears nothing new: the first decision wins, and saying so twice would put two
+        answers in the log for one question. That is worth an operator seeing, so it is
+        logged here, and the inner transition is kept on
+        :attr:`steward.transitions.outcome.Transition.via` so a caller can render it.
         """
         pause = self.store.unpause_resident(resident_id)
         if pause is None:
@@ -143,7 +166,15 @@ class BudgetTransitions:
             )
         log.info("%s: budget pause lifted by %s (%s)", resident_id, decided_by, pause.reason)
         if decide and pause.request_id:
-            return carried(
-                pause, self.approvals.decide(pause.request_id, "approve", decided_by=decided_by)
-            )
+            decided = self.approvals.decide(pause.request_id, "approve", decided_by=decided_by)
+            if not decided.applied:
+                log.warning(
+                    "%s: request %s was already %s (%s) — the pause was lifted anyway and "
+                    "the village was not told again",
+                    resident_id,
+                    pause.request_id,
+                    decided.outcome,
+                    decided.reason,
+                )
+            return carried(pause, decided)
         return applied(self.emitter, pause)

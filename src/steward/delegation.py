@@ -58,6 +58,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cached_property
 from typing import Any
 
 from steward import approvals, prompt
@@ -384,7 +385,7 @@ class Delegator:
 
     # -- the seams a decision is carried out through -------------------------------------
 
-    @property
+    @cached_property
     def deliveries(self) -> DelegationTransitions:
         """Where an accepted handoff becomes a durable letter and a ``task_delegated``.
 
@@ -394,7 +395,7 @@ class Delegator:
         """
         return DelegationTransitions(store=self.store, emitter=self.emitter)
 
-    @property
+    @cached_property
     def knocks(self) -> ApprovalTransitions:
         """Where a *refused* handoff becomes a question for a person instead."""
         return ApprovalTransitions(store=self.store, emitter=self.emitter)
@@ -687,8 +688,9 @@ class Delegator:
     ) -> Delivery:
         """Raise a refused handoff as an approval request, so a person hears about it.
 
-        The knock is steward's own — steward refused, steward wrote the message — and it
-        is exempt from the repeat-deny guard (``repeat_guard=False``). Both actions here
+        The knock is steward's own — steward refused, steward wrote the message — so it
+        goes through :meth:`ApprovalTransitions.knock`, which is exempt from the
+        repeat-deny guard. Both actions here
         are catch-alls: *every* refusal of this resident's, whatever recipient or route or
         title it was about, is filed under :data:`REJECTED_ACTION` or
         :data:`UNREADABLE_ACTION`. A deny on one of them — and a deny is the natural way to
@@ -712,11 +714,10 @@ class Delegator:
             "title": handoff.title,
             "raw": handoff.raw[:DETAIL_MAX_CHARS],
         }
-        record = self.knocks.raise_request(
+        record = self.knocks.knock(
             manifest=sender.manifest,
             request=approvals.NeedsHuman(raw=handoff.raw, action=action, detail=detail),
             now=now or datetime.now(UTC),
             message=message,
-            repeat_guard=False,
         ).require()
         return Delivery(handoff=handoff, reason=error.reason, message=str(error), knock=record)

@@ -55,8 +55,8 @@ class DelegationTransitions:
         ``assignee`` are *resident ids*, because that is what an inbox is addressed by and
         what a lineage is walked with. ``sender_agent_id`` and ``recipient_agent_id`` are
         *burrow agent ids*, because that is what the village walks villagers by. The fact
-        is emitted under the **delegating** resident, since the villager burrow has to walk
-        across the village is the one carrying the letter.
+        is emitted under the **delegating** resident, since the villager walking across the
+        village is the one carrying the letter.
 
         Nothing else in the chain needs a new event type: the receiver picks the item up
         with ``task_claimed`` and closes it with ``task_done``/``task_failed``, both

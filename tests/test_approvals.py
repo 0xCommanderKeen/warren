@@ -56,8 +56,9 @@ def region(*blocks: str) -> str:
     """Wrap blocks in the machine-read region a real session ends its message with.
 
     The harvester acts only on this region (steward #62), so anything exercising
-    :func:`approvals.harvest` — as opposed to the bare-grammar parser
-    :func:`approvals.extract_requests` — has to speak the way a taught session speaks.
+    :meth:`steward.transitions.approval.ApprovalTransitions.harvest` — as opposed to the
+    bare-grammar parser :func:`approvals.extract_requests`, which still lives here — has
+    to speak the way a taught session speaks.
     """
     return f"{p.ACTIONS_OPEN}\n" + "\n".join(blocks) + f"\n{p.ACTIONS_CLOSE}"
 
@@ -220,20 +221,32 @@ def test_the_message_is_derived_so_it_can_never_disagree_with_the_action(
 # --------------------------------------------------------------- the repeat-deny guard
 
 
-def ask(  # noqa: PLR0913 — the collaborators, plus every knob one of these tests varies
+def ask(
     store: Store,
     sink: ev.NullEmitter,
     manifest: ResidentManifest,
     *,
     at: datetime,
     action: str = "send_email",
-    repeat_guard: bool = True,
 ) -> ApprovalRecord:
-    """Raise one ordinary session-chosen request at a chosen moment."""
+    """Raise one ordinary session-chosen request at a chosen moment. The guard applies."""
+    (parsed,) = ap.extract_requests(block(f'action="{action}" expires-in="1h"'))
+    return seam(store, sink).raise_request(manifest=manifest, request=parsed, now=at).require()
+
+
+def steward_knocks(
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+    *,
+    at: datetime,
+    action: str = "send_email",
+) -> ApprovalRecord:
+    """Raise the same request as steward's own knock *about* the resident. No guard."""
     (parsed,) = ap.extract_requests(block(f'action="{action}" expires-in="1h"'))
     return (
         seam(store, sink)
-        .raise_request(manifest=manifest, request=parsed, now=at, repeat_guard=repeat_guard)
+        .knock(manifest=manifest, request=parsed, message="steward says so", now=at)
         .require()
     )
 
@@ -318,13 +331,12 @@ def test_stewards_own_knocks_are_never_swallowed_as_repeats(
     deny(store, ask(store, sink, manifest, at=NOW, action="budget_unpause"), at=NOW)
     sink.events.clear()
 
-    again = ask(
+    again = steward_knocks(
         store,
         sink,
         manifest,
         at=NOW + timedelta(hours=1),
         action="budget_unpause",
-        repeat_guard=False,
     )
     assert again.pending
     assert [event.type for event in sink.events] == ["needs_human"]
@@ -402,7 +414,9 @@ def test_expiry_denies_by_default_and_closes_the_loop_in_the_log(
     sink.events.clear()
 
     later = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
-    (expired,) = seam(store, sink).expire(later)
+    (swept,) = seam(store, sink).expire(later)
+    assert swept.applied
+    expired = swept.require()
     assert expired.request_id == record.request_id
     assert expired.decision == "deny"
     assert expired.decided_by == "expiry"

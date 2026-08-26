@@ -397,18 +397,14 @@ class BudgetGuard:
     """
 
     def __init__(self, store: Store, emitter: ev.Emitter | None = None) -> None:
-        """Hold the durable ledger and the emitter a pause knocks through."""
+        """Hold the durable ledger, the emitter, and the seam a pause knocks through."""
         self.store = store
         self.emitter: ev.Emitter = emitter if emitter is not None else ev.NullEmitter()
-
-    @property
-    def transitions(self) -> BudgetTransitions:
-        """The seam a pause and its knock — or an unpause and its answer — cross together.
-
-        Read per access rather than held, like :attr:`steward.board.Dispatcher.tasks`, so a
-        guard whose emitter is swapped after construction knocks through the new one.
-        """
-        return BudgetTransitions(store=self.store, emitter=self.emitter)
+        #: The seam a pause and its knock — or an unpause and its answer — cross together.
+        #: Built here rather than per access, like every other owner of a transitions
+        #: seam, because the store and the emitter it closes over are settled by the time
+        #: this returns and nothing in steward swaps either one afterwards.
+        self.transitions = BudgetTransitions(store=self.store, emitter=self.emitter)
 
     # -- reading -----------------------------------------------------------------------
 
@@ -419,7 +415,7 @@ class BudgetGuard:
         budgets = manifest.budgets
         return BudgetStatus(
             resident=manifest.id,
-            agent_id=_agent_id(manifest),
+            agent_id=manifest.burrow_agent_id,
             window=window,
             spend=spend,
             gauges=(
@@ -581,7 +577,7 @@ class BudgetGuard:
         )
         entry = self.store.record_run(
             resident=manifest.id,
-            agent_id=_agent_id(manifest),
+            agent_id=manifest.burrow_agent_id,
             kind=kind,
             run_id=run_id,
             ref=ref,
@@ -681,8 +677,3 @@ def knock_message(manifest: ResidentManifest, tripped: Gauge) -> str:
         f"{manifest.soul.name} has spent {_number(tripped.spent)} of {limit} "
         f"{tripped.name} today and is paused"
     )
-
-
-def _agent_id(manifest: ResidentManifest) -> str:
-    """Name the burrow identity this resident's spend is recorded under."""
-    return manifest.agent_id or f"steward:{manifest.id}"

@@ -22,6 +22,7 @@ exactly one line, and a second one is the bug this shape exists to make visible.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 from steward import events as ev
 
@@ -66,7 +67,9 @@ SUPERSEDED = "superseded"
 #: transition ends this way — the repeat-deny guard in
 #: :meth:`steward.transitions.approval.ApprovalTransitions.raise_request` — and it is
 #: named rather than folded into :data:`APPLIED` so that "a durable change with no fact"
-#: can never happen quietly anywhere else.
+#: can never happen quietly anywhere else. ``steward approval raise`` is the caller that
+#: looks at it: a person raising a request that was auto-denied on arrival is told so,
+#: rather than shown the knock's message as though somebody had been woken.
 ANSWERED = "answered"
 
 OUTCOMES = (APPLIED, REFUSED, REPLAYED, EXPIRED, SUPERSEDED, ANSWERED)
@@ -85,12 +88,19 @@ class Transition[RecordT]:
     without reaching into an emitter, and so a caller can name what was said without
     rebuilding it. It is **not** a delivery receipt: whether that event reached burrow or
     only the fallback log is the emitter's business, and steward never claims otherwise.
+
+    ``via`` is the inner transition this one delegated its fact to, set only by
+    :func:`carried`. It is how an outer act that borrowed somebody else's event can still
+    be asked *how that went*, which the outer outcome alone cannot say: a budget resume
+    always applies, and whether the approval it carried was recorded here or had already
+    been answered by a person is a different question with a different answer.
     """
 
     outcome: str
     record: RecordT | None = None
     fact: ev.Event | None = None
     reason: str = ""
+    via: "Transition[Any] | None" = None  # noqa: UP037 — self-reference inside the class body
 
     @property
     def applied(self) -> bool:
@@ -121,6 +131,19 @@ class Transition[RecordT]:
     def answered(self) -> bool:
         """True when steward recorded the answer itself and knocked on nobody."""
         return self.outcome == ANSWERED
+
+    @property
+    def wrote(self) -> bool:
+        """True when this call made a durable change, whether or not it said anything.
+
+        Not the same question as :attr:`applied`, and the difference is the trap this
+        property exists to close. Two outcomes write a row — an applied change and an
+        :data:`ANSWERED` one — so a caller asking "is there a record here" and reaching
+        for ``.applied`` would drop the auto-denied request that *was* written down and
+        *was* an ask. Ask this instead, and let ``.applied`` mean what it says: the change
+        happened and the village was told.
+        """
+        return self.outcome in (APPLIED, ANSWERED)
 
     @property
     def silent(self) -> bool:
@@ -179,8 +202,17 @@ def carried[RecordT, InnerT](
     happened here, so the outcome is :data:`APPLIED` whatever the inner act came to — but
     the fact is the inner one's, named rather than rebuilt, so the two can never disagree
     and nobody is tempted to emit a second copy.
+
+    The inner transition is kept whole in :attr:`Transition.via` rather than flattened to
+    its fact. "Applied, silently" is true of a resume the API already answered *and* of a
+    resume whose request a person had denied hours ago, and those are not the same event
+    for anybody reading a log — the first is one answer recorded once, the second is a
+    pause lifted against a standing no. The outer outcome cannot tell them apart, so the
+    inner one is carried along to be asked.
     """
-    return Transition(APPLIED, record=record, fact=inner.fact, reason=reason or inner.reason)
+    return Transition(
+        APPLIED, record=record, fact=inner.fact, reason=reason or inner.reason, via=inner
+    )
 
 
 def refused[RecordT](reason: str, record: RecordT | None = None) -> Transition[RecordT]:

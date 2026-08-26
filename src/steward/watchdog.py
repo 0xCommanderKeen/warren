@@ -669,6 +669,9 @@ class Watchdog:
         self.fallback = fallback if fallback is not None else ev.default_fallback_path()
         self.state = state if state is not None else SchedulerState.load(default_state_path())
         self.guard = guard if guard is not None else BudgetGuard(store, self.emitter)
+        #: The seam a give-up knocks through, built once from this watchdog's own store
+        #: and emitter, like every other owner of a transitions seam.
+        self.approvals = ApprovalTransitions(store=store, emitter=self.emitter)
         self.supervisors: tuple[ProcessSupervisor, ...] = (
             tuple(supervisors)
             if supervisors is not None
@@ -867,7 +870,11 @@ class Watchdog:
         if not self.store.give_up_on(resident.id, reason=summary, now=ev.utc_now_iso(now)):
             return  # Already asked. One knock per crash loop, not one per pass.
         log.error("%s: %s", resident.id, summary)
-        ApprovalTransitions(store=self.store, emitter=self.emitter).raise_request(
+        # A knock rather than a raise: this is steward's news about a resident, not the
+        # resident asking for anything, so the repeat-deny guard stays off. ``give_up_on``
+        # above already makes this one knock per crash loop, and a resident that fell over
+        # again a day after a denied restart is new news rather than a repeat.
+        self.approvals.knock(
             manifest=resident.manifest,
             request=NeedsHuman(
                 raw=summary,
@@ -886,9 +893,6 @@ class Watchdog:
             ),
             message=summary,
             now=now,
-            # ``give_up_on`` above already makes this one knock per crash loop. A resident
-            # that fell over again a day after a denied restart is new news, not a repeat.
-            repeat_guard=False,
         )
 
     # -- burying runs that vanished ----------------------------------------------------
