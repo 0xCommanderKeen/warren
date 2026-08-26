@@ -1090,6 +1090,16 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"approval request {request_id!r} expired at {record.expires_at} and denies "
                 f"by default; it can no longer be decided",
             )
+        if decided.refused:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "approval_decision_not_offered",
+                    "message": f"decision {body.decision!r} was not offered for this approval; "
+                    f"use one of: {', '.join(record.options)}",
+                    "offered": list(record.options),
+                },
+            )
         if decided.replayed:
             # The first decision won. A double-tapped notification changes nothing and
             # emitted nothing — it is told what was recorded.

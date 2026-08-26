@@ -677,6 +677,12 @@ def test_the_console_never_claims_an_effect_the_api_did_not_confirm() -> None:
         assert "await call(" in body, f"{name} must read an outcome back from steward"
 
 
+def test_the_console_only_renders_decisions_the_request_offered() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    for decision in ("approve", "deny", "edit"):
+        assert f'offered.has("{decision}")' in source
+
+
 def test_the_deploy_switch_is_on_now_that_the_endpoint_is_real() -> None:
     # It was off while POST /residents deployed nothing, because a checkbox that quietly
     # did nothing would be the exact lie this console exists not to tell. The endpoint
