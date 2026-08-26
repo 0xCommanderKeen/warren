@@ -751,6 +751,28 @@ def test_the_console_puts_text_in_as_text() -> None:
         assert hazard not in source, f"ui/app.js uses {hazard}"
 
 
+def test_the_element_builder_applies_css_custom_and_ordinary_properties() -> None:
+    """The style helper honours both halves of CSSStyleDeclaration's interface."""
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    element_builder = source.split("function el(")[1].split("\n}\n", 1)[0]
+
+    assert 'name.startsWith("--")' in element_builder
+    assert "node.style.setProperty(name, setting)" in element_builder
+    assert "node.style[name] = setting" in element_builder
+
+
+def test_resident_accents_reach_the_elements_whose_css_consumes_them() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    styles = (UI_DIR / "app.css").read_text(encoding="utf-8")
+    listing = source.split("async function viewResidents(")[1].split("\nfunction gauge(")[0]
+    detail = source.split("async function viewResident(")[1].split("\nfunction soulPanel(")[0]
+
+    assert '"--accent": resident.soul.accent' in listing
+    assert '"--accent": soul.accent' in detail
+    assert "a.row:hover { border-left-color: var(--accent, var(--ember)); }" in styles
+    assert "border-left: 3px solid var(--accent, var(--ember));" in styles
+
+
 def test_the_shell_is_valid_enough_to_boot() -> None:
     shell = (UI_DIR / "index.html").read_text(encoding="utf-8")
     for anchor in ('id="main"', 'id="nav"', 'id="gate"', 'id="ledger"', 'id="rail"'):

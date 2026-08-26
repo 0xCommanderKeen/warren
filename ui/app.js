@@ -202,7 +202,12 @@ function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (value === null || value === undefined || value === false) continue;
-    if (key === "style") Object.assign(node.style, value);
+    if (key === "style") {
+      for (const [name, setting] of Object.entries(value)) {
+        if (name.startsWith("--")) node.style.setProperty(name, setting);
+        else node.style[name] = setting;
+      }
+    }
     else if (key === "on") for (const [type, fn] of Object.entries(value)) node.addEventListener(type, fn);
     else if (key === "class") node.className = value;
     else node.setAttribute(key, value === true ? "" : String(value));
