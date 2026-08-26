@@ -19,6 +19,7 @@ from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
 from steward.skills import SkillLibrary, library_for
 from steward.store import Store
+from steward.transitions.approval import ApprovalTransitions
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -401,8 +402,10 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
     (parsed,) = approvals.extract_requests(
         '<needs-human action="send_email">{"to": "anna@example.com"}</needs-human>'
     )
-    record = approvals.raise_request(
-        store, sink, manifest=resident.manifest, request=parsed, now=NOW
+    record = (
+        ApprovalTransitions(store=store, emitter=sink)
+        .raise_request(manifest=resident.manifest, request=parsed, now=NOW)
+        .require()
     )
     store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
@@ -892,7 +895,7 @@ def test_a_harvest_that_raises_still_closes_the_task(
     def boom(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("the approvals store is on fire")
 
-    monkeypatch.setattr(approvals, "harvest", boom)
+    monkeypatch.setattr(ApprovalTransitions, "harvest", boom)
     (report,) = make_dispatcher(runner=runner).dispatch(NOW).reports
     assert report.done, "the task is still closed despite the raising hook"
     assert types(sink) == ["task_claimed", "task_done"]

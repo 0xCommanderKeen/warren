@@ -31,7 +31,6 @@ from steward.approvals import (
     decisions_preamble,
     parse_duration,
     parse_options,
-    raise_request,
     redact_decision,
 )
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
@@ -87,6 +86,7 @@ from steward.store import (
     Store,
     default_db_path,
 )
+from steward.transitions.approval import ApprovalTransitions
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
@@ -1245,8 +1245,10 @@ def approval_raise(  # noqa: PLR0913, PLR0917 — click passes one parameter per
         sys.exit(EXIT_INVALID)
 
     with _open_store(db) as store:
-        record = raise_request(
-            store, ev.EventEmitter.from_env(), manifest=resident.manifest, request=request
+        record = (
+            ApprovalTransitions(store=store, emitter=ev.EventEmitter.from_env())
+            .raise_request(manifest=resident.manifest, request=request)
+            .require()
         )
     click.secho(record.message, fg="yellow")
     click.echo(record.request_id)

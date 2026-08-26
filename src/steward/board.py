@@ -54,7 +54,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
-from steward import approvals
+from steward import approvals as ap
 from steward import delegation as dg
 from steward import events as ev
 from steward.manifest import (
@@ -105,6 +105,8 @@ from steward.store import (
     Store,
     new_id,
 )
+from steward.transitions.approval import ApprovalTransitions
+from steward.transitions.task import LEASE_EXPIRED, TaskTransitions
 
 __all__ = [
     "LEASE_EXPIRED",
@@ -121,9 +123,6 @@ __all__ = [
 ]
 
 log = logging.getLogger("steward.board")
-
-#: The reason a ``task_failed`` carries when nobody finished what they claimed.
-LEASE_EXPIRED = "lease_expired"
 
 
 def _utcnow() -> datetime:
@@ -523,6 +522,21 @@ class Dispatcher:
         )
 
     @property
+    def tasks(self) -> TaskTransitions:
+        """The seam every board write crosses, paired with the fact that announces it.
+
+        Built per access from this dispatcher's own store and emitter, exactly as
+        :attr:`delegator` is, so a dispatcher that was handed a mock emitter announces
+        into that mock and nowhere else.
+        """
+        return TaskTransitions(store=self.store, emitter=self.emitter, project_of=self._project_of)
+
+    @property
+    def approvals(self) -> ApprovalTransitions:
+        """The seam a session's escalations and the deadline sweep both cross."""
+        return ApprovalTransitions(store=self.store, emitter=self.emitter)
+
+    @property
     def delegator(self) -> dg.Delegator:
         """The arbiter this dispatch validates handoffs through.
 
@@ -545,32 +559,7 @@ class Dispatcher:
         under the agent id of the resident that dropped it. A task silently returning to
         ``open`` would let the village show unattended work as work in progress.
         """
-        expired = self.store.expire_leases(ev.utc_now_iso(now))
-        for job in expired:
-            claimant = job.claimant or ev.API_AGENT_ID
-            log.warning(
-                "task %s (%s): lease held by %s expired at %s — back on the board",
-                job.task_id,
-                job.title,
-                claimant,
-                job.lease_expires_at,
-            )
-            # No ``run_id``: this is the board mourning a claim, not a session reporting
-            # back, and steward does not know which session dropped it. Naming one would
-            # answer that session's run registry row — the very silence the registry is
-            # there to catch — and, worse, the retry claimed moments later in this same
-            # dispatch pass is the row a guess would land on (steward #39).
-            self.emitter.emit(
-                ev.task_failed_event(
-                    task_id=job.task_id,
-                    title=job.title,
-                    claimant=claimant,
-                    project=self._project_of(claimant),
-                    reason=LEASE_EXPIRED,
-                    parent_task_id=job.parent_task_id,
-                )
-            )
-        return expired
+        return self.tasks.expire_leases(now=now)
 
     def _project_of(self, claimant: str) -> str:
         """Name the burrow project a claimant belongs to, falling back to steward's own."""
@@ -592,7 +581,7 @@ class Dispatcher:
         The preamble is rendered from what *this* call claimed.
         """
         records = self.store.claim_undelivered_decisions(resident_id)
-        return approvals.decisions_preamble(records)
+        return ap.decisions_preamble(records)
 
     def harvest(self, manifest: ResidentManifest, output: str) -> list[ApprovalRecord]:
         """Turn what a finished session wrote into requests and handoffs.
@@ -656,18 +645,17 @@ class Dispatcher:
         or another resident won the race — and does not distinguish them here, because
         from the caller's side they are the same fact: this resident has no work.
         """
-        board = resident.manifest.board
-        lease_until = ev.utc_now_iso(now + timedelta(seconds=board.lease_s))
-        job = self.store.claim_next_job(
+        claimed = self.tasks.claim(
             claimant=resident.agent_id,
+            project=resident.project,
             skills=claimable_skills(resident.manifest, self.library),
-            lease_expires_at=lease_until,
-            now=ev.utc_now_iso(now),
+            now=now,
+            lease_s=resident.manifest.board.lease_s,
         )
+        job = claimed.record
         if job is None:
             return None
         log.info("%s claimed task %s (%s)", resident.id, job.task_id, job.title)
-        self._announce_claim(resident, job)
         return job
 
     def take_delivery(self, resident: Resident, now: datetime) -> JobRecord | None:
@@ -679,12 +667,14 @@ class Dispatcher:
         board already knows how to do to a task applies to it unchanged — including the
         lease sweep that puts it back if the receiver dies mid-session.
         """
-        job = self.store.claim_next_delegated(
+        taken = self.tasks.take_delivery(
             assignee=resident.id,
             claimant=resident.agent_id,
-            lease_expires_at=ev.utc_now_iso(now + timedelta(seconds=self.delegation_lease_s)),
-            now=ev.utc_now_iso(now),
+            project=resident.project,
+            now=now,
+            lease_s=self.delegation_lease_s,
         )
+        job = taken.record
         if job is None:
             return None
         log.info(
@@ -694,20 +684,7 @@ class Dispatcher:
             job.title,
             job.delegated_by,
         )
-        self._announce_claim(resident, job)
         return job
-
-    def _announce_claim(self, resident: Resident, job: JobRecord) -> None:
-        """Tell the village who holds this work now, delegated or claimed."""
-        self.emitter.emit(
-            ev.task_claimed_event(
-                task_id=job.task_id,
-                title=job.title,
-                claimant=resident.agent_id,
-                project=resident.project,
-                parent_task_id=job.parent_task_id,
-            )
-        )
 
     # -- working ----------------------------------------------------------------------
 
@@ -724,9 +701,7 @@ class Dispatcher:
         if not output:
             return []
         try:
-            return approvals.harvest(
-                self.store, self.emitter, manifest=manifest, output=output, now=now
-            )
+            return self.approvals.harvest(manifest=manifest, output=output, now=now)
         except Exception as exc:  # noqa: BLE001 — a failed escalation is not a failed task
             log.warning("%s: could not record an approval from this session: %s", manifest.id, exc)
             return []
@@ -883,68 +858,38 @@ class Dispatcher:
         tell this close from the close of an attempt that came before (steward #39). It is
         required rather than optional so a future caller cannot quietly drop the name.
         """
-        status = STATUS_DONE if result.ok else STATUS_FAILED
-        reason = None if result.ok else f"{result.outcome}: {result.summary()}"
-        closed = self.store.finish_job(
-            job.task_id,
-            status=status,
+        closed = self.tasks.finish(
+            job,
             claimant=resident.agent_id,
-            outcome=str(result.outcome),
-            reason=reason,
-            artifacts=result.artifacts,
-            lease=job.claimed_at,
-            now=ev.utc_now_iso(moment),
+            project=resident.project,
+            result=result,
+            run_id=run_id,
+            now=moment,
         )
-        if closed is None:
+        if closed.superseded:
             # The lease died while the session ran and the task is somebody else's now.
-            # Reporting it done would overwrite a claim this resident no longer holds.
-            log.warning(
-                "%s finished task %s but no longer held the claim — the board keeps its own record",
-                resident.id,
-                job.task_id,
-            )
+            # The transition wrote nothing and said nothing; the board keeps its own record.
+            # Branching on the *outcome* rather than on a missing record on purpose: a
+            # superseded close is allowed to carry the row that won, and reading "no record"
+            # as "it worked" would report a refused close as a finished task.
             return BoardReport(
                 resident_id=resident.id,
                 claimant=resident.agent_id,
-                task=job,
+                task=closed.record or job,
                 status=STATUS_FAILED,
                 result=result,
-                reason="lease lost while the session was running",
+                reason=closed.reason,
                 raised=tuple(raised),
                 handed_over=tuple(handed),
             )
-
-        if result.ok:
-            self.emitter.emit(
-                ev.task_done_event(
-                    task_id=job.task_id,
-                    title=job.title,
-                    claimant=resident.agent_id,
-                    project=resident.project,
-                    artifacts=result.artifacts,
-                    parent_task_id=job.parent_task_id,
-                    run_id=run_id,
-                )
-            )
-        else:
-            self.emitter.emit(
-                ev.task_failed_event(
-                    task_id=job.task_id,
-                    title=job.title,
-                    claimant=resident.agent_id,
-                    project=resident.project,
-                    reason=reason or str(result.outcome),
-                    parent_task_id=job.parent_task_id,
-                    run_id=run_id,
-                )
-            )
+        recorded = closed.require()
         return BoardReport(
             resident_id=resident.id,
             claimant=resident.agent_id,
-            task=closed,
-            status=status,
+            task=recorded,
+            status=recorded.status,
             result=result,
-            reason=reason,
+            reason=closed.reason or None,
             artifacts=result.artifacts,
             raised=tuple(raised),
             handed_over=tuple(handed),
@@ -977,7 +922,7 @@ class Dispatcher:
         if self.dry_run:
             return self._rehearse(moment)
         reopened = self.expire_leases(moment)
-        expired_approvals = approvals.expire(self.store, self.emitter, moment)
+        expired_approvals = self.approvals.expire(moment)
 
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))

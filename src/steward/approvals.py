@@ -19,6 +19,19 @@ paths, both documented in ``docs/approvals.md``, both landing in the same store 
 2. **``steward approval raise``** — a local, token-free CLI a session with shell access
    calls directly, for work that wants the request registered before the turn ends.
 
+**The pairings live next door.** Raising a request, deciding one, and denying an expired
+one by default are :mod:`steward.transitions.approval` — each is a durable row plus the
+burrow fact that belongs to it, and coordinating those two is not this module's job. What
+stays here is the grammar and the rendering: what a block may say, what a duration parses
+to, what a decision reads like when it is handed back to the resident that asked. Nothing
+here emits.
+
+The one durable write that stayed is :func:`deliver_decisions`, and it stayed because it
+is not a pairing: telling a resident what a human decided marks a row and announces
+nothing, since the village already heard the answer when it was given. Emitting a second
+fact days later, when the resident finally woke up, would put two answers in the log for
+one question.
+
 **Park, do not block.** A session that raises an approval finishes its turn and stops.
 Holding a ``claude -p`` turn open waiting for a human is expensive and fragile, and a
 resident sitting on a paused session is not resting. The decision is delivered on the
@@ -26,13 +39,14 @@ resident's *next* wake-up, injected into its preamble by :func:`decisions_preamb
 marked delivered exactly once. (A blocking path — a session that genuinely waits — is
 deferred; the store and the events already support it.)
 
-**Expiry is deny-by-default.** :func:`expire` runs on every tick and every dispatch:
-past ``expires_at``, the request is resolved as ``deny`` with ``decided_by: "expiry"``,
-``needs_human_resolved`` is emitted, and the gated action never ran. A human going to
-sleep must never be the reason something irreversible happened.
+**Expiry is deny-by-default.** :meth:`steward.transitions.approval.ApprovalTransitions.expire`
+runs on every tick and every dispatch: past ``expires_at``, the request is resolved as
+``deny`` with ``decided_by: "expiry"``, ``needs_human_resolved`` is emitted, and the gated
+action never ran. A human going to sleep must never be the reason something irreversible
+happened.
 
 **A deny answers for a while.** The decisions preamble tells a resident that a deny means
-"do not ask again this session"; :func:`raise_request` is the enforcement. When the same
+"do not ask again this session"; the raise transition is the enforcement. When the same
 resident raises the same action again within :data:`DEFAULT_REPEAT_DENY_WINDOW_H` hours of
 being told no, the ask is recorded as an auto-deny (``decided_by: "repeat"``) and nobody's
 phone buzzes. A looping resident cannot knock on every wake-up. The guard answers only for
@@ -55,13 +69,12 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from steward import events as ev
-from steward import prompt
 from steward.manifest import ResidentManifest, redact_mapping, redact_secrets
-from steward.store import APPROVAL_DECISIONS, DECIDED_BY_REPEAT, ApprovalRecord, Store
+from steward.store import APPROVAL_DECISIONS, ApprovalRecord, Store
 
 __all__ = [
     "BLOCK_CLOSE",
@@ -77,12 +90,9 @@ __all__ = [
     "NeedsHuman",
     "decisions_preamble",
     "deliver_decisions",
-    "expire",
     "extract_requests",
-    "harvest",
     "human_message",
     "parse_duration",
-    "raise_request",
     "redact_decision",
     "repeat_deny_window_s",
 ]
@@ -324,7 +334,7 @@ def extract_requests(output: str) -> list[NeedsHuman]:
 
 
 # --------------------------------------------------------------------------------------
-# raising, delivering, expiring
+# the words: what a knock says, how long a deny answers for, what a resident is told
 # --------------------------------------------------------------------------------------
 
 
@@ -365,169 +375,6 @@ def repeat_deny_window_s(env: Mapping[str, str] | None = None) -> int:
     return hours * 3600
 
 
-def _denied_recently(store: Store, resident: str, action: str, moment: datetime) -> bool:
-    """Report whether this resident has already been told no about this action, recently.
-
-    The fingerprint is deliberately coarse: ``(resident, action)`` and nothing else. A
-    request's ``detail`` is free-form, un-normalized JSON (:func:`parse_detail`), so two
-    asks that differ only in a timestamp inside it would read as different questions to
-    any comparison and the guard would catch nothing. Coarse means a resident denied
-    ``send_email`` to one address cannot ask about a *different* address for the rest of
-    the window either — the trade steward makes on purpose, because the failure it exists
-    to stop is a resident knocking on every wake-up.
-
-    That trade is only payable when the action names what the resident asked for. For the
-    slugs in :data:`REPEAT_GUARD_EXEMPT_ACTIONS` it does not: they are catch-alls steward
-    assigns, and every ask that lands under one is a *different* question wearing the same
-    name. Those are never answered by an earlier deny.
-    """
-    if action in REPEAT_GUARD_EXEMPT_ACTIONS:
-        return False
-    window_s = repeat_deny_window_s()
-    if window_s <= 0:
-        return False
-    since = ev.utc_now_iso(moment - timedelta(seconds=window_s))
-    return store.recent_denials(resident, action, since) > 0
-
-
-def raise_request(  # noqa: PLR0913 — the collaborators plus the request, all keyword-only
-    store: Store,
-    emitter: ev.Emitter,
-    *,
-    manifest: ResidentManifest,
-    request: NeedsHuman,
-    message: str | None = None,
-    now: datetime | None = None,
-    request_id: str | None = None,
-    repeat_guard: bool = True,
-) -> ApprovalRecord:
-    """Persist one request and knock. Returns the record the human will answer.
-
-    A request that could not be parsed is persisted too, under
-    :data:`UNREADABLE_ACTION`, with the raw block and the complaint in its detail. That
-    is the whole reason this function takes a :class:`NeedsHuman` rather than an action
-    string: an escalation steward failed to read still has to reach a person.
-
-    ``message`` overrides the derived one-liner, and only steward itself passes it. A
-    *session* never gets to write its own knock — :func:`human_message` derives that from
-    the action, so the message can never disagree with what the decision is recorded
-    against — but steward raising a request on a resident's behalf knows something the
-    action name cannot carry: :mod:`steward.budgets` names the number that tripped a cap,
-    and :mod:`steward.delegation` says "steward refused this handoff" in words the action
-    slug has no room for.
-
-    ``repeat_guard`` is on for everything a *session* chose to ask, and off for the two
-    knocks steward raises about a resident rather than for it: a budget pause
-    (:mod:`steward.budgets`) and a watchdog give-up (:mod:`steward.watchdog`) are
-    one-per-condition by their own conditional insert, they never expire, and the deny a
-    human gives them is the answer to a *different* question — turning that deny into a
-    reason to swallow the next pause would hide the thing steward most needs to say. The
-    same reasoning exempts the catch-all actions steward assigns rather than a session
-    choosing them (:data:`REPEAT_GUARD_EXEMPT_ACTIONS`), whichever way ``repeat_guard`` is
-    set.
-    """
-    moment = now or datetime.now(UTC)
-    agent_id = manifest.agent_id or f"steward:{manifest.id}"
-    project = manifest.project or manifest.id
-    detail: dict[str, Any] = dict(request.detail)
-    if request.problem is not None:
-        log.warning(
-            "%s: could not read a needs-human block — %s; raising it anyway so somebody sees it",
-            manifest.id,
-            request.problem,
-        )
-        detail = {"problem": request.problem, "raw": request.raw[:DETAIL_MAX_CHARS]}
-
-    repeat = repeat_guard and _denied_recently(store, manifest.id, request.action, moment)
-    record = store.create_approval_request(
-        agent_id=agent_id,
-        project=project,
-        action=request.action,
-        message=message or human_message(manifest, request.action),
-        resident=manifest.id,
-        detail=detail,
-        options=request.options,
-        expires_at=request.expires_at(moment),
-        request_id=request_id,
-        denied_by=DECIDED_BY_REPEAT if repeat else None,
-    )
-    if repeat:
-        log.info(
-            "%s: %s was already denied within the last %d h — auto-denied as a repeat, "
-            "nobody knocked",
-            manifest.id,
-            request.action,
-            repeat_deny_window_s() // 3600,
-        )
-        return record
-    emitter.emit(
-        ev.needs_human_event(
-            message=record.message,
-            request_id=record.request_id,
-            action=record.action,
-            agent_id=record.agent_id,
-            project=record.project,
-            detail=record.detail,
-            options=record.options,
-            expires_at=record.expires_at,
-        )
-    )
-    return record
-
-
-def harvest(
-    store: Store,
-    emitter: ev.Emitter,
-    *,
-    manifest: ResidentManifest,
-    output: str,
-    now: datetime | None = None,
-) -> list[ApprovalRecord]:
-    """Turn every ``<needs-human>`` block in a finished session's output into a request.
-
-    The one place a session's output becomes an approval, called by both session types —
-    the scheduler's routines and the board's claimed tasks — so "how does a resident
-    ask?" has a single answer that does not depend on why it woke up.
-
-    Only the session's machine-read region is scanned (:func:`steward.prompt.harvestable`),
-    and quoted or fenced parts of it are stripped first, so a ``<needs-human>`` block a
-    session quoted back from an attacker-supplied job or task detail is not mistaken for the
-    session actually asking (steward #62).
-    """
-    return [
-        raise_request(store, emitter, manifest=manifest, request=request, now=now)
-        for request in extract_requests(prompt.harvestable(output))
-    ]
-
-
-def expire(store: Store, emitter: ev.Emitter, now: datetime | None = None) -> list[ApprovalRecord]:
-    """Deny every request whose deadline has passed, and close the loop in the log.
-
-    Called on every scheduler tick and every board dispatch, which is what makes the
-    deadline real rather than decorative: nothing sweeps a queue that nobody visits.
-    """
-    moment = ev.utc_now_iso(now or datetime.now(UTC))
-    expired = store.expire_approvals(moment)
-    for record in expired:
-        log.info(
-            "approval %s (%s) expired at %s — denied by default",
-            record.request_id,
-            record.action,
-            record.expires_at,
-        )
-        emitter.emit(
-            ev.needs_human_resolved_event(
-                request_id=record.request_id,
-                decision="deny",
-                action=record.action,
-                agent_id=record.agent_id,
-                project=record.project,
-                decided_by=record.decided_by or "expiry",
-            )
-        )
-    return expired
-
-
 def _render_decision(record: ApprovalRecord) -> str:
     line = f"- {record.action}: {record.decision}"
     if record.decided_by:
@@ -544,7 +391,7 @@ def redact_decision(record: ApprovalRecord) -> ApprovalRecord:
     """Return ``record`` with every string a model wrote scrubbed of inline secrets.
 
     A request's ``message`` and ``detail`` are written by a resident at runtime and stored
-    verbatim (:func:`raise_request`); the ``edit`` is written by whoever answered. No
+    verbatim by the raise transition; the ``edit`` is written by whoever answered. No
     validator ever scanned any of them — the manifest scanners guard what enters the repo,
     not what a session types — so anything that renders a decision *outside* the session
     that asked (``steward show``, a report pasted into an issue) must scrub it first, the

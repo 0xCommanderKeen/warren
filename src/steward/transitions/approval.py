@@ -1,0 +1,300 @@
+"""Approval transitions: a knock at the door, an answer, and a deadline that answers itself.
+
+Four acts, and the safety properties of :mod:`steward.approvals` live in the branching
+here rather than in each caller:
+
+- **deny by default** — :meth:`expire` is what makes ``expires_at`` real, and
+  :meth:`decide` refuses a request whose deadline has already passed, so a click a minute
+  late cannot slip a gated action through ahead of the sweep;
+- **first decision wins** — a replay changes nothing, returns what was recorded, and
+  emits nothing;
+- **a deny answers for a while** — a repeat inside the window is recorded as an auto-deny
+  and *nobody's phone buzzes*, which is the one durable write in all of steward that
+  deliberately has no fact beside it;
+- **a session that tried to ask and failed still reaches a person** — an unreadable block
+  is raised like any other request, carrying its complaint.
+
+The grammar stays in :mod:`steward.approvals`: what a ``<needs-human>`` block may say,
+what a duration parses to, how a decision reads back to a resident. This module never
+parses and never renders. It writes, and it says what it wrote.
+"""
+
+import logging
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from steward import events as ev
+from steward import prompt
+from steward.approvals import (
+    DETAIL_MAX_CHARS,
+    REPEAT_GUARD_EXEMPT_ACTIONS,
+    NeedsHuman,
+    extract_requests,
+    human_message,
+    repeat_deny_window_s,
+)
+from steward.manifest import ResidentManifest
+from steward.store import DECIDED_BY_REPEAT, ApprovalRecord, Store
+from steward.transitions.outcome import (
+    Transition,
+    answered,
+    applied,
+    expired,
+    refused,
+    replayed,
+)
+
+__all__ = ["ALREADY_DECIDED", "PAST_DEADLINE", "UNKNOWN_REQUEST", "ApprovalTransitions"]
+
+log = logging.getLogger("steward.transitions.approval")
+
+#: Why a decision was refused outright: there is no such request to decide.
+UNKNOWN_REQUEST = "no such approval request"
+
+#: Why a decision was refused although the request exists: its deadline has passed and
+#: deny-by-default keeps the last word, whatever a late click says.
+PAST_DEADLINE = "this request expired and denies by default"
+
+#: Why a decision changed nothing: somebody already answered, and the first answer wins.
+ALREADY_DECIDED = "this request was already decided"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalTransitions:
+    """Approval requests, decisions and deadlines, each with the fact that closes it."""
+
+    store: Store
+    emitter: ev.Emitter
+
+    # -- raising -------------------------------------------------------------------------
+
+    def raise_request(  # noqa: PLR0913 — the request plus the knobs steward's own callers need
+        self,
+        *,
+        manifest: ResidentManifest,
+        request: NeedsHuman,
+        message: str | None = None,
+        now: datetime | None = None,
+        request_id: str | None = None,
+        repeat_guard: bool = True,
+    ) -> Transition[ApprovalRecord]:
+        """Persist one request and knock. The record is the thing a human will answer.
+
+        A request that could not be parsed is persisted too, under
+        :data:`steward.approvals.UNREADABLE_ACTION`, with the raw block and the complaint
+        in its detail. That is why this takes a :class:`steward.approvals.NeedsHuman`
+        rather than an action string: an escalation steward failed to read still has to
+        reach a person.
+
+        ``message`` overrides the derived one-liner, and only steward itself passes it. A
+        *session* never gets to write its own knock — :func:`steward.approvals.human_message`
+        derives that from the action, so the message can never disagree with what the
+        decision is recorded against — but steward raising a request on a resident's
+        behalf knows something the action name cannot carry: a budget pause names the
+        number that tripped a cap, and a refused handoff says "steward refused this" in
+        words the action slug has no room for.
+
+        ``repeat_guard`` is on for everything a *session* chose to ask, and off for the
+        knocks steward raises about a resident rather than for it: a budget pause and a
+        watchdog give-up are one-per-condition by their own conditional insert, they never
+        expire, and the deny a human gives them answers a *different* question.
+
+        Two outcomes, and the second is the interesting one. **applied** is a pending row
+        and a ``needs_human``. **answered** is the repeat-deny guard: the row is written
+        already resolved, so the ledger still shows the resident asked and what it was
+        told and the resident still hears the answer in its next preamble — but nothing is
+        emitted, because a looping resident must not be able to knock on every wake-up.
+        """
+        moment = now or datetime.now(UTC)
+        agent_id = manifest.agent_id or f"steward:{manifest.id}"
+        project = manifest.project or manifest.id
+        detail: dict[str, Any] = dict(request.detail)
+        if request.problem is not None:
+            log.warning(
+                "%s: could not read a needs-human block — %s; raising it anyway so "
+                "somebody sees it",
+                manifest.id,
+                request.problem,
+            )
+            detail = {"problem": request.problem, "raw": request.raw[:DETAIL_MAX_CHARS]}
+
+        repeat = repeat_guard and self._denied_recently(manifest.id, request.action, moment)
+        record = self.store.create_approval_request(
+            agent_id=agent_id,
+            project=project,
+            action=request.action,
+            message=message or human_message(manifest, request.action),
+            resident=manifest.id,
+            detail=detail,
+            options=request.options,
+            expires_at=request.expires_at(moment),
+            request_id=request_id,
+            denied_by=DECIDED_BY_REPEAT if repeat else None,
+        )
+        if repeat:
+            log.info(
+                "%s: %s was already denied within the last %d h — auto-denied as a "
+                "repeat, nobody knocked",
+                manifest.id,
+                request.action,
+                repeat_deny_window_s() // 3600,
+            )
+            return answered(record, "already denied inside the repeat window")
+        return applied(
+            self.emitter,
+            record,
+            ev.needs_human_event(
+                message=record.message,
+                request_id=record.request_id,
+                action=record.action,
+                agent_id=record.agent_id,
+                project=record.project,
+                detail=record.detail,
+                options=record.options,
+                expires_at=record.expires_at,
+            ),
+        )
+
+    def _denied_recently(self, resident: str, action: str, moment: datetime) -> bool:
+        """Report whether this resident was already told no about this action, recently.
+
+        The fingerprint is deliberately coarse: ``(resident, action)`` and nothing else. A
+        request's ``detail`` is free-form, un-normalized JSON, so two asks that differ only
+        in a timestamp inside it would read as different questions to any comparison and
+        the guard would catch nothing. Coarse means a resident denied ``send_email`` to one
+        address cannot ask about a *different* address for the rest of the window either —
+        the trade steward makes on purpose, because the failure it exists to stop is a
+        resident knocking on every wake-up.
+
+        That trade is only payable when the action names what the resident asked for. For
+        the slugs in :data:`steward.approvals.REPEAT_GUARD_EXEMPT_ACTIONS` it does not:
+        they are catch-alls steward assigns, and every ask that lands under one is a
+        *different* question wearing the same name.
+        """
+        if action in REPEAT_GUARD_EXEMPT_ACTIONS:
+            return False
+        window_s = repeat_deny_window_s()
+        if window_s <= 0:
+            return False
+        since = ev.utc_now_iso(moment - timedelta(seconds=window_s))
+        return self.store.recent_denials(resident, action, since) > 0
+
+    def harvest(
+        self,
+        *,
+        manifest: ResidentManifest,
+        output: str,
+        now: datetime | None = None,
+    ) -> list[ApprovalRecord]:
+        """Turn every ``<needs-human>`` block a finished session wrote into a request.
+
+        The one place a session's output becomes an approval, called by both session types
+        — the scheduler's routines and the board's claimed tasks — so "how does a resident
+        ask?" has a single answer that does not depend on why it woke up.
+
+        Only the session's machine-read region is scanned
+        (:func:`steward.prompt.harvestable`), and quoted or fenced parts of it are stripped
+        first, so a ``<needs-human>`` block a session quoted back from an attacker-supplied
+        job or task detail is not mistaken for the session actually asking (steward #62).
+
+        Returns the records, raised and auto-denied alike: the caller is reporting what
+        this session asked for, and an ask steward answered itself was still an ask.
+        """
+        raised: list[ApprovalRecord] = []
+        for request in extract_requests(prompt.harvestable(output)):
+            transition = self.raise_request(manifest=manifest, request=request, now=now)
+            if transition.record is not None:
+                raised.append(transition.record)
+        return raised
+
+    # -- deciding ------------------------------------------------------------------------
+
+    def decide(
+        self,
+        request_id: str,
+        decision: str,
+        *,
+        decided_by: str = "api",
+        edit: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> Transition[ApprovalRecord]:
+        """Record one decision and close the loop in the log. The first decision wins.
+
+        Four outcomes, and only the first says anything:
+
+        - **applied** — this call recorded the answer, and ``needs_human_resolved`` was
+          emitted under the *resident's* identity, because the villager burrow has to walk
+          away from your door is the one who knocked;
+        - **refused** — there is no such request, and ``record`` is ``None``;
+        - **expired** — the request exists and is *still pending*, which after a refused
+          conditional write can only mean its deadline had passed. Deny-by-default has the
+          last word and the sweep is what records it, so nothing is written or said here;
+        - **replayed** — somebody already answered. A double-tapped notification changes
+          nothing, reads back what was recorded, and emits nothing new.
+
+        The expired and replayed branches are told apart by the row's own status rather
+        than by re-reading the clock, which is what makes them stable under a sweep landing
+        between the write and the read.
+        """
+        record, recorded = self.store.decide(
+            request_id,
+            decision,
+            decided_by=decided_by,
+            edit=edit,
+            now=ev.utc_now_iso(now) if now is not None else None,
+        )
+        if record is None:
+            return refused(UNKNOWN_REQUEST)
+        if recorded:
+            return applied(
+                self.emitter,
+                record,
+                ev.needs_human_resolved_event(
+                    request_id=record.request_id,
+                    decision=decision,
+                    action=record.action,
+                    agent_id=record.agent_id,
+                    project=record.project,
+                    decided_by=decided_by,
+                ),
+            )
+        if record.pending:
+            return expired(record, PAST_DEADLINE)
+        return replayed(record, ALREADY_DECIDED)
+
+    # -- the deadline --------------------------------------------------------------------
+
+    def expire(self, now: datetime | None = None) -> list[ApprovalRecord]:
+        """Deny every request whose deadline has passed, and close the loop in the log.
+
+        Called on every board dispatch — which the scheduler tick, ``steward board
+        dispatch`` and every watchdog pass all reach — and that is what makes the deadline
+        real rather than decorative: nothing sweeps a queue that nobody visits.
+
+        Every record returned had both its durable deny and its fact. A request a human
+        answered in the same instant is simply absent: their answer won the store's
+        conditional write, so this call wrote nothing about it and says nothing about it.
+        """
+        expired_records = self.store.expire_approvals(ev.utc_now_iso(now or datetime.now(UTC)))
+        for record in expired_records:
+            log.info(
+                "approval %s (%s) expired at %s — denied by default",
+                record.request_id,
+                record.action,
+                record.expires_at,
+            )
+            applied(
+                self.emitter,
+                record,
+                ev.needs_human_resolved_event(
+                    request_id=record.request_id,
+                    decision="deny",
+                    action=record.action,
+                    agent_id=record.agent_id,
+                    project=record.project,
+                    decided_by=record.decided_by or "expiry",
+                ),
+            )
+        return expired_records

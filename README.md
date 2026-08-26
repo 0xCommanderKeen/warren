@@ -61,6 +61,19 @@ It owns the safety-critical provision → context → prompt → runner → comp
 owns claims, leases, and task events; production and mock runners remain interchangeable
 at the runner seam.
 
+**Named durable transitions** (#123). Every durable state change and the burrow fact that
+says it happened are coordinated in one place, per domain: posting, claiming, finishing,
+failing and lease expiry in `transitions/task.py`; raising, deciding and expiring in
+`transitions/approval.py`; accepted handoffs in `transitions/delegation.py`; pause and
+resume in `transitions/budget.py`. Callers ask for the domain act and get its durable
+result — they no longer interpret a `rowcount`, choose an identity, or decide whether to
+emit. The invariant is one sentence: a fact reaches the emitter only on the branch where
+the write actually won, and exactly once. Refusals, replays, expiries and lost races write
+nothing and say nothing; the one deliberate exception, a repeat auto-deny, is named as its
+own outcome so it cannot happen anywhere by accident. Persistence and delivery stay two
+systems — there is no bus, no outbox, and no callback out of the store. The full matrix is
+`docs/transitions.md`.
+
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
 markdown entry into the location its own manifest declares, and the next session opens
 with that entry. The resident writes it; steward only asks for it, reads it back, and

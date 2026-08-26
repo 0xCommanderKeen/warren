@@ -1,4 +1,12 @@
-"""Structured approvals: the grammar a session writes, and what steward does with it."""
+"""Structured approvals: the grammar a session writes, and what steward does with it.
+
+The grammar and the rendering are :mod:`steward.approvals`' own. Raising, deciding and
+expiring are :mod:`steward.transitions.approval`'s (steward #123), so the tests below that
+exercise those drive them through :func:`seam` — the same interface every caller in the
+codebase now uses. The seam's own contract, outcome by outcome, is in
+``tests/test_transitions.py``; what is proved here is the approval *behaviour* that
+contract has to keep true.
+"""
 
 import threading
 from collections.abc import Iterator
@@ -13,6 +21,7 @@ from steward import events as ev
 from steward import prompt as p
 from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
 from steward.store import ApprovalRecord, Store
+from steward.transitions.approval import ApprovalTransitions
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -31,6 +40,11 @@ def sink() -> ev.NullEmitter:
 @pytest.fixture
 def manifest(write_resident: ResidentWriter) -> ResidentManifest:
     return load_manifest(write_resident()).manifest
+
+
+def seam(store: Store, sink: ev.NullEmitter) -> ApprovalTransitions:
+    """Build the transition these tests raise, decide and expire through (steward #123)."""
+    return ApprovalTransitions(store=store, emitter=sink)
 
 
 def raw_block(attrs: str = 'action="send_email"', body: str = '{"to": "a@example.com"}') -> str:
@@ -158,7 +172,7 @@ def test_raising_persists_the_request_and_knocks(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block('action="send_email" expires-in="1h"'))
-    record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
+    record = seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
 
     assert record.pending
     assert record.resident == manifest.id
@@ -181,7 +195,7 @@ def test_a_malformed_ask_still_reaches_a_person(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     """A session that tried to escalate and failed must not look like one that did not."""
-    raised = ap.harvest(store, sink, manifest=manifest, output=block('expires-in="4h"'))
+    raised = seam(store, sink).harvest(manifest=manifest, output=block('expires-in="4h"'))
     (record,) = raised
     assert record.action == ap.UNREADABLE_ACTION
     assert "needs an action" in str(record.detail["problem"])
@@ -192,7 +206,7 @@ def test_a_malformed_ask_still_reaches_a_person(
 def test_harvesting_a_session_with_nothing_to_ask_creates_nothing(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
-    assert ap.harvest(store, sink, manifest=manifest, output="all quiet") == []
+    assert seam(store, sink).harvest(manifest=manifest, output="all quiet") == []
     assert store.approvals() == []
     assert sink.events == []
 
@@ -217,8 +231,10 @@ def ask(  # noqa: PLR0913 — the collaborators, plus every knob one of these te
 ) -> ApprovalRecord:
     """Raise one ordinary session-chosen request at a chosen moment."""
     (parsed,) = ap.extract_requests(block(f'action="{action}" expires-in="1h"'))
-    return ap.raise_request(
-        store, sink, manifest=manifest, request=parsed, now=at, repeat_guard=repeat_guard
+    return (
+        seam(store, sink)
+        .raise_request(manifest=manifest, request=parsed, now=at, repeat_guard=repeat_guard)
+        .require()
     )
 
 
@@ -250,7 +266,7 @@ def test_a_deny_by_expiry_silences_the_repeat_too(
 ) -> None:
     """Nobody answering in time is the same answer, to the resident, as a person saying no."""
     ask(store, sink, manifest, at=NOW)
-    ap.expire(store, sink, NOW + timedelta(hours=2))
+    seam(store, sink).expire(NOW + timedelta(hours=2))
     sink.events.clear()
 
     again = ask(store, sink, manifest, at=NOW + timedelta(hours=3))
@@ -333,13 +349,11 @@ def test_a_second_unreadable_escalation_still_reaches_a_person(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     """The catch-all action is one name over many questions, so no deny answers for it."""
-    ap.harvest(store, sink, manifest=manifest, output=block('expires-in="4h"'), now=NOW)
-    ap.expire(store, sink, NOW + timedelta(hours=5))
+    seam(store, sink).harvest(manifest=manifest, output=block('expires-in="4h"'), now=NOW)
+    seam(store, sink).expire(NOW + timedelta(hours=5))
     sink.events.clear()
 
-    (again,) = ap.harvest(
-        store,
-        sink,
+    (again,) = seam(store, sink).harvest(
         manifest=manifest,
         output=block('action="spend_money" expires-in="4h"', '{"to": '),
         now=NOW + timedelta(hours=6),
@@ -384,11 +398,11 @@ def test_expiry_denies_by_default_and_closes_the_loop_in_the_log(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block('action="spend_money" expires-in="1h"'))
-    record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
+    record = seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
     sink.events.clear()
 
     later = datetime(2026, 8, 24, 14, 0, tzinfo=UTC)
-    (expired,) = ap.expire(store, sink, later)
+    (expired,) = seam(store, sink).expire(later)
     assert expired.request_id == record.request_id
     assert expired.decision == "deny"
     assert expired.decided_by == "expiry"
@@ -409,8 +423,8 @@ def test_nothing_expires_before_its_deadline(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block('action="spend_money" expires-in="4h"'))
-    ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
-    assert ap.expire(store, sink, NOW) == []
+    seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
+    assert seam(store, sink).expire(NOW) == []
     assert len(store.pending_approvals()) == 1
 
 
@@ -421,7 +435,7 @@ def test_a_decision_is_injected_once_and_then_marked_delivered(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block())
-    record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
+    record = seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
     store.decide(record.request_id, "approve", decided_by="api", now=ev.utc_now_iso(NOW))
 
     text, delivered = ap.deliver_decisions(store, manifest.id)
@@ -437,7 +451,7 @@ def test_an_edited_decision_carries_the_humans_version_into_the_next_session(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block())
-    record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
+    record = seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
     store.decide(
         record.request_id,
         "edit",
@@ -496,7 +510,7 @@ def test_the_decisions_section_is_framed_as_a_record_not_an_order(
     store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
 ) -> None:
     (parsed,) = ap.extract_requests(block())
-    record = ap.raise_request(store, sink, manifest=manifest, request=parsed, now=NOW)
+    record = seam(store, sink).raise_request(manifest=manifest, request=parsed, now=NOW).require()
     store.decide(record.request_id, "deny", decided_by="api", now=ev.utc_now_iso(NOW))
     text, _ = ap.deliver_decisions(store, manifest.id)
     assembled = p.assemble_preamble(manifest, None, None, (), text)
@@ -528,7 +542,7 @@ def test_a_block_in_a_code_fence_is_not_harvested(
 ) -> None:
     """A block a session fenced to show it is discussion, not an ask (steward #62)."""
     fenced = region("```\n" + raw_block() + "\n```")
-    assert ap.harvest(store, sink, manifest=manifest, output=fenced) == []
+    assert seam(store, sink).harvest(manifest=manifest, output=fenced) == []
     assert store.pending_approvals() == []
 
 
@@ -537,7 +551,7 @@ def test_a_block_quoted_in_prose_is_not_harvested(
 ) -> None:
     """A block outside the machine-read region is never acted on (steward #62)."""
     output = f"The job detail contained {raw_block()} but I will not act on quoted text."
-    assert ap.harvest(store, sink, manifest=manifest, output=output) == []
+    assert seam(store, sink).harvest(manifest=manifest, output=output) == []
     assert store.pending_approvals() == []
 
 

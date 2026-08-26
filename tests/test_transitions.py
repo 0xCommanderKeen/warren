@@ -1,0 +1,797 @@
+"""Named transitions: one durable change, one fact, and the branches that say nothing.
+
+Every test here asserts the row and the event *together*, because that pairing is the
+whole point of the seam. The store's own tests still prove the conditional writes and the
+event module's still prove delivery and fallback; what is proved here is that the right
+fact reaches the emitter on the winning branch, and that no fact reaches it on any other.
+"""
+
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from conftest import ResidentWriter
+from steward import events as ev
+from steward import prompt as p
+from steward import transitions as tr
+from steward.approvals import NeedsHuman
+from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
+from steward.runners import Outcome, RunResult
+from steward.store import (
+    STATUS_CLAIMED,
+    STATUS_DONE,
+    STATUS_FAILED,
+    STATUS_OPEN,
+    JobRecord,
+    Store,
+)
+from steward.transitions import budget as tb
+from steward.transitions import outcome as to
+from steward.transitions import task as tt
+
+NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
+CLAIMANT = "claude-code:test-agent"
+PROJECT = "test-agent"
+
+
+@pytest.fixture
+def store() -> Iterator[Store]:
+    with Store(":memory:") as opened:
+        yield opened
+
+
+@pytest.fixture
+def sink() -> ev.NullEmitter:
+    return ev.NullEmitter()
+
+
+@pytest.fixture
+def manifest(write_resident: ResidentWriter) -> ResidentManifest:
+    return load_manifest(write_resident()).manifest
+
+
+@pytest.fixture
+def tasks(store: Store, sink: ev.NullEmitter) -> tr.TaskTransitions:
+    return tr.TaskTransitions(store=store, emitter=sink, project_of=lambda _agent: PROJECT)
+
+
+@pytest.fixture
+def approvals(store: Store, sink: ev.NullEmitter) -> tr.ApprovalTransitions:
+    return tr.ApprovalTransitions(store=store, emitter=sink)
+
+
+@pytest.fixture
+def handoffs(store: Store, sink: ev.NullEmitter) -> tr.DelegationTransitions:
+    return tr.DelegationTransitions(store=store, emitter=sink)
+
+
+@pytest.fixture
+def budgets(store: Store, sink: ev.NullEmitter) -> tr.BudgetTransitions:
+    return tr.BudgetTransitions(store=store, emitter=sink)
+
+
+def claimed(tasks: tr.TaskTransitions, title: str = "sweep the hall") -> JobRecord:
+    """Post one task and claim it, returning the live claim handle."""
+    tasks.post(title=title)
+    outcome = tasks.claim(claimant=CLAIMANT, project=PROJECT, skills=(), now=NOW, lease_s=1800)
+    assert outcome.record is not None
+    return outcome.record
+
+
+def ok(artifacts: tuple[str, ...] = ()) -> RunResult:
+    return RunResult(outcome=Outcome.OK, exit_status=0, artifacts=artifacts)
+
+
+def failed(error: str) -> RunResult:
+    return RunResult(outcome=Outcome.FAILED, exit_status=2, error=error)
+
+
+def types(sink: ev.NullEmitter) -> list[str]:
+    return [event.type for event in sink.events]
+
+
+# ------------------------------------------------------------------ the outcome vocabulary
+
+
+def test_only_an_applied_transition_reaches_an_emitter(sink: ev.NullEmitter) -> None:
+    event = ev.task_posted_event(task_id="t1", title="a thing")
+    assert to.applied(sink, "row", event).fact is event
+    assert sink.events == [event]
+
+    silent = [
+        to.refused("nothing to do"),
+        to.replayed("row"),
+        to.expired("row"),
+        to.superseded("lost"),
+        to.answered("row"),
+    ]
+    assert all(transition.silent for transition in silent)
+    assert sink.events == [event], "a non-applied transition must never emit"
+
+
+def test_an_applied_transition_may_legitimately_carry_no_fact(sink: ev.NullEmitter) -> None:
+    transition = to.applied(sink, "row")
+    assert transition.applied
+    assert transition.silent
+    assert sink.events == []
+
+
+def test_each_outcome_answers_to_exactly_one_name() -> None:
+    named = {
+        to.APPLIED: to.Transition(to.APPLIED),
+        to.REFUSED: to.refused(""),
+        to.REPLAYED: to.replayed(None),
+        to.EXPIRED: to.expired(None),
+        to.SUPERSEDED: to.superseded(),
+        to.ANSWERED: to.answered(None),
+    }
+    assert set(named) == set(to.OUTCOMES)
+    flags = ("applied", "refused", "replayed", "expired", "superseded", "answered")
+    for name, transition in named.items():
+        assert [flag for flag in flags if getattr(transition, flag)] == [name]
+
+
+def test_requiring_a_record_a_refusal_never_produced_is_a_bug_that_surfaces() -> None:
+    with pytest.raises(ValueError, match="refused transition has no durable record"):
+        to.refused("nothing to claim").require()
+
+
+def test_a_carried_fact_is_the_inner_ones_and_is_not_sent_twice(sink: ev.NullEmitter) -> None:
+    event = ev.task_posted_event(task_id="t1", title="a thing")
+    inner = to.applied(sink, "inner-row", event)
+    outer = to.carried("outer-row", inner)
+    assert outer.applied
+    assert outer.record == "outer-row"
+    assert outer.fact is event
+    assert sink.events == [event]
+
+
+# ----------------------------------------------------------------------- task transitions
+
+
+def test_posting_writes_an_open_row_and_announces_it_as_steward(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    outcome = tasks.post(title="water the plants", required_skills=("research",))
+
+    assert outcome.applied
+    assert outcome.record is not None
+    row = store.job(outcome.record.task_id)
+    assert row is not None
+    assert (row.status, row.claimant, row.assignee) == (STATUS_OPEN, None, None)
+
+    (event,) = sink.events
+    assert event is outcome.fact
+    assert event.type == "task_posted"
+    assert (event.agent_id, event.project) == (ev.API_AGENT_ID, ev.API_PROJECT)
+    assert event.payload["task_id"] == row.task_id
+    assert event.payload["required_skills"] == ["research"]
+
+
+def test_a_claim_leases_the_row_and_walks_the_claimant_to_the_notice(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    tasks.post(title="sweep the hall")
+    sink.events.clear()
+
+    outcome = tasks.claim(claimant=CLAIMANT, project=PROJECT, skills=(), now=NOW, lease_s=1800)
+
+    assert outcome.applied
+    assert outcome.record is not None
+    row = store.job(outcome.record.task_id)
+    assert row is not None
+    assert row.status == STATUS_CLAIMED
+    assert row.claimant == CLAIMANT
+    assert row.lease_expires_at == ev.utc_now_iso(NOW + timedelta(seconds=1800))
+
+    (event,) = sink.events
+    assert event.type == "task_claimed"
+    assert (event.agent_id, event.project) == (CLAIMANT, PROJECT)
+    assert event.payload["claimant"] == CLAIMANT
+    assert "parent_task_id" not in event.payload, "an unparented claim answers no lineage"
+
+
+def test_a_claim_that_finds_nothing_is_refused_and_says_nothing(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    outcome = tasks.claim(claimant=CLAIMANT, project=PROJECT, skills=(), now=NOW, lease_s=1800)
+
+    assert outcome.refused
+    assert outcome.record is None
+    assert sink.events == []
+
+
+def test_a_claim_the_skills_do_not_match_is_refused_and_says_nothing(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    tasks.post(title="fly the plane", required_skills=("aviation",))
+    sink.events.clear()
+
+    outcome = tasks.claim(
+        claimant=CLAIMANT, project=PROJECT, skills=("research",), now=NOW, lease_s=1800
+    )
+
+    assert outcome.refused
+    assert sink.events == []
+
+
+def test_taking_delivery_claims_a_letter_and_carries_its_lineage(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    parent = store.post_job(title="the root task")
+    store.delegate_job(
+        title="read this",
+        assignee="test-agent",
+        delegated_by="other-agent",
+        route="delegation",
+        parent_task_id=parent.task_id,
+        depth=1,
+    )
+
+    outcome = tasks.take_delivery(
+        assignee="test-agent", claimant=CLAIMANT, project=PROJECT, now=NOW, lease_s=600
+    )
+
+    assert outcome.applied
+    assert outcome.record is not None
+    assert outcome.record.lease_expires_at == ev.utc_now_iso(NOW + timedelta(seconds=600))
+    (event,) = sink.events
+    assert event.type == "task_claimed"
+    assert event.payload["parent_task_id"] == parent.task_id
+
+
+def test_an_empty_inbox_is_refused_and_says_nothing(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    outcome = tasks.take_delivery(
+        assignee="test-agent", claimant=CLAIMANT, project=PROJECT, now=NOW, lease_s=600
+    )
+
+    assert outcome.refused
+    assert sink.events == []
+
+
+def test_finishing_a_task_closes_the_row_and_reports_what_it_left_behind(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    job = claimed(tasks)
+    sink.events.clear()
+
+    outcome = tasks.finish(
+        job,
+        claimant=CLAIMANT,
+        project=PROJECT,
+        result=ok(("notes.md",)),
+        run_id="run-1",
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.reason == ""
+    row = store.job(job.task_id)
+    assert row is not None
+    assert (row.status, row.artifacts) == (STATUS_DONE, ("notes.md",))
+
+    (event,) = sink.events
+    assert event.type == "task_done"
+    assert (event.agent_id, event.project) == (CLAIMANT, PROJECT)
+    assert event.payload["artifacts"] == ["notes.md"]
+    assert event.payload["run_id"] == "run-1"
+
+
+def test_a_failed_task_records_and_emits_one_derived_reason(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    job = claimed(tasks)
+    sink.events.clear()
+
+    outcome = tasks.finish(
+        job,
+        claimant=CLAIMANT,
+        project=PROJECT,
+        result=failed("the runner refused"),
+        run_id="run-2",
+        now=NOW,
+    )
+
+    assert outcome.applied
+    row = store.job(job.task_id)
+    assert row is not None
+    assert row.status == STATUS_FAILED
+    (event,) = sink.events
+    assert event.type == "task_failed"
+    assert row.reason == event.payload["reason"] == outcome.reason
+    assert outcome.reason.endswith("the runner refused")
+    assert event.payload["run_id"] == "run-2"
+
+
+def test_a_close_on_a_lease_that_died_writes_nothing_and_says_nothing(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    job = claimed(tasks)
+    # The lease dies, the task is swept back onto the board, and somebody re-claims it.
+    store.expire_leases(ev.utc_now_iso(NOW + timedelta(hours=2)))
+    tasks.claim(
+        claimant="claude-code:someone-else",
+        project="elsewhere",
+        skills=(),
+        now=NOW + timedelta(hours=2),
+        lease_s=1800,
+    )
+    sink.events.clear()
+
+    outcome = tasks.finish(
+        job, claimant=CLAIMANT, project=PROJECT, result=ok(), run_id="run-3", now=NOW
+    )
+
+    assert outcome.superseded
+    assert outcome.record is None
+    assert outcome.reason == tt.LEASE_LOST
+    assert sink.events == [], "a close that lost its lease must not overwrite the live claim"
+    row = store.job(job.task_id)
+    assert row is not None
+    assert row.status == STATUS_CLAIMED
+    assert row.claimant == "claude-code:someone-else"
+
+
+def test_an_expired_lease_goes_back_to_the_board_loudly_and_names_no_session(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    job = claimed(tasks)
+    sink.events.clear()
+
+    expired = tasks.expire_leases(now=NOW + timedelta(hours=2))
+
+    assert [record.task_id for record in expired] == [job.task_id]
+    assert expired[0].claimant == CLAIMANT, "the row is reported as it was when it died"
+    row = store.job(job.task_id)
+    assert row is not None
+    assert (row.status, row.claimant) == (STATUS_OPEN, None)
+
+    (event,) = sink.events
+    assert event.type == "task_failed"
+    assert (event.agent_id, event.project) == (CLAIMANT, PROJECT)
+    assert event.payload["reason"] == tt.LEASE_EXPIRED
+    assert "run_id" not in event.payload, "the board mourns a claim, it does not answer a run"
+
+
+def test_a_sweep_with_nothing_to_reopen_says_nothing(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    assert tasks.expire_leases(now=NOW) == []
+    assert sink.events == []
+
+
+def test_a_swept_lease_is_mourned_under_stewards_project_when_the_fleet_is_unknown(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    unmapped = tr.TaskTransitions(store=store, emitter=sink)
+    unmapped.post(title="sweep the hall")
+    unmapped.claim(claimant=CLAIMANT, project=PROJECT, skills=(), now=NOW, lease_s=1)
+    sink.events.clear()
+
+    unmapped.expire_leases(now=NOW + timedelta(hours=2))
+
+    (event,) = sink.events
+    assert event.project == ev.API_PROJECT
+
+
+# ------------------------------------------------------------------- approval transitions
+
+
+def test_raising_a_request_files_it_pending_and_knocks(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    outcome = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", detail={"to": "a@example.com"}),
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.record is not None
+    row = store.approval(outcome.record.request_id)
+    assert row is not None
+    assert row.pending
+
+    (event,) = sink.events
+    assert event.type == "needs_human"
+    assert event.agent_id == manifest.agent_id
+    assert event.payload["action"] == "send_email"
+    assert event.payload["expires_at"] == row.expires_at
+
+
+def test_a_knock_is_scrubbed_before_it_reaches_the_village(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(
+            raw="", action="rotate_token", detail={"key": "sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF"}
+        ),
+        now=NOW,
+    )
+
+    (event,) = sink.events
+    assert event.payload["detail"]["key"] == SECRET_REDACTION
+
+
+def test_a_repeat_inside_the_window_is_answered_and_nobody_is_knocked_on(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    first = approvals.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert first.record is not None
+    approvals.decide(first.record.request_id, "deny", now=NOW)
+    sink.events.clear()
+
+    outcome = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email"),
+        now=NOW + timedelta(hours=1),
+    )
+
+    assert outcome.answered
+    assert outcome.silent
+    assert outcome.record is not None
+    row = store.approval(outcome.record.request_id)
+    assert row is not None
+    assert (row.decision, row.decided_by) == ("deny", "repeat")
+    assert sink.events == [], "a looping resident must not knock on every wake-up"
+
+
+def test_an_unreadable_escalation_still_reaches_a_person(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    outcome = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="<needs-human oops>", action="x", problem="no action"),
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.record is not None
+    assert outcome.record.detail["problem"] == "no action"
+    assert types(sink) == ["needs_human"]
+
+
+def test_harvesting_a_session_raises_every_block_it_wrote(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    output = (
+        f"{p.ACTIONS_OPEN}\n"
+        '<needs-human action="send_email">{"to": "a@example.com"}</needs-human>\n'
+        '<needs-human action="spend_money">{"amount": 5}</needs-human>\n'
+        f"{p.ACTIONS_CLOSE}"
+    )
+
+    raised = approvals.harvest(manifest=manifest, output=output, now=NOW)
+
+    assert [record.action for record in raised] == ["send_email", "spend_money"]
+    assert types(sink) == ["needs_human", "needs_human"]
+
+
+def test_deciding_resolves_the_row_and_closes_the_loop_in_the_log(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert raised.record is not None
+    sink.events.clear()
+
+    outcome = approvals.decide(raised.record.request_id, "approve", decided_by="api", now=NOW)
+
+    assert outcome.applied
+    row = store.approval(raised.record.request_id)
+    assert row is not None
+    assert (row.decision, row.decided_by) == ("approve", "api")
+    (event,) = sink.events
+    assert event.type == "needs_human_resolved"
+    assert event.agent_id == manifest.agent_id, "the villager who knocked walks away"
+    assert event.payload["decision"] == "approve"
+
+
+def test_a_second_decision_is_a_replay_that_changes_and_says_nothing(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert raised.record is not None
+    approvals.decide(raised.record.request_id, "approve", now=NOW)
+    sink.events.clear()
+
+    outcome = approvals.decide(raised.record.request_id, "deny", now=NOW)
+
+    assert outcome.replayed
+    assert outcome.record is not None
+    assert outcome.record.decision == "approve", "the first decision wins"
+    assert store.approval(raised.record.request_id).decision == "approve"  # ty: ignore
+    assert sink.events == []
+
+
+def test_an_expired_request_can_never_be_approved(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", expires_in_s=60),
+        now=NOW,
+    )
+    assert raised.record is not None
+    sink.events.clear()
+
+    outcome = approvals.decide(raised.record.request_id, "approve", now=NOW + timedelta(hours=1))
+
+    assert outcome.expired
+    assert outcome.record is not None
+    assert outcome.record.pending, "deny-by-default keeps the last word until the sweep"
+    assert sink.events == []
+    row = store.approval(raised.record.request_id)
+    assert row is not None
+    assert row.decision is None
+
+
+def test_deciding_a_request_nobody_raised_is_refused(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter
+) -> None:
+    outcome = approvals.decide("no-such-request", "approve")
+
+    assert outcome.refused
+    assert outcome.record is None
+    assert sink.events == []
+
+
+def test_the_sweep_denies_a_passed_deadline_and_says_who_decided(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", expires_in_s=60),
+        now=NOW,
+    )
+    assert raised.record is not None
+    sink.events.clear()
+
+    swept = approvals.expire(NOW + timedelta(hours=1))
+
+    assert [record.request_id for record in swept] == [raised.record.request_id]
+    row = store.approval(raised.record.request_id)
+    assert row is not None
+    assert (row.decision, row.decided_by) == ("deny", "expiry")
+    (event,) = sink.events
+    assert event.type == "needs_human_resolved"
+    assert event.payload["decided_by"] == "expiry"
+
+
+def test_the_sweep_leaves_an_answered_request_alone(
+    approvals: tr.ApprovalTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", expires_in_s=60),
+        now=NOW,
+    )
+    assert raised.record is not None
+    approvals.decide(raised.record.request_id, "approve", now=NOW)
+    sink.events.clear()
+
+    assert approvals.expire(NOW + timedelta(hours=1)) == []
+    assert sink.events == []
+
+
+# ----------------------------------------------------------------- delegation transitions
+
+
+def test_delivering_a_handoff_writes_the_letter_and_names_both_ends(
+    handoffs: tr.DelegationTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    outcome = handoffs.deliver(
+        title="read the shelf",
+        detail="everything you need",
+        assignee="shelf-worker",
+        delegated_by="librarian",
+        route="delegation",
+        parent_task_id=None,
+        origin="resident:librarian",
+        depth=1,
+        sender_agent_id="claude-code:librarian",
+        sender_project="library",
+        recipient_agent_id="claude-code:shelf-worker",
+    )
+
+    assert outcome.applied
+    assert outcome.record is not None
+    row = store.job(outcome.record.task_id)
+    assert row is not None
+    assert (row.status, row.assignee, row.delegated_by) == (
+        STATUS_OPEN,
+        "shelf-worker",
+        "librarian",
+    )
+    assert store.inbox("shelf-worker") == [row]
+
+    (event,) = sink.events
+    assert event.type == "task_delegated"
+    assert event.agent_id == "claude-code:librarian", "the villager carrying the letter walks"
+    assert event.project == "library"
+    assert event.payload["to"] == "claude-code:shelf-worker"
+    assert event.payload["route"] == "delegation"
+    assert event.payload["depth"] == 1
+    assert event.payload["parent_task_id"] is None, "the delegation payload is explicit"
+
+
+# --------------------------------------------------------------------- budget transitions
+
+
+def knock(resident: str = "test-agent") -> NeedsHuman:
+    return NeedsHuman(
+        raw="budget daily_cost_usd exhausted",
+        action="budget_unpause",
+        detail={"resident": resident},
+        options=("approve", "deny"),
+        expires_in_s=None,
+    )
+
+
+def test_pausing_stops_the_resident_and_knocks_once(
+    budgets: tr.BudgetTransitions, store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    outcome = budgets.pause(
+        manifest=manifest,
+        agent_id=CLAIMANT,
+        budget="daily_cost_usd",
+        spent=5.2,
+        cap=5.0,
+        reason="spent 5.20 of 5.00",
+        knock=knock(),
+        message="Testy has spent 5.20 of 5.00 daily_cost_usd today and is paused",
+        window_end="2026-08-25T00:00:00.000Z",
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.record is not None
+    pause = store.budget_pause("test-agent")
+    assert pause is not None
+    assert pause.request_id is not None
+    assert pause.request_id == outcome.record.request_id
+
+    (event,) = sink.events
+    assert event.type == "needs_human"
+    assert event.payload["request_id"] == pause.request_id
+    assert event.payload["expires_at"] is None, "a pause is already the safe state"
+    request = store.approval(pause.request_id)
+    assert request is not None
+    assert request.pending
+
+
+def test_a_second_pause_of_the_same_budget_adds_nothing_and_knocks_on_nobody(
+    budgets: tr.BudgetTransitions, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    common: dict[str, Any] = {
+        "manifest": manifest,
+        "agent_id": CLAIMANT,
+        "budget": "daily_cost_usd",
+        "spent": 5.2,
+        "cap": 5.0,
+        "reason": "spent 5.20 of 5.00",
+        "knock": knock(),
+        "message": "paused",
+        "now": NOW,
+    }
+    first = budgets.pause(**common)
+    sink.events.clear()
+
+    outcome = budgets.pause(**common)
+
+    assert outcome.superseded
+    assert outcome.reason == tb.ALREADY_PAUSED
+    assert first.record is not None
+    assert outcome.record is not None
+    assert outcome.record.request_id == first.record.request_id
+    assert sink.events == []
+
+
+def test_resuming_from_a_terminal_answers_the_request_that_was_waiting(
+    budgets: tr.BudgetTransitions, store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    paused = budgets.pause(
+        manifest=manifest,
+        agent_id=CLAIMANT,
+        budget="daily_cost_usd",
+        spent=5.2,
+        cap=5.0,
+        reason="spent 5.20 of 5.00",
+        knock=knock(),
+        message="paused",
+        window_end="2026-08-25T00:00:00.000Z",
+        now=NOW,
+    )
+    assert paused.record is not None
+    assert paused.record.request_id is not None
+    sink.events.clear()
+
+    outcome = budgets.resume("test-agent", decided_by="cli")
+
+    assert outcome.applied
+    assert store.budget_pause("test-agent") is None
+    assert store.budget_allowance("test-agent") is not None, "carry on, for today only"
+    (event,) = sink.events
+    assert event.type == "needs_human_resolved"
+    assert event.payload["decision"] == "approve"
+    assert event.payload["decided_by"] == "cli"
+    request = store.approval(paused.record.request_id)
+    assert request is not None
+    assert request.decision == "approve"
+
+
+def test_resuming_from_the_api_lifts_the_pause_without_answering_twice(
+    budgets: tr.BudgetTransitions, store: Store, sink: ev.NullEmitter, manifest: ResidentManifest
+) -> None:
+    budgets.pause(
+        manifest=manifest,
+        agent_id=CLAIMANT,
+        budget="daily_cost_usd",
+        spent=5.2,
+        cap=5.0,
+        reason="spent 5.20 of 5.00",
+        knock=knock(),
+        message="paused",
+        now=NOW,
+    )
+    sink.events.clear()
+
+    outcome = budgets.resume("test-agent", decided_by="api", decide=False)
+
+    assert outcome.applied
+    assert outcome.silent, "the decision endpoint already said this"
+    assert store.budget_pause("test-agent") is None
+    assert sink.events == []
+
+
+def test_resuming_a_resident_that_was_never_paused_is_refused(
+    budgets: tr.BudgetTransitions, sink: ev.NullEmitter
+) -> None:
+    outcome = budgets.resume("test-agent")
+
+    assert outcome.refused
+    assert outcome.record is None
+    assert sink.events == []
+
+
+def test_the_transitions_package_has_exactly_one_place_that_emits() -> None:
+    """The structural half of the pairing invariant, asserted rather than trusted."""
+    package = Path(__file__).resolve().parents[1] / "src" / "steward" / "transitions"
+    emitting = [
+        f"{path.name}:{number}"
+        for path in sorted(package.glob("*.py"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if ".emit(" in line
+    ]
+    assert emitting == ["outcome.py:" + emitting[0].split(":")[1]], (
+        f"only outcome.applied may reach an emitter; found {emitting}"
+    )

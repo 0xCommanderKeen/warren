@@ -52,7 +52,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
-from steward import approvals
 from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.board import Dispatcher, DispatchRun
@@ -67,6 +66,7 @@ from steward.store import (
     OpenRun,
     Store,
 )
+from steward.transitions.approval import ApprovalTransitions
 
 __all__ = [
     "BACKOFF_S",
@@ -867,9 +867,7 @@ class Watchdog:
         if not self.store.give_up_on(resident.id, reason=summary, now=ev.utc_now_iso(now)):
             return  # Already asked. One knock per crash loop, not one per pass.
         log.error("%s: %s", resident.id, summary)
-        approvals.raise_request(
-            self.store,
-            self.emitter,
+        ApprovalTransitions(store=self.store, emitter=self.emitter).raise_request(
             manifest=resident.manifest,
             request=NeedsHuman(
                 raw=summary,
