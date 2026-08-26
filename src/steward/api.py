@@ -78,6 +78,8 @@ from steward.store import (
     default_db_path,
     new_id,
 )
+from steward.transitions.approval import ApprovalTransitions
+from steward.transitions.task import TaskTransitions
 
 __all__ = [
     "DEFAULT_HOST",
@@ -561,6 +563,17 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
     db = store if store is not None else Store(settings.db_path or default_db_path())
     sink: ev.Emitter = emitter if emitter is not None else ev.EventEmitter.from_env()
+    # The named transitions this API's two mutating domain acts cross. Every durable
+    # change and the burrow fact that says it happened are paired in there; what stays
+    # here is translation — status codes, the request log, and the words a caller reads.
+    #
+    # Resolved once, unlike the per-access properties the board, the guard and the
+    # delegator expose, because this whole function resolves its collaborators once: the
+    # library, the store, the emitter and the guard below are all read at startup and
+    # closed over by every route. A route that rebuilt its seam per request would be
+    # reading the same two objects it is handed here anyway.
+    tasks = TaskTransitions(store=db, emitter=sink)
+    approvals = ApprovalTransitions(store=db, emitter=sink)
     # One guard for the whole app: the run-now path refuses through it before it accepts
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
@@ -904,20 +917,12 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     @app.post("/jobs", status_code=202)
     def post_job(body: JobPost, request: Request) -> dict[str, Any]:
         """Put a task on the board and announce it. No resident is prompted."""
-        job = db.post_job(
+        job = tasks.post(
             title=body.title,
             detail=body.detail,
             required_skills=body.required_skills,
             posted_by=POSTED_BY,
-        )
-        sink.emit(
-            ev.task_posted_event(
-                task_id=job.task_id,
-                title=job.title,
-                required_skills=job.required_skills,
-                posted_by=job.posted_by,
-            )
-        )
+        ).require()
         request_id = accept(request, "posted", {"task_id": job.task_id})
         return {
             "request_id": request_id,
@@ -1041,7 +1046,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         A request past its ``expires_at`` but not yet swept is **not** pending here (steward
         #66): it denies by default, and a panel that listed it as still answerable would let
         a human click *approve* on something the deny-by-default sweep is about to close. It
-        reappears under ``resolved`` once :func:`steward.approvals.expire` records the deny.
+        reappears under ``resolved`` once the approval sweep records the deny.
         """
         wanted = status or APPROVAL_STATUS_PENDING
         if wanted not in APPROVAL_STATUSES:
@@ -1070,26 +1075,24 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
-        record, recorded = db.decide(
-            request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit
-        )
+        decided = approvals.decide(request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit)
+        record = decided.record
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
-        if not recorded and record.pending:
-            # Not a replay: the request was still pending, so decide() refused it because it
-            # had already expired (steward #66). Deny-by-default has the last word — a click
-            # a minute past the deadline must not slip an action through ahead of the sweep,
-            # which denies it and closes the loop in the log. Distinct from an already-decided
-            # request, which comes back resolved and reads as a replay below.
+        if decided.expired:
+            # Deny-by-default has the last word — a click a minute past the deadline must
+            # not slip an action through ahead of the sweep, which denies it and closes the
+            # loop in the log (steward #66). Distinct from an already-decided request, which
+            # comes back resolved and reads as a replay below.
             _refuse(
                 409,
                 "approval_expired",
                 f"approval request {request_id!r} expired at {record.expires_at} and denies "
                 f"by default; it can no longer be decided",
             )
-        if not recorded:
+        if decided.replayed:
             # The first decision won. A double-tapped notification changes nothing and
-            # emits nothing — it is told what was recorded.
+            # emitted nothing — it is told what was recorded.
             response.status_code = 200
             return {
                 "request_id": request_id,
@@ -1099,16 +1102,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 "decided_at": record.decided_at,
                 "message": "this request was already decided; nothing changed",
             }
-        sink.emit(
-            ev.needs_human_resolved_event(
-                request_id=record.request_id,
-                decision=body.decision,
-                action=record.action,
-                agent_id=record.agent_id,
-                project=record.project,
-                decided_by=DECIDED_BY,
-            )
-        )
         accept(request, "recorded", {"approval": request_id, "decision": body.decision})
         response.status_code = 202
         resumed = _resume_if_budget(record.action, body.decision, request_id)

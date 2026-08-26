@@ -9,10 +9,15 @@ board, approvals, and delegation that hang off it — how a resident picks work 
 without being told to, what it does when its charter says stop, and how it hands work to
 a neighbour when the work is not its own — and the watchdog and budgets that keep an
 unattended resident both alive and bounded, whichever of those ways it woke up.
+
+Every durable change any of that makes crosses one named transition
+(:mod:`steward.transitions`), which is also where the burrow fact that says it happened is
+built and handed over. A caller asks for the domain act and gets its durable result; it
+never pairs a write with an event itself.
 """
 
 from steward.api import ApiConfig, ApiError, create_app
-from steward.approvals import NeedsHuman, extract_requests, harvest
+from steward.approvals import NeedsHuman, extract_requests
 from steward.board import BoardReport, Dispatcher, DispatchRun, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus, day_window, primary_tz
 from steward.delegation import DelegationError, Delegator, Handoff, extract_handoffs
@@ -70,17 +75,27 @@ from steward.skills import (
     load_library,
 )
 from steward.store import LedgerEntry, PauseRecord, Store
+from steward.transitions import (
+    ApprovalTransitions,
+    BudgetTransitions,
+    DelegationTransitions,
+    TaskTransitions,
+    Transition,
+)
 from steward.watchdog import DockerSupervisor, Health, LocalProbe, ProcessSupervisor, Watchdog
 
 __all__ = [
     "Admission",
     "ApiConfig",
     "ApiError",
+    "ApprovalTransitions",
     "BoardReport",
     "BudgetGuard",
     "BudgetStatus",
+    "BudgetTransitions",
     "DelegatedWake",
     "DelegationError",
+    "DelegationTransitions",
     "Delegator",
     "Diagnostic",
     "DispatchRun",
@@ -115,7 +130,9 @@ __all__ = [
     "Skill",
     "SkillLibrary",
     "Store",
+    "TaskTransitions",
     "TaskWake",
+    "Transition",
     "ValidationResult",
     "WakeHooks",
     "Watchdog",
@@ -132,7 +149,6 @@ __all__ = [
     "effective_skills",
     "extract_handoffs",
     "extract_requests",
-    "harvest",
     "journal_complaint",
     "latest_entry",
     "library_for",

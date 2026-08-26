@@ -74,9 +74,9 @@ APPROVAL_DECISIONS = ("approve", "deny", "edit")
 DECIDED_BY_EXPIRY = "expiry"
 
 #: Who a request is recorded as decided by when steward answered it with a deny a human
-#: had already given for the same action (:func:`steward.approvals.raise_request`). Also
-#: a decision steward makes on its own, and also said out loud rather than filed as if a
-#: person had clicked deny a second time.
+#: had already given for the same action — the repeat guard in
+#: :mod:`steward.transitions.approval`. Also a decision steward makes on its own, and also
+#: said out loud rather than filed as if a person had clicked deny a second time.
 DECIDED_BY_REPEAT = "repeat"
 
 STATUS_OPEN = "open"
@@ -257,8 +257,8 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
 
 #: Indexes over columns that arrived after the first schema, and so can only be created
 #: once :meth:`Store._add_missing_columns` has added them. ``approvals_denials`` is what
-#: keeps the repeat-deny guard (:func:`steward.approvals.raise_request`) a lookup rather
-#: than a table scan on every knock: the table has grown one row per ask since phase 3.
+#: keeps the repeat-deny guard (:mod:`steward.transitions.approval`) a lookup rather than a
+#: table scan on every knock: the table has grown one row per ask since phase 3.
 _LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS approvals_denials
     ON approvals (resident, action, decided_at);
@@ -1190,8 +1190,8 @@ class Store:
 
         ``denied_by``, when given, files the request already resolved as a deny rather
         than pending — a decision steward made itself, with nobody waiting on it. It is
-        how the repeat-deny guard (:func:`steward.approvals.raise_request`) records an ask
-        it answered instead of knocking about: the row still exists, so the ledger shows
+        how the repeat-deny guard (:mod:`steward.transitions.approval`) records an ask it
+        answered instead of knocking about: the row still exists, so the ledger shows
         the resident asked and what it was told, and the resident hears the answer in the
         next preamble like any other decision.
         """

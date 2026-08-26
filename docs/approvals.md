@@ -13,6 +13,11 @@ The pair of events is the whole audit trail:
 | `needs_human` | a session reached a gated action and parked |
 | `needs_human_resolved` | somebody answered — or nobody did, and it denied itself |
 
+Each of those is written and emitted together, by the approval transition. What that seam
+guarantees — a replay emits nothing, an expired request cannot be approved, a repeat
+auto-deny is the one durable write that deliberately knocks on nobody — is spelled out
+transition by transition in `docs/transitions.md`.
+
 ## The two safety properties
 
 **Deny by default.** Every request a *session* raises carries an `expires_at`. Past it,
@@ -258,7 +263,7 @@ old bare form keeps working.
 ```
 
 `needs_human_resolved` — `{request_id, decision, decided_by, action}`, emitted under the
-resident's own agent id, because the villager burrow has to walk away from your door is
+resident's own agent id, because the villager walking away from your door is
 the one who knocked.
 
 The message is **derived** from the resident's name and the action (`"<name> wants to

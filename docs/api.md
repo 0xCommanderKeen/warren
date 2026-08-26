@@ -227,7 +227,7 @@ decider, and every timestamp, in one call. `404` for an id steward has never see
 
 The decision is recorded durably and emitted as `needs_human_resolved` with
 `{request_id, decision, decided_by, action}`, under the *resident's* agent id — the
-villager burrow has to walk away from your door is the one who knocked.
+villager walking away from your door is the one who knocked.
 
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,

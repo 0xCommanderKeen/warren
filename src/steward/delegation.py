@@ -58,12 +58,15 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import cached_property
 from typing import Any
 
 from steward import approvals, prompt
 from steward import events as ev
 from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match, retired_complaint
 from steward.store import STATUS_CLAIMED, JobRecord, Store
+from steward.transitions.approval import ApprovalTransitions
+from steward.transitions.delegation import DelegationTransitions
 
 __all__ = [
     "BLOCK_CLOSE",
@@ -380,6 +383,23 @@ class Delegator:
     emitter: ev.Emitter = field(default_factory=ev.NullEmitter)
     max_depth: int = field(default_factory=max_depth)
 
+    # -- the seams a decision is carried out through -------------------------------------
+
+    @cached_property
+    def deliveries(self) -> DelegationTransitions:
+        """Where an accepted handoff becomes a durable letter and a ``task_delegated``.
+
+        Reached only past every check below. Everything this class refuses, it refuses
+        before touching this property, which is what makes "a refusal writes nothing and
+        emits nothing" a property of the shape rather than of remembering to return early.
+        """
+        return DelegationTransitions(store=self.store, emitter=self.emitter)
+
+    @cached_property
+    def knocks(self) -> ApprovalTransitions:
+        """Where a *refused* handoff becomes a question for a person instead."""
+        return ApprovalTransitions(store=self.store, emitter=self.emitter)
+
     # -- lookups -----------------------------------------------------------------------
 
     def resident(self, resident_id: str) -> Resident | None:
@@ -603,7 +623,7 @@ class Delegator:
         self._check_depth(depth)
         self._check_cycle(chain, sender_id, receiver.id)
 
-        task = self.store.delegate_job(
+        task = self.deliveries.deliver(
             title=handoff.title,
             detail=handoff.detail,
             assignee=receiver.id,
@@ -612,7 +632,10 @@ class Delegator:
             parent_task_id=parent.task_id if parent is not None else None,
             origin=origin_for(parent, sender_id),
             depth=depth,
-        )
+            sender_agent_id=sender.agent_id if sender is not None else ev.API_AGENT_ID,
+            sender_project=sender.project if sender is not None else ev.API_PROJECT,
+            recipient_agent_id=receiver.agent_id,
+        ).require()
         log.info(
             "%s delegated %s (%s) to %s via route %s at depth %d",
             sender_id,
@@ -621,18 +644,6 @@ class Delegator:
             receiver.id,
             handoff.route,
             depth,
-        )
-        self.emitter.emit(
-            ev.task_delegated_event(
-                task_id=task.task_id,
-                title=task.title,
-                sender=sender.agent_id if sender is not None else ev.API_AGENT_ID,
-                recipient=receiver.agent_id,
-                route=handoff.route,
-                project=sender.project if sender is not None else ev.API_PROJECT,
-                depth=depth,
-                parent_task_id=task.parent_task_id,
-            )
         )
         return task
 
@@ -677,8 +688,9 @@ class Delegator:
     ) -> Delivery:
         """Raise a refused handoff as an approval request, so a person hears about it.
 
-        The knock is steward's own — steward refused, steward wrote the message — and it
-        is exempt from the repeat-deny guard (``repeat_guard=False``). Both actions here
+        The knock is steward's own — steward refused, steward wrote the message — so it
+        goes through :meth:`ApprovalTransitions.knock`, which is exempt from the
+        repeat-deny guard. Both actions here
         are catch-alls: *every* refusal of this resident's, whatever recipient or route or
         title it was about, is filed under :data:`REJECTED_ACTION` or
         :data:`UNREADABLE_ACTION`. A deny on one of them — and a deny is the natural way to
@@ -702,13 +714,10 @@ class Delegator:
             "title": handoff.title,
             "raw": handoff.raw[:DETAIL_MAX_CHARS],
         }
-        record = approvals.raise_request(
-            self.store,
-            self.emitter,
+        record = self.knocks.knock(
             manifest=sender.manifest,
             request=approvals.NeedsHuman(raw=handoff.raw, action=action, detail=detail),
             now=now or datetime.now(UTC),
             message=message,
-            repeat_guard=False,
-        )
+        ).require()
         return Delivery(handoff=handoff, reason=error.reason, message=str(error), knock=record)

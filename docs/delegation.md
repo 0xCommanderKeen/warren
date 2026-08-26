@@ -19,6 +19,10 @@ The last three are the job board's own events, reused unchanged and carrying
 `parent_task_id`, because a delegated item **is** a task — one addressed to a single
 resident instead of to the fleet.
 
+The letter and its `task_delegated` are written together, past every check below, by the
+delegation transition — `docs/transitions.md` has the guard, the payload, and the reason a
+refusal cannot reach it.
+
 ## Steward is the sole arbiter
 
 Both manifests have to agree, and steward checks both. Neither half can waive the other,

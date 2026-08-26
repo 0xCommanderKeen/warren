@@ -611,8 +611,8 @@ def task_delegated_event(  # noqa: PLR0913 — the payload the issue documents
 ) -> Event:
     """Announce that one resident handed work to another, and name both ends.
 
-    Emitted under the **delegating** resident's agent id, because the villager burrow has
-    to walk across the village is the one carrying the letter. ``to`` names the doorway it
+    Emitted under the **delegating** resident's agent id, because the villager walking
+    across the village is the one carrying the letter. ``to`` names the doorway it
     is walking to, and ``route`` names which door — a resident may declare more than one.
 
     Nothing else in the chain needs a new event type: the receiver picks the item up with
@@ -688,8 +688,8 @@ def needs_human_resolved_event(  # noqa: PLR0913 — the payload the protocol do
 ) -> Event:
     """Close the loop on a knock at the door: the human answered, and this is the answer.
 
-    Emitted under the *resident's* identity, not steward's, because the villager burrow
-    has to walk away from your door is the one who knocked.
+    Emitted under the *resident's* identity, not steward's, because the villager walking
+    away from your door is the one who knocked.
     """
     return Event(
         type=NEEDS_HUMAN_RESOLVED,

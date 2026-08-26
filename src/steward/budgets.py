@@ -58,12 +58,12 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-from steward import approvals
 from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.manifest import CLOSE_OF_DAY, DEFAULT_SCHEDULE_TZ, ResidentManifest
 from steward.runners import RunResult
-from steward.store import RUN_ROUTINE, Store, new_id
+from steward.store import RUN_ROUTINE, Store
+from steward.transitions.budget import BudgetTransitions
 
 if TYPE_CHECKING:  # pragma: no cover — runtime never needs the record classes by name
     from steward.store import LedgerEntry, PauseRecord
@@ -397,9 +397,14 @@ class BudgetGuard:
     """
 
     def __init__(self, store: Store, emitter: ev.Emitter | None = None) -> None:
-        """Hold the durable ledger and the emitter a pause knocks through."""
+        """Hold the durable ledger, the emitter, and the seam a pause knocks through."""
         self.store = store
         self.emitter: ev.Emitter = emitter if emitter is not None else ev.NullEmitter()
+        #: The seam a pause and its knock — or an unpause and its answer — cross together.
+        #: Built here rather than per access, like every other owner of a transitions
+        #: seam, because the store and the emitter it closes over are settled by the time
+        #: this returns and nothing in steward swaps either one afterwards.
+        self.transitions = BudgetTransitions(store=self.store, emitter=self.emitter)
 
     # -- reading -----------------------------------------------------------------------
 
@@ -410,7 +415,7 @@ class BudgetGuard:
         budgets = manifest.budgets
         return BudgetStatus(
             resident=manifest.id,
-            agent_id=_agent_id(manifest),
+            agent_id=manifest.burrow_agent_id,
             window=window,
             spend=spend,
             gauges=(
@@ -499,33 +504,23 @@ class BudgetGuard:
         tripped: Gauge,
         now: datetime | None,
     ) -> PauseRecord:
-        """Stop this resident and knock once. The conditional insert decides who knocks."""
-        request_id = new_id()
-        record, created = self.store.pause_resident(
-            resident=manifest.id,
+        """Stop this resident and knock once, through the one seam that pairs the two.
+
+        What a knock *says* is this module's, because only this module knows the number
+        that tripped: the detail names the budget, the spend, the cap and the window, and
+        the message says it in a sentence a person can answer yes or no to. Whether a
+        knock happens at all is the transition's, because that follows from the
+        conditional insert — a second caller tripping the same budget in the same instant
+        reads the existing row back and nobody is knocked on twice.
+        """
+        return self.transitions.pause(
+            manifest=manifest,
             agent_id=status.agent_id,
             budget=tripped.name,
             spent=tripped.spent,
             cap=float(tripped.limit if tripped.limit is not None else 0.0),
             reason=tripped.describe(),
-            request_id=request_id,
-            window_end=status.window.end_iso,
-            now=ev.utc_now_iso(now) if now is not None else None,
-        )
-        if not created:
-            # Somebody else tripped the same budget in the same instant and already
-            # knocked. Their row and their request stand; this call adds nothing.
-            return record
-        log.warning(
-            "%s: %s — pausing this resident and knocking at the door",
-            manifest.id,
-            tripped.describe(),
-        )
-        approvals.raise_request(
-            self.store,
-            self.emitter,
-            manifest=manifest,
-            request=NeedsHuman(
+            knock=NeedsHuman(
                 raw=f"budget {tripped.name} exhausted",
                 action=BUDGET_ACTION,
                 detail={
@@ -545,14 +540,9 @@ class BudgetGuard:
                 expires_in_s=None,
             ),
             message=knock_message(manifest, tripped),
+            window_end=status.window.end_iso,
             now=now,
-            request_id=request_id,
-            # The pause row above already makes this exactly one knock per tripped budget.
-            # A human denying yesterday's unpause must not swallow today's pause: that
-            # deny answered "may this resident run again", not "has it stopped again".
-            repeat_guard=False,
-        )
-        return record
+        ).require()
 
     def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
         """Return the timeout one run of this resident actually gets."""
@@ -587,7 +577,7 @@ class BudgetGuard:
         )
         entry = self.store.record_run(
             resident=manifest.id,
-            agent_id=_agent_id(manifest),
+            agent_id=manifest.burrow_agent_id,
             kind=kind,
             run_id=run_id,
             ref=ref,
@@ -648,34 +638,7 @@ class BudgetGuard:
         the same event is emitted — an unpause from a terminal and an unpause from a panel
         leave the village looking identical, because they are the same act.
         """
-        pause = self.store.unpause_resident(resident_id)
-        if pause is None:
-            return None
-        if pause.window_end:
-            # "Carry on" scoped to the day it was said about. Without this the next fire
-            # would re-trip the same cap and knock again, and answering a question would
-            # be answering it into a loop.
-            self.store.grant_budget_allowance(
-                resident_id,
-                until=pause.window_end,
-                granted_by=decided_by,
-                reason=pause.reason,
-            )
-        log.info("%s: budget pause lifted by %s (%s)", resident_id, decided_by, pause.reason)
-        if decide and pause.request_id:
-            record, recorded = self.store.decide(pause.request_id, "approve", decided_by=decided_by)
-            if recorded and record is not None:
-                self.emitter.emit(
-                    ev.needs_human_resolved_event(
-                        request_id=record.request_id,
-                        decision="approve",
-                        action=record.action,
-                        agent_id=record.agent_id,
-                        project=record.project,
-                        decided_by=decided_by,
-                    )
-                )
-        return pause
+        return self.transitions.resume(resident_id, decided_by=decided_by, decide=decide).record
 
 
 # --------------------------------------------------------------------------------------
@@ -714,8 +677,3 @@ def knock_message(manifest: ResidentManifest, tripped: Gauge) -> str:
         f"{manifest.soul.name} has spent {_number(tripped.spent)} of {limit} "
         f"{tripped.name} today and is paused"
     )
-
-
-def _agent_id(manifest: ResidentManifest) -> str:
-    """Name the burrow identity this resident's spend is recorded under."""
-    return manifest.agent_id or f"steward:{manifest.id}"

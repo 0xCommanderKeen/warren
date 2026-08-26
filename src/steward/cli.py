@@ -31,7 +31,6 @@ from steward.approvals import (
     decisions_preamble,
     parse_duration,
     parse_options,
-    raise_request,
     redact_decision,
 )
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
@@ -88,6 +87,7 @@ from steward.store import (
     Store,
     default_db_path,
 )
+from steward.transitions.approval import ApprovalTransitions
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
 DEFAULT_RESIDENTS_DIR = Path("residents")
@@ -1279,6 +1279,11 @@ def approval_raise(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     request appears in `GET /approvals` and knocks in burrow exactly as an output-block
     request does. Prints the ``request_id``; the session then finishes its turn and
     stops. Nothing here waits for a decision.
+
+    A request the repeat-deny guard answered on arrival says so, rather than printing its
+    message as though somebody had been woken by it. The row exists and the session will
+    read the deny in its next preamble either way — but "nobody was knocked on" is the
+    part a person running this at a terminal cannot find out any other way.
     """
     resident = _resident_or_exit(residents, resident_id)
     if detail_json and note:
@@ -1292,10 +1297,18 @@ def approval_raise(  # noqa: PLR0913, PLR0917 — click passes one parameter per
         sys.exit(EXIT_INVALID)
 
     with _open_store(db) as store:
-        record = raise_request(
-            store, ev.EventEmitter.from_env(), manifest=resident.manifest, request=request
+        raised = ApprovalTransitions(store=store, emitter=ev.EventEmitter.from_env()).raise_request(
+            manifest=resident.manifest, request=request
         )
-    click.secho(record.message, fg="yellow")
+    record = raised.require()
+    if raised.answered:
+        click.secho(
+            f"{record.action} was already denied recently — auto-denied as a repeat, "
+            "nobody was knocked on",
+            fg="yellow",
+        )
+    else:
+        click.secho(record.message, fg="yellow")
     click.echo(record.request_id)
 
 
