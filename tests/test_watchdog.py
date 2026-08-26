@@ -786,6 +786,125 @@ def test_a_resident_that_comes_back_forgets_its_restart_history(
     assert store.watchdog_attempt("test-agent").attempts == 0
 
 
+class UnownedProbe(StubSupervisor):
+    """A supervisor with nothing of its own to restart — what LocalProbe actually is.
+
+    Reports stuckness when told to and ``known=False`` otherwise, exactly as
+    :class:`~steward.watchdog.LocalProbe` does, and owns no process, exactly as it does.
+    """
+
+    def __init__(self, *, stuck: bool = True) -> None:
+        """Start out complaining, or not."""
+        super().__init__(alive=False, restarts_work=False)
+        self.kind = "local"
+        self.stuck = stuck
+
+    def health(self, resident: Resident, now: datetime) -> w.Health:  # noqa: ARG002
+        """Complain about stuckness, or say nothing can be told from here."""
+        if not self.stuck:
+            return w.Health(
+                resident_id=resident.id,
+                known=False,
+                detail="steward's own state shows nothing stuck, which is not the same as up",
+                supervisor=self.kind,
+            )
+        return w.Health(
+            resident_id=resident.id,
+            alive=False,
+            detail="a lease is held past its expiry",
+            supervisor=self.kind,
+        )
+
+    def owns(self, resident: Resident) -> bool:  # noqa: ARG002 — never, for any resident
+        """Own nothing, the way a probe that only observes steward owns nothing."""
+        return False
+
+
+def test_a_resident_nothing_supervises_recovers_from_a_give_up(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A give-up receipt must not outlive the thing it was raised about (steward #130).
+
+    ``clear_watchdog_attempts`` is the only thing that erases a receipt and it is gated on
+    ``known and alive``. The sole producer of such a reading is a supervisor that can see
+    a real process — and a resident declaring no ``deploy.container`` has none: docker
+    returns ``known=False`` for it by design and a local probe never reports life.
+
+    So once ``gave_up_at`` was set, ``intervene`` answered "already asked for a human" on
+    every subsequent pass, for ever. No CLI command and no endpoint cleared it; approving
+    the watchdog's ``needs_human`` records a decision without touching
+    ``watchdog_attempts``. Two of the three shipped residents qualify.
+    """
+    probe = UnownedProbe()
+    dog = build(resident, store, sink, tmp_path, supervisors=[probe])
+
+    gave_up = dog.tick(NOW)
+
+    assert [h.resident_id for h in gave_up.gave_up] == ["test-agent"]
+    assert store.watchdog_attempt("test-agent").gave_up
+
+    # Whatever was stuck is unstuck. Nothing here can ever say "alive" — that is the
+    # whole point — so "steward's own state has stopped complaining" has to be enough.
+    probe.stuck = False
+    dog.tick(NOW + timedelta(hours=1))
+
+    assert not store.watchdog_attempt("test-agent").gave_up
+    assert store.watchdog_attempt("test-agent").attempts == 0
+
+
+def test_a_resident_nothing_supervises_can_be_given_up_on_again_afterwards(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Recovering has to mean the next real outage still reaches a person.
+
+    A receipt that cleared but could never be re-earned would trade a permanent silence
+    for a permanent deafness, which is the same bug facing the other way.
+    """
+    probe = UnownedProbe()
+    dog = build(resident, store, sink, tmp_path, supervisors=[probe])
+    dog.tick(NOW)
+    probe.stuck = False
+    dog.tick(NOW + timedelta(hours=1))
+
+    probe.stuck = True
+    again = dog.tick(NOW + timedelta(hours=2))
+
+    assert [h.resident_id for h in again.gave_up] == ["test-agent"]
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 2
+
+
+def test_a_resident_nothing_supervises_still_knocks_only_once_while_it_is_stuck(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The receipt is still the dedup: one knock per outage, not one per pass."""
+    dog = build(resident, store, sink, tmp_path, supervisors=[UnownedProbe()])
+
+    dog.tick(NOW)
+    dog.tick(NOW + timedelta(minutes=1))
+    dog.tick(NOW + timedelta(minutes=2))
+
+    assert len([e for e in sink.events if e.type == ev.NEEDS_HUMAN]) == 1
+
+
+def test_a_supervised_resident_keeps_its_receipt_across_an_unreadable_pass(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The non-regression the flap guard exists for.
+
+    A resident something *does* own is unchanged: an "I cannot tell" pass in the middle of
+    a crash loop must not wipe its receipt, or the loop would knock again on every flap.
+    """
+    supervisor = StubSupervisor(alive=False, restarts_work=False)
+    dog = build(resident, store, sink, tmp_path, supervisors=[supervisor])
+    dog.tick(NOW)
+    assert store.watchdog_attempt("test-agent").gave_up
+
+    supervisor.known = False  # docker stopped answering; nothing recovered
+    dog.tick(NOW + timedelta(hours=1))
+
+    assert store.watchdog_attempt("test-agent").gave_up
+
+
 def test_a_flapping_container_still_respects_the_three_attempt_cap(
     resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:

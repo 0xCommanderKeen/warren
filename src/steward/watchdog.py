@@ -166,6 +166,13 @@ class ProcessSupervisor(Protocol):
     A supervisor that can only observe (:class:`LocalProbe`) returns ``False`` from
     :meth:`restart` rather than raising: "I noticed, and I cannot fix it" is a complete
     and useful answer, and it is the one that reaches a human.
+
+    A third method is *optional*, read through :func:`_owns` the way ``state`` already is:
+    ``owns(resident) -> bool``, meaning "there is a process here that is mine to put
+    back". It is what tells a resident nothing supervises from one every supervisor
+    happens to be failing to restart, and :meth:`Watchdog.tick` needs that distinction to
+    keep a give-up receipt from becoming permanent (steward #130). A supervisor that does
+    not answer is taken to own one, which is the reading that changes nothing.
     """
 
     kind: str
@@ -177,6 +184,17 @@ class ProcessSupervisor(Protocol):
     def restart(self, resident: Resident) -> bool:
         """Try to bring this resident back. Returns whether the attempt succeeded."""
         ...
+
+
+def _owns(supervisor: ProcessSupervisor, resident: Resident) -> bool:
+    """Ask a supervisor whether it owns a process for this resident, kindly.
+
+    Optional capability, read the way ``state`` already is: a supervisor that does not
+    implement ``owns`` is taken at its word as owning one. That default is deliberate —
+    it is the answer under which nothing about the give-up path changes.
+    """
+    owns = getattr(supervisor, "owns", None)
+    return True if owns is None else bool(owns(resident))
 
 
 # --------------------------------------------------------------------------------------
@@ -467,6 +485,10 @@ class LocalProbe:
         """Return ``False``: this probe observes steward, it does not own a process."""
         return False
 
+    def owns(self, resident: Resident) -> bool:  # noqa: ARG002 — never, for any resident
+        """Return ``False``: there is no process here that is this probe's to put back."""
+        return False
+
     def _stale_anchors(self, resident: Resident, now: datetime) -> list[str]:
         cutoff = now - timedelta(seconds=self.grace_s)
         complaints: list[str] = []
@@ -577,6 +599,15 @@ class DockerSupervisor:
             detail=f"container {name} is {'running' if running else 'not running'}",
             supervisor=self.kind,
         )
+
+    def owns(self, resident: Resident) -> bool:
+        """Return whether this resident declares a container for docker to supervise.
+
+        Not "is it running" — that is :meth:`health`. This is the prior question of
+        whether there is anything here to run at all, and it is the one that decides
+        whether steward giving up on this resident means anything (steward #130).
+        """
+        return self.container(resident) is not None
 
     def restart(self, resident: Resident) -> bool:
         """Restart this resident's container. Returns whether docker said it worked."""
@@ -776,6 +807,16 @@ class Watchdog:
     def _supervisor_for(self, health: Health) -> ProcessSupervisor | None:
         """Return the supervisor whose reading this is — the only one that may act on it."""
         return next((s for s in self.supervisors if s.kind == health.supervisor), None)
+
+    def _supervised(self, resident: Resident) -> bool:
+        """Report whether any supervisor owns a process it could put this resident back as.
+
+        The question a give-up receipt implicitly claims an answer to. Giving up means
+        having tried, and of the shipped residents only ``life-agent`` declares a
+        ``deploy.container``; ``pip`` and ``burrow-builder`` have nothing that could ever
+        have tried (steward #130).
+        """
+        return any(_owns(supervisor, resident) for supervisor in self.supervisors)
 
     def intervene(
         self, resident: Resident, down: Sequence[Health], now: datetime
@@ -1014,7 +1055,24 @@ class Watchdog:
                 self.store.clear_watchdog_attempts(resident.id)
                 continue
             if not health.down:
-                continue  # Nobody can see it. Say nothing, change nothing.
+                # Nobody can see it right now. Say nothing, change nothing — unless
+                # nobody ever *could*. A resident no supervisor owns a process for can
+                # never produce the ``known and alive`` reading above: ``LocalProbe``
+                # reports stuckness or ``known=False`` and never life, and
+                # ``DockerSupervisor`` returns ``known=False`` for a manifest that names
+                # no container. So a give-up receipt written about such a resident was
+                # permanent — ``intervene`` answered "already asked for a human" on every
+                # pass afterwards, for ever, with no CLI or endpoint that could undo it
+                # (steward #130).
+                #
+                # Nothing tried to restart it, so there is nothing to keep having given up
+                # on. "Steward's own state has stopped complaining" is the only recovery
+                # signal such a resident has, so it is the one that clears the receipt.
+                # The flap this branch guards against elsewhere cannot happen here: an
+                # unowned resident's unknown is structural and constant, not intermittent.
+                if not self._supervised(resident):
+                    self.store.clear_watchdog_attempts(resident.id)
+                continue
             outcome, acted = self.intervene(resident, [r for r in all_readings if r.down], moment)
             if outcome.startswith("restarted") and acted is not None:
                 restarted.append(acted)
