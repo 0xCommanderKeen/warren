@@ -19,6 +19,7 @@ from conftest import ResidentWriter
 from steward import approvals as ap
 from steward import events as ev
 from steward import prompt as p
+from steward.input_bounds import EDIT_MAX_DEPTH
 from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
 from steward.store import ApprovalRecord, Store
 from steward.transitions.approval import ApprovalTransitions
@@ -45,6 +46,26 @@ def manifest(write_resident: ResidentWriter) -> ResidentManifest:
 def seam(store: Store, sink: ev.NullEmitter) -> ApprovalTransitions:
     """Build the transition these tests raise, decide and expire through (steward #123)."""
     return ApprovalTransitions(store=store, emitter=sink)
+
+
+def test_direct_decision_callers_cannot_bypass_edit_bounds(
+    store: Store, sink: ev.NullEmitter
+) -> None:
+    request = store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+    )
+    edit: dict[str, object] = {"leaf": "ok"}
+    for _ in range(EDIT_MAX_DEPTH):
+        edit = {"next": edit}
+    with pytest.raises(ValueError, match="nesting limit"):
+        seam(store, sink).decide(request.request_id, "edit", edit=edit)
+    record = store.approval(request.request_id)
+    assert record is not None
+    assert record.pending
+    assert sink.events == []
 
 
 def raw_block(attrs: str = 'action="send_email"', body: str = '{"to": "a@example.com"}') -> str:

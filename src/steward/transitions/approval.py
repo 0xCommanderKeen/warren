@@ -38,6 +38,7 @@ from steward.approvals import (
     human_message,
     repeat_deny_window_s,
 )
+from steward.input_bounds import validate_approval_edit
 from steward.manifest import ResidentManifest
 from steward.store import DECIDED_BY_REPEAT, ApprovalRecord, Store
 from steward.transitions.outcome import (
@@ -298,6 +299,7 @@ class ApprovalTransitions:
         than by re-reading the clock, which is what makes them stable under a sweep landing
         between the write and the read.
         """
+        validate_approval_edit(edit)
         record, recorded = self.store.decide(
             request_id,
             decision,

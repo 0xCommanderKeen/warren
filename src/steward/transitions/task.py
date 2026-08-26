@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from steward import events as ev
+from steward.input_bounds import SKILLS_MAX_ITEMS, validate_identifier, validate_work_text
 from steward.runners import RunResult
 from steward.store import STATUS_DONE, STATUS_FAILED, JobRecord, Store
 from steward.transitions.outcome import Transition, applied, refused, superseded
@@ -94,6 +95,11 @@ class TaskTransitions:
         :func:`steward.events.task_posted_event` supplies ``steward:api`` and there is no
         knob for a caller to reach for and get wrong.
         """
+        validate_work_text(title, detail)
+        if len(required_skills) > SKILLS_MAX_ITEMS:
+            raise ValueError(f"required_skills exceeds the {SKILLS_MAX_ITEMS} item limit")
+        for skill in required_skills:
+            validate_identifier(skill, "required skill")
         job = self.store.post_job(
             title=title,
             detail=detail,

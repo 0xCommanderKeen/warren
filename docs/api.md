@@ -40,6 +40,41 @@ Every accepted mutating request is logged to `.steward/state/steward.db` with it
 outcome, so a queued action that later failed is traceable. A failure surfaces as a
 truthful event (`routine_failed`, `needs_human`) and never as a synthesized success.
 
+## Body validation
+
+Malformed bodies and bodies outside these limits are FastAPI/Pydantic `422` responses.
+Validation happens before a route runs, so a rejected body writes no request or domain
+row, emits no event, and reaches no resident prompt. The limits are repeated at the
+durable transition/delegation seams where a CLI or an in-process caller can otherwise
+bypass HTTP validation.
+
+| body | field | limit |
+|---|---|---|
+| `POST /jobs` | `title`, `detail` | 200 and 8,000 Unicode characters |
+| `POST /jobs` | `required_skills` | 100 items; each identifier 100 characters |
+| `POST /delegate` | `title`, `detail` | 200 and 8,000 Unicode characters |
+| `POST /delegate` | `to`, `route`, `from`, `parent_task_id` | 100 characters each |
+| `POST /approvals/{id}` | `edit` | 16 KiB compact UTF-8 JSON; 8 container levels; 100 members/items per container; 1,000 values; strings 8,000 and keys 200 characters |
+
+The work-text limits deliberately match the `<delegate>` block grammar, so the same
+task cannot grow larger depending on which door it entered through. Identifier limits
+comfortably cover resident/route slugs and steward's generated IDs while bounding lookup
+and near-match work. Approval edits get a structural budget as well as a serialized byte
+budget because they are stored verbatim and rendered into the resident's next prompt;
+the validator walks iteratively before serializing, so deeply nested input does not cause
+recursive validation work.
+
+These are all API bodies: `JobPost`, `HandoffPost`, `ApprovalDecision`, and
+`ResidentPost`. `ResidentPost` inherits the shared `NewResident` declaration model used
+by the CLI, including its manifest/domain validation; it writes reviewable manifest and
+soul files rather than job/event/prompt payloads, so its broader declaration prose is not
+part of the work-envelope limits above. Route path and query parameters are separate
+inputs and retain their endpoint-specific validation. SQLite stores these values in
+`TEXT` columns and supplies no length constraint itself.
+
+The OpenAPI schema and interactive docs are disabled, as described below, so these
+limits are documented here rather than advertised at `/openapi.json`.
+
 ## Auth
 
 One shared token, exactly like burrow's ingest auth.

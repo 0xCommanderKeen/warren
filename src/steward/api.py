@@ -38,18 +38,25 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hmac import compare_digest
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from steward import delegation as dg
 from steward import events as ev
 from steward.board import Dispatcher
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
+from steward.input_bounds import (
+    DETAIL_MAX_CHARS,
+    IDENTIFIER_MAX_CHARS,
+    SKILLS_MAX_ITEMS,
+    TITLE_MAX_CHARS,
+    validate_approval_edit,
+)
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
 from steward.nursery import (
@@ -251,11 +258,20 @@ class _Body(BaseModel):
 class JobPost(_Body):
     """A task a human wants the fleet to pick up."""
 
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the claimant needs to know.")
-    required_skills: list[str] = Field(
-        default_factory=list,
-        description="Skills a resident must be granted before it may claim this.",
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the claimant needs to know.",
+    )
+    required_skills: list[Annotated[str, Field(min_length=1, max_length=IDENTIFIER_MAX_CHARS)]] = (
+        Field(
+            default_factory=list,
+            max_length=SKILLS_MAX_ITEMS,
+            description="Skills a resident must be granted before it may claim this.",
+        )
     )
 
 
@@ -283,23 +299,45 @@ class ApprovalDecision(_Body):
         default=None, description="The modified detail, for decision=edit."
     )
 
+    @field_validator("edit")
+    @classmethod
+    def _bounded_edit(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        validate_approval_edit(value)
+        return value
+
 
 class HandoffPost(_Body):
     """Work handed to one named resident, through a route that resident declares."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
 
-    to: str = Field(min_length=1, description="The resident id receiving the work.")
-    route: str = Field(min_length=1, description="A delegation route that resident declares.")
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the receiver needs to know.")
+    to: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The resident id receiving the work.",
+    )
+    route: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="A delegation route that resident declares.",
+    )
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the receiver needs to know.",
+    )
     sender: str | None = Field(
         default=None,
         alias="from",
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The resident handing the work over. Omit it when a person is.",
     )
     parent_task_id: str | None = Field(
         default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The task this work descends from, for lineage and attribution.",
     )
 

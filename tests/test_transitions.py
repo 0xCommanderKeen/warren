@@ -199,6 +199,15 @@ def test_posting_writes_an_open_row_and_announces_it_as_steward(
     assert event.payload["required_skills"] == ["research"]
 
 
+def test_direct_task_posters_cannot_bypass_work_bounds(
+    tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
+) -> None:
+    with pytest.raises(ValueError, match="character limit"):
+        tasks.post(title="x" * 201)
+    assert store.jobs() == []
+    assert sink.events == []
+
+
 def test_a_claim_leases_the_row_and_walks_the_claimant_to_the_notice(
     tasks: tr.TaskTransitions, store: Store, sink: ev.NullEmitter
 ) -> None:
