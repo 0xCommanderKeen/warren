@@ -46,6 +46,7 @@ from steward.journal import (
     resolve_journal_dir,
 )
 from steward.manifest import (
+    NO_MANIFESTS_PROBLEM,
     SCHEMA_ARTIFACT,
     Diagnostic,
     ManifestError,
@@ -122,6 +123,49 @@ def _diagnostic_as_dict(diagnostic: Diagnostic) -> dict[str, str]:
     return payload
 
 
+def _require_residents(result: ValidationResult, root: Path) -> ValidationResult:
+    """Fail a defaulted run that validated nothing (steward #137).
+
+    ``steward validate`` with no argument is CI's merge gate, and it falls back to
+    :data:`DEFAULT_RESIDENTS_DIR` — a *relative* path, resolved against whatever the
+    process cwd happens to be. A tree that is renamed, moved, or simply looked for from
+    the wrong working directory therefore validated nothing and printed ``ok:`` while
+    doing it: the step whose whole purpose is that an invalid manifest must never merge,
+    passing green having read no manifests at all.
+
+    The condition is *zero residents and nothing already wrong*, not "the tree said it was
+    empty in these exact words". Keying on the wording would fail **open** — reword the
+    diagnostic at the source, or reach zero residents down some path that words it
+    differently, and the gate would quietly go back to exiting 0 on a run that checked
+    nothing. The count is the thing that matters, so the count is what is tested.
+    :data:`NO_MANIFESTS_PROBLEM` is used only to drop the warning this error replaces, so
+    a drift in that prose costs a duplicated line and never a green gate.
+
+    Naming a tree explicitly is a different act. ``steward validate ./drafts`` against an
+    empty directory is a fair question with a fair answer, so that stays a warning; only
+    the defaulted run is held to "you must have found something".
+    """
+    if result.residents or result.errors:
+        return result
+    kept = tuple(d for d in result.diagnostics if d.problem != NO_MANIFESTS_PROBLEM)
+    return ValidationResult(
+        residents=(),
+        diagnostics=(
+            *kept,
+            Diagnostic(
+                file=root,
+                field_path="<path>",
+                problem=(
+                    f"{NO_MANIFESTS_PROBLEM} under {root.resolve()}, and no path was named "
+                    f"on the command line — so this run validated nothing"
+                ),
+                example="residents/life-agent/manifest.yaml",
+                severity=Severity.ERROR,
+            ),
+        ),
+    )
+
+
 def _report_text(result: ValidationResult, targets: Sequence[Path]) -> None:
     for diagnostic in result.diagnostics:
         style = "red" if diagnostic.severity is Severity.ERROR else "yellow"
@@ -186,10 +230,13 @@ def validate(paths: tuple[Path, ...], output_format: str, skills_dir: Path | Non
     """Validate resident manifests. Defaults to the residents/ tree.
 
     Exits non-zero if any manifest fails, so CI can gate on it. A granted skill that
-    names nothing in the library is one of the failures.
+    names nothing in the library is one of the failures — and so, when no path is named,
+    is finding no manifests at all: a gate that validated nothing has not held.
     """
     targets = list(paths) or [DEFAULT_RESIDENTS_DIR]
     result = validate_paths(targets, skills_dir)
+    if not paths:
+        result = _require_residents(result, DEFAULT_RESIDENTS_DIR)
     if output_format == "json":
         _report_json(result)
     else:

@@ -90,6 +90,13 @@ if TYPE_CHECKING:  # pragma: no cover — the library reads this module, not the
     from steward.skills import SkillLibrary
 
 MANIFEST_FILENAME = "manifest.yaml"
+
+#: What a tree with nothing in it is called. A warning rather than an error here on
+#: purpose — asking about an empty directory is a fair question — but ``steward validate``
+#: promotes it when nobody named the tree, because that run is CI's merge gate and a gate
+#: that passes having read no manifests is not a gate (steward #137).
+NO_MANIFESTS_PROBLEM = "no resident manifests found"
+
 DEFAULT_SOUL_FILENAME = "soul.md"
 SCHEMA_VERSION = 0
 VOICE_MAX_CHARS = 1200
@@ -1861,7 +1868,7 @@ def validate_tree(
                 Diagnostic(
                     file=root,
                     field_path="<path>",
-                    problem="no resident manifests found",
+                    problem=NO_MANIFESTS_PROBLEM,
                     example="residents/life-agent/manifest.yaml",
                     severity=Severity.WARNING,
                 ),
