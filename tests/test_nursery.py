@@ -15,7 +15,7 @@ from steward.board import (
     load_board_residents,
     load_residents,
 )
-from steward.deploy import LocalTransport, TransportError
+from steward.deploy import LocalTransport, SshTransport, TransportError
 from steward.manifest import (
     Diagnostic,
     ValidationResult,
@@ -660,6 +660,112 @@ def test_retiring_something_that_was_never_deployed_says_so(
     assert report.marked
     assert not report.stopped
     assert "nothing at" in report.note
+
+
+def test_retiring_against_an_unreachable_host_does_not_report_success(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The container is still running, so `steward retire` must not say it is not.
+
+    `_stop_retired_container` decides whether there is anything to stop by reading the
+    compose file, and `SshTransport.read` used to fold every failure — no ssh binary, a
+    host that never answered, an auth refusal — into the same `None` a missing file gives.
+    So an unreachable NAS returned "nothing at ~/docker/<id> on dxp2800 to stop", the
+    function completed normally, and `steward retire` printed `<id> is retired` in green
+    and exited 0 while the container kept firing and kept spending (steward #136).
+
+    A `LocalTransport` cannot show this: it raises on an unreachable host, which is the
+    behaviour the real one was missing. So this drives a real `SshTransport` over an ssh
+    that never connects.
+    """
+    raise_into(scratch_repo, host)
+
+    def never_connects(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        return CommandOutcome(argv=tuple(argv), error="'ssh' did not answer within 20s")
+
+    with pytest.raises(NurseryError, match="could not be reached"):
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=SshTransport(command=never_connects),
+        )
+
+    # The mark is committed before the host is touched, and stays committed: that order is
+    # what keeps the watchdog from restarting a resident nobody could stop.
+    assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
+    assert validate_tree(scratch_repo.residents).residents[0].retired
+
+
+def test_retiring_stops_a_container_whose_compose_file_cannot_be_read(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """An unreadable compose file is not a resident with nothing to stop (steward #136).
+
+    ``cat`` exits 1 both for a file that is missing and for one steward may not open — a
+    root-owned directory on the NAS is enough. Deciding "nothing to stop" from that status
+    is the same wrong conclusion as reading an unreachable host as an empty one, reached
+    by a different route: the manifest is marked, the command exits 0, and the container
+    keeps running. So the question asked is ``test -e``, which answers it.
+    """
+    raise_into(scratch_repo, host)
+
+    def unreadable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        if "test" in parts:
+            return CommandOutcome(argv=parts, exit_status=0)  # it is there
+        if "cat" in parts:
+            return CommandOutcome(argv=parts, exit_status=1, stderr="cat: Permission denied")
+        return CommandOutcome(argv=parts, exit_status=0)  # docker compose down works
+
+    report = retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=SshTransport(command=unreadable),
+    )
+
+    assert report.stopped, "the container was there, so it was brought down"
+    assert "nothing at" not in report.note
+
+
+def test_retiring_does_not_report_success_below_an_unsearchable_directory(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """An inaccessible compose tree is not evidence that no container exists."""
+    raise_into(scratch_repo, host)
+
+    def unsearchable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the run_argv signature
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        predicate, candidate = parts[-2], parts[-1]
+        if predicate == "-e":
+            exists = candidate in {"~/docker", "~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
+        assert predicate == "-x"
+        return CommandOutcome(argv=parts, exit_status=1)
+
+    with pytest.raises(NurseryError, match="could not be reached"):
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=SshTransport(command=unsearchable),
+        )
 
 
 def test_retiring_marks_the_manifest_before_it_touches_the_host(

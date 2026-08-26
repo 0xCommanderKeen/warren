@@ -358,6 +358,134 @@ def test_reading_over_ssh_is_a_cat_and_a_missing_file_is_none() -> None:
     assert SshTransport(command=Recorder(ok=False)).read("~/x") is None
 
 
+class Unreachable:
+    """A stand-in for run_argv that answers the way a host nobody can reach does."""
+
+    def __init__(self, *, error: str | None = None, exit_status: int | None = None) -> None:
+        """Answer with steward's own diagnostic, or with ssh's reserved status."""
+        self.error = error
+        self.exit_status = exit_status
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG002 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG002 — likewise
+    ) -> CommandOutcome:
+        """Report the failure without launching anything."""
+        return CommandOutcome(argv=tuple(argv), error=self.error, exit_status=self.exit_status)
+
+
+@pytest.mark.parametrize(
+    ("command", "why"),
+    [
+        (Unreachable(error="cannot launch 'ssh': No such file or directory"), "no ssh at all"),
+        (Unreachable(error="'ssh' did not answer within 20s"), "the host never answered"),
+        (Unreachable(exit_status=255), "ssh refused the connection, so cat never ran"),
+    ],
+)
+def test_a_host_steward_never_reached_is_not_an_empty_one(command: Unreachable, why: str) -> None:
+    """``None`` from ``read`` must mean the file is absent, and nothing weaker.
+
+    ``run`` reports a missing ssh binary, a host that never answered, and an auth refusal
+    all as non-ok outcomes. Folding them into ``None`` told the caller the file was not
+    there — about a machine steward never reached (steward #136).
+    """
+    with pytest.raises(TransportError) as raised:
+        SshTransport(command=command).read("~/docker/x/compose.yaml")
+
+    assert f"{DEFAULT_USER}@{DEFAULT_HOST}" in str(raised.value), why
+
+
+class Filesystem:
+    """A stand-in for run_argv that answers ``cat`` and ``test -e`` about a fake tree.
+
+    The point is that the two disagree: ``cat`` exits 1 for a file that is missing *and*
+    for one it may not open, while ``test -e`` exits 1 only for genuinely not there.
+    """
+
+    def __init__(self, *, present: bool, readable: bool) -> None:
+        """Describe the one path this fake knows about."""
+        self.present = present
+        self.readable = readable
+
+    def __call__(
+        self,
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG002 — part of the signature run_argv has
+        *,
+        stdin: bytes | None = None,  # noqa: ARG002 — likewise
+    ) -> CommandOutcome:
+        """Answer as the remote shell would for this path's state."""
+        parts = tuple(argv)
+        if "test" in parts:
+            asked = parts[-1]
+            exists = self.present or asked in {"~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
+        if self.present and self.readable:
+            return CommandOutcome(argv=parts, exit_status=0, stdout="services:\n")
+        detail = "Permission denied" if self.present else "No such file or directory"
+        return CommandOutcome(argv=parts, exit_status=1, stderr=f"cat: {detail}")
+
+
+def test_a_file_that_is_there_but_unreadable_is_not_reported_as_absent() -> None:
+    """``exists`` asks the question ``cat`` cannot answer (steward #136).
+
+    A compose file under a directory steward may not read — root-owned on the NAS, say —
+    makes ``cat`` exit 1 with exactly the status a missing file gives. Reading that as
+    absence is how ``steward retire`` reported success with the container still running,
+    which is the whole bug; fixing only the unreachable-host half would have left the
+    same wrong conclusion reachable by a different route.
+    """
+    unreadable = SshTransport(command=Filesystem(present=True, readable=False))
+
+    assert unreadable.exists("~/docker/x/compose.yaml") is True
+    assert SshTransport(command=Filesystem(present=False, readable=False)).exists("~/x") is False
+
+
+def test_an_unsearchable_parent_is_not_reported_as_an_absent_file() -> None:
+    """A false ``test -e`` below a forbidden directory is not proof of absence."""
+
+    def unsearchable(
+        argv: Sequence[str],
+        timeout_s: float = 20.0,  # noqa: ARG001 — part of the run_argv signature
+        *,
+        stdin: bytes | None = None,  # noqa: ARG001 — likewise
+    ) -> CommandOutcome:
+        parts = tuple(argv)
+        predicate, candidate = parts[-2], parts[-1]
+        if predicate == "-e":
+            exists = candidate in {"~/docker", "~", "."}
+            return CommandOutcome(argv=parts, exit_status=0 if exists else 1)
+        assert predicate == "-x"
+        return CommandOutcome(argv=parts, exit_status=1)
+
+    with pytest.raises(TransportError, match="not searchable"):
+        SshTransport(command=unsearchable).exists("~/docker/x/compose.yaml")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        Unreachable(error="'ssh' did not answer within 20s"),
+        Unreachable(exit_status=255),
+    ],
+)
+def test_exists_will_not_call_an_unreachable_host_empty_either(command: Unreachable) -> None:
+    """The same discipline as ``read``: not reached is never an answer about the host."""
+    with pytest.raises(TransportError):
+        SshTransport(command=command).exists("~/docker/x/compose.yaml")
+
+
+def test_a_host_that_answered_and_said_no_is_still_an_empty_one() -> None:
+    """The other half: ssh connected, ``cat`` exited non-zero, the file is genuinely gone.
+
+    This is the answer ``read`` exists to give, and the one the fix must not swallow.
+    """
+    assert SshTransport(command=Unreachable(exit_status=1)).read("~/docker/x/nope") is None
+
+
 def test_the_default_transport_is_built_from_the_manifest(write_resident) -> None:
     target = target_for(resident(write_resident, deploy={"host": "other-nas"}).manifest)
     built = transport_for(target)

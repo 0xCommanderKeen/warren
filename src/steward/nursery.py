@@ -964,7 +964,12 @@ def _stop_retired_container(
     tells the operator to re-run once the host answers, rather than unwinding the mark.
     """
     try:
-        if conveyance.read(target.compose_path) is None:
+        # ``exists``, not ``read``: this only ever asked whether there is a deployment
+        # here, and ``cat`` answers 1 both for a file that is missing and for one it may
+        # not open. Reading the second as the first would report a resident retired with
+        # its container still running, which is the bug this function is being fixed for
+        # (steward #136).
+        if not conveyance.exists(target.compose_path):
             return False, f"nothing at {target.path} on {target.host} to stop"
         outcome = conveyance.run(down)
         if not outcome.ok:

@@ -69,6 +69,7 @@ __all__ = [
     "DEFAULT_ROOT",
     "DEFAULT_USER",
     "ENV_FILENAME",
+    "SSH_FAILURE_STATUS",
     "DeployTarget",
     "LocalTransport",
     "SshTransport",
@@ -137,6 +138,12 @@ FALLBACK_MEMORY_PATH = "/data/memory"
 #: remote ``.env``; never into the compose file, never into a manifest, never into git.
 BURROW_URL_ENV = "BURROW_URL"
 BURROW_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
+
+
+#: ssh's reserved exit status for "ssh itself failed" — connection refused, host
+#: unreachable, auth denied, host-key mismatch. Every other status belongs to the remote
+#: command, so this is the one value that tells the two apart from the near side.
+SSH_FAILURE_STATUS = 255
 
 
 class TransportError(Exception):
@@ -462,6 +469,10 @@ class Transport(Protocol):
         """Return the contents of a file on the host, or ``None`` when there is none."""
         ...
 
+    def exists(self, path: str) -> bool:
+        """Report whether a path is there, for a caller that does not want the bytes."""
+        ...
+
 
 @dataclass
 class SshTransport:
@@ -511,9 +522,79 @@ class SshTransport:
         )
 
     def read(self, path: str) -> str | None:
-        """Read a file on the host, or return ``None`` when it is not there."""
+        """Read a file on the host, or return ``None`` when it is not there.
+
+        ``None`` means one thing only: *the host answered, and the file is absent*. Every
+        other failure raises :class:`TransportError`, which is the word this module
+        already has for "there was nobody to ask".
+
+        The distinction is load-bearing rather than tidy. ``run`` reports a missing ssh
+        binary, a host that never answered, and an auth refusal all as non-``ok``
+        outcomes, so folding them into ``None`` told a caller the file was not there —
+        about a machine steward never reached. ``steward retire`` read the compose file
+        to decide whether there was a container to stop, took an unreachable NAS for an
+        empty directory, and reported the resident retired while its container kept
+        running and kept spending (steward #136).
+        """
         outcome = self.run(["cat", path])
-        return outcome.stdout if outcome.ok else None
+        if outcome.ok:
+            return outcome.stdout
+        self._require_reached(outcome)
+        # ssh connected and ``cat`` exited non-zero. Usually that is "no such file", but
+        # ``cat`` answers 1 for an unreadable file too and does not distinguish the two in
+        # its status. A caller that must not confuse "absent" with "there but unreadable"
+        # asks :meth:`exists` — which is the question, and the only question,
+        # ``_stop_retired_container`` was ever using this method for.
+        return None
+
+    def exists(self, path: str) -> bool:
+        """Report whether a path is there. Raises rather than guessing when unreachable.
+
+        ``test -e`` where :meth:`read` uses ``cat``, because an unreadable file still
+        exists. A false answer is not sufficient on its own, though: ``test -e`` also
+        returns false when an ancestor cannot be traversed. Walk upward to the nearest
+        ancestor the remote shell can see and require it to be searchable before calling
+        the original path absent. Retiring a resident must fail closed when it cannot tell
+        "missing" from "forbidden", or it can leave a container running (steward #136).
+        """
+        candidate = PurePosixPath(path)
+        original = candidate
+        while True:
+            outcome = self.run(["test", "-e", str(candidate)])
+            if outcome.ok:
+                if candidate == original:
+                    return True
+                searchable = self.run(["test", "-x", str(candidate)])
+                if searchable.ok:
+                    return False
+                self._require_reached(searchable)
+                raise TransportError(
+                    f"{self.target}: cannot inspect {path}: ancestor {candidate} is not searchable"
+                )
+            self._require_reached(outcome)
+            parent = candidate.parent
+            if parent == candidate:
+                raise TransportError(f"{self.target}: cannot inspect {path}")
+            candidate = parent
+
+    def _require_reached(self, outcome: CommandOutcome) -> None:
+        """Raise unless the far side actually ran the command and answered for itself.
+
+        The shared half of :meth:`read` and :meth:`exists`: every way a command can fail
+        *without having run* — no ssh binary, a host that never answered, ssh refusing the
+        connection — is a :class:`TransportError`, because none of them say anything about
+        what is on the host.
+        """
+        if outcome.error is not None:
+            # The command never ran at all: no ssh binary, or it hung until steward gave
+            # up on it. Either way this says nothing about what is on the far side.
+            raise TransportError(f"{self.target}: {outcome.error}")
+        if outcome.exit_status == SSH_FAILURE_STATUS:
+            # ssh's own reserved status — refused, timed out, bad host key, no such user.
+            # The far side never got as far as running anything.
+            raise TransportError(
+                f"{self.target}: ssh could not open the connection ({outcome.summary()})"
+            )
 
 
 @dataclass
@@ -585,6 +666,11 @@ class LocalTransport:
         self._reachable()
         target = self.resolve(path)
         return target.read_text(encoding="utf-8") if target.is_file() else None
+
+    def exists(self, path: str) -> bool:
+        """Report whether the fake host has this path."""
+        self._reachable()
+        return self.resolve(path).exists()
 
 
 def transport_for(target: DeployTarget) -> Transport:
