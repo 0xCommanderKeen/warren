@@ -22,7 +22,7 @@ from steward import manifest as m
 from steward import scheduler as s
 from steward.board import Dispatcher
 from steward.manifest import load_manifest
-from steward.runners import Outcome, Runner, RunRequest, RunResult
+from steward.runners import ClaudeRunner, Outcome, Runner, RunRequest, RunResult
 from steward.store import Store
 
 LJUBLJANA = "Europe/Ljubljana"
@@ -233,6 +233,33 @@ def test_the_ledger_accumulates_across_every_kind_of_run(store: Store) -> None:
         "task",
         "delegated",
     }
+
+
+def test_a_run_whose_usage_steward_refused_is_counted_as_unreported(store: Store) -> None:
+    """The gap has to be visible, or the cap bypass just changes shape (steward #129).
+
+    ``usage_known`` is derived by OR-ing the three usage fields, and the ledger writes
+    ``cost_usd or 0.0``. So a claude payload carrying a NaN cost beside honest token
+    counts would once have landed as ``cost_usd=0.0, usage_known=1`` — contributing
+    nothing to the daily cap and nothing to ``unreported`` either. Invisible in both
+    directions is worse than the NaN was: at least a NaN made the sum obviously wrong.
+
+    This drives the real parser rather than hand-building a ``RunResult``, because the
+    thing under test is what survives the boundary.
+    """
+    guard = bg.BudgetGuard(store)
+    manifest = manifest_of()
+    hostile = ClaudeRunner(m.Runner(kind="claude")).parse(
+        RunResult(outcome=Outcome.OK),
+        '{"result":"did it","usage":{"input_tokens":120,"output_tokens":34},"total_cost_usd":NaN}',
+    )
+
+    guard.record(manifest, result=hostile, run_id="hostile", now=NOON)
+    guard.record(manifest, result=spent(cost=1.0), run_id="honest", now=NOON)
+
+    status = guard.status(manifest, NOON)
+    assert status.spend.cost_usd == pytest.approx(1.0), "nothing invented, nothing poisoned"
+    assert status.spend.unreported == 1, "and the run steward could not read is visible"
 
 
 def test_usage_a_brain_did_not_report_is_counted_as_zero_and_said_out_loud(
