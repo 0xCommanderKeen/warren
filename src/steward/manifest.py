@@ -1527,6 +1527,60 @@ def _check_budget_runtime(manifest: ResidentManifest, source: Path) -> list[Diag
     return diagnostics
 
 
+#: Runner kinds that spawn a real brain and cannot say what it cost. ``codex`` prints
+#: plain text — :mod:`steward.runners` says so out loud — and a ``command`` is whatever
+#: argv the manifest supplied. Only ``claude`` parses ``--output-format json`` for usage.
+#:
+#: ``mock`` is missing from this set deliberately: it reports no usage either, but it
+#: spawns nothing and spends nothing, so a cap over it is inert without being untruthful.
+#: This set is about caps that read green while real money goes out.
+UNMETERED_RUNNER_KINDS = frozenset({"codex", "command"})
+
+#: The budget fields computed from what a runner reported. ``max_run_seconds`` is not one
+#: of them — steward times the run itself — so it stays legal under any runner.
+METERED_BUDGET_FIELDS = ("daily_cost_usd", "daily_tokens")
+
+
+def _check_budget_is_enforceable(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a daily cap the declared runner can never report enough usage to trip.
+
+    ``Gauge.exhausted`` is ``spent >= limit``, and ``spent`` is summed from ``run_ledger``
+    rows that :meth:`steward.budgets.BudgetGuard.record` writes as **zeros** whenever the
+    runner reported nothing. A resident on ``runner.kind: codex`` or ``command`` therefore
+    accumulates ``cost_usd = 0.0`` for ever: the cap never trips, the pause machinery never
+    fires, and ``GET /residents/{id}/budget`` reports a green gauge with real money being
+    spent behind it (steward #125).
+
+    An error rather than a warning, and at validation time rather than at run time, because
+    the failure is silent by construction: nothing at run time is going to notice that a
+    number stayed zero. The declared cap and the declared runner contradict each other, and
+    this is the one moment somebody is reading both.
+
+    ``max_run_seconds`` is untouched — steward measures a run's duration itself, so that
+    cap is enforceable whatever the brain is.
+    """
+    if manifest.runner.kind not in UNMETERED_RUNNER_KINDS:
+        return []
+    return [
+        Diagnostic(
+            file=source,
+            field_path=f"budgets.{name}",
+            problem=(
+                f"runner kind {manifest.runner.kind!r} does not report usage, so this cap "
+                f"can never trip: every run is ledgered as costing zero and the budget "
+                f"gauge reads green while the resident spends"
+            ),
+            example=(
+                "runner: {kind: claude}  (the only kind that reports usage), "
+                "or drop the cap and cap the session instead: "
+                "budgets: {max_run_seconds: 900}"
+            ),
+        )
+        for name in METERED_BUDGET_FIELDS
+        if getattr(manifest.budgets, name) is not None
+    ]
+
+
 def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     """Check that the delegation block says something, and does not say it about itself.
 
@@ -1789,6 +1843,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
     diagnostics.extend(_check_budget_runtime(manifest, source))
+    diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
