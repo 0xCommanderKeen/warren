@@ -603,6 +603,97 @@ def test_edit_serialized_byte_boundary_is_exact(api: ApiFactory) -> None:
     )
 
 
+def test_deep_raw_approval_json_is_422_before_materialization(api: ApiFactory) -> None:
+    prompts: list[str] = []
+
+    def record(request: RunRequest) -> RunResult:
+        prompts.append(request.prompt)
+        return RunResult(outcome=Outcome.OK, output="done")
+
+    harness = api(behavior=record)
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_100 + "0" + "]" * 1_100 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "edit"]
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.store.requests() == []
+    assert harness.events() == []
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    harness.settle()
+    assert prompts
+    assert "the human edited it to" not in prompts[0]
+
+
+def test_raw_depth_guard_is_quote_escape_and_utf8_aware(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    edit = _nested_edit(EDIT_MAX_DEPTH)
+    edit["text"] = '🦉 braces { [ and an escaped quote: " still text } ]'
+    raw = json.dumps({"decision": "edit", "edit": edit}, ensure_ascii=False)
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw.encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 202
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_api_edit_numbers_are_422_without_effect(api: ApiFactory, number: str) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = f'{{"decision":"edit","edit":{{"value":{number}}}}}'
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.events() == []
+
+
+@pytest.mark.parametrize("raw", ["", '{"decision":'])
+def test_raw_guard_leaves_empty_and_malformed_json_to_standard_validation(
+    api: ApiFactory, raw: str
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+
+
+def test_raw_guard_preserves_json_content_types_and_duplicate_key_semantics(
+    api: ApiFactory,
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content='{"decision":"deny","decision":"approve"}',
+        headers={"content-type": "application/vnd.api+json"},
+    )
+    assert response.status_code == 202
+    assert harness.store.approval(request_id).decision == "approve"  # ty: ignore[unresolved-attribute]
+
+
+def test_unauthorized_deep_approval_body_still_uses_the_auth_error(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_100 + "0" + "]" * 1_100 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw,
+        headers={"content-type": "application/json", "authorization": "Bearer wrong"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "unauthorized"
+
+
 def test_deciding_an_unknown_request_is_404(api: ApiFactory) -> None:
     harness = api()
     response = harness.client.post("/approvals/no-such-request", json={"decision": "approve"})

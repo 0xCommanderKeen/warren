@@ -42,8 +42,10 @@ from typing import Annotated, Any, Literal, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import delegation as dg
 from steward import events as ev
@@ -52,10 +54,12 @@ from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStat
 from steward.deploy import Transport
 from steward.input_bounds import (
     DETAIL_MAX_CHARS,
+    EDIT_MAX_DEPTH,
     IDENTIFIER_MAX_CHARS,
     SKILLS_MAX_ITEMS,
     TITLE_MAX_CHARS,
     validate_approval_edit,
+    validate_json_container_depth,
 )
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
@@ -573,6 +577,75 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     return require_token
 
 
+class _ApprovalBodyDepthMiddleware:
+    """Bound approval JSON before FastAPI's recursive JSON/Pydantic materialisation."""
+
+    def __init__(self, app: ASGIApp, *, token: str | None) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        is_decision = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/approvals/")
+            and "/" not in path.removeprefix("/approvals/")
+        )
+        if not is_decision or not self._authorized(scope):
+            await self.app(scope, receive, send)
+            return
+
+        messages: list[Message] = []
+        body = bytearray()
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] != "http.request":
+                break
+            body.extend(message.get("body", b""))
+            if not message.get("more_body", False):
+                break
+        try:
+            # The request object is level one; an eight-level edit is therefore level nine.
+            validate_json_container_depth(bytes(body), EDIT_MAX_DEPTH + 1)
+        except ValueError as error:
+            response = JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [
+                        {
+                            "type": "value_error",
+                            "loc": ["body", "edit"],
+                            "msg": f"Value error, {error}",
+                            "input": None,
+                        }
+                    ]
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        pending = iter(messages)
+
+        async def replay() -> Message:
+            try:
+                return next(pending)
+            except StopIteration:
+                return await receive()
+
+        await self.app(scope, replay, send)
+
+    def _authorized(self, scope: Scope) -> bool:
+        if self.token is None:
+            return True
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        scheme, _, presented = headers.get(b"authorization", b"").partition(b" ")
+        return scheme.lower() == b"bearer" and compare_digest(
+            presented.strip(), self.token.encode("utf-8")
+        )
+
+
 def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collaborator is a seam
     config: ApiConfig | None = None,
     *,
@@ -655,6 +728,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         openapi_url=None,
         dependencies=[Depends(_auth_dependency(token))],
     )
+    app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

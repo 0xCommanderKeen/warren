@@ -8,6 +8,7 @@ codebase now uses. The seam's own contract, outcome by outcome, is in
 contract has to keep true.
 """
 
+import math
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -65,6 +66,19 @@ def test_direct_decision_callers_cannot_bypass_edit_bounds(
     record = store.approval(request.request_id)
     assert record is not None
     assert record.pending
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf, b"not-json"])
+def test_direct_decision_callers_accept_only_json_values(
+    store: Store, sink: ev.NullEmitter, value: object
+) -> None:
+    request = store.create_approval_request(
+        agent_id="claude-code:test-agent", project="test-agent", action="send_email", message="ask"
+    )
+    with pytest.raises((TypeError, ValueError)):
+        seam(store, sink).decide(request.request_id, "edit", edit={"value": value})
+    assert store.approval(request.request_id).pending  # ty: ignore[unresolved-attribute]
     assert sink.events == []
 
 

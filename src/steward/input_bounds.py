@@ -1,6 +1,7 @@
 """Shared bounds for human-supplied work before it becomes durable or prompt text."""
 
 import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -43,7 +44,43 @@ def _bounded_children(value: object, depth: int) -> list[tuple[object, int]]:
         return [(child, depth + 1) for child in value]
     if isinstance(value, str) and len(value) > EDIT_MAX_STRING_CHARS:
         raise ValueError(f"edit string exceeds the {EDIT_MAX_STRING_CHARS} character limit")
-    return []
+    if isinstance(value, str | int | bool) or value is None:
+        return []
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("edit numbers must be finite")
+        return []
+    raise TypeError("edit values must be JSON strings, numbers, booleans, null, arrays, or objects")
+
+
+def validate_json_container_depth(raw: bytes, max_depth: int) -> None:  # noqa: C901
+    """Reject excessive raw JSON nesting without parsing or recursively materialising it.
+
+    Only ASCII JSON structure is relevant.  Quotes and backslash escapes are tracked so
+    braces in strings do not spend the structural budget.  JSON syntax remains the JSON
+    parser's responsibility; this guard has one deliberately narrow job.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, byte in enumerate(raw):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif byte == ord("\\"):
+                escaped = True
+            elif byte == ord('"'):
+                in_string = False
+        elif byte == ord('"'):
+            in_string = True
+        elif raw.startswith((b"NaN", b"Infinity", b"-Infinity"), index):
+            raise ValueError("edit numbers must be finite")
+        elif byte in (ord("{"), ord("[")):
+            depth += 1
+            if depth > max_depth:
+                raise ValueError(f"edit exceeds the {EDIT_MAX_DEPTH} level nesting limit")
+        elif byte in (ord("}"), ord("]")) and depth:
+            depth -= 1
 
 
 def validate_work_text(title: str, detail: str) -> None:
@@ -76,6 +113,8 @@ def validate_approval_edit(edit: Mapping[str, Any] | None) -> None:
         if nodes > EDIT_MAX_NODES:
             raise ValueError(f"edit exceeds the {EDIT_MAX_NODES} value limit")
         stack.extend(_bounded_children(value, depth))
-    encoded = json.dumps(edit, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(edit, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode(
+        "utf-8"
+    )
     if len(encoded) > EDIT_MAX_BYTES:
         raise ValueError(f"edit exceeds the {EDIT_MAX_BYTES} byte serialized limit")
