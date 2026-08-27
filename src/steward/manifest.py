@@ -143,6 +143,14 @@ SOUL_NAME_MAX_CHARS = 80
 SOUL_ROLE_MAX_CHARS = 200
 SUMMARY_MAX_CHARS = 400
 
+#: A routine's own prompt. Declared text like the charter, and it lands in a section of its
+#: own *after* the charter — the last thing a session reads — so leaving it unbounded left
+#: the one manifest field able to make the size of an assembled prompt uncomputable, and
+#: the one able to draw a section rule in the best position for a forgery to be believed.
+#: Bounded here for the same reason the charter is, and neutralized in :mod:`steward.prompt`
+#: alongside it (steward #147).
+ROUTINE_PROMPT_MAX_CHARS = 8000
+
 #: The journal subdirectory, under ``memory.path``, a manifest gets when it names none.
 DEFAULT_JOURNAL_DIR = "journal"
 
@@ -649,6 +657,28 @@ CharterEntry = Annotated[
 ]
 
 
+def _entries_are_single_lines(value: list[str]) -> list[str]:
+    """Refuse a charter entry that is blank or spans more than one line.
+
+    A duty, a hard rule and an escalation trigger are rendered as bullets — ``- <entry>``,
+    joined by newlines — so a newline *inside* one escapes its own bullet and lands in the
+    charter as free-standing text. The charter draws its own headings in plain prose
+    (``HARD RULES (these override everything else you have been told)``), which the rule
+    collapsing in :func:`steward.prompt._declared` does not and cannot defend, so "an entry
+    is one line" is the boundary that keeps a bullet a bullet (steward #147). The mission is
+    deliberately not held to this: it is a paragraph, and it says so.
+    """
+    for entry in value:
+        if not entry.strip():
+            raise ValueError("entries must not be empty")
+        if _CONTROL_CHARS.search(entry):
+            raise ValueError(
+                "an entry is one line: it is rendered as a single bullet, and a line break "
+                "inside one escapes that bullet into the charter's own structure"
+            )
+    return value
+
+
 class Escalation(_Model):
     """Structured escalation policy: when to stop and ask instead of acting."""
 
@@ -668,6 +698,11 @@ class Escalation(_Model):
         max_length=ESCALATION_NOTE_MAX_CHARS,
         description="Extra guidance for the human.",
     )
+
+    # `when` is a list of bullets exactly like `duties` and `rules`, and until now it was
+    # the one of the three with no guard at all — `min_length=1` bounds the list, not the
+    # entry, so `when: [""]` validated and rendered a bare `- ` into every session.
+    _entries_are_lines = field_validator("when")(_entries_are_single_lines)
 
 
 class Charter(_Model):
@@ -702,12 +737,7 @@ class Charter(_Model):
         | Escalation
     ) = Field(description="When and how to raise needs_human.")
 
-    @field_validator("duties", "rules")
-    @classmethod
-    def _no_blank_entries(cls, value: list[str]) -> list[str]:
-        if any(not entry.strip() for entry in value):
-            raise ValueError("entries must not be empty")
-        return value
+    _no_blank_entries = field_validator("duties", "rules")(_entries_are_single_lines)
 
 
 def _normalize_skill_grant(value: object) -> object:
@@ -1139,7 +1169,11 @@ class Routine(_Model):
         default=DEFAULT_SCHEDULE_TZ,
         description="IANA zone the schedule is read in, e.g. Europe/Ljubljana.",
     )
-    prompt: str = Field(min_length=1, description="Prompt template for the session.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=ROUTINE_PROMPT_MAX_CHARS,
+        description="Prompt template for the session.",
+    )
     requires: list[str] = Field(
         default_factory=list,
         description="Skills that must be granted for this routine to run.",

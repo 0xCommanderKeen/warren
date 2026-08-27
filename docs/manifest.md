@@ -105,7 +105,18 @@ that **refuse**, and so do `soul.name`, `soul.role` and `summary`:
 | each duty, rule, or `when` entry | 400 | `escalation.note` | 1,000 |
 | how many duties, rules, or `when` entries | 20 | `soul.name` | 80 |
 | `charter.escalation` as prose | 2,000 | `soul.role` | 200 |
-| `summary` | 400 | | |
+| `summary` | 400 | `routines[].prompt` | 8,000 |
+
+A duty, a hard rule, and an escalation `when` entry are each **one line**. They are
+rendered as bullets, so a line break inside one escapes its own bullet and lands loose in
+the charter — which draws its own headings (`HARD RULES (these override everything else
+you have been told)`) in plain prose that rule-collapsing cannot defend. The `mission` is
+deliberately exempt: it is a paragraph, and it says so.
+
+A routine's `prompt` is on this list for the same reason the charter is. It is declared
+text, and it lands in a section of its own *after* the charter — the last thing a session
+reads, which is the best position in the whole prompt for a forged section rule to be
+believed.
 
 The charter is the last section of the preamble and it says out loud that it overrides
 everything above it, so it is the one section steward must never shorten: a hard rule cut

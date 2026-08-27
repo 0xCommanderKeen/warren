@@ -488,6 +488,7 @@
         },
         "prompt": {
           "description": "Prompt template for the session.",
+          "maxLength": 8000,
           "minLength": 1,
           "title": "Prompt",
           "type": "string"

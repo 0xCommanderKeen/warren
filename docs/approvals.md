@@ -324,9 +324,17 @@ the `DECISIONS SINCE YOU LAST RAN` section of its own next session, and the line
 `steward approval raise` echoes to the session that just called it. Redacting either
 would misquote the question the resident asked.
 
-Because the console prefills its **edit** box from the `detail` it was served, an operator
-can be looking at `[redacted:secret]` where a value used to be. Sending that back would
-store steward's own placeholder over a value the resident still needs, and the record
-would then claim a human chose it — so `POST /approvals/{id}` **refuses** an edit
-containing the marker, whatever client sent it, and says to put the real value back or
-drop the key. The console warns about the same thing when it opens the box.
+Redaction and its inverse are only honest as a pair. An `edit` **replaces** the whole
+detail, and the console prefills its edit box from the `detail` it was served — so an
+operator wanting to change one key of a request that carried a secret is looking at
+`[redacted:secret]` where a value used to be. Without a way back, their only options would
+be to retype a live credential into a browser textarea or to drop the key and take the
+value away from the resident that needs it.
+
+So `POST /approvals/{id}` **restores** what it withheld: any string in the edit that is
+*exactly* what the decider was shown means "I did not touch this", and the stored value is
+put back before the decision is recorded. Anything else carrying the marker — one typed by
+hand, or one left inside a string that was otherwise edited — is a sentence steward cannot
+read, and it is refused (`422 edit_withheld_value`) rather than guessed at. The restore
+lives on the same route as the redaction, because whoever withheld a value owes the way
+back; a decider that was never served a scrubbed detail has nothing to put back.

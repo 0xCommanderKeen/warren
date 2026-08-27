@@ -44,9 +44,10 @@ voice at :data:`steward.manifest.VOICE_MAX_CHARS`, the journal at
 :data:`DECISIONS_MAX_CHARS`. A note to tomorrow is not a transcript, and a skill set is
 not a manual.
 
-The charter and the identity section are the exception, and steward #147 is where the
-exception got argued rather than merely inherited. They are **bounded at validation and
-never truncated here** — a hard rule cut in half still reads as authoritative, and half a
+The charter, the identity section, and a routine's own prompt are the exception, and
+steward #147 is where the exception got argued rather than merely inherited. All three are
+**declared** — written in a manifest — and so **bounded at validation and never truncated
+here** — a hard rule cut in half still reads as authoritative, and half a
 name is not an identity, so an over-long charter is a refused pull request instead of a
 3am surprise (:data:`steward.manifest.CHARTER_MISSION_MAX_CHARS` and its neighbours). What
 they *do* share with every injected section is neutralisation (:func:`_declared`): the one
@@ -360,6 +361,12 @@ def _declared(text: str) -> str:
     Steward's own frames are deliberately **not** run through this. :data:`ESCALATION_PROTOCOL`
     and :data:`DELEGATION_PROTOCOL` carry the ``===STEWARD-ACTIONS===`` markers on purpose,
     and neutralizing steward's own grammar would break the very escalation it is teaching.
+
+    One accepted cost: :func:`_neutralize` NFKC-normalizes, so a ``soul.name`` written with
+    a compatibility character reads here in its folded form while every other rendering of
+    that name — a knock's message, the soul frontmatter burrow draws from — shows it raw. A
+    name is capped at 80 characters, which is room for a 72-column rule, so dropping the
+    defence to keep the spelling identical would trade a real forgery for a cosmetic one.
     """
     return _neutralize(text.strip())
 
@@ -499,7 +506,12 @@ def assemble_routine_prompt(  # noqa: PLR0913 — one keyword per section of the
     ordinary session in every other respect — same identity, same voice, same charter.
     """
     preamble = assemble_preamble(manifest, soul_text, journal_entry, skills, decisions)
-    task = _section("YOUR TASK RIGHT NOW", routine_prompt)
+    # Declared text, and the *last* section a session reads — which makes it the best
+    # position in the whole prompt for a forged section rule to be believed, and the one
+    # manifest field that could make an assembled prompt's size uncomputable. It gets the
+    # charter's treatment for the charter's reasons: bounded at validation
+    # (:data:`steward.manifest.ROUTINE_PROMPT_MAX_CHARS`), neutralized here (steward #147).
+    task = _section("YOUR TASK RIGHT NOW", _declared(routine_prompt))
     if closing and closing.strip():
         return f"{preamble}\n{task}\n{_section(CLOSING_TITLE, closing)}"
     return f"{preamble}\n{task}"

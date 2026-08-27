@@ -698,6 +698,39 @@ def test_retirement_still_keeps_the_memory_and_the_declaration(
     assert not any("manifest.yaml" in path for path in removed)
 
 
+def test_a_host_that_never_held_a_deployment_does_not_claim_a_scrub(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """`rm -f` cannot tell "removed it" from "there was nothing here"; the report must."""
+    raise_into(scratch_repo, host, provision=False)
+
+    report = retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+
+    assert not report.stopped  # nothing at the path to stop
+    assert not report.scrubbed  # …and so nothing there to scrub either
+    assert "nothing at" in report.note
+
+
+def test_a_dry_run_still_names_the_login_it_would_leave_behind(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A rehearsal is where an operator decides whether a manual step is needed (#157)."""
+    raise_into(scratch_repo, host)
+
+    report = retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        dry_run=True,
+    )
+
+    assert not report.scrubbed  # a rehearsal removed nothing
+    assert "claude/" in "\n".join(report.render())
+
+
 def test_a_retirement_that_cannot_remove_the_token_says_so(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:

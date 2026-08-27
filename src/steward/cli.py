@@ -1176,26 +1176,41 @@ def board_dispatch(
 
 
 def _report_board(report: BoardReport) -> None:
+    """Print what one dispatched task came to, scrubbed of anything a session wrote.
+
+    Which halves of these lines need scrubbing is not obvious, so it is worked out here
+    once (steward #144). A **task title** is the risky one: a job posted over the API by
+    anyone holding the token, or a handoff another resident's session wrote, and it is
+    printed on every sweep. A **delegation refusal** carries that same title back inside
+    its message. A **knock's message**, by contrast, is derived rather than authored —
+    :func:`steward.approvals.human_message` builds it from ``soul.name`` and the action
+    slug — so it cannot carry a secret; it goes through the scrubber anyway, because
+    ``ApprovalTransitions.knock`` may supply a message of its own and a reader should not
+    have to know which of the two produced the line in front of them.
+    """
     kind = f"delegated by {report.task.delegated_by}" if report.delegated else "claimed"
-    label = f"{report.resident_id} → {report.task.task_id} ({report.task.title}, {kind})"
+    title = redact_secrets(report.task.title)
+    label = f"{report.resident_id} → {report.task.task_id} ({title}, {kind})"
     if report.done:
         click.secho(f"done {label}", fg="green")
     else:
         click.secho(f"failed {label}: {report.reason}", fg="red", err=True)
     for record in report.raised:
-        # A dispatch line is a terminal rendering like any other, and this message is
-        # whatever the session typed — so it is scrubbed on the way out (steward #144).
-        knock = redact_decision(record)
-        click.secho(f"  needs human: {knock.message} [{knock.request_id}]", fg="yellow")
+        message = redact_secrets(record.message)
+        click.secho(f"  needs human: {message} [{record.request_id}]", fg="yellow")
     for delivery in report.handed_over:
         if delivery.task is not None:
             click.secho(
-                f"  delegated: {delivery.task.title} → {delivery.task.assignee} "
+                f"  delegated: {redact_secrets(delivery.task.title)} → {delivery.task.assignee} "
                 f"[{delivery.task.task_id}]",
                 fg="cyan",
             )
         else:
-            click.secho(f"  delegation refused ({delivery.reason}): {delivery.message}", fg="red")
+            click.secho(
+                f"  delegation refused ({delivery.reason}): "
+                f"{redact_secrets(delivery.message or '')}",
+                fg="red",
+            )
 
 
 @board.command("list")

@@ -50,7 +50,7 @@ import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -60,7 +60,6 @@ from steward.deploy import (
     BUNDLE_NAMES,
     BURROW_URL_ENV,
     COMPOSE_FILENAME,
-    ENV_FILENAME,
     DeployTarget,
     Transport,
     TransportError,
@@ -335,18 +334,6 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
 #: lifecycle rather than as noise from a robot.
 DECLARE_SUBJECT = "feat(residents): declare {id}"
 RETIRE_SUBJECT = "chore(residents): retire {id}"
-
-#: What retirement removes from the host, and the rule behind the list: **steward removes
-#: on retire exactly what steward rewrites on provision** (steward #157). ``.env`` holds
-#: ``BURROW_TOKEN``, and a village ingest token belonging to a resident that is no longer
-#: allowed to act had been sitting on the NAS indefinitely with nothing in the retire
-#: report mentioning it. The compose file goes with it, and not merely because it is inert
-#: without the ``.env``: ``BURROW_URL`` is interpolated as ``${BURROW_URL:?…}``, so a
-#: compose file left beside a removed ``.env`` would make the *next* ``docker compose
-#: down`` fail on a variable rather than report an already-stopped container. Both are
-#: written again, byte for byte, by the next provision, so removing them costs the
-#: documented way back nothing.
-SCRUBBED_FILES = (ENV_FILENAME, COMPOSE_FILENAME)
 
 #: The credential retirement deliberately leaves behind, said out loud rather than left as
 #: a silence. ``claude/`` is bind-mounted to ``/root/.claude`` and holds whatever a
@@ -626,8 +613,11 @@ class RetireReport:
     #: True when this run wrote ``retired: true``; False when it already said so.
     marked: bool
     stopped: bool
-    #: True when this run removed the generated compose file and the ``.env`` holding
-    #: ``BURROW_TOKEN`` from the host (steward #157).
+    #: True when this run found a ``.env`` holding ``BURROW_TOKEN`` on the host and removed
+    #: it. **False when there was nothing to remove** — a host that never held a deployment,
+    #: or one an earlier retirement already scrubbed — because "the token is gone" and "this
+    #: run took it away" are different sentences and only the second is this field's
+    #: (steward #157).
     scrubbed: bool = False
     commands: tuple[tuple[str, ...], ...] = ()
     commit: str | None = None
@@ -663,7 +653,11 @@ class RetireReport:
         lines += [f"  $ {render_argv(argv)}" for argv in self.commands]
         if self.commit:
             lines.append(f"  committed {self.commit[:12]}")
-        if self.scrubbed:
+        if self.commands:
+            # Gated on having a host plan rather than on ``scrubbed``, so a ``--dry-run``
+            # says it too. A rehearsal is exactly where an operator is deciding whether
+            # this retirement needs a manual step, and it is the one run that never sets
+            # ``scrubbed``.
             lines.append(f"  {CLAUDE_LOGIN_REMAINS}")
         if self.note:
             lines.append(f"  {self.note}")
@@ -1001,6 +995,28 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
     )
 
 
+def scrubbed_paths(target: DeployTarget) -> tuple[str, ...]:
+    """Name the two host files retirement removes, through the target's own properties.
+
+    The rule behind the list: **steward removes on retire exactly what steward rewrites on
+    provision** (steward #157). ``.env`` holds ``BURROW_TOKEN``, and a village ingest token
+    belonging to a resident that is no longer allowed to act had been sitting on the NAS
+    indefinitely with nothing in the retire report mentioning it. The compose file goes with
+    it, and not merely because it is inert without the ``.env``: ``BURROW_URL`` is
+    interpolated as ``${BURROW_URL:?…}``, so a compose file left beside a removed ``.env``
+    would make the *next* ``docker compose down`` fail on a variable rather than report an
+    already-stopped container. Both are written again, byte for byte, by the next provision,
+    so removing them costs the documented way back nothing.
+
+    :attr:`~steward.deploy.DeployTarget.env_path` and ``.compose_path`` already answer
+    "where does this land on the host", and ``compose_argv`` and the stop already address
+    the compose file through them. Joining the same paths by hand here would leave the
+    argv and the error message that names it free to drift apart from each other and from
+    the deploy that wrote them.
+    """
+    return (target.env_path, target.compose_path)
+
+
 def scrub_argv(target: DeployTarget) -> tuple[str, ...]:
     """Build the argv that removes a retired resident's generated files from the host.
 
@@ -1009,8 +1025,7 @@ def scrub_argv(target: DeployTarget) -> tuple[str, ...]:
     :data:`steward.manifest.REMOTE_PATH_PATTERN` has already refused whitespace and shell
     metacharacters in — the same argument every other remote argv in this package rests on.
     """
-    base = PurePosixPath(target.path)
-    return ("rm", "-f", *(str(base / name) for name in SCRUBBED_FILES))
+    return ("rm", "-f", *scrubbed_paths(target))
 
 
 def _scrub_host(
@@ -1022,7 +1037,12 @@ def _scrub_host(
     file, and ``BURROW_URL`` is interpolated as ``${BURROW_URL:?…}``, so scrubbing first
     would make the stop fail on a missing variable.
     """
-    left_behind = ", ".join(str(PurePosixPath(target.path) / name) for name in SCRUBBED_FILES)
+    left_behind = ", ".join(scrubbed_paths(target))
+    # Asked *before* the removal, because ``rm -f`` cannot tell "removed it" from "there
+    # was nothing here" — and a report that says `scrubbed` over a host that never held a
+    # deployment is exactly the false assurance this whole change exists to remove. The
+    # question is the token's file specifically: it is the one worth being sure about.
+    held_a_token = conveyance.exists(target.env_path)
     try:
         outcome = conveyance.run(scrub)
     except TransportError as exc:
@@ -1041,7 +1061,7 @@ def _scrub_host(
             f"could not be removed from {target.user}@{target.host}: {outcome.summary()}; "
             f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
         )
-    return True
+    return held_a_token
 
 
 def _stop_retired_container(

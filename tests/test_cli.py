@@ -1392,28 +1392,41 @@ def test_board_dispatch_carries_clean_partial_and_failed_outcomes(
     assert result.exit_code == expected, result.output
 
 
-def test_board_dispatch_scrubs_the_knock_it_prints(
+def test_board_dispatch_scrubs_the_text_a_session_wrote(
     runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A dispatch line is a terminal rendering, and this message is what a session typed."""
+    """A dispatch line prints a task title and a handoff message on every sweep.
+
+    Both carry text somebody else wrote — a job posted over the API, a title another
+    resident's session chose — and both land in a terminal scrollback (steward #144). A
+    knock's message is derived from `soul.name` and the action, so it is here for
+    completeness rather than because it can carry a secret.
+    """
+    leak = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
     with Store(tmp_path / "raised.db") as store:
         record = store.create_approval_request(
             agent_id="claude-code:test-agent",
             project="p",
             action="send_email",
-            message="need ghp_abcdefghijklmnopqrstuvwxyz0123456789 for the send",
+            message=f"Testy needs {leak}",
         )
     reports = (
         SimpleNamespace(
             done=True,
             delegated=False,
             resident_id="test-agent",
-            task=SimpleNamespace(task_id="t1", title="work", delegated=False, delegated_by=None),
+            task=SimpleNamespace(
+                task_id="t1", title=f"file the key {leak}", delegated=False, delegated_by=None
+            ),
             reason=None,
             raised=(record,),
-            handed_over=(),
+            handed_over=(
+                SimpleNamespace(
+                    task=None, reason="not_permitted", message=f"tried to delegate {leak!r}"
+                ),
+            ),
         ),
     )
     dispatch = SimpleNamespace(reopened=(), expired_approvals=(), reports=reports, planned=())
@@ -1429,7 +1442,9 @@ def test_board_dispatch_scrubs_the_knock_it_prints(
 
     assert result.exit_code == 0, result.output
     assert "ghp_" not in result.output
-    assert "[redacted:secret]" in result.output
+    # All three lines printed, and all three scrubbed.
+    assert result.output.count("[redacted:secret]") == 3
+    assert "file the key" in result.output  # only the secret is cut
 
 
 def test_board_dispatch_reports_the_deadlines_it_swept(

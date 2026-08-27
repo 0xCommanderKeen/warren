@@ -36,9 +36,9 @@ const ROUTES = {
 };
 
 /* The marker steward puts where a rendering withheld a secret (steward #144). Spelled
- * here so the editor can warn *before* a send instead of relying on the API's refusal;
- * tests/test_ui.py asserts this literal is still the one `manifest.SECRET_REDACTION`
- * writes, because a stale copy is a warning that never fires. */
+ * here so the edit box can say what leaving it alone means; tests/test_ui.py asserts this
+ * literal is still the one `manifest.SECRET_REDACTION` writes, because a stale copy is a
+ * note that stops matching what the box actually contains. */
 const REDACTION = "[redacted:secret]";
 
 /* ------------------------------------------------------------------------------------
@@ -1500,8 +1500,9 @@ function approvalCard(item, index) {
   const prefill = JSON.stringify(item.detail || {}, null, 2);
   const editor = el("textarea", { rows: 8, style: { display: "none" } }, prefill);
   const editorError = el("p", { class: "err" });
-  // The detail arrives scrubbed, so the box you are about to edit may be missing a value
-  // the resident still needs. Say so on open; steward refuses the marker on send anyway.
+  // The detail arrives scrubbed, so the box may show a marker where a value used to be.
+  // Steward puts that value back when it is sent unchanged — say so, because an operator
+  // who does not know that will retype a credential into this textarea instead.
   const withheld = prefill.includes(REDACTION);
 
   const send = async (decision, edit) => {
@@ -1534,8 +1535,8 @@ function approvalCard(item, index) {
       editButton.textContent = "Send edit";
       editorError.textContent = withheld
         ? `One value here was withheld as a secret and shows as ${REDACTION}. `
-          + "Put the real value back or drop that key — steward will not record the "
-          + "placeholder as your decision."
+          + "Leave it exactly as it is and steward restores the real value; you do not "
+          + "need to know it to edit the rest."
         : "";
       editor.focus();
       return;

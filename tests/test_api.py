@@ -1447,28 +1447,53 @@ def test_the_stored_row_still_holds_what_the_session_typed(api: ApiFactory) -> N
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" in stored.message
 
 
-def test_an_edit_carrying_stewards_own_redaction_marker_is_refused(api: ApiFactory) -> None:
+def test_an_edit_can_change_one_key_without_seeing_the_withheld_one(api: ApiFactory) -> None:
     """The console prefills its edit box from the scrubbed detail it was served.
 
-    Sending that back unchanged would store the placeholder over a value the resident
-    still needs, and the record would then claim a human chose it (steward #144).
+    An edit *replaces* the whole detail, so without restoring the withheld value the only
+    ways to change one key would be to retype a live credential into a browser textarea or
+    to drop the key and take the value away from the resident. Sending back exactly what
+    was shown means "I did not touch this" (steward #144).
     """
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+    shown = harness.client.get(f"/approvals/{request_id}").json()["detail"]
+    assert m.SECRET_REDACTION in shown["auth"]
+
+    edited = {**shown, "to": "roofer@example.com"}
+    response = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": edited}
+    )
+
+    assert response.status_code == 202
+    recorded = harness.store.approval(request_id)
+    assert recorded is not None
+    assert recorded.edit is not None
+    assert recorded.edit["to"] == "roofer@example.com"
+    # The value the decider never saw is the value the resident gets back, intact.
+    assert recorded.edit["auth"] == "Bearer ghp_zyxwvutsrqponmlkjihgfe98765"
+
+
+def test_a_marker_no_stored_value_explains_is_refused(api: ApiFactory) -> None:
+    """Restoring is equality against what was shown, never "there is a marker here"."""
     harness = api()
     request_id = _pending_with_a_secret(harness)
 
     response = harness.client.post(
         f"/approvals/{request_id}",
-        json={"decision": "edit", "edit": {"auth": f"Bearer {m.SECRET_REDACTION}"}},
+        json={"decision": "edit", "edit": {"auth": f"Bearer {m.SECRET_REDACTION} and mine"}},
     )
 
     assert response.status_code == 422
-    assert m.SECRET_REDACTION in json.dumps(response.json())
+    assert response.json()["detail"]["error"] == "edit_withheld_value"
     still_open = harness.store.approval(request_id)
     assert still_open is not None
     assert still_open.pending  # nothing was decided
 
 
-def test_an_edit_that_replaces_the_withheld_value_is_accepted(api: ApiFactory) -> None:
+def test_an_edit_that_replaces_the_withheld_value_outright_is_accepted(
+    api: ApiFactory,
+) -> None:
     harness = api()
     request_id = _pending_with_a_secret(harness)
 
@@ -1478,6 +1503,9 @@ def test_an_edit_that_replaces_the_withheld_value_is_accepted(api: ApiFactory) -
     )
 
     assert response.status_code == 202
+    recorded = harness.store.approval(request_id)
+    assert recorded is not None
+    assert recorded.edit == {"auth": "Bearer the-real-one"}
 
 
 def test_an_unknown_approval_status_is_refused(api: ApiFactory) -> None:

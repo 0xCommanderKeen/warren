@@ -51,7 +51,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import delegation as dg
 from steward import events as ev
-from steward.approvals import redact_decision
+from steward.approvals import WithheldValueError, redact_decision, restore_withheld
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
@@ -1292,14 +1292,28 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     def decide_approval(
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
-        """Record a decision, once. A replay reads back what was already recorded."""
+        """Record a decision, once. A replay reads back what was already recorded.
+
+        The edit is un-redacted before it is recorded, by the same route that redacted the
+        copy the decider read (steward #144). Restoring here rather than deeper down is
+        deliberate: an edit only carries a marker because *this* route withheld the value,
+        so whoever withheld it owes the restore, and a decider that was never served a
+        scrubbed detail has nothing to put back.
+        """
         ledger_id = new_id()
         moment = now()
+        edit = body.edit
+        stored = db.approval(request_id)
+        if stored is not None and edit is not None:
+            try:
+                edit = restore_withheld(edit, stored.detail)
+            except WithheldValueError as exc:
+                _refuse(422, "edit_withheld_value", str(exc))
         decided = approvals.decide(
             request_id,
             body.decision,
             decided_by=DECIDED_BY,
-            edit=body.edit,
+            edit=edit,
             now=moment,
             request_log=(ledger_id, request.method, request.url.path),
         )
