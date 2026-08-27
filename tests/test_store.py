@@ -492,6 +492,40 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         assert migrated.open_runs() == []
 
 
+def test_a_run_registry_written_before_credentials_existed_still_opens(tmp_path: Path) -> None:
+    """``open_runs`` gained two columns (#41): an existing registry keeps its rows.
+
+    A live steward has a ``steward.db`` full of real runs, so the migration has to be an
+    ``ALTER TABLE`` and the index over the new column has to be created *after* it —
+    which is exactly what breaks if the index is put in the base schema by mistake. The
+    old row reads back with an empty digest, and the credential lookup must not match it.
+    """
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    with legacy:
+        legacy.execute(
+            "CREATE TABLE open_runs (run_id TEXT PRIMARY KEY, kind TEXT NOT NULL "
+            "DEFAULT 'routine', agent_id TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', "
+            "ref TEXT NOT NULL DEFAULT '', timeout_s REAL NOT NULL DEFAULT 0.0, "
+            "started_at TEXT NOT NULL, closed_at TEXT)"
+        )
+        legacy.execute(
+            "INSERT INTO open_runs (run_id, kind, agent_id, started_at) VALUES (?, ?, ?, ?)",
+            ("old-run", "routine", "claude-code:hob", EARLY),
+        )
+    legacy.close()
+
+    with Store(path) as migrated:
+        (run,) = migrated.open_runs()
+        assert run.run_id == "old-run"
+        assert run.resident_id == ""
+        assert migrated.session_principal("", fresh_since=EARLY) is None
+        credential = credentialed(migrated, run_id="new-run")
+        principal = migrated.session_principal(credential, fresh_since=EARLY)
+        assert principal is not None
+        assert principal.run_id == "new-run"
+
+
 def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) -> None:
     """``run_ledger.origin`` (#45) is the same ALTER TABLE: an old ledger loses nothing.
 

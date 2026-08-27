@@ -161,16 +161,21 @@ SESSION_ENV_BASE = (
     "REQUESTS_CA_BUNDLE",
     "SSL_CERT_DIR",
     "SSL_CERT_FILE",
-    # Steward's own *configuration* — never its credentials. A session with shell access
-    # is expected to call ``steward delegate`` and ``steward approval raise``, and those
-    # commands open the same database and read the same caps the control plane does. Drop
-    # these and a session's CLI quietly opens a different ``steward.db`` under its own
-    # working directory, or runs under a delegation depth cap nobody chose.
+    # Steward's own *configuration* — never its credentials. A session with shell access is
+    # expected to call ``steward delegate`` and ``steward approval raise``, and those
+    # commands open the same database and read the same caps the control plane does:
+    # ``STEWARD_STATE`` is where ``default_db_path`` looks, and the other three are read by
+    # ``max_depth``, ``repeat_deny_window_s`` and ``EventEmitter.from_env``. Drop them and a
+    # session's CLI quietly opens a different ``steward.db`` under its own working
+    # directory, or runs under a delegation depth cap nobody chose.
     "STEWARD_EVENTS_FALLBACK",
     "STEWARD_MAX_DELEGATION_DEPTH",
     "STEWARD_REPEAT_DENY_WINDOW_H",
-    "STEWARD_RESIDENTS",
     "STEWARD_STATE",
+    # Named by ``ApiConfig.from_env`` rather than by anything a session runs today. It is
+    # here so a session and the control plane cannot end up disagreeing about where the
+    # residents tree is the day a command learns to read it.
+    "STEWARD_RESIDENTS",
     # Where the village is, so a session's own emitter posts to the same burrow. Its
     # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
     "BURROW_URL",

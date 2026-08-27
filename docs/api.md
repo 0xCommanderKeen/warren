@@ -141,6 +141,12 @@ is `403 session_credential_forbidden`, and nothing is recorded — it is refused
 before a route runs. This is an allowlist, so a write path added later is refused until
 somebody decides otherwise.
 
+Reads are *not* narrowed, and that is a decision rather than an omission. A locally placed
+session already has `steward.db` and the residents tree on the same disk — that is how
+`steward delegate` and `steward approval raise` work at all — so narrowing what it may read
+over HTTP would move nothing it could not read directly. Narrowing reads becomes meaningful
+when a session runs somewhere that has neither, which rides with container placement.
+
 Three of those refusals name the act rather than the rule, because the act is the part
 worth knowing:
 
