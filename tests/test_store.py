@@ -318,7 +318,12 @@ def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) 
 
     with Store(path) as migrated:
         (entry,) = migrated.ledger("hob")
-        assert (entry.kind, entry.cost_usd, entry.origin) == ("delegated", 2.5, "")
+        assert (entry.kind, entry.cost_usd, entry.origin, entry.trigger) == (
+            "delegated",
+            2.5,
+            "",
+            "",
+        )
         migrated.delegate_job(
             title="the chain the old row came off",
             assignee="hob",
@@ -331,6 +336,47 @@ def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) 
         (rolled,) = migrated.spend_by_origin()
 
         assert (rolled.origin, rolled.cost_usd) == ("task:root", pytest.approx(2.5))
+
+
+def test_a_registry_written_before_trigger_existed_keeps_the_run_unknown(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-registry.db"
+    legacy = sqlite3.connect(path)
+    with legacy:
+        legacy.execute(
+            "CREATE TABLE open_runs (run_id TEXT PRIMARY KEY, kind TEXT NOT NULL, "
+            "agent_id TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', "
+            "ref TEXT NOT NULL DEFAULT '', timeout_s REAL NOT NULL DEFAULT 0.0, "
+            "started_at TEXT NOT NULL, closed_at TEXT)"
+        )
+        legacy.execute(
+            "INSERT INTO open_runs (run_id, kind, agent_id, started_at) VALUES (?, ?, ?, ?)",
+            ("legacy", "routine", "a:hob", EARLY),
+        )
+    legacy.close()
+
+    with Store(path) as migrated:
+        (run,) = migrated.open_runs()
+        assert run.trigger == ""
+
+
+def test_run_triggers_are_validated_before_writing(store: Store) -> None:
+    with pytest.raises(ValueError, match="invalid run trigger"):
+        store.record_run(
+            resident="hob",
+            agent_id="a:hob",
+            kind="routine",
+            run_id="bad-ledger",
+            trigger="button-ish",
+        )
+    with pytest.raises(ValueError, match="invalid run trigger"):
+        store.open_run(
+            run_id="bad-registry",
+            kind="routine",
+            agent_id="a:hob",
+            trigger="button-ish",
+        )
+    assert store.ledger() == []
+    assert store.open_runs() == []
 
 
 # ------------------------------------------------------------------------ approvals

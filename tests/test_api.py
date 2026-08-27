@@ -1138,6 +1138,7 @@ def test_a_run_now_lands_on_the_ledger(api: ApiFactory) -> None:
     entries = harness.store.ledger("test-agent")
     assert len(entries) == 1
     assert entries[0].kind == "routine"
+    assert entries[0].trigger == "manual"
     assert entries[0].ref == "daily-summary"
     assert entries[0].cost_usd == pytest.approx(0.5)
     assert entries[0].tokens == 10

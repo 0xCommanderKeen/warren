@@ -204,6 +204,7 @@ class RunRegistry(Protocol):
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
@@ -886,7 +887,13 @@ class Scheduler:
         trigger: str = TRIGGER_SCHEDULE,
         now: datetime | None = None,
     ) -> FireReport:
-        """Run one routine end to end, bracketed by events. Never raises."""
+        """Run one routine end to end, bracketed by events.
+
+        ``trigger`` is protocol data, not an arbitrary label; reject unknown values before
+        opening a run or emitting an event that persistence could not represent.
+        """
+        if trigger not in (TRIGGER_SCHEDULE, TRIGGER_MANUAL):
+            raise ValueError(f"invalid routine trigger: {trigger!r}")
         run_id = str(uuid.uuid4())
         moment = now or datetime.now(UTC)
         if not self._claim(item.key):
@@ -926,7 +933,7 @@ class Scheduler:
                 skipped_reason=admission.reason,
             )
 
-        wake = RoutineWake(item.routine, run_id)
+        wake = RoutineWake(item.routine, run_id, trigger)
         if self.dry_run:
             session = self.sessions.run(admission, wake)
             return FireReport(
@@ -952,7 +959,7 @@ class Scheduler:
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
         # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
-        self._open_run(item, run_id, timeout_s, moment)
+        self._open_run(item, run_id, timeout_s, trigger, moment)
 
         session = self.sessions.run(admission, wake)
         result = session.require_result()
@@ -985,7 +992,12 @@ class Scheduler:
         )
 
     def _open_run(
-        self, item: ScheduledRoutine, run_id: str, timeout_s: int, moment: datetime
+        self,
+        item: ScheduledRoutine,
+        run_id: str,
+        timeout_s: int,
+        trigger: str,
+        moment: datetime,
     ) -> None:
         """Write this run into the registry. Never raises: a lost row is not a lost run."""
         if self.registry is None:
@@ -994,6 +1006,7 @@ class Scheduler:
             opened = self.registry.open_run(
                 run_id=run_id,
                 kind="routine",
+                trigger=trigger,
                 agent_id=item.agent_id,
                 project=item.project,
                 ref=item.routine.id,

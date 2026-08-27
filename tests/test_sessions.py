@@ -129,6 +129,7 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
             "result": result.result,
             "kind": "routine",
             "run_id": "run-1",
+            "trigger": "schedule",
             "ref": "daily-summary",
             "origin": "resident:test-agent",
             "now": result.completed_at,

@@ -53,6 +53,7 @@ __all__ = [
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
     "RUN_KINDS",
+    "RUN_TRIGGERS",
     "STATUS_OPEN",
     "ApprovalRecord",
     "JobRecord",
@@ -95,6 +96,12 @@ RUN_ROUTINE = "routine"
 RUN_TASK = "task"
 RUN_DELEGATED = "delegated"
 RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED)
+
+#: Who asked for a routine session. Empty means the trigger was not recorded (legacy
+#: rows) or does not apply (board/delegated work); it must not be guessed as scheduled.
+RUN_TRIGGER_SCHEDULE = "schedule"
+RUN_TRIGGER_MANUAL = "manual"
+RUN_TRIGGERS = ("", RUN_TRIGGER_SCHEDULE, RUN_TRIGGER_MANUAL)
 
 #: Where spend lands when no task — and so no delegation origin — stands behind the run.
 #: A resident's own routines are the ordinary case, and they are named rather than
@@ -146,6 +153,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     resident      TEXT NOT NULL,
     agent_id      TEXT NOT NULL,
     kind          TEXT NOT NULL,
+    trigger       TEXT NOT NULL DEFAULT '',
     run_id        TEXT NOT NULL,
     ref           TEXT NOT NULL DEFAULT '',
     origin        TEXT NOT NULL DEFAULT '',
@@ -208,6 +216,7 @@ CREATE TABLE IF NOT EXISTS unbracketed_runs (
 CREATE TABLE IF NOT EXISTS open_runs (
     run_id     TEXT PRIMARY KEY,
     kind       TEXT NOT NULL DEFAULT 'routine',
+    trigger    TEXT NOT NULL DEFAULT '',
     agent_id   TEXT NOT NULL,
     project    TEXT NOT NULL DEFAULT '',
     ref        TEXT NOT NULL DEFAULT '',
@@ -252,6 +261,10 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         # equal some task's id would have inherited that task's bill. The row says what
         # it descends from, so the ledger is self-describing and a join cannot misread it.
         "origin": "TEXT NOT NULL DEFAULT ''",
+        "trigger": "TEXT NOT NULL DEFAULT ''",
+    },
+    "open_runs": {
+        "trigger": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
@@ -477,6 +490,7 @@ class LedgerEntry:
     resident: str
     agent_id: str
     kind: str
+    trigger: str
     run_id: str
     recorded_at: str
     ref: str = ""
@@ -504,6 +518,7 @@ class LedgerEntry:
             resident=row["resident"],
             agent_id=row["agent_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             run_id=row["run_id"],
             recorded_at=row["recorded_at"],
             ref=row["ref"],
@@ -523,6 +538,7 @@ class LedgerEntry:
             "resident": self.resident,
             "agent_id": self.agent_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "run_id": self.run_id,
             "ref": self.ref,
             "origin": self.origin,
@@ -668,6 +684,7 @@ class OpenRun:
     #: are two runs with two ids; what they have in common lives in ``ref``.
     run_id: str
     kind: str
+    trigger: str
     agent_id: str
     started_at: str
     project: str = ""
@@ -688,6 +705,7 @@ class OpenRun:
         return cls(
             run_id=row["run_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             agent_id=row["agent_id"],
             started_at=row["started_at"],
             project=row["project"],
@@ -701,6 +719,7 @@ class OpenRun:
         return {
             "run_id": self.run_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "agent_id": self.agent_id,
             "project": self.project,
             "ref": self.ref,
@@ -1448,6 +1467,7 @@ class Store:
         agent_id: str,
         kind: str,
         run_id: str,
+        trigger: str = "",
         ref: str = "",
         origin: str = "",
         outcome: str = "",
@@ -1469,11 +1489,14 @@ class Store:
         later: a caller that knows the chain says so, and the row stops depending on a
         join that can only guess.
         """
+        if trigger not in RUN_TRIGGERS:
+            raise ValueError(f"invalid run trigger: {trigger!r}")
         entry = LedgerEntry(
             entry_id=new_id(),
             resident=resident,
             agent_id=agent_id,
             kind=kind,
+            trigger=trigger,
             run_id=run_id,
             ref=ref,
             origin=origin,
@@ -1487,14 +1510,15 @@ class Store:
         )
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
+                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, trigger, run_id, ref, "
                 "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
-                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
                     entry.agent_id,
                     entry.kind,
+                    entry.trigger,
                     entry.run_id,
                     entry.ref,
                     entry.origin,
@@ -1806,6 +1830,7 @@ class Store:
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
@@ -1825,11 +1850,22 @@ class Store:
         insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
         thing the session was about goes; several rows may share one.
         """
+        if trigger not in RUN_TRIGGERS:
+            raise ValueError(f"invalid run trigger: {trigger!r}")
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
-                "started_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
-                (run_id, kind, agent_id, project, ref, float(timeout_s), now or utc_now_iso()),
+                "INSERT INTO open_runs (run_id, kind, trigger, agent_id, project, ref, timeout_s, "
+                "started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+                (
+                    run_id,
+                    kind,
+                    trigger,
+                    agent_id,
+                    project,
+                    ref,
+                    float(timeout_s),
+                    now or utc_now_iso(),
+                ),
             )
             return cursor.rowcount == 1
 
