@@ -38,3 +38,25 @@ contract, not a UI read API.
 
 Generation orders published snapshots within a running cursor namespace. Cursor identifies
 the durable log position and namespace. Neither is a schema-version substitute.
+
+## Client adapter policy
+
+The snapshot itself is the shared client interface. `viewer/state-transport.js` validates
+and publishes that snapshot unchanged, and `viewer/browser-runtime.js` also passes it through
+unchanged unless a client explicitly supplies an adapter. New clients should render the
+documented arrays directly; there is no published hydration package and clients must not
+recreate projection or domain decisions from `history` or `/events`.
+
+The existing village has an intentionally UI-local compatibility adapter in
+`viewer/village-adapter.js`. It exists only because older village rendering modules still
+expect shapes from the retired JavaScript reducer. Its transformations are:
+
+- resident-manifest lookup and village names (`souls`, `visitor-lodge`);
+- scene conveniences (`lastTs`, `doing`, pending knocks, resolved approvals);
+- legacy wrappers for task, approval, journal, and routine rendering modules; and
+- event-shaped recent-activity entries derived from already-authoritative snapshot fields.
+
+Those shapes are not part of the state contract. Changes needed by multiple clients belong
+in the versioned Python snapshot; village-only presentation changes belong in this local
+adapter. This keeps one projection authority while allowing the compatibility adapter to
+shrink as the village rendering modules adopt snapshot arrays directly.

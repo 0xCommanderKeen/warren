@@ -23,6 +23,7 @@ const moduleGlobals = new Map([
   ["/approval-knocks.js", "BurrowApprovals"], ["/mood-glyph.js", "BurrowMoodGlyph"],
   ["/nursery.js", "BurrowNursery"], ["/charter-journal.js", "BurrowIdentity"],
   ["/state-transport.js", "BurrowStateTransport"],
+  ["/village-adapter.js", "BurrowVillageAdapter"],
   ["/browser-runtime.js", "BurrowBrowser"],
 ]);
 

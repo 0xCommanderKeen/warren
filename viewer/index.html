@@ -340,6 +340,7 @@
 <script src="/nursery.js"></script>
 <script src="/charter-journal.js"></script>
 <script src="/state-transport.js"></script>
+<script src="/village-adapter.js"></script>
 <script src="/browser-runtime.js"></script>
 <script>
 "use strict";
@@ -2747,6 +2748,7 @@ let artifacts = [];
 let deliverySuffix = "";
 const runtime = BurrowBrowser.createBrowserRuntime({
   now: () => Date.now(), fetch: (...args) => fetch(...args),
+  adaptSnapshot: BurrowVillageAdapter.adapt,
   EventSource: typeof EventSource === "undefined" ? null : EventSource,
   setTimeout: (...args) => setTimeout(...args),
   clearTimeout: timer => clearTimeout(timer),
