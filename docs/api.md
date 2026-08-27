@@ -234,6 +234,10 @@ client request or restart. Completion effects such as budget resume happen only 
 that acknowledgement and are themselves crash-recoverable. A replay consults the durable
 outbox row: it returns `recorded_announcement_pending` and wakes the worker while delivery
 is pending, but returns the ordinary idempotent `recorded` response after acknowledgement.
+Every accepted response returns its own request-log id as `request_id`, suitable for
+`GET /requests/{request_id}`, and names the gated request separately as
+`approval_request_id`. Each replay therefore has a distinct correlated request-log row;
+when recovery completes, all rows correlated to that approval become `recorded`.
 
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
@@ -241,6 +245,10 @@ changes nothing, and emits nothing. An unknown `request_id` is `404`. A request 
 already **expired** is a `409` with `approval_expired` — distinct from the replay of an
 already-decided one, because it was never decided: deny-by-default has the last word and the
 sweep records the deny (steward #66).
+
+The lifecycle worker reconciles announcement and completion-effects rows only after a
+decision or expiry transition has recorded them. It does not decide when deadlines expire;
+the existing approval sweep owns that transition.
 
 Requests are *created* by the session that reaches a gated action — through a
 `<needs-human>` block in its output or `steward approval raise`, both documented in

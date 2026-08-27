@@ -504,14 +504,14 @@ function confirmJob(taskId) {
   };
 }
 
-/** Confirm a decision by reading the approval record back. */
+/** Confirm a decision by polling the exact request-log id the POST returned. */
 function confirmApproval(requestId) {
   return async () => {
-    const record = await call("approval", { params: { request_id: requestId } });
-    if (record.status === "pending") return null;
+    const record = await call("request", { params: { request_id: requestId } });
+    if (record.outcome === "recorded_announcement_pending") return null;
     return {
-      state: "confirmed",
-      why: `recorded: ${record.decision} by ${record.decided_by} at ${stamp(record.decided_at)}.`,
+      state: record.outcome === "recorded" ? "confirmed" : "failed",
+      why: `steward's log: ${record.outcome}.`,
     };
   };
 }
@@ -1473,9 +1473,9 @@ function approvalCard(item, index) {
       });
       ticket({
         what: `${decision} ${item.action}`,
-        requestId: item.request_id,
+        requestId: answer.request_id,
         why: answer.message,
-        confirm: confirmApproval(item.request_id),
+        confirm: confirmApproval(answer.request_id),
       });
     } catch (error) {
       if (error !== REPROMPT) add(errors, [problem(error)]);

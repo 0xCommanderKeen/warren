@@ -1129,7 +1129,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             # emitted nothing — it is told what was recorded.
             response.status_code = 200
             return {
-                "request_id": request_id,
+                "request_id": ledger_id,
+                "approval_request_id": request_id,
                 "status": "recorded",
                 "decision": record.decision,
                 "decided_by": record.decided_by,
@@ -1152,7 +1153,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 if not completed:
                     db.release_approval_effects(request_id, token)
         return {
-            "request_id": request_id,
+            "request_id": ledger_id,
+            "approval_request_id": request_id,
             "status": outcome,
             "decision": record.decision,
             "decided_by": record.decided_by,

@@ -94,6 +94,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
         transport: LocalTransport | None = None,
+        emitter: ev.Emitter | None = None,
     ) -> Harness:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -110,7 +111,9 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
                 workdir=tmp_path,
             ),
             store=store,
-            emitter=ev.EventEmitter(url=None, fallback=events_path),
+            emitter=(
+                emitter if emitter is not None else ev.EventEmitter(url=None, fallback=events_path)
+            ),
             runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
             nursery=nursery,
             transport=transport,
@@ -437,6 +440,10 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     assert response.status_code == 202
     assert response.json()["status"] == "recorded"
     assert response.json()["decision"] == "approve"
+    assert response.json()["approval_request_id"] == request_id
+    ledger_id = response.json()["request_id"]
+    assert ledger_id != request_id
+    assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == "recorded"
 
     resolved = harness.events("needs_human_resolved")
     assert len(resolved) == 1
@@ -478,16 +485,62 @@ def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) ->
 def test_a_second_decision_changes_nothing_and_emits_nothing(api: ApiFactory) -> None:
     harness = api()
     request_id = _pending(harness)
-    harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"})
+    first = harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"}).json()
 
     replay = harness.client.post(f"/approvals/{request_id}", json={"decision": "deny"})
     assert replay.status_code == 200
     assert replay.json()["decision"] == "approve"
+    assert replay.json()["approval_request_id"] == request_id
+    assert replay.json()["request_id"] != first["request_id"]
+    replay_ledger = harness.client.get(f"/requests/{replay.json()['request_id']}").json()
+    assert replay_ledger["outcome"] == "recorded"
     assert len(harness.events("needs_human_resolved")) == 1
 
     record = harness.store.approval(request_id)
     assert record is not None
     assert record.decision == "approve"
+
+
+def test_returned_decision_id_polls_pending_then_recorded_after_worker_recovery(
+    api: ApiFactory,
+) -> None:
+    """The response id names the ledger row the lifecycle worker later finalizes."""
+
+    class RecoveringEmitter:
+        def __init__(self) -> None:
+            self.available = threading.Event()
+            self.recovered = threading.Event()
+
+        def emit_durable(self, _event: ev.Event) -> bool:
+            if not self.available.is_set():
+                return False
+            self.recovered.set()
+            return True
+
+    emitter = RecoveringEmitter()
+    harness = api(emitter=emitter)
+    approval_id = _pending(harness)
+
+    with harness.client:
+        answer = harness.client.post(
+            f"/approvals/{approval_id}", json={"decision": "approve"}
+        ).json()
+        ledger_id = answer["request_id"]
+        assert answer["approval_request_id"] == approval_id
+        assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == (
+            "recorded_announcement_pending"
+        )
+
+        emitter.available.set()
+        harness.client.app.state.approval_outbox.notify()
+        assert emitter.recovered.wait(2.0)
+        for _ in range(100):
+            polled = harness.client.get(f"/requests/{ledger_id}").json()
+            if polled["outcome"] == "recorded":
+                break
+            threading.Event().wait(0.01)
+        assert polled["request_id"] == ledger_id
+        assert polled["outcome"] == "recorded"
 
 
 def test_an_edit_decision_carries_the_humans_version(api: ApiFactory) -> None:

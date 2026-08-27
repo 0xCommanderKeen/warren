@@ -49,7 +49,9 @@ other API processes; an exact
 retry or lease deadline can wake the worker sooner. Each accepted decision request is
 linked to the approval in the same transaction as the decision/outbox row, and completion
 updates every correlated pending request-log entry to `recorded`, so recovery does not
-depend on the same client returning.
+depend on the same client returning. The API returns that per-call ledger id as
+`request_id` and the gated request's stable id as `approval_request_id`; repeated replays
+create distinct pollable ledger rows, all correlated to the same approval.
 
 Announcement delivery is at least once. A short SQLite lease prevents concurrent API
 processes from emitting the same queued item together; a dead process's lease expires and
@@ -65,6 +67,9 @@ exact deadline. For a budget approval, deleting the pause, granting the window-s
 carry-on allowance, and marking completion are one SQLite transaction. A crash is therefore
 either wholly before that act or wholly after it; it cannot leave an unpaused resident
 without its allowance, or mark incomplete/refused work complete.
+The lifecycle worker only reconciles announcement/effects rows after the decision or
+expiry transition records them. Deadline detection and the expiry transition remain the
+approval sweep's responsibility.
 
 ## How a session asks
 

@@ -677,6 +677,15 @@ def test_the_console_never_claims_an_effect_the_api_did_not_confirm() -> None:
         assert "await call(" in body, f"{name} must read an outcome back from steward"
 
 
+def test_approval_confirmation_polls_the_returned_ledger_id() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    confirmation = source.split("function confirmApproval(")[1].split("\n}")[0]
+    assert 'call("request"' in confirmation
+    decision = source.split("function approvalCard(")[1].split("function ", 1)[0]
+    assert "requestId: answer.request_id" in decision
+    assert "confirmApproval(answer.request_id)" in decision
+
+
 def test_the_deploy_switch_is_on_now_that_the_endpoint_is_real() -> None:
     # It was off while POST /residents deployed nothing, because a checkbox that quietly
     # did nothing would be the exact lie this console exists not to tell. The endpoint
