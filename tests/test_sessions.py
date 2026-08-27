@@ -1,5 +1,6 @@
 """The resident session lifecycle: one seam for every real wake-up."""
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -262,6 +263,108 @@ def test_provisioning_refuses_a_declared_directory_replaced_after_admission(
 
     assert isinstance(refusal, Refusal)
     assert "no longer the directory" in refusal.reason
+
+
+def test_provisioning_refuses_a_declared_directory_recreated_at_the_same_path(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    """A pathname is not authority once its admitted directory has been replaced."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    memory.rmdir()
+    memory.mkdir()
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
+
+
+def test_provisioning_refuses_when_the_admitted_directory_moves_filesystems(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mount replacement changes st_dev even when path and inode appear unchanged."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_stat = Path.stat
+
+    def changed_device(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        result = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == memory and not follow_symlinks:
+            values = list(result)
+            values[2] += 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", changed_device)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
+
+
+def test_provisioning_refuses_a_replacement_during_identity_observation(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve cannot be paired with stat data from two different directories."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_stat = Path.stat
+    observations = 0
+
+    def replaced_between_stats(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        nonlocal observations
+        result = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == memory and not follow_symlinks:
+            observations += 1
+            if observations == 2:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", replaced_between_stats)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
 
 
 def test_missing_skills_fail_before_decisions_are_consumed(

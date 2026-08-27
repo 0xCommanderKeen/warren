@@ -1565,6 +1565,59 @@ def test_a_resident_with_an_absent_memory_dir_is_refused_not_run_in_cwd(
     assert any("current working directory" in complaint for complaint in engine.check())
 
 
+def test_scheduler_refuses_a_same_path_replacement_immediately_before_provisioning(
+    write_resident: ResidentWriter,
+    write_skill,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler's route retains lifecycle revalidation beside provisioning."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    write_skill("write-journal", defaults=True, body="Write it.\n")
+    data = manifest_with(
+        HOURLY,
+        memory={"kind": "directory", "path": str(memory), "journal": "journal"},
+    )
+    data["runner"] = {"kind": "claude", "model": "pretend"}
+    data["skills"] = []
+    path = write_resident(data)
+    runner_builds = 0
+
+    def build_runner(_spec: m.Runner) -> r.Runner:
+        nonlocal runner_builds
+        runner_builds += 1
+        return r.MockRunner()
+
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path / "fallback",
+        runner_factory=build_runner,
+        library=sk.load_library(tmp_path / "skills"),
+    )
+    run = engine.sessions.run
+
+    def replace_then_run(admission: ss.Admission, wake: ss.RoutineWake) -> ss.SessionResult:
+        memory.rmdir()
+        memory.mkdir()
+        return run(admission, wake)
+
+    monkeypatch.setattr(engine.sessions, "run", replace_then_run)
+
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+    assert report.result is not None
+    assert not report.result.ok
+    assert "filesystem identity changed" in report.result.summary()
+    assert runner_builds == 0
+    assert list(memory.iterdir()) == []
+    events = emitted(tmp_path / "events.jsonl")
+    assert [event["type"] for event in events] == ["routine_started", "routine_failed"]
+    assert "filesystem identity changed" in events[-1]["payload"]["error"]
+
+
 # --------------------------------------------------------------- guarded collaborators (#80)
 
 

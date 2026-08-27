@@ -8,6 +8,7 @@ harvest.
 """
 
 import logging
+import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -125,6 +126,25 @@ class Refusal:
 
 
 @dataclass(frozen=True, slots=True)
+class _DirectoryIdentity:
+    """The POSIX identity of one consistently observed declared directory.
+
+    Steward's supported deployment targets are POSIX hosts, where ``st_dev`` and
+    ``st_ino`` identify an extant filesystem object.  ``file_type`` records the relevant
+    part of ``st_mode`` so a non-directory can never inherit an admitted identity.
+    """
+
+    canonical: Path
+    device: int
+    inode: int
+    file_type: int
+
+
+class _DirectoryChangedError(OSError):
+    """The declared path changed during one supposedly consistent observation."""
+
+
+@dataclass(frozen=True, slots=True)
 class Admission:
     """A resident allowed to cross the session lifecycle seam."""
 
@@ -133,6 +153,7 @@ class Admission:
     admitted_at: datetime
     rehearsal: bool = False
     declared_workdir: Path | None = None
+    declared_identity: _DirectoryIdentity | None = field(default=None, repr=False, compare=False)
     _resolve_timeout: Callable[[int], int] = field(
         default=lambda declared_s: declared_s, repr=False, compare=False
     )
@@ -365,29 +386,58 @@ class ResidentSessions:
         resolved = self._resolve_admitted_workdir(resident)
         if isinstance(resolved, Refusal):
             return resolved
-        workdir, declared_workdir = resolved
+        workdir, identity = resolved
         return Admission(
             resident,
             workdir,
             now,
-            declared_workdir=declared_workdir,
+            declared_workdir=identity.canonical if identity is not None else None,
+            declared_identity=identity,
             _resolve_timeout=resolve_timeout,
         )
 
-    def _resolve_admitted_workdir(self, resident: Resident) -> tuple[Path, Path | None] | Refusal:
+    def _resolve_admitted_workdir(
+        self, resident: Resident
+    ) -> tuple[Path, _DirectoryIdentity | None] | Refusal:
         """Resolve the chosen directory and remember when it was the declared memory."""
         workdir = resident.workdir(self.workdir)
-        declared_workdir: Path | None = None
+        identity: _DirectoryIdentity | None = None
         try:
             memory = resident.manifest.memory
             if memory.kind == "directory":
                 candidate = Path(memory.path).expanduser()
-                if not candidate.is_symlink() and candidate.is_dir():
-                    declared_workdir = candidate.resolve(strict=True)
-            workdir = workdir.resolve(strict=declared_workdir is not None)
+                try:
+                    identity = self._observe_directory(candidate)
+                except FileNotFoundError:
+                    identity = None
+                workdir = (
+                    identity.canonical if identity is not None else resident.workdir(self.workdir)
+                )
+            workdir = workdir.resolve(strict=identity is not None)
+        except _DirectoryChangedError:
+            return Refusal(self._changed_workdir_reason(resident))
         except OSError:
             return Refusal(self._vanished_workdir_reason(resident))
-        return workdir, declared_workdir
+        return workdir, identity
+
+    @staticmethod
+    def _observe_directory(candidate: Path) -> _DirectoryIdentity | None:
+        """Observe path, resolution, and identity without following a final symlink.
+
+        The two no-follow stats bracket ``resolve``.  Any replacement while those calls
+        are in flight is rejected instead of combining a canonical path from one object
+        with identity from another.
+        """
+        before = candidate.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            return None
+        canonical = candidate.resolve(strict=True)
+        after = candidate.stat(follow_symlinks=False)
+        before_identity = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+        after_identity = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+        if before_identity != after_identity or not stat.S_ISDIR(after.st_mode):
+            raise _DirectoryChangedError("declared directory changed while it was inspected")
+        return _DirectoryIdentity(canonical, *after_identity)
 
     def run(
         self,
@@ -480,16 +530,19 @@ class ResidentSessions:
             return None
         if skills_home(resident.manifest.runner) is None or not self.library.configured:
             return None
-        if admission.declared_workdir is None:
+        if admission.declared_identity is None:
             return None
         candidate = Path(memory.path).expanduser()
         try:
-            if candidate.is_symlink() or not candidate.is_dir():
-                return Refusal(self._vanished_workdir_reason(resident))
-            if candidate.resolve(strict=True) != admission.declared_workdir:
-                return Refusal(self._vanished_workdir_reason(resident))
+            observed = self._observe_directory(candidate)
+        except _DirectoryChangedError:
+            return Refusal(self._changed_workdir_reason(resident))
         except OSError:
             return Refusal(self._vanished_workdir_reason(resident))
+        if observed is None:
+            return Refusal(self._vanished_workdir_reason(resident))
+        if observed != admission.declared_identity:
+            return Refusal(self._changed_workdir_reason(resident))
         return None
 
     def _require_revalidated(self, admission: Admission) -> None:
@@ -503,6 +556,13 @@ class ResidentSessions:
             f"memory.path {resident.manifest.memory.path!r} is no longer the directory "
             "admitted for this session; steward refuses to fall back to the current "
             "working directory"
+        )
+
+    def _changed_workdir_reason(self, resident: Resident) -> str:
+        return (
+            f"memory.path {resident.manifest.memory.path!r} canonical path or filesystem "
+            "identity changed after admission; steward refuses to provision or run in "
+            "the replacement directory"
         )
 
     def _skills_for(self, resident: Resident) -> tuple[Skill, ...]:

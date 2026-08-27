@@ -1037,6 +1037,64 @@ def test_a_memory_dir_that_vanishes_after_claim_fails_without_touching_cwd(
     assert list(sentinel.parent.iterdir()) == [sentinel]
 
 
+def test_a_memory_dir_recreated_at_the_same_path_fails_before_provision_or_runner(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claimed task cannot spend an admission issued to the replaced directory."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    cwd = tmp_path / "cwd"
+    sentinel = cwd / ".claude" / "skills" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("operator-owned", encoding="utf-8")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
+    write_skill("research", defaults=True)
+    data = board_manifest(memory={"kind": "directory", "path": str(memory)})
+    data["runner"] = {"kind": "claude", "model": "pretend"}
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Do not trust a recycled path", required_skills=["research"])
+    runner_builds = 0
+
+    def build_runner(_spec) -> Runner:
+        nonlocal runner_builds
+        runner_builds += 1
+        return ScriptedRunner()
+
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=(sink := ev.NullEmitter()),
+        workdir=cwd,
+        library=library_for(tmp_path / "residents"),
+        runner_factory=build_runner,
+    )
+    claim = dispatcher.claim
+
+    def claim_then_replace(candidate: Resident, now: datetime) -> JobRecord | None:
+        job = claim(candidate, now)
+        memory.rmdir()
+        memory.mkdir()
+        return job
+
+    monkeypatch.setattr(dispatcher, "claim", claim_then_replace)
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.status == "failed"
+    assert report.reason is not None
+    assert "filesystem identity changed" in report.reason
+    assert types(sink) == ["task_claimed", "task_failed"]
+    assert runner_builds == 0
+    assert list(memory.iterdir()) == []
+    assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+    assert list(sentinel.parent.iterdir()) == [sentinel]
+
+
 def test_a_memory_dir_vanishing_mid_drain_leaves_later_tasks_open(
     write_resident: ResidentWriter,
     write_skill: SkillWriter,
