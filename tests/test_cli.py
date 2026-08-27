@@ -1392,6 +1392,46 @@ def test_board_dispatch_carries_clean_partial_and_failed_outcomes(
     assert result.exit_code == expected, result.output
 
 
+def test_board_dispatch_scrubs_the_knock_it_prints(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch line is a terminal rendering, and this message is what a session typed."""
+    with Store(tmp_path / "raised.db") as store:
+        record = store.create_approval_request(
+            agent_id="claude-code:test-agent",
+            project="p",
+            action="send_email",
+            message="need ghp_abcdefghijklmnopqrstuvwxyz0123456789 for the send",
+        )
+    reports = (
+        SimpleNamespace(
+            done=True,
+            delegated=False,
+            resident_id="test-agent",
+            task=SimpleNamespace(task_id="t1", title="work", delegated=False, delegated_by=None),
+            reason=None,
+            raised=(record,),
+            handed_over=(),
+        ),
+    )
+    dispatch = SimpleNamespace(reopened=(), expired_approvals=(), reports=reports, planned=())
+    monkeypatch.setattr(
+        cli.Dispatcher,
+        "from_path",
+        lambda *_args, **_kwargs: SimpleNamespace(dispatch=lambda: dispatch),
+    )
+
+    result = runner.invoke(
+        main, ["board", "dispatch", "--residents", str(tmp_path), "--db", str(tmp_path / "b.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ghp_" not in result.output
+    assert "[redacted:secret]" in result.output
+
+
 def test_board_dispatch_reports_the_deadlines_it_swept(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -1632,6 +1672,44 @@ def test_approval_show_is_the_audit_query(runner: CliRunner, tmp_path: Path) -> 
         main, ["approval", "show", record.request_id, "--db", str(db), "--format", "json"]
     )
     assert json.loads(as_json.output)["decision"] == "edit"
+
+
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_approval_show_scrubs_what_the_session_typed(
+    runner: CliRunner, tmp_path: Path, output_format: str
+) -> None:
+    """The audit query is the output most likely to be pasted into an issue (steward #144).
+
+    Both formats: `--format json` is the one more likely to be piped somewhere, not less.
+    """
+    db = tmp_path / "approvals.db"
+    with Store(db) as store:
+        record = store.create_approval_request(
+            agent_id="claude-code:test-agent",
+            project="p",
+            action="rotate_token",
+            message="need ghp_abcdefghijklmnopqrstuvwxyz0123456789 to rotate",
+            detail={"to": "a@example.com", "auth": "Bearer ghp_zyxwvutsrqponmlkjihgfe98765"},
+        )
+        store.decide(
+            record.request_id,
+            "edit",
+            decided_by="api",
+            edit={"note": "use sk-ant-abcdef0123456789ghij"},
+        )
+
+    result = runner.invoke(
+        main,
+        ["approval", "show", record.request_id, "--db", str(db), "--format", output_format],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "ghp_" not in result.output
+    assert "sk-ant-" not in result.output
+    assert "[redacted:secret]" in result.output
+    # Only the secret is cut: the action still reads as itself and the address survives.
+    assert "rotate_token" in result.output
+    assert "a@example.com" in result.output
 
 
 def test_approval_show_says_when_it_has_never_heard_of_a_request(

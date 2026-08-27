@@ -1183,7 +1183,10 @@ def _report_board(report: BoardReport) -> None:
     else:
         click.secho(f"failed {label}: {report.reason}", fg="red", err=True)
     for record in report.raised:
-        click.secho(f"  needs human: {record.message} [{record.request_id}]", fg="yellow")
+        # A dispatch line is a terminal rendering like any other, and this message is
+        # whatever the session typed — so it is scrubbed on the way out (steward #144).
+        knock = redact_decision(record)
+        click.secho(f"  needs human: {knock.message} [{knock.request_id}]", fg="yellow")
     for delivery in report.handed_over:
         if delivery.task is not None:
             click.secho(
@@ -1521,10 +1524,14 @@ def _build_needs_human(
 def approval_show(request_id: str, db: Path | None, output_format: str) -> None:
     """Print one request with its decision, decider, and timestamps. The audit query."""
     with _open_store(db) as store:
-        record = store.approval(request_id)
-    if record is None:
+        stored = store.approval(request_id)
+    if stored is None:
         click.secho(f"no approval request {request_id!r}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
+    # The audit query is the output most likely to end up in a scrollback, a screenshot,
+    # or a pasted bug report, which is the risk redaction exists for — so it is scrubbed,
+    # in both formats, like `steward show` (steward #144).
+    record = redact_decision(stored)
     if output_format == "json":
         click.echo(json.dumps(record.to_dict(), indent=2))
         return

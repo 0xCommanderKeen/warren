@@ -5,6 +5,8 @@ import math
 from collections.abc import Mapping
 from typing import Any
 
+from steward.manifest import SECRET_REDACTION
+
 TITLE_MAX_CHARS = 200
 DETAIL_MAX_CHARS = 8_000
 IDENTIFIER_MAX_CHARS = 100
@@ -129,3 +131,16 @@ def validate_approval_edit(edit: Mapping[str, Any] | None) -> None:
     )
     if len(encoded) > EDIT_MAX_BYTES:
         raise ValueError(f"edit exceeds the {EDIT_MAX_BYTES} byte serialized limit")
+    if SECRET_REDACTION.encode("utf-8") in encoded:
+        # Steward writes this marker and nobody else means it. Every rendering a human
+        # decides from is scrubbed (steward #144), and the console prefills its edit box
+        # from the detail it was served — so an operator who opens the box and sends it
+        # back unchanged would store the placeholder over a value the resident still
+        # needs, and the record would then claim a human chose it. Refuse it instead and
+        # say what to do (steward #144).
+        raise ValueError(
+            f"edit carries {SECRET_REDACTION}, which is steward's own marker for a value "
+            f"withheld from the rendering you decided from; put the real value back, or "
+            f"drop that key from the edit — steward will not record the placeholder as "
+            f"your decision"
+        )

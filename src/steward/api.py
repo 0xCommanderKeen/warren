@@ -51,6 +51,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import delegation as dg
 from steward import events as ev
+from steward.approvals import redact_decision
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
@@ -1274,7 +1275,10 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         if wanted == APPROVAL_STATUS_PENDING:
             moment = ev.utc_now_iso(now())
             records = [r for r in records if r.expires_at is None or r.expires_at > moment]
-        return {"status": wanted, "approvals": [record.to_dict() for record in records]}
+        return {
+            "status": wanted,
+            "approvals": [redact_decision(record).to_dict() for record in records],
+        }
 
     @app.get("/approvals/{request_id}")
     def get_approval(request_id: str) -> dict[str, Any]:
@@ -1282,7 +1286,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         record = db.approval(request_id)
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
-        return record.to_dict()
+        return redact_decision(record).to_dict()
 
     @app.post("/approvals/{request_id}")
     def decide_approval(

@@ -40,6 +40,7 @@ from steward.api import (
     latest_run_requests,
 )
 from steward.deploy import DeployTarget
+from steward.manifest import SECRET_REDACTION
 from steward.nursery import (
     DeclareStage,
     NurseryReport,
@@ -661,6 +662,20 @@ def test_the_console_declares_the_paths_it_actually_needs() -> None:
         "/requests/{request_id}",
     ):
         assert path in declared, f"ui/app.js no longer declares {path}"
+
+
+def test_the_console_spells_the_redaction_marker_the_way_steward_writes_it() -> None:
+    """A stale copy here is a warning that never fires (steward #144).
+
+    The console prefills its edit box from the scrubbed detail the API served, so it warns
+    before a send rather than leaving the operator to discover the API's refusal. That
+    warning is only correct while this literal is the one ``redact_secrets`` writes.
+    """
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    declared = re.search(r'const REDACTION = "([^"]*)";', source)
+
+    assert declared is not None, "ui/app.js must declare the marker in one `const REDACTION`"
+    assert declared.group(1) == SECRET_REDACTION
 
 
 def test_the_console_fetches_through_exactly_one_door() -> None:

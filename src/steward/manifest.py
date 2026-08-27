@@ -53,6 +53,7 @@ __all__ = [
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
+    "SECRET_REDACTION",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
     "AppGrant",

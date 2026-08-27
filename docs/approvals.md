@@ -309,8 +309,24 @@ rest of the knock is intact, so a person still reads the question. Redaction run
 the length bound, so a secret cut in half by the cap can never surface a live prefix.
 
 The stored row keeps what the session actually typed, so **every rendering meant for a
-human scrubs it again**: `steward show` runs each decision through
-`approvals.redact_decision` before printing it, since that output is made to be pasted
-into a review. The one reader that gets the raw text back is the resident that wrote it,
-in the `DECISIONS SINCE YOU LAST RAN` section of its own next session — redacting there
-would misquote the question it asked.
+human scrubs it again** — each through `approvals.redact_decision`, and the list is the
+whole list:
+
+| rendering | why it is the risk |
+|---|---|
+| `steward show` | made to be pasted into a review |
+| `steward approval show`, both formats | the audit query; a terminal scrollback or a screenshot |
+| `steward board dispatch`'s `needs human:` line | the same terminal, on every sweep |
+| `GET /approvals` and `GET /approvals/{id}` | the console renders it into the DOM; `curl` renders it into a scrollback |
+
+Two readers deliberately get the raw text back, and both are the session that wrote it:
+the `DECISIONS SINCE YOU LAST RAN` section of its own next session, and the line
+`steward approval raise` echoes to the session that just called it. Redacting either
+would misquote the question the resident asked.
+
+Because the console prefills its **edit** box from the `detail` it was served, an operator
+can be looking at `[redacted:secret]` where a value used to be. Sending that back would
+store steward's own placeholder over a value the resident still needs, and the record
+would then claim a human chose it — so `POST /approvals/{id}` **refuses** an edit
+containing the marker, whatever client sent it, and says to put the real value back or
+drop the key. The console warns about the same thing when it opens the box.

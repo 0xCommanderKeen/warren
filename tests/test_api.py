@@ -26,6 +26,7 @@ from starlette.types import Message, Receive, Scope, Send
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import events as ev
 from steward import journal
+from steward import manifest as m
 from steward.api import ApiConfig, ApiError, _ApprovalBodyDepthMiddleware, create_app
 from steward.deploy import LocalTransport
 from steward.input_bounds import (
@@ -1395,6 +1396,86 @@ def test_the_approval_list_defaults_to_pending_and_filters_on_request(api: ApiFa
 
     every = harness.client.get("/approvals", params={"status": "all"}).json()
     assert {r["request_id"] for r in every["approvals"]} == {decided, waiting}
+
+
+def _pending_with_a_secret(harness: Harness) -> str:
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy needs ghp_abcdefghijklmnopqrstuvwxyz0123456789 to send it",
+        detail={"to": "plumber@example.com", "auth": "Bearer ghp_zyxwvutsrqponmlkjihgfe98765"},
+    )
+    return record.request_id
+
+
+def test_the_approval_list_scrubs_what_the_session_typed(api: ApiFactory) -> None:
+    """The API is a rendering meant for a human, and the console puts it on a screen.
+
+    Redaction already ran on the event path to burrow; the row served here was the copy
+    that still carried the secret (steward #144).
+    """
+    harness = api()
+    _pending_with_a_secret(harness)
+
+    served = harness.client.get("/approvals").json()["approvals"][0]
+
+    assert "ghp_" not in json.dumps(served)
+    assert m.SECRET_REDACTION in served["message"]
+    assert m.SECRET_REDACTION in served["detail"]["auth"]
+    assert served["detail"]["to"] == "plumber@example.com"  # only the secret is cut
+
+
+def test_auditing_one_approval_by_id_scrubs_it_too(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    served = harness.client.get(f"/approvals/{request_id}").json()
+
+    assert "ghp_" not in json.dumps(served)
+    assert m.SECRET_REDACTION in served["message"]
+
+
+def test_the_stored_row_still_holds_what_the_session_typed(api: ApiFactory) -> None:
+    """Redaction is egress, not storage: the resident's own copy must stay truthful."""
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    stored = harness.store.approval(request_id)
+
+    assert stored is not None
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" in stored.message
+
+
+def test_an_edit_carrying_stewards_own_redaction_marker_is_refused(api: ApiFactory) -> None:
+    """The console prefills its edit box from the scrubbed detail it was served.
+
+    Sending that back unchanged would store the placeholder over a value the resident
+    still needs, and the record would then claim a human chose it (steward #144).
+    """
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"auth": f"Bearer {m.SECRET_REDACTION}"}},
+    )
+
+    assert response.status_code == 422
+    assert m.SECRET_REDACTION in json.dumps(response.json())
+    assert harness.store.approval(request_id).pending  # nothing was decided
+
+
+def test_an_edit_that_replaces_the_withheld_value_is_accepted(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"auth": "Bearer the-real-one"}},
+    )
+
+    assert response.status_code == 202
 
 
 def test_an_unknown_approval_status_is_refused(api: ApiFactory) -> None:
