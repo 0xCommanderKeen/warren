@@ -40,6 +40,7 @@ import threading
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
@@ -254,6 +255,11 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "parent_task_id": "TEXT",
         "origin": "TEXT",
         "depth": "INTEGER NOT NULL DEFAULT 0",
+        # The currently leased attempt.  These are cleared together when the attempt
+        # finishes or is swept; a retry therefore cannot inherit its predecessor's run.
+        "run_id": "TEXT",
+        "owner_token": "TEXT",
+        "lease_duration_s": "REAL",
     },
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
@@ -347,6 +353,9 @@ class JobRecord:
     #: to one root rather than to the last hop. See :mod:`steward.delegation`.
     origin: str | None = None
     depth: int = 0
+    run_id: str | None = None
+    owner_token: str | None = None
+    lease_duration_s: float | None = None
 
     @property
     def claimable_by(self) -> frozenset[str]:
@@ -382,6 +391,9 @@ class JobRecord:
             parent_task_id=row["parent_task_id"],
             origin=row["origin"],
             depth=row["depth"] or 0,
+            run_id=row["run_id"],
+            owner_token=row["owner_token"],
+            lease_duration_s=row["lease_duration_s"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -407,6 +419,7 @@ class JobRecord:
             "parent_task_id": self.parent_task_id,
             "origin": self.origin,
             "depth": self.depth,
+            "run_id": self.run_id,
         }
 
 
@@ -1018,6 +1031,7 @@ class Store:
         claimant: str,
         skills: Iterable[str],
         lease_expires_at: str,
+        lease_duration_s: float | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
         """Atomically claim the oldest open task this claimant is qualified for.
@@ -1055,12 +1069,14 @@ class Store:
                     continue
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = ?, claimed_at = ?, "
-                    "lease_expires_at = ? WHERE task_id = ? AND status = ?",
+                    "lease_expires_at = ?, lease_duration_s = ?, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ?",
                     (
                         STATUS_CLAIMED,
                         claimant,
                         moment,
                         lease_expires_at,
+                        lease_duration_s,
                         record.task_id,
                         STATUS_OPEN,
                     ),
@@ -1079,6 +1095,7 @@ class Store:
         assignee: str,
         claimant: str,
         lease_expires_at: str,
+        lease_duration_s: float | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
         """Atomically pick up the oldest item waiting in one resident's inbox.
@@ -1106,12 +1123,14 @@ class Store:
                 record = JobRecord.from_row(row)
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = ?, claimed_at = ?, "
-                    "lease_expires_at = ? WHERE task_id = ? AND status = ? AND assignee = ?",
+                    "lease_expires_at = ?, lease_duration_s = ?, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ? AND assignee = ?",
                     (
                         STATUS_CLAIMED,
                         claimant,
                         moment,
                         lease_expires_at,
+                        lease_duration_s,
                         record.task_id,
                         STATUS_OPEN,
                         assignee,
@@ -1153,7 +1172,7 @@ class Store:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
-                "finished_at = ?, lease_expires_at = NULL "
+                "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
                 "WHERE task_id = ? AND status = ? AND claimant = ? "
                 "AND (? IS NULL OR claimed_at = ?)",
                 (
@@ -1213,9 +1232,9 @@ class Store:
                     raise _AtomicTaskCloseLostError  # noqa: TRY301
                 job = self._conn.execute(
                     "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
-                    "finished_at = ?, lease_expires_at = NULL "
+                    "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
                     "WHERE task_id = ? AND status = ? AND claimant = ? "
-                    "AND (? IS NULL OR claimed_at = ?)",
+                    "AND (? IS NULL OR claimed_at = ?) AND run_id = ? AND owner_token = ?",
                     (
                         status,
                         outcome,
@@ -1227,6 +1246,8 @@ class Store:
                         claimant,
                         lease,
                         lease,
+                        run_id,
+                        owner_token,
                     ),
                 )
                 if job.rowcount == 0:
@@ -1256,14 +1277,79 @@ class Store:
             ).fetchall()
             for row in rows:
                 record = JobRecord.from_row(row)
+                if record.run_id is not None:
+                    # Bound attempts need a run-specific terminal choice; callers using
+                    # the legacy API must not split those two durable facts.
+                    continue
+                # An upgraded database may contain a claimed job and its still-open run
+                # from before the association columns existed.  Silence is safer than
+                # reopening underneath a possibly live owner; a later operator/sweep can
+                # resolve the legacy row once the run is answered.
+                legacy = self._conn.execute(
+                    "SELECT 1 FROM open_runs WHERE kind IN (?, ?) AND ref = ? "
+                    "AND closed_at IS NULL LIMIT 1",
+                    (RUN_TASK, RUN_DELEGATED, record.task_id),
+                ).fetchone()
+                if legacy is not None:
+                    continue
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = NULL, claimed_at = NULL, "
-                    "lease_expires_at = NULL WHERE task_id = ? AND status = ?",
-                    (STATUS_OPEN, record.task_id, STATUS_CLAIMED),
+                    "lease_expires_at = NULL, lease_duration_s = NULL WHERE task_id = ? "
+                    "AND status = ? AND claimed_at = ?",
+                    (STATUS_OPEN, record.task_id, STATUS_CLAIMED, record.claimed_at),
                 )
                 if cursor.rowcount == 1:
                     expired.append(record)
         return expired
+
+    def expire_task_attempt_and_claim_terminal(  # noqa: PLR0913
+        self,
+        task_id: str,
+        *,
+        lease: str,
+        run_id: str,
+        owner_token: str,
+        event: str,
+        event_id: str,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Atomically reopen one dead attempt and choose its exact run failure."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                row = self._conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ? AND status = ? AND claimed_at = ? "
+                    "AND run_id = ? AND owner_token = ? AND lease_expires_at <= ?",
+                    (task_id, STATUS_CLAIMED, lease, run_id, owner_token, moment),
+                ).fetchone()
+                if row is None:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                run = self._conn.execute(
+                    "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                    "terminal_claimed_at = ? WHERE run_id = ? AND owner_token = ? "
+                    "AND closed_at IS NULL AND terminal_event IS NULL",
+                    (event, event_id, moment, run_id, owner_token),
+                )
+                job = self._conn.execute(
+                    "UPDATE jobs SET status = ?, claimant = NULL, claimed_at = NULL, "
+                    "lease_expires_at = NULL, lease_duration_s = NULL, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ? AND claimed_at = ? "
+                    "AND run_id = ? AND owner_token = ? AND lease_expires_at <= ?",
+                    (
+                        STATUS_OPEN,
+                        task_id,
+                        STATUS_CLAIMED,
+                        lease,
+                        run_id,
+                        owner_token,
+                        moment,
+                    ),
+                )
+                if run.rowcount != 1 or job.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return None
+        return JobRecord.from_row(row)
 
     # -- approvals -------------------------------------------------------------------
 
@@ -1952,6 +2038,105 @@ class Store:
                 ),
             )
             return cursor.rowcount == 1
+
+    def open_task_run(  # noqa: PLR0913
+        self,
+        *,
+        task_id: str,
+        lease: str,
+        run_id: str,
+        kind: str,
+        agent_id: str,
+        project: str = "",
+        ref: str = "",
+        timeout_s: float = 0.0,
+        event_log_path: str = "",
+        owner_token: str,
+        now: str | None = None,
+    ) -> bool:
+        """Open and bind a task attempt in one transaction.
+
+        The claim stamp fences the binding.  A swept/retried job cannot accidentally be
+        attached to the late predecessor, and an inserted run is rolled back when the
+        binding loses that race.
+        """
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                opened = self._conn.execute(
+                    "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
+                    "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                    (
+                        run_id,
+                        kind,
+                        agent_id,
+                        project,
+                        ref,
+                        float(timeout_s),
+                        moment,
+                        moment,
+                        event_log_path,
+                        owner_token,
+                    ),
+                )
+                if opened.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                bound = self._conn.execute(
+                    "UPDATE jobs SET run_id = ?, owner_token = ? WHERE task_id = ? "
+                    "AND status = ? AND claimed_at = ? AND run_id IS NULL",
+                    (run_id, owner_token, task_id, STATUS_CLAIMED, lease),
+                )
+                if bound.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return False
+        return True
+
+    def renew_task_run(
+        self,
+        run_id: str,
+        *,
+        owner_token: str,
+        now: str | None = None,
+    ) -> bool:
+        """Atomically renew the run heartbeat and its exact job attempt lease."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                row = self._conn.execute(
+                    "SELECT task_id, claimed_at, lease_duration_s FROM jobs WHERE run_id = ? "
+                    "AND owner_token = ? AND status = ?",
+                    (run_id, owner_token, STATUS_CLAIMED),
+                ).fetchone()
+                if row is None or row["lease_duration_s"] is None:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                lease_end = utc_now_iso(
+                    datetime.fromisoformat(moment)
+                    + timedelta(seconds=float(row["lease_duration_s"]))
+                )
+                run = self._conn.execute(
+                    "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                    "AND terminal_event IS NULL AND owner_token = ?",
+                    (moment, run_id, owner_token),
+                )
+                job = self._conn.execute(
+                    "UPDATE jobs SET lease_expires_at = ? WHERE task_id = ? AND status = ? "
+                    "AND claimed_at = ? AND run_id = ? AND owner_token = ?",
+                    (
+                        lease_end,
+                        row["task_id"],
+                        STATUS_CLAIMED,
+                        row["claimed_at"],
+                        run_id,
+                        owner_token,
+                    ),
+                )
+                if run.rowcount != 1 or job.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return False
+        return True
 
     def renew_run(self, run_id: str, *, owner_token: str = "", now: str | None = None) -> bool:
         """Renew an open run's ownership lease; a terminal run stays terminal."""

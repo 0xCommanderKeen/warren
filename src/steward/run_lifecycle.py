@@ -77,14 +77,21 @@ class RunTransitions:
         self.heartbeat_every_s = heartbeat_every_s
 
     @contextmanager
-    def owned(self, run_id: str, owner_token: str = "") -> Iterator[None]:
+    def owned(
+        self, run_id: str, owner_token: str = "", *, task_attempt: bool = False
+    ) -> Iterator[None]:
         """Renew ``run_id`` through its result/accounting/event tail."""
         stop = threading.Event()
 
         def beat() -> None:
             while not stop.wait(self.heartbeat_every_s):
                 try:
-                    if not self.store.renew_run(run_id, owner_token=owner_token):
+                    renew = (
+                        cast("Any", self.store).renew_task_run
+                        if task_attempt and hasattr(self.store, "renew_task_run")
+                        else self.store.renew_run
+                    )
+                    if not renew(run_id, owner_token=owner_token):
                         return
                 except Exception as exc:  # noqa: BLE001
                     log.warning("could not renew run %s ownership: %s", run_id, exc)

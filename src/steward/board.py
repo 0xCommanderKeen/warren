@@ -645,7 +645,7 @@ class Dispatcher:
             result = RunResult(outcome=Outcome.FAILED, error=admitted.reason)
             watched = self._open_run(resident, job, run_id, declared_s, moment, owner_token)
             ownership = (
-                self.run_transitions.owned(run_id, owner_token)
+                self.run_transitions.owned(run_id, owner_token, task_attempt=True)
                 if watched
                 else contextlib.nullcontext()
             )
@@ -692,7 +692,9 @@ class Dispatcher:
         watched = self._open_run(resident, job, run_id, timeout_s, moment, owner_token)
 
         ownership = (
-            self.run_transitions.owned(run_id, owner_token) if watched else contextlib.nullcontext()
+            self.run_transitions.owned(run_id, owner_token, task_attempt=True)
+            if watched
+            else contextlib.nullcontext()
         )
         with ownership:
             session = self.sessions.run(admitted, wake)
@@ -810,7 +812,11 @@ class Dispatcher:
         precisely the death this registry exists to catch.
         """
         try:
-            opened = self.store.open_run(
+            if job.claimed_at is None:
+                return False
+            opened = self.store.open_task_run(
+                task_id=job.task_id,
+                lease=job.claimed_at,
                 run_id=run_id,
                 kind=RUN_DELEGATED if job.delegated else RUN_TASK,
                 agent_id=resident.agent_id,
