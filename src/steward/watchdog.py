@@ -43,6 +43,7 @@ to sweep, buries unbracketed runs, and checks every resident's budget so a cap t
 on a day nothing was scheduled.
 """
 
+import dataclasses
 import json
 import logging
 import time
@@ -229,6 +230,7 @@ class StaleRun:
     timeout_s: float = 0.0
     heartbeat_at: datetime | None = None
     event_log_path: str = ""
+    evidence_version: int = 0
     registered: bool = False
 
     def age_s(self, now: datetime) -> float:
@@ -284,14 +286,33 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     mean "you may hang forever". A registry row that carries its own timeout is judged
     against that instead: it is the deadline the session was actually given.
     """
-    started = {run.run_id: run for run in _from_registry(registry)}
-    logged = _from_log(path, required=bool(started))
-    expected_paths = {run.event_log_path for run in started.values() if run.event_log_path}
-    actual_path = str(path.resolve())
-    if expected_paths and expected_paths != {actual_path}:
-        raise EventLogEvidenceError(
-            f"run registry expects event log {sorted(expected_paths)!r}, not {actual_path!r}"
-        )
+    registered = _from_registry(registry)
+    started = {run.run_id: run for run in registered}
+    scans: dict[str, _LogScan] = {}
+    unsafe: set[str] = set()
+    for run in registered:
+        if not run.event_log_path and run.evidence_version == 0:
+            log.warning(
+                "refusing to bury run %s: no recorded event log path; "
+                "migrate or close this legacy row",
+                run.run_id,
+            )
+            unsafe.add(run.run_id)
+            continue
+        current = run
+        if not current.event_log_path:
+            current = dataclasses.replace(current, event_log_path=str(path.resolve()))
+            started[current.run_id] = current
+        try:
+            scans.setdefault(
+                current.event_log_path, _from_log(Path(current.event_log_path), required=True)
+            )
+        except EventLogEvidenceError as exc:
+            log.warning(
+                "refusing to bury runs recorded against %s: %s", current.event_log_path, exc
+            )
+            unsafe.add(current.run_id)
+    logged = _from_log(path, required=False)
     # The registry wins where both know a run; a closing event in the log wins over both,
     # because a run whose finish steward actually emitted did report back, however the
     # row it should have answered ended up.
@@ -302,12 +323,13 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     return [
         run
         for run in started.values()
-        if not logged.answers(run)
+        if run.run_id not in unsafe
+        and not (scans[run.event_log_path].answers(run) if run.registered else logged.answers(run))
         and run.age_s(now) > _deadline_s(run, deadlines, default_timeout_s) + grace_s
     ]
 
 
-def answered_runs(path: Path, registry: Store | None = None) -> list[StaleRun]:
+def answered_runs(_path: Path, registry: Store | None = None) -> list[StaleRun]:
     """Return the open registry rows the fallback log already holds a closing event for.
 
     The other half of :func:`scan_unbracketed`'s answer, and a separate question because
@@ -319,14 +341,30 @@ def answered_runs(path: Path, registry: Store | None = None) -> list[StaleRun]:
     source of truth — slowly fills with sessions that are long over.
     """
     rows = _from_registry(registry)
-    logged = _from_log(path, required=bool(rows))
-    expected_paths = {run.event_log_path for run in rows if run.event_log_path}
-    if expected_paths and expected_paths != {str(path.resolve())}:
-        actual_path = str(path.resolve())
-        raise EventLogEvidenceError(
-            f"run registry expects event log {sorted(expected_paths)!r}, not {actual_path!r}"
-        )
-    return [run for run in rows if logged.answers(run)]
+    scans: dict[str, _LogScan] = {}
+    answered = []
+    for run in rows:
+        if not run.event_log_path and run.evidence_version == 0:
+            log.warning(
+                "refusing to close run %s: no recorded event log path; migrate this legacy row",
+                run.run_id,
+            )
+            continue
+        current = run
+        if not current.event_log_path:
+            current = dataclasses.replace(current, event_log_path=str(_path.resolve()))
+        try:
+            scan = scans.setdefault(
+                current.event_log_path, _from_log(Path(current.event_log_path), required=True)
+            )
+        except EventLogEvidenceError as exc:
+            log.warning(
+                "refusing to close runs recorded against %s: %s", current.event_log_path, exc
+            )
+            continue
+        if scan.answers(current):
+            answered.append(current)
+    return answered
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,10 +409,11 @@ def _from_log(path: Path, *, required: bool = False) -> _LogScan:
     except OSError as exc:
         raise EventLogEvidenceError(f"could not read event log {path}: {exc}") from exc
     lines = text.splitlines()
+    torn_final = bool(text) and not text.endswith("\n")
     for index, line in enumerate(lines):
         event = _parse_line(line)
         if event is None:
-            if line.strip() and index != len(lines) - 1:
+            if line.strip() and not (index == len(lines) - 1 and torn_final):
                 raise EventLogEvidenceError(f"event log {path} has an unreadable line {index + 1}")
             continue
         payload = event.get("payload")
@@ -451,6 +490,7 @@ def _from_registry(registry: Store | None) -> list[StaleRun]:
                 timeout_s=row.timeout_s,
                 heartbeat_at=_parse_ts(row.heartbeat_at),
                 event_log_path=row.event_log_path,
+                evidence_version=row.evidence_version,
                 registered=True,
             )
         )
@@ -970,7 +1010,7 @@ class Watchdog:
 
     # -- burying runs that vanished ----------------------------------------------------
 
-    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:
+    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:  # noqa: C901
         """Close every unbracketed run with the ``routine_failed`` its session never sent.
 
         The store's primary key on ``run_id`` is what makes this exactly-once: a run that
@@ -1000,13 +1040,33 @@ class Watchdog:
             log.warning("refusing to bury runs without trustworthy close evidence: %s", exc)
             return []
         buried: list[StaleRun] = []
+        if hasattr(self.runs, "publish_pending"):
+            self.runs.publish_pending(self.emitter, now=now)
         for run in stale:
-            registry_lost = run.registered and not self.runs.watchdog_close(
-                run.run_id, now=now, grace_s=self.grace_s
+            terminal = ev.routine_failed_event(
+                agent_id=run.agent_id,
+                project=run.project or run.agent_id,
+                routine=run.routine,
+                run_id=run.run_id,
+                error=NEVER_REPORTED_BACK,
             )
+            if run.registered and hasattr(self.runs, "watchdog_claim"):
+                registry_lost = not self.runs.watchdog_claim(
+                    run.run_id, terminal, now=now, grace_s=self.grace_s
+                )
+            elif run.registered:
+                registry_lost = not self.runs.watchdog_close(
+                    run.run_id, now=now, grace_s=self.grace_s
+                )
+            else:
+                registry_lost = False
             if registry_lost:
                 continue
-            if not self.store.close_unbracketed_run(
+            if run.registered and run.kind != RUN_ROUTINE:
+                self.store.mark_run_terminal_published(
+                    run.run_id, f"run-terminal:{run.run_id}", now=ev.utc_now_iso(now)
+                )
+            if not run.registered and not self.store.close_unbracketed_run(
                 run_id=run.run_id,
                 agent_id=run.agent_id,
                 routine=run.routine,
@@ -1022,15 +1082,10 @@ class Watchdog:
                 run.age_s(now),
             )
             if run.kind == RUN_ROUTINE:
-                self.emitter.emit(
-                    ev.routine_failed_event(
-                        agent_id=run.agent_id,
-                        project=run.project or run.agent_id,
-                        routine=run.routine,
-                        run_id=run.run_id,
-                        error=NEVER_REPORTED_BACK,
-                    )
-                )
+                if run.registered:
+                    self.runs.publish_pending(self.emitter, now=now)
+                else:
+                    self.emitter.emit(terminal)
             buried.append(run)
         return buried
 

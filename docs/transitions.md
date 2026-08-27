@@ -201,12 +201,18 @@ the way it learns of any other.
 
 Routine events remain outside the domain-row matrix, but their terminal transition has a
 named seam in `steward.run_lifecycle`. Opening a registry row begins a renewable ownership
-lease. The session renews it through the runner and post-run tail, then conditionally
-closes the row before emitting its terminal event. The watchdog can conditionally close
-the same row only after the heartbeat has been silent for the full grace period and only
-after reading the exact complete local event record stored on the row. The winner alone
-may emit. Two watchdog processes, or a watchdog racing a finishing session, therefore
-produce at most one terminal event.
+lease fenced by an unguessable owner token. The session renews it through accounting,
+harvesting, delegation, the domain-row close, and the event tail. At the terminal seam the
+owner or a stale-heartbeat watchdog atomically stores one immutable event and stable event
+identity. Any process may replay that chosen fact; the row closes only after the remote or
+fsynced local sink accepts it. A crash before emit and a crash after emit but before close
+therefore recover the same outcome at least once, never a contradictory outcome.
+
+Each row names its own canonical evidence file. Watchdogs group rows by that path, so a
+missing, unreadable, or corrupt file blocks only its rows. A malformed final record is
+ignored only when the file lacks its terminating newline (a torn append); a complete
+malformed line blocks burial. Schema-migrated rows with no path are legacy-unknown and are
+refused loudly until an operator migrates or closes them.
 
 The lease deliberately does not record or probe a PID. Scheduler, board, and watchdog can
 run in different processes, hosts, containers, and PID namespaces; a PID is neither a

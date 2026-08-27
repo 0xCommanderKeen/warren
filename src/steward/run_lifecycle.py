@@ -5,13 +5,15 @@ durable lease alive for the entire session lifecycle and makes the session and w
 compete for the same conditional close in SQLite.
 """
 
+import json
 import logging
 import threading
-from collections.abc import Iterator
+import uuid
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from steward import events as ev
 
@@ -22,7 +24,7 @@ RUN_HEARTBEAT_EVERY_S = 15.0
 class RunStore(Protocol):
     """Storage operations needed by run-close arbitration."""
 
-    def renew_run(self, run_id: str, *, now: str | None = None) -> bool:
+    def renew_run(self, run_id: str, *, owner_token: str = "", now: str | None = None) -> bool:
         """Renew an open run."""
         ...
 
@@ -32,6 +34,29 @@ class RunStore(Protocol):
 
     def close_stale_run(self, run_id: str, *, stale_before: str, now: str | None = None) -> bool:
         """Claim a watchdog close for an expired lease."""
+        ...
+
+    def claim_run_terminal(  # noqa: PLR0913 - mirrors the durable store operation
+        self,
+        run_id: str,
+        *,
+        event: str,
+        event_id: str,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> bool:
+        """Choose an immutable terminal event under one authority condition."""
+        ...
+
+    def terminal_runs(self) -> Sequence[Any]:
+        """Return chosen terminal events awaiting finalization."""
+        ...
+
+    def mark_run_terminal_published(
+        self, run_id: str, event_id: str, *, now: str | None = None
+    ) -> bool:
+        """Finalize one published terminal event."""
         ...
 
 
@@ -52,14 +77,14 @@ class RunTransitions:
         self.heartbeat_every_s = heartbeat_every_s
 
     @contextmanager
-    def owned(self, run_id: str) -> Iterator[None]:
+    def owned(self, run_id: str, owner_token: str = "") -> Iterator[None]:
         """Renew ``run_id`` through its result/accounting/event tail."""
         stop = threading.Event()
 
         def beat() -> None:
             while not stop.wait(self.heartbeat_every_s):
                 try:
-                    if not self.store.renew_run(run_id):
+                    if not self.store.renew_run(run_id, owner_token=owner_token):
                         return
                 except Exception as exc:  # noqa: BLE001
                     log.warning("could not renew run %s ownership: %s", run_id, exc)
@@ -72,14 +97,92 @@ class RunTransitions:
             stop.set()
             thread.join(timeout=self.heartbeat_every_s)
 
-    def session_close(self, run_id: str, *, now: datetime) -> bool:
-        """Let the session atomically claim the terminal close."""
-        return self.store.close_run(run_id, now=ev.utc_now_iso(now))
+    def session_claim(
+        self, run_id: str, event: ev.Event, *, owner_token: str, now: datetime
+    ) -> bool:
+        """Let the live owner durably choose its immutable terminal event."""
+        event_id = f"run-terminal:{run_id}"
+        event = _identified(event, event_id)
+        store = cast("Any", self.store)
+        if not hasattr(store, "claim_run_terminal"):
+            return self.store.close_run(run_id, now=ev.utc_now_iso(now))
+        return bool(
+            store.claim_run_terminal(
+                run_id,
+                event=event.to_json(),
+                event_id=event_id,
+                owner_token=owner_token,
+                now=ev.utc_now_iso(now),
+            )
+        )
+
+    def watchdog_claim(
+        self, run_id: str, event: ev.Event, *, now: datetime, grace_s: float
+    ) -> bool:
+        """Let a watchdog choose failure only after the ownership heartbeat is stale."""
+        event_id = f"run-terminal:{run_id}"
+        event = _identified(event, event_id)
+        return self.store.claim_run_terminal(
+            run_id,
+            event=event.to_json(),
+            event_id=event_id,
+            stale_before=ev.utc_now_iso(now - timedelta(seconds=grace_s)),
+            now=ev.utc_now_iso(now),
+        )
 
     def watchdog_close(self, run_id: str, *, now: datetime, grace_s: float) -> bool:
-        """Let the watchdog close only a lease silent for a full grace."""
+        """Compatibility spelling for old test doubles; new callers choose an event."""
         return self.store.close_stale_run(
             run_id,
             stale_before=ev.utc_now_iso(now - timedelta(seconds=grace_s)),
             now=ev.utc_now_iso(now),
         )
+
+    def publish_pending(self, emitter: ev.Emitter, *, now: datetime) -> list[str]:
+        """Replay every chosen fact and finalize it only after a durable sink accepts it."""
+        published = []
+        store = cast("Any", self.store)
+        if not hasattr(store, "terminal_runs"):
+            return published
+        for run in store.terminal_runs():
+            if not run.terminal_event or not run.terminal_event_id:
+                continue
+            event = _event_from_json(run.terminal_event)
+            durable = getattr(emitter, "emit_durable", emitter.emit)(event)
+            if durable and store.mark_run_terminal_published(
+                run.run_id, run.terminal_event_id, now=ev.utc_now_iso(now)
+            ):
+                published.append(run.run_id)
+        return published
+
+
+def new_owner_token() -> str:
+    """Return an unguessable process/session fencing token."""
+    return str(uuid.uuid4())
+
+
+def _identified(event: ev.Event, event_id: str) -> ev.Event:
+    return ev.Event(
+        type=event.type,
+        agent_id=event.agent_id,
+        project=event.project,
+        cwd=event.cwd,
+        ts=event.ts,
+        source=event.source,
+        v=event.v,
+        payload={**event.payload, "event_id": event_id},
+    )
+
+
+def _event_from_json(raw: str) -> ev.Event:
+    data = json.loads(raw)
+    return ev.Event(
+        type=data["type"],
+        agent_id=data["agent_id"],
+        project=data["project"],
+        payload=data.get("payload", {}),
+        cwd=data.get("cwd"),
+        ts=data["ts"],
+        source=data.get("source", ev.EVENT_SOURCE),
+        v=data.get("v", ev.EVENT_VERSION),
+    )

@@ -215,6 +215,12 @@ CREATE TABLE IF NOT EXISTS open_runs (
     started_at TEXT NOT NULL,
     heartbeat_at TEXT NOT NULL DEFAULT '',
     event_log_path TEXT NOT NULL DEFAULT '',
+    evidence_version INTEGER NOT NULL DEFAULT 1,
+    owner_token TEXT NOT NULL DEFAULT '',
+    terminal_event TEXT,
+    terminal_event_id TEXT,
+    terminal_claimed_at TEXT,
+    terminal_published_at TEXT,
     closed_at  TEXT
 );
 
@@ -258,6 +264,12 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
     "open_runs": {
         "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
         "event_log_path": "TEXT NOT NULL DEFAULT ''",
+        "evidence_version": "INTEGER NOT NULL DEFAULT 0",
+        "owner_token": "TEXT NOT NULL DEFAULT ''",
+        "terminal_event": "TEXT",
+        "terminal_event_id": "TEXT",
+        "terminal_claimed_at": "TEXT",
+        "terminal_published_at": "TEXT",
     },
 }
 
@@ -683,6 +695,12 @@ class OpenRun:
     timeout_s: float = 0.0
     heartbeat_at: str = ""
     event_log_path: str = ""
+    evidence_version: int = 0
+    owner_token: str = ""
+    terminal_event: str | None = None
+    terminal_event_id: str | None = None
+    terminal_claimed_at: str | None = None
+    terminal_published_at: str | None = None
     closed_at: str | None = None
 
     @property
@@ -703,6 +721,12 @@ class OpenRun:
             timeout_s=row["timeout_s"],
             heartbeat_at=row["heartbeat_at"],
             event_log_path=row["event_log_path"],
+            evidence_version=row["evidence_version"],
+            owner_token=row["owner_token"],
+            terminal_event=row["terminal_event"],
+            terminal_event_id=row["terminal_event_id"],
+            terminal_claimed_at=row["terminal_claimed_at"],
+            terminal_published_at=row["terminal_published_at"],
             closed_at=row["closed_at"],
         )
 
@@ -1822,6 +1846,7 @@ class Store:
         ref: str = "",
         timeout_s: float = 0.0,
         event_log_path: str = "",
+        owner_token: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started. Returns whether this call opened the row.
@@ -1842,8 +1867,8 @@ class Store:
             opened_at = now or utc_now_iso()
             cursor = self._conn.execute(
                 "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
-                "started_at, heartbeat_at, event_log_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+                "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
                 (
                     run_id,
                     kind,
@@ -1854,16 +1879,18 @@ class Store:
                     opened_at,
                     opened_at,
                     event_log_path,
+                    owner_token,
                 ),
             )
             return cursor.rowcount == 1
 
-    def renew_run(self, run_id: str, *, now: str | None = None) -> bool:
+    def renew_run(self, run_id: str, *, owner_token: str = "", now: str | None = None) -> bool:
         """Renew an open run's ownership lease; a terminal run stays terminal."""
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL",
-                (now or utc_now_iso(), run_id),
+                "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND terminal_event IS NULL AND owner_token = ?",
+                (now or utc_now_iso(), run_id, owner_token),
             )
             return cursor.rowcount == 1
 
@@ -1874,6 +1901,57 @@ class Store:
                 "UPDATE open_runs SET closed_at = ? WHERE run_id = ? AND closed_at IS NULL "
                 "AND heartbeat_at <= ?",
                 (now or utc_now_iso(), run_id, stale_before),
+            )
+            return cursor.rowcount == 1
+
+    def claim_run_terminal(  # noqa: PLR0913 - authority is owner token or stale cutoff
+        self,
+        run_id: str,
+        *,
+        event: str,
+        event_id: str,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> bool:
+        """Choose one immutable terminal fact, by the live owner or an expired watchdog."""
+        with self._lock, self._conn:
+            prefix = (
+                "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND terminal_event IS NULL AND "
+            )
+            if owner_token is not None:
+                cursor = self._conn.execute(
+                    prefix + "owner_token = ?",
+                    (event, event_id, now or utc_now_iso(), run_id, owner_token),
+                )
+            else:
+                cursor = self._conn.execute(
+                    prefix + "heartbeat_at <= ?",
+                    (event, event_id, now or utc_now_iso(), run_id, stale_before),
+                )
+            return cursor.rowcount == 1
+
+    def terminal_runs(self) -> list[OpenRun]:
+        """Return chosen terminal facts that still need durable publication/finalization."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM open_runs WHERE terminal_event IS NOT NULL AND closed_at IS NULL "
+                "ORDER BY terminal_claimed_at, rowid"
+            ).fetchall()
+        return [OpenRun.from_row(row) for row in rows]
+
+    def mark_run_terminal_published(
+        self, run_id: str, event_id: str, *, now: str | None = None
+    ) -> bool:
+        """Finalize only the immutable chosen event identified by ``event_id``."""
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET terminal_published_at = COALESCE(terminal_published_at, ?), "
+                "closed_at = ? WHERE run_id = ? AND terminal_event_id = ? AND closed_at IS NULL",
+                (moment, moment, run_id, event_id),
             )
             return cursor.rowcount == 1
 

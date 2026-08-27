@@ -204,10 +204,59 @@ def test_a_half_written_line_is_skipped_not_raised_on(tmp_path: Path) -> None:
     """The fallback log is appended to by several processes; a torn last line is ordinary."""
     log = tmp_path / "events.jsonl"
     log.write_text(
-        started("gone", ts=NOW - timedelta(hours=2)) + "\n\n{not json at all\n",
+        started("gone", ts=NOW - timedelta(hours=2)) + "\n\n{not json at all",
         encoding="utf-8",
     )
     assert [r.run_id for r in w.scan_unbracketed(log, now=NOW)] == ["gone"]
+
+
+def test_a_complete_malformed_final_line_blocks_burial(tmp_path: Path) -> None:
+    """A newline says the append completed; corruption is not evidence of no close."""
+    log = tmp_path / "events.jsonl"
+    log.write_text(
+        started("gone", ts=NOW - timedelta(hours=2)) + "\n{not json}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(w.EventLogEvidenceError, match="unreadable line 2"):
+        w.scan_unbracketed(log, now=NOW)
+
+
+def test_each_registry_path_is_evaluated_independently(store: Store, tmp_path: Path) -> None:
+    """Corruption on one host's evidence cannot hide a stale row from another host."""
+    good = write_log(tmp_path / "good.jsonl")
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{complete corruption}\n", encoding="utf-8")
+    for run_id, path in (("good", good), ("bad", bad)):
+        store.open_run(
+            run_id=run_id,
+            kind="routine",
+            agent_id="claude-code:test-agent",
+            ref="daily-summary",
+            timeout_s=60,
+            event_log_path=str(path.resolve()),
+            now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+        )
+
+    assert [run.run_id for run in w.scan_unbracketed(good, now=NOW, registry=store)] == ["good"]
+
+
+def test_migrated_empty_evidence_path_is_refused_loudly(
+    store: Store, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Version zero means the empty path predates canonical-path recording and is unknown."""
+    store.open_run(
+        run_id="legacy",
+        kind="routine",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        timeout_s=60,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    with store._lock, store._conn:  # simulate the ALTER migration result
+        store._conn.execute("UPDATE open_runs SET evidence_version = 0 WHERE run_id = 'legacy'")
+
+    assert w.scan_unbracketed(write_log(tmp_path / "events.jsonl"), now=NOW, registry=store) == []
+    assert "migrate or close this legacy row" in caplog.text
 
 
 def test_a_missing_log_is_no_stale_runs(tmp_path: Path) -> None:
@@ -565,7 +614,7 @@ def test_concurrent_watchdogs_publish_exactly_one_terminal_event(
     assert [event.payload["run_id"] for event in failures] == ["gone"]
 
 
-@pytest.mark.parametrize("bad_log", ["missing", "unreadable", "divergent"])
+@pytest.mark.parametrize("bad_log", ["missing", "unreadable"])
 def test_untrustworthy_event_evidence_refuses_burial(  # noqa: PLR0913, PLR0917
     bad_log: str,
     resident: Resident,

@@ -201,13 +201,14 @@ watchdog could read was the log of events burrow never received.
 
 Age alone is not death. Each registry row also carries a renewable ownership lease and
 the absolute path of the complete local event record. The scheduler and board renew the
-lease through the whole lifecycle, including result harvesting and event emission after
-the child process exits. A watchdog may publish failure only after that lease has gone
-quiet for the grace window and its conditional registry close wins; a late session then
-loses the same close and publishes no contradictory success. This uses durable heartbeats
-rather than PIDs, whose meaning does not survive another host, container, or PID namespace.
-If the recorded event log is missing, unreadable, malformed before its final append, or
-differs from the watchdog's configured path, the pass refuses burial and logs the reason.
+lease through the whole lifecycle, including accounting, harvesting, delegation, task
+closure, and terminal publication after the child exits. The live owner and watchdog race
+to store one immutable terminal event under a fencing token/stale-heartbeat condition.
+That chosen event has a stable identity, is replayed after either crash window, and closes
+only after a remote or fsynced local sink accepts it. Each row's own recorded event-log
+path is checked independently; missing, unreadable, or corrupt evidence blocks that path's
+rows without hiding healthy rows elsewhere. Legacy migrated rows with no known path are
+refused loudly. Only a malformed final line lacking a newline is treated as a torn append.
 
 ```console
 $ steward budget show                # today's spend against every declared cap

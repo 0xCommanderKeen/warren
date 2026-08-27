@@ -77,7 +77,7 @@ from steward.manifest import (
     active_residents,
     validate_path,
 )
-from steward.run_lifecycle import RunStore, RunTransitions, event_log_path
+from steward.run_lifecycle import RunStore, RunTransitions, event_log_path, new_owner_token
 from steward.runners import (
     RunResult,
     build_runner,
@@ -209,6 +209,7 @@ class RunRegistry(Protocol):
         ref: str = "",
         timeout_s: float = 0.0,
         event_log_path: str = "",
+        owner_token: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started, and return whether this call opened it."""
@@ -952,15 +953,16 @@ class Scheduler:
         # The deadline the session actually gets, read once: the registry is judged
         # against it, and the runner is given it.
         timeout_s = admission.timeout_for(item.routine.timeout_s)
+        owner_token = new_owner_token()
         # The event first, then the row. A crash between the two leaves a run steward
         # cannot find, which is where this stood before the registry existed; the other
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
         # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
-        watched = self._open_run(item, run_id, timeout_s, moment)
+        watched = self._open_run(item, run_id, timeout_s, moment, owner_token)
 
         ownership = (
-            self.run_transitions.owned(run_id)
+            self.run_transitions.owned(run_id, owner_token)
             if watched and self.run_transitions is not None
             else contextlib.nullcontext()
         )
@@ -969,24 +971,26 @@ class Scheduler:
             result = session.require_result()
             # Win the durable terminal transition before publishing it. If the watchdog
             # already won, a late success must not contradict its failure event.
-            owns_close = not watched or (
-                self.run_transitions is not None
-                and self.run_transitions.session_close(run_id, now=session.completed_at or moment)
-            )
-            if owns_close and result.ok:
-                self.emitter.emit(
-                    context.finished(
-                        outcome=str(result.outcome),
-                        artifacts=result.artifacts,
-                        duration_s=result.duration_s,
-                    )
+            terminal = (
+                context.finished(
+                    outcome=str(result.outcome),
+                    artifacts=result.artifacts,
+                    duration_s=result.duration_s,
                 )
-            elif owns_close:
-                self.emitter.emit(
-                    context.failed(
-                        error=f"{result.outcome}: {result.summary()}",
-                        duration_s=result.duration_s,
-                    )
+                if result.ok
+                else context.failed(
+                    error=f"{result.outcome}: {result.summary()}",
+                    duration_s=result.duration_s,
+                )
+            )
+            if not watched:
+                self.emitter.emit(terminal)
+            elif self.run_transitions is not None:
+                self.run_transitions.session_claim(
+                    run_id, terminal, owner_token=owner_token, now=session.completed_at or moment
+                )
+                self.run_transitions.publish_pending(
+                    self.emitter, now=session.completed_at or moment
                 )
         return FireReport(
             scheduled=item,
@@ -998,7 +1002,12 @@ class Scheduler:
         )
 
     def _open_run(
-        self, item: ScheduledRoutine, run_id: str, timeout_s: int, moment: datetime
+        self,
+        item: ScheduledRoutine,
+        run_id: str,
+        timeout_s: int,
+        moment: datetime,
+        owner_token: str = "",
     ) -> bool:
         """Write this run into the registry. Never raises: a lost row is not a lost run."""
         if self.registry is None:
@@ -1012,6 +1021,7 @@ class Scheduler:
                 ref=item.routine.id,
                 timeout_s=float(timeout_s),
                 event_log_path=event_log_path(self.emitter),
+                owner_token=owner_token,
                 now=ev.utc_now_iso(moment),
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine

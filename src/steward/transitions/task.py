@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 from steward import events as ev
 from steward.runners import RunResult
 from steward.store import STATUS_DONE, STATUS_FAILED, JobRecord, Store
-from steward.transitions.outcome import Transition, applied, refused, superseded
+from steward.transitions.outcome import APPLIED, Transition, applied, refused, superseded
 
 __all__ = ["LEASE_EXPIRED", "LEASE_LOST", "NOTHING_TO_CLAIM", "TaskTransitions"]
 
@@ -199,6 +199,7 @@ class TaskTransitions:
         result: RunResult,
         run_id: str,
         now: datetime,
+        announce: bool = True,
     ) -> Transition[JobRecord]:
         """Close a claimed task on the board and say how it went. Only its claimant may.
 
@@ -257,6 +258,8 @@ class TaskTransitions:
                 parent_task_id=job.parent_task_id,
                 run_id=run_id,
             )
+        if not announce:
+            return Transition(APPLIED, record=closed, fact=fact, reason=reason or "")
         return applied(self.emitter, closed, fact, reason or "")
 
     # -- the deadline --------------------------------------------------------------------

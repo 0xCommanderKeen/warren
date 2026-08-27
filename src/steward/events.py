@@ -263,6 +263,11 @@ class NullEmitter:
         self.events.append(event)
         return False
 
+    def emit_durable(self, event: Event) -> bool:
+        """Treat the explicit in-memory test record as the durable sink for arbitration tests."""
+        self.events.append(event)
+        return True
+
 
 def _is_loopback(url: str) -> bool:
     host = url.split("//", 1)[-1].split("/", maxsplit=1)[0].rsplit(":", 1)[0]
@@ -325,14 +330,18 @@ class EventEmitter:
         except OSError, urllib.error.URLError, ValueError:
             return False
 
-    def _append_fallback(self, line: str) -> None:
+    def _append_fallback(self, line: str) -> bool:
         try:
             self.fallback.parent.mkdir(parents=True, exist_ok=True)
             with self.fallback.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         except OSError:
             # The village losing an event must never take a routine down with it.
-            pass
+            return False
+        else:
+            return True
 
     def emit(self, event: Event) -> bool:
         """Deliver one event and keep a local copy. Returns remote reach. Never raises.
@@ -351,6 +360,17 @@ class EventEmitter:
                 self._trip_breaker(self.url)
         self._append_fallback(line)
         return delivered
+
+    def emit_durable(self, event: Event) -> bool:
+        """Publish and report whether either the remote or fsynced local record accepted it."""
+        line = event.to_json()
+        delivered = False
+        if self.url and not self._breaker_open(self.url):
+            if self._post(self.url, line.encode("utf-8")):
+                delivered = True
+            else:
+                self._trip_breaker(self.url)
+        return self._append_fallback(line) or delivered
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""
