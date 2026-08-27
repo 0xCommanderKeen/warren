@@ -33,6 +33,7 @@
   function createStateTransport(options) {
     const fetch = options.fetch;
     const EventSource = options.EventSource;
+    const baseUrl = String(options.baseUrl || "").replace(/\/+$/, "");
     const onState = options.onState || (() => {});
     const onStatus = options.onStatus || (() => {});
     const warn = options.warn || (() => {});
@@ -73,7 +74,7 @@
       polling = (async () => {
         const query = current ? `?generation=${current.generation}&cursor=${encodeURIComponent(current.cursor)}` : "";
         try {
-          const response = await fetch("/state" + query, { cache: "no-store" });
+          const response = await fetch(baseUrl + "/state" + query, { cache: "no-store" });
           if (response.status === 204) { setStatus(stream ? "live" : "polling"); return; }
           if (!response || response.status !== 200) throw new Error(`state HTTP ${response && response.status}`);
           apply(await response.json());
@@ -88,7 +89,7 @@
     function connect() {
       if (!EventSource || stream) return;
       const query = current ? `?generation=${current.generation}&cursor=${encodeURIComponent(current.cursor)}` : "";
-      const candidate = new EventSource("/state/stream" + query);
+      const candidate = new EventSource(baseUrl + "/state/stream" + query);
       stream = candidate; setStatus("reconnecting");
       candidate.addEventListener("snapshot", message => {
         if (stream !== candidate) return;

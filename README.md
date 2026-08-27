@@ -154,6 +154,8 @@ map of everything the fleet does.
   retrieval remains an internal diagnostic and audit interface. The public UI
   read contract, checked-in OpenAPI, fixtures, and versioning policy are documented
   in [docs/state-contract.md](docs/state-contract.md).
+  Development proxies and side-by-side production client routes are documented in
+  [docs/ui-clients.md](docs/ui-clients.md).
 - **Mac emitter** — the installed `burrow-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
   `~/.claude/settings.json` hooks

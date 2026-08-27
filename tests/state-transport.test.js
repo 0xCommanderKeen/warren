@@ -50,16 +50,22 @@ assert.match(validateEnvelope({ kind: "snapshot", snapshot: { schema_version: 2 
     addEventListener(type, listener) { this.listeners[type] = listener; }
     close() { this.closed = true; }
   }
+  const reconnectPolls = [];
   const reconnectTransport = createStateTransport({
-    fetch: async () => ({ status: 204 }), EventSource: FakeEventSource, warn: () => {},
+    baseUrl: "/burrow/", fetch: async url => { reconnectPolls.push(url); return { status: 204 }; },
+    EventSource: FakeEventSource, warn: () => {},
   });
   reconnectTransport.connect();
+  assert.equal(sources[0].url, "/burrow/state/stream");
   sources[0].listeners.snapshot({ data: JSON.stringify({ kind: "snapshot",
     snapshot: snapshot(7, "v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1:2:4:20") }) });
   sources[0].onerror();
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(sources[0].closed, true);
   assert.equal(sources.length, 2);
+  assert.match(reconnectPolls[0], /^\/burrow\/state\?/);
+  assert.match(reconnectPolls[0], /generation=7/);
+  assert.match(sources[1].url, /^\/burrow\/state\/stream\?/);
   assert.match(sources[1].url, /generation=7/);
   assert.match(sources[1].url, /cursor=v1%3Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa%3A1%3A2%3A4%3A20/);
   console.log("state transport tests passed");

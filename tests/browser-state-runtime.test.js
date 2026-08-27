@@ -39,8 +39,12 @@ assert.equal(view.state.routineRecent[0].event.payload.run_id, "run-1");
 
 (async () => {
   let published;
+  const requested = [];
   const runtime = createBrowserRuntime({
-    fetch: async () => ({ status: 200, json: async () => ({ kind: "snapshot", snapshot: state }) }),
+    baseUrl: "/burrow/",
+    fetch: async url => { requested.push(url);
+      return { status: 200, json: async () => url.endsWith("/transport/status") ?
+        { notifications: {} } : { kind: "snapshot", snapshot: state } }; },
     EventSource: null,
     onProjection: value => { published = value; },
   });
@@ -48,7 +52,10 @@ assert.equal(view.state.routineRecent[0].event.payload.run_id, "run-1");
   assert.strictEqual(published.villagers, state.villagers,
     "the shared runtime passes authoritative collections through unchanged");
   assert.strictEqual(published.approvals, state.approvals);
+  assert.equal(requested[0], "/burrow/state");
   assert.equal(published.transport, "polling");
   assert.equal(runtime.snapshot().transport, "polling");
+  await runtime.refreshTransportStatus();
+  assert.equal(requested[1], "/burrow/transport/status");
   console.log("browser state runtime fixture passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });
