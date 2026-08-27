@@ -40,18 +40,30 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hmac import compare_digest
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import delegation as dg
 from steward import events as ev
 from steward.board import Dispatcher
 from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
+from steward.input_bounds import (
+    APPROVAL_BODY_MAX_BYTES,
+    DETAIL_MAX_CHARS,
+    EDIT_MAX_DEPTH,
+    IDENTIFIER_MAX_CHARS,
+    SKILLS_MAX_ITEMS,
+    TITLE_MAX_CHARS,
+    validate_approval_edit,
+    validate_json_container_depth,
+)
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
 from steward.nursery import (
@@ -258,11 +270,20 @@ class _Body(BaseModel):
 class JobPost(_Body):
     """A task a human wants the fleet to pick up."""
 
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the claimant needs to know.")
-    required_skills: list[str] = Field(
-        default_factory=list,
-        description="Skills a resident must be granted before it may claim this.",
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the claimant needs to know.",
+    )
+    required_skills: list[Annotated[str, Field(min_length=1, max_length=IDENTIFIER_MAX_CHARS)]] = (
+        Field(
+            default_factory=list,
+            max_length=SKILLS_MAX_ITEMS,
+            description="Skills a resident must be granted before it may claim this.",
+        )
     )
 
 
@@ -290,23 +311,45 @@ class ApprovalDecision(_Body):
         default=None, description="The modified detail, for decision=edit."
     )
 
+    @field_validator("edit")
+    @classmethod
+    def _bounded_edit(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        validate_approval_edit(value)
+        return value
+
 
 class HandoffPost(_Body):
     """Work handed to one named resident, through a route that resident declares."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
 
-    to: str = Field(min_length=1, description="The resident id receiving the work.")
-    route: str = Field(min_length=1, description="A delegation route that resident declares.")
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the receiver needs to know.")
+    to: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The resident id receiving the work.",
+    )
+    route: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="A delegation route that resident declares.",
+    )
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the receiver needs to know.",
+    )
     sender: str | None = Field(
         default=None,
         alias="from",
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The resident handing the work over. Omit it when a person is.",
     )
     parent_task_id: str | None = Field(
         default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The task this work descends from, for lineage and attribution.",
     )
 
@@ -524,12 +567,7 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     """Build the bearer-token gate every endpoint hangs off."""
 
     def require_token(request: Request) -> None:
-        if token is None:
-            return
-        scheme, _, presented = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not compare_digest(
-            presented.strip().encode("utf-8"), token.encode("utf-8")
-        ):
+        if not _authorized(request.scope.get("headers", []), token):
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -540,6 +578,116 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
             )
 
     return require_token
+
+
+def _authorized(headers: Sequence[tuple[bytes, bytes]], token: str | None) -> bool:
+    """Apply the API's one bearer policy to raw ASGI headers.
+
+    Exactly one Authorization field is accepted.  Rejecting duplicates avoids proxy and
+    framework disagreement over first/last/comma-joined semantics.  All presented bearer
+    tokens reach the same constant-time comparison used by the route dependency.
+    """
+    if token is None:
+        return True
+    values = [value for key, value in headers if key.lower() == b"authorization"]
+    if len(values) != 1:
+        return False
+    scheme, separator, presented = values[0].partition(b" ")
+    return (
+        separator == b" "
+        and scheme.lower() == b"bearer"
+        and compare_digest(presented.strip(), token.encode("utf-8"))
+    )
+
+
+class _ApprovalBodyDepthMiddleware:
+    """Bound approval JSON while receiving, before recursive materialisation."""
+
+    def __init__(self, app: ASGIApp, *, token: str | None) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901
+        path = scope.get("path", "")
+        is_decision = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/approvals/")
+            and "/" not in path.removeprefix("/approvals/")
+        )
+        if not is_decision or not _authorized(scope.get("headers", []), self.token):
+            await self.app(scope, receive, send)
+            return
+
+        body = bytearray()
+        complete = False
+        terminal: Message | None = None
+        saw_request = False
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                terminal = message
+                break
+            saw_request = True
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > APPROVAL_BODY_MAX_BYTES:
+                response = JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": {
+                            "error": "approval_body_too_large",
+                            "message": (
+                                "approval request body exceeds the "
+                                f"{APPROVAL_BODY_MAX_BYTES} byte wire limit"
+                            ),
+                        }
+                    },
+                )
+                await response(scope, receive, send)
+                return
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                complete = True
+                break
+        try:
+            # The request object is level one; an eight-level edit is therefore level nine.
+            if complete:
+                validate_json_container_depth(body, EDIT_MAX_DEPTH + 1)
+        except ValueError as error:
+            response = JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [
+                        {
+                            "type": "value_error",
+                            "loc": ["body", "edit"],
+                            "msg": f"Value error, {error}",
+                            "input": None,
+                        }
+                    ]
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        replayed_body = False
+        replayed_terminal = False
+
+        async def replay() -> Message:
+            nonlocal replayed_body, replayed_terminal
+            if saw_request and not replayed_body:
+                replayed_body = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": not complete,
+                }
+            if terminal is not None and not replayed_terminal:
+                replayed_terminal = True
+                return terminal
+            return await receive()
+
+        await self.app(scope, replay, send)
 
 
 def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collaborator is a seam
@@ -653,6 +801,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         dependencies=[Depends(_auth_dependency(token))],
         lifespan=lifespan,
     )
+    app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
