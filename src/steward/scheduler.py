@@ -939,7 +939,10 @@ class Scheduler:
 
         wake = RoutineWake(item.routine, run_id, trigger)
         if self.dry_run:
-            session = self.sessions.run(admission, wake)
+            try:
+                session = self.sessions.run(admission, wake)
+            finally:
+                admission.close()
             return FireReport(
                 scheduled=item,
                 run_id=run_id,
@@ -962,6 +965,7 @@ class Scheduler:
         except Exception as exc:  # noqa: BLE001 - an unreadable budget refuses safely
             reason = f"budget unreadable: {type(exc).__name__}: {exc}"
             log.warning("%s: could not resolve the run timeout: %s", item.key, exc)
+            admission.close()
             return FireReport(
                 scheduled=item,
                 run_id=run_id,
@@ -981,32 +985,38 @@ class Scheduler:
             if watched and self.run_transitions is not None
             else contextlib.nullcontext()
         )
-        with ownership:
-            session = self.sessions.run(admission, wake)
-            result = session.require_result()
-            # Win the durable terminal transition before publishing it. If the watchdog
-            # already won, a late success must not contradict its failure event.
-            terminal = (
-                context.finished(
-                    outcome=str(result.outcome),
-                    artifacts=result.artifacts,
-                    duration_s=result.duration_s,
+        try:
+            with ownership:
+                session = self.sessions.run(admission, wake)
+                result = session.require_result()
+                # Win the durable terminal transition before publishing it. If the watchdog
+                # already won, a late success must not contradict its failure event.
+                terminal = (
+                    context.finished(
+                        outcome=str(result.outcome),
+                        artifacts=result.artifacts,
+                        duration_s=result.duration_s,
+                    )
+                    if result.ok
+                    else context.failed(
+                        error=f"{result.outcome}: {result.summary()}",
+                        duration_s=result.duration_s,
+                    )
                 )
-                if result.ok
-                else context.failed(
-                    error=f"{result.outcome}: {result.summary()}",
-                    duration_s=result.duration_s,
-                )
-            )
-            if not watched:
-                self.emitter.emit(terminal)
-            elif self.run_transitions is not None:
-                self.run_transitions.session_claim(
-                    run_id, terminal, owner_token=owner_token, now=session.completed_at or moment
-                )
-                self.run_transitions.publish_pending(
-                    self.emitter, now=session.completed_at or moment
-                )
+                if not watched:
+                    self.emitter.emit(terminal)
+                elif self.run_transitions is not None:
+                    self.run_transitions.session_claim(
+                        run_id,
+                        terminal,
+                        owner_token=owner_token,
+                        now=session.completed_at or moment,
+                    )
+                    self.run_transitions.publish_pending(
+                        self.emitter, now=session.completed_at or moment
+                    )
+        finally:
+            admission.close()
         return FireReport(
             scheduled=item,
             run_id=run_id,

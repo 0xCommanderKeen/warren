@@ -32,15 +32,18 @@ exactly one file* — a rule worth keeping even for the processes that are not b
 """
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -101,6 +104,27 @@ _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
 log = logging.getLogger("steward.runners")
 
+_DESCRIPTOR_CWD_HELPER = """
+import os
+import sys
+
+workdir_fd = int(sys.argv[1])
+status_fd = int(sys.argv[2])
+argv = sys.argv[3:]
+try:
+    os.set_inheritable(status_fd, False)
+    os.fchdir(workdir_fd)
+    os.close(workdir_fd)
+    os.execvpe(argv[0], argv, os.environ)
+except OSError as exc:
+    message = str(exc.strerror or exc).encode("utf-8", "replace")[:1000]
+    try:
+        os.write(status_fd, message)
+    except OSError:
+        pass
+    raise SystemExit(126) from None
+"""
+
 
 class Outcome(StrEnum):
     """What actually happened to a run. Nothing here is a guess."""
@@ -123,6 +147,12 @@ class RunRequest:
     timeout_s: int
     model: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    workdir_fd: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def execution_workdir(self) -> str:
+        """Return the declared path exposed to command-template substitution."""
+        return str(self.workdir)
 
     def key(self) -> str:
         """Return a stable digest of the request, so mock results are reproducible."""
@@ -255,6 +285,61 @@ def _drain(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
         return b"", b""
 
 
+def _remaining(started: float, timeout_s: int) -> float:
+    """Return the unspent part of one session's absolute timeout budget."""
+    return max(0.0, started + timeout_s - time.monotonic())
+
+
+def _duplicate_for_helper(fd: int) -> int:
+    """Return an owned close-on-exec duplicate outside the standard-stream range."""
+    return fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 3)
+
+
+def _timeout_result(
+    process: subprocess.Popen[bytes], *, started: float, timeout_s: int
+) -> RunResult:
+    """Kill and reap a run whose shared launch/execution deadline expired."""
+    _terminate(process)
+    duration = time.monotonic() - started
+    raw_out, _raw_err = _drain(process)
+    return RunResult(
+        outcome=Outcome.TIMEOUT,
+        output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        exit_status=process.returncode,
+        duration_s=duration,
+        error=f"exceeded its {timeout_s}s timeout and was killed",
+    )
+
+
+def _await_descriptor_launch(
+    status_reader: int,
+    process: subprocess.Popen[bytes],
+    *,
+    started: float,
+    timeout_s: int,
+    executable: str,
+) -> RunResult | None:
+    """Wait within the session deadline for the cwd helper to exec or diagnose failure."""
+    with os.fdopen(status_reader, "rb") as status:
+        ready, _, _ = select.select([status], [], [], _remaining(started, timeout_s))
+        if not ready:
+            return _timeout_result(process, started=started, timeout_s=timeout_s)
+        helper_error = os.read(status.fileno(), 1000).decode("utf-8", "replace")
+    if not helper_error:
+        return None
+    try:
+        raw_out, _raw_err = process.communicate(timeout=_remaining(started, timeout_s))
+    except subprocess.TimeoutExpired:
+        return _timeout_result(process, started=started, timeout_s=timeout_s)
+    return RunResult(
+        outcome=Outcome.FAILED,
+        output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        exit_status=process.returncode,
+        duration_s=time.monotonic() - started,
+        error=f"cannot launch {executable!r}: {helper_error}",
+    )
+
+
 class _ProcessRunner(Runner):
     """Shared body for every runner that launches a real process."""
 
@@ -283,41 +368,76 @@ class _ProcessRunner(Runner):
 
     def run(self, request: RunRequest) -> RunResult:
         """Launch the session, bound by its timeout, and report what happened."""
+        started = time.monotonic()
         argv = self.argv(request)
         env = {**os.environ, **request.env}
-        started = time.monotonic()
+        workdir_fd = request.workdir_fd
+        launch_argv = argv
+        status_reader: int | None = None
+        status_writer: int | None = None
+        helper_fds: tuple[int, ...] = ()
+        inherited_fds: tuple[int, ...] = ()
         try:
-            process = subprocess.Popen(  # noqa: S603 — argv list, shell=False, no template
-                argv,
-                cwd=str(request.workdir),
+            if workdir_fd is not None:
+                helper_workdir = _duplicate_for_helper(workdir_fd)
+                helper_fds = (helper_workdir,)
+                status_reader, raw_status_writer = os.pipe()
+                try:
+                    status_writer = _duplicate_for_helper(raw_status_writer)
+                finally:
+                    os.close(raw_status_writer)
+                helper_fds += (status_writer,)
+                inherited_fds = helper_fds
+                launch_argv = [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    _DESCRIPTOR_CWD_HELPER,
+                    str(helper_workdir),
+                    str(status_writer),
+                    *argv,
+                ]
+            process = subprocess.Popen(  # noqa: S603 — argv + capability cwd
+                launch_argv,
+                cwd=(request.execution_workdir if request.workdir_fd is None else None),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                pass_fds=inherited_fds,
             )
         except OSError as exc:
+            if status_reader is not None:
+                os.close(status_reader)
+            for fd in helper_fds:
+                os.close(fd)
             return RunResult(
                 outcome=Outcome.FAILED,
                 duration_s=time.monotonic() - started,
                 error=f"cannot launch {argv[0]!r}: {exc.strerror or exc}",
             )
 
-        try:
-            raw_out, raw_err = process.communicate(timeout=request.timeout_s)
-        except subprocess.TimeoutExpired:
-            _terminate(process)
-            duration = time.monotonic() - started
-            # Drain the partial stdout the killed session already produced: an escalation
-            # it printed just before hanging is honest output, and losing it would let a
-            # question that was actually asked go unanswered.
-            raw_out, _raw_err = _drain(process)
-            return RunResult(
-                outcome=Outcome.TIMEOUT,
-                output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
-                exit_status=process.returncode,
-                duration_s=duration,
-                error=f"exceeded its {request.timeout_s}s timeout and was killed",
+        for fd in helper_fds:
+            os.close(fd)
+        if status_reader is not None:
+            launch_failure = _await_descriptor_launch(
+                status_reader,
+                process,
+                started=started,
+                timeout_s=request.timeout_s,
+                executable=argv[0],
             )
+            if launch_failure is not None:
+                return launch_failure
+
+        try:
+            remaining = _remaining(started, request.timeout_s)
+            raw_out, raw_err = process.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            # The timeout result drains partial stdout too: an escalation printed just
+            # before the hang is honest output and must remain available to its harvester.
+            return _timeout_result(process, started=started, timeout_s=request.timeout_s)
 
         duration = time.monotonic() - started
         stdout = raw_out.decode("utf-8", "replace")
@@ -429,7 +549,7 @@ class CommandRunner(_ProcessRunner):
 
     def argv(self, request: RunRequest) -> list[str]:
         """Substitute the two allowed placeholders; everything else stays literal."""
-        return substitute(self.template, prompt=request.prompt, workdir=str(request.workdir))
+        return substitute(self.template, prompt=request.prompt, workdir=request.execution_workdir)
 
     def check(self) -> str | None:
         """Report a template whose executable is not on PATH."""

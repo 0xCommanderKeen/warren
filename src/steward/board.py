@@ -639,6 +639,7 @@ class Dispatcher:
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
+        owns_admission = admission is None
         run_id = new_id()
         owner_token = new_owner_token()
         admitted = admission or self.sessions.admit(resident, now=moment)
@@ -694,6 +695,8 @@ class Dispatcher:
         except Exception as exc:  # noqa: BLE001 - an unreadable budget fails closed
             reason = f"budget unreadable: {type(exc).__name__}: {exc}"
             log.warning("%s: could not resolve the run timeout: %s", resident.id, exc)
+            if owns_admission:
+                admitted.close()
             return self._record(
                 resident,
                 job,
@@ -709,20 +712,24 @@ class Dispatcher:
             if watched
             else contextlib.nullcontext()
         )
-        with ownership:
-            session = self.sessions.run(admitted, wake)
-            result = session.require_result()
-            return self._finish(
-                resident,
-                job,
-                result,
-                session.completed_at or moment,
-                cast("tuple[ApprovalRecord, ...]", session.raised),
-                handed=cast("tuple[dg.Delivery, ...]", session.handed_over),
-                run_id=run_id,
-                owner_token=owner_token,
-                watched=watched,
-            )
+        try:
+            with ownership:
+                session = self.sessions.run(admitted, wake)
+                result = session.require_result()
+                return self._finish(
+                    resident,
+                    job,
+                    result,
+                    session.completed_at or moment,
+                    cast("tuple[ApprovalRecord, ...]", session.raised),
+                    handed=cast("tuple[dg.Delivery, ...]", session.handed_over),
+                    run_id=run_id,
+                    owner_token=owner_token,
+                    watched=watched,
+                )
+        finally:
+            if owns_admission:
+                admitted.close()
 
     def _finish(  # noqa: PLR0913
         self,
@@ -966,22 +973,26 @@ class Dispatcher:
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
         admissions, refusals = self._claim_admissions(moment)
-        reports = self._drain(
-            delegation_residents(self.residents),
-            moment,
-            refusals,
-            admissions,
-            pick=self.take_delivery,
-            count_for=lambda _r: self.max_delegations_per_wake,
-        )
-        reports += self._drain(
-            board_residents(self.residents),
-            moment,
-            refusals,
-            admissions,
-            pick=self.claim,
-            count_for=lambda r: r.manifest.board.max_claims_per_wake,
-        )
+        try:
+            reports = self._drain(
+                delegation_residents(self.residents),
+                moment,
+                refusals,
+                admissions,
+                pick=self.take_delivery,
+                count_for=lambda _r: self.max_delegations_per_wake,
+            )
+            reports += self._drain(
+                board_residents(self.residents),
+                moment,
+                refusals,
+                admissions,
+                pick=self.claim,
+                count_for=lambda r: r.manifest.board.max_claims_per_wake,
+            )
+        finally:
+            for admission in admissions.values():
+                admission.close()
         return DispatchRun(
             reopened=tuple(reopened),
             expired_approvals=tuple(expired_approvals),
@@ -1013,10 +1024,15 @@ class Dispatcher:
             if resident.id in refusals:
                 continue
             for _ in range(count_for(resident)):
+                admission = admissions[resident.id]
+                refusal = self.sessions.revalidate(admission)
+                if refusal is not None:
+                    log.warning("%s: not working — %s", resident.id, refusal.reason)
+                    break
                 job = pick(resident, self.clock())
                 if job is None:
                     break
-                reports.append(self.work(resident, job, moment, admission=admissions[resident.id]))
+                reports.append(self.work(resident, job, moment, admission=admission))
         return reports
 
     def _claimants(self) -> list[Resident]:

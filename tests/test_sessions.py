@@ -1,11 +1,13 @@
 """The resident session lifecycle: one seam for every real wake-up."""
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from conftest import ResidentWriter, valid_manifest
+from steward import sessions as sessions_module
 from steward.manifest import ResidentManifest, load_manifest
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.sessions import (
@@ -17,7 +19,7 @@ from steward.sessions import (
     SessionHarvest,
     TaskWake,
 )
-from steward.skills import Skill, SkillLibrary
+from steward.skills import Materialization, Skill, SkillLibrary
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -263,6 +265,225 @@ def test_admission_refuses_an_unsafe_current_working_directory(
 
     assert isinstance(admission, Refusal)
     assert "current working directory" in admission.reason
+
+
+@pytest.mark.parametrize("replacement", ["file", "symlink"])
+def test_provisioning_refuses_a_declared_directory_replaced_after_admission(
+    replacement: str,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    """A stable admitted path cannot be replaced before destructive provisioning (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    memory.rmdir()
+    if replacement == "file":
+        memory.write_text("not a directory", encoding="utf-8")
+    else:
+        target = tmp_path / "other"
+        target.mkdir()
+        memory.symlink_to(target, target_is_directory=True)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "no longer the directory" in refusal.reason
+
+
+def test_provisioning_refuses_a_declared_directory_recreated_at_the_same_path(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    """A pathname is not authority once its admitted directory has been replaced."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    memory.rmdir()
+    memory.mkdir()
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
+
+
+def test_materialization_stays_bound_when_workdir_is_replaced_after_revalidation(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing the pathname cannot redirect descriptor-relative mutations (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    moved = tmp_path / "admitted-memory"
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    skills = {
+        name: Skill(name, f"{name} carefully.", "Do it.")
+        for name in ("daily-summary", "write-journal")
+    }
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "skills", skills=skills),
+        runner_factory=lambda _spec: _CapturingRunner(RunResult(outcome=Outcome.OK)),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_materialize = sessions_module.materialize
+
+    def replace_then_materialize(skills, workdir, subdir, *, workdir_fd=None) -> Materialization:
+        memory.rename(moved)
+        memory.mkdir()
+        (memory / "replacement.txt").write_text("untouched", encoding="utf-8")
+        return real_materialize(skills, workdir, subdir, workdir_fd=workdir_fd)
+
+    monkeypatch.setattr(sessions_module, "materialize", replace_then_materialize)
+
+    result = sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-1"))
+
+    assert result.require_result().outcome is Outcome.OK
+    assert (moved / ".claude/skills/daily-summary/SKILL.md").is_file()
+    assert sorted(path.name for path in memory.iterdir()) == ["replacement.txt"]
+
+
+def test_provisioning_refuses_when_the_admitted_directory_moves_filesystems(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mount replacement changes st_dev even when path and inode appear unchanged."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_stat = Path.stat
+
+    def changed_device(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        result = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == memory and not follow_symlinks:
+            values = list(result)
+            values[2] += 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", changed_device)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
+
+
+def test_provisioning_refuses_a_replacement_during_identity_observation(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve cannot be paired with stat data from two different directories."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_stat = Path.stat
+    observations = 0
+
+    def replaced_between_stats(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        nonlocal observations
+        result = real_stat(path, follow_symlinks=follow_symlinks)
+        if path == memory and not follow_symlinks:
+            observations += 1
+            if observations == 2:
+                values = list(result)
+                values[1] += 1
+                return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(Path, "stat", replaced_between_stats)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "filesystem identity changed" in refusal.reason
+
+
+def test_admission_fails_closed_when_declared_memory_vanishes_during_capture(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capture race cannot downgrade a declared directory into process cwd."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    sentinel = tmp_path / "keep.txt"
+    sentinel.write_text("untouched", encoding="utf-8")
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK))
+    monkeypatch.chdir(tmp_path)
+    sessions = ResidentSessions(
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+        runner_factory=lambda _spec: runner,
+    )
+    real_open = os.open
+
+    def vanish_before_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(path) == memory:
+            memory.rmdir()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(sessions_module.os, "open", vanish_before_open)
+
+    admission = sessions.admit(resident, now=NOW)
+
+    assert isinstance(admission, Refusal)
+    assert runner.requests == []
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+    assert not (tmp_path / ".claude").exists()
 
 
 def test_missing_skills_fail_before_decisions_are_consumed(

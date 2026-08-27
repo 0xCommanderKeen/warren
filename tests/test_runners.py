@@ -1,7 +1,12 @@
 """The runner seam: what each brain is actually told, and who may spawn one."""
 
+import inspect
 import json
+import os
 import re
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -47,6 +52,191 @@ def test_a_command_runner_without_a_template_refuses_to_exist() -> None:
     spec = RunnerSpec(kind="mock")
     object.__setattr__(spec, "kind", "command")
     assert r.check_runner(spec) == "runner kind 'command' requires a command template"
+
+
+def test_a_threaded_process_starts_in_the_descriptor_bound_admitted_directory(
+    tmp_path: Path,
+) -> None:
+    admitted = tmp_path / "work"
+    admitted.mkdir()
+    descriptor = os.open(admitted, os.O_RDONLY | os.O_DIRECTORY)
+    admitted_inode = os.fstat(descriptor).st_ino
+    admitted.rename(tmp_path / "old-work")
+    admitted.mkdir()
+    stop = threading.Event()
+    background = threading.Thread(target=stop.wait)
+    background.start()
+    target = """
+import errno
+import os
+import sys
+
+try:
+    os.fstat(int(sys.argv[1]))
+except OSError as exc:
+    assert exc.errno == errno.EBADF
+else:
+    raise AssertionError("admission descriptor leaked into target")
+print(os.stat(".").st_ino)
+"""
+    spec = RunnerSpec(
+        kind="command",
+        command=[sys.executable, "-c", target, str(descriptor), "{prompt}"],
+    )
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=admitted, workdir_fd=descriptor, timeout_s=10)
+        )
+    finally:
+        os.close(descriptor)
+        stop.set()
+        background.join()
+
+    assert result.ok
+    assert "preexec_fn" not in inspect.getsource(r._ProcessRunner.run)
+    assert int(result.output.strip()) == admitted_inode
+    assert admitted.stat().st_ino != admitted_inode
+
+
+def test_a_descriptor_bound_launch_keeps_a_missing_binary_diagnostic(tmp_path: Path) -> None:
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    spec = RunnerSpec(kind="command", command=["missing-steward-test-binary", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=10)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.startswith("cannot launch 'missing-steward-test-binary':")
+    assert not result.error_is_child
+
+
+@pytest.mark.parametrize("closed_fd", [1, 2])
+@pytest.mark.parametrize("scenario", ["launch", "missing"])
+def test_descriptor_launch_survives_a_parent_with_closed_standard_streams(
+    tmp_path: Path, closed_fd: int, scenario: str
+) -> None:
+    """Helper capabilities cannot be consumed by Popen's stdout/stderr remapping."""
+    missing_binary = scenario == "missing"
+    result_path = tmp_path / f"result-{closed_fd}-{scenario}.json"
+    command = (
+        ["missing-steward-test-binary", "{prompt}"]
+        if missing_binary
+        else ["/bin/sh", "-c", "pwd", "{prompt}"]
+    )
+    harness = f"""
+import json
+import os
+from pathlib import Path
+
+from steward import runners
+from steward.manifest import Runner
+
+os.close({closed_fd})
+workdir = Path({str(tmp_path)!r})
+descriptor = os.open(workdir, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    result = runners.build_runner(
+        Runner(kind="command", command={command!r})
+    ).run(runners.RunRequest(prompt="", workdir=workdir, workdir_fd=descriptor, timeout_s=10))
+finally:
+    os.close(descriptor)
+Path({str(result_path)!r}).write_text(json.dumps({{
+    "ok": result.ok,
+    "output": result.output.strip(),
+    "error": result.error,
+    "error_is_child": result.error_is_child,
+}}))
+"""
+    completed = subprocess.run(  # noqa: S603 — fixed interpreter and generated harness
+        [sys.executable, "-c", harness],
+        cwd=SRC.parents[1],
+        env={**os.environ, "PYTHONPATH": str(SRC.parent)},
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode()
+    observed = json.loads(result_path.read_text())
+    if missing_binary:
+        assert not observed["ok"]
+        assert observed["error"].startswith("cannot launch 'missing-steward-test-binary':")
+        assert "No such file or directory" in observed["error"]
+        assert not observed["error_is_child"]
+    else:
+        assert observed["ok"], observed
+        assert observed["output"] == str(tmp_path)
+
+
+def test_descriptor_helper_ignores_hostile_python_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    startup = tmp_path / "startup"
+    startup.mkdir()
+    (startup / "sitecustomize.py").write_text("import time; time.sleep(30)\n")
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setenv("PYTHONPATH", str(startup))
+    spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf ready", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.outcome is r.Outcome.OK
+    assert result.output == "ready"
+
+
+def test_a_stalled_descriptor_handshake_consumes_the_timeout_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "helper-child-survived"
+    helper = f"""
+import os
+import time
+
+if os.fork() == 0:
+    time.sleep(1.5)
+    open({str(marker)!r}, "w").close()
+    os._exit(0)
+time.sleep(30)
+"""
+    monkeypatch.setattr(r, "_DESCRIPTOR_CWD_HELPER", helper)
+    real_pipe = os.pipe
+    status_fds: list[int] = []
+
+    def recording_pipe() -> tuple[int, int]:
+        status_fds.extend(created := real_pipe())
+        return created
+
+    monkeypatch.setattr(r.os, "pipe", recording_pipe)
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf unreachable", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert result.duration_s < 3
+    assert result.exit_status is not None
+    assert all(_fd_is_closed(fd) for fd in status_fds)
+    time.sleep(0.5)
+    assert not marker.exists(), "the timed-out helper's process group must not survive"
+
+
+def _fd_is_closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
 
 
 def test_describe_names_the_brain() -> None:

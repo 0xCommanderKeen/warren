@@ -26,9 +26,13 @@ no credentials: a SKILL.md with a credential-shaped frontmatter key or an inline
 fails validation exactly like a manifest would.
 """
 
+import os
 import re
+import secrets
 import shutil
+import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -531,30 +535,128 @@ class Materialization:
         )
 
 
-def _require_owned_dir(base: Path, root: Path) -> None:
-    """Refuse a skills directory steward cannot safely own and prune (#64).
+def _open_owned_subdir(workdir_fd: int, subdir: str, display_root: Path) -> int:
+    """Open/create ``subdir`` beneath an already-open workdir, following no links."""
+    parts = Path(subdir).parts
+    if not parts or Path(subdir).is_absolute() or any(part in ("", ".", "..") for part in parts):
+        raise SkillError(f"invalid skills directory {subdir!r}: expected a relative path")
+    current = os.dup(workdir_fd)
+    try:
+        for index, part in enumerate(parts):
+            try:
+                next_fd = os.open(
+                    part,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=current,
+                )
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, dir_fd=current)
+                    next_fd = os.open(
+                        part,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=current,
+                    )
+                except OSError as exc:
+                    raise SkillError(
+                        f"cannot create skills directory {display_root}: {exc}"
+                    ) from exc
+            except OSError as exc:
+                location = display_root.parents[len(parts) - index - 1]
+                failed = location / part
+                try:
+                    failed_stat = os.stat(part, dir_fd=current, follow_symlinks=False)
+                except OSError:
+                    failed_stat = None
+                if failed_stat is not None and stat.S_ISLNK(failed_stat.st_mode):
+                    raise SkillError(
+                        f"steward's skills directory {failed} resolves outside the workdir "
+                        f"{display_root.parents[len(parts) - 1]}; steward will not follow it"
+                    ) from exc
+                raise SkillError(f"cannot write skill below {failed}: {exc}") from exc
+            os.close(current)
+            current = next_fd
+    except BaseException:
+        os.close(current)
+        raise
+    else:
+        return current
 
-    Steward *rmtree*s anything it does not recognise inside this directory, so the
-    directory itself must be real and genuinely inside the workdir. A symlink — or a path
-    reaching its target through one, resolving outside the workdir — would turn the prune
-    into a deletion through the link into a tree steward was never given. Refusing loudly
-    is the only honest move; a missing directory is fine and is created on write.
-    """
-    if root.is_symlink():
-        raise SkillError(
-            f"steward's skills directory {root} is a symlink; steward owns and prunes "
-            f"this directory and will not follow a link out of the workdir to do it"
-        )
-    if root.exists():
-        resolved = root.resolve()
-        if resolved != root or not resolved.is_relative_to(base):
+
+def _prune_skills(root_fd: int, granted: Mapping[str, Skill], root: Path) -> list[str]:
+    """Remove ungranted entries relative to the bound skills-directory descriptor."""
+    try:
+        existing = sorted(os.scandir(root_fd), key=lambda entry: entry.name)
+    except OSError as exc:
+        raise SkillError(f"cannot read the skills directory {root}: {exc}") from exc
+    removed: list[str] = []
+    for entry in existing:
+        try:
+            if entry.is_symlink():
+                os.unlink(entry.name, dir_fd=root_fd)
+            elif entry.name in granted and entry.is_dir(follow_symlinks=False):
+                continue
+            elif entry.is_dir(follow_symlinks=False):
+                shutil.rmtree(entry.name, dir_fd=root_fd)
+            else:
+                os.unlink(entry.name, dir_fd=root_fd)
+        except OSError as exc:
             raise SkillError(
-                f"steward's skills directory {root} resolves to {resolved}, outside the "
-                f"workdir {base}; steward will not prune a directory it does not own"
-            )
+                f"cannot remove {entry} from steward's skills directory: {exc}"
+            ) from exc
+        removed.append(entry.name)
+    return removed
 
 
-def materialize(skills: Sequence[Skill], workdir: Path | str, subdir: str) -> Materialization:
+def _write_skill(root_fd: int, root: Path, name: str, document: str) -> bool:
+    """Write one skill relative to the bound root; return whether it changed."""
+    target = root / name / SKILL_FILENAME
+    try:
+        with suppress(FileExistsError):
+            os.mkdir(name, dir_fd=root_fd)
+        skill_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+        try:
+            try:
+                target_fd = os.open(SKILL_FILENAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=skill_fd)
+            except FileNotFoundError:
+                target_fd = None
+            if target_fd is not None:
+                with os.fdopen(target_fd, encoding="utf-8") as stream:
+                    if stream.read() == document:
+                        return False
+            temporary = f".{SKILL_FILENAME}.{secrets.token_hex(8)}.tmp"
+            try:
+                target_fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=skill_fd,
+                )
+                with os.fdopen(target_fd, "w", encoding="utf-8") as stream:
+                    stream.write(document)
+                os.replace(
+                    temporary,
+                    SKILL_FILENAME,
+                    src_dir_fd=skill_fd,
+                    dst_dir_fd=skill_fd,
+                )
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=skill_fd)
+        finally:
+            os.close(skill_fd)
+    except OSError as exc:
+        raise SkillError(f"cannot write skill {name!r} to {target}: {exc}") from exc
+    return True
+
+
+def materialize(
+    skills: Sequence[Skill],
+    workdir: Path | str,
+    subdir: str,
+    *,
+    workdir_fd: int | None = None,
+) -> Materialization:
     """Write a session's skills into ``<workdir>/<subdir>``, and own that directory.
 
     Write-if-changed, so a session that runs hourly does not rewrite eight files an
@@ -568,50 +670,33 @@ def materialize(skills: Sequence[Skill], workdir: Path | str, subdir: str) -> Ma
     granted = {skill.name: skill for skill in skills}
     written: list[str] = []
     unchanged: list[str] = []
-    removed: list[str] = []
 
-    _require_owned_dir(base, root)
+    if workdir_fd is None:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SkillError(f"cannot open workdir {base}: {exc}") from exc
+    try:
+        base_fd = (
+            os.open(base, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            if workdir_fd is None
+            else os.dup(workdir_fd)
+        )
+    except OSError as exc:
+        raise SkillError(f"cannot open workdir {base}: {exc}") from exc
+    try:
+        root_fd = _open_owned_subdir(base_fd, subdir, root)
+    finally:
+        os.close(base_fd)
 
     try:
-        existing = sorted(root.iterdir()) if root.is_dir() else []
-    except OSError as exc:  # pragma: no cover — an unreadable workdir fails on write below
-        raise SkillError(f"cannot read the skills directory {root}: {exc}") from exc
-
-    for entry in existing:
-        # A symlinked child is pruned by removing the *link*, never by rmtree'ing through
-        # it: a link is not a file steward wrote, so it never belongs here, and unlink
-        # touches only the link and not whatever it points at (#64).
-        if entry.is_symlink():
-            try:
-                entry.unlink()
-            except OSError as exc:
-                raise SkillError(
-                    f"cannot remove {entry} from steward's skills directory: {exc}"
-                ) from exc
-            removed.append(entry.name)
-            continue
-        if entry.name in granted and entry.is_dir():
-            continue
-        try:
-            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
-        except OSError as exc:
-            raise SkillError(
-                f"cannot remove {entry} from steward's skills directory: {exc}"
-            ) from exc
-        removed.append(entry.name)
-
-    for name, skill in granted.items():
-        target = root / name / SKILL_FILENAME
-        document = skill.document()
-        try:
-            if target.is_file() and target.read_text(encoding="utf-8") == document:
-                unchanged.append(name)
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(document, encoding="utf-8")
-        except OSError as exc:
-            raise SkillError(f"cannot write skill {name!r} to {target}: {exc}") from exc
-        written.append(name)
+        removed = _prune_skills(root_fd, granted, root)
+        for name, skill in granted.items():
+            (written if _write_skill(root_fd, root, name, skill.document()) else unchanged).append(
+                name
+            )
+    finally:
+        os.close(root_fd)
 
     return Materialization(
         root=root,

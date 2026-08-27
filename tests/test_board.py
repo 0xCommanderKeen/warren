@@ -1,6 +1,7 @@
 """The job board: who claims what, and what the village is told about it."""
 
 import copy
+import shutil
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,7 +20,7 @@ from steward.manifest import Resident, ResidentManifest, load_manifest, validate
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
 from steward.skills import SkillLibrary, library_for
-from steward.store import Store
+from steward.store import JobRecord, Store
 from steward.transitions.approval import ApprovalTransitions
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
@@ -1043,6 +1044,196 @@ def test_the_board_refuses_a_resident_that_would_run_in_cwd(
     assert run.reports == ()
     assert [job.status for job in store.jobs()] == ["open"], "the notice stays open, unclaimed"
     assert types(sink) == []
+
+
+def test_the_board_refuses_an_initial_symlink_without_touching_cwd(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared symlink is not authority to provision or launch from cwd (#133)."""
+    target = tmp_path / "memory-target"
+    target.mkdir()
+    memory = tmp_path / "memory"
+    memory.symlink_to(target, target_is_directory=True)
+    cwd = tmp_path / "cwd"
+    sentinel = cwd / ".claude" / "skills" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("operator-owned", encoding="utf-8")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
+    write_skill("research", defaults=True)
+    data = board_manifest(memory={"kind": "directory", "path": str(memory), "journal": "journal"})
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Do not follow or fall back", required_skills=["research"])
+    runner = ScriptedRunner()
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=(sink := ev.NullEmitter()),
+        workdir=cwd,
+        library=library_for(tmp_path / "residents"),
+        runner_factory=lambda _spec: runner,
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert run.reports == ()
+    assert [job.status for job in store.jobs()] == ["open"]
+    assert types(sink) == []
+    assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+    assert runner.requests == []
+
+
+def test_a_memory_dir_that_vanishes_after_claim_fails_without_touching_cwd(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final lifecycle check closes an already-claimed task truthfully (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    cwd = tmp_path / "cwd"
+    sentinel = cwd / ".claude" / "skills" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("operator-owned", encoding="utf-8")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
+    write_skill("research", defaults=True)
+    data = board_manifest(memory={"kind": "directory", "path": str(memory), "journal": "journal"})
+    data["runner"] = {"kind": "command", "command": ["unused", "{prompt}"]}
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Do not provision in cwd", required_skills=["research"])
+    runner = ScriptedRunner()
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=(sink := ev.NullEmitter()),
+        workdir=cwd,
+        library=library_for(tmp_path / "residents"),
+        runner_factory=lambda _spec: runner,
+    )
+    claim = dispatcher.claim
+
+    def claim_then_vanish(candidate: Resident, now: datetime) -> JobRecord | None:
+        job = claim(candidate, now)
+        memory.rmdir()
+        return job
+
+    monkeypatch.setattr(dispatcher, "claim", claim_then_vanish)
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.status == "failed"
+    assert report.reason is not None
+    assert "no longer the directory" in report.reason
+    assert types(sink) == ["task_claimed", "task_failed"]
+    assert runner.requests == []
+    assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+    assert list(sentinel.parent.iterdir()) == [sentinel]
+
+
+def test_a_memory_dir_recreated_at_the_same_path_fails_before_provision_or_runner(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A claimed task cannot spend an admission issued to the replaced directory."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    cwd = tmp_path / "cwd"
+    sentinel = cwd / ".claude" / "skills" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("operator-owned", encoding="utf-8")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
+    write_skill("research", defaults=True)
+    data = board_manifest(memory={"kind": "directory", "path": str(memory)})
+    data["runner"] = {"kind": "claude", "model": "pretend"}
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Do not trust a recycled path", required_skills=["research"])
+    runner_builds = 0
+
+    def build_runner(_spec) -> Runner:
+        nonlocal runner_builds
+        runner_builds += 1
+        return ScriptedRunner()
+
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=(sink := ev.NullEmitter()),
+        workdir=cwd,
+        library=library_for(tmp_path / "residents"),
+        runner_factory=build_runner,
+    )
+    claim = dispatcher.claim
+
+    def claim_then_replace(candidate: Resident, now: datetime) -> JobRecord | None:
+        job = claim(candidate, now)
+        memory.rmdir()
+        memory.mkdir()
+        return job
+
+    monkeypatch.setattr(dispatcher, "claim", claim_then_replace)
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.status == "failed"
+    assert report.reason is not None
+    assert "filesystem identity changed" in report.reason
+    assert types(sink) == ["task_claimed", "task_failed"]
+    assert runner_builds == 0
+    assert list(memory.iterdir()) == []
+    assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+    assert list(sentinel.parent.iterdir()) == [sentinel]
+
+
+def test_a_memory_dir_vanishing_mid_drain_leaves_later_tasks_open(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+) -> None:
+    """Every task is rechecked; one completed task cannot authorize the next (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    write_skill("research", defaults=True)
+    data = board_manifest(
+        memory={"kind": "directory", "path": str(memory), "journal": "journal"},
+        board={"claim": True, "max_claims_per_wake": 2, "lease_s": 1800, "timeout_s": 900},
+    )
+    data["runner"] = {"kind": "claude", "model": "pretend"}
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="First", required_skills=["research"])
+    store.post_job(title="Second", required_skills=["research"])
+
+    class VanishingRunner(ScriptedRunner):
+        def run(self, request: RunRequest) -> RunResult:
+            result = super().run(request)
+            shutil.rmtree(memory)
+            return result
+
+    run = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=ev.NullEmitter(),
+        workdir=tmp_path / "fallback",
+        library=library_for(tmp_path / "residents"),
+        runner_factory=lambda _spec: VanishingRunner(),
+    ).dispatch(NOW)
+
+    assert [report.task.title for report in run.reports] == ["First"]
+    assert [job.title for job in store.jobs("open")] == ["Second"]
 
 
 def test_a_dry_run_dispatch_does_not_deliver_a_decision(
