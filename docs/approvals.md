@@ -309,8 +309,32 @@ rest of the knock is intact, so a person still reads the question. Redaction run
 the length bound, so a secret cut in half by the cap can never surface a live prefix.
 
 The stored row keeps what the session actually typed, so **every rendering meant for a
-human scrubs it again**: `steward show` runs each decision through
-`approvals.redact_decision` before printing it, since that output is made to be pasted
-into a review. The one reader that gets the raw text back is the resident that wrote it,
-in the `DECISIONS SINCE YOU LAST RAN` section of its own next session — redacting there
-would misquote the question it asked.
+human scrubs it again** — each through `approvals.redact_decision`, and the list is the
+whole list:
+
+| rendering | why it is the risk |
+|---|---|
+| `steward show` | made to be pasted into a review |
+| `steward approval show`, both formats | the audit query; a terminal scrollback or a screenshot |
+| `steward board dispatch`'s `needs human:` line | the same terminal, on every sweep |
+| `GET /approvals` and `GET /approvals/{id}` | the console renders it into the DOM; `curl` renders it into a scrollback |
+
+Two readers deliberately get the raw text back, and both are the session that wrote it:
+the `DECISIONS SINCE YOU LAST RAN` section of its own next session, and the line
+`steward approval raise` echoes to the session that just called it. Redacting either
+would misquote the question the resident asked.
+
+Redaction and its inverse are only honest as a pair. An `edit` **replaces** the whole
+detail, and the console prefills its edit box from the `detail` it was served — so an
+operator wanting to change one key of a request that carried a secret is looking at
+`[redacted:secret]` where a value used to be. Without a way back, their only options would
+be to retype a live credential into a browser textarea or to drop the key and take the
+value away from the resident that needs it.
+
+So `POST /approvals/{id}` **restores** what it withheld: any string in the edit that is
+*exactly* what the decider was shown means "I did not touch this", and the stored value is
+put back before the decision is recorded. Anything else carrying the marker — one typed by
+hand, or one left inside a string that was otherwise edited — is a sentence steward cannot
+read, and it is refused (`422 edit_withheld_value`) rather than guessed at. The restore
+lives on the same route as the redaction, because whoever withheld a value owes the way
+back; a decider that was never served a scrubbed detail has nothing to put back.

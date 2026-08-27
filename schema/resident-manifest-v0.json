@@ -145,10 +145,11 @@
     },
     "Charter": {
       "additionalProperties": false,
-      "description": "What a resident is for. Injected into every headless session for this resident.",
+      "description": "What a resident is for. Injected into every headless session for this resident.\n\nEvery field here is bounded, and the bound is a *refusal* rather than the injection cap\nthe voice, the journal, the skills, and a task's detail get (:mod:`steward.prompt`).\nThe charter is the section that has the last word and is therefore never shortened on\nits way in: a hard rule truncated mid-clause would still be read as authoritative, and\nan unbounded one would decide how much room every bounded section above it has left.\nSo the size is settled here, where it is somebody's pull request rather than a session's\nsurprise (steward #147).",
       "properties": {
         "mission": {
           "description": "One paragraph of purpose.",
+          "maxLength": 2000,
           "minLength": 1,
           "title": "Mission",
           "type": "string"
@@ -156,8 +157,10 @@
         "duties": {
           "description": "Standing responsibilities.",
           "items": {
+            "maxLength": 400,
             "type": "string"
           },
+          "maxItems": 20,
           "minItems": 1,
           "title": "Duties",
           "type": "array"
@@ -165,8 +168,10 @@
         "rules": {
           "description": "Hard constraints.",
           "items": {
+            "maxLength": 400,
             "type": "string"
           },
+          "maxItems": 20,
           "minItems": 1,
           "title": "Rules",
           "type": "array"
@@ -174,6 +179,7 @@
         "escalation": {
           "anyOf": [
             {
+              "maxLength": 2000,
               "type": "string"
             },
             {
@@ -321,8 +327,10 @@
         "when": {
           "description": "Situations that must be escalated.",
           "items": {
+            "maxLength": 400,
             "type": "string"
           },
+          "maxItems": 20,
           "minItems": 1,
           "title": "When",
           "type": "array"
@@ -330,6 +338,7 @@
         "how": {
           "default": "needs_human",
           "description": "The protocol event or channel used to escalate.",
+          "maxLength": 200,
           "minLength": 1,
           "title": "How",
           "type": "string"
@@ -337,6 +346,7 @@
         "note": {
           "anyOf": [
             {
+              "maxLength": 1000,
               "type": "string"
             },
             {
@@ -478,6 +488,7 @@
         },
         "prompt": {
           "description": "Prompt template for the session.",
+          "maxLength": 8000,
           "minLength": 1,
           "title": "Prompt",
           "type": "string"
@@ -641,6 +652,7 @@
       "properties": {
         "name": {
           "description": "Display name, e.g. Hob.",
+          "maxLength": 80,
           "minLength": 1,
           "title": "Name",
           "type": "string"
@@ -659,13 +671,15 @@
         },
         "role": {
           "description": "One-line role, e.g. life bot.",
+          "maxLength": 200,
           "minLength": 1,
           "title": "Role",
           "type": "string"
         },
         "file": {
           "default": "soul.md",
-          "description": "Soul body, relative to the manifest directory.",
+          "description": "Soul body: a file name beside the manifest, never a path.",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
           "title": "File",
           "type": "string"
         }
@@ -744,6 +758,7 @@
     "summary": {
       "anyOf": [
         {
+          "maxLength": 400,
           "type": "string"
         },
         {

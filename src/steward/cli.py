@@ -1176,23 +1176,41 @@ def board_dispatch(
 
 
 def _report_board(report: BoardReport) -> None:
+    """Print what one dispatched task came to, scrubbed of anything a session wrote.
+
+    Which halves of these lines need scrubbing is not obvious, so it is worked out here
+    once (steward #144). A **task title** is the risky one: a job posted over the API by
+    anyone holding the token, or a handoff another resident's session wrote, and it is
+    printed on every sweep. A **delegation refusal** carries that same title back inside
+    its message. A **knock's message**, by contrast, is derived rather than authored —
+    :func:`steward.approvals.human_message` builds it from ``soul.name`` and the action
+    slug — so it cannot carry a secret; it goes through the scrubber anyway, because
+    ``ApprovalTransitions.knock`` may supply a message of its own and a reader should not
+    have to know which of the two produced the line in front of them.
+    """
     kind = f"delegated by {report.task.delegated_by}" if report.delegated else "claimed"
-    label = f"{report.resident_id} → {report.task.task_id} ({report.task.title}, {kind})"
+    title = redact_secrets(report.task.title)
+    label = f"{report.resident_id} → {report.task.task_id} ({title}, {kind})"
     if report.done:
         click.secho(f"done {label}", fg="green")
     else:
         click.secho(f"failed {label}: {report.reason}", fg="red", err=True)
     for record in report.raised:
-        click.secho(f"  needs human: {record.message} [{record.request_id}]", fg="yellow")
+        message = redact_secrets(record.message)
+        click.secho(f"  needs human: {message} [{record.request_id}]", fg="yellow")
     for delivery in report.handed_over:
         if delivery.task is not None:
             click.secho(
-                f"  delegated: {delivery.task.title} → {delivery.task.assignee} "
+                f"  delegated: {redact_secrets(delivery.task.title)} → {delivery.task.assignee} "
                 f"[{delivery.task.task_id}]",
                 fg="cyan",
             )
         else:
-            click.secho(f"  delegation refused ({delivery.reason}): {delivery.message}", fg="red")
+            click.secho(
+                f"  delegation refused ({delivery.reason}): "
+                f"{redact_secrets(delivery.message or '')}",
+                fg="red",
+            )
 
 
 @board.command("list")
@@ -1521,10 +1539,14 @@ def _build_needs_human(
 def approval_show(request_id: str, db: Path | None, output_format: str) -> None:
     """Print one request with its decision, decider, and timestamps. The audit query."""
     with _open_store(db) as store:
-        record = store.approval(request_id)
-    if record is None:
+        stored = store.approval(request_id)
+    if stored is None:
         click.secho(f"no approval request {request_id!r}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
+    # The audit query is the output most likely to end up in a scrollback, a screenshot,
+    # or a pasted bug report, which is the risk redaction exists for — so it is scrubbed,
+    # in both formats, like `steward show` (steward #144).
+    record = redact_decision(stored)
     if output_format == "json":
         click.echo(json.dumps(record.to_dict(), indent=2))
         return

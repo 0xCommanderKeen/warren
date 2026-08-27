@@ -59,8 +59,15 @@ soul:
   char: Monk           # burrow sprite key
   accent: "#a68a4f"    # hex, #rrggbb
   role: life bot       # one line
-  file: soul.md        # optional; the soul body, relative to the manifest
+  file: soul.md        # optional; a file name beside the manifest, never a path
 ```
+
+`file` is a **name**, not a path: no `/` or `\`, no leading dot (which is what excludes
+`..`), and none of the whitespace or shell metacharacters the `deploy` patterns refuse.
+It is joined onto the manifest's own directory at three places — the validation read, the
+deploy bundle read, and the nursery's declare write — and `pathlib` would let an absolute
+value replace that directory entirely. The soul always ships to the host as `soul.md`
+whatever this says, so the pattern only decides which local file is read.
 
 ## `charter` — what the resident is for
 
@@ -85,6 +92,48 @@ charter:
     how: needs_human          # the protocol event used to escalate
     note: Optional guidance for the human.
 ```
+
+### Why the charter is bounded here and not at injection
+
+Every other injected section has a cap that *truncates*: a voice at 1,200 characters, a
+journal at 4,000, the skill set at 24,000, a task's detail at 8,000. The charter has caps
+that **refuse**, and so do `soul.name`, `soul.role` and `summary`:
+
+| field | cap | field | cap |
+|---|---|---|---|
+| `charter.mission` | 2,000 | `escalation.how` | 200 |
+| each duty, rule, or `when` entry | 400 | `escalation.note` | 1,000 |
+| how many duties, rules, or `when` entries | 20 | `soul.name` | 80 |
+| `charter.escalation` as prose | 2,000 | `soul.role` | 200 |
+| `summary` | 400 | `routines[].prompt` | 8,000 |
+
+A duty, a hard rule, and an escalation `when` entry are each **one line**. They are
+rendered as bullets, so a line break inside one escapes its own bullet and lands loose in
+the charter — which draws its own headings (`HARD RULES (these override everything else
+you have been told)`) in plain prose that rule-collapsing cannot defend. The `mission` is
+deliberately exempt: it is a paragraph, and it says so.
+
+A routine's `prompt` is on this list for the same reason the charter is. It is declared
+text, and it lands in a section of its own *after* the charter — the last thing a session
+reads, which is the best position in the whole prompt for a forged section rule to be
+believed.
+
+The charter is the last section of the preamble and it says out loud that it overrides
+everything above it, so it is the one section steward must never shorten: a hard rule cut
+in half at 3am would still be read as authoritative. An unbounded charter would also
+decide how much room the bounded sections above it have left, which makes the size of a
+preamble something you hope about rather than compute. Both problems are settled by
+refusing at validation — in a pull request, where a person can shorten the sentence — and
+that is why these numbers live in `manifest.py` rather than in `prompt.py` (steward #147).
+
+The caps are generous against practice: across `residents/` the longest mission is 359
+characters, the longest duty 90, the longest hard rule 92, the longest summary 72.
+
+Charter and identity text is also **neutralized** on its way into a prompt, exactly like
+injected text: a run of three or more `=` (or of the box-drawing and long-bar codepoints
+that render like one) is collapsed, so the section that claims the last word cannot itself
+draw steward's own section rule. Manifests are reviewed repo content, so this is not a
+guard against their authors — it removes the need to reason about them.
 
 ## `skills` — capabilities
 
@@ -776,6 +825,38 @@ projection rules do the rest. Steward forges no `session_ended` on its behalf.
 
 Bringing one back is a person's decision written down: set `retired: false`, commit, and
 run `steward new-resident` again to put the container up.
+
+### What retirement removes from the host, and what it leaves
+
+**Steward removes on retire exactly what steward rewrites on provision.** That is two
+files under `~/docker/<container>/`, deleted after the container is down:
+
+| removed | why |
+|---|---|
+| `.env` | it holds `BURROW_URL` and **`BURROW_TOKEN`** — a village ingest token belonging to a resident that is no longer allowed to act |
+| `docker-compose.yaml` | inert without the `.env`, and worse than inert: `BURROW_URL` is interpolated as `${BURROW_URL:?…}`, so a compose file left beside a removed `.env` makes the *next* `docker compose down` fail on a variable instead of reporting an already-stopped container |
+
+Both come back byte for byte on the next provision, so removing them costs the way back
+above nothing. The removal runs **after** `docker compose down` for the same interpolation
+reason, and `--no-deploy` reaches no host at all — its report says so, and says the `.env`
+is still there.
+
+Everything else stays, because retirement is not deletion: `manifest.yaml`, `soul.md`, and
+`memory/` with the resident's journal and durable knowledge.
+
+`claude/` also stays, and this one is a deliberate call rather than an oversight. It is
+bind-mounted to `/root/.claude` and holds whatever credentials a `docker exec … claude`
+login wrote. Steward created the empty directory and never wrote its contents, and a
+re-provision does not restore them — so deleting it would make the way back silently
+require a re-login. The retire report names it instead, so an operator who wants it gone
+knows there is a step left rather than finding out later.
+
+Removing the file is the narrow lever. The broad one is **rotating `BURROW_TOKEN` fleet-wide**,
+and it is the right lever whenever a retirement was a response to something rather than a
+tidy-up: steward writes one token into every resident's `.env` from its own environment, so
+a copy that leaked from one host is a copy that works for all of them. Rotation is a burrow-
+side change plus a re-provision of every live resident (`steward new-resident` again, which
+rewrites each `.env`); steward has no command for it, and retiring one resident does not do it.
 
 ## The watchdog
 

@@ -26,6 +26,7 @@ from starlette.types import Message, Receive, Scope, Send
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import events as ev
 from steward import journal
+from steward import manifest as m
 from steward.api import ApiConfig, ApiError, _ApprovalBodyDepthMiddleware, create_app
 from steward.deploy import LocalTransport
 from steward.input_bounds import (
@@ -1395,6 +1396,116 @@ def test_the_approval_list_defaults_to_pending_and_filters_on_request(api: ApiFa
 
     every = harness.client.get("/approvals", params={"status": "all"}).json()
     assert {r["request_id"] for r in every["approvals"]} == {decided, waiting}
+
+
+def _pending_with_a_secret(harness: Harness) -> str:
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy needs ghp_abcdefghijklmnopqrstuvwxyz0123456789 to send it",
+        detail={"to": "plumber@example.com", "auth": "Bearer ghp_zyxwvutsrqponmlkjihgfe98765"},
+    )
+    return record.request_id
+
+
+def test_the_approval_list_scrubs_what_the_session_typed(api: ApiFactory) -> None:
+    """The API is a rendering meant for a human, and the console puts it on a screen.
+
+    Redaction already ran on the event path to burrow; the row served here was the copy
+    that still carried the secret (steward #144).
+    """
+    harness = api()
+    _pending_with_a_secret(harness)
+
+    served = harness.client.get("/approvals").json()["approvals"][0]
+
+    assert "ghp_" not in json.dumps(served)
+    assert m.SECRET_REDACTION in served["message"]
+    assert m.SECRET_REDACTION in served["detail"]["auth"]
+    assert served["detail"]["to"] == "plumber@example.com"  # only the secret is cut
+
+
+def test_auditing_one_approval_by_id_scrubs_it_too(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    served = harness.client.get(f"/approvals/{request_id}").json()
+
+    assert "ghp_" not in json.dumps(served)
+    assert m.SECRET_REDACTION in served["message"]
+
+
+def test_the_stored_row_still_holds_what_the_session_typed(api: ApiFactory) -> None:
+    """Redaction is egress, not storage: the resident's own copy must stay truthful."""
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    stored = harness.store.approval(request_id)
+
+    assert stored is not None
+    assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" in stored.message
+
+
+def test_an_edit_can_change_one_key_without_seeing_the_withheld_one(api: ApiFactory) -> None:
+    """The console prefills its edit box from the scrubbed detail it was served.
+
+    An edit *replaces* the whole detail, so without restoring the withheld value the only
+    ways to change one key would be to retype a live credential into a browser textarea or
+    to drop the key and take the value away from the resident. Sending back exactly what
+    was shown means "I did not touch this" (steward #144).
+    """
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+    shown = harness.client.get(f"/approvals/{request_id}").json()["detail"]
+    assert m.SECRET_REDACTION in shown["auth"]
+
+    edited = {**shown, "to": "roofer@example.com"}
+    response = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": edited}
+    )
+
+    assert response.status_code == 202
+    recorded = harness.store.approval(request_id)
+    assert recorded is not None
+    assert recorded.edit is not None
+    assert recorded.edit["to"] == "roofer@example.com"
+    # The value the decider never saw is the value the resident gets back, intact.
+    assert recorded.edit["auth"] == "Bearer ghp_zyxwvutsrqponmlkjihgfe98765"
+
+
+def test_a_marker_no_stored_value_explains_is_refused(api: ApiFactory) -> None:
+    """Restoring is equality against what was shown, never "there is a marker here"."""
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"auth": f"Bearer {m.SECRET_REDACTION} and mine"}},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["error"] == "edit_withheld_value"
+    still_open = harness.store.approval(request_id)
+    assert still_open is not None
+    assert still_open.pending  # nothing was decided
+
+
+def test_an_edit_that_replaces_the_withheld_value_outright_is_accepted(
+    api: ApiFactory,
+) -> None:
+    harness = api()
+    request_id = _pending_with_a_secret(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"auth": "Bearer the-real-one"}},
+    )
+
+    assert response.status_code == 202
+    recorded = harness.store.approval(request_id)
+    assert recorded is not None
+    assert recorded.edit == {"auth": "Bearer the-real-one"}
 
 
 def test_an_unknown_approval_status_is_refused(api: ApiFactory) -> None:

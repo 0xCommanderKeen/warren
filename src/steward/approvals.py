@@ -72,10 +72,15 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from steward import events as ev
-from steward.manifest import ResidentManifest, redact_mapping, redact_secrets
+from steward.manifest import (
+    SECRET_REDACTION,
+    ResidentManifest,
+    redact_mapping,
+    redact_secrets,
+)
 from steward.store import APPROVAL_DECISIONS, ApprovalRecord, Store
 
 __all__ = [
@@ -90,6 +95,7 @@ __all__ = [
     "UNREADABLE_ACTION",
     "ApprovalError",
     "NeedsHuman",
+    "WithheldValueError",
     "decisions_preamble",
     "deliver_decisions",
     "extract_requests",
@@ -97,6 +103,7 @@ __all__ = [
     "parse_duration",
     "redact_decision",
     "repeat_deny_window_s",
+    "restore_withheld",
 ]
 
 log = logging.getLogger("steward.approvals")
@@ -412,6 +419,66 @@ def redact_decision(record: ApprovalRecord) -> ApprovalRecord:
         detail=redact_mapping(record.detail) or {},
         edit=redact_mapping(record.edit),
     )
+
+
+class WithheldValueError(ValueError):
+    """Raised when an edit carries a redaction marker no stored value explains."""
+
+
+def _restore_node(edited: object, stored: object, path: str) -> object:
+    """Restore one node of an edit, following the stored detail alongside it."""
+    if isinstance(edited, str):
+        if SECRET_REDACTION not in edited:
+            return edited
+        if isinstance(stored, str) and redact_secrets(stored) == edited:
+            return stored
+        raise WithheldValueError(
+            f"the edit's {path or 'value'} carries {SECRET_REDACTION}, steward's own marker "
+            f"for a value it withheld — but it does not match what is stored there, so "
+            f"steward cannot tell what you meant. Send the value you want recorded, or "
+            f"leave the withheld one exactly as it was shown to you to keep it."
+        )
+    if isinstance(edited, Mapping):
+        below = stored if isinstance(stored, Mapping) else {}
+        return {
+            str(key): _restore_node(value, below.get(str(key)), f"{path}.{key}" if path else key)
+            for key, value in edited.items()
+        }
+    if isinstance(edited, (list, tuple)):
+        below = stored if isinstance(stored, (list, tuple)) else ()
+        return [
+            _restore_node(item, below[index] if index < len(below) else None, f"{path}[{index}]")
+            for index, item in enumerate(edited)
+        ]
+    return edited
+
+
+def restore_withheld(
+    edit: Mapping[str, Any] | None, detail: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Put back the values redaction withheld from the copy the decider was shown.
+
+    The exact inverse of :func:`redact_decision`, and it exists because the two are only
+    honest as a pair. Once a rendering scrubs ``detail``, whoever decides from it is
+    looking at ``[redacted:secret]`` where a value used to be — and an ``edit`` **replaces**
+    the whole detail, so without this the only ways to edit one key of a request that
+    carried a secret are to retype a live credential into a browser textarea or to drop
+    the key and take the value away from the resident that needs it. Neither is a decision
+    anybody meant to make (steward #144).
+
+    The test is equality against the redacted stored value, not the mere presence of the
+    marker: a string that is *exactly* what the decider was shown means "I did not touch
+    this", and the value it stood for is restored. Anything else — a marker typed by hand,
+    a marker left in a string that was otherwise edited — is a sentence steward cannot read,
+    and it is refused rather than guessed at.
+
+    Lives beside redaction and is applied by whoever applied the redaction, so "who owes
+    the restore" has the same answer as "who withheld it".
+    """
+    if edit is None:
+        return None
+    restored = _restore_node(dict(edit), dict(detail), "")
+    return cast("dict[str, Any]", restored)
 
 
 def decisions_preamble(records: Sequence[ApprovalRecord]) -> str | None:

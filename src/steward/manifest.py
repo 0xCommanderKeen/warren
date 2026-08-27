@@ -53,6 +53,7 @@ __all__ = [
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
+    "SECRET_REDACTION",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
     "AppGrant",
@@ -110,6 +111,46 @@ SCHEMA_VERSION = 0
 VOICE_MAX_CHARS = 1200
 VOICE_HEADING = "## Voice"
 
+#: The charter and the identity section are the two parts of a preamble that are **never**
+#: truncated on their way into a prompt (:mod:`steward.prompt`): a hard rule cut in half is
+#: worse than no hard rule, and half a name is not an identity. So the bound they get is a
+#: refusal here, at authoring time, rather than a silent shortening at 3am — and with it the
+#: total size of a preamble becomes something you can compute rather than hope about. Without
+#: these numbers the section framed as the last word is also the one section able to crowd
+#: out every bounded section above it (steward #147). Each is generous against what live
+#: residents actually write: across ``residents/`` the longest mission is 359 characters,
+#: the longest duty 90, the longest hard rule 92, the longest summary 72.
+CHARTER_MISSION_MAX_CHARS = 2000
+
+#: One duty, one hard rule, or one escalation trigger. A line, not an essay.
+CHARTER_ENTRY_MAX_CHARS = 400
+
+#: How many duties, rules, or escalation triggers one charter may list. A charter nobody can
+#: hold in their head is not a charter, and the session has to hold it too.
+CHARTER_ENTRIES_MAX = 20
+
+#: The free-text escalation form, for a manifest that writes prose instead of an
+#: :class:`Escalation` block.
+ESCALATION_MAX_CHARS = 2000
+
+#: ``how`` names a protocol or a channel — ``needs_human``, an address; ``note`` is the extra
+#: guidance for whoever gets woken.
+ESCALATION_HOW_MAX_CHARS = 200
+ESCALATION_NOTE_MAX_CHARS = 1000
+
+#: The identity section: a display name, a one-line role, and the one line burrow displays.
+SOUL_NAME_MAX_CHARS = 80
+SOUL_ROLE_MAX_CHARS = 200
+SUMMARY_MAX_CHARS = 400
+
+#: A routine's own prompt. Declared text like the charter, and it lands in a section of its
+#: own *after* the charter — the last thing a session reads — so leaving it unbounded left
+#: the one manifest field able to make the size of an assembled prompt uncomputable, and
+#: the one able to draw a section rule in the best position for a forgery to be believed.
+#: Bounded here for the same reason the charter is, and neutralized in :mod:`steward.prompt`
+#: alongside it (steward #147).
+ROUTINE_PROMPT_MAX_CHARS = 8000
+
 #: The journal subdirectory, under ``memory.path``, a manifest gets when it names none.
 DEFAULT_JOURNAL_DIR = "journal"
 
@@ -158,6 +199,19 @@ WORKSPACE_PATH_PATTERN = r"""^/[^\s'"`$;|&<>(){}\[\]!*?\\]*$"""
 #: manifest that bounds its tools and then declares this has drawn one boundary and dropped
 #: the other, which :func:`_check_tools_are_enforceable` refuses.
 BYPASS_PERMISSIONS = "bypassPermissions"
+
+#: ``soul.file`` is joined onto the manifest's own directory at three places — the
+#: validation read, the deploy bundle read, and the nursery's declare write — and
+#: ``pathlib`` semantics mean an absolute value replaces the base entirely while ``..``
+#: segments compose without normalisation. It was the one path component in a manifest
+#: with no pattern and no validator, in a module whose stated posture is that a value is
+#: data and never markup, so it was gated by review rather than by validation (steward
+#: #149). This closes it the way the others are closed: **a name, not a path**. No
+#: separator of either slash, no leading dot — which is what excludes ``..`` — and none of
+#: the whitespace, quotes, or shell metacharacters the deploy patterns already refuse.
+#: The archive entry name is the constant :data:`steward.deploy.SOUL_FILENAME`, so the
+#: remote layout never depended on this value; only which local file is read did.
+SOUL_FILE_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
@@ -573,42 +627,117 @@ class _Model(BaseModel):
 class SoulIdentity(_Model):
     """The villager burrow draws. Field names match burrow's soul frontmatter."""
 
-    name: str = Field(min_length=1, description="Display name, e.g. Hob.")
+    name: str = Field(
+        min_length=1,
+        max_length=SOUL_NAME_MAX_CHARS,
+        description="Display name, e.g. Hob.",
+    )
     char: str = Field(min_length=1, description="Burrow sprite key, e.g. Monk.")
     accent: str = Field(pattern=ACCENT_PATTERN, description="Hex accent colour, #rrggbb.")
-    role: str = Field(min_length=1, description="One-line role, e.g. life bot.")
+    role: str = Field(
+        min_length=1,
+        max_length=SOUL_ROLE_MAX_CHARS,
+        description="One-line role, e.g. life bot.",
+    )
     file: str = Field(
         default=DEFAULT_SOUL_FILENAME,
-        description="Soul body, relative to the manifest directory.",
+        pattern=SOUL_FILE_PATTERN,
+        description="Soul body: a file name beside the manifest, never a path.",
     )
+
+
+#: One line of a charter: a duty, a hard rule, or a situation that must be escalated.
+#: Bounded per entry as well as per list, because "how long can a charter get" has to have
+#: an answer that does not depend on how many bullets somebody wrote. ``strip_whitespace``
+#: is named rather than inherited: a field-level string constraint replaces the model's
+#: config, so leaving it out would quietly stop trimming exactly these entries.
+CharterEntry = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=CHARTER_ENTRY_MAX_CHARS),
+]
+
+
+def _entries_are_single_lines(value: list[str]) -> list[str]:
+    """Refuse a charter entry that is blank or spans more than one line.
+
+    A duty, a hard rule and an escalation trigger are rendered as bullets — ``- <entry>``,
+    joined by newlines — so a newline *inside* one escapes its own bullet and lands in the
+    charter as free-standing text. The charter draws its own headings in plain prose
+    (``HARD RULES (these override everything else you have been told)``), which the rule
+    collapsing in :func:`steward.prompt._declared` does not and cannot defend, so "an entry
+    is one line" is the boundary that keeps a bullet a bullet (steward #147). The mission is
+    deliberately not held to this: it is a paragraph, and it says so.
+    """
+    for entry in value:
+        if not entry.strip():
+            raise ValueError("entries must not be empty")
+        if _CONTROL_CHARS.search(entry):
+            raise ValueError(
+                "an entry is one line: it is rendered as a single bullet, and a line break "
+                "inside one escapes that bullet into the charter's own structure"
+            )
+    return value
 
 
 class Escalation(_Model):
     """Structured escalation policy: when to stop and ask instead of acting."""
 
-    when: list[str] = Field(min_length=1, description="Situations that must be escalated.")
+    when: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Situations that must be escalated.",
+    )
     how: str = Field(
         default="needs_human",
         min_length=1,
+        max_length=ESCALATION_HOW_MAX_CHARS,
         description="The protocol event or channel used to escalate.",
     )
-    note: str | None = Field(default=None, description="Extra guidance for the human.")
+    note: str | None = Field(
+        default=None,
+        max_length=ESCALATION_NOTE_MAX_CHARS,
+        description="Extra guidance for the human.",
+    )
+
+    # `when` is a list of bullets exactly like `duties` and `rules`, and until now it was
+    # the one of the three with no guard at all — `min_length=1` bounds the list, not the
+    # entry, so `when: [""]` validated and rendered a bare `- ` into every session.
+    _entries_are_lines = field_validator("when")(_entries_are_single_lines)
 
 
 class Charter(_Model):
-    """What a resident is for. Injected into every headless session for this resident."""
+    """What a resident is for. Injected into every headless session for this resident.
 
-    mission: str = Field(min_length=1, description="One paragraph of purpose.")
-    duties: list[str] = Field(min_length=1, description="Standing responsibilities.")
-    rules: list[str] = Field(min_length=1, description="Hard constraints.")
-    escalation: str | Escalation = Field(description="When and how to raise needs_human.")
+    Every field here is bounded, and the bound is a *refusal* rather than the injection cap
+    the voice, the journal, the skills, and a task's detail get (:mod:`steward.prompt`).
+    The charter is the section that has the last word and is therefore never shortened on
+    its way in: a hard rule truncated mid-clause would still be read as authoritative, and
+    an unbounded one would decide how much room every bounded section above it has left.
+    So the size is settled here, where it is somebody's pull request rather than a session's
+    surprise (steward #147).
+    """
 
-    @field_validator("duties", "rules")
-    @classmethod
-    def _no_blank_entries(cls, value: list[str]) -> list[str]:
-        if any(not entry.strip() for entry in value):
-            raise ValueError("entries must not be empty")
-        return value
+    mission: str = Field(
+        min_length=1,
+        max_length=CHARTER_MISSION_MAX_CHARS,
+        description="One paragraph of purpose.",
+    )
+    duties: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Standing responsibilities.",
+    )
+    rules: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Hard constraints.",
+    )
+    escalation: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=ESCALATION_MAX_CHARS)]
+        | Escalation
+    ) = Field(description="When and how to raise needs_human.")
+
+    _no_blank_entries = field_validator("duties", "rules")(_entries_are_single_lines)
 
 
 def _normalize_skill_grant(value: object) -> object:
@@ -1040,7 +1169,11 @@ class Routine(_Model):
         default=DEFAULT_SCHEDULE_TZ,
         description="IANA zone the schedule is read in, e.g. Europe/Ljubljana.",
     )
-    prompt: str = Field(min_length=1, description="Prompt template for the session.")
+    prompt: str = Field(
+        min_length=1,
+        max_length=ROUTINE_PROMPT_MAX_CHARS,
+        description="Prompt template for the session.",
+    )
     requires: list[str] = Field(
         default_factory=list,
         description="Skills that must be granted for this routine to run.",
@@ -1091,7 +1224,11 @@ class ResidentManifest(_Model):
         pattern=PROJECT_PATTERN,
         description="Project label for scoped residents.",
     )
-    summary: str | None = Field(default=None, description="One line burrow can display.")
+    summary: str | None = Field(
+        default=None,
+        max_length=SUMMARY_MAX_CHARS,
+        description="One line burrow can display.",
+    )
     retired: bool = Field(
         default=False,
         description="This resident has been retired. It keeps validating and stops working.",

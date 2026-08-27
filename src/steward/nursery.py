@@ -335,6 +335,18 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
 DECLARE_SUBJECT = "feat(residents): declare {id}"
 RETIRE_SUBJECT = "chore(residents): retire {id}"
 
+#: The credential retirement deliberately leaves behind, said out loud rather than left as
+#: a silence. ``claude/`` is bind-mounted to ``/root/.claude`` and holds whatever a
+#: ``docker exec … claude`` login wrote; steward created the empty directory and never
+#: wrote its contents, and a provision does not restore them — so deleting it would make
+#: the documented way back (``retired: false``, re-provision) silently require a re-login.
+#: An operator who wants it gone gets told it is there instead of discovering it later.
+CLAUDE_LOGIN_REMAINS = (
+    "left in place: claude/ still holds any login a `docker exec … claude` wrote — "
+    "steward did not write it and a re-provision does not restore it, so removing it is "
+    "yours to decide"
+)
+
 #: How many dirty paths a refusal names before it starts counting instead.
 DIRTY_SHOWN = 5
 
@@ -601,6 +613,12 @@ class RetireReport:
     #: True when this run wrote ``retired: true``; False when it already said so.
     marked: bool
     stopped: bool
+    #: True when this run found a ``.env`` holding ``BURROW_TOKEN`` on the host and removed
+    #: it. **False when there was nothing to remove** — a host that never held a deployment,
+    #: or one an earlier retirement already scrubbed — because "the token is gone" and "this
+    #: run took it away" are different sentences and only the second is this field's
+    #: (steward #157).
+    scrubbed: bool = False
     commands: tuple[tuple[str, ...], ...] = ()
     commit: str | None = None
     dry_run: bool = False
@@ -613,6 +631,7 @@ class RetireReport:
             "manifest_path": str(self.manifest_path),
             "marked": self.marked,
             "stopped": self.stopped,
+            "scrubbed": self.scrubbed,
             "commands": [render_argv(argv) for argv in self.commands],
             "commit": self.commit,
             "dry_run": self.dry_run,
@@ -634,6 +653,12 @@ class RetireReport:
         lines += [f"  $ {render_argv(argv)}" for argv in self.commands]
         if self.commit:
             lines.append(f"  committed {self.commit[:12]}")
+        if self.commands:
+            # Gated on having a host plan rather than on ``scrubbed``, so a ``--dry-run``
+            # says it too. A rehearsal is exactly where an operator is deciding whether
+            # this retirement needs a manual step, and it is the one run that never sets
+            # ``scrubbed``.
+            lines.append(f"  {CLAUDE_LOGIN_REMAINS}")
         if self.note:
             lines.append(f"  {self.note}")
         return lines
@@ -970,6 +995,75 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
     )
 
 
+def scrubbed_paths(target: DeployTarget) -> tuple[str, ...]:
+    """Name the two host files retirement removes, through the target's own properties.
+
+    The rule behind the list: **steward removes on retire exactly what steward rewrites on
+    provision** (steward #157). ``.env`` holds ``BURROW_TOKEN``, and a village ingest token
+    belonging to a resident that is no longer allowed to act had been sitting on the NAS
+    indefinitely with nothing in the retire report mentioning it. The compose file goes with
+    it, and not merely because it is inert without the ``.env``: ``BURROW_URL`` is
+    interpolated as ``${BURROW_URL:?…}``, so a compose file left beside a removed ``.env``
+    would make the *next* ``docker compose down`` fail on a variable rather than report an
+    already-stopped container. Both are written again, byte for byte, by the next provision,
+    so removing them costs the documented way back nothing.
+
+    :attr:`~steward.deploy.DeployTarget.env_path` and ``.compose_path`` already answer
+    "where does this land on the host", and ``compose_argv`` and the stop already address
+    the compose file through them. Joining the same paths by hand here would leave the
+    argv and the error message that names it free to drift apart from each other and from
+    the deploy that wrote them.
+    """
+    return (target.env_path, target.compose_path)
+
+
+def scrub_argv(target: DeployTarget) -> tuple[str, ...]:
+    """Build the argv that removes a retired resident's generated files from the host.
+
+    ``-f`` so a re-run over an already-scrubbed host succeeds instead of erroring on a
+    file it deliberately removed last time. The paths come from ``deploy.path``, which
+    :data:`steward.manifest.REMOTE_PATH_PATTERN` has already refused whitespace and shell
+    metacharacters in — the same argument every other remote argv in this package rests on.
+    """
+    return ("rm", "-f", *scrubbed_paths(target))
+
+
+def _scrub_host(
+    resident_id: str, conveyance: Transport, target: DeployTarget, scrub: Sequence[str]
+) -> bool:
+    """Remove the token and the compose file, after the container is already down.
+
+    **After**, not before: ``docker compose down`` reads the ``.env`` beside the compose
+    file, and ``BURROW_URL`` is interpolated as ``${BURROW_URL:?…}``, so scrubbing first
+    would make the stop fail on a missing variable.
+    """
+    left_behind = ", ".join(scrubbed_paths(target))
+    # Asked *before* the removal, because ``rm -f`` cannot tell "removed it" from "there
+    # was nothing here" — and a report that says `scrubbed` over a host that never held a
+    # deployment is exactly the false assurance this whole change exists to remove. The
+    # question is the token's file specifically: it is the one worth being sure about.
+    held_a_token = conveyance.exists(target.env_path)
+    try:
+        outcome = conveyance.run(scrub)
+    except TransportError as exc:
+        # Wrapped for the same reason the stop wraps it: `steward retire` answers a
+        # NurseryError with a message and a non-zero exit, and a raw TransportError from
+        # a connection that died between the stop and the removal would be a traceback.
+        raise NurseryError(
+            f"{resident_id} is retired and its container is stopped, but "
+            f"{target.user}@{target.host} could not be reached to remove its credentials: "
+            f"{exc}; re-run `steward retire {resident_id}` once the host is back, or "
+            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
+        ) from exc
+    if not outcome.ok:
+        raise NurseryError(
+            f"{resident_id} is retired and its container is stopped, but the credentials "
+            f"could not be removed from {target.user}@{target.host}: {outcome.summary()}; "
+            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
+        )
+    return held_a_token
+
+
 def _stop_retired_container(
     resident_id: str, conveyance: Transport, target: DeployTarget, down: Sequence[str]
 ) -> tuple[bool, str]:
@@ -1047,7 +1141,8 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     target = target_for(resident.manifest)
     conveyance = transport if transport is not None else transport_for(target)
     down = compose_argv(target, "down", "--remove-orphans")
-    plan = (conveyance.plan(down),) if deploy else ()
+    scrub = scrub_argv(target)
+    plan = (conveyance.plan(down), conveyance.plan(scrub)) if deploy else ()
 
     if dry_run:
         if not deploy:
@@ -1092,12 +1187,21 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
         else None
     )
 
+    scrubbed = False
     if deploy:
         stopped, note = _stop_retired_container(resident_id, conveyance, target, down)
+        # Runs whether or not there was a container to stop: "nothing here to stop" is
+        # exactly the state a half-finished earlier retirement leaves behind, and the
+        # ``.env`` is the thing worth being sure about. ``rm -f`` makes it a no-op when
+        # the files are already gone.
+        scrubbed = _scrub_host(resident_id, conveyance, target, scrub)
     else:
         stopped, note = (
             False,
-            "deploy skipped: the manifest is marked and the host was left untouched",
+            (
+                "deploy skipped: the manifest is marked and the host was left untouched, "
+                "so the .env holding BURROW_TOKEN is still there"
+            ),
         )
 
     return RetireReport(
@@ -1105,6 +1209,7 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
         manifest_path=manifest_path,
         marked=marked,
         stopped=stopped,
+        scrubbed=scrubbed,
         commands=plan,
         commit=sha,
         note=note or ("retired" if marked else "already retired; container reconciled"),
