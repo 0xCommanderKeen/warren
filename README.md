@@ -15,11 +15,11 @@ It does not consume `/events` or recreate Burrow's projection decisions. During 
 
 [`src/steward/StewardClient.js`](src/steward/StewardClient.js) is Arcadia's only Steward write boundary. It owns job posts, approval decisions, resident declarations, and manual routine runs. Feature code supplies declarations or decisions to that client; it must not call Steward directly.
 
-The Steward URL is supplied when the client is created. Its bearer token is supplied with `setCredentials`, can be replaced or cleared at runtime, and lives only inside that client instance: Arcadia never writes it to web storage, markup, URLs, or logs. A `401` clears the rejected token.
+The Steward URL is supplied when the client is created; the shipped client reads `?steward=` and then `VITE_STEWARD_URL`, falling back to same-origin. Its bearer token is supplied with `setCredentials`, can be replaced or cleared at runtime, and lives only inside that client instance: Arcadia never writes it to web storage, markup, URLs, or logs. A `401` clears the rejected token.
 
 Writes are deliberately non-optimistic. A valid Steward receipt leaves the client in `awaiting_confirmation`; the village continues to render Burrow's last complete snapshot. Pass later Burrow snapshots to `confirm`. Only the matching projected job, approval, routine run, or resident appearance releases the write lock. The client never reads Burrow's internal `/events` endpoint.
 
-Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. If an ambiguous receipt still contains an exact usable identity, a later matching Burrow snapshot can reconcile it without another write.
+Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. If the request or receipt retains an exact usable identity, a later matching Burrow snapshot can reconcile it without another write. Ambiguous routine runs remain blocked because Steward's receipt does not expose the projected run ID.
 
 ## Development
 
