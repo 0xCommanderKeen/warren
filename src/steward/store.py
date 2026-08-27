@@ -213,6 +213,8 @@ CREATE TABLE IF NOT EXISTS open_runs (
     ref        TEXT NOT NULL DEFAULT '',
     timeout_s  REAL NOT NULL DEFAULT 0.0,
     started_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL DEFAULT '',
+    event_log_path TEXT NOT NULL DEFAULT '',
     closed_at  TEXT
 );
 
@@ -252,6 +254,10 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         # equal some task's id would have inherited that task's bill. The row says what
         # it descends from, so the ledger is self-describing and a join cannot misread it.
         "origin": "TEXT NOT NULL DEFAULT ''",
+    },
+    "open_runs": {
+        "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
+        "event_log_path": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
@@ -675,6 +681,8 @@ class OpenRun:
     #: Not unique — every attempt at one task carries the same ``ref``.
     ref: str = ""
     timeout_s: float = 0.0
+    heartbeat_at: str = ""
+    event_log_path: str = ""
     closed_at: str | None = None
 
     @property
@@ -693,6 +701,8 @@ class OpenRun:
             project=row["project"],
             ref=row["ref"],
             timeout_s=row["timeout_s"],
+            heartbeat_at=row["heartbeat_at"],
+            event_log_path=row["event_log_path"],
             closed_at=row["closed_at"],
         )
 
@@ -706,6 +716,8 @@ class OpenRun:
             "ref": self.ref,
             "timeout_s": self.timeout_s,
             "started_at": self.started_at,
+            "heartbeat_at": self.heartbeat_at,
+            "event_log_path": self.event_log_path,
             "closed_at": self.closed_at,
         }
 
@@ -1809,6 +1821,7 @@ class Store:
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
+        event_log_path: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started. Returns whether this call opened the row.
@@ -1826,10 +1839,41 @@ class Store:
         thing the session was about goes; several rows may share one.
         """
         with self._lock, self._conn:
+            opened_at = now or utc_now_iso()
             cursor = self._conn.execute(
                 "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
-                "started_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
-                (run_id, kind, agent_id, project, ref, float(timeout_s), now or utc_now_iso()),
+                "started_at, heartbeat_at, event_log_path) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
+                (
+                    run_id,
+                    kind,
+                    agent_id,
+                    project,
+                    ref,
+                    float(timeout_s),
+                    opened_at,
+                    opened_at,
+                    event_log_path,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def renew_run(self, run_id: str, *, now: str | None = None) -> bool:
+        """Renew an open run's ownership lease; a terminal run stays terminal."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL",
+                (now or utc_now_iso(), run_id),
+            )
+            return cursor.rowcount == 1
+
+    def close_stale_run(self, run_id: str, *, stale_before: str, now: str | None = None) -> bool:
+        """Atomically close a run only if its ownership lease remains expired."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET closed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND heartbeat_at <= ?",
+                (now or utc_now_iso(), run_id, stale_before),
             )
             return cursor.rowcount == 1
 

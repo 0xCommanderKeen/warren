@@ -197,13 +197,28 @@ the way it learns of any other.
 | **already answered** | a person may have denied the unpause from a panel and somebody may then lift the same pause from a terminal. The pause still lifts — a terminal is a person too — but the inner A2 comes back **replayed**, the approval log keeps the deny, and nothing new is emitted. That is logged at `WARNING`, and the inner transition is kept on `Transition.via` so a caller can render it rather than seeing only "applied, silently" |
 | **callers** | `steward budget unpause` (`decide=True`), `POST /approvals/{id}` via `_resume_if_budget` (`decide=False`) |
 
-### 1.4 What is deliberately *not* in the matrix
+### 1.4 Run-close arbitration
+
+Routine events remain outside the domain-row matrix, but their terminal transition has a
+named seam in `steward.run_lifecycle`. Opening a registry row begins a renewable ownership
+lease. The session renews it through the runner and post-run tail, then conditionally
+closes the row before emitting its terminal event. The watchdog can conditionally close
+the same row only after the heartbeat has been silent for the full grace period and only
+after reading the exact complete local event record stored on the row. The winner alone
+may emit. Two watchdog processes, or a watchdog racing a finishing session, therefore
+produce at most one terminal event.
+
+The lease deliberately does not record or probe a PID. Scheduler, board, and watchdog can
+run in different processes, hosts, containers, and PID namespaces; a PID is neither a
+portable identity nor durable proof. A timestamp renewed through the shared SQLite store
+is the liveness fact all those deployments can verify.
+
+### 1.5 What is deliberately *not* in the matrix
 
 Routine bracketing (`routine_started` / `routine_finished` / `routine_failed`) and
-`resident_restarted` are transitions of a *run*, not of a durable domain row: the run
-registry row and the event are already paired inside the scheduler and the watchdog, and
-#123 names them out of scope. They are listed here so the omission is a decision rather
-than an oversight. The watchdog's give-up *knock* is in scope, because it is an A1.
+`resident_restarted` are transitions of a *run*, not of the task/approval/budget domain
+rows in this matrix. The run registry and terminal ownership seam above pair the close;
+the watchdog's give-up *knock* remains in scope here because it is an A1.
 
 ---
 

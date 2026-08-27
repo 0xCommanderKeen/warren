@@ -69,6 +69,7 @@ from steward.manifest import (
 from steward.manifest import (
     Runner as RunnerSpec,
 )
+from steward.run_lifecycle import RunTransitions, event_log_path
 from steward.runners import (
     Outcome,
     Runner,
@@ -462,6 +463,7 @@ class Dispatcher:
     delegation_lease_s: int = DEFAULT_BOARD_LEASE_S
     delegation_timeout_s: int = DEFAULT_BOARD_TIMEOUT_S
     sessions: ResidentSessions = field(init=False, repr=False)
+    run_transitions: RunTransitions = field(init=False, repr=False)
     _registry_run: ContextVar[_RegistryRun | None] = field(
         default_factory=lambda: ContextVar("steward_board_registry_run", default=None),
         init=False,
@@ -478,6 +480,7 @@ class Dispatcher:
             hooks=self,
             residents=self.residents,
         )
+        self.run_transitions = RunTransitions(self.store)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -783,7 +786,8 @@ class Dispatcher:
         registry_run = _RegistryRun(run_id, job.task_id, moment)
         token = self._registry_run.set(registry_run)
         try:
-            session = self.sessions.run(admitted, wake)
+            with self.run_transitions.owned(run_id):
+                session = self.sessions.run(admitted, wake)
         finally:
             self._registry_run.reset(token)
         result = session.require_result()
@@ -833,6 +837,7 @@ class Dispatcher:
                 project=resident.project,
                 ref=job.task_id,
                 timeout_s=float(timeout_s),
+                event_log_path=event_log_path(self.emitter),
                 now=ev.utc_now_iso(moment),
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed task
