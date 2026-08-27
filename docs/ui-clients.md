@@ -52,38 +52,24 @@ must stream the response instead of buffering it, must not impose a timeout shor
 15-second SSE keepalive interval, and must pass query parameters unchanged. The client then
 uses the default empty `baseUrl`.
 
-Captured snapshots in `tests/fixtures/state-contract/` let the village and Observatory
-render identical state without a live backend. Run `sh tests/ui-contract.sh` before using a
-fixture in either client.
+Captured snapshots in `tests/fixtures/state-contract/` let clients render identical state
+without a live backend. Run `sh tests/ui-contract.sh` before using a fixture in a client.
 
-The checked-in read-only tracer bullet is available at `/observatory/` when Burrow serves
-the repository directly; the existing village remains at `/` and is also addressable at
-`/village/`. To point the experiment at a prefixed backend, open
-`/observatory/?backend=/burrow`. The Observatory renders residents, tasks, approvals,
-connection state, a filterable chronological feed of every retained per-agent history item,
-and selectable agent dossiers from complete snapshots only. It displays event evidence
-already carried by the snapshot but never reads `/events` or reduces that evidence into new
-domain state. Created residents (`villagers[].residency == "resident"`) have permanent pages
-at `/observatory/agents/<uuid>`, whether their manifest matched by agent ID or project. Those pages collect every
-agent-related field, task, routine, approval, artifact, journal, and retained history item in
-the current snapshot. Visitors do not receive permanent URLs. It contains no Steward write
-client.
+The Observatory is an external client maintained in
+[`0xCommanderKeen/observatory`](https://github.com/0xCommanderKeen/observatory). Follow that
+repository's development and deployment instructions; Burrow supplies only the authoritative
+`/state` and `/state/stream` read interfaces. Burrow does not serve `/observatory/`.
 
 ## Production
 
-Expose both clients and one backend under a single origin. This nginx shape serves the
-existing viewer at `/village/`, the Observatory at `/observatory/`, and
-the shared state transport under `/burrow/`:
+When hosting an external client under the same origin, proxy Burrow's state endpoints under
+`/burrow/`. This nginx shape serves Burrow's village at `/village/` and exposes the shared
+state transport for independently deployed clients:
 
 ```nginx
 location /village/ {
     alias /srv/burrow/viewer/;
     try_files $uri $uri/ /village/index.html;
-}
-
-location /observatory/ {
-    alias /srv/burrow/observatory/;
-    try_files $uri $uri/ /observatory/index.html;
 }
 
 location = /burrow/state {
@@ -107,7 +93,7 @@ location = /burrow/transport/status {
 }
 ```
 
-Both clients set `baseUrl: "/burrow"`. The proxy preserves the SSE body, event type, query
+External clients set `baseUrl: "/burrow"`. The proxy preserves the SSE body, event type, query
 string, and connection lifetime, so the transport retains keepalive, reconnection,
 generation, cursor, and reset semantics. Routes for Steward writes are deliberately absent
-from the Observatory client setup; the first UI lab remains read-only.
+from this read-only client setup.

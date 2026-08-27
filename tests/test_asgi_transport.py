@@ -11,7 +11,7 @@ import serve
 
 
 class ASGITransportContractTests(unittest.TestCase):
-    def test_both_ui_clients_are_served_side_by_side(self):
+    def test_village_is_served_and_removed_observatory_routes_are_not(self):
         with TestClient(serve.app) as client:
             village = client.get("/village/")
             observatory = client.get("/observatory/")
@@ -20,10 +20,10 @@ class ASGITransportContractTests(unittest.TestCase):
 
         self.assertEqual(village.status_code, 200)
         self.assertIn("Burrow", village.text)
-        self.assertEqual(observatory.status_code, 200)
-        self.assertIn("Burrow Observatory", observatory.text)
-        self.assertEqual(agent_page.status_code, 200)
-        self.assertIn("id=\"agent-page\"", agent_page.text)
+        self.assertEqual(observatory.status_code, 404)
+        self.assertNotIn("Burrow", observatory.text)
+        self.assertEqual(agent_page.status_code, 404)
+        self.assertNotIn("Burrow", agent_page.text)
         self.assertEqual(transport.status_code, 200)
         self.assertIn("createStateTransport", transport.text)
 

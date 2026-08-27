@@ -138,7 +138,7 @@ map of everything the fleet does.
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
-  residents.py hooks viewer observatory villagers | ssh
+  residents.py hooks viewer villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
   `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
@@ -154,7 +154,7 @@ map of everything the fleet does.
   retrieval remains an internal diagnostic and audit interface. The public UI
   read contract, checked-in OpenAPI, fixtures, and versioning policy are documented
   in [docs/state-contract.md](docs/state-contract.md).
-  Development proxies and side-by-side production client routes are documented in
+  Development proxies and external-client production state routing are documented in
   [docs/ui-clients.md](docs/ui-clients.md).
 - **Mac emitter** — the installed `burrow-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into

@@ -1212,13 +1212,6 @@ async def static_village(asset_path: str):
     return _static_file("viewer", asset_path)
 
 
-@app.get("/observatory/{asset_path:path}", include_in_schema=False)
-async def static_observatory(asset_path: str):
-    if asset_path.startswith("agents/"):
-        return _static_file("observatory", "index.html")
-    return _static_file("observatory", asset_path)
-
-
 @app.get("/{asset_path:path}", include_in_schema=False)
 async def static_viewer(asset_path: str):
     return _static_file("viewer", asset_path)
