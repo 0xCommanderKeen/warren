@@ -677,7 +677,8 @@
         },
         "file": {
           "default": "soul.md",
-          "description": "Soul body, relative to the manifest directory.",
+          "description": "Soul body: a file name beside the manifest, never a path.",
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
           "title": "File",
           "type": "string"
         }

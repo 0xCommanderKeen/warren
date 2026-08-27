@@ -192,6 +192,19 @@ WORKSPACE_PATH_PATTERN = r"""^/[^\s'"`$;|&<>(){}\[\]!*?\\]*$"""
 #: the other, which :func:`_check_tools_are_enforceable` refuses.
 BYPASS_PERMISSIONS = "bypassPermissions"
 
+#: ``soul.file`` is joined onto the manifest's own directory at three places — the
+#: validation read, the deploy bundle read, and the nursery's declare write — and
+#: ``pathlib`` semantics mean an absolute value replaces the base entirely while ``..``
+#: segments compose without normalisation. It was the one path component in a manifest
+#: with no pattern and no validator, in a module whose stated posture is that a value is
+#: data and never markup, so it was gated by review rather than by validation (steward
+#: #149). This closes it the way the others are closed: **a name, not a path**. No
+#: separator of either slash, no leading dot — which is what excludes ``..`` — and none of
+#: the whitespace, quotes, or shell metacharacters the deploy patterns already refuse.
+#: The archive entry name is the constant :data:`steward.deploy.SOUL_FILENAME`, so the
+#: remote layout never depended on this value; only which local file is read did.
+SOUL_FILE_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$"
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
 AGENT_ID_PATTERN = r"^[a-z0-9][a-z0-9._-]*:[A-Za-z0-9._:-]+$"
@@ -620,7 +633,8 @@ class SoulIdentity(_Model):
     )
     file: str = Field(
         default=DEFAULT_SOUL_FILENAME,
-        description="Soul body, relative to the manifest directory.",
+        pattern=SOUL_FILE_PATTERN,
+        description="Soul body: a file name beside the manifest, never a path.",
     )
 
 

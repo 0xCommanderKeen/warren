@@ -59,8 +59,15 @@ soul:
   char: Monk           # burrow sprite key
   accent: "#a68a4f"    # hex, #rrggbb
   role: life bot       # one line
-  file: soul.md        # optional; the soul body, relative to the manifest
+  file: soul.md        # optional; a file name beside the manifest, never a path
 ```
+
+`file` is a **name**, not a path: no `/` or `\`, no leading dot (which is what excludes
+`..`), and none of the whitespace or shell metacharacters the `deploy` patterns refuse.
+It is joined onto the manifest's own directory at three places — the validation read, the
+deploy bundle read, and the nursery's declare write — and `pathlib` would let an absolute
+value replace that directory entirely. The soul always ships to the host as `soul.md`
+whatever this says, so the pattern only decides which local file is read.
 
 ## `charter` — what the resident is for
 

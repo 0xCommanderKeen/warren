@@ -382,6 +382,35 @@ def test_secret_in_the_soul_body_is_rejected(write_resident: ResidentWriter) -> 
 # --------------------------------------------------------------------------------- soul file
 
 
+@pytest.mark.parametrize(
+    "value",
+    ["../secrets.md", "/etc/passwd", "souls/hob.md", "~/soul.md", "..", "a soul.md"],
+)
+def test_soul_file_is_a_name_and_never_a_path(
+    write_resident: ResidentWriter, value: str
+) -> None:
+    """It is joined onto the manifest's directory at three places, and pathlib obliges.
+
+    An absolute value replaces the base entirely and `..` composes without normalisation,
+    so this was the one path component in a manifest gated by review rather than by
+    validation (steward #149).
+    """
+    data = valid_manifest()
+    data["soul"]["file"] = value
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert problem_for(result, "soul.file")
+
+
+def test_an_ordinary_soul_file_name_still_passes(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["soul"]["file"] = "Testy-soul_2.md"
+    resident = write_resident(data)
+    (resident.parent / "Testy-soul_2.md").write_text(VALID_SOUL, encoding="utf-8")
+    (resident.parent / "soul.md").unlink()
+    assert m.validate_manifest(resident).ok
+
+
 def test_voice_cap_is_enforced(write_resident: ResidentWriter) -> None:
     soul = VALID_SOUL.replace("Flat, factual, short.", "x" * (m.VOICE_MAX_CHARS + 1))
     result = m.validate_manifest(write_resident(soul=soul))
