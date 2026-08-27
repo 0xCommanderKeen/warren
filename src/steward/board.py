@@ -689,7 +689,19 @@ class Dispatcher:
             )
         # The deadline this session actually gets, read once: the run registry is judged
         # against it, and the runner is given it.
-        timeout_s = admitted.timeout_for(declared_s)
+        try:
+            timeout_s = admitted.timeout_for(declared_s)
+        except Exception as exc:  # noqa: BLE001 - an unreadable budget fails closed
+            reason = f"budget unreadable: {type(exc).__name__}: {exc}"
+            log.warning("%s: could not resolve the run timeout: %s", resident.id, exc)
+            return self._record(
+                resident,
+                job,
+                RunResult(outcome=Outcome.FAILED, error=reason),
+                moment,
+                (),
+                run_id=run_id,
+            )
         watched = self._open_run(resident, job, run_id, timeout_s, moment, owner_token)
 
         ownership = (

@@ -957,7 +957,17 @@ class Scheduler:
         )
         # The deadline the session actually gets, read once: the registry is judged
         # against it, and the runner is given it.
-        timeout_s = admission.timeout_for(item.routine.timeout_s)
+        try:
+            timeout_s = admission.timeout_for(item.routine.timeout_s)
+        except Exception as exc:  # noqa: BLE001 - an unreadable budget refuses safely
+            reason = f"budget unreadable: {type(exc).__name__}: {exc}"
+            log.warning("%s: could not resolve the run timeout: %s", item.key, exc)
+            return FireReport(
+                scheduled=item,
+                run_id=run_id,
+                fired=False,
+                skipped_reason=reason,
+            )
         owner_token = new_owner_token()
         # The event first, then the row. A crash between the two leaves a run steward
         # cannot find, which is where this stood before the registry existed; the other

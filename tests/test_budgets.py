@@ -813,6 +813,45 @@ def test_a_guard_that_cannot_be_read_stops_the_run(
     assert "budget unreadable" in (report.skipped_reason or "")
 
 
+def test_a_guard_that_cannot_resolve_a_timeout_stops_the_run(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """An unreadable timeout cap refuses rather than escaping ``fire`` or running uncapped."""
+
+    class Broken:
+        def allow(
+            self,
+            manifest: m.ResidentManifest,  # noqa: ARG002
+            now: datetime | None = None,  # noqa: ARG002
+        ) -> str | None:
+            return None
+
+        def timeout_for(self, manifest: m.ResidentManifest, declared_s: int) -> int:  # noqa: ARG002
+            raise RuntimeError("the timeout ledger is on fire")
+
+        def record(self, manifest: m.ResidentManifest, **_: object) -> object:  # noqa: ARG002
+            return None
+
+    resident = load_manifest(write_resident(budget_manifest()))
+    runner = ScriptedRunner()
+    sink = ev.NullEmitter()
+    engine = s.Scheduler(
+        [s.ScheduledRoutine(resident=resident, routine=resident.manifest.routines[0])],
+        emitter=sink,
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        guard=Broken(),
+    )
+
+    report = engine.fire(engine.scheduled[0], now=NOON)
+
+    assert not report.fired
+    assert "budget unreadable" in (report.skipped_reason or "")
+    assert runner.requests == []
+    assert sink.events == []
+
+
 def test_a_broken_ledger_does_not_fail_the_routine(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
