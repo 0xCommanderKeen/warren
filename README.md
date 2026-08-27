@@ -20,7 +20,7 @@ pnpm install
 pnpm dev
 ```
 
-The initial screen deliberately uses the vendored fixture. A later transport slice can replace that import with either allowed endpoint without changing the parser or renderer.
+The initial screen deliberately uses the vendored fixture. A later transport slice can replace that import with either allowed endpoint without changing the parser or renderer. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. Placeholder SVG tiles keep the asset pipeline replaceable while the scene architecture settles.
 
 ## Verification
 

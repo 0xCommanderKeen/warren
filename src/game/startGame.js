@@ -1,15 +1,18 @@
 import Phaser from "phaser";
+import { createVillageScene } from "./VillageScene.js";
 
-export function startGame(parent) {
+export function startGame(parent, snapshot) {
   return new Phaser.Game({
     type: Phaser.AUTO,
     parent,
-    width: 1280,
-    height: 720,
+    width: 640,
+    height: 384,
     backgroundColor: "#d8c59e",
     scale: {
       mode: Phaser.Scale.RESIZE,
       autoCenter: Phaser.Scale.CENTER_BOTH,
     },
+    pixelArt: true,
+    scene: [createVillageScene(snapshot)],
   });
 }
