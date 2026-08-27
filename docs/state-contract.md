@@ -14,8 +14,9 @@ versioned snapshots; they do not read or reduce the event log.
 
 The checked-in [OpenAPI document](openapi.json) is the machine-readable contract. The
 complete examples in `tests/fixtures/state-contract/` are portable contract fixtures.
-Run `sh tests/ui-contract.sh` in this repository, or run a prospective client's parser
-against those fixtures, before integrating a UI.
+Clients vendor those fixtures and check their copies for drift on a schedule. Burrow's CI
+does not install, run, or otherwise verify any client; each client is responsible for
+testing its parser against its vendored fixture.
 
 `GET /events` is an internal diagnostic and audit interface. It is deliberately absent
 from OpenAPI and is not a UI contract. `POST /events` is the authenticated emitter ingest
@@ -35,6 +36,25 @@ contract, not a UI read API.
   breaking shape under an existing version.
 - Changes to `docs/openapi.json` and the representative fixtures are reviewed like code.
   The contract test fails when runtime OpenAPI drifts from the checked-in document.
+
+The checked-in [state-shape binding](state-shape.json) fingerprints `VillageState` and
+only the wire models reachable from it. Its canonical JSON representation ignores schema
+documentation and object-key order, so route, prose, formatting, and unrelated OpenAPI
+changes do not move the fingerprint. The Python contract test compares that fingerprint
+with the current snapshot models. When the shape changes, the author must deliberately
+choose one of these review-visible responses:
+
+- bump `SCHEMA_VERSION` when an unupdated client cannot safely consume the new shape; or
+- for a compatible additive change, run
+  `uv run python scripts/export_state_contract.py` and review the re-recorded fingerprint.
+
+Run the exporter after either choice so the artifact always binds the current shape to its
+current version.
+
+Contract fixtures must carry the current `SCHEMA_VERSION`; a version bump therefore fails
+until every checked-in fixture has been updated. This guard is Burrow's compatibility
+enforcement mechanism after clients leave this repository. The fixtures remain portable
+test data, not a substitute for the version-to-shape binding.
 
 Generation orders published snapshots within a running cursor namespace. Cursor identifies
 the durable log position and namespace. Neither is a schema-version substitute.
