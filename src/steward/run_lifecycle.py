@@ -20,6 +20,15 @@ from steward import events as ev
 log = logging.getLogger("steward.run_lifecycle")
 RUN_HEARTBEAT_EVERY_S = 15.0
 
+#: How long a run's ownership lease survives without a heartbeat.
+#:
+#: One number with one home, because three things read it and they must agree: the watchdog
+#: buries a run whose heartbeat went stale by this much (:data:`steward.watchdog.DEFAULT_GRACE_S`
+#: is this constant), and a session credential is accepted only while its run could still
+#: be renewed (steward #41). A credential with its own expiry would be a second clock, and
+#: the run lifecycle is already the one that decides when a session is over.
+RUN_LEASE_GRACE_S = 120.0
+
 
 class RunStore(Protocol):
     """Storage operations needed by run-close arbitration."""

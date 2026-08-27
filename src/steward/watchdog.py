@@ -58,7 +58,7 @@ from steward.approvals import NeedsHuman
 from steward.board import Dispatcher, DispatchRun
 from steward.budgets import BudgetGuard
 from steward.manifest import Resident, active_residents, validate_path
-from steward.run_lifecycle import RunTransitions
+from steward.run_lifecycle import RUN_LEASE_GRACE_S, RunTransitions
 from steward.runners import CommandRun, run_argv
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
 from steward.store import (
@@ -95,7 +95,11 @@ log = logging.getLogger("steward.watchdog")
 #: purpose: a session killed at its timeout still has to be reaped, its output read, and
 #: its event emitted, and burying a run that was two seconds from reporting would be its
 #: own kind of lie.
-DEFAULT_GRACE_S = 120.0
+#:
+#: It is the ownership lease, so it is named by the seam that owns it: a run whose heartbeat
+#: is this stale is a run whose owner can no longer renew it, which is also when a session
+#: credential minted for it stops working (steward #41).
+DEFAULT_GRACE_S = RUN_LEASE_GRACE_S
 
 #: The bounded restart schedule, in seconds, and the number of attempts it implies.
 #: Widely spaced because the failures worth restarting through are the transient ones; a

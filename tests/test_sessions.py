@@ -10,6 +10,7 @@ from conftest import ResidentWriter, valid_manifest
 from steward import sessions as sessions_module
 from steward.manifest import ResidentManifest, load_manifest
 from steward.runners import Outcome, Runner, RunRequest, RunResult
+from steward.session_auth import SESSION_TOKEN_ENV
 from steward.sessions import (
     Admission,
     DelegatedWake,
@@ -722,3 +723,49 @@ def test_a_delegated_letter_and_a_rehearsal_use_the_same_seam_without_dry_run_wr
     assert guard.records[0]["kind"] == "delegated"
     assert hooks.harvested[-1]["parent_task_id"] == "letter-1"
     assert (tmp_path / ".claude" / "skills" / "daily-summary" / "SKILL.md").is_file()
+
+
+# ------------------------------------------- scoped per-session credentials (steward #41)
+
+
+def test_every_kind_of_wake_names_the_credential_the_same_way(write_resident) -> None:
+    """A routine session and a board session must not look for it under different names."""
+    resident = load_manifest(write_resident())
+    routine = resident.manifest.routines[0]
+    wakes = (
+        RoutineWake(routine, "run-1", "schedule", session_credential="steward-session-abc"),
+        TaskWake(
+            task_id="t1",
+            title="t",
+            detail="",
+            timeout_s=60,
+            origin="task:t1",
+            run_id="run-1",
+            required_skills=(),
+            session_credential="steward-session-abc",
+        ),
+        DelegatedWake(
+            task_id="t1",
+            title="t",
+            detail="",
+            timeout_s=60,
+            origin="task:t1",
+            run_id="run-1",
+            delegated_by="somebody",
+            route="inbox",
+            session_credential="steward-session-abc",
+        ),
+    )
+
+    for wake in wakes:
+        assert wake.environment(resident)[SESSION_TOKEN_ENV] == "steward-session-abc"
+
+
+def test_a_session_with_no_credential_is_told_nothing_rather_than_nothing_useful(
+    write_resident,
+) -> None:
+    """``STEWARD_SESSION_TOKEN=""`` reads like a revoked credential, not an unregistered run."""
+    resident = load_manifest(write_resident())
+    wake = RoutineWake(resident.manifest.routines[0], "run-1", "schedule")
+
+    assert SESSION_TOKEN_ENV not in wake.environment(resident)

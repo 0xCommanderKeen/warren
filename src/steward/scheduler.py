@@ -60,7 +60,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -84,6 +84,7 @@ from steward.runners import (
     check_runner,
 )
 from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE, validate_kind_trigger
+from steward.session_auth import new_session_credential
 from steward.sessions import (
     Refusal,
     ResidentSessions,
@@ -207,6 +208,8 @@ class RunRegistry(Protocol):
         timeout_s: float = 0.0,
         event_log_path: str = "",
         owner_token: str = "",
+        resident_id: str = "",
+        session_credential: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started, and return whether this call opened it."""
@@ -973,12 +976,20 @@ class Scheduler:
                 skipped_reason=reason,
             )
         owner_token = new_owner_token()
+        # Minted beside the owner token and used in the opposite direction: that fences
+        # steward's own writes about this run, this is what the run itself may present at
+        # the API (steward #41). A rehearsal returned above, so nothing mints for one.
+        credential = new_session_credential()
         # The event first, then the row. A crash between the two leaves a run steward
         # cannot find, which is where this stood before the registry existed; the other
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
         # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
-        watched = self._open_run(item, run_id, timeout_s, trigger, moment, owner_token)
+        watched = self._open_run(item, run_id, timeout_s, trigger, moment, owner_token, credential)
+        # Only a registered run carries the digest the credential is checked against, so a
+        # run the registry did not take is told nothing rather than handed a dud.
+        if watched:
+            wake = replace(wake, session_credential=credential)
 
         ownership = (
             self.run_transitions.owned(run_id, owner_token)
@@ -1034,6 +1045,7 @@ class Scheduler:
         trigger: str,
         moment: datetime,
         owner_token: str = "",
+        session_credential: str = "",
     ) -> bool:
         """Write this run into the registry. Never raises: a lost row is not a lost run."""
         if self.registry is None:
@@ -1049,6 +1061,8 @@ class Scheduler:
                 timeout_s=float(timeout_s),
                 event_log_path=event_log_path(self.emitter),
                 owner_token=owner_token,
+                resident_id=item.resident.id,
+                session_credential=session_credential,
                 now=ev.utc_now_iso(moment),
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine

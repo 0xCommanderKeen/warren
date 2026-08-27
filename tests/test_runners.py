@@ -11,6 +11,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -956,7 +957,7 @@ def child_env(
     tmp_path: Path,
     *,
     request: r.RunRequest | None = None,
-    kind: str = "claude",
+    kind: Literal["claude", "codex"] = "claude",
 ) -> dict[str, str]:
     """Launch a real stub and return the environment it was actually given."""
     stub_bin(kind, ENV_DUMP_STUB)
@@ -1024,14 +1025,21 @@ def test_a_session_sees_only_the_allowlist_and_what_steward_chose(
 def test_a_session_finds_its_brains_own_credential(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A session that cannot buy tokens is not a bounded session, it is a broken one."""
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "the-session-fuel")
-    monkeypatch.setenv("OPENAI_API_KEY", "somebody-elses-fuel")
+    """A session that cannot buy tokens is not a bounded session, it is a broken one.
 
-    observed = child_env(stub_bin, tmp_path)
+    And each brain gets only its own: the provider credential is the session's fuel, so it
+    passes, but there is no reason a claude session should be holding an OpenAI key.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-fuel")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-fuel")
 
-    assert observed["ANTHROPIC_API_KEY"] == "the-session-fuel"
-    assert "OPENAI_API_KEY" not in observed, "a claude session has no use for it"
+    claude = child_env(stub_bin, tmp_path)
+    codex = child_env(stub_bin, tmp_path, kind="codex")
+
+    assert claude["ANTHROPIC_API_KEY"] == "anthropic-fuel"
+    assert "OPENAI_API_KEY" not in claude
+    assert codex["OPENAI_API_KEY"] == "openai-fuel"
+    assert "ANTHROPIC_API_KEY" not in codex
 
 
 def test_request_env_wins_over_the_launching_process(

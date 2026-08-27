@@ -19,6 +19,7 @@ from steward import watchdog as w
 from steward.manifest import Resident, ResidentManifest, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
+from steward.session_auth import SESSION_CREDENTIAL_PREFIX, SESSION_TOKEN_ENV
 from steward.skills import SkillLibrary, library_for
 from steward.store import JobRecord, Store
 from steward.transitions.approval import ApprovalTransitions
@@ -1540,3 +1541,51 @@ def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
     retry = next(run for run in store.open_runs() if run.started_at == ev.utc_now_iso(retried_at))
     assert retry.run_id in {run.run_id for run in stale}, "the retry is found, not silenced"
     assert first_run_id != retry.run_id, "the predecessor's terminal cannot answer the retry"
+
+
+# ------------------------------------------- scoped per-session credentials (steward #41)
+
+
+def test_a_claimed_task_session_is_handed_a_credential_naming_its_resident(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """Per attempt, not per task: the credential is the identity of one session."""
+    runner = ScriptedRunner()
+    store.post_job(title="Read the mail")
+
+    make_dispatcher(runner=runner, clock=lambda: NOW).dispatch(NOW)
+
+    credential = runner.requests[0].env[SESSION_TOKEN_ENV]
+    assert credential.startswith(SESSION_CREDENTIAL_PREFIX)
+    assert store.open_run(
+        run_id="still-open",
+        kind="routine",
+        trigger="schedule",
+        agent_id="claude-code:test-agent",
+        resident_id="test-agent",
+        session_credential=credential,
+    )
+    principal = store.session_principal(credential, fresh_since="")
+    assert principal is not None
+    assert principal.resident_id == "test-agent"
+
+
+def test_two_attempts_at_one_task_are_two_credentials(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A task claimed, dropped on a dead lease and re-claimed is two sessions.
+
+    Sharing one credential across attempts would let a dead session's leaked credential
+    keep working for the retry, which is exactly the fencing mistake ``owner_token``
+    already exists to avoid.
+    """
+    runner = ScriptedRunner()
+    store.post_job(title="Read the mail")
+    make_dispatcher(runner=runner, clock=lambda: NOW).dispatch(NOW)
+    store.post_job(title="Read the mail again")
+    later = NOW + timedelta(hours=1)
+    make_dispatcher(runner=runner, clock=lambda: later).dispatch(later)
+
+    credentials = {request.env[SESSION_TOKEN_ENV] for request in runner.requests}
+    assert len(runner.requests) == 2
+    assert len(credentials) == 2

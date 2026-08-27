@@ -49,7 +49,7 @@ reconstructible from those four events alone.
 import contextlib
 import logging
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cached_property
 from pathlib import Path
@@ -73,6 +73,7 @@ from steward.runners import (
     build_runner,
     check_runner,
 )
+from steward.session_auth import new_session_credential
 from steward.sessions import (
     Admission,
     DelegatedWake,
@@ -642,10 +643,16 @@ class Dispatcher:
         owns_admission = admission is None
         run_id = new_id()
         owner_token = new_owner_token()
+        # Two per-run secrets, minted together and used in opposite directions: the owner
+        # token fences steward's own writes about this attempt, and the session credential
+        # is what the attempt itself may present at the API (steward #41).
+        credential = new_session_credential()
         admitted = admission or self.sessions.admit(resident, now=moment)
         if isinstance(admitted, Refusal):
             result = RunResult(outcome=Outcome.FAILED, error=admitted.reason)
-            watched = self._open_run(resident, job, run_id, declared_s, moment, owner_token)
+            watched = self._open_run(
+                resident, job, run_id, declared_s, moment, owner_token, credential
+            )
             ownership = (
                 self.run_transitions.owned(run_id, owner_token, task_attempt=True)
                 if watched
@@ -705,7 +712,11 @@ class Dispatcher:
                 (),
                 run_id=run_id,
             )
-        watched = self._open_run(resident, job, run_id, timeout_s, moment, owner_token)
+        watched = self._open_run(resident, job, run_id, timeout_s, moment, owner_token, credential)
+        # Only a registered run has the digest that makes the credential mean anything, so
+        # an unwatched attempt is told nothing rather than handed a credential that 401s.
+        if watched:
+            wake = replace(wake, session_credential=credential)
 
         ownership = (
             self.run_transitions.owned(run_id, owner_token, task_attempt=True)
@@ -813,6 +824,7 @@ class Dispatcher:
         timeout_s: int,
         moment: datetime,
         owner_token: str = "",
+        session_credential: str = "",
     ) -> bool:
         """Write this session into steward's run registry. Never raises.
 
@@ -845,6 +857,8 @@ class Dispatcher:
                 timeout_s=float(timeout_s),
                 event_log_path=event_log_path(self.emitter),
                 owner_token=owner_token,
+                resident_id=resident.id,
+                session_credential=session_credential,
                 now=ev.utc_now_iso(moment),
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed task

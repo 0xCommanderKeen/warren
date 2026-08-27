@@ -11,6 +11,7 @@ import pytest
 from steward import health, scheduler
 from steward.events import utc_now_iso
 from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE
+from steward.session_auth import credential_digest, new_session_credential
 from steward.store import (
     ORIGIN_UNATTRIBUTED,
     ApprovalRecord,
@@ -1254,3 +1255,111 @@ def test_closing_a_run_nobody_opened_changes_nothing(store: Store) -> None:
     """A close with no row is a no-op, not a row invented to close."""
     assert not store.close_run("never-started")
     assert store.open_runs() == []
+
+
+# ------------------------------------------- scoped per-session credentials (steward #41)
+
+
+def credentialed(store: Store, *, run_id: str = "r1", now: str = LATER) -> str:
+    """Open a live run holding one freshly minted credential, and return the plaintext."""
+    credential = new_session_credential()
+    assert store.open_run(
+        run_id=run_id,
+        kind="routine",
+        trigger=TRIGGER_SCHEDULE,
+        agent_id="claude-code:hob",
+        project="household",
+        ref="daily-summary",
+        resident_id="hob",
+        session_credential=credential,
+        now=now,
+    )
+    return credential
+
+
+def test_a_credential_resolves_to_the_resident_whose_run_it_is(store: Store) -> None:
+    """The credential *is* the identity: the resident is read from the row, not a body."""
+    credential = credentialed(store)
+
+    principal = store.session_principal(credential, fresh_since=EARLY)
+
+    assert principal is not None
+    assert principal.resident_id == "hob"
+    assert principal.agent_id == "claude-code:hob"
+    assert principal.run_id == "r1"
+    assert principal.kind == "routine"
+    assert principal.ref == "daily-summary"
+
+
+def test_only_the_digest_is_written(store: Store) -> None:
+    """A copy of steward.db must not yield live credentials."""
+    credential = credentialed(store)
+
+    (row,) = store._conn.execute("SELECT * FROM open_runs").fetchall()
+
+    assert credential not in set(dict(row).values())
+    assert row["session_credential_sha256"] == credential_digest(credential)
+
+
+def test_a_closed_run_authenticates_nothing(store: Store) -> None:
+    credential = credentialed(store)
+    assert store.close_run("r1")
+
+    assert store.session_principal(credential, fresh_since=EARLY) is None
+
+
+def test_a_chosen_terminal_fact_ends_the_credential_before_the_close(store: Store) -> None:
+    """It asks exactly what ``renew_run`` asks, and that refuses a terminal run too."""
+    credential = credentialed(store)
+    assert store.claim_run_terminal("r1", event="{}", event_id="t:r1", owner_token="")
+
+    assert not store.renew_run("r1", owner_token="")
+    assert store.session_principal(credential, fresh_since=EARLY) is None
+
+
+def test_a_stale_lease_ends_the_credential_before_the_watchdog_sweeps(store: Store) -> None:
+    """No second clock: the freshness bound is the run's own ownership lease."""
+    credential = credentialed(store, now=EARLY)
+
+    assert store.session_principal(credential, fresh_since=LATER) is None
+    assert store.open_runs(), "and nobody has swept the row yet"
+
+
+def test_a_credential_nobody_minted_is_nobody(store: Store) -> None:
+    credentialed(store)
+
+    assert store.session_principal(new_session_credential(), fresh_since=EARLY) is None
+
+
+def test_no_credential_is_not_a_master_key(store: Store) -> None:
+    """Every run opened without one stores the empty digest; it must never match."""
+    assert store.open_run(
+        run_id="r1", kind="routine", trigger=TRIGGER_SCHEDULE, agent_id="a:hob", now=LATER
+    )
+
+    assert store.session_principal("", fresh_since=EARLY) is None
+
+
+def test_a_task_attempt_credential_dies_with_the_binding_that_lost_the_race(
+    store: Store,
+) -> None:
+    """An inserted run is rolled back when the claim stamp no longer matches.
+
+    Its credential has to go with it: one that outlived a run nobody is watching would
+    authenticate a session steward never started.
+    """
+    credential = new_session_credential()
+
+    assert not store.open_task_run(
+        task_id="no-such-task",
+        lease=EARLY,
+        run_id="r1",
+        kind="task",
+        agent_id="claude-code:hob",
+        owner_token="owner",
+        resident_id="hob",
+        session_credential=credential,
+    )
+
+    assert store.open_runs() == []
+    assert store.session_principal(credential, fresh_since=EARLY) is None

@@ -31,7 +31,10 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
 - ``open_runs`` — one row per session steward has started and not yet closed. The
   watchdog reads this to find runs that never reported back, instead of reading the
   undelivered-event log, which can only answer for the host that fired them and only
-  while burrow was unreachable (steward #39).
+  while burrow was unreachable (steward #39). It is also where a session's own scoped
+  credential lives, as a digest: the run's lease is the credential's expiry, so
+  :meth:`Store.session_principal` asks exactly the question ``renew_run`` asks
+  (steward #41).
 """
 
 import json
@@ -61,6 +64,7 @@ from steward.runs import (
     TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE,
 )
 from steward.scheduler import default_state_path
+from steward.session_auth import SessionPrincipal, credential_digest
 
 __all__ = [
     "APPROVAL_DECISIONS",
@@ -254,6 +258,8 @@ CREATE TABLE IF NOT EXISTS open_runs (
     event_log_path TEXT NOT NULL DEFAULT '',
     evidence_version INTEGER NOT NULL DEFAULT 1,
     owner_token TEXT NOT NULL DEFAULT '',
+    resident_id TEXT NOT NULL DEFAULT '',
+    session_credential_sha256 TEXT NOT NULL DEFAULT '',
     terminal_event TEXT,
     terminal_event_id TEXT,
     terminal_claimed_at TEXT,
@@ -318,6 +324,12 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
     },
     "open_runs": {
         "trigger": "TEXT NOT NULL DEFAULT ''",
+        # Who the session belongs to, and what it may prove that with (steward #41). The
+        # resident id rather than only ``agent_id``, because ``agent_id`` is burrow's join
+        # key and two manifests may declare the same one, while the sender of a delegated
+        # letter has to resolve to exactly one manifest.
+        "resident_id": "TEXT NOT NULL DEFAULT ''",
+        "session_credential_sha256": "TEXT NOT NULL DEFAULT ''",
         "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
         "event_log_path": "TEXT NOT NULL DEFAULT ''",
         "evidence_version": "INTEGER NOT NULL DEFAULT 0",
@@ -342,6 +354,8 @@ CREATE INDEX IF NOT EXISTS requests_approval
     ON requests (approval_id, outcome);
 CREATE INDEX IF NOT EXISTS jobs_lineage
     ON jobs (parent_task_id);
+CREATE INDEX IF NOT EXISTS open_runs_session_credential
+    ON open_runs (session_credential_sha256);
 """
 
 
@@ -770,6 +784,9 @@ class OpenRun:
     event_log_path: str = ""
     evidence_version: int = 0
     owner_token: str = ""
+    #: Which resident's session this is. ``agent_id`` is burrow's join key and need not be
+    #: unique across manifests; this is the id a delegated letter's sender resolves to.
+    resident_id: str = ""
     terminal_event: str | None = None
     terminal_event_id: str | None = None
     terminal_claimed_at: str | None = None
@@ -797,6 +814,7 @@ class OpenRun:
             event_log_path=row["event_log_path"],
             evidence_version=row["evidence_version"],
             owner_token=row["owner_token"],
+            resident_id=row["resident_id"],
             terminal_event=row["terminal_event"],
             terminal_event_id=row["terminal_event_id"],
             terminal_claimed_at=row["terminal_claimed_at"],
@@ -2372,6 +2390,8 @@ class Store:
         timeout_s: float = 0.0,
         event_log_path: str = "",
         owner_token: str = "",
+        resident_id: str = "",
+        session_credential: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started. Returns whether this call opened the row.
@@ -2387,14 +2407,20 @@ class Store:
         dead lease and re-claimed opened a row the first attempt had already closed, the
         insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
         thing the session was about goes; several rows may share one.
+
+        ``session_credential`` is the plaintext, and only its digest is written: a copy of
+        this database must not yield live credentials. Hashing here rather than in the
+        caller means the mint and the check share one definition of what is hashed.
         """
         validate_kind_trigger(kind, trigger)
         with self._lock, self._conn:
             opened_at = now or utc_now_iso()
             cursor = self._conn.execute(
                 "INSERT INTO open_runs (run_id, kind, trigger, agent_id, project, ref, timeout_s, "
-                "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                "started_at, heartbeat_at, event_log_path, evidence_version, owner_token, "
+                "resident_id, session_credential_sha256) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) "
+                "ON CONFLICT(run_id) DO NOTHING",
                 (
                     run_id,
                     kind,
@@ -2407,6 +2433,8 @@ class Store:
                     opened_at,
                     event_log_path,
                     owner_token,
+                    resident_id,
+                    credential_digest(session_credential),
                 ),
             )
             return cursor.rowcount == 1
@@ -2424,6 +2452,8 @@ class Store:
         timeout_s: float = 0.0,
         event_log_path: str = "",
         owner_token: str,
+        resident_id: str = "",
+        session_credential: str = "",
         now: str | None = None,
     ) -> bool:
         """Open and bind a task attempt in one transaction.
@@ -2431,14 +2461,20 @@ class Store:
         The claim stamp fences the binding.  A swept/retried job cannot accidentally be
         attached to the late predecessor, and an inserted run is rolled back when the
         binding loses that race.
+
+        ``session_credential`` is stored as a digest, exactly as in :meth:`open_run`, and
+        rolled back with the row when the binding loses that race — a credential for a run
+        that never opened would authenticate a session nobody is watching.
         """
         moment = now or utc_now_iso()
         try:
             with self._lock, self._conn:
                 opened = self._conn.execute(
                     "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
-                    "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                    "started_at, heartbeat_at, event_log_path, evidence_version, owner_token, "
+                    "resident_id, session_credential_sha256) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) "
+                    "ON CONFLICT(run_id) DO NOTHING",
                     (
                         run_id,
                         kind,
@@ -2450,6 +2486,8 @@ class Store:
                         moment,
                         event_log_path,
                         owner_token,
+                        resident_id,
+                        credential_digest(session_credential),
                     ),
                 )
                 if opened.rowcount != 1:
@@ -2580,6 +2618,42 @@ class Store:
                 (moment, moment, run_id, event_id),
             )
             return cursor.rowcount == 1
+
+    def session_principal(self, credential: str, *, fresh_since: str) -> SessionPrincipal | None:
+        """Return who a session credential is, or ``None`` if it is not a live one.
+
+        The condition is deliberately the same one :meth:`renew_run` renews under — the run
+        is open, no terminal fact has been chosen for it, and its ownership heartbeat is no
+        older than ``fresh_since``. So there is no second clock and no second definition of
+        "this session is over": a credential works exactly while its run's owner could
+        still renew the lease, and stops the moment the session closes, times out, or the
+        lease goes stale — whether or not the watchdog has swept yet (steward #41).
+
+        Looked up by digest, so the plaintext is never compared against anything on disk.
+        An empty credential is refused before the query: every row that never got one
+        stores the empty digest, and matching those would make "no credential" a master
+        key.
+        """
+        digest = credential_digest(credential)
+        if not digest:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT run_id, resident_id, agent_id, project, kind, ref FROM open_runs "
+                "WHERE session_credential_sha256 = ? AND closed_at IS NULL "
+                "AND terminal_event IS NULL AND heartbeat_at > ?",
+                (digest, fresh_since),
+            ).fetchone()
+        if row is None:
+            return None
+        return SessionPrincipal(
+            run_id=row["run_id"],
+            resident_id=row["resident_id"],
+            agent_id=row["agent_id"],
+            project=row["project"],
+            kind=row["kind"],
+            ref=row["ref"],
+        )
 
     def close_run(self, run_id: str, *, now: str | None = None) -> bool:
         """Record that a session reported back. Returns whether this call closed the row.

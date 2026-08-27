@@ -37,7 +37,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
@@ -73,6 +73,7 @@ from steward.nursery import (
     NurseryReport,
     raise_resident,
 )
+from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.scheduler import (
     TRIGGER_MANUAL,
@@ -82,6 +83,11 @@ from steward.scheduler import (
     SchedulerState,
     default_state_path,
     scheduler_liveness,
+)
+from steward.session_auth import (
+    SESSION_TOKEN_ENV,
+    SessionPrincipal,
+    looks_like_session_credential,
 )
 from steward.sessions import RunnerFactory
 from steward.skills import SkillLibrary, effective_skills, library_for
@@ -574,21 +580,154 @@ def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Pa
 # --------------------------------------------------------------------------------------
 
 
-def _auth_dependency(token: str | None) -> Callable[[Request], None]:
-    """Build the bearer-token gate every endpoint hangs off."""
+@dataclass(frozen=True, slots=True)
+class Caller:
+    """Who is on the other end of one request.
+
+    Two kinds, and the difference is the whole of steward #41. A **human** presents
+    ``STEWARD_TOKEN``, which is a master key with no principal behind it — one shared
+    secret, one constant-time compare — and may reach everything. A **session** presents
+    the credential minted for its own run, which *is* a principal: it names a resident,
+    dies with the run, and reaches only what a session legitimately needs.
+
+    Open mode (``--allow-open``) has no token to compare, so every caller is the human one
+    and none of this applies. That is not a gap this class can close: a session running
+    against an open steward can call any route with no header at all.
+    """
+
+    session: SessionPrincipal | None = None
+
+    @property
+    def is_session(self) -> bool:
+        """Whether this request came from a resident's own session."""
+        return self.session is not None
+
+    def require_session(self) -> SessionPrincipal:
+        """Return the principal, for a path that has already established there is one."""
+        if self.session is None:  # pragma: no cover — guarded by :attr:`is_session`
+            raise ValueError("this caller is not a session")
+        return self.session
+
+
+HUMAN = Caller()
+
+#: Methods a session credential may use on any route. Reads only.
+SESSION_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+#: The write paths a session credential may reach, exactly.
+#:
+#: An allowlist, so a route added later is refused until somebody decides otherwise —
+#: the opposite way round from a denylist, where a new write path would be session-reachable
+#: the moment it was merged and nobody would notice.
+#:
+#: It is a short list because the write surface a session actually wants is small. There is
+#: no endpoint to *raise* an approval at all — the routes are ``GET /approvals``,
+#: ``GET /approvals/{id}`` and the human-only ``POST /approvals/{id}`` — so raising stays on
+#: the block and CLI path either way. This credential buys denial and identity, not reach.
+SESSION_WRITE_PATHS = frozenset({"/delegate"})
+
+#: Why a particular refusal is the one it is. Generic prose would tell a session it may not
+#: write; these say what the act *is*, which is the part worth knowing: these three are
+#: human acts, and a session that could perform them would be answering its own knock,
+#: declaring its own colleagues, or firing its own work.
+#: **Most specific first**, and the first match wins: the routine-fire path is
+#: ``/residents/{id}/routines/{id}/run``, so a ``/residents`` fragment ahead of
+#: ``/routines/`` would tell a session it had tried to declare a resident.
+_SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
+    (
+        "/approvals/",
+        (
+            "deciding an approval is the human end of the escalation boundary; a session "
+            "that could decide would be answering its own knock"
+        ),
+    ),
+    (
+        "/routines/",
+        (
+            "firing a routine is a human act; a session's own work arrives through the "
+            "board and its inbox"
+        ),
+    ),
+    (
+        "/residents",
+        ("declaring a resident is a human act; a session may not add to the fleet it is part of"),
+    ),
+)
+
+
+def _session_refusal(path: str) -> str:
+    """Name the act a session credential was refused, as specifically as steward can."""
+    for fragment, reason in _SESSION_REFUSALS:
+        if fragment in path:
+            return reason
+    return "this write path is not one a session credential reaches"
+
+
+def _presented_bearer(headers: Sequence[tuple[bytes, bytes]]) -> str:
+    """Return the single presented bearer value, or ``""``.
+
+    Exactly one ``Authorization`` field, like :func:`_authorized`: rejecting duplicates
+    avoids proxy and framework disagreement over first/last/comma-joined semantics, and the
+    two credential kinds must not disagree about which header they read.
+    """
+    values = [value for key, value in headers if key.lower() == b"authorization"]
+    if len(values) != 1:
+        return ""
+    scheme, separator, presented = values[0].partition(b" ")
+    if separator != b" " or scheme.lower() != b"bearer":
+        return ""
+    return presented.strip().decode("utf-8", "replace")
+
+
+def _presents_session_credential(headers: Sequence[tuple[bytes, bytes]]) -> bool:
+    """Whether what was presented is shaped like a session credential. Grants nothing."""
+    return looks_like_session_credential(_presented_bearer(headers))
+
+
+type PrincipalLookup = Callable[[str], SessionPrincipal | None]
+
+
+def _auth_dependency(
+    token: str | None, principal_for: PrincipalLookup
+) -> Callable[[Request], None]:
+    """Build the gate every endpoint hangs off, and record who got through it."""
 
     def require_token(request: Request) -> None:
-        if not _authorized(request.scope.get("headers", []), token):
+        headers = request.scope.get("headers", [])
+        if _authorized(headers, token):
+            request.state.caller = HUMAN
+            return
+        presented = _presented_bearer(headers)
+        principal = principal_for(presented) if looks_like_session_credential(presented) else None
+        if principal is None:
             raise HTTPException(
                 status_code=401,
                 detail={
                     "error": "unauthorized",
-                    "message": f"this endpoint needs Authorization: Bearer <{TOKEN_ENV}>",
+                    "message": (
+                        f"this endpoint needs Authorization: Bearer <{TOKEN_ENV}>, or the "
+                        f"credential steward minted for a live run (${SESSION_TOKEN_ENV})"
+                    ),
                 },
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        request.state.caller = Caller(session=principal)
+        path = request.url.path.rstrip("/") or "/"
+        if request.method not in SESSION_SAFE_METHODS and path not in SESSION_WRITE_PATHS:
+            _refuse(
+                403,
+                "session_credential_forbidden",
+                f"{principal.resident_id} presented a session credential, and "
+                f"{_session_refusal(path)}. Nothing was recorded.",
+            )
 
     return require_token
+
+
+def caller_of(request: Request) -> Caller:
+    """Return who this request authenticated as. Set by the gate, before any route runs."""
+    caller = getattr(request.state, "caller", None)
+    return caller if isinstance(caller, Caller) else HUMAN
 
 
 def _authorized(headers: Sequence[tuple[bytes, bytes]], token: str | None) -> bool:
@@ -626,7 +765,15 @@ class _ApprovalBodyDepthMiddleware:
             and path.startswith("/approvals/")
             and "/" not in path.removeprefix("/approvals/")
         )
-        if not is_decision or not _authorized(scope.get("headers", []), self.token):
+        if not is_decision:
+            await self.app(scope, receive, send)
+            return
+        # A session credential is *authenticated* and then refused by the route policy, so
+        # it reaches body parsing the way the human token does. Bound it here on shape
+        # alone — no database lookup in the middleware — or the depth guard would hold for
+        # one credential kind and not the other.
+        headers = scope.get("headers", [])
+        if not (_authorized(headers, self.token) or _presents_session_credential(headers)):
             await self.app(scope, receive, send)
             return
 
@@ -731,6 +878,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
     db = store if store is not None else Store(settings.db_path or default_db_path())
     sink: ev.Emitter = emitter if emitter is not None else ev.EventEmitter.from_env()
+
     # The named transitions this API's two mutating domain acts cross. Every durable
     # change and the burrow fact that says it happened are paired in there; what stays
     # here is translation — status codes, the request log, and the words a caller reads.
@@ -740,6 +888,20 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # library, the store, the emitter and the guard below are all read at startup and
     # closed over by every route. A route that rebuilt its seam per request would be
     # reading the same two objects it is handed here anyway.
+    def session_principal(credential: str) -> SessionPrincipal | None:
+        """Resolve a presented session credential against the live run registry.
+
+        The freshness bound is the run's ownership lease, not a window of this endpoint's
+        own invention: a credential works exactly while its run's owner could still renew
+        it (steward #41). A registry that cannot be read refuses rather than admits.
+        """
+        fresh_since = ev.utc_now_iso(now() - timedelta(seconds=RUN_LEASE_GRACE_S))
+        try:
+            return db.session_principal(credential, fresh_since=fresh_since)
+        except Exception:
+            log.exception("could not check a presented session credential")
+            return None
+
     tasks = TaskTransitions(store=db, emitter=sink)
     approvals = ApprovalTransitions(store=db, emitter=sink)
     # One guard for the whole app: the run-now path refuses through it before it accepts
@@ -823,7 +985,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(_auth_dependency(token))],
+        dependencies=[Depends(_auth_dependency(token, session_principal))],
         lifespan=lifespan,
     )
     app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
@@ -1192,11 +1354,38 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         for a block — a person must not be able to make a resident do what its own
         declaration forbids. Omitting ``from`` means the person is the sender, and then
         the receiver's route is the whole of the agreement.
+
+        **A session credential is the sender**, and the body cannot say otherwise
+        (steward #41). This route used to read the sender from the request body with
+        nothing binding the caller to the resident it named, so a session holding the API
+        token could sign as any resident — or omit ``from`` and be read as "a person
+        asked" — which skips the sender-charter half of the agreement by design. With the
+        sender derived from the credential, both halves of #7's both-manifests-must-agree
+        rule hold for a session too.
+
+        The *chain* needs nothing further here, and that is worth saying out loud so nobody
+        adds it: ``Delegator._resolve_parent`` already refuses to trust a supplied
+        ``parent_task_id`` once it knows who the sender is (steward #67). It derives the
+        parent from the tasks that sender is actually holding, and honours a supplied id
+        only when it is one of them. Binding the sender is therefore the whole fix — a
+        second derivation here would only turn a swept task row into a 404 where #67
+        correctly falls back to the chain the sender is really in.
         """
+        caller = caller_of(request)
+        if caller.is_session:
+            principal = caller.require_session()
+            if body.sender is not None and body.sender != principal.resident_id:
+                _refuse(
+                    403,
+                    "sender_not_the_caller",
+                    f"this credential belongs to {principal.resident_id!r}, which cannot "
+                    f"hand work over as {body.sender!r}; omit `from` and steward fills it in",
+                )
+            sender_id: str | None = principal.resident_id
+        else:
+            sender_id = body.sender
         result = validate_path(residents_dir, settings.skills_dir)
-        sender = (
-            _find_resident(result, body.sender, residents_dir) if body.sender is not None else None
-        )
+        sender = _find_resident(result, sender_id, residents_dir) if sender_id is not None else None
         delegator = dg.Delegator(residents=result.residents, store=db, emitter=sink)
         handoff = dg.Handoff(
             raw="POST /delegate",
