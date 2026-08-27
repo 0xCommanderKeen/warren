@@ -517,6 +517,9 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         # rather than folded into "runner" because it is a capability dimension like the
         # four above it, and because "which residents are unbounded" should be one read.
         "tools": manifest.tools.model_dump(mode="json"),
+        # And where those tools may act: the directories opened to a session beyond the
+        # working directory it is confined to. Empty is the common, and the safe, answer.
+        "workspace": list(manifest.workspace),
         # Which brain, answerable without opening a file.
         "runner": {"kind": manifest.runner.kind, "model": manifest.runner.model},
         # Whether this resident takes work off the board, and on what terms.

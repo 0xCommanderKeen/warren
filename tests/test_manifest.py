@@ -1097,6 +1097,103 @@ def test_a_permission_mode_the_cli_would_reject_is_refused(
     assert any(d.field_path == "runner.permission_mode" for d in result.errors)
 
 
+# ------------------------------------------------------------------ workspace (steward #204)
+
+
+def test_a_resident_reaches_nothing_beyond_its_own_directory_by_default(
+    write_resident: ResidentWriter,
+) -> None:
+    """`workspace` may be absent where `tools` may not, and the asymmetry is the point.
+
+    An absent `tools` would have meant *every tool*, which is silence read as a grant. An
+    absent `workspace` means *no directory beyond the resident's own*, which is silence
+    granting nothing — so this one is allowed to be a default.
+    """
+    assert m.load_manifest(write_resident(valid_manifest())).manifest.workspace == []
+
+
+def test_a_workspace_grant_is_kept_in_order(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["workspace"] = ["/data/library/books", "/data/incoming"]
+
+    resident = m.load_manifest(write_resident(data))
+
+    assert resident.manifest.workspace == ["/data/library/books", "/data/incoming"]
+
+
+@pytest.mark.parametrize(
+    ("path", "why"),
+    [
+        ("books", "a relative path would resolve against the working directory"),
+        ("./books", "and so would this one"),
+        ("/data/my books", "whitespace makes a path an argv question"),
+        ("/data/$(whoami)", "a value must never be able to become markup"),
+        ("/data/a;rm -rf b", "nor a second command"),
+        ("/data/'quoted'", "nor quoted"),
+    ],
+)
+def test_a_workspace_path_that_is_not_a_plain_absolute_directory_is_refused(
+    write_resident: ResidentWriter, path: str, why: str
+) -> None:
+    data = valid_manifest()
+    data["workspace"] = [path]
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok, why
+    assert any(d.field_path.startswith("workspace") for d in result.errors)
+
+
+@pytest.mark.parametrize("kind", ["codex", "command"])
+def test_a_workspace_grant_a_runner_cannot_make_is_refused(
+    write_resident: ResidentWriter, kind: str
+) -> None:
+    """Only `ClaudeRunner.argv` compiles `--add-dir`.
+
+    Under any other spawning kind the list would sit in the manifest reading like access
+    somebody granted while the session could not open a byte of it.
+    """
+    data = valid_manifest()
+    data["workspace"] = ["/data/library/books"]
+    data["tools"] = "unrestricted"
+    runner: dict[str, object] = {"kind": kind}
+    if kind == "command":
+        runner["command"] = ["tool", "{prompt}"]
+    data["runner"] = runner
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "workspace"]
+    assert len(complaints) == 1
+    assert "reaches nothing" in complaints[0].problem
+
+
+def test_mock_may_be_granted_a_workspace_because_it_opens_nothing(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["workspace"] = ["/data/library/books"]
+    data["runner"] = {"kind": "mock"}
+
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_a_bounded_resident_may_be_given_somewhere_to_work(write_resident: ResidentWriter) -> None:
+    """The shape the demo's shelf-worker actually needs, and the reason both exist.
+
+    `bypassPermissions` was doing two jobs in that manifest: waiving tool-call approval, and
+    escaping the working directory. `tools` replaces the first and `workspace` the second,
+    and only together do they retire it.
+    """
+    data = valid_manifest()
+    data["tools"] = ["Bash", "Read", "Write"]
+    data["workspace"] = ["/data/library/books"]
+    data["runner"] = {"kind": "claude", "permission_mode": "acceptEdits"}
+
+    assert m.validate_manifest(write_resident(data)).ok
+
+
 # ----------------------------------------------------------------------------- delegation
 
 

@@ -183,6 +183,10 @@ class NewResident(BaseModel):
         default_factory=lambda: ToolGrant([]),
         description="Tools a session may reach; defaults to none until declared.",
     )
+    workspace: list[str] = Field(
+        default_factory=list,
+        description="Absolute directories a session may reach beyond its working directory.",
+    )
     runner: Runner = Field(default_factory=Runner, description="Which brain this resident runs on.")
     soul_body: str | None = Field(default=None, description="Opening paragraph of soul.md.")
     voice: str | None = Field(default=None, description="The soul's ## Voice section.")
@@ -261,6 +265,7 @@ def _manifest_model(spec: NewResident) -> ResidentManifest:
             routes=spec.routes,
             app_grants=spec.app_grants,
             tools=spec.tools,
+            workspace=spec.workspace,
             runner=spec.runner,
             routines=[],
         )

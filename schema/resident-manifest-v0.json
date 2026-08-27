@@ -805,6 +805,15 @@
       "$ref": "#/$defs/ToolGrant",
       "description": "Tool dimension: the names a session may reach, or 'unrestricted'."
     },
+    "workspace": {
+      "description": "Absolute directories a session may reach beyond its working directory.",
+      "items": {
+        "pattern": "^/[^\\s'\"`$;|&<>(){}\\[\\]!*?\\\\]*$",
+        "type": "string"
+      },
+      "title": "Workspace",
+      "type": "array"
+    },
     "runner": {
       "$ref": "#/$defs/Runner"
     },

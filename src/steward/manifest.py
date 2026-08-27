@@ -55,6 +55,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
+    "WORKSPACE_PATH_PATTERN",
     "AppGrant",
     "Board",
     "Budgets",
@@ -141,6 +142,16 @@ TOOL_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*$"
 #: How the claude CLI spells a tool that came from an MCP server. Refused inside a bounded
 #: list: see :func:`_check_tools_are_enforceable`.
 MCP_TOOL_PREFIX = "mcp__"
+
+#: A directory a session may reach beyond its own working directory.
+#:
+#: Absolute, because a relative path would resolve against the working directory — the one
+#: place the resident can already write — so "which directory did that grant name" would
+#: depend on where steward happened to be launched from rather than on what the manifest
+#: says. The character class is ``memory.path``'s and is there for the same reason: this
+#: value is interpolated into an argv, and for a provisioned resident into generated
+#: compose YAML, so it has to be data and never markup (steward #61).
+WORKSPACE_PATH_PATTERN = r"""^/[^\s'"`$;|&<>(){}\[\]!*?\\]*$"""
 
 #: The permission mode that auto-approves every call a session makes. Named because a
 #: manifest that bounds its tools and then declares this has drawn one boundary and dropped
@@ -733,6 +744,14 @@ class AppGrant(_Model):
     )
 
 
+#: One directory in a ``workspace`` grant. Not stripped, like a tool name and a skill id:
+#: the contract is the exact string, and a path that only resolves after a trim is a path
+#: somebody typed wrong.
+WorkspacePath = Annotated[
+    str,
+    StringConstraints(strip_whitespace=False, pattern=WORKSPACE_PATH_PATTERN),
+]
+
 #: A single tool name inside a declared list. Whitespace is not stripped, for the same
 #: reason a skill id is not: the schema's contract is the exact string, and a name that
 #: only matches after a trim is a name somebody typed wrong.
@@ -1077,6 +1096,10 @@ class ResidentManifest(_Model):
     tools: ToolGrant = Field(
         description="Tool dimension: the names a session may reach, or 'unrestricted'.",
     )
+    workspace: list[WorkspacePath] = Field(
+        default_factory=list,
+        description="Absolute directories a session may reach beyond its working directory.",
+    )
 
     runner: Runner = Field(default_factory=Runner)
     routines: list[Routine] = Field(default_factory=list)
@@ -1371,6 +1394,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "app_grants.scopes": "scopes: [gmail.readonly]",
     "app_grants.status_ref": "status_ref: https://myaccount.google.com/permissions",
     "tools": "tools: [Read, Glob, Grep]  (or: tools: unrestricted)",
+    "workspace": "workspace: [/data/library/books]  (absolute paths)",
     "runner": "runner: {kind: claude, model: claude-opus-5}",
     "runner.kind": "kind: claude  (claude | codex | command | mock)",
     "runner.model": "model: claude-opus-5",
@@ -1899,6 +1923,44 @@ def _check_tools_are_enforceable(manifest: ResidentManifest, source: Path) -> li
     return diagnostics
 
 
+def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a directory grant steward has no way to make.
+
+    ``workspace`` is the mirror image of ``tools``: ``tools`` narrows *what exists* in a
+    session, ``workspace`` widens *where it may act*. That is why one is required and the
+    other is not — an absent ``tools`` would have meant every tool, while an absent
+    ``workspace`` means no directory beyond the resident's own, which is a silence that
+    grants nothing and so is a silence this schema can live with.
+
+    It still has to be a grant steward can actually make. Only :meth:`ClaudeRunner.argv`
+    compiles ``--add-dir``; under ``codex`` or ``command`` the list would sit in the
+    manifest reading like access somebody granted while the session could not reach a byte
+    of it. Unlike the tools refusals this one fails loudly at run time — the resident simply
+    cannot open the files — but it fails at the resident's next fire, over a manifest that
+    read as if the access was there, and the manifest is where it should have been caught.
+
+    ``mock`` is exempt for the reason it is always exempt: it opens nothing.
+    """
+    if not manifest.workspace or manifest.runner.kind not in UNBOUNDABLE_RUNNER_KINDS:
+        return []
+    return [
+        Diagnostic(
+            file=source,
+            field_path="workspace",
+            problem=(
+                f"runner kind {manifest.runner.kind!r} takes no directory flag, so this "
+                f"grant reaches nothing: the session's access is whatever that brain "
+                f"allows, and the manifest reads as if {len(manifest.workspace)} "
+                f"director{'y' if len(manifest.workspace) == 1 else 'ies'} had been opened to it"
+            ),
+            example=(
+                "runner: {kind: claude}  (the only kind steward can widen), or drop the "
+                "grant and let the session work inside its own memory directory"
+            ),
+        )
+    ]
+
+
 def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     """Check that the delegation block says something, and does not say it about itself.
 
@@ -2192,6 +2254,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))
+    diagnostics.extend(_check_workspace_is_reachable(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 

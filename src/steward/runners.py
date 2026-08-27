@@ -72,8 +72,9 @@ __all__ = [
     "Runner",
     "RunnerError",
     "build_runner",
+    "check_cli_support",
     "check_runner",
-    "check_tool_bound",
+    "required_flags",
     "run_argv",
     "skills_home",
     "substitute",
@@ -152,6 +153,10 @@ class RunRequest:
     #: that nobody chose to make unbounded, which is the exact silence-as-a-grant this
     #: field exists to end. Forgetting it is a type error, not a quiet grant.
     tools: ToolGrant
+    #: Directories this session may reach beyond :attr:`workdir`. Defaulted, unlike
+    #: :attr:`tools`, because forgetting it grants nothing: the session stays inside the
+    #: one directory it was always confined to.
+    workspace: tuple[str, ...] = ()
     model: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
     workdir_fd: int | None = field(default=None, repr=False, compare=False)
@@ -172,6 +177,7 @@ class RunRequest:
                 # Two requests that differ only in what the session may touch are two
                 # different sessions, so they must not share a mock result.
                 self.tools.describe(),
+                "\x1f".join(self.workspace),
             ]
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -515,6 +521,12 @@ class ClaudeRunner(_ProcessRunner):
         bound = request.tools.bound
         if bound is not None:
             argv += ["--tools", ",".join(bound), "--strict-mcp-config"]
+        # One flag per directory rather than the variadic spelling `--add-dir a b`: a
+        # variadic option followed by another flag is a parser question steward does not
+        # need to have an opinion about. Measured: repeating it accumulates, and a session
+        # given two directories read a file in each.
+        for directory in request.workspace:
+            argv += [WORKSPACE_FLAG, directory]
         return argv
 
     def parse(self, result: RunResult, stdout: str) -> RunResult:
@@ -793,6 +805,9 @@ def check_runner(spec: RunnerSpec) -> str | None:
 #: :meth:`ClaudeRunner.argv`), and ``--strict-mcp-config`` alone bounds nothing.
 TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
 
+#: The flag that widens a session past its own working directory (:attr:`RunRequest.workspace`).
+WORKSPACE_FLAG = "--add-dir"
+
 
 def _cli_help(binary: str) -> str | None:
     """Return ``<binary> --help``, or ``None`` when the binary would not answer.
@@ -808,38 +823,54 @@ def _cli_help(binary: str) -> str | None:
     return outcome.stdout + outcome.stderr
 
 
-def check_tool_bound(spec: RunnerSpec, tools: ToolGrant) -> str | None:
-    """Return why the *installed* brain cannot hold this manifest's tool bound, or ``None``.
+def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> tuple[str, ...]:
+    """Return the CLI flags this manifest's declarations compile into, in argv order.
 
-    The CLI is part of the boundary, and that is the part of it steward does not ship. A
-    ``claude`` old enough not to know ``--tools`` accepts the manifest, launches, and hands
-    the session everything — the declaration is still in the file, still readable, and no
-    longer true. Nothing at run time notices; the resident simply has tools it was not
-    granted. So the flag is probed, rather than the binary merely being found on PATH the
-    way :meth:`_ProcessRunner.check` finds it.
+    Empty for a kind that compiles none — which, for both declarations, is a kind
+    validation refuses to pair with the declaration in the first place.
+    """
+    if spec.kind != ClaudeRunner.kind:
+        return ()
+    flags: list[str] = []
+    if not tools.unrestricted:
+        flags.extend(TOOL_BOUND_FLAGS)
+    if workspace:
+        flags.append(WORKSPACE_FLAG)
+    return tuple(flags)
 
-    This matters most where it is least visible: a provisioned resident installs its own
-    CLI from a hand-written bootstrap in the image, pinned by ``CLAUDE_VERSION`` in the
-    Makefile, so the version enforcing a bound on the NAS is not the one on the laptop that
-    validated the manifest.
+
+def check_cli_support(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> str | None:
+    """Return why the *installed* brain cannot honour what this manifest declares, or ``None``.
+
+    The CLI is the part of the boundary steward does not ship, and a manifest that declares
+    a bound is perfectly valid against a ``claude`` too old to have the flag. That version
+    does not quietly ignore it — measured: an unknown option is ``error: unknown option``
+    and exit 1 — so the failure is loud. It is loud *at the resident's next fire*, which for
+    the 07:00 routine means a failed session in a ledger nobody is reading, over a manifest
+    that validated clean. Probing the flag here moves that from 7am to daylight, which is
+    the whole of what this function buys.
+
+    It matters most where it is least visible: a provisioned resident installs its own CLI
+    from a hand-written bootstrap in the image, pinned by ``CLAUDE_VERSION`` in the
+    Makefile, so the version running a manifest on the NAS is not the one on the laptop
+    that validated it.
 
     Unlike :func:`check_runner` this *does* start a process — ``<binary> --help``, which is
     not a session and not a brain, and lands in this module for the same reason
     :func:`run_argv` does: steward starts processes in exactly one file.
     """
-    if tools.unrestricted or spec.kind != ClaudeRunner.kind:
-        # Nothing declared to enforce, or a kind that compiles no tool flag at all — which
-        # validation refuses to pair with a bound in the first place.
+    needed = required_flags(spec, tools, workspace)
+    if not needed:
         return None
     binary = ClaudeRunner.binary
     help_text = _cli_help(binary)
     if help_text is None:
-        return f"cannot ask {binary!r} what it supports, so a declared tools bound is unproven"
-    missing = [flag for flag in TOOL_BOUND_FLAGS if flag not in help_text]
+        return f"cannot ask {binary!r} what it supports, so what this manifest declares is unproven"
+    missing = [flag for flag in needed if flag not in help_text]
     if missing:
         return (
-            f"the installed {binary!r} does not support {', '.join(missing)}, so the "
-            f"declared tools bound would not be applied to this resident's sessions"
+            f"the installed {binary!r} does not support {', '.join(missing)}, so a session "
+            f"for this resident would fail to launch rather than run unbounded"
         )
     return None
 

@@ -342,21 +342,34 @@ def test_claude_runner_passes_permission_mode_when_declared(
 # ------------------------------------------------------- the tool bound (steward #204)
 
 
-def claude_argv(
+def claude_argv(  # noqa: PLR0913 — one keyword per thing a test wants to vary
+    stub_bin: StubWriter,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tools: ToolGrant,
     *,
     model: str | None = None,
     permission_mode: PermissionMode | None = None,
+    workspace: tuple[str, ...] = (),
 ) -> list[str]:
-    """Run a stubbed claude and return the argv it was actually handed."""
+    """Run a stubbed claude and return the argv it was actually handed.
+
+    The stub is written here rather than by each caller, so no test in this group can
+    accidentally reach a real ``claude`` on the developer's PATH.
+    """
+    stub_bin("claude", CLAUDE_STUB)
     dump = tmp_path / "argv.txt"
     monkeypatch.setenv("ARGV_DUMP", str(dump))
     monkeypatch.setenv("CWD_DUMP", str(tmp_path / "cwd.txt"))
     spec = RunnerSpec(kind="claude", model=model, permission_mode=permission_mode)
     r.build_runner(spec).run(
-        r.RunRequest(prompt="say hello", workdir=tmp_path, timeout_s=10, tools=tools)
+        r.RunRequest(
+            prompt="say hello",
+            workdir=tmp_path,
+            timeout_s=10,
+            tools=tools,
+            workspace=workspace,
+        )
     )
     return dump.read_text().splitlines()
 
@@ -369,8 +382,7 @@ def test_an_unrestricted_resident_gets_the_argv_it_always_got(
     Every live resident is migrated that way, so this is the assertion that says the
     migration is a change in what the manifest *says*, not in what steward *does*.
     """
-    stub_bin("claude", CLAUDE_STUB)
-    argv = claude_argv(tmp_path, monkeypatch, UNRESTRICTED, model="claude-opus-5")
+    argv = claude_argv(stub_bin, tmp_path, monkeypatch, UNRESTRICTED, model="claude-opus-5")
 
     assert argv == ["-p", "say hello", "--output-format", "json", "--model", "claude-opus-5"]
 
@@ -379,8 +391,7 @@ def test_a_bounded_resident_is_launched_with_the_names_and_strict_mcp(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The pair, always: `--tools` alone leaves the host's MCP servers reachable."""
-    stub_bin("claude", CLAUDE_STUB)
-    argv = claude_argv(tmp_path, monkeypatch, ToolGrant(["Read", "Glob", "Grep"]))
+    argv = claude_argv(stub_bin, tmp_path, monkeypatch, ToolGrant(["Read", "Glob", "Grep"]))
 
     assert argv[-3:] == ["--tools", "Read,Glob,Grep", "--strict-mcp-config"]
 
@@ -393,8 +404,7 @@ def test_a_resident_bounded_to_nothing_says_so_on_the_command_line(
     `--tools ""` is documented as *disable all tools*, and it measures that way: a session
     launched with it had none and answered by writing tool-call markup as plain text.
     """
-    stub_bin("claude", CLAUDE_STUB)
-    argv = claude_argv(tmp_path, monkeypatch, ToolGrant([]))
+    argv = claude_argv(stub_bin, tmp_path, monkeypatch, ToolGrant([]))
 
     assert argv[-3:] == ["--tools", "", "--strict-mcp-config"]
 
@@ -408,8 +418,9 @@ def test_the_bound_survives_a_permissive_permission_mode(
     Bash. The two are different axes — which tools exist, and whether a call to one is
     approved — which is why a manifest may carry both and steward passes both.
     """
-    stub_bin("claude", CLAUDE_STUB)
-    argv = claude_argv(tmp_path, monkeypatch, ToolGrant(["Read"]), permission_mode="acceptEdits")
+    argv = claude_argv(
+        stub_bin, tmp_path, monkeypatch, ToolGrant(["Read"]), permission_mode="acceptEdits"
+    )
 
     assert "--permission-mode" in argv
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
@@ -428,6 +439,66 @@ def test_two_requests_that_differ_only_in_tools_are_two_requests(tmp_path: Path)
     assert bounded.key() != request(UNRESTRICTED).key()
 
 
+def test_a_declared_workspace_reaches_argv_one_flag_at_a_time(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One `--add-dir` per directory, not the variadic `--add-dir a b`.
+
+    A variadic option followed by another flag is a parser question steward does not need
+    an opinion about. Measured: repeating it accumulates, and a session handed two
+    directories read a file in each.
+    """
+    argv = claude_argv(
+        stub_bin, tmp_path, monkeypatch, UNRESTRICTED, workspace=("/data/library", "/data/incoming")
+    )
+
+    assert argv[-4:] == ["--add-dir", "/data/library", "--add-dir", "/data/incoming"]
+
+
+def test_declaring_no_workspace_adds_nothing(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default is the safe one: the session stays in the directory it was confined to."""
+    assert "--add-dir" not in claude_argv(stub_bin, tmp_path, monkeypatch, UNRESTRICTED)
+
+
+def test_a_bounded_session_can_still_be_given_somewhere_to_work(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two declarations are orthogonal and compile side by side.
+
+    `tools` narrows what exists; `workspace` widens where it may act. Neither is the other,
+    and a resident that moves files outside its memory directory needs both.
+    """
+    argv = claude_argv(
+        stub_bin,
+        tmp_path,
+        monkeypatch,
+        ToolGrant(["Bash", "Read"]),
+        permission_mode="acceptEdits",
+        workspace=("/data/library",),
+    )
+
+    assert "--permission-mode" in argv
+    assert argv[-5:] == [
+        "--tools",
+        "Bash,Read",
+        "--strict-mcp-config",
+        "--add-dir",
+        "/data/library",
+    ]
+
+
+def test_two_requests_that_differ_only_in_workspace_are_two_requests(tmp_path: Path) -> None:
+    def request(workspace: tuple[str, ...]) -> r.RunRequest:
+        return r.RunRequest(
+            prompt="p", workdir=tmp_path, timeout_s=10, tools=UNRESTRICTED, workspace=workspace
+        )
+
+    assert request(("/data/library",)).key() != request(()).key()
+    assert request(("/data/library",)).key() != request(("/data/incoming",)).key()
+
+
 # --------------------------------------------- whether the installed CLI can hold a bound
 
 #: A `claude --help` that knows both flags, and one that knows neither.
@@ -440,12 +511,12 @@ def test_an_unrestricted_resident_asks_the_cli_nothing(
 ) -> None:
     """Nothing is declared, so there is nothing the installed CLI could fail to hold."""
     stub_bin("claude", OLD_HELP_STUB)
-    assert r.check_tool_bound(RunnerSpec(kind="claude"), UNRESTRICTED) is None
+    assert r.check_cli_support(RunnerSpec(kind="claude"), UNRESTRICTED, ()) is None
 
 
 def test_a_cli_that_knows_the_flags_can_hold_the_bound(stub_bin: StubWriter) -> None:
     stub_bin("claude", HELP_STUB)
-    assert r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"])) is None
+    assert r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), ()) is None
 
 
 def test_a_cli_too_old_for_the_flags_is_a_complaint_not_a_silent_grant(
@@ -457,7 +528,7 @@ def test_a_cli_too_old_for_the_flags_is_a_complaint_not_a_silent_grant(
     against is not in the file. `steward doctor` is the only place the two meet.
     """
     stub_bin("claude", OLD_HELP_STUB)
-    complaint = r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"]))
+    complaint = r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), ())
 
     assert complaint is not None
     assert "--tools" in complaint
@@ -467,7 +538,7 @@ def test_a_cli_too_old_for_the_flags_is_a_complaint_not_a_silent_grant(
 def test_half_the_pair_is_still_a_complaint(stub_bin: StubWriter) -> None:
     """`--tools` without `--strict-mcp-config` bounds the built-ins and leaks the host's MCP."""
     stub_bin("claude", 'echo "  --tools <tools...>"')
-    complaint = r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"]))
+    complaint = r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), ())
 
     assert complaint is not None
     assert "--strict-mcp-config" in complaint
@@ -476,13 +547,37 @@ def test_half_the_pair_is_still_a_complaint(stub_bin: StubWriter) -> None:
 
 @pytest.mark.usefixtures("empty_path")
 def test_a_cli_that_will_not_answer_is_unproven_rather_than_assumed_fine() -> None:
-    assert "unproven" in (r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"])) or "")
+    assert "unproven" in (
+        r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), ()) or ""
+    )
 
 
 def test_a_kind_that_compiles_no_tool_flag_is_not_probed(stub_bin: StubWriter) -> None:
     """Validation already refuses a bound under codex/command; doctor does not re-litigate."""
     stub_bin("claude", OLD_HELP_STUB)
-    assert r.check_tool_bound(RunnerSpec(kind="mock"), ToolGrant(["Read"])) is None
+    assert r.check_cli_support(RunnerSpec(kind="mock"), ToolGrant(["Read"]), ()) is None
+
+
+def test_a_cli_that_cannot_widen_a_session_is_a_complaint_too(stub_bin: StubWriter) -> None:
+    """A workspace grant is a flag as much as a bound is, and the same CLI has to have it."""
+    stub_bin("claude", HELP_STUB)  # knows --tools and --strict-mcp-config, not --add-dir
+    complaint = r.check_cli_support(RunnerSpec(kind="claude"), UNRESTRICTED, ("/data/library",))
+
+    assert complaint is not None
+    assert "--add-dir" in complaint
+
+
+def test_the_flags_a_manifest_needs_are_exactly_what_it_declared() -> None:
+    """Nothing declared, nothing probed — and a kind that compiles none is asked for none."""
+    claude = RunnerSpec(kind="claude")
+
+    assert r.required_flags(claude, UNRESTRICTED, ()) == ()
+    assert r.required_flags(claude, UNRESTRICTED, ("/data",)) == ("--add-dir",)
+    assert r.required_flags(claude, ToolGrant(["Read"]), ()) == (
+        "--tools",
+        "--strict-mcp-config",
+    )
+    assert r.required_flags(RunnerSpec(kind="codex"), ToolGrant(["Read"]), ("/data",)) == ()
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)

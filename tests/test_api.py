@@ -1789,12 +1789,14 @@ def test_a_resident_reports_which_tools_it_may_reach(api: ApiFactory) -> None:
     unbounded = api().client.get("/residents/test-agent").json()
     assert unbounded["tools"] == "unrestricted"
 
+    assert unbounded["workspace"] == []
+
     bounded = valid_manifest()
     bounded["tools"] = ["Read", "Glob"]
-    assert api(manifest=bounded).client.get("/residents/test-agent").json()["tools"] == [
-        "Read",
-        "Glob",
-    ]
+    bounded["workspace"] = ["/data/library/books"]
+    body = api(manifest=bounded).client.get("/residents/test-agent").json()
+    assert body["tools"] == ["Read", "Glob"]
+    assert body["workspace"] == ["/data/library/books"]
 
 
 def test_the_skills_listing_needs_the_token_like_everything_else(api: ApiFactory) -> None:

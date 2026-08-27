@@ -32,6 +32,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `routes` | yes | Route dimension (may be an empty list). |
 | `app_grants` | yes | App access dimension (may be an empty list). |
 | `tools` | yes | Tool dimension: the names a session may reach, or `unrestricted`. |
+| `workspace` | no | Absolute directories a session may reach beyond its working directory. |
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
@@ -234,6 +235,9 @@ but headless with no mode at all **denies** write-ish Bash calls (`mv`, `echo >>
 landed in `permission_denials`), so a resident that has to change files needs a mode as
 well as the tools. `acceptEdits` is the narrow one that works; `dontAsk` denied them.
 
+There is a third axis, and it is the one that actually retires `bypassPermissions`: the
+**directory** a session may act in. See [`workspace`](#workspace--where-a-session-may-act).
+
 The bound is over *tools*, not over commands. Granting `Bash` grants `rm` — "never delete"
 is still a line for the charter to hold, not something this list expresses.
 
@@ -253,17 +257,23 @@ is still a line for the charter to hold, not something this list expresses.
 
 ### The installed CLI is part of the boundary
 
-A `claude` too old to know `--tools` accepts the manifest, launches, and hands the session
-everything: the declaration is still in the file and no longer true, and nothing at run
-time notices. Validation cannot reach this — the binary is not in the manifest — so
-`steward doctor` probes the flags rather than merely finding the binary on PATH, and fails
-for any resident whose declared bound the installed CLI could not hold.
+A manifest declaring a bound is perfectly valid against a `claude` too old to have the
+flag. That version does not quietly ignore it — an unknown option is `error: unknown
+option` and exit 1 — so the failure is loud. It is loud *at the resident's next fire*,
+which for the 07:00 routine means a failed session in a ledger nobody is reading, over a
+manifest that validated clean. Validation cannot reach it either, because the binary is not
+in the manifest.
 
-This matters most where it is least visible: a provisioned resident installs its own CLI
-from the image's bootstrap, pinned by `CLAUDE_VERSION` in the Makefile, so the version
-enforcing a bound on the NAS is not the one on the laptop that validated the manifest.
+So `steward doctor` probes the flags a manifest's declarations compile into, rather than
+merely finding the binary on PATH, and fails for any resident whose declaration the
+installed CLI could not carry out. That moves the failure from 7am to daylight, which is
+the whole of what the probe buys.
 
-Two edges this does **not** yet close, both worth knowing:
+It matters most where it is least visible: a provisioned resident installs its own CLI from
+the image's bootstrap, pinned by `CLAUDE_VERSION` in the Makefile, so the version running a
+manifest on the NAS is not the one on the laptop that validated it.
+
+Two edges this does **not** close, both worth knowing:
 
 - A granted skill can need a tool the list denies. Nothing cross-checks skill frontmatter
   against `tools`, so that mismatch surfaces at run time rather than at validation.
@@ -272,6 +282,44 @@ Two edges this does **not** yet close, both worth knowing:
   `.claude/settings.json` from an untrusted workspace — it says so on stderr — and a
   resident's memory directory is not trusted. That is a mitigation resting on host state
   rather than on anything steward declares, and closing it properly is separate work.
+
+## `workspace` — where a session may act
+
+```yaml
+workspace:
+  - /data/library/books
+```
+
+The mirror image of `tools`, and the other half of retiring `bypassPermissions`. `tools`
+narrows **what exists** in a session; `workspace` widens **where it may act**. Neither is
+the other, and a resident that touches anything outside its own memory directory needs both.
+
+A session runs in the resident's memory directory and, by default, may act only there. The
+permission modes are scoped to that directory: measured against CLI 2.1.247, a `mv` whose
+target is outside it is denied under `acceptEdits` **and** under `auto`, and lands in
+`permission_denials`. Each entry here compiles to one `--add-dir` — one flag per directory,
+because a variadic option followed by another flag is a parser question steward does not
+need an opinion about — and with it the same `mv` goes through with no denials.
+
+Unlike `tools` this key is **optional**, and the asymmetry is deliberate. An absent `tools`
+would have meant *every tool*, which is silence read as a grant. An absent `workspace` means
+*no directory beyond the resident's own*, which is silence granting nothing. Being a
+widening grant is also why it is worth reading out loud: `steward doctor` prints a
+resident's workspace whenever it has one.
+
+Paths are **absolute**, and are checked against the same character class as `memory.path`.
+A relative path would resolve against the working directory — the one place the resident can
+already write — so which directory a grant named would depend on where steward happened to
+be launched from. And the value is interpolated into an argv, and for a provisioned resident
+into generated compose YAML, so it has to be data and never markup (#61).
+
+Validation refuses a grant steward cannot make: only `claude` compiles `--add-dir`, so a
+list under `codex` or `command` reads like access somebody granted while the session cannot
+open a byte of it. `mock` is exempt; it opens nothing.
+
+**This is a grant, not a confinement.** It says where a session may work *in addition to*
+its own directory. It does not say the resident is confined to those directories — that is
+the permission mode's job, and `bypassPermissions` overrides all of it.
 
 ## `runner` — which brain
 
@@ -1105,8 +1153,9 @@ Burrow reads the same files for display (burrow #35). The contract:
 - Identity fields in `soul` are exactly burrow's villager frontmatter fields.
 - Match a villager to a resident by `agent_id` first, then by `project`.
 - The capability dimensions are the panel burrow renders; `app_grants[].status`
-  is the only truth about whether access exists, and `tools` is either a list of names or
-  the string `unrestricted` — never absent.
+  is the only truth about whether access exists, `tools` is either a list of names or
+  the string `unrestricted` — never absent — and `workspace` is a list of absolute
+  directories that may be empty or missing.
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
   this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
   the schema's `$id` says they are, so burrow can fetch a file rather than run a command.

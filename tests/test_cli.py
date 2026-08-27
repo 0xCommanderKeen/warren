@@ -415,6 +415,32 @@ def test_doctor_fails_when_the_installed_brain_cannot_hold_a_declared_bound(
     assert "--tools" in result.output
 
 
+def test_doctor_says_where_a_resident_may_work_beyond_its_own_directory(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    """A widening grant is worth saying out loud even when nothing is wrong."""
+    stub_bin("claude", NEW_CLAUDE_HELP + '; echo "  --add-dir <directories...>"')
+    data = valid_manifest()
+    data["workspace"] = ["/data/library/books"]
+    result = runner.invoke(main, ["doctor", str(write_resident(data).parent)])
+
+    assert result.exit_code == 0
+    assert "test-agent: workspace /data/library/books" in result.output
+
+
+def test_doctor_fails_when_the_brain_cannot_widen_a_session(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    """`--add-dir` is as much a flag the installed CLI has to have as `--tools` is."""
+    stub_bin("claude", NEW_CLAUDE_HELP)  # no --add-dir
+    data = valid_manifest()
+    data["workspace"] = ["/data/library/books"]
+    result = runner.invoke(main, ["doctor", str(write_resident(data).parent)])
+
+    assert result.exit_code == 1
+    assert "--add-dir" in result.output
+
+
 def test_doctor_does_not_ask_the_brain_about_a_resident_that_declared_no_bound(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:
