@@ -192,6 +192,7 @@ def _report_json(result: ValidationResult) -> None:
         "residents": [
             {
                 "id": resident.id,
+                "uid": str(resident.manifest.uid),
                 "agent_id": resident.manifest.agent_id,
                 "path": str(resident.path),
             }
