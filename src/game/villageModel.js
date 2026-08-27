@@ -100,14 +100,15 @@ export function validateReachability(map) {
   return { walkable: total, reachable: seen.size };
 }
 
-export function buildVillageModel(map, snapshotVillagers) {
+export function buildVillageModel(map, snapshotVillagers, snapshotApprovals = []) {
   validateReachability(map);
   const lodge = place(map, "lodge");
   const work = place(map, "work");
   const doorstep = place(map, "street");
-  const knockingSlots = new Map(snapshotVillagers
-    .filter((villager) => villager.state === "knocking")
-    .map((villager) => villager.id)
+  const pendingAgentIds = new Set(snapshotApprovals
+    .filter((approval) => approval.state === "pending")
+    .map((approval) => approval.agent_id));
+  const knockingSlots = new Map([...pendingAgentIds]
     .toSorted()
     .map((id, index, ids) => [id, (index - (ids.length - 1) / 2) * 16]));
   let visitorIndex = 0;

@@ -15,6 +15,7 @@ function StewardSnapshotBridge({ client, snapshot }) {
 
 function ApprovalKnocks({ snapshot, stewardClient }) {
   const [error, setError] = useState(null);
+  const [submittedRequestId, setSubmittedRequestId] = useState(null);
   const villagers = new Map(snapshot.villagers.map((villager) => [villager.id, villager]));
   const approvals = snapshot.approvals
     .filter((approval) => approval.state === "pending")
@@ -22,19 +23,30 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
       left.opened_at.localeCompare(right.opened_at) ||
       left.request_id.localeCompare(right.request_id));
 
+  useEffect(() => {
+    if (submittedRequestId && !approvals.some((approval) =>
+      approval.request_id === submittedRequestId)) {
+      setSubmittedRequestId(null);
+      setError(null);
+    }
+  }, [approvals, submittedRequestId]);
+
   if (approvals.length === 0) return null;
 
   async function decide(approval, decision) {
     setError(null);
+    setSubmittedRequestId(approval.request_id);
     try {
       await stewardClient.decideApproval(approval.request_id, { decision });
     } catch (writeError) {
       setError(writeError instanceof Error ? writeError.message : "Steward could not record the answer");
+      if (writeError?.retryable === true) setSubmittedRequestId(null);
     }
   }
 
   return (
     <section
+      aria-busy={submittedRequestId !== null}
       aria-label="Approval knocks"
       className="absolute top-3 left-3 z-3 grid max-h-[calc(100%-1.5rem)] w-[min(28rem,calc(100%-1.5rem))] gap-2 overflow-auto"
     >
@@ -52,7 +64,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
                 <button
                   aria-label={`${option[0].toUpperCase()}${option.slice(1)} ${approval.message}`}
                   className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.1em] shadow-[2px_2px_0_#2a1817] enabled:cursor-pointer enabled:hover:translate-x-px enabled:hover:translate-y-px enabled:hover:shadow-none disabled:opacity-50"
-                  disabled={!stewardClient}
+                  disabled={!stewardClient || submittedRequestId !== null}
                   key={option}
                   onClick={() => decide(approval, option)}
                   type="button"
@@ -64,6 +76,11 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
           </article>
         );
       })}
+      {submittedRequestId && !error ? (
+        <p className="border border-[#785a25] bg-[#fff8e7] p-2 font-mono text-xs" role="status">
+          Answer sent. Waiting for Steward's confirming state…
+        </p>
+      ) : null}
       {error ? <p className="border border-[#d96b54] bg-[#2a1817] p-2 text-sm text-[#fff8e7]" role="alert">{error}</p> : null}
     </section>
   );

@@ -58,11 +58,14 @@ describe("village snapshot model", () => {
     ]);
   });
 
-  it("places knocking villagers together at the operator's doorstep", () => {
+  it("places only villagers backed by pending approvals at the operator's doorstep", () => {
     const villagers = buildVillageModel(map, [
       { id: "knocker-b", name: "B", residency: "resident", home: 1, state: "knocking" },
       { id: "resting", name: "Resting", residency: "resident", home: 2, state: "resting" },
-      { id: "knocker-a", name: "A", residency: "visitor", home: null, state: "knocking" },
+      { id: "knocker-a", name: "A", residency: "visitor", home: null, state: "idle" },
+    ], [
+      { request_id: "approval-b", agent_id: "knocker-b", state: "pending" },
+      { request_id: "approval-a", agent_id: "knocker-a", state: "pending" },
     ]);
 
     expect(villagers.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
@@ -70,5 +73,13 @@ describe("village snapshot model", () => {
       { id: "resting", x: 464, y: 112 },
       { id: "knocker-a", x: 312, y: 192 },
     ]);
+  });
+
+  it("does not draw a doorstep knock from villager state alone", () => {
+    const [villager] = buildVillageModel(map, [
+      { id: "stale-knock", name: "Stale", residency: "resident", home: 1, state: "knocking" },
+    ], []);
+
+    expect({ x: villager.x, y: villager.y }).toEqual({ x: 304, y: 112 });
   });
 });

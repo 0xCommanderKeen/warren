@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from "@testing-library/rea
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.json";
+import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
   PhaserGame: () => <div data-testid="village-canvas" />,
@@ -132,38 +133,23 @@ describe("Arcadia", () => {
   });
 
   it("orders multiple fixture approvals deterministically and answers each by request id", () => {
-    const envelope = structuredClone(fixture);
-    envelope.snapshot.approvals = [
-      {
-        ...envelope.snapshot.approvals[0], request_id: "approval-z", message: "Second?",
-        opened_at: "2026-08-27T12:00:00.000Z",
-      },
-      {
-        ...envelope.snapshot.approvals[0], request_id: "approval-b", message: "Same time B?",
-        opened_at: "2026-08-27T11:58:00.000Z",
-      },
-      {
-        ...envelope.snapshot.approvals[0], request_id: "approval-a", message: "Same time A?",
-        opened_at: "2026-08-27T11:58:00.000Z",
-      },
-    ];
     const stewardClient = {
       confirm: vi.fn(),
       decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
     };
 
-    render(<App envelope={envelope} stewardClient={stewardClient} />);
+    render(<App envelope={multiplePendingFixture} stewardClient={stewardClient} />);
 
     const knocks = screen.getByRole("region", { name: "Approval knocks" });
     expect(within(knocks).getAllByRole("article").map((item) => item.textContent)).toEqual([
-      expect.stringContaining("Same time A?"),
-      expect.stringContaining("Same time B?"),
-      expect.stringContaining("Second?"),
+      expect.stringContaining("Deploy?"),
+      expect.stringContaining("Publish?"),
     ]);
-    fireEvent.click(within(knocks).getByRole("button", { name: "Deny Same time B?" }));
+    fireEvent.click(within(knocks).getByRole("button", { name: "Deny Publish?" }));
     expect(stewardClient.decideApproval).toHaveBeenCalledWith("approval-b", {
       decision: "deny",
     });
+    expect(within(knocks).getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
   });
 
   it("never draws a knock for a resolved approval", () => {
