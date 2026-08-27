@@ -79,6 +79,7 @@ __all__ = [
     "task_done_event",
     "task_failed_event",
     "task_posted_event",
+    "task_session_finished_event",
     "truncate_error",
     "validate_event",
 ]
@@ -93,6 +94,7 @@ TASK_POSTED = "task_posted"
 TASK_CLAIMED = "task_claimed"
 TASK_DONE = "task_done"
 TASK_FAILED = "task_failed"
+TASK_SESSION_FINISHED = "task_session_finished"
 TASK_DELEGATED = "task_delegated"
 NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
@@ -108,6 +110,7 @@ EVENT_TYPES = (
     TASK_CLAIMED,
     TASK_DONE,
     TASK_FAILED,
+    TASK_SESSION_FINISHED,
     TASK_DELEGATED,
     NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
@@ -1196,6 +1199,41 @@ def task_failed_event(  # noqa: PLR0913 — every field is keyword-only and part
             "reason": truncate_error(reason),
             **_session(run_id),
             **_lineage(parent_task_id),
+        },
+    )
+
+
+def task_session_finished_event(  # noqa: PLR0913 — one keyword per reported fact
+    *,
+    task_id: str,
+    title: str,
+    claimant: str,
+    project: str,
+    run_id: str,
+    outcome: str,
+    artifacts: Sequence[str] = (),
+    duration_s: float = 0.0,
+    reason: str,
+) -> Event:
+    """Report a session that returned after losing its claim, without closing the task.
+
+    This is deliberately not ``task_done`` or ``task_failed``: both describe the board
+    row, while this fact describes only the late session.  The lease sweep remains the
+    authority on the task and this event names the particular run that reported back.
+    """
+    return Event(
+        type=TASK_SESSION_FINISHED,
+        agent_id=claimant,
+        project=project,
+        payload={
+            "task_id": task_id,
+            "title": title,
+            "claimant": claimant,
+            "run_id": run_id,
+            "outcome": outcome,
+            "artifacts": list(artifacts),
+            "duration_s": round(duration_s, 3),
+            "reason": truncate_error(reason),
         },
     )
 

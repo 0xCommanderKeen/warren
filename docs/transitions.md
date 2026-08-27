@@ -225,6 +225,7 @@ is the liveness fact all those deployments can verify.
 ### 1.5 What is deliberately *not* in the matrix
 
 Routine bracketing (`routine_started` / `routine_finished` / `routine_failed`) and
+`task_session_finished` when a board session reports after losing its lease, and
 `resident_restarted` are transitions of a *run*, not of the task/approval/budget domain
 rows in this matrix. The run registry and terminal ownership seam above pair the close;
 the watchdog's give-up *knock* remains in scope here because it is an A1.

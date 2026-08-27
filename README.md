@@ -26,7 +26,8 @@ They share **contracts, not code**:
 
 1. **The event protocol** — burrow's `docs/protocol.md`. Steward adds event types
    (`routine_started`, `routine_finished`, `routine_failed`, `task_posted`,
-   `task_claimed`, `task_done`, `task_failed`, `task_delegated`, `resident_restarted`,
+   `task_claimed`, `task_done`, `task_failed`, `task_session_finished`, `task_delegated`,
+   `resident_restarted`,
    structured `needs_human` payloads, `needs_human_resolved`) and burrow only ever renders
    them.
 2. **The resident manifest** — the versioned declaration of a resident's soul,

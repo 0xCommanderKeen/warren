@@ -84,6 +84,7 @@ def test_the_added_types_are_the_additive_set() -> None:
         "task_claimed",
         "task_done",
         "task_failed",
+        "task_session_finished",
         "task_delegated",
         "needs_human",
         "needs_human_resolved",
@@ -271,6 +272,32 @@ def test_a_tasks_close_names_the_session_that_closed_it() -> None:
             task_id="t2", title="Y", claimant="claude-code:hob", project="hob"
         ).payload
     )
+
+
+def test_a_late_task_session_reports_its_outcome_without_closing_the_task() -> None:
+    event = ev.task_session_finished_event(
+        task_id="t2",
+        title="Y",
+        claimant="claude-code:hob",
+        project="hob",
+        run_id="run-7",
+        outcome="ok",
+        artifacts=("report.md",),
+        duration_s=1.2345,
+        reason="lease lost while the session was running",
+    )
+    assert ev.validate_event(event.to_dict()) == ()
+    assert event.type == "task_session_finished"
+    assert event.payload == {
+        "task_id": "t2",
+        "title": "Y",
+        "claimant": "claude-code:hob",
+        "run_id": "run-7",
+        "outcome": "ok",
+        "artifacts": ["report.md"],
+        "duration_s": 1.234,
+        "reason": "lease lost while the session was running",
+    }
 
 
 def test_an_error_is_truncated_to_one_line() -> None:
