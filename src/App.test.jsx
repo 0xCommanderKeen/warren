@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.json";
@@ -160,5 +160,24 @@ describe("Arcadia", () => {
     render(<App envelope={envelope} />);
 
     expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+  });
+
+  it("keeps approvals answerable after a definitive preflight refusal", async () => {
+    const refusal = Object.assign(new Error("Steward credentials are required"), {
+      ambiguous: false,
+      code: "credentials_required",
+    });
+    const stewardClient = {
+      confirm: vi.fn(),
+      decideApproval: vi.fn().mockRejectedValue(refusal),
+    };
+
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Steward credentials are required");
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "Approve Deploy?" }),
+    ).toBeEnabled());
   });
 });

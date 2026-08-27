@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { pendingApprovals } from "./contract/approvals.js";
 import fixture from "./contract/fixtures/complete-v1.json";
 import { parseSnapshot } from "./contract/parseSnapshot.js";
 import { PhaserGame } from "./game/PhaserGame.jsx";
@@ -17,8 +18,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
   const [error, setError] = useState(null);
   const [submittedRequestId, setSubmittedRequestId] = useState(null);
   const villagers = new Map(snapshot.villagers.map((villager) => [villager.id, villager]));
-  const approvals = snapshot.approvals
-    .filter((approval) => approval.state === "pending")
+  const approvals = pendingApprovals(snapshot.approvals)
     .toSorted((left, right) =>
       left.opened_at.localeCompare(right.opened_at) ||
       left.request_id.localeCompare(right.request_id));
@@ -40,7 +40,7 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
       await stewardClient.decideApproval(approval.request_id, { decision });
     } catch (writeError) {
       setError(writeError instanceof Error ? writeError.message : "Steward could not record the answer");
-      if (writeError?.retryable === true) setSubmittedRequestId(null);
+      if (writeError?.ambiguous !== true) setSubmittedRequestId(null);
     }
   }
 

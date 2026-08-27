@@ -1,3 +1,5 @@
+import { pendingApprovals } from "../contract/approvals.js";
+
 function property(object, name) {
   return object.properties?.find((item) => item.name === name)?.value;
 }
@@ -105,8 +107,7 @@ export function buildVillageModel(map, snapshotVillagers, snapshotApprovals = []
   const lodge = place(map, "lodge");
   const work = place(map, "work");
   const doorstep = place(map, "street");
-  const pendingAgentIds = new Set(snapshotApprovals
-    .filter((approval) => approval.state === "pending")
+  const pendingAgentIds = new Set(pendingApprovals(snapshotApprovals)
     .map((approval) => approval.agent_id));
   const knockingSlots = new Map([...pendingAgentIds]
     .toSorted()
