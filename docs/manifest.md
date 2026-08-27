@@ -928,6 +928,18 @@ steward watchdog tick            # one pass: probe, sweep, bury stale runs, chec
 
 Exit code is non-zero on any error, so CI can gate on it.
 
+Outcome-bearing commands use the same stable process codes: `0` means the requested
+one-shot work completed without a failed session or an unresolved watchdog intervention;
+`1` means invalid input, failed started work, a watchdog give-up or newly tripped budget,
+or a `new-resident` registration check that found problems. Click reserves `2` for command
+line usage errors. Empty work, dry runs, policy skips, successful deadline cleanup, and an
+idempotent `budget unpause` of a known resident that is already running are successful
+no-ops. An unknown resident is invalid.
+
+The `scheduler run` and `watchdog run` daemons do not stop on an individual recoverable
+pass. When bounded by `--max-ticks` / `--max-passes`, they return the aggregate outcome of
+those passes; an operator interrupt of an unbounded daemon is a clean stop.
+
 The same path is importable, and returns structured diagnostics rather than printed text:
 
 ```python

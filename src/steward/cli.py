@@ -868,6 +868,17 @@ def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
             click.secho(f"failed {report.scheduled.key}: {detail}", fg="red", err=True)
 
 
+def _fires_failed(reports: Sequence[FireReport]) -> bool:
+    """Return whether work that actually started failed.
+
+    A skip is an honest scheduling decision (overlap, pause, or catch-up policy), not a
+    process failure.  Dry runs never reach this predicate.
+    """
+    return any(
+        report.fired and (report.result is None or not report.result.ok) for report in reports
+    )
+
+
 @scheduler.command("tick")
 @_scheduler_options
 def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
@@ -894,6 +905,8 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
             click.secho(str(exc), fg="red", err=True)
             sys.exit(EXIT_INVALID)
     _report_fires(reports, dry_run=dry_run)
+    if not dry_run and _fires_failed(reports):
+        sys.exit(EXIT_INVALID)
 
 
 @scheduler.command("run")
@@ -923,6 +936,10 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
         click.echo("stopped")
         return
     _report_fires(reports, dry_run=False)
+    # An unbounded daemon never reaches here: recoverable fire failures are reported and
+    # the loop stays alive.  A bounded run is a one-shot command and carries its aggregate.
+    if _fires_failed(reports):
+        sys.exit(EXIT_INVALID)
 
 
 # --------------------------------------------------------------------------------------
@@ -1006,6 +1023,8 @@ def board_dispatch(
         return
     for report in run.reports:
         _report_board(report)
+    if any(not report.done for report in run.reports):
+        sys.exit(EXIT_INVALID)
 
 
 def _report_board(report: BoardReport) -> None:
@@ -1498,14 +1517,16 @@ def _render_origins(statuses: Sequence[BudgetStatus], origins: Sequence[OriginSp
 
 @budget.command("unpause")
 @click.argument("resident_id")
+@_RESIDENTS_OPTION
 @_DB_OPTION
-def budget_unpause(resident_id: str, db: Path | None) -> None:
+def budget_unpause(resident_id: str, residents: Path, db: Path | None) -> None:
     """Lift a budget pause and let this resident run again.
 
     The same act as approving the ``needs_human`` the pause raised, from a terminal
     instead of a panel: the request is resolved as ``approve``, ``needs_human_resolved``
     is emitted, and the village sees one answer to one question either way.
     """
+    _resident_or_exit(residents, resident_id)
     with _open_store(db) as store:
         pause = BudgetGuard(store, ev.EventEmitter.from_env()).resume(resident_id, decided_by="cli")
     if pause is None:
@@ -1557,6 +1578,11 @@ def _report_pass(report: WatchdogPass) -> None:
         click.echo("nothing to intervene in")
 
 
+def _watchdog_failed(report: WatchdogPass) -> bool:
+    """Return whether the pass ended with work requiring human recovery."""
+    return bool(report.gave_up or report.paused)
+
+
 @watchdog.command("tick")
 @_RESIDENTS_OPTION
 @_DB_OPTION
@@ -1568,8 +1594,10 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
         report = Watchdog.from_path(residents, store).tick()
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
-        return
-    _report_pass(report)
+    else:
+        _report_pass(report)
+    if _watchdog_failed(report):
+        sys.exit(EXIT_INVALID)
 
 
 @watchdog.command("run")
@@ -1599,6 +1627,10 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
             return
     for report in passes:
         _report_pass(report)
+    # As with scheduler run, only a returning (bounded) daemon invocation summarizes its
+    # passes into an exit status.  An individual recoverable pass never kills the daemon.
+    if any(_watchdog_failed(report) for report in passes):
+        sys.exit(EXIT_INVALID)
 
 
 # --------------------------------------------------------------------------------------
@@ -1858,8 +1890,10 @@ def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per o
         sys.exit(EXIT_INVALID)
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
-        return
-    _report_nursery(report)
+    else:
+        _report_nursery(report)
+    if report.register is not None and report.register.problems:
+        sys.exit(EXIT_INVALID)
 
 
 def _report_retire(report: RetireReport) -> None:
