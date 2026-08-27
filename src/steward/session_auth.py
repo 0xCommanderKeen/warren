@@ -19,15 +19,18 @@ a copy of ``steward.db`` yields no live credentials. The plaintext exists in exa
 places: the child's environment, and the ``Authorization`` header it presents.
 
 **Expiring with the run.** There is no second clock. The digest is looked up against the
-same condition ``renew_run`` renews under — the run is open, no terminal fact has been
-chosen for it, and its ownership heartbeat is fresh. A credential that leaked into a
-transcript is worthless by the time anybody reads the transcript.
+negation of the watchdog's burial condition — the run is open, no terminal fact has been
+chosen for it, and its heartbeat is not stale — so a credential is accepted exactly while
+nobody could yet call the run dead. A credential that leaked into a transcript is worthless
+by the time anybody reads the transcript.
 
 **Recognisable on sight.** :data:`SESSION_CREDENTIAL_PREFIX` is what makes the credential
-redactable: ``redact_secrets`` matches its shape (:data:`SECRET_CREDENTIAL_PATTERN` is
+redactable: ``redact_secrets`` matches its shape (:data:`SESSION_CREDENTIAL_PATTERN` is
 folded into :data:`steward.manifest.SECRET_VALUE_PATTERNS`), so a session that prints its
-own credential into its own stdout cannot have it survive into a burrow event, an approval
-rendering, or a ledger row.
+own credential into its own stdout cannot have it survive into a burrow event or an
+approval rendering. The run ledger needs no redaction and gets none: every column in
+``run_ledger`` is a fact steward built — two ids, a kind, an outcome, four numbers — and
+none of it is session-written text.
 
 This module deliberately imports nothing from steward. Both ends of the credential's life
 depend on it — the store that keeps the digest and the manifest redactor that scrubs the
@@ -109,16 +112,15 @@ def looks_like_session_credential(value: str) -> bool:
 class SessionPrincipal:
     """Who a session credential says the caller is, resolved from its live run.
 
-    The credential *is* the identity, which is the whole point: ``resident_id`` is read
-    from the run registry rather than from a request body, so a session cannot name a
-    resident it is not. ``kind`` and ``ref`` come along because the same reasoning applies
-    to the work: a board session's letters belong to the task it is working, and that task
-    id is here rather than in the caller's gift.
+    Two fields, and no more than the two things anybody asks. ``resident_id`` is the
+    identity — read from the run registry rather than from a request body, which is the
+    whole point: a session cannot name a resident it is not. ``run_id`` is what a refusal
+    says out loud, so an operator reading a 403 can find the exact session in the ledger.
+
+    Deliberately not a copy of the whole run row. The rest of what a run knows — its
+    ``agent_id``, its kind, the task it is working — is already answerable from the
+    registry by ``run_id``, and a field nothing reads is a field that quietly goes wrong.
     """
 
     run_id: str
     resident_id: str
-    agent_id: str
-    project: str
-    kind: str
-    ref: str

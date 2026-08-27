@@ -172,10 +172,6 @@ SESSION_ENV_BASE = (
     "STEWARD_MAX_DELEGATION_DEPTH",
     "STEWARD_REPEAT_DENY_WINDOW_H",
     "STEWARD_STATE",
-    # Named by ``ApiConfig.from_env`` rather than by anything a session runs today. It is
-    # here so a session and the control plane cannot end up disagreeing about where the
-    # residents tree is the day a command learns to read it.
-    "STEWARD_RESIDENTS",
     # Where the village is, so a session's own emitter posts to the same burrow. Its
     # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
     "BURROW_URL",
@@ -227,13 +223,15 @@ SESSION_ENV_PASSTHROUGH_ENV = "STEWARD_SESSION_ENV_PASSTHROUGH"
 #: from the mint at fire time, per run, and an operator-supplied one would be a credential
 #: with no run behind it and no expiry.
 #:
-#: ``BURROW_TOKEN`` is *not* refused, and that is a decision worth stating: it is one
-#: shared ingest secret that lets its holder post events as any ``agent_id``, so it is off
-#: the default allowlist, and a session that cannot present it loses nothing durable — the
-#: emitter queues its events in ``events.jsonl.pending`` and a control-plane ``steward
-#: events flush`` delivers them under the control plane's own credential. An operator who
-#: would rather have live session-emitted events can name it here and know what they
-#: bought. Per-resident ingest credentials are the real answer and are their own issue.
+#: ``BURROW_TOKEN`` is not in this set, and that is a narrower statement than it looks.
+#: It is off the default allowlist for its own reason — one shared ingest secret whose
+#: holder can post events as any ``agent_id`` — and a session should not be given it. What
+#: a session loses without it is nothing durable: the emitter queues its events in
+#: ``events.jsonl.pending`` and a control-plane ``steward events flush`` delivers them under
+#: the control plane's own credential, so the events arrive either way. Naming it here is
+#: therefore an operator buying *live* emission at the price of that shared secret, and
+#: steward does not refuse it only because the choice is legitimately theirs to get wrong.
+#: Per-resident ingest credentials are the real answer, and are their own issue.
 SESSION_ENV_REFUSED = frozenset({"STEWARD_TOKEN", SESSION_TOKEN_ENV})
 
 

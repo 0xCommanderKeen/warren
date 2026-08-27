@@ -580,37 +580,6 @@ def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Pa
 # --------------------------------------------------------------------------------------
 
 
-@dataclass(frozen=True, slots=True)
-class Caller:
-    """Who is on the other end of one request.
-
-    Two kinds, and the difference is the whole of steward #41. A **human** presents
-    ``STEWARD_TOKEN``, which is a master key with no principal behind it — one shared
-    secret, one constant-time compare — and may reach everything. A **session** presents
-    the credential minted for its own run, which *is* a principal: it names a resident,
-    dies with the run, and reaches only what a session legitimately needs.
-
-    Open mode (``--allow-open``) has no token to compare, so every caller is the human one
-    and none of this applies. That is not a gap this class can close: a session running
-    against an open steward can call any route with no header at all.
-    """
-
-    session: SessionPrincipal | None = None
-
-    @property
-    def is_session(self) -> bool:
-        """Whether this request came from a resident's own session."""
-        return self.session is not None
-
-    def require_session(self) -> SessionPrincipal:
-        """Return the principal, for a path that has already established there is one."""
-        if self.session is None:  # pragma: no cover — guarded by :attr:`is_session`
-            raise ValueError("this caller is not a session")
-        return self.session
-
-
-HUMAN = Caller()
-
 #: Methods a session credential may use on any route. Reads only.
 SESSION_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -663,25 +632,18 @@ def _session_refusal(path: str) -> str:
     return "this write path is not one a session credential reaches"
 
 
-def _presented_bearer(headers: Sequence[tuple[bytes, bytes]]) -> str:
-    """Return the single presented bearer value, or ``""``.
+def _presented_session_credential(headers: Sequence[tuple[bytes, bytes]]) -> str:
+    """Return the presented bearer value if it is *shaped* like a session credential.
 
-    Exactly one ``Authorization`` field, like :func:`_authorized`: rejecting duplicates
-    avoids proxy and framework disagreement over first/last/comma-joined semantics, and the
-    two credential kinds must not disagree about which header they read.
+    A cheap syntactic test that grants nothing: the API tries the human token first and
+    only reaches for the run registry when what was presented could not be anything else.
+    A credential is ASCII by construction, so a value that is not decodable is not one.
     """
-    values = [value for key, value in headers if key.lower() == b"authorization"]
-    if len(values) != 1:
+    try:
+        presented = _presented_bearer(headers).decode("ascii")
+    except UnicodeDecodeError:
         return ""
-    scheme, separator, presented = values[0].partition(b" ")
-    if separator != b" " or scheme.lower() != b"bearer":
-        return ""
-    return presented.strip().decode("utf-8", "replace")
-
-
-def _presents_session_credential(headers: Sequence[tuple[bytes, bytes]]) -> bool:
-    """Whether what was presented is shaped like a session credential. Grants nothing."""
-    return looks_like_session_credential(_presented_bearer(headers))
+    return presented if looks_like_session_credential(presented) else ""
 
 
 type PrincipalLookup = Callable[[str], SessionPrincipal | None]
@@ -695,10 +657,10 @@ def _auth_dependency(
     def require_token(request: Request) -> None:
         headers = request.scope.get("headers", [])
         if _authorized(headers, token):
-            request.state.caller = HUMAN
+            request.state.session = None
             return
-        presented = _presented_bearer(headers)
-        principal = principal_for(presented) if looks_like_session_credential(presented) else None
+        presented = _presented_session_credential(headers)
+        principal = principal_for(presented) if presented else None
         if principal is None:
             raise HTTPException(
                 status_code=401,
@@ -711,43 +673,68 @@ def _auth_dependency(
                 },
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        request.state.caller = Caller(session=principal)
+        request.state.session = principal
         path = request.url.path.rstrip("/") or "/"
         if request.method not in SESSION_SAFE_METHODS and path not in SESSION_WRITE_PATHS:
             _refuse(
                 403,
                 "session_credential_forbidden",
-                f"{principal.resident_id} presented a session credential, and "
-                f"{_session_refusal(path)}. Nothing was recorded.",
+                f"{principal.resident_id} presented the credential for run "
+                f"{principal.run_id}, and {_session_refusal(path)}. Nothing was recorded.",
             )
 
     return require_token
 
 
-def caller_of(request: Request) -> Caller:
-    """Return who this request authenticated as. Set by the gate, before any route runs."""
-    caller = getattr(request.state, "caller", None)
-    return caller if isinstance(caller, Caller) else HUMAN
+def session_of(request: Request) -> SessionPrincipal | None:
+    """Return the resident whose session made this request, or ``None`` for a human.
+
+    Two kinds of caller, and the difference is the whole of steward #41. A **human**
+    presents ``STEWARD_TOKEN``, a master key with no principal behind it — one shared
+    secret, one constant-time compare — and may reach everything. A **session** presents the
+    credential minted for its own run, which *is* a principal: it names a resident, dies
+    with the run, and reaches only what a session legitimately needs.
+
+    ``None`` also covers open mode (``--allow-open``), where there is no token to compare
+    and so no caller steward can tell apart. That is not a gap this function can close: a
+    session running against an open steward can reach any route with no header at all.
+
+    Set by the gate, which runs before any route.
+    """
+    principal = getattr(request.state, "session", None)
+    return principal if isinstance(principal, SessionPrincipal) else None
+
+
+def _presented_bearer(headers: Sequence[tuple[bytes, bytes]]) -> bytes:
+    """Return the single presented bearer value, or ``b""``.
+
+    Exactly one Authorization field is accepted.  Rejecting duplicates avoids proxy and
+    framework disagreement over first/last/comma-joined semantics.
+
+    One parse for both credential kinds, and bytes rather than ``str`` on purpose: the
+    human token is compared byte for byte, and decoding first would let an
+    invalid-UTF-8 header be lossily normalised into a comparison it should have failed
+    (steward #41).
+    """
+    values = [value for key, value in headers if key.lower() == b"authorization"]
+    if len(values) != 1:
+        return b""
+    scheme, separator, presented = values[0].partition(b" ")
+    if separator != b" " or scheme.lower() != b"bearer":
+        return b""
+    return presented.strip()
 
 
 def _authorized(headers: Sequence[tuple[bytes, bytes]], token: str | None) -> bool:
-    """Apply the API's one bearer policy to raw ASGI headers.
+    """Apply the API's human-token policy to raw ASGI headers.
 
-    Exactly one Authorization field is accepted.  Rejecting duplicates avoids proxy and
-    framework disagreement over first/last/comma-joined semantics.  All presented bearer
-    tokens reach the same constant-time comparison used by the route dependency.
+    All presented bearer tokens reach the same constant-time comparison used by the route
+    dependency.  ``token is None`` is open mode, where there is nothing to compare.
     """
     if token is None:
         return True
-    values = [value for key, value in headers if key.lower() == b"authorization"]
-    if len(values) != 1:
-        return False
-    scheme, separator, presented = values[0].partition(b" ")
-    return (
-        separator == b" "
-        and scheme.lower() == b"bearer"
-        and compare_digest(presented.strip(), token.encode("utf-8"))
-    )
+    presented = _presented_bearer(headers)
+    return bool(presented) and compare_digest(presented, token.encode("utf-8"))
 
 
 class _ApprovalBodyDepthMiddleware:
@@ -773,7 +760,7 @@ class _ApprovalBodyDepthMiddleware:
         # alone — no database lookup in the middleware — or the depth guard would hold for
         # one credential kind and not the other.
         headers = scope.get("headers", [])
-        if not (_authorized(headers, self.token) or _presents_session_credential(headers)):
+        if not (_authorized(headers, self.token) or _presented_session_credential(headers)):
             await self.app(scope, receive, send)
             return
 
@@ -892,8 +879,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         """Resolve a presented session credential against the live run registry.
 
         The freshness bound is the run's ownership lease, not a window of this endpoint's
-        own invention: a credential works exactly while its run's owner could still renew
-        it (steward #41). A registry that cannot be read refuses rather than admits.
+        own invention: a credential is accepted exactly while the watchdog could not yet
+        bury the run (steward #41). A registry that cannot be read refuses rather than
+        admits — an unreadable database is not a reason to let somebody in.
         """
         fresh_since = ev.utc_now_iso(now() - timedelta(seconds=RUN_LEASE_GRACE_S))
         try:
@@ -1371,9 +1359,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         second derivation here would only turn a swept task row into a 404 where #67
         correctly falls back to the chain the sender is really in.
         """
-        caller = caller_of(request)
-        if caller.is_session:
-            principal = caller.require_session()
+        principal = session_of(request)
+        if principal is not None:
             if body.sender is not None and body.sender != principal.resident_id:
                 _refuse(
                     403,

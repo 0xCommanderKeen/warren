@@ -33,8 +33,8 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
   undelivered-event log, which can only answer for the host that fired them and only
   while burrow was unreachable (steward #39). It is also where a session's own scoped
   credential lives, as a digest: the run's lease is the credential's expiry, so
-  :meth:`Store.session_principal` asks exactly the question ``renew_run`` asks
-  (steward #41).
+  :meth:`Store.session_principal` accepts one exactly while the watchdog could not yet
+  bury the run (steward #41).
 """
 
 import json
@@ -2622,12 +2622,20 @@ class Store:
     def session_principal(self, credential: str, *, fresh_since: str) -> SessionPrincipal | None:
         """Return who a session credential is, or ``None`` if it is not a live one.
 
-        The condition is deliberately the same one :meth:`renew_run` renews under — the run
-        is open, no terminal fact has been chosen for it, and its ownership heartbeat is no
-        older than ``fresh_since``. So there is no second clock and no second definition of
-        "this session is over": a credential works exactly while its run's owner could
-        still renew the lease, and stops the moment the session closes, times out, or the
-        lease goes stale — whether or not the watchdog has swept yet (steward #41).
+        The condition is the exact negation of the watchdog's burial condition — the run is
+        open, no terminal fact has been chosen for it, and its heartbeat is *not* stale by
+        ``fresh_since``, which is what :meth:`close_stale_run` and :meth:`claim_run_terminal`
+        require in order to bury it. So a credential is accepted exactly while the watchdog
+        could not yet call this run dead, and it stops the moment the session closes, times
+        out, or the lease goes stale — whether or not a watchdog has actually swept.
+
+        Not :meth:`renew_run`'s condition, which is a near miss worth naming: that one has no
+        freshness clause at all (an owner whose heartbeat thread was starved for three
+        minutes may still renew and carry on) and it does check ``owner_token``. The owner
+        token fences steward's own writes about a run; it is not the session's to present,
+        and a session that had it could renew its own credential. Burial is the right clock
+        here because it is the one that answers "is anybody still entitled to act as this
+        session" — and it is deny-by-default, which is the house rule (steward #41).
 
         Looked up by digest, so the plaintext is never compared against anything on disk.
         An empty credential is refused before the query: every row that never got one
@@ -2639,21 +2647,14 @@ class Store:
             return None
         with self._lock:
             row = self._conn.execute(
-                "SELECT run_id, resident_id, agent_id, project, kind, ref FROM open_runs "
+                "SELECT run_id, resident_id FROM open_runs "
                 "WHERE session_credential_sha256 = ? AND closed_at IS NULL "
                 "AND terminal_event IS NULL AND heartbeat_at > ?",
                 (digest, fresh_since),
             ).fetchone()
         if row is None:
             return None
-        return SessionPrincipal(
-            run_id=row["run_id"],
-            resident_id=row["resident_id"],
-            agent_id=row["agent_id"],
-            project=row["project"],
-            kind=row["kind"],
-            ref=row["ref"],
-        )
+        return SessionPrincipal(run_id=row["run_id"], resident_id=row["resident_id"])
 
     def close_run(self, run_id: str, *, now: str | None = None) -> bool:
         """Record that a session reported back. Returns whether this call closed the row.

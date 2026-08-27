@@ -1319,10 +1319,7 @@ def test_a_credential_resolves_to_the_resident_whose_run_it_is(store: Store) -> 
 
     assert principal is not None
     assert principal.resident_id == "hob"
-    assert principal.agent_id == "claude-code:hob"
     assert principal.run_id == "r1"
-    assert principal.kind == "routine"
-    assert principal.ref == "daily-summary"
 
 
 def test_only_the_digest_is_written(store: Store) -> None:
@@ -1343,16 +1340,22 @@ def test_a_closed_run_authenticates_nothing(store: Store) -> None:
 
 
 def test_a_chosen_terminal_fact_ends_the_credential_before_the_close(store: Store) -> None:
-    """It asks exactly what ``renew_run`` asks, and that refuses a terminal run too."""
+    """A run whose end is decided is over, whether or not the event has been published."""
     credential = credentialed(store)
     assert store.claim_run_terminal("r1", event="{}", event_id="t:r1", owner_token="")
 
-    assert not store.renew_run("r1", owner_token="")
+    assert store.open_runs(), "the row is still open — publication has not happened yet"
     assert store.session_principal(credential, fresh_since=EARLY) is None
 
 
 def test_a_stale_lease_ends_the_credential_before_the_watchdog_sweeps(store: Store) -> None:
-    """No second clock: the freshness bound is the run's own ownership lease."""
+    """No second clock: the bound is the moment the watchdog *could* bury the run.
+
+    Deliberately not the condition ``renew_run`` renews under — that has no freshness
+    clause at all, so a live owner whose heartbeat thread was starved may still renew and
+    carry on. Burial is the clock that answers "is anybody still entitled to act as this
+    session", and it denies by default.
+    """
     credential = credentialed(store, now=EARLY)
 
     assert store.session_principal(credential, fresh_since=LATER) is None

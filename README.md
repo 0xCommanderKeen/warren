@@ -551,8 +551,9 @@ Two names are deliberately missing, and neither is an oversight:
 - **`BURROW_TOKEN`** is one shared ingest secret whose holder can post events as any
   `agent_id`. A session without it loses nothing durable: its emitter queues events in
   `events.jsonl.pending`, and a control-plane `steward events flush` delivers them under
-  the control plane's own credential. An operator who wants live session-emitted events
-  can name it in `STEWARD_SESSION_ENV_PASSTHROUGH` and know what that buys.
+  the control plane's own credential — the events arrive either way. Naming it in
+  `STEWARD_SESSION_ENV_PASSTHROUGH` buys *live* emission at the price of handing every
+  session a secret that can impersonate every other resident. Prefer the flush.
 
 One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scoped
 credential — see [the API's two kinds of caller](docs/api.md#two-kinds-of-caller).

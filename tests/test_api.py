@@ -2546,7 +2546,7 @@ def test_a_credential_stops_working_when_its_run_closes(api: ApiFactory) -> None
 
 
 def test_a_credential_stops_working_when_its_lease_goes_stale(api: ApiFactory) -> None:
-    """Before the watchdog sweeps, too: the credential asks the question `renew_run` asks."""
+    """Before the watchdog sweeps, too: the bound is when a run *could* be buried."""
     harness = api()
     stale = ev.utc_now_iso(dt.datetime.now(dt.UTC) - dt.timedelta(seconds=RUN_LEASE_GRACE_S + 60))
     credential = open_session_run(harness, heartbeat_at=stale)

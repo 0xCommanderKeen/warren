@@ -22,7 +22,11 @@ from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
 from steward.budgets import BudgetGuard
-from steward.session_auth import SESSION_CREDENTIAL_PREFIX, SESSION_TOKEN_ENV
+from steward.session_auth import (
+    SESSION_CREDENTIAL_PREFIX,
+    SESSION_TOKEN_ENV,
+    SessionPrincipal,
+)
 from steward.store import Store
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
@@ -1850,33 +1854,38 @@ def test_a_fired_session_is_handed_a_credential_its_own_run_backs(
 ) -> None:
     """The whole of steward #41's second half, end to end: mint, store, resolve.
 
-    The session is handed a plaintext credential nobody else has, the registry keeps only
-    its digest, and presenting it resolves to *this* resident and *this* run — which is
-    what makes it an identity rather than a shared key.
+    Asked *from inside the session*, which is the only moment that proves anything: the
+    run this fire actually opened is the row the credential resolves against, and it
+    resolves while the session is running rather than against a row the test made up. The
+    same question after the session reports back must answer nothing.
     """
     path = write_resident(manifest_with(HOURLY))
-    mock = r.MockRunner()
+    handed: list[str] = []
+    resolved: list[SessionPrincipal | None] = []
+
     with Store(":memory:") as store:
-        engine = _engine_with_registry(path, store, tmp_path, lambda _spec: mock)
 
-        engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+        def ask_from_inside(request: r.RunRequest) -> r.RunResult:
+            credential = request.env[SESSION_TOKEN_ENV]
+            handed.append(credential)
+            resolved.append(store.session_principal(credential, fresh_since=""))
+            return r.RunResult(outcome=r.Outcome.OK, output="done", exit_status=0)
 
-        credential = mock.requests[0].env[SESSION_TOKEN_ENV]
-        assert credential.startswith(SESSION_CREDENTIAL_PREFIX)
-        # The run closed when the session reported back, so ask the live-run question
-        # against a run that is still open.
-        assert store.open_run(
-            run_id="still-open",
-            kind="routine",
-            trigger="schedule",
-            agent_id="claude-code:test-agent",
-            resident_id="test-agent",
-            session_credential=credential,
+        engine = _engine_with_registry(
+            path, store, tmp_path, lambda _spec: r.MockRunner(behavior=ask_from_inside)
         )
-        principal = store.session_principal(credential, fresh_since="")
+
+        report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+        (credential,) = handed
+        (principal,) = resolved
+        assert credential.startswith(SESSION_CREDENTIAL_PREFIX)
         assert principal is not None
         assert principal.resident_id == "test-agent"
-        assert principal.run_id == "still-open"
+        assert principal.run_id == report.run_id, "the row this fire opened, not another"
+
+        assert store.open_runs() == [], "and the run reported back"
+        assert store.session_principal(credential, fresh_since="") is None
 
 
 def test_a_registry_that_will_not_take_the_run_hands_over_no_credential(

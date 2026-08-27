@@ -82,7 +82,7 @@ Two kinds of caller present two kinds of credential. A **human** presents
 minted for its own run and may reach very little. See
 [Two kinds of caller](#two-kinds-of-caller) below.
 
-One shared token, exactly like burrow's ingest auth.
+**The human token** is one shared secret, exactly like burrow's ingest auth.
 
 - `STEWARD_TOKEN` in steward's environment; `Authorization: Bearer <token>` on the
   request.
@@ -116,8 +116,9 @@ it fetches from the endpoints below, with the token, and a `401` on any of them 
 forget what it holds and ask again. See [`/ui`](#ui) at the end of this document.
 
 **Tailnet only.** The default bind is `127.0.0.1`; in deployment steward listens on
-its tailnet address and is never exposed to the public internet. One shared token is
-the whole of its auth, and that is only enough behind a private network.
+its tailnet address and is never exposed to the public internet. One shared human token is
+the whole of its auth against an operator — session credentials narrow what a *resident*
+may do, not what an intruder may — and that is only enough behind a private network.
 
 ## Two kinds of caller
 
@@ -144,8 +145,16 @@ somebody decides otherwise.
 Reads are *not* narrowed, and that is a decision rather than an omission. A locally placed
 session already has `steward.db` and the residents tree on the same disk — that is how
 `steward delegate` and `steward approval raise` work at all — so narrowing what it may read
-over HTTP would move nothing it could not read directly. Narrowing reads becomes meaningful
-when a session runs somewhere that has neither, which rides with container placement.
+over HTTP would move nothing it could not read directly.
+
+**And that cuts both ways, so say it plainly: this is a boundary, not a sandbox.** A
+session with shell access and `$STEWARD_STATE` can open `steward.db` and write to it — it
+can record an approval decision with `sqlite3` that the API would have refused it. What
+these refusals buy is that steward's *own* write path no longer treats a session as an
+operator: the API stops being the easy door, every refusal is logged, and a session that
+takes the other road has to do something no resident's charter describes. Real containment
+needs the session to have neither the database nor the residents tree, which is container
+placement's job, not this issue's.
 
 Three of those refusals name the act rather than the rule, because the act is the part
 worth knowing:
