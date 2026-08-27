@@ -139,7 +139,8 @@ CREATE TABLE IF NOT EXISTS requests (
     method       TEXT NOT NULL,
     path         TEXT NOT NULL,
     outcome      TEXT NOT NULL,
-    detail       TEXT NOT NULL DEFAULT '{}'
+    detail       TEXT NOT NULL DEFAULT '{}',
+    approval_id  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS approval_announcements (
@@ -270,6 +271,9 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "effects_attempts": "INTEGER NOT NULL DEFAULT 0",
         "effects_next_attempt_at": "TEXT",
     },
+    "requests": {
+        "approval_id": "TEXT",
+    },
     "run_ledger": {
         # Denormalized from the task the run came off (steward #45). Rolling spend up by
         # joining ``ref`` to ``jobs.task_id`` guessed: a routine whose ref happens to
@@ -286,6 +290,8 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
 _LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS approvals_denials
     ON approvals (resident, action, decided_at);
+CREATE INDEX IF NOT EXISTS requests_approval
+    ON requests (approval_id, outcome);
 """
 
 
@@ -1416,7 +1422,7 @@ class Store:
                 marked += cursor.rowcount
         return marked
 
-    def decide(
+    def decide(  # noqa: PLR0913 — optional API ledger metadata joins the same transaction
         self,
         request_id: str,
         decision: str,
@@ -1424,6 +1430,7 @@ class Store:
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
         now: str | None = None,
+        request_log: tuple[str, str, str] | None = None,
     ) -> tuple[ApprovalRecord | None, bool]:
         """Record a decision. Returns the record and whether *this* call recorded it.
 
@@ -1471,6 +1478,24 @@ class Store:
             row = self._conn.execute(
                 "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
             ).fetchone()
+            if request_log is not None and row["status"] == STATUS_RESOLVED:
+                log_id, method, path = request_log
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO requests (request_id, received_at, method, path, "
+                    "outcome, detail, approval_id) VALUES (?, ?, ?, ?, "
+                    "CASE WHEN EXISTS (SELECT 1 FROM approval_announcements "
+                    "WHERE request_id = ? AND effects_at IS NOT NULL) THEN 'recorded' "
+                    "ELSE 'recorded_announcement_pending' END, ?, ?)",
+                    (
+                        log_id,
+                        moment,
+                        method,
+                        path,
+                        request_id,
+                        _dumps({"approval": request_id, "decision": row["decision"]}),
+                        request_id,
+                    ),
+                )
         return ApprovalRecord.from_row(row), recorded
 
     def claim_approval_announcement(
@@ -1646,6 +1671,12 @@ class Store:
                 "AND effects_claimed_by = ?",
                 (moment, record.request_id, token),
             )
+            if cursor.rowcount == 1:
+                self._conn.execute(
+                    "UPDATE requests SET outcome = 'recorded' WHERE approval_id = ? "
+                    "AND outcome = 'recorded_announcement_pending'",
+                    (record.request_id,),
+                )
         return cursor.rowcount == 1, resumed
 
     def release_approval_effects(self, request_id: str, token: str) -> bool:

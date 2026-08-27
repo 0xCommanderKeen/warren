@@ -449,6 +449,30 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     # Emitted as the villager who knocked, so burrow walks the right one from the door.
     assert resolved[0]["agent_id"] == "claude-code:test-agent"
     assert harness.client.get("/approvals").json()["approvals"] == []
+    assert [row.outcome for row in harness.store.requests()] == ["recorded"]
+
+
+def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) -> None:
+    harness = api()
+    worker = harness.client.app.state.approval_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTransitions:
+        def __init__(self) -> None:
+            self.store = harness.store
+
+        def reconcile_announcements(self) -> None:
+            entered.set()
+            release.wait()
+
+    worker.transitions = SlowTransitions()
+    worker.close_timeout = 0.01
+    with pytest.raises(TimeoutError, match="did not stop"), harness.client:
+        assert entered.wait(1.0)
+    assert worker.alive
+    release.set()
+    worker.close(timeout=1.0)
 
 
 def test_a_second_decision_changes_nothing_and_emits_nothing(api: ApiFactory) -> None:

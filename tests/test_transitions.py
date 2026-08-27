@@ -743,6 +743,80 @@ def test_worker_retries_an_injected_error_before_atomic_effect_completion(
     assert store.approval_announcement_state(raised.request_id) == "complete"
 
 
+def test_idle_worker_polls_for_expired_work_created_by_another_store(
+    tmp_path: Path, manifest: ResidentManifest
+) -> None:
+    path = tmp_path / "shared-worker.db"
+    worker_store, producer = Store(path), Store(path)
+
+    class FailOnceEmitter:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.accepted = threading.Event()
+
+        def emit(self, event: ev.Event) -> bool:
+            return self.emit_durable(event)
+
+        def emit_durable(self, event: ev.Event) -> bool:
+            del event
+            self.attempts += 1
+            if self.attempts == 1:
+                return False
+            self.accepted.set()
+            return True
+
+    sink = FailOnceEmitter()
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(worker_store, sink),
+        lambda record, token: worker_store.complete_approval_effects(record, token)[0],
+        poll_interval=0.02,
+    )
+    worker.start()
+    try:
+        time.sleep(0.04)  # worker is idle before the independent producer commits
+        raised = producer.create_approval_request(
+            agent_id=manifest.burrow_agent_id,
+            project=manifest.burrow_project,
+            action="send_email",
+            message="ask",
+            expires_at=ev.utc_now_iso(datetime.now(UTC) - timedelta(seconds=1)),
+        )
+        assert [row.request_id for row in producer.expire_approvals()] == [raised.request_id]
+        assert sink.accepted.wait(1.0)
+    finally:
+        worker.close()
+        worker_store.close()
+        producer.close()
+    assert sink.attempts == 2
+
+
+def test_worker_close_surfaces_a_slow_active_pass(store: Store) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTransitions:
+        def __init__(self) -> None:
+            self.store = store
+
+        def reconcile_announcements(self) -> None:
+            entered.set()
+            release.wait()
+
+    worker = ApprovalOutboxWorker(
+        SlowTransitions(),  # ty: ignore[invalid-argument-type]
+        lambda _record, _token: True,
+        close_timeout=0.01,
+    )
+    worker.start()
+    assert entered.wait(1.0)
+    with pytest.raises(TimeoutError, match="did not stop"):
+        worker.close()
+    assert worker.alive
+    release.set()
+    worker.close(timeout=1.0)
+    assert not worker.alive
+
+
 def test_an_expired_request_can_never_be_approved(
     approvals: tr.ApprovalTransitions,
     store: Store,

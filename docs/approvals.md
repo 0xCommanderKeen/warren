@@ -44,7 +44,12 @@ better. They wait for a person, because only a person can answer them.
 SQLite transaction steward queues the resolution announcement. A replay — a double-tapped
 notification or retried request — never changes the decision, but it may finish a still
 pending announcement left by a process that died after committing the answer. API startup
-also reconciles that queue, so recovery does not depend on the same client returning.
+also reconciles that queue, and a bounded background poll discovers work committed by
+other API processes; an exact
+retry or lease deadline can wake the worker sooner. Each accepted decision request is
+linked to the approval in the same transaction as the decision/outbox row, and completion
+updates every correlated pending request-log entry to `recorded`, so recovery does not
+depend on the same client returning.
 
 Announcement delivery is at least once. A short SQLite lease prevents concurrent API
 processes from emitting the same queued item together; a dead process's lease expires and

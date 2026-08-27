@@ -62,6 +62,26 @@ def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: P
     }
 
 
+def test_an_existing_request_log_gains_approval_correlation(tmp_path: Path) -> None:
+    path = tmp_path / "old-requests.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE requests (request_id TEXT PRIMARY KEY, received_at TEXT NOT NULL, "
+        "method TEXT NOT NULL, path TEXT NOT NULL, outcome TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+    connection.close()
+    assert "approval_id" in columns
+
+
 def test_two_independent_connections_cannot_claim_one_announcement(tmp_path: Path) -> None:
     path = tmp_path / "shared.db"
     first, second = Store(path), Store(path)
@@ -131,6 +151,42 @@ def test_budget_completion_and_marker_are_one_atomic_idempotent_act(store: Store
     assert store.budget_allowance("hob")["until"] == LATER  # ty: ignore
     assert store.approval_announcement_state(record.request_id) == "complete"
     assert store.complete_approval_effects(record, token) == (False, None)
+
+
+def test_approval_completion_finalizes_every_correlated_pending_request(store: Store) -> None:
+    request = store.create_approval_request(
+        agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+    )
+    record, recorded = store.decide(
+        request.request_id,
+        "approve",
+        request_log=("api-1", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert recorded
+    assert record is not None
+    replay, recorded = store.decide(
+        request.request_id,
+        "deny",
+        request_log=("api-2", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert not recorded
+    assert replay is not None
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded_announcement_pending",
+        "recorded_announcement_pending",
+    ]
+    announcement = store.claim_approval_announcement(request.request_id)
+    assert announcement is not None
+    _, token = announcement
+    assert store.finish_approval_announcement(request.request_id, token, accepted=True)
+    effects = store.claim_approval_effects(request.request_id)
+    assert effects is not None
+    effect_record, token = effects
+    assert store.complete_approval_effects(effect_record, token)[0]
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded",
+        "recorded",
+    ]
 
 
 def test_two_store_workers_cannot_apply_the_same_effects(tmp_path: Path) -> None:

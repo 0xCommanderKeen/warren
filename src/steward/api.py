@@ -162,6 +162,8 @@ class ApiConfig:
     #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
     #: a directory with no ``index.html`` in it is not served at all.
     ui_dir: Path | None = None
+    approval_poll_interval_s: float = 1.0
+    approval_close_timeout_s: float = 5.0
 
     @classmethod
     def from_env(  # noqa: PLR0913 — one keyword per thing the environment can name
@@ -585,7 +587,12 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         completed, _resumed = db.complete_approval_effects(record, token)
         return completed
 
-    outbox = ApprovalOutboxWorker(approvals, complete_approval)
+    outbox = ApprovalOutboxWorker(
+        approvals,
+        complete_approval,
+        poll_interval=settings.approval_poll_interval_s,
+        close_timeout=settings.approval_close_timeout_s,
+    )
     # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
     # respect (steward #W1): a run-now session's <needs-human>/<delegate> blocks are
     # harvested and its pending decisions are delivered into its preamble, exactly as they
@@ -1094,7 +1101,14 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
-        decided = approvals.decide(request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit)
+        ledger_id = new_id()
+        decided = approvals.decide(
+            request_id,
+            body.decision,
+            decided_by=DECIDED_BY,
+            edit=body.edit,
+            request_log=(ledger_id, request.method, request.url.path),
+        )
         record = decided.record
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
@@ -1125,10 +1139,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         # A replay that recovered an abandoned announcement must also finish the
         # idempotent workflow below (notably budget unpause). The decision did not change,
         # but this request completed work the dead first process did not.
-        final_decision = record.decision or body.decision
         announced = state in {"announced", "complete"}
         outcome = "recorded" if announced else "recorded_announcement_pending"
-        accept(request, outcome, {"approval": request_id, "decision": final_decision})
         outbox.notify()
         response.status_code = 202
         resumed = None

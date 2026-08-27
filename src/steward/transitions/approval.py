@@ -69,10 +69,19 @@ class ApprovalOutboxWorker:
         self,
         transitions: "ApprovalTransitions",  # noqa: UP037 — class is declared below
         complete: Callable[[ApprovalRecord, str], bool],
+        *,
+        poll_interval: float = 1.0,
+        close_timeout: float = 5.0,
     ) -> None:
         """Bind one transition seam and its idempotent post-ack completion."""
+        if poll_interval <= 0:
+            raise ValueError("approval outbox poll interval must be positive")
+        if close_timeout <= 0:
+            raise ValueError("approval outbox close timeout must be positive")
         self.transitions = transitions
         self.complete = complete
+        self.poll_interval = poll_interval
+        self.close_timeout = close_timeout
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="approval-outbox", daemon=True)
@@ -86,11 +95,13 @@ class ApprovalOutboxWorker:
         """Wake the worker because a producer committed new work."""
         self._wake.set()
 
-    def close(self, timeout: float = 5.0) -> None:
-        """Request shutdown and wait for the active pass to finish."""
+    def close(self, timeout: float | None = None) -> None:
+        """Request shutdown, raising when an active pass cannot stop in time."""
         self._stop.set()
         self._wake.set()
-        self._thread.join(timeout)
+        self._thread.join(self.close_timeout if timeout is None else timeout)
+        if self._thread.is_alive():
+            raise TimeoutError("approval outbox worker did not stop before its shutdown deadline")
 
     @property
     def alive(self) -> bool:
@@ -102,7 +113,9 @@ class ApprovalOutboxWorker:
             failed = False
             try:
                 self.transitions.reconcile_announcements()
-                while claimed := self.transitions.store.claim_approval_effects():
+                while not self._stop.is_set() and (
+                    claimed := self.transitions.store.claim_approval_effects()
+                ):
                     record, token = claimed
                     try:
                         if not self.complete(record, token):
@@ -117,10 +130,10 @@ class ApprovalOutboxWorker:
                 log.exception("approval outbox pass failed; it will retry")
                 failed = True
             due = self.transitions.store.next_approval_work_at()
-            timeout = 0.1 if failed else None
+            timeout = 0.1 if failed else self.poll_interval
             if due is not None:
                 deadline = datetime.fromisoformat(due)
-                timeout = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+                timeout = min(timeout, max(0.0, (deadline - datetime.now(UTC)).total_seconds()))
             self._wake.wait(timeout)
             self._wake.clear()
 
@@ -343,7 +356,7 @@ class ApprovalTransitions:
 
     # -- deciding ------------------------------------------------------------------------
 
-    def decide(
+    def decide(  # noqa: PLR0913 — mirrors the atomic store decision inputs
         self,
         request_id: str,
         decision: str,
@@ -351,6 +364,7 @@ class ApprovalTransitions:
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
         now: datetime | None = None,
+        request_log: tuple[str, str, str] | None = None,
     ) -> Transition[ApprovalRecord]:
         """Record one decision and close the loop in the log. The first decision wins.
 
@@ -376,6 +390,7 @@ class ApprovalTransitions:
             decided_by=decided_by,
             edit=edit,
             now=ev.utc_now_iso(now) if now is not None else None,
+            request_log=request_log,
         )
         if record is None:
             return refused(UNKNOWN_REQUEST)
