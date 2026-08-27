@@ -1,8 +1,9 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.json";
+import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
   PhaserGame: () => <div data-testid="village-canvas" />,
@@ -99,5 +100,84 @@ describe("Arcadia", () => {
     render(<App envelope={fixture} stewardClient={stewardClient} />);
 
     expect(stewardClient.confirm).toHaveBeenCalledWith(fixture.snapshot);
+  });
+
+  it("keeps a knock visible until a confirming snapshot resolves it", () => {
+    const stewardClient = {
+      confirm: vi.fn(),
+      decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
+    };
+    const { rerender } = render(<App envelope={fixture} stewardClient={stewardClient} />);
+    const knocks = screen.getByRole("region", { name: "Approval knocks" });
+
+    expect(knocks).toHaveTextContent("KeeperDeploy?");
+    fireEvent.click(within(knocks).getByRole("button", { name: "Approve Deploy?" }));
+
+    expect(stewardClient.decideApproval).toHaveBeenCalledWith("approval-1", {
+      decision: "approve",
+    });
+    expect(screen.getByText("Deploy?")).toBeInTheDocument();
+
+    const confirmed = structuredClone(fixture);
+    confirmed.snapshot.approvals[0] = {
+      ...confirmed.snapshot.approvals[0],
+      state: "resolved",
+      decision: "approve",
+      resolved_at: "2026-08-27T12:01:00.000Z",
+    };
+    confirmed.snapshot.villagers[0].pending_approval_ids = [];
+    confirmed.snapshot.villagers[0].state = "idle";
+    rerender(<App envelope={confirmed} stewardClient={stewardClient} />);
+
+    expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+  });
+
+  it("orders multiple fixture approvals deterministically and answers each by request id", () => {
+    const stewardClient = {
+      confirm: vi.fn(),
+      decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
+    };
+
+    render(<App envelope={multiplePendingFixture} stewardClient={stewardClient} />);
+
+    const knocks = screen.getByRole("region", { name: "Approval knocks" });
+    expect(within(knocks).getAllByRole("article").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Deploy?"),
+      expect.stringContaining("Publish?"),
+    ]);
+    fireEvent.click(within(knocks).getByRole("button", { name: "Deny Publish?" }));
+    expect(stewardClient.decideApproval).toHaveBeenCalledWith("approval-b", {
+      decision: "deny",
+    });
+    expect(within(knocks).getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
+  });
+
+  it("never draws a knock for a resolved approval", () => {
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.approvals[0].state = "resolved";
+    envelope.snapshot.approvals[0].decision = "deny";
+
+    render(<App envelope={envelope} />);
+
+    expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+  });
+
+  it("keeps approvals answerable after a definitive preflight refusal", async () => {
+    const refusal = Object.assign(new Error("Steward credentials are required"), {
+      ambiguous: false,
+      code: "credentials_required",
+    });
+    const stewardClient = {
+      confirm: vi.fn(),
+      decideApproval: vi.fn().mockRejectedValue(refusal),
+    };
+
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+    fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Steward credentials are required");
+    await waitFor(() => expect(
+      screen.getByRole("button", { name: "Approve Deploy?" }),
+    ).toBeEnabled());
   });
 });

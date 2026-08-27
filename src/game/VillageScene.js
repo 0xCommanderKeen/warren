@@ -38,7 +38,7 @@ export function createVillageScene(snapshot) {
       this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
       this.cameras.main.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
 
-      for (const villager of buildVillageModel(mapData, snapshot.villagers)) {
+      for (const villager of buildVillageModel(mapData, snapshot.villagers, snapshot.approvals)) {
         this.createHome(villager);
         this.createVillager(villager);
       }

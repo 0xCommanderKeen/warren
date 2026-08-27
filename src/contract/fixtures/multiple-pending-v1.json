@@ -1,0 +1,27 @@
+{
+  "kind": "snapshot",
+  "snapshot": {
+    "schema_version": 1,
+    "generation": 8,
+    "cursor": "v1:fixture:multiple",
+    "log_generation": 1,
+    "evaluated_at": "2026-08-27T12:00:00.000Z",
+    "villagers": [
+      {"id":"claude:ada","name":"Ada","accent":"#d96b54","residency":"visitor","home":null,"state":"idle","project":"arcadia","pending_approval_ids":["approval-b"]},
+      {"id":"claude:keeper","name":"Keeper","accent":"#6aa84f","residency":"resident","home":2,"state":"knocking","project":"burrow","pending_approval_ids":["approval-a"]}
+    ],
+    "approvals": [
+      {"request_id":"approval-b","agent_id":"claude:ada","project":"arcadia","state":"pending","message":"Publish?","action":"publish","detail":{"target":"production"},"options":["approve","deny"],"opened_at":"2026-08-27T11:59:00.000Z"},
+      {"request_id":"approval-a","agent_id":"claude:keeper","project":"burrow","state":"pending","message":"Deploy?","action":"deploy","detail":{"target":"test"},"options":["approve","deny"],"opened_at":"2026-08-27T11:59:00.000Z"}
+    ],
+    "artifacts": [],
+    "tasks": [],
+    "routines": [],
+    "residents": [],
+    "journals": [],
+    "diagnostic_residents": [],
+    "diagnostics": [],
+    "capacity": {"villagers":80,"events_per_villager":160,"tasks":200,"approvals":200,"journals":200,"routines":200,"diagnostics":200},
+    "capabilities": {"ingest":true,"approvals":true,"jobs":true,"routines":true}
+  }
+}

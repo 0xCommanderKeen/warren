@@ -16,7 +16,9 @@ export function parseSnapshot(envelope) {
     throw new UnsupportedSchemaVersionError(snapshot?.schema_version);
   }
 
-  const collections = ["villagers", "artifacts", "tasks", "routines", "residents", "journals"];
+  const collections = [
+    "villagers", "artifacts", "tasks", "approvals", "routines", "residents", "journals",
+  ];
   for (const collection of collections) {
     if (!Array.isArray(snapshot[collection])) {
       throw new TypeError(`Expected snapshot.${collection} to be an array`);

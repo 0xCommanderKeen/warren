@@ -1,3 +1,5 @@
+import { pendingApprovals } from "../contract/approvals.js";
+
 function property(object, name) {
   return object.properties?.find((item) => item.name === name)?.value;
 }
@@ -100,10 +102,16 @@ export function validateReachability(map) {
   return { walkable: total, reachable: seen.size };
 }
 
-export function buildVillageModel(map, snapshotVillagers) {
+export function buildVillageModel(map, snapshotVillagers, snapshotApprovals = []) {
   validateReachability(map);
   const lodge = place(map, "lodge");
   const work = place(map, "work");
+  const doorstep = place(map, "street");
+  const pendingAgentIds = new Set(pendingApprovals(snapshotApprovals)
+    .map((approval) => approval.agent_id));
+  const knockingSlots = new Map([...pendingAgentIds]
+    .toSorted()
+    .map((id, index, ids) => [id, (index - (ids.length - 1) / 2) * 16]));
   let visitorIndex = 0;
 
   return snapshotVillagers.map((villager) => {
@@ -112,6 +120,7 @@ export function buildVillageModel(map, snapshotVillagers) {
     const door = isResident ? place(map, "door", villager.home) : place(map, "lodge-door");
     const offset = isResident ? 0 : visitorIndex++ * 16;
     const moving = villager.state === "working";
+    const knockingOffset = knockingSlots.get(villager.id);
 
     return {
       ...villager,
@@ -121,8 +130,8 @@ export function buildVillageModel(map, snapshotVillagers) {
         x: anchor.x,
         y: anchor.y,
       },
-      x: door.x + offset,
-      y: door.y,
+      x: knockingOffset === undefined ? door.x + offset : doorstep.x + knockingOffset,
+      y: knockingOffset === undefined ? door.y : doorstep.y,
       moving,
       route: moving ? routeBetween(map, door, work) : [],
     };
