@@ -38,6 +38,7 @@ import logging
 import math
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -282,6 +283,56 @@ def _drain(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
         return b"", b""
 
 
+def _remaining(started: float, timeout_s: int) -> float:
+    """Return the unspent part of one session's absolute timeout budget."""
+    return max(0.0, started + timeout_s - time.monotonic())
+
+
+def _timeout_result(
+    process: subprocess.Popen[bytes], *, started: float, timeout_s: int
+) -> RunResult:
+    """Kill and reap a run whose shared launch/execution deadline expired."""
+    _terminate(process)
+    duration = time.monotonic() - started
+    raw_out, _raw_err = _drain(process)
+    return RunResult(
+        outcome=Outcome.TIMEOUT,
+        output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        exit_status=process.returncode,
+        duration_s=duration,
+        error=f"exceeded its {timeout_s}s timeout and was killed",
+    )
+
+
+def _await_descriptor_launch(
+    status_reader: int,
+    process: subprocess.Popen[bytes],
+    *,
+    started: float,
+    timeout_s: int,
+    executable: str,
+) -> RunResult | None:
+    """Wait within the session deadline for the cwd helper to exec or diagnose failure."""
+    with os.fdopen(status_reader, "rb") as status:
+        ready, _, _ = select.select([status], [], [], _remaining(started, timeout_s))
+        if not ready:
+            return _timeout_result(process, started=started, timeout_s=timeout_s)
+        helper_error = os.read(status.fileno(), 1000).decode("utf-8", "replace")
+    if not helper_error:
+        return None
+    try:
+        raw_out, _raw_err = process.communicate(timeout=_remaining(started, timeout_s))
+    except subprocess.TimeoutExpired:
+        return _timeout_result(process, started=started, timeout_s=timeout_s)
+    return RunResult(
+        outcome=Outcome.FAILED,
+        output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        exit_status=process.returncode,
+        duration_s=time.monotonic() - started,
+        error=f"cannot launch {executable!r}: {helper_error}",
+    )
+
+
 class _ProcessRunner(Runner):
     """Shared body for every runner that launches a real process."""
 
@@ -322,6 +373,8 @@ class _ProcessRunner(Runner):
             inherited_fds = (workdir_fd, status_writer)
             launch_argv = [
                 sys.executable,
+                "-I",
+                "-S",
                 "-c",
                 _DESCRIPTOR_CWD_HELPER,
                 str(workdir_fd),
@@ -353,34 +406,23 @@ class _ProcessRunner(Runner):
         if status_writer is not None:
             os.close(status_writer)
         if status_reader is not None:
-            with os.fdopen(status_reader, "rb") as status:
-                helper_error = status.read(1000).decode("utf-8", "replace")
-            if helper_error:
-                raw_out, raw_err = process.communicate()
-                return RunResult(
-                    outcome=Outcome.FAILED,
-                    output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
-                    exit_status=process.returncode,
-                    duration_s=time.monotonic() - started,
-                    error=f"cannot launch {argv[0]!r}: {helper_error}",
-                )
+            launch_failure = _await_descriptor_launch(
+                status_reader,
+                process,
+                started=started,
+                timeout_s=request.timeout_s,
+                executable=argv[0],
+            )
+            if launch_failure is not None:
+                return launch_failure
 
         try:
-            raw_out, raw_err = process.communicate(timeout=request.timeout_s)
+            remaining = _remaining(started, request.timeout_s)
+            raw_out, raw_err = process.communicate(timeout=remaining)
         except subprocess.TimeoutExpired:
-            _terminate(process)
-            duration = time.monotonic() - started
-            # Drain the partial stdout the killed session already produced: an escalation
-            # it printed just before hanging is honest output, and losing it would let a
-            # question that was actually asked go unanswered.
-            raw_out, _raw_err = _drain(process)
-            return RunResult(
-                outcome=Outcome.TIMEOUT,
-                output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
-                exit_status=process.returncode,
-                duration_s=duration,
-                error=f"exceeded its {request.timeout_s}s timeout and was killed",
-            )
+            # The timeout result drains partial stdout too: an escalation printed just
+            # before the hang is honest output and must remain available to its harvester.
+            return _timeout_result(process, started=started, timeout_s=request.timeout_s)
 
         duration = time.monotonic() - started
         stdout = raw_out.decode("utf-8", "replace")

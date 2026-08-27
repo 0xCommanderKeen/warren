@@ -6,6 +6,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,74 @@ def test_a_descriptor_bound_launch_keeps_a_missing_binary_diagnostic(tmp_path: P
     assert result.error is not None
     assert result.error.startswith("cannot launch 'missing-steward-test-binary':")
     assert not result.error_is_child
+
+
+def test_descriptor_helper_ignores_hostile_python_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    startup = tmp_path / "startup"
+    startup.mkdir()
+    (startup / "sitecustomize.py").write_text("import time; time.sleep(30)\n")
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setenv("PYTHONPATH", str(startup))
+    spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf ready", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.outcome is r.Outcome.OK
+    assert result.output == "ready"
+
+
+def test_a_stalled_descriptor_handshake_consumes_the_timeout_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "helper-child-survived"
+    helper = f"""
+import os
+import time
+
+if os.fork() == 0:
+    time.sleep(1.5)
+    open({str(marker)!r}, "w").close()
+    os._exit(0)
+time.sleep(30)
+"""
+    monkeypatch.setattr(r, "_DESCRIPTOR_CWD_HELPER", helper)
+    real_pipe = os.pipe
+    status_fds: list[int] = []
+
+    def recording_pipe() -> tuple[int, int]:
+        status_fds.extend(created := real_pipe())
+        return created
+
+    monkeypatch.setattr(r.os, "pipe", recording_pipe)
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf unreachable", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert result.duration_s < 3
+    assert result.exit_status is not None
+    assert all(_fd_is_closed(fd) for fd in status_fds)
+    time.sleep(0.5)
+    assert not marker.exists(), "the timed-out helper's process group must not survive"
+
+
+def _fd_is_closed(fd: int) -> bool:
+    try:
+        os.fstat(fd)
+    except OSError:
+        return True
+    return False
 
 
 def test_describe_names_the_brain() -> None:
