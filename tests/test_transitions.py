@@ -29,6 +29,7 @@ from steward.store import (
     STATUS_DONE,
     STATUS_FAILED,
     STATUS_OPEN,
+    ApprovalRecord,
     JobRecord,
     Store,
 )
@@ -690,7 +691,10 @@ def test_worker_recovers_a_transient_failure_without_replay(
     )
     store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
     sink = TransientEmitter()
-    worker = ApprovalOutboxWorker(tr.ApprovalTransitions(store, sink), lambda _record: None)
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(store, sink),
+        lambda record, token: store.complete_approval_effects(record, token)[0],
+    )
     worker.start()
     try:
         assert sink.accepted.wait(2.0)
@@ -698,6 +702,45 @@ def test_worker_recovers_a_transient_failure_without_replay(
     finally:
         worker.close()
     assert not worker.alive
+
+
+def test_worker_retries_an_injected_error_before_atomic_effect_completion(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    raised = (
+        tr.ApprovalTransitions(store, ev.NullEmitter())
+        .raise_request(manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW)
+        .require()
+    )
+    record, recorded = store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
+    assert recorded
+    assert record is not None
+    announcement = store.claim_approval_announcement(raised.request_id)
+    assert announcement is not None
+    _, announcement_token = announcement
+    assert store.finish_approval_announcement(raised.request_id, announcement_token, accepted=True)
+    attempted = 0
+    completed = threading.Event()
+
+    def crash_then_complete(effect: ApprovalRecord, token: str) -> bool:
+        nonlocal attempted
+        attempted += 1
+        if attempted == 1:
+            raise RuntimeError("injected crash before atomic effect transaction")
+        result, _resumed = store.complete_approval_effects(effect, token)
+        completed.set()
+        return result
+
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(store, ev.NullEmitter()), crash_then_complete
+    )
+    worker.start()
+    try:
+        assert completed.wait(2)
+    finally:
+        worker.close()
+    assert attempted == 2
+    assert store.approval_announcement_state(raised.request_id) == "complete"
 
 
 def test_an_expired_request_can_never_be_approved(

@@ -49,7 +49,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from steward import delegation as dg
 from steward import events as ev
 from steward.board import Dispatcher
-from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
@@ -580,14 +580,10 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
 
-    def complete_approval(record: ApprovalRecord) -> None:
-        """Run only after durable announcement acknowledgement; safe to replay."""
-        if record.action == BUDGET_ACTION and record.decision == "approve":
-            pause = db.pause_for_request(record.request_id)
-            if pause is not None:
-                guard.resume(
-                    pause.resident, decided_by=record.decided_by or DECIDED_BY, decide=False
-                )
+    def complete_approval(record: ApprovalRecord, token: str) -> bool:
+        """Atomically apply idempotent post-announcement effects and their marker."""
+        completed, _resumed = db.complete_approval_effects(record, token)
+        return completed
 
     outbox = ApprovalOutboxWorker(approvals, complete_approval)
     # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
@@ -1113,7 +1109,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"approval request {request_id!r} expired at {record.expires_at} and denies "
                 f"by default; it can no longer be decided",
             )
-        if decided.replayed and decided.fact is None:
+        state = db.approval_announcement_state(request_id)
+        if decided.replayed and state != "pending":
             # The first decision won. A double-tapped notification changes nothing and
             # emitted nothing — it is told what was recorded.
             response.status_code = 200
@@ -1123,23 +1120,25 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 "decision": record.decision,
                 "decided_by": record.decided_by,
                 "decided_at": record.decided_at,
-                "message": "this request was already decided; announcement remains pending",
+                "message": "this request was already decided; nothing changed",
             }
         # A replay that recovered an abandoned announcement must also finish the
         # idempotent workflow below (notably budget unpause). The decision did not change,
         # but this request completed work the dead first process did not.
         final_decision = record.decision or body.decision
-        announced = decided.fact is not None
+        announced = state in {"announced", "complete"}
         outcome = "recorded" if announced else "recorded_announcement_pending"
         accept(request, outcome, {"approval": request_id, "decision": final_decision})
         outbox.notify()
         response.status_code = 202
         resumed = None
         if announced:
-            pause = db.pause_for_request(request_id)
-            resumed = pause.resident if pause is not None and final_decision == "approve" else None
-            complete_approval(record)
-            db.finish_approval_effects(request_id)
+            claimed = db.claim_approval_effects(request_id)
+            if claimed is not None:
+                effect_record, token = claimed
+                completed, resumed = db.complete_approval_effects(effect_record, token)
+                if not completed:
+                    db.release_approval_effects(request_id, token)
         return {
             "request_id": request_id,
             "status": outcome,

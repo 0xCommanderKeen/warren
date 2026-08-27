@@ -53,6 +53,14 @@ before SQLite records that acknowledgement, the retry can repeat the event. Cons
 therefore treat `needs_human_resolved.payload.request_id` as its idempotency key. The
 decision itself remains exactly once.
 
+After acknowledgement, completion effects use a separate SQLite lease, retry deadline,
+attempt counter, and backoff. This matters for multi-process serving: only the worker that
+owns the live effects token may finish it, and an abandoned token becomes claimable at its
+exact deadline. For a budget approval, deleting the pause, granting the window-scoped
+carry-on allowance, and marking completion are one SQLite transaction. A crash is therefore
+either wholly before that act or wholly after it; it cannot leave an unpaused resident
+without its allowance, or mark incomplete/refused work complete.
+
 ## How a session asks
 
 Sessions are headless CLIs (`claude -p`, `codex exec`). There is nothing in-process for

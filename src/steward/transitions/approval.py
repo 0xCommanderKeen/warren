@@ -68,7 +68,7 @@ class ApprovalOutboxWorker:
     def __init__(
         self,
         transitions: "ApprovalTransitions",  # noqa: UP037 — class is declared below
-        complete: Callable[[ApprovalRecord], None],
+        complete: Callable[[ApprovalRecord, str], bool],
     ) -> None:
         """Bind one transition seam and its idempotent post-ack completion."""
         self.transitions = transitions
@@ -102,13 +102,21 @@ class ApprovalOutboxWorker:
             failed = False
             try:
                 self.transitions.reconcile_announcements()
-                for record in self.transitions.store.pending_approval_effects():
-                    self.complete(record)
-                    self.transitions.store.finish_approval_effects(record.request_id)
+                while claimed := self.transitions.store.claim_approval_effects():
+                    record, token = claimed
+                    try:
+                        if not self.complete(record, token):
+                            self.transitions.store.release_approval_effects(
+                                record.request_id, token
+                            )
+                            break
+                    except Exception:
+                        self.transitions.store.release_approval_effects(record.request_id, token)
+                        raise
             except Exception:
                 log.exception("approval outbox pass failed; it will retry")
                 failed = True
-            due = self.transitions.store.next_approval_announcement_at()
+            due = self.transitions.store.next_approval_work_at()
             timeout = 0.1 if failed else None
             if due is not None:
                 deadline = datetime.fromisoformat(due)
