@@ -13,6 +13,7 @@ def _open(store: Store) -> None:
     store.open_run(
         run_id="run-1",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test",
         project="test",
         ref="daily",

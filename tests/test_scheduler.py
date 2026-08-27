@@ -21,6 +21,7 @@ from steward import runners as r
 from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
+from steward.budgets import BudgetGuard
 from steward.store import Store
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
@@ -1804,6 +1805,27 @@ def test_a_fire_opens_a_registry_row_and_closes_it(
         assert store.open_runs() == [], "the run reported back, so its row is answered"
 
 
+def test_a_scheduled_fire_records_its_trigger_on_the_ledger(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident(manifest_with(HOURLY))
+    with Store(":memory:") as store:
+        engine = s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+            registry=store,
+            guard=BudgetGuard(store),
+        )
+
+        report = engine.fire(engine.scheduled[0])
+
+        assert report.fired
+        (entry,) = store.ledger("test-agent")
+        assert (entry.kind, entry.trigger) == ("routine", "schedule")
+
+
 def test_a_run_that_never_finishes_leaves_its_row_open(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -1816,10 +1838,15 @@ def test_a_run_that_never_finishes_leaves_its_row_open(
     with Store(":memory:") as store:
         engine = _engine_with_registry(path, store, tmp_path, runner_factory=dies)
         with pytest.raises(KeyboardInterrupt):
-            engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+            engine.fire(
+                engine.scheduled[0],
+                trigger=s.TRIGGER_MANUAL,
+                now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC),
+            )
 
         (open_run,) = store.open_runs()
         assert (open_run.kind, open_run.ref) == ("routine", "inbox-read")
+        assert open_run.trigger == "manual"
         assert open_run.timeout_s == pytest.approx(60.0)
 
 

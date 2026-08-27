@@ -69,6 +69,7 @@ class RunGuard(Protocol):
         result: RunResult,
         kind: str,
         run_id: str,
+        trigger: str = "",
         ref: str,
         origin: str,
         now: datetime | None = None,
@@ -147,6 +148,7 @@ class RoutineWake:
 
     routine: Routine
     run_id: str
+    trigger: str = "schedule"
 
     @property
     def timeout_s(self) -> int:
@@ -556,6 +558,7 @@ class ResidentSessions:
                 result=result,
                 kind=wake.kind,
                 run_id=wake.run_id,
+                trigger=wake.trigger if isinstance(wake, RoutineWake) else "",
                 ref=wake.ref,
                 origin=wake.origin_for(resident),
                 now=completed_at,

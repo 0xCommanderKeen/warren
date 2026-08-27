@@ -230,6 +230,7 @@ def test_each_registry_path_is_evaluated_independently(store: Store, tmp_path: P
         store.open_run(
             run_id=run_id,
             kind="routine",
+            trigger="schedule",
             agent_id="claude-code:test-agent",
             ref="daily-summary",
             timeout_s=60,
@@ -247,6 +248,7 @@ def test_migrated_empty_evidence_path_is_refused_loudly(
     store.open_run(
         run_id="legacy",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         ref="daily-summary",
         timeout_s=60,
@@ -269,6 +271,7 @@ def test_a_run_only_the_registry_knows_about_is_still_found(store: Store, tmp_pa
     store.open_run(
         run_id="delivered",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         project="test-agent",
         ref="daily-summary",
@@ -290,6 +293,7 @@ def test_a_registry_run_is_judged_against_the_timeout_it_was_given(
     store.open_run(
         run_id="capped",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         ref="daily-summary",
         timeout_s=60.0,
@@ -311,6 +315,7 @@ def test_a_closed_registry_row_is_not_a_stale_run(store: Store, tmp_path: Path) 
     store.open_run(
         run_id="done",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         ref="daily-summary",
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
@@ -328,6 +333,7 @@ def test_a_closing_event_in_the_log_answers_an_open_registry_row(
     store.open_run(
         run_id="fine",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         ref="daily-summary",
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
@@ -472,6 +478,7 @@ def test_a_row_the_log_has_answered_is_closed_rather_than_left_open(
     store.open_run(
         run_id="fine",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         project="test-agent",
         ref="daily-summary",
@@ -518,6 +525,7 @@ def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(
     store.open_run(
         run_id="gone",
         kind="routine",
+        trigger="schedule",
         agent_id="claude-code:test-agent",
         project="test-agent",
         ref="daily-summary",
@@ -545,6 +553,7 @@ def test_an_active_post_run_tail_keeps_ownership_and_cannot_be_buried(
     store.open_run(
         run_id="tail",
         kind="routine",
+        trigger="schedule",
         agent_id=resident.agent_id,
         project=resident.project,
         ref="daily-summary",
@@ -569,6 +578,7 @@ def test_session_close_wins_after_scan_before_watchdog_transition(
     store.open_run(
         run_id="finishing",
         kind="routine",
+        trigger="schedule",
         agent_id=resident.agent_id,
         project=resident.project,
         ref="daily-summary",
@@ -597,6 +607,7 @@ def test_concurrent_watchdogs_publish_exactly_one_terminal_event(
     store.open_run(
         run_id="gone",
         kind="routine",
+        trigger="schedule",
         agent_id=resident.agent_id,
         project=resident.project,
         ref="daily-summary",
@@ -635,6 +646,7 @@ def test_untrustworthy_event_evidence_refuses_burial(  # noqa: PLR0913, PLR0917
     store.open_run(
         run_id="uncertain",
         kind="routine",
+        trigger="schedule",
         agent_id=resident.agent_id,
         project=resident.project,
         ref="daily-summary",
@@ -1314,6 +1326,7 @@ def test_a_pass_pauses_a_resident_that_has_spent_its_day(
         resident=resident.manifest.id,
         agent_id=resident.manifest.agent_id or "",
         kind="routine",
+        trigger="schedule",
         run_id="a",
         cost_usd=4.0,
         now=ev.utc_now_iso(NOW),

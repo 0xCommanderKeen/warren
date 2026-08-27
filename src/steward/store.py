@@ -46,6 +46,20 @@ from typing import Any, Self
 
 from steward.events import utc_now_iso
 from steward.health import HealthJournal
+from steward.runs import (
+    RUN_DELEGATED,
+    RUN_KINDS,
+    RUN_ROUTINE,
+    RUN_TASK,
+    RUN_TRIGGERS,
+    validate_kind_trigger,
+)
+from steward.runs import (
+    TRIGGER_MANUAL as RUN_TRIGGER_MANUAL,
+)
+from steward.runs import (
+    TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE,
+)
 from steward.scheduler import default_state_path
 
 __all__ = [
@@ -54,7 +68,13 @@ __all__ = [
     "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
+    "RUN_DELEGATED",
     "RUN_KINDS",
+    "RUN_ROUTINE",
+    "RUN_TASK",
+    "RUN_TRIGGERS",
+    "RUN_TRIGGER_MANUAL",
+    "RUN_TRIGGER_SCHEDULE",
     "STATUS_OPEN",
     "ApprovalRecord",
     "JobRecord",
@@ -95,13 +115,6 @@ class _AtomicTaskCloseLostError(Exception):
 
 #: Every status a task on the board can be in. The board reports these and no others.
 JOB_STATUSES = (STATUS_OPEN, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED)
-
-#: Why a session ran. The ledger keeps them apart so "what did the board cost me this
-#: week" and "what did Hob's own routines cost me" are two answerable questions.
-RUN_ROUTINE = "routine"
-RUN_TASK = "task"
-RUN_DELEGATED = "delegated"
-RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED)
 
 #: Where spend lands when no task — and so no delegation origin — stands behind the run.
 #: A resident's own routines are the ordinary case, and they are named rather than
@@ -168,6 +181,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     resident      TEXT NOT NULL,
     agent_id      TEXT NOT NULL,
     kind          TEXT NOT NULL,
+    trigger       TEXT NOT NULL DEFAULT '',
     run_id        TEXT NOT NULL,
     ref           TEXT NOT NULL DEFAULT '',
     origin        TEXT NOT NULL DEFAULT '',
@@ -230,6 +244,7 @@ CREATE TABLE IF NOT EXISTS unbracketed_runs (
 CREATE TABLE IF NOT EXISTS open_runs (
     run_id     TEXT PRIMARY KEY,
     kind       TEXT NOT NULL DEFAULT 'routine',
+    trigger    TEXT NOT NULL DEFAULT '',
     agent_id   TEXT NOT NULL,
     project    TEXT NOT NULL DEFAULT '',
     ref        TEXT NOT NULL DEFAULT '',
@@ -299,8 +314,10 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         # equal some task's id would have inherited that task's bill. The row says what
         # it descends from, so the ledger is self-describing and a join cannot misread it.
         "origin": "TEXT NOT NULL DEFAULT ''",
+        "trigger": "TEXT NOT NULL DEFAULT ''",
     },
     "open_runs": {
+        "trigger": "TEXT NOT NULL DEFAULT ''",
         "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
         "event_log_path": "TEXT NOT NULL DEFAULT ''",
         "evidence_version": "INTEGER NOT NULL DEFAULT 0",
@@ -543,6 +560,7 @@ class LedgerEntry:
     resident: str
     agent_id: str
     kind: str
+    trigger: str
     run_id: str
     recorded_at: str
     ref: str = ""
@@ -570,6 +588,7 @@ class LedgerEntry:
             resident=row["resident"],
             agent_id=row["agent_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             run_id=row["run_id"],
             recorded_at=row["recorded_at"],
             ref=row["ref"],
@@ -589,6 +608,7 @@ class LedgerEntry:
             "resident": self.resident,
             "agent_id": self.agent_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "run_id": self.run_id,
             "ref": self.ref,
             "origin": self.origin,
@@ -734,6 +754,7 @@ class OpenRun:
     #: are two runs with two ids; what they have in common lives in ``ref``.
     run_id: str
     kind: str
+    trigger: str
     agent_id: str
     started_at: str
     project: str = ""
@@ -762,6 +783,7 @@ class OpenRun:
         return cls(
             run_id=row["run_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             agent_id=row["agent_id"],
             started_at=row["started_at"],
             project=row["project"],
@@ -783,6 +805,7 @@ class OpenRun:
         return {
             "run_id": self.run_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "agent_id": self.agent_id,
             "project": self.project,
             "ref": self.ref,
@@ -1924,6 +1947,7 @@ class Store:
         agent_id: str,
         kind: str,
         run_id: str,
+        trigger: str = "",
         ref: str = "",
         origin: str = "",
         outcome: str = "",
@@ -1945,11 +1969,13 @@ class Store:
         later: a caller that knows the chain says so, and the row stops depending on a
         join that can only guess.
         """
+        validate_kind_trigger(kind, trigger)
         entry = LedgerEntry(
             entry_id=new_id(),
             resident=resident,
             agent_id=agent_id,
             kind=kind,
+            trigger=trigger,
             run_id=run_id,
             ref=ref,
             origin=origin,
@@ -1963,14 +1989,15 @@ class Store:
         )
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
+                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, trigger, run_id, ref, "
                 "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
-                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
                     entry.agent_id,
                     entry.kind,
+                    entry.trigger,
                     entry.run_id,
                     entry.ref,
                     entry.origin,
@@ -2282,6 +2309,7 @@ class Store:
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
@@ -2303,15 +2331,17 @@ class Store:
         insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
         thing the session was about goes; several rows may share one.
         """
+        validate_kind_trigger(kind, trigger)
         with self._lock, self._conn:
             opened_at = now or utc_now_iso()
             cursor = self._conn.execute(
-                "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
+                "INSERT INTO open_runs (run_id, kind, trigger, agent_id, project, ref, timeout_s, "
                 "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
                 (
                     run_id,
                     kind,
+                    trigger,
                     agent_id,
                     project,
                     ref,

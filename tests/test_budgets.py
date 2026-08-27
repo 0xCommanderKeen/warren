@@ -221,6 +221,7 @@ def test_the_ledger_accumulates_across_every_kind_of_run(store: Store) -> None:
             manifest,
             result=spent(cost=cost, tokens=tokens),
             kind=kind,
+            trigger="schedule" if kind == "routine" else "",
             run_id=f"run-{kind}",
             ref=kind,
             now=NOON,

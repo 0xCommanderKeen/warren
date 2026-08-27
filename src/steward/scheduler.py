@@ -83,6 +83,7 @@ from steward.runners import (
     build_runner,
     check_runner,
 )
+from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE, validate_kind_trigger
 from steward.sessions import (
     Refusal,
     ResidentSessions,
@@ -144,11 +145,6 @@ HEARTBEAT_EVERY_S = MAX_SLEEP_S
 #: a heartbeat older than the two together could not have fired anything on time anyway.
 STALE_TICK_AFTER_S = HEARTBEAT_EVERY_S + DEFAULT_CATCHUP_S
 
-#: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
-#: asking for it now through the API. The ledger has to be able to tell them apart.
-TRIGGER_SCHEDULE = "schedule"
-TRIGGER_MANUAL = "manual"
-
 STATE_VERSION = 0
 
 
@@ -205,6 +201,7 @@ class RunRegistry(Protocol):
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
@@ -892,7 +889,12 @@ class Scheduler:
         trigger: str = TRIGGER_SCHEDULE,
         now: datetime | None = None,
     ) -> FireReport:
-        """Run one routine end to end, bracketed by events. Never raises."""
+        """Run one routine end to end, bracketed by events.
+
+        ``trigger`` is protocol data, not an arbitrary label; reject unknown values before
+        opening a run or emitting an event that persistence could not represent.
+        """
+        validate_kind_trigger("routine", trigger)
         run_id = str(uuid.uuid4())
         moment = now or datetime.now(UTC)
         if not self._claim(item.key):
@@ -932,7 +934,7 @@ class Scheduler:
                 skipped_reason=admission.reason,
             )
 
-        wake = RoutineWake(item.routine, run_id)
+        wake = RoutineWake(item.routine, run_id, trigger)
         if self.dry_run:
             session = self.sessions.run(admission, wake)
             return FireReport(
@@ -959,7 +961,7 @@ class Scheduler:
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
         # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
-        watched = self._open_run(item, run_id, timeout_s, moment, owner_token)
+        watched = self._open_run(item, run_id, timeout_s, trigger, moment, owner_token)
 
         ownership = (
             self.run_transitions.owned(run_id, owner_token)
@@ -1001,11 +1003,12 @@ class Scheduler:
             journal_path=session.journal_path,
         )
 
-    def _open_run(
+    def _open_run(  # noqa: PLR0913, PLR0917 - one argument per persisted run fact
         self,
         item: ScheduledRoutine,
         run_id: str,
         timeout_s: int,
+        trigger: str,
         moment: datetime,
         owner_token: str = "",
     ) -> bool:
@@ -1016,6 +1019,7 @@ class Scheduler:
             opened = self.registry.open_run(
                 run_id=run_id,
                 kind="routine",
+                trigger=trigger,
                 agent_id=item.agent_id,
                 project=item.project,
                 ref=item.routine.id,

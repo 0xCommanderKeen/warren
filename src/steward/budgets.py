@@ -62,6 +62,7 @@ from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.manifest import CLOSE_OF_DAY, DEFAULT_SCHEDULE_TZ, ResidentManifest
 from steward.runners import RunResult
+from steward.runs import TRIGGER_SCHEDULE
 from steward.store import RUN_ROUTINE, Store
 from steward.transitions.budget import BudgetTransitions
 
@@ -557,6 +558,7 @@ class BudgetGuard:
         result: RunResult,
         kind: str = RUN_ROUTINE,
         run_id: str = "",
+        trigger: str = TRIGGER_SCHEDULE,
         ref: str = "",
         origin: str = "",
         now: datetime | None = None,
@@ -580,6 +582,7 @@ class BudgetGuard:
                 resident=manifest.id,
                 agent_id=manifest.burrow_agent_id,
                 kind=kind,
+                trigger=trigger,
                 run_id=run_id,
                 ref=ref,
                 origin=origin,

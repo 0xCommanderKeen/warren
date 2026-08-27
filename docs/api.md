@@ -140,8 +140,10 @@ $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
 `202` with a `request_id`. The run goes through the scheduler's own fire path **with the
 same wake hooks the scheduler daemon runs with**, so it gets the same prompt assembly, the
 same timeout, the same runner seam, and the same bracketing events as a scheduled fire —
-with `routine_started.payload.trigger` set to `manual` instead of `schedule`, so the ledger
-can tell prompted work from standing work. Because the hooks are the same, a run-now session
+with `routine_started.payload.trigger` set to `manual` instead of `schedule`. The same
+trigger is persisted on the open-run registry and finished-run ledger, so reconciliation
+can tell prompted work from standing work even after the event stream is unavailable.
+Because the hooks are the same, a run-now session
 delivers the resident's pending approval decisions into its preamble and harvests any
 `<needs-human>`/`<delegate>` blocks it emits, exactly as a scheduled fire does — a manual
 fire is a fire, not a lesser one (steward #W1).
@@ -637,7 +639,8 @@ there is no endpoint that would let it. See the README for what it shows.
 | `jobs` | the board *and* the inboxes: task, status, claimant, lease, artifacts — plus `assignee`, `delegated_by`, `route`, `parent_task_id`, `origin`, `depth` when delegated |
 | `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
-| `run_ledger` | one row per finished session: tokens, money, seconds, and whether the brain reported any of it |
+| `run_ledger` | one row per finished session: work kind, routine trigger (`schedule`/`manual`, empty for legacy or non-routine rows), tokens, money, seconds, and whether the brain reported any of it |
+| `open_runs` | one row per session awaiting an answer, including work kind and routine trigger; the watchdog reconciles these rows |
 | `budget_pauses` | the residents steward has stopped, and the number that stopped them |
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
