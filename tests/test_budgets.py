@@ -6,6 +6,7 @@ that knocks exactly once however many times it is asked.
 """
 
 import copy
+import sqlite3
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -220,6 +221,7 @@ def test_the_ledger_accumulates_across_every_kind_of_run(store: Store) -> None:
             manifest,
             result=spent(cost=cost, tokens=tokens),
             kind=kind,
+            trigger="schedule" if kind == "routine" else "",
             run_id=f"run-{kind}",
             ref=kind,
             now=NOON,
@@ -590,6 +592,68 @@ def test_a_run_under_the_cap_records_without_pausing(store: Store, sink: ev.Null
     assert [e for e in sink.events if e.type == ev.NEEDS_HUMAN] == []
 
 
+def test_a_post_insert_pause_failure_does_not_claim_the_ledger_write_failed(
+    sink: ev.NullEmitter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "steward.db"
+    store = Store(path)
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=1.0))
+
+    def fail_pause(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no pause")
+
+    monkeypatch.setattr(guard, "_pause", fail_pause)
+
+    entry = guard.record(manifest, result=spent(cost=2.0), run_id="spent", now=NOON)
+
+    assert entry.run_id == "spent"
+    assert [row.run_id for row in store.ledger()] == ["spent"]
+    assert "was recorded, but the post-run budget pause failed: no pause" in caplog.text
+    assert "could not record what this run cost" not in caplog.text
+    failure = store.health.latest()
+    assert failure is not None
+    assert failure.kind == "pause_enforcement"
+    assert failure.run_id == "spent"
+    store.close()
+
+
+def test_a_competing_sqlite_writer_leaves_independent_durable_health_evidence(
+    sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    path = tmp_path / "steward.db"
+    store = Store(path, busy_timeout_ms=20)
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of()
+    competing = sqlite3.connect(path)
+    competing.execute("BEGIN EXCLUSIVE")
+    competing.execute(
+        "INSERT INTO run_ledger (resident, agent_id, kind, run_id, ref, origin, outcome, "
+        "input_tokens, output_tokens, cost_usd, duration_s, usage_known, recorded_at) "
+        "VALUES ('other','other','routine','held','','unattributed','ok',0,0,0,0,1,?)",
+        (ev.utc_now_iso(NOON),),
+    )
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            guard.record(manifest, result=spent(cost=2.0), run_id="lost", now=NOON)
+    finally:
+        competing.rollback()
+        competing.close()
+        store.close()
+
+    with Store(path) as reopened:
+        assert reopened.ledger() == []
+        failure = reopened.health.latest()
+    assert failure is not None
+    assert failure.count == 1
+    assert failure.kind == "ledger_write"
+    assert failure.run_id == "lost"
+    assert failure.error == "database is locked"
+
+
 def test_a_carry_on_allowance_survives_a_later_over_cap_run(
     store: Store, sink: ev.NullEmitter
 ) -> None:
@@ -747,6 +811,45 @@ def test_a_guard_that_cannot_be_read_stops_the_run(
     report = engine.fire(engine.scheduled[0], now=NOON)
     assert not report.fired
     assert "budget unreadable" in (report.skipped_reason or "")
+
+
+def test_a_guard_that_cannot_resolve_a_timeout_stops_the_run(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """An unreadable timeout cap refuses rather than escaping ``fire`` or running uncapped."""
+
+    class Broken:
+        def allow(
+            self,
+            manifest: m.ResidentManifest,  # noqa: ARG002
+            now: datetime | None = None,  # noqa: ARG002
+        ) -> str | None:
+            return None
+
+        def timeout_for(self, manifest: m.ResidentManifest, declared_s: int) -> int:  # noqa: ARG002
+            raise RuntimeError("the timeout ledger is on fire")
+
+        def record(self, manifest: m.ResidentManifest, **_: object) -> object:  # noqa: ARG002
+            return None
+
+    resident = load_manifest(write_resident(budget_manifest()))
+    runner = ScriptedRunner()
+    sink = ev.NullEmitter()
+    engine = s.Scheduler(
+        [s.ScheduledRoutine(resident=resident, routine=resident.manifest.routines[0])],
+        emitter=sink,
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        guard=Broken(),
+    )
+
+    report = engine.fire(engine.scheduled[0], now=NOON)
+
+    assert not report.fired
+    assert "budget unreadable" in (report.skipped_reason or "")
+    assert runner.requests == []
+    assert sink.events == []
 
 
 def test_a_broken_ledger_does_not_fail_the_routine(

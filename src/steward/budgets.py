@@ -62,6 +62,7 @@ from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.manifest import CLOSE_OF_DAY, DEFAULT_SCHEDULE_TZ, ResidentManifest
 from steward.runners import RunResult
+from steward.runs import TRIGGER_SCHEDULE
 from steward.store import RUN_ROUTINE, Store
 from steward.transitions.budget import BudgetTransitions
 
@@ -557,6 +558,7 @@ class BudgetGuard:
         result: RunResult,
         kind: str = RUN_ROUTINE,
         run_id: str = "",
+        trigger: str = TRIGGER_SCHEDULE,
         ref: str = "",
         origin: str = "",
         now: datetime | None = None,
@@ -575,22 +577,59 @@ class BudgetGuard:
             or result.input_tokens is not None
             or result.output_tokens is not None
         )
-        entry = self.store.record_run(
-            resident=manifest.id,
-            agent_id=manifest.burrow_agent_id,
-            kind=kind,
-            run_id=run_id,
-            ref=ref,
-            origin=origin,
-            outcome=str(result.outcome),
-            input_tokens=result.input_tokens or 0,
-            output_tokens=result.output_tokens or 0,
-            cost_usd=result.cost_usd or 0.0,
-            duration_s=result.duration_s,
-            usage_known=known,
-            now=ev.utc_now_iso(now) if now is not None else None,
-        )
-        self._pause_if_over(manifest, now)
+        try:
+            entry = self.store.record_run(
+                resident=manifest.id,
+                agent_id=manifest.burrow_agent_id,
+                kind=kind,
+                trigger=trigger,
+                run_id=run_id,
+                ref=ref,
+                origin=origin,
+                outcome=str(result.outcome),
+                input_tokens=result.input_tokens or 0,
+                output_tokens=result.output_tokens or 0,
+                cost_usd=result.cost_usd or 0.0,
+                duration_s=result.duration_s,
+                usage_known=known,
+                now=ev.utc_now_iso(now) if now is not None else None,
+            )
+        except Exception as exc:
+            # This is a second, best-effort transaction: a transient lock may have
+            # cleared, leaving a durable warning even though the spend itself was lost.
+            try:
+                self.store.health.record(
+                    kind="ledger_write",
+                    resident=manifest.id,
+                    run_id=run_id,
+                    error=str(exc),
+                    now=ev.utc_now_iso(now) if now is not None else None,
+                )
+            except Exception:
+                log.exception(
+                    "%s: could not persist the ledger failure either",
+                    manifest.id,
+                )
+            raise
+        try:
+            self._pause_if_over(manifest, now)
+        except Exception as exc:  # noqa: BLE001 — spend is durable; pausing is independent
+            try:
+                self.store.health.record(
+                    kind="pause_enforcement",
+                    resident=manifest.id,
+                    run_id=run_id,
+                    error=str(exc),
+                    now=ev.utc_now_iso(now) if now is not None else None,
+                )
+            except Exception:
+                log.exception("%s: could not persist the pause failure either", manifest.id)
+            log.warning(
+                "%s: run %s was recorded, but the post-run budget pause failed: %s",
+                manifest.id,
+                run_id,
+                exc,
+            )
         return entry
 
     def _pause_if_over(self, manifest: ResidentManifest, now: datetime | None) -> None:

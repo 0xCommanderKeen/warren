@@ -63,7 +63,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -77,11 +77,13 @@ from steward.manifest import (
     active_residents,
     validate_path,
 )
+from steward.run_lifecycle import RunStore, RunTransitions, event_log_path, new_owner_token
 from steward.runners import (
     RunResult,
     build_runner,
     check_runner,
 )
+from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE, validate_kind_trigger
 from steward.sessions import (
     Refusal,
     ResidentSessions,
@@ -143,11 +145,6 @@ HEARTBEAT_EVERY_S = MAX_SLEEP_S
 #: a heartbeat older than the two together could not have fired anything on time anyway.
 STALE_TICK_AFTER_S = HEARTBEAT_EVERY_S + DEFAULT_CATCHUP_S
 
-#: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
-#: asking for it now through the API. The ledger has to be able to tell them apart.
-TRIGGER_SCHEDULE = "schedule"
-TRIGGER_MANUAL = "manual"
-
 STATE_VERSION = 0
 
 
@@ -204,9 +201,12 @@ class RunRegistry(Protocol):
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
+        event_log_path: str = "",
+        owner_token: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started, and return whether this call opened it."""
@@ -575,6 +575,7 @@ class Scheduler:
         hooks: WakeHooks | None = None,
         guard: RunGuard | None = None,
         registry: RunRegistry | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
@@ -584,6 +585,10 @@ class Scheduler:
         # No registry means the watchdog is back to reading the fallback log for runs
         # that vanished — which is what it read before steward #39, and no worse.
         self.registry = registry
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.run_transitions = (
+            RunTransitions(cast("RunStore", registry)) if registry is not None else None
+        )
         # One library for the fleet: improving a skill improves every resident holding
         # it. An unconfigured library means no skill is injected and none is written.
         self.library = library if library is not None else SkillLibrary()
@@ -605,6 +610,7 @@ class Scheduler:
             library=self.library,
             guard=guard,
             hooks=hooks,
+            clock=self.clock,
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()
@@ -886,7 +892,12 @@ class Scheduler:
         trigger: str = TRIGGER_SCHEDULE,
         now: datetime | None = None,
     ) -> FireReport:
-        """Run one routine end to end, bracketed by events. Never raises."""
+        """Run one routine end to end, bracketed by events.
+
+        ``trigger`` is protocol data, not an arbitrary label; reject unknown values before
+        opening a run or emitting an event that persistence could not represent.
+        """
+        validate_kind_trigger("routine", trigger)
         run_id = str(uuid.uuid4())
         moment = now or datetime.now(UTC)
         if not self._claim(item.key):
@@ -926,7 +937,7 @@ class Scheduler:
                 skipped_reason=admission.reason,
             )
 
-        wake = RoutineWake(item.routine, run_id)
+        wake = RoutineWake(item.routine, run_id, trigger)
         if self.dry_run:
             session = self.sessions.run(admission, wake)
             return FireReport(
@@ -946,35 +957,56 @@ class Scheduler:
         )
         # The deadline the session actually gets, read once: the registry is judged
         # against it, and the runner is given it.
-        timeout_s = admission.timeout_for(item.routine.timeout_s)
+        try:
+            timeout_s = admission.timeout_for(item.routine.timeout_s)
+        except Exception as exc:  # noqa: BLE001 - an unreadable budget refuses safely
+            reason = f"budget unreadable: {type(exc).__name__}: {exc}"
+            log.warning("%s: could not resolve the run timeout: %s", item.key, exc)
+            return FireReport(
+                scheduled=item,
+                run_id=run_id,
+                fired=False,
+                skipped_reason=reason,
+            )
+        owner_token = new_owner_token()
         # The event first, then the row. A crash between the two leaves a run steward
         # cannot find, which is where this stood before the registry existed; the other
         # order would leave a row the watchdog buries as ``routine_failed`` for a run the
         # village never saw start, which is a death it would have to invent a life for.
         self.emitter.emit(context.started(trigger))
-        self._open_run(item, run_id, timeout_s, moment)
+        watched = self._open_run(item, run_id, timeout_s, trigger, moment, owner_token)
 
-        session = self.sessions.run(admission, wake)
-        result = session.require_result()
-        if result.ok:
-            self.emitter.emit(
+        ownership = (
+            self.run_transitions.owned(run_id, owner_token)
+            if watched and self.run_transitions is not None
+            else contextlib.nullcontext()
+        )
+        with ownership:
+            session = self.sessions.run(admission, wake)
+            result = session.require_result()
+            # Win the durable terminal transition before publishing it. If the watchdog
+            # already won, a late success must not contradict its failure event.
+            terminal = (
                 context.finished(
                     outcome=str(result.outcome),
                     artifacts=result.artifacts,
                     duration_s=result.duration_s,
                 )
-            )
-        else:
-            self.emitter.emit(
-                context.failed(
+                if result.ok
+                else context.failed(
                     error=f"{result.outcome}: {result.summary()}",
                     duration_s=result.duration_s,
                 )
             )
-        # The bracket is closed in the village and in steward's own registry, in that
-        # order: the event is the thing burrow renders, and the row only has to be right
-        # before the next watchdog pass reads it.
-        self._close_run(run_id, session.completed_at or moment)
+            if not watched:
+                self.emitter.emit(terminal)
+            elif self.run_transitions is not None:
+                self.run_transitions.session_claim(
+                    run_id, terminal, owner_token=owner_token, now=session.completed_at or moment
+                )
+                self.run_transitions.publish_pending(
+                    self.emitter, now=session.completed_at or moment
+                )
         return FireReport(
             scheduled=item,
             run_id=run_id,
@@ -984,40 +1016,41 @@ class Scheduler:
             journal_path=session.journal_path,
         )
 
-    def _open_run(
-        self, item: ScheduledRoutine, run_id: str, timeout_s: int, moment: datetime
-    ) -> None:
+    def _open_run(  # noqa: PLR0913, PLR0917 - one argument per persisted run fact
+        self,
+        item: ScheduledRoutine,
+        run_id: str,
+        timeout_s: int,
+        trigger: str,
+        moment: datetime,
+        owner_token: str = "",
+    ) -> bool:
         """Write this run into the registry. Never raises: a lost row is not a lost run."""
         if self.registry is None:
-            return
+            return False
         try:
             opened = self.registry.open_run(
                 run_id=run_id,
                 kind="routine",
+                trigger=trigger,
                 agent_id=item.agent_id,
                 project=item.project,
                 ref=item.routine.id,
                 timeout_s=float(timeout_s),
+                event_log_path=event_log_path(self.emitter),
+                owner_token=owner_token,
                 now=ev.utc_now_iso(moment),
             )
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine
             log.warning("%s: could not record that this run started: %s", item.key, exc)
-            return
+            return False
         if not opened:  # pragma: no cover — a fresh id per fire cannot collide
             # An ignored open means the watchdog cannot see this session at all, and a
             # run nobody is watching must not look like a run that is fine.
             log.warning(
                 "%s: run %s was already recorded, so it is not being watched", item.key, run_id
             )
-
-    def _close_run(self, run_id: str, moment: datetime) -> None:
-        """Answer this run's registry row. Never raises, and never emits: the events did."""
-        if self.registry is None:
-            return
-        try:
-            self.registry.close_run(run_id, now=ev.utc_now_iso(moment))
-        except Exception as exc:  # noqa: BLE001 — the registry must not take a routine down
-            log.warning("could not record that run %s reported back: %s", run_id, exc)
+        return opened
 
     # -- liveness ----------------------------------------------------------------------
 

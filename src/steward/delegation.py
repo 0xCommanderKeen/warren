@@ -63,6 +63,12 @@ from typing import Any
 
 from steward import approvals, prompt
 from steward import events as ev
+from steward.input_bounds import (
+    DETAIL_MAX_CHARS,
+    TITLE_MAX_CHARS,
+    validate_identifier,
+    validate_work_text,
+)
 from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match, retired_complaint
 from steward.store import STATUS_CLAIMED, JobRecord, Store
 from steward.transitions.approval import ApprovalTransitions
@@ -100,12 +106,6 @@ DEFAULT_MAX_DEPTH = 3
 
 #: Where the fleet's depth cap is configured, so every entry point reads one number.
 MAX_DEPTH_ENV = "STEWARD_MAX_DELEGATION_DEPTH"
-
-#: A title is a line on a notice, not a paragraph.
-TITLE_MAX_CHARS = 200
-
-#: A handoff is a request, not a transcript: the detail is bounded before it is stored.
-DETAIL_MAX_CHARS = 8000
 
 #: The action recorded when a session tried to delegate and steward could not read it.
 UNREADABLE_ACTION = "unreadable_delegation"
@@ -413,6 +413,17 @@ class Delegator:
 
     # -- validation --------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_input(handoff: Handoff, parent_task_id: str | None) -> None:
+        try:
+            validate_work_text(handoff.title, handoff.detail)
+            validate_identifier(handoff.to, "to")
+            validate_identifier(handoff.route, "route")
+            if parent_task_id is not None:
+                validate_identifier(parent_task_id, "parent_task_id")
+        except ValueError as exc:
+            raise DelegationError(UNREADABLE_BLOCK, str(exc)) from None
+
     def _find_receiver(self, handoff: Handoff, sender_id: str) -> Resident:
         receiver = self.resident(handoff.to)
         if receiver is None:
@@ -610,6 +621,7 @@ class Delegator:
         """
         if not handoff.ok:
             raise DelegationError(UNREADABLE_BLOCK, handoff.problem or "unreadable handoff")
+        self._validate_input(handoff, parent_task_id)
         sender_id = sender.id if sender is not None else HUMAN_SENDER
         self._check_sender_active(sender)
 

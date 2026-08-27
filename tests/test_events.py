@@ -1,6 +1,8 @@
 """Emitting: the shape burrow accepts, and what happens when burrow is not there."""
 
+import hashlib
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -348,9 +350,10 @@ def test_a_failed_post_trips_a_breaker_so_the_caller_is_never_slowed(
     )
     attempts: list[str] = []
 
-    def refuse(_self: ev.EventEmitter, url: str, body: bytes) -> bool:
+    def refuse(_self: ev.EventEmitter, url: str, body: bytes, delivery_id: str = "") -> bool:
         attempts.append(url)
         assert body
+        assert delivery_id
         return False
 
     monkeypatch.setattr(ev.EventEmitter, "_post", refuse)
@@ -377,13 +380,17 @@ def test_a_loopback_breaker_lets_go_sooner(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_a_reachable_burrow_gets_the_event_with_the_bearer_token(tmp_path: Path) -> None:
-    seen: list[tuple[str, dict]] = []
+    seen: list[tuple[str, str, dict]] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             length = int(self.headers["Content-Length"])
             seen.append(
-                (self.headers.get("Authorization", ""), json.loads(self.rfile.read(length)))
+                (
+                    self.headers.get("Authorization", ""),
+                    self.headers.get("X-Burrow-Delivery-ID", ""),
+                    json.loads(self.rfile.read(length)),
+                )
             )
             self.send_response(204)
             self.end_headers()
@@ -404,8 +411,9 @@ def test_a_reachable_burrow_gets_the_event_with_the_bearer_token(tmp_path: Path)
         server.shutdown()
         server.server_close()
 
-    (authorization, body) = seen[0]
+    (authorization, delivery_id, body) = seen[0]
     assert authorization == "Bearer s3cret"
+    assert len(delivery_id) == 32
     assert ev.validate_event(body) == ()
     # A delivered event is *also* kept locally: the fallback log is the watchdog's own
     # complete record, so a bracket is never split across a transient outage.
@@ -457,11 +465,564 @@ def test_no_url_means_straight_to_the_local_log(tmp_path: Path) -> None:
     assert len(fallback.read_text().splitlines()) == 2
 
 
-def test_an_unwritable_fallback_never_takes_a_routine_down(tmp_path: Path) -> None:
+def test_an_unwritable_fallback_never_takes_a_routine_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     blocked = tmp_path / "a-file"
     blocked.write_text("not a directory", encoding="utf-8")
     emitter = ev.EventEmitter(fallback=blocked / "events.jsonl")
     assert emitter.emit(context().started("schedule")) is False
+    assert "could not persist event in the watchdog log" in caplog.text
+
+
+def test_outage_is_replayed_after_restart_oldest_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    offline = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: False)
+    assert offline.emit(context().started("schedule")) is False
+    assert offline.emit(context().failed(error="no", duration_s=1)) is False
+
+    seen: list[tuple[str, str]] = []
+
+    def accept(_self: ev.EventEmitter, _url: str, body: bytes, delivery_id: str = "") -> bool:
+        seen.append((json.loads(body)["type"], delivery_id))
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    report = restarted.flush()
+    assert report == ev.FlushReport(delivered=2, retired_records=2)
+    assert [kind for kind, _delivery_id in seen] == ["routine_started", "routine_failed"]
+    assert len({delivery_id for _kind, delivery_id in seen}) == 2
+
+
+def test_real_http_outage_then_recovery_drains_the_durable_queue(tmp_path: Path) -> None:
+    healthy = [False]
+    deliveries: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            deliveries.append(self.headers["X-Burrow-Delivery-ID"])
+            self.send_response(204 if healthy[0] else 503)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Quiet."""
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    fallback = tmp_path / "events.jsonl"
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        assert (
+            ev.EventEmitter(url=url, fallback=fallback).emit(context().started("schedule")) is False
+        )
+        healthy[0] = True
+        report = ev.EventEmitter(url=url, fallback=fallback).flush()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert report.delivered == 1
+    assert deliveries[0] == deliveries[1]
+
+
+def test_partial_flush_retires_success_and_stops_at_first_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    events = [context().started("schedule"), context().failed(error="x", duration_s=1)]
+    for index, event in enumerate(events):
+        assert emitter._queue_record(event, f"delivery-{index:08d}")
+    attempts = 0
+
+    def partial(*_args: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return attempts == 1
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", partial)
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.pending == 1
+    assert report.failed == 1
+
+
+def test_foreign_target_backlog_does_not_starve_current_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    old = ev.EventEmitter(url="https://old.example", fallback=fallback)
+    for index in range(ev.REPLAY_BATCH_SIZE + 1):
+        assert old._queue_record(context().started("schedule"), f"foreign-{index:016d}")
+    current = ev.EventEmitter(url="https://current.example", fallback=fallback)
+    assert current._queue_record(context().started("schedule"), "delivery-current-0001")
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+    report = current.flush(limit=ev.REPLAY_BATCH_SIZE)
+    assert report.delivered == 1
+    assert report.foreign == ev.REPLAY_BATCH_SIZE + 1
+    assert report.pending == ev.REPLAY_BATCH_SIZE + 1
+
+
+def test_corrupt_and_torn_queue_lines_are_quarantined_without_blocking_valid_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-00000000")
+    with emitter.queue.open("ab") as handle:
+        handle.write(b'not-json\n{"torn":')
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.pending == 0
+    assert report.corrupt == 2
+    assert emitter.queue.with_name(f"{emitter.queue.name}.corrupt").exists()
+
+
+def test_corrupt_quarantine_preserves_invalid_utf8_and_newline_bytes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    evidence = [b"bad-\xff\n", b'{"torn":']
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b"".join(evidence))
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+
+    assert emitter.flush().corrupt == 2
+    framed = emitter.queue.with_name(f"{emitter.queue.name}.corrupt").read_bytes()
+    assert framed == (
+        b"STEWARD-CORRUPT-V1 6\n"
+        + evidence[0]
+        + b"\nSTEWARD-CORRUPT-END\n"
+        + b"STEWARD-CORRUPT-V1 8\n"
+        + evidence[1]
+        + b"\nSTEWARD-CORRUPT-END\n"
+    )
+
+
+def test_failed_corrupt_quarantine_leaves_original_queue_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b"corrupt\n")
+    monkeypatch.setattr(
+        emitter,
+        "_append_corrupt_evidence",
+        lambda _chunks: (_ for _ in ()).throw(OSError("simulated quarantine failure")),
+    )
+    report = emitter.flush()
+    assert report.errors == 1
+    assert report.unknown == 1
+    assert emitter.queue.read_bytes() == b"corrupt\n"
+
+
+def test_queue_read_failure_is_not_reported_as_a_clean_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-unreadable")
+
+    def unreadable() -> tuple[list[dict[str, object]], list[bytes]]:
+        raise OSError("simulated unreadable queue")
+
+    monkeypatch.setattr(emitter, "_read_queue_unlocked", unreadable)
+    report = emitter.flush()
+    assert report.errors == 1
+    assert report.unknown == 1
+
+
+def test_repeated_delivery_after_crash_uses_the_same_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-crash-window")
+    ids: list[str] = []
+
+    def accept(_self: ev.EventEmitter, _url: str, _body: bytes, delivery_id: str = "") -> bool:
+        ids.append(delivery_id)
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    original = emitter._rewrite_queue
+
+    def crash(_retired: set[str]) -> None:
+        raise OSError("simulated crash before retirement")
+
+    monkeypatch.setattr(emitter, "_rewrite_queue", crash)
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.errors == 1
+    assert report.unknown == 1
+    monkeypatch.setattr(emitter, "_rewrite_queue", original)
+    assert emitter.flush().delivered == 1
+    assert ids == ["delivery-crash-window", "delivery-crash-window"]
+
+
+def test_queue_append_failure_never_posts_without_retry_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    posts: list[object] = []
+    monkeypatch.setattr(emitter, "_queue_record", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(emitter, "_post", lambda *_args: posts.append(object()) or True)
+    assert emitter.emit(context().started("schedule")) is False
+    assert posts == []
+
+
+def test_queue_append_quarantines_torn_tail_and_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    old = context().started("schedule")
+    new = context().failed(error="later", duration_s=1)
+    assert emitter._queue_record(old, "delivery-complete-old")
+    with emitter.queue.open("ab") as handle:
+        handle.write(b'{"torn":')
+
+    results: list[bool] = []
+    writers = [
+        threading.Thread(
+            target=lambda delivery_id=delivery_id: results.append(
+                emitter._queue_record(new, delivery_id)
+            )
+        )
+        for delivery_id in ("delivery-after-torn-a", "delivery-after-torn-b")
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=2)
+    assert not any(writer.is_alive() for writer in writers)
+    assert results == [True, True]
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        ev.EventEmitter,
+        "_post",
+        lambda _self, _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert restarted.flush() == ev.FlushReport(delivered=3, retired_records=3)
+    assert attempts[0] == "delivery-complete-old"
+    assert set(attempts[1:]) == {"delivery-after-torn-a", "delivery-after-torn-b"}
+    quarantine = emitter.queue.with_name(f"{emitter.queue.name}.corrupt").read_bytes()
+    assert quarantine == (b'STEWARD-CORRUPT-V1 8\n{"torn":\nSTEWARD-CORRUPT-END\n')
+
+
+def test_queue_append_rejects_new_record_when_torn_tail_quarantine_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b'{"torn":')
+    monkeypatch.setattr(
+        emitter,
+        "_append_corrupt_evidence",
+        lambda _chunks: (_ for _ in ()).throw(OSError("simulated quarantine failure")),
+    )
+
+    assert emitter._queue_record(context().started("schedule"), "delivery-not-accepted") is False
+    assert emitter.queue.read_bytes() == b'{"torn":'
+
+
+def test_history_failure_is_recovered_before_remote_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    event = context().started("schedule")
+    assert emitter._queue_record(event, "delivery-history-retry", history=False)
+    original = emitter._confirm_history
+    attempts = 0
+    posts: list[str] = []
+
+    def fail_once(record: dict[str, object]) -> bool:
+        nonlocal attempts
+        if attempts == 0:
+            attempts += 1
+            return False
+        return original(record)
+
+    monkeypatch.setattr(emitter, "_confirm_history", fail_once)
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": posts.append(delivery_id) or True,
+    )
+    first = emitter.flush()
+    assert first.delivered == 0
+    assert first.errors == 1
+    assert posts == []
+    assert emitter.queue.exists()
+
+    second = emitter.flush()
+    assert second.delivered == 1
+    assert posts == ["delivery-history-retry"]
+    history = [json.loads(line) for line in emitter.fallback.read_bytes().splitlines()]
+    assert [row["steward_delivery_id"] for row in history] == ["delivery-history-retry"]
+
+
+def test_concurrent_append_survives_a_flush_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-concurrent-old")
+    posting = threading.Event()
+    release = threading.Event()
+
+    def accept(*_args: object) -> bool:
+        posting.set()
+        assert release.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    worker = threading.Thread(target=emitter.flush)
+    worker.start()
+    assert posting.wait(timeout=2)
+    assert emitter._queue_record(
+        context().failed(error="later", duration_s=1), "delivery-concurrent-new"
+    )
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    remaining, corrupt = emitter._read_queue()
+    assert corrupt == []
+    assert [record["delivery_id"] for record in remaining] == ["delivery-concurrent-new"]
+
+
+def test_legacy_import_is_idempotent_while_records_are_pending(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    fallback.write_text(event.to_json() + "\nnot-json\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    first = emitter.import_legacy()
+    second = emitter.import_legacy()
+    records, corrupt = emitter._read_queue()
+    assert first == ev.ImportReport(scanned=2, imported=1, corrupt=1)
+    assert second == ev.ImportReport(scanned=2, skipped_duplicate=1, corrupt=1)
+    assert corrupt == []
+    assert len(records) == 1
+
+
+def test_legacy_import_skips_modern_history_and_duplicate_source_lines(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    legacy = context().started("schedule").to_dict()
+    modern = context().failed(error="x", duration_s=1).to_dict()
+    modern["steward_delivery_id"] = "delivery-already-modern"
+    fallback.write_text(
+        "\n".join(json.dumps(row) for row in (legacy, legacy, modern)) + "\n",
+        encoding="utf-8",
+    )
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+
+    assert emitter.import_legacy() == ev.ImportReport(
+        scanned=3, imported=1, skipped_modern=1, skipped_duplicate=1
+    )
+    records, corrupt = emitter._read_queue()
+    assert corrupt == []
+    assert len(records) == 1
+    assert records[0]["event"] == legacy
+
+
+def test_flush_posts_an_old_duplicate_queue_id_once_and_retires_every_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    event = context().started("schedule")
+    assert emitter._queue_record(event, "delivery-old-duplicate")
+    assert emitter._queue_record(event, "delivery-old-duplicate")
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    assert emitter.flush() == ev.FlushReport(delivered=1, retired_records=2)
+    assert attempts == ["delivery-old-duplicate"]
+    assert emitter._read_queue() == ([], [])
+
+
+def test_legacy_import_dedupes_old_index_id_by_event_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    raw = event.to_json().encode()
+    old_index_one_id = "legacy_" + hashlib.sha256(b"1\0" + raw).hexdigest()
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(event, old_index_one_id)
+    fallback.write_bytes(raw + b"\n")
+
+    assert emitter.import_legacy() == ev.ImportReport(scanned=1, skipped_duplicate=1)
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        ev.EventEmitter,
+        "_post",
+        lambda _self, _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+    assert emitter.flush() == ev.FlushReport(delivered=1, retired_records=1)
+    assert attempts == [old_index_one_id]
+
+
+def test_legacy_import_can_repeat_after_retirement_but_reuses_the_stable_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    assert emitter.import_legacy().imported == 1
+    assert emitter.flush().delivered == 1
+    assert emitter.import_legacy().imported == 1
+    assert emitter.flush().delivered == 1
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+
+
+def test_legacy_id_is_canonical_and_target_bound_after_retirement(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule").to_dict()
+    fallback.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    first = ev.EventEmitter(url="https://a.example/", fallback=fallback)
+    assert first.import_legacy().imported == 1
+    records, _ = first._read_queue()
+    first_id = records[0]["delivery_id"]
+    first._rewrite_queue({first._record_identity(records[0])})
+
+    fallback.write_text(json.dumps(event, sort_keys=True) + "\n", encoding="utf-8")
+    assert first.import_legacy().imported == 1
+    records, _ = first._read_queue()
+    assert records[0]["delivery_id"] == first_id
+    first._rewrite_queue({first._record_identity(records[0])})
+
+    second = ev.EventEmitter(url="https://b.example", fallback=fallback)
+    assert second.import_legacy().imported == 1
+    records, _ = second._read_queue()
+    assert records[0]["delivery_id"] != first_id
+
+
+def test_legacy_import_atomic_commit_preserves_authority_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        context().failed(error="foreign", duration_s=1), "foreign-existing-record"
+    )
+    original = emitter.queue.read_bytes() + b"corrupt\n"
+    emitter.queue.write_bytes(original)
+    original_replace = Path.replace
+
+    def fail_queue_replace(path: Path, target: Path) -> Path:
+        if target == emitter.queue:
+            raise OSError("simulated replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_queue_replace)
+    report = emitter.import_legacy()
+    assert report.imported == 0
+    assert report.failed == 1
+    assert report.errors == 1
+    assert emitter.queue.read_bytes() == original
+
+
+def test_legacy_import_partial_temp_write_failure_leaves_original_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        context().failed(error="existing", duration_s=1), "existing-authority-record"
+    )
+    original = emitter.queue.read_bytes()
+    real_write = os.write
+    writes = 0
+
+    def partial_then_fail(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            return real_write(descriptor, data[:7])
+        raise OSError("simulated failure after partial temp write")
+
+    monkeypatch.setattr(os, "write", partial_then_fail)
+    report = emitter.import_legacy()
+    assert report.imported == 0
+    assert report.failed == 1
+    assert report.errors == 1
+    assert emitter.queue.read_bytes() == original
+
+
+def test_flush_limit_counts_post_groups_and_keeps_same_id_for_other_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    current = ev.EventEmitter(url="https://a.example", fallback=fallback)
+    old_one = "legacy_" + hashlib.sha256(b"old-one").hexdigest()
+    old_two = "legacy_" + hashlib.sha256(b"old-two").hexdigest()
+    assert current._queue_record(event, old_one)
+    assert current._queue_record(event, old_two)
+    foreign = ev.EventEmitter(url="https://b.example", fallback=fallback)
+    assert foreign._queue_record(event, old_one)
+    posts: list[str] = []
+    monkeypatch.setattr(
+        current,
+        "_post",
+        lambda _u, _b, delivery_id="": posts.append(delivery_id) or True,
+    )
+
+    report = current.flush(limit=1)
+    assert report.delivered == 1
+    assert report.retired_records == 2
+    assert posts == [old_one]
+    records, corrupt = current._read_queue()
+    assert corrupt == []
+    assert [(record["target"], record["delivery_id"]) for record in records] == [
+        ("https://b.example", old_one)
+    ]
+
+
+def test_legacy_import_reports_non_missing_os_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "legacy.jsonl"
+    source.write_text("unreadable", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    original = Path.read_bytes
+
+    def deny(path: Path) -> bytes:
+        if path == source:
+            raise PermissionError("simulated")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny)
+    assert emitter.import_legacy(source) == ev.ImportReport(errors=1, unknown=1)
+
+
+def test_an_unwritable_fallback_is_not_a_durable_outbox_receipt(tmp_path: Path) -> None:
+    blocked = tmp_path / "a-file"
+    blocked.write_text("not a directory", encoding="utf-8")
+    emitter = ev.EventEmitter(fallback=blocked / "events.jsonl")
+    assert emitter.emit_durable(context().started("schedule")) is False
+
+
+def test_a_fallback_append_is_a_durable_outbox_receipt(tmp_path: Path) -> None:
+    emitter = ev.EventEmitter(fallback=tmp_path / "events.jsonl")
+    assert emitter.emit_durable(context().started("schedule")) is True
 
 
 def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:

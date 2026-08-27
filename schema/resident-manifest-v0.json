@@ -591,7 +591,7 @@
       "description": "A named, reusable capability granted to a resident.\n\nThe id names a skill in the library (``skills/<id>/SKILL.md``), and a name the\nlibrary does not have fails validation with the closest match named. The default\nskills every resident holds are not listed here: a grant is what this resident has\n*on top* of them.",
       "properties": {
         "id": {
-          "description": "Skill name in the library.",
+          "description": "Skill name in the library; surrounding whitespace is invalid.",
           "pattern": "^[a-z0-9][a-z0-9-]*$",
           "title": "Id",
           "type": "string"
@@ -743,7 +743,15 @@
     "skills": {
       "description": "Granted capabilities (may be empty).",
       "items": {
-        "$ref": "#/$defs/SkillGrant"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/SkillGrant"
+          },
+          {
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "type": "string"
+          }
+        ]
       },
       "title": "Skills",
       "type": "array"
