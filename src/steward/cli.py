@@ -443,7 +443,7 @@ def _render_effective_set(
     click.secho(f"  runner {resident.manifest.runner.kind} — {where}", fg="bright_black")
 
 
-def _report_tools(resident: Resident) -> int:
+def _report_reach(resident: Resident) -> int:
     """Say what a resident may reach and where, and whether the installed brain can do it.
 
     Printed for every resident rather than only the bounded ones, because "which residents
@@ -524,7 +524,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
                 click.secho(f"{label} — ready", fg="green")
-            problems += _report_tools(resident)
+            problems += _report_reach(resident)
             # Before the journal line, which probes by creating the directory it names: a
             # claimant with no working directory must be reported as doctor found it, not
             # as doctor left it.

@@ -55,7 +55,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
-    "WORKSPACE_PATH_PATTERN",
     "AppGrant",
     "Board",
     "Budgets",
@@ -66,6 +65,7 @@ __all__ = [
     "Escalation",
     "ManifestError",
     "Memory",
+    "PermissionMode",
     "Resident",
     "ResidentManifest",
     "Route",
@@ -77,6 +77,7 @@ __all__ = [
     "SoulIdentity",
     "ToolGrant",
     "ValidationResult",
+    "WorkspacePath",
     "active_residents",
     "closest_match",
     "extract_voice",
@@ -761,7 +762,7 @@ ToolName = Annotated[
 ]
 
 
-class ToolGrant(RootModel[Literal["unrestricted"] | list[ToolName]]):
+class ToolGrant(RootModel[Literal["unrestricted"] | tuple[ToolName, ...]]):
     """Which tools a session may reach: an exact list of names, or ``unrestricted``.
 
     The capability dimension that used to be prose. Skills are granted and pruned, app
@@ -780,6 +781,12 @@ class ToolGrant(RootModel[Literal["unrestricted"] | list[ToolName]]):
 
     Ask :attr:`bound` rather than reading :attr:`root`, because ``None`` (not bounded) and
     ``()`` (bounded to nothing) are different answers and both of them happen.
+
+    The list branch is a **tuple**, not a list, and that is not a style preference. Every
+    other model here is ``frozen``, and over a ``list`` root ``frozen`` half-works: pydantic
+    stops attribute assignment while ``grant.root.append("Bash")`` quietly widens a bound
+    somebody already validated, and the model is unhashable on one branch and hashable on
+    the other. A boundary that can be edited after it was checked is not one.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -790,14 +797,17 @@ class ToolGrant(RootModel[Literal["unrestricted"] | list[ToolName]]):
         return self.root == UNRESTRICTED_TOOLS
 
     @property
-    def bound(self) -> tuple[str, ...] | None:
+    def bound(self) -> tuple[ToolName, ...] | None:
         """The exact names a session may reach, or ``None`` when it is not bounded.
 
         The ``None`` matters: an empty tuple is a resident declared with no tools at all,
         which is a legal and occasionally useful thing to be, and a caller that read it as
         "no bound declared" would hand that resident everything.
         """
-        return None if self.unrestricted else tuple(self.root)
+        root = self.root
+        # The same question :attr:`unrestricted` asks — the string branch of the root union
+        # *is* the word — spelled so the type checker follows the narrowing into the return.
+        return None if isinstance(root, str) else root
 
     def describe(self) -> str:
         """One line for a report: the word, or the names in the order they were declared."""

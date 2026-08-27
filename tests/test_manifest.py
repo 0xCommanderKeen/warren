@@ -921,6 +921,23 @@ def test_unrestricted_is_a_declaration_not_an_absence(write_resident: ResidentWr
     assert resident.manifest.tools.describe() == "unrestricted"
 
 
+def test_a_bound_cannot_be_widened_after_it_was_validated(write_resident: ResidentWriter) -> None:
+    """The list branch is a tuple, and `frozen` over a list would have half-worked.
+
+    Pydantic's `frozen` stops attribute assignment, so `grant.root = [...]` was already
+    refused — but `grant.root.append("Bash")` was not, and it widened a bound that had
+    passed validation. A boundary somebody can edit after it was checked is not one.
+    """
+    grant = m.load_manifest(write_resident(tools_manifest(["Read"]))).manifest.tools
+
+    assert isinstance(grant.root, tuple)
+    with pytest.raises(AttributeError):
+        grant.root.append("Bash")  # ty: ignore[unresolved-attribute]
+    assert grant.bound == ("Read",)
+    # And it hashes on both branches rather than only on the word.
+    assert {grant, m.ToolGrant("unrestricted")}
+
+
 def test_a_declared_list_is_kept_in_the_order_it_was_written(
     write_resident: ResidentWriter,
 ) -> None:

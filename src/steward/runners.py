@@ -103,6 +103,20 @@ COST_USD_MAX = 10_000.0
 #: and summed. Generous by orders of magnitude against any real session.
 TOKENS_MAX = 1_000_000_000
 
+#: The two flags a bounded session is launched with. Both, or the bound does not hold:
+#: ``--tools`` alone leaves the host's MCP servers reachable (see :meth:`ClaudeRunner.argv`),
+#: and ``--strict-mcp-config`` alone bounds nothing.
+#:
+#: :meth:`ClaudeRunner.argv` emits these and :func:`check_cli_support` probes for them, and
+#: both read this one tuple. They must: the probe exists to say the installed CLI supports
+#: what argv sends, so a second copy of the spelling is a probe that can go on passing over
+#: an argv it no longer describes.
+TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
+
+#: The flag that widens a session past its own working directory
+#: (:attr:`RunRequest.workspace`), read by the same two places for the same reason.
+WORKSPACE_FLAG = "--add-dir"
+
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
 log = logging.getLogger("steward.runners")
@@ -520,7 +534,8 @@ class ClaudeRunner(_ProcessRunner):
             argv += ["--permission-mode", self.spec.permission_mode]
         bound = request.tools.bound
         if bound is not None:
-            argv += ["--tools", ",".join(bound), "--strict-mcp-config"]
+            tools_flag, strict_flag = TOOL_BOUND_FLAGS
+            argv += [tools_flag, ",".join(bound), strict_flag]
         # One flag per directory rather than the variadic spelling `--add-dir a b`: a
         # variadic option followed by another flag is a parser question steward does not
         # need to have an opinion about. Measured: repeating it accumulates, and a session
@@ -798,15 +813,6 @@ def check_runner(spec: RunnerSpec) -> str | None:
         return build_runner(spec).check()
     except RunnerError as exc:
         return str(exc)
-
-
-#: The two flags a bounded session is launched with. Both, or the bound does not hold:
-#: ``--tools`` alone leaves the host's MCP servers reachable (see
-#: :meth:`ClaudeRunner.argv`), and ``--strict-mcp-config`` alone bounds nothing.
-TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
-
-#: The flag that widens a session past its own working directory (:attr:`RunRequest.workspace`).
-WORKSPACE_FLAG = "--add-dir"
 
 
 def _cli_help(binary: str) -> str | None:

@@ -89,6 +89,7 @@ from steward.manifest import (
     SoulDocument,
     SoulIdentity,
     ToolGrant,
+    WorkspacePath,
     closest_match,
     load_manifest,
     validate_manifest,
@@ -183,7 +184,7 @@ class NewResident(BaseModel):
         default_factory=lambda: ToolGrant([]),
         description="Tools a session may reach; defaults to none until declared.",
     )
-    workspace: list[str] = Field(
+    workspace: list[WorkspacePath] = Field(
         default_factory=list,
         description="Absolute directories a session may reach beyond its working directory.",
     )
