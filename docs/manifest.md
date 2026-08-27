@@ -86,6 +86,37 @@ charter:
     note: Optional guidance for the human.
 ```
 
+### Why the charter is bounded here and not at injection
+
+Every other injected section has a cap that *truncates*: a voice at 1,200 characters, a
+journal at 4,000, the skill set at 24,000, a task's detail at 8,000. The charter has caps
+that **refuse**, and so do `soul.name`, `soul.role` and `summary`:
+
+| field | cap | field | cap |
+|---|---|---|---|
+| `charter.mission` | 2,000 | `escalation.how` | 200 |
+| each duty, rule, or `when` entry | 400 | `escalation.note` | 1,000 |
+| how many duties, rules, or `when` entries | 20 | `soul.name` | 80 |
+| `charter.escalation` as prose | 2,000 | `soul.role` | 200 |
+| `summary` | 400 | | |
+
+The charter is the last section of the preamble and it says out loud that it overrides
+everything above it, so it is the one section steward must never shorten: a hard rule cut
+in half at 3am would still be read as authoritative. An unbounded charter would also
+decide how much room the bounded sections above it have left, which makes the size of a
+preamble something you hope about rather than compute. Both problems are settled by
+refusing at validation — in a pull request, where a person can shorten the sentence — and
+that is why these numbers live in `manifest.py` rather than in `prompt.py` (steward #147).
+
+The caps are generous against practice: the longest mission in this repo is 359
+characters, the longest duty 190, the longest summary 76.
+
+Charter and identity text is also **neutralized** on its way into a prompt, exactly like
+injected text: a run of three or more `=` (or of the box-drawing and long-bar codepoints
+that render like one) is collapsed, so the section that claims the last word cannot itself
+draw steward's own section rule. Manifests are reviewed repo content, so this is not a
+guard against their authors — it removes the need to reason about them.
+
 ## `skills` — capabilities
 
 Each entry names a skill in the [skills library](#the-skills-library)

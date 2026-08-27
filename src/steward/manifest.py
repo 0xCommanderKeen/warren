@@ -110,6 +110,38 @@ SCHEMA_VERSION = 0
 VOICE_MAX_CHARS = 1200
 VOICE_HEADING = "## Voice"
 
+#: The charter and the identity section are the two parts of a preamble that are **never**
+#: truncated on their way into a prompt (:mod:`steward.prompt`): a hard rule cut in half is
+#: worse than no hard rule, and half a name is not an identity. So the bound they get is a
+#: refusal here, at authoring time, rather than a silent shortening at 3am — and with it the
+#: total size of a preamble becomes something you can compute rather than hope about. Without
+#: these numbers the section framed as the last word is also the one section able to crowd
+#: out every bounded section above it (steward #147). Each is generous against what live
+#: residents actually write: the longest mission in the tree is 359 characters, the longest
+#: duty 190, the longest summary 76.
+CHARTER_MISSION_MAX_CHARS = 2000
+
+#: One duty, one hard rule, or one escalation trigger. A line, not an essay.
+CHARTER_ENTRY_MAX_CHARS = 400
+
+#: How many duties, rules, or escalation triggers one charter may list. A charter nobody can
+#: hold in their head is not a charter, and the session has to hold it too.
+CHARTER_ENTRIES_MAX = 20
+
+#: The free-text escalation form, for a manifest that writes prose instead of an
+#: :class:`Escalation` block.
+ESCALATION_MAX_CHARS = 2000
+
+#: ``how`` names a protocol or a channel — ``needs_human``, an address; ``note`` is the extra
+#: guidance for whoever gets woken.
+ESCALATION_HOW_MAX_CHARS = 200
+ESCALATION_NOTE_MAX_CHARS = 1000
+
+#: The identity section: a display name, a one-line role, and the one line burrow displays.
+SOUL_NAME_MAX_CHARS = 80
+SOUL_ROLE_MAX_CHARS = 200
+SUMMARY_MAX_CHARS = 400
+
 #: The journal subdirectory, under ``memory.path``, a manifest gets when it names none.
 DEFAULT_JOURNAL_DIR = "journal"
 
@@ -573,35 +605,87 @@ class _Model(BaseModel):
 class SoulIdentity(_Model):
     """The villager burrow draws. Field names match burrow's soul frontmatter."""
 
-    name: str = Field(min_length=1, description="Display name, e.g. Hob.")
+    name: str = Field(
+        min_length=1,
+        max_length=SOUL_NAME_MAX_CHARS,
+        description="Display name, e.g. Hob.",
+    )
     char: str = Field(min_length=1, description="Burrow sprite key, e.g. Monk.")
     accent: str = Field(pattern=ACCENT_PATTERN, description="Hex accent colour, #rrggbb.")
-    role: str = Field(min_length=1, description="One-line role, e.g. life bot.")
+    role: str = Field(
+        min_length=1,
+        max_length=SOUL_ROLE_MAX_CHARS,
+        description="One-line role, e.g. life bot.",
+    )
     file: str = Field(
         default=DEFAULT_SOUL_FILENAME,
         description="Soul body, relative to the manifest directory.",
     )
 
 
+#: One line of a charter: a duty, a hard rule, or a situation that must be escalated.
+#: Bounded per entry as well as per list, because "how long can a charter get" has to have
+#: an answer that does not depend on how many bullets somebody wrote. ``strip_whitespace``
+#: is named rather than inherited: a field-level string constraint replaces the model's
+#: config, so leaving it out would quietly stop trimming exactly these entries.
+CharterEntry = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, max_length=CHARTER_ENTRY_MAX_CHARS),
+]
+
+
 class Escalation(_Model):
     """Structured escalation policy: when to stop and ask instead of acting."""
 
-    when: list[str] = Field(min_length=1, description="Situations that must be escalated.")
+    when: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Situations that must be escalated.",
+    )
     how: str = Field(
         default="needs_human",
         min_length=1,
+        max_length=ESCALATION_HOW_MAX_CHARS,
         description="The protocol event or channel used to escalate.",
     )
-    note: str | None = Field(default=None, description="Extra guidance for the human.")
+    note: str | None = Field(
+        default=None,
+        max_length=ESCALATION_NOTE_MAX_CHARS,
+        description="Extra guidance for the human.",
+    )
 
 
 class Charter(_Model):
-    """What a resident is for. Injected into every headless session for this resident."""
+    """What a resident is for. Injected into every headless session for this resident.
 
-    mission: str = Field(min_length=1, description="One paragraph of purpose.")
-    duties: list[str] = Field(min_length=1, description="Standing responsibilities.")
-    rules: list[str] = Field(min_length=1, description="Hard constraints.")
-    escalation: str | Escalation = Field(description="When and how to raise needs_human.")
+    Every field here is bounded, and the bound is a *refusal* rather than the injection cap
+    the voice, the journal, the skills, and a task's detail get (:mod:`steward.prompt`).
+    The charter is the section that has the last word and is therefore never shortened on
+    its way in: a hard rule truncated mid-clause would still be read as authoritative, and
+    an unbounded one would decide how much room every bounded section above it has left.
+    So the size is settled here, where it is somebody's pull request rather than a session's
+    surprise (steward #147).
+    """
+
+    mission: str = Field(
+        min_length=1,
+        max_length=CHARTER_MISSION_MAX_CHARS,
+        description="One paragraph of purpose.",
+    )
+    duties: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Standing responsibilities.",
+    )
+    rules: list[CharterEntry] = Field(
+        min_length=1,
+        max_length=CHARTER_ENTRIES_MAX,
+        description="Hard constraints.",
+    )
+    escalation: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=ESCALATION_MAX_CHARS)]
+        | Escalation
+    ) = Field(description="When and how to raise needs_human.")
 
     @field_validator("duties", "rules")
     @classmethod
@@ -1091,7 +1175,11 @@ class ResidentManifest(_Model):
         pattern=PROJECT_PATTERN,
         description="Project label for scoped residents.",
     )
-    summary: str | None = Field(default=None, description="One line burrow can display.")
+    summary: str | None = Field(
+        default=None,
+        max_length=SUMMARY_MAX_CHARS,
+        description="One line burrow can display.",
+    )
     retired: bool = Field(
         default=False,
         description="This resident has been retired. It keeps validating and stops working.",

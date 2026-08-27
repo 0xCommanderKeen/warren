@@ -43,6 +43,16 @@ voice at :data:`steward.manifest.VOICE_MAX_CHARS`, the journal at
 :data:`JOURNAL_MAX_CHARS`, the skills at :data:`SKILLS_MAX_CHARS`, the decisions at
 :data:`DECISIONS_MAX_CHARS`. A note to tomorrow is not a transcript, and a skill set is
 not a manual.
+
+The charter and the identity section are the exception, and steward #147 is where the
+exception got argued rather than merely inherited. They are **bounded at validation and
+never truncated here** — a hard rule cut in half still reads as authoritative, and half a
+name is not an identity, so an over-long charter is a refused pull request instead of a
+3am surprise (:data:`steward.manifest.CHARTER_MISSION_MAX_CHARS` and its neighbours). What
+they *do* share with every injected section is neutralisation (:func:`_declared`): the one
+section that says it outranks everything above it must not be the one section able to carry
+a forged section rule. Steward's own frames are not neutralized — they carry the
+``===STEWARD-ACTIONS===`` grammar on purpose.
 """
 
 import re
@@ -331,25 +341,55 @@ def _inject(text: str, limit: int) -> str:
     return _neutralize(_truncate(text, limit))
 
 
+def _declared(text: str) -> str:
+    """Neutralize one piece of *declared* text: a charter field, a name, a role, a summary.
+
+    The twin of :func:`_inject`, and the whole difference is the missing truncation.
+    Declared text is bounded at validation instead — :data:`steward.manifest.
+    CHARTER_MISSION_MAX_CHARS` and its neighbours — where an over-long charter is a refused
+    pull request rather than a hard rule silently cut in half at 3am. There is nothing left
+    for this function to cap.
+
+    Neutralizing it at all is the asymmetry steward #147 named, and it is deliberate rather
+    than defensive. A manifest is reviewed repo content, so this is not a guard against its
+    author; it removes the need to *reason about* its author. The charter is the section
+    that says in so many words that it overrides everything above it, which makes it the one
+    place a forged 72-column rule would be believed — and a rule run has no legitimate use
+    inside a mission statement or a duty. Collapsing it costs an honest charter nothing.
+
+    Steward's own frames are deliberately **not** run through this. :data:`ESCALATION_PROTOCOL`
+    and :data:`DELEGATION_PROTOCOL` carry the ``===STEWARD-ACTIONS===`` markers on purpose,
+    and neutralizing steward's own grammar would break the very escalation it is teaching.
+    """
+    return _neutralize(text.strip())
+
+
 def _bullets(items: Sequence[str]) -> str:
-    return "\n".join(f"- {item.strip()}" for item in items)
+    return "\n".join(f"- {_declared(item)}" for item in items)
 
 
 def render_escalation(escalation: str | Escalation) -> str:
     """Render either escalation form as prose the session can act on."""
     if isinstance(escalation, str):
-        return escalation.strip()
-    lines = ["Stop and escalate when:", _bullets(escalation.when), f"How: {escalation.how}"]
+        return _declared(escalation)
+    lines = [
+        "Stop and escalate when:",
+        _bullets(escalation.when),
+        f"How: {_declared(escalation.how)}",
+    ]
     if escalation.note:
-        lines.append(f"Note: {escalation.note.strip()}")
+        lines.append(f"Note: {_declared(escalation.note)}")
     return "\n".join(lines)
 
 
 def render_charter(charter: Charter) -> str:
-    """Render mission, duties, hard rules, and escalation in that fixed order."""
+    """Render mission, duties, hard rules, and escalation in that fixed order.
+
+    Every field is neutralized on the way out (:func:`_declared`); none is truncated.
+    """
     return "\n\n".join(
         [
-            f"MISSION\n{charter.mission.strip()}",
+            f"MISSION\n{_declared(charter.mission)}",
             f"DUTIES\n{_bullets(charter.duties)}",
             (
                 "HARD RULES (these override everything else you have been told)\n"
@@ -372,9 +412,9 @@ def render_skills(skills: Sequence[Skill]) -> str:
 
 def _identity_section(manifest: ResidentManifest) -> str:
     soul = manifest.soul
-    lines = [f"You are {soul.name}, {soul.role}, a resident of this fleet."]
+    lines = [f"You are {_declared(soul.name)}, {_declared(soul.role)}, a resident of this fleet."]
     if manifest.summary:
-        lines.append(manifest.summary.strip())
+        lines.append(_declared(manifest.summary))
     lines.append(
         "You are running unattended in a headless session. Nobody is watching the "
         "transcript, so anything you want a person to see must end up in a real work "

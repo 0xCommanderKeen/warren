@@ -142,6 +142,80 @@ def test_blank_charter_entry_fails(write_resident: ResidentWriter) -> None:
     assert "must not be empty" in problem_for(result, "charter.rules")
 
 
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        ("charter.mission", "x" * (m.CHARTER_MISSION_MAX_CHARS + 1)),
+        ("charter.duties[0]", ["x" * (m.CHARTER_ENTRY_MAX_CHARS + 1)]),
+        ("charter.rules[0]", ["x" * (m.CHARTER_ENTRY_MAX_CHARS + 1)]),
+        ("charter.duties", ["a duty"] * (m.CHARTER_ENTRIES_MAX + 1)),
+        ("charter.escalation", "x" * (m.ESCALATION_MAX_CHARS + 1)),
+    ],
+)
+def test_an_unbounded_charter_is_refused(
+    write_resident: ResidentWriter, field_path: str, value: object
+) -> None:
+    """The charter is bounded at validation because it is never truncated at injection.
+
+    A hard rule cut in half at 3am would still be read as authoritative, and an unbounded
+    charter decides how much room the sections above it have left (#147). So the size is
+    settled in a pull request instead.
+    """
+    data = valid_manifest()
+    data["charter"][field_path.split(".", 1)[1].removesuffix("[0]")] = value
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert problem_for(result, field_path)
+
+
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        ("soul.name", "x" * (m.SOUL_NAME_MAX_CHARS + 1)),
+        ("soul.role", "x" * (m.SOUL_ROLE_MAX_CHARS + 1)),
+    ],
+)
+def test_an_unbounded_identity_is_refused(
+    write_resident: ResidentWriter, field_path: str, value: str
+) -> None:
+    """The identity section is not truncated at injection either — half a name is not one."""
+    data = valid_manifest()
+    data["soul"][field_path.split(".", 1)[1]] = value
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert problem_for(result, field_path)
+
+
+def test_an_unbounded_summary_is_refused(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["summary"] = "x" * (m.SUMMARY_MAX_CHARS + 1)
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert problem_for(result, "summary")
+
+
+def test_a_charter_at_every_cap_still_passes(write_resident: ResidentWriter) -> None:
+    """The bounds have to leave room for a real charter, not merely exist."""
+    data = valid_manifest()
+    data["charter"]["mission"] = "x" * m.CHARTER_MISSION_MAX_CHARS
+    data["charter"]["duties"] = ["y" * m.CHARTER_ENTRY_MAX_CHARS] * m.CHARTER_ENTRIES_MAX
+    data["charter"]["rules"] = ["z" * m.CHARTER_ENTRY_MAX_CHARS]
+    data["charter"]["escalation"] = {
+        "when": ["w" * m.CHARTER_ENTRY_MAX_CHARS],
+        "how": "h" * m.ESCALATION_HOW_MAX_CHARS,
+        "note": "n" * m.ESCALATION_NOTE_MAX_CHARS,
+    }
+    name = "N" * m.SOUL_NAME_MAX_CHARS
+    role = "r" * m.SOUL_ROLE_MAX_CHARS
+    data["soul"]["name"] = name
+    data["soul"]["role"] = role
+    data["summary"] = "s" * m.SUMMARY_MAX_CHARS
+    soul = VALID_SOUL.replace("name: Testy", f"name: {name}").replace(
+        "role: test bot", f"role: {role}"
+    )
+    assert m.validate_manifest(write_resident(data, soul=soul)).ok
+
+
 def test_every_diagnostic_has_file_field_problem_and_example(
     write_resident: ResidentWriter,
 ) -> None:
