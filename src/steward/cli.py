@@ -37,6 +37,7 @@ from steward.board import BoardReport, Dispatcher, board_preflight, claimable_sk
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError
+from steward.health import HealthFailure
 from steward.journal import (
     JournalEntry,
     journal_complaint,
@@ -410,6 +411,7 @@ def doctor(residents: Path, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
+        problems += _report_health_failures(store.health.latest())
         problems += _report_watchdog(store.last_watchdog_pass())
     problems += _report_scheduler(SchedulerState.load(default_state_path()))
 
@@ -588,6 +590,19 @@ def _report_watchdog(last: dict[str, Any] | None) -> int:
         fg="green",
     )
     return 0
+
+
+def _report_health_failures(failures: HealthFailure | None) -> int:
+    """Name durable accounting/enforcement failures; either makes budgets unhealthy."""
+    if failures is None:
+        return 0
+    click.secho(
+        f"budget health: {failures.count} durable failure(s); latest {failures.kind} for "
+        f"{failures.resident} run {failures.run_id} at {failures.failed_at}: {failures.error}",
+        fg="red",
+        err=True,
+    )
+    return 1
 
 
 def _report_scheduler(state: SchedulerState) -> int:

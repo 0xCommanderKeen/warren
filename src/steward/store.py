@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from steward.events import utc_now_iso
+from steward.health import HealthJournal
 from steward.scheduler import default_state_path
 
 __all__ = [
@@ -807,16 +808,21 @@ class RequestRecord:
 class Store:
     """The one durable memory the API writes to. Safe to share across threads."""
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(self, path: Path | str | None = None, *, busy_timeout_ms: int = 15_000) -> None:
         """Open (and migrate) the database at ``path``; ``:memory:`` for a scratch one."""
         self.path = Path(path) if path is not None and path != ":memory:" else path
         if isinstance(self.path, Path):
             self.path.parent.mkdir(parents=True, exist_ok=True)
         target = str(self.path) if self.path is not None else ":memory:"
         self._lock = threading.Lock()
+        self.health = HealthJournal(self.path if isinstance(self.path, Path) else None)
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock, self._conn:
+            # The API, scheduler and CLI legitimately share this file. Make the wait
+            # explicit (and testable) instead of depending on sqlite3's constructor
+            # default, so a short-lived writer does not turn into missing spend.
+            self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)

@@ -1667,6 +1667,29 @@ def test_doctor_reports_the_budget_and_the_watchdog(
     assert "watchdog: has never made a pass" in result.output
 
 
+def test_doctor_fails_loudly_when_completed_spend_was_dropped(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest()
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.health.record(
+            kind="ledger_write",
+            resident="test-agent",
+            run_id="lost-run",
+            error="database is locked",
+        )
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code != 0
+    assert "budget health: 1 durable failure(s)" in result.output
+    assert "ledger_write for test-agent run lost-run" in result.output
+
+
 def test_doctor_says_a_paused_resident_will_not_fire_tonight(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:

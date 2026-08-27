@@ -576,6 +576,12 @@ there is no endpoint that would let it. See the README for what it shows.
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
 | `watchdog_passes` | when the watchdog last swept, which is how `doctor` can say nothing is watching |
+
+Budget accounting has one deliberately separate durable file: `steward.db.health.jsonl`.
+It records a bounded, redacted error when a completed run cannot be ledgered or its
+post-run pause cannot be enforced. It is independent of SQLite so a persistent database
+lock cannot hide its own failure; `steward doctor` reports any entry as unhealthy. SQLite
+writes wait up to 15 seconds for a competing writer before this evidence is recorded.
 | `unbracketed_runs` | the runs steward buried on their session's behalf, so nobody is mourned twice |
 
 SQLite rather than a JSON file because the two interesting writes are both
