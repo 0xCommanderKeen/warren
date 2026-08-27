@@ -57,4 +57,18 @@ describe("village snapshot model", () => {
       { id: "stale", moving: false, route: [] },
     ]);
   });
+
+  it("places knocking villagers together at the operator's doorstep", () => {
+    const villagers = buildVillageModel(map, [
+      { id: "knocker-b", name: "B", residency: "resident", home: 1, state: "knocking" },
+      { id: "resting", name: "Resting", residency: "resident", home: 2, state: "resting" },
+      { id: "knocker-a", name: "A", residency: "visitor", home: null, state: "knocking" },
+    ]);
+
+    expect(villagers.map(({ id, x, y }) => ({ id, x, y }))).toEqual([
+      { id: "knocker-b", x: 328, y: 192 },
+      { id: "resting", x: 464, y: 112 },
+      { id: "knocker-a", x: 312, y: 192 },
+    ]);
+  });
 });

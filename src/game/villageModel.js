@@ -104,6 +104,12 @@ export function buildVillageModel(map, snapshotVillagers) {
   validateReachability(map);
   const lodge = place(map, "lodge");
   const work = place(map, "work");
+  const doorstep = place(map, "street");
+  const knockingSlots = new Map(snapshotVillagers
+    .filter((villager) => villager.state === "knocking")
+    .map((villager) => villager.id)
+    .toSorted()
+    .map((id, index, ids) => [id, (index - (ids.length - 1) / 2) * 16]));
   let visitorIndex = 0;
 
   return snapshotVillagers.map((villager) => {
@@ -112,6 +118,7 @@ export function buildVillageModel(map, snapshotVillagers) {
     const door = isResident ? place(map, "door", villager.home) : place(map, "lodge-door");
     const offset = isResident ? 0 : visitorIndex++ * 16;
     const moving = villager.state === "working";
+    const knockingOffset = knockingSlots.get(villager.id);
 
     return {
       ...villager,
@@ -121,8 +128,8 @@ export function buildVillageModel(map, snapshotVillagers) {
         x: anchor.x,
         y: anchor.y,
       },
-      x: door.x + offset,
-      y: door.y,
+      x: knockingOffset === undefined ? door.x + offset : doorstep.x + knockingOffset,
+      y: knockingOffset === undefined ? door.y : doorstep.y,
       moving,
       route: moving ? routeBetween(map, door, work) : [],
     };
