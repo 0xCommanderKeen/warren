@@ -1,8 +1,17 @@
 import fixture from "./contract/fixtures/complete-v1.json";
 import { parseSnapshot } from "./contract/parseSnapshot.js";
 import { PhaserGame } from "./game/PhaserGame.jsx";
+import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 
 export function App({ envelope = fixture }) {
+  if (envelope === null) {
+    return (
+      <main className="app-shell app-shell--loading">
+        <p role="status">Village snapshot has not loaded yet.</p>
+      </main>
+    );
+  }
+
   let snapshot;
 
   try {
@@ -48,6 +57,7 @@ export function App({ envelope = fixture }) {
           ))}
         </div>
       </section>
+      <ReadOnlyPanels snapshot={snapshot} />
     </main>
   );
 }

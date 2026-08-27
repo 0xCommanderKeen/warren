@@ -11,6 +11,9 @@ body { margin: 0; min-width: 320px; min-height: 100vh; }
 
 .app-shell { min-height: 100vh; padding: clamp(1rem, 3vw, 2.5rem); }
 
+.app-shell--loading { display: grid; place-items: center; }
+.app-shell--loading p { padding: 1rem 1.25rem; border: 1px solid #785a25; background: #faf6eb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 .masthead { display: flex; align-items: end; justify-content: space-between; max-width: 1280px; margin: 0 auto 1rem; }
 
 h1, h2, p { margin: 0; }
@@ -42,10 +45,35 @@ h1 { font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 400; letter-spacing: -0.0
 
 .contract-error h1 { margin: 0.5rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
 
+.panels { display: grid; grid-template-columns: repeat(6, 1fr); gap: 1rem; max-width: 1280px; margin: 2rem auto 0; }
+
+.panel { grid-column: span 2; min-width: 0; border: 1px solid #1d3328; padding: 1rem; background: #faf6eb; box-shadow: 4px 4px 0 #1d3328; }
+.panel--charters, .panel--journals { grid-column: span 3; }
+
+.panel__header { margin-bottom: 1rem; border-bottom: 1px solid #b7aa8c; padding-bottom: 0.65rem; }
+.panel__header h2 { font-size: 1.25rem; font-weight: 400; }
+.panel__header p, .record-list span, .record-list time, .charter-list > li > p:first-of-type, .panel-empty { color: #566158; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.76rem; }
+
+.record-list, .charter-list { display: grid; gap: 0.75rem; margin: 0; padding: 0; list-style: none; }
+.record-list li { display: grid; gap: 0.18rem; border-left: 3px solid #d2a15c; padding-left: 0.65rem; }
+.record-list strong { overflow-wrap: anywhere; font-weight: 400; }
+.record-list time { overflow-wrap: anywhere; }
+.charter-list li { border-left: 3px solid #6aa84f; padding-left: 0.65rem; }
+.charter-list h3 { margin: 0; font-size: 1rem; font-weight: 400; }
+.charter-list p { margin-top: 0.3rem; }
+.panel-empty { line-height: 1.5; }
+
 @media (max-width: 600px) {
   .masthead { align-items: start; flex-direction: column; gap: 0.5rem; }
   .village { aspect-ratio: 4 / 5; }
   .villager { grid-template-columns: auto 1fr; }
   .villager__state { display: none; }
   .villager p { display: none; }
+  .panels { grid-template-columns: 1fr; }
+  .panel, .panel--charters, .panel--journals { grid-column: auto; }
+}
+
+@media (min-width: 601px) and (max-width: 900px) {
+  .panels { grid-template-columns: repeat(2, 1fr); }
+  .panel, .panel--charters, .panel--journals { grid-column: span 1; }
 }
