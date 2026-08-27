@@ -42,6 +42,11 @@ routes:
 
 app_grants: []
 
+# Not bounded yet. Narrowing a live resident is a separate, deliberate act — guessing
+# the list wrong breaks a routine at 7am — so this migration says what is true today and
+# each resident is narrowed afterwards, one at a time, on evidence.
+tools: unrestricted
+
 runner:
   kind: claude
   model: claude-haiku-4-5-20251001

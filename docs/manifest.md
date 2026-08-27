@@ -31,6 +31,8 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `memory` | yes | Memory dimension. |
 | `routes` | yes | Route dimension (may be an empty list). |
 | `app_grants` | yes | App access dimension (may be an empty list). |
+| `tools` | yes | Tool dimension: the names a session may reach, or `unrestricted`. |
+| `workspace` | no | Absolute directories a session may reach beyond its working directory. |
 | `runner` | no | Which brain the resident runs on. Defaults to `{kind: claude}`. |
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
@@ -43,9 +45,9 @@ value fails validation and is never stored. Credentials live outside both repos,
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
 with neither cannot be matched to a villager and fails validation.
 
-The five capability dimensions (`soul`, `skills`, `memory`, `routes`, `app_grants`) must
-be present explicitly. An empty list is a valid declaration ("this resident has no
-routes"); a missing key is not, because silence must never be read as a grant.
+The six capability dimensions (`soul`, `skills`, `memory`, `routes`, `app_grants`,
+`tools`) must be present explicitly. An empty list is a valid declaration ("this resident
+has no routes"); a missing key is not, because silence must never be read as a grant.
 
 ## `soul` — identity
 
@@ -167,6 +169,158 @@ app_grants:
     status_ref: https://myaccount.google.com/permissions   # where the grant is administered
 ```
 
+## `tools` — what a session may reach
+
+```yaml
+tools: unrestricted          # this resident reaches whatever its brain has
+```
+```yaml
+tools:                       # …or exactly these, and nothing else
+  - Read
+  - Glob
+  - Grep
+```
+
+Required, like the other capability dimensions, and for the reason stated above: silence
+is not a grant. `unrestricted` is how a manifest says *unlimited* out loud — the same
+choice `budgets` makes when it reports a limit of `null` rather than omitting the gauge.
+It is also greppable: "which residents can reach anything" is one search over the tree
+rather than an audit of which key is absent from which file.
+
+An **empty list is a real declaration**, not an omission: a session that can think and
+reply and touch nothing. It reaches the CLI as `--tools ""`, which is that CLI's own
+spelling for *no tools at all*.
+
+### What actually enforces it
+
+`ClaudeRunner.argv` compiles a declared list into `--tools <names> --strict-mcp-config`,
+always the pair, and compiles nothing at all for `unrestricted` — so migrating a resident
+to `unrestricted` changes what the manifest *says* and not one byte of what steward *does*.
+
+Measured against `claude` 2.1.247, headless, in an empty directory, under
+`env -i HOME PATH TERM`:
+
+| argv | Bash reachable? | what came back |
+|---|---|---|
+| *(no flags)* | yes | `hello-from-bash`, `permission_denials: []` |
+| `--allowed-tools Read` | **yes** | `hello-from-bash`, `permission_denials: []` |
+| `--tools Read` | no | but the session also had `mcp__spell__spell_search` |
+| `--tools Read --strict-mcp-config` | no | the session had exactly `Read` |
+| `--tools ""` | — | no tools at all |
+
+Three things that follow, and the design turns on all of them:
+
+- **Headless is permissive by default.** With no flags a session ran a shell command and
+  recorded no denial. Nothing was bounding these residents before this field existed.
+- **`--allowed-tools` is not an allowlist and is not the mechanism.** It pre-approves
+  permission *rules* and removes nothing. A `tools:` block compiled to it would read as a
+  boundary in the manifest and be inert at run time — the same failure shape as a daily cap
+  under a runner that reports no usage. Recorded here by name so it is not reached for later.
+- **`--tools` alone leaks the host's MCP servers.** `mcp__spell__spell_search`, from the
+  calling machine's config and nothing steward declared, survived `--tools Read`.
+  `--strict-mcp-config` closes it, which is why neither flag is ever emitted without the other.
+
+A deny list (`--disallowed-tools`) does work, and is rejected for a different reason: it
+grants by default, so a tool added in a future CLI release is available to every resident
+until somebody notices and denies it. That is silence-as-a-grant again.
+
+### `tools` and `permission_mode` are different axes
+
+`tools` decides **which tools exist** in a session; `permission_mode` decides **whether a
+call to one is approved**. They do not substitute for each other, and neither undoes the
+other: `--tools Read --permission-mode acceptEdits` still had no Bash.
+
+That matters in both directions. A bounded list is *not* made inert by a permissive mode —
+but headless with no mode at all **denies** write-ish Bash calls (`mv`, `echo >>` both
+landed in `permission_denials`), so a resident that has to change files needs a mode as
+well as the tools. `acceptEdits` is the narrow one that works; `dontAsk` denied them.
+
+There is a third axis, and it is the one that actually retires `bypassPermissions`: the
+**directory** a session may act in. See [`workspace`](#workspace--where-a-session-may-act).
+
+The bound is over *tools*, not over commands. Granting `Bash` grants `rm` — "never delete"
+is still a line for the charter to hold, not something this list expresses.
+
+### What validation refuses
+
+- **A list under `runner.kind: codex` or `command`.** Neither compiles a tool flag, so the
+  list would bound nothing while reading like a boundary. `mock` is exempt: it spawns
+  nothing. Say `unrestricted` instead — it is true under every kind.
+- **A list beside `permission_mode: bypassPermissions`.** Not because the bypass makes the
+  list inert (it does not, see above), but because this manifest went to the trouble of
+  naming which tools may exist and then auto-approved every call to the ones that survive.
+  One boundary drawn, the other dropped, in the one file somebody is reading both in.
+- **An `mcp__…` name inside a list.** A bounded session is launched with
+  `--strict-mcp-config`, which loads no MCP servers at all, so such a name resolves to a
+  tool the session does not have. The CLI accepts the argument without complaint, which is
+  exactly what makes it worth refusing here. MCP tools are not grantable in v0.
+
+### The installed CLI is part of the boundary
+
+A manifest declaring a bound is perfectly valid against a `claude` too old to have the
+flag. That version does not quietly ignore it — an unknown option is `error: unknown
+option` and exit 1 — so the failure is loud. It is loud *at the resident's next fire*,
+which for the 07:00 routine means a failed session in a ledger nobody is reading, over a
+manifest that validated clean. Validation cannot reach it either, because the binary is not
+in the manifest.
+
+So `steward doctor` probes the flags a manifest's declarations compile into, rather than
+merely finding the binary on PATH, and fails for any resident whose declaration the
+installed CLI could not carry out. That moves the failure from 7am to daylight, which is
+the whole of what the probe buys.
+
+It matters most where it is least visible: a provisioned resident installs its own CLI from
+the image's bootstrap, pinned by `CLAUDE_VERSION` in the Makefile, so the version running a
+manifest on the NAS is not the one on the laptop that validated it.
+
+Two edges this does **not** close, both worth knowing:
+
+- A granted skill can need a tool the list denies. Nothing cross-checks skill frontmatter
+  against `tools`, so that mismatch surfaces at run time rather than at validation.
+- `--setting-sources` is not passed, so in principle a resident session could load settings
+  from the host or from its own working directory. In practice the CLI refuses to apply a
+  `.claude/settings.json` from an untrusted workspace — it says so on stderr — and a
+  resident's memory directory is not trusted. That is a mitigation resting on host state
+  rather than on anything steward declares, and closing it properly is separate work.
+
+## `workspace` — where a session may act
+
+```yaml
+workspace:
+  - /data/library/books
+```
+
+The mirror image of `tools`, and the other half of retiring `bypassPermissions`. `tools`
+narrows **what exists** in a session; `workspace` widens **where it may act**. Neither is
+the other, and a resident that touches anything outside its own memory directory needs both.
+
+A session runs in the resident's memory directory and, by default, may act only there. The
+permission modes are scoped to that directory: measured against CLI 2.1.247, a `mv` whose
+target is outside it is denied under `acceptEdits` **and** under `auto`, and lands in
+`permission_denials`. Each entry here compiles to one `--add-dir` — one flag per directory,
+because a variadic option followed by another flag is a parser question steward does not
+need an opinion about — and with it the same `mv` goes through with no denials.
+
+Unlike `tools` this key is **optional**, and the asymmetry is deliberate. An absent `tools`
+would have meant *every tool*, which is silence read as a grant. An absent `workspace` means
+*no directory beyond the resident's own*, which is silence granting nothing. Being a
+widening grant is also why it is worth reading out loud: `steward doctor` prints a
+resident's workspace whenever it has one.
+
+Paths are **absolute**, and are checked against the same character class as `memory.path`.
+A relative path would resolve against the working directory — the one place the resident can
+already write — so which directory a grant named would depend on where steward happened to
+be launched from. And the value is interpolated into an argv, and for a provisioned resident
+into generated compose YAML, so it has to be data and never markup (#61).
+
+Validation refuses a grant steward cannot make: only `claude` compiles `--add-dir`, so a
+list under `codex` or `command` reads like access somebody granted while the session cannot
+open a byte of it. `mock` is exempt; it opens nothing.
+
+**This is a grant, not a confinement.** It says where a session may work *in addition to*
+its own directory. It does not say the resident is confined to those directories — that is
+the permission mode's job, and `bypassPermissions` overrides all of it.
+
 ## `runner` — which brain
 
 Every headless session steward launches goes through one seam, `steward.runners`. The
@@ -177,8 +331,13 @@ runner:
   kind: claude               # claude | codex | command | mock
   model: claude-opus-5
   command: [my-agent, --prompt, "{prompt}", --cwd, "{workdir}"]   # kind: command only
-  permission_mode: null
+  permission_mode: null      # acceptEdits | auto | bypassPermissions | manual | dontAsk | plan
 ```
+
+`permission_mode` is a closed set, because the CLI's is. It used to be free text that
+reached `--permission-mode` unchecked, which made a typo not a failed validation but a
+session that died at its next fire with a commander error — at 7am, in a log nobody was
+reading.
 
 | kind | what it runs |
 |---|---|
@@ -993,8 +1152,10 @@ Burrow reads the same files for display (burrow #35). The contract:
 
 - Identity fields in `soul` are exactly burrow's villager frontmatter fields.
 - Match a villager to a resident by `agent_id` first, then by `project`.
-- The five capability dimensions are the panel burrow renders; `app_grants[].status`
-  is the only truth about whether access exists.
+- The capability dimensions are the panel burrow renders; `app_grants[].status`
+  is the only truth about whether access exists, `tools` is either a list of names or
+  the string `unrestricted` — never absent — and `workspace` is a list of absolute
+  directories that may be empty or missing.
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
   this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
   the schema's `$id` says they are, so burrow can fetch a file rather than run a command.

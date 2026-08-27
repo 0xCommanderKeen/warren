@@ -410,6 +410,27 @@ gets — the library's defaults plus those grants, in injection order:
  "effective_skills": ["daily-summary", "escalate", "research", "write-journal", "read-inbox"]}
 ```
 
+`tools` and `workspace` are what a session may reach, and where it may act. `tools` is
+either a list of tool names or the string `"unrestricted"` — never absent, and never null,
+for the reason a budget reports a limit of `null` rather than omitting the gauge: unlimited
+is something a reader is told rather than something they infer from a missing key, so
+"which residents can reach anything" is one pass over this endpoint. `workspace` is a list
+of absolute directories opened to the session beyond the working directory it is otherwise
+confined to, and is usually empty.
+
+```json
+{"tools": ["Bash", "Read", "Write", "Edit", "Glob", "Grep"],
+ "workspace": ["/data/library/books"]}
+```
+
+```json
+{"tools": "unrestricted", "workspace": []}
+```
+
+See [`tools`](manifest.md#tools--what-a-session-may-reach) and
+[`workspace`](manifest.md#workspace--where-a-session-may-act) for what each one actually
+enforces, and for why a bounded list and a permission mode are different axes.
+
 `GET /residents` additionally carries a small `budget` block on every resident, so a
 fleet view can draw fuel gauges without a round trip each:
 

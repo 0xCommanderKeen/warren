@@ -31,7 +31,7 @@ Flat, factual, short.
 
 
 def valid_manifest() -> dict[str, Any]:
-    """Build a minimal manifest that declares all five capability dimensions."""
+    """Build a minimal manifest that declares every capability dimension."""
     return {
         "version": 0,
         "id": "test-agent",
@@ -61,6 +61,7 @@ def valid_manifest() -> dict[str, Any]:
         "app_grants": [
             {"id": "burrow", "name": "Burrow", "status": "granted", "scopes": ["events.write"]},
         ],
+        "tools": "unrestricted",
         "runner": {"kind": "claude", "model": "claude-opus-5"},
         "routines": [
             {

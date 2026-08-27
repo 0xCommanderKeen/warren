@@ -68,7 +68,7 @@ from steward.nursery import (
     retire_resident,
 )
 from steward.prompt import assemble_preamble
-from steward.runners import check_runner, skills_home
+from steward.runners import check_cli_support, check_runner, skills_home
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -443,6 +443,33 @@ def _render_effective_set(
     click.secho(f"  runner {resident.manifest.runner.kind} — {where}", fg="bright_black")
 
 
+def _report_reach(resident: Resident) -> int:
+    """Say what a resident may reach and where, and whether the installed brain can do it.
+
+    Printed for every resident rather than only the bounded ones, because "which residents
+    are unbounded" is a question this dimension exists to make answerable, and a report that
+    stayed quiet about the unbounded ones would answer it by omission.
+
+    The complaint underneath is the one thing validation cannot reach: the CLI a manifest
+    will actually run against is not in the manifest. A ``claude`` without the flags fails
+    the session at its next fire, which for a 07:00 routine means a failed run in a ledger
+    nobody is reading. Red, and counted, so it is read here instead.
+    """
+    manifest = resident.manifest
+    tools = manifest.tools
+    complaint = check_cli_support(manifest.runner, tools, manifest.workspace)
+    if complaint:
+        click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
+        return 1
+    colour = "yellow" if tools.unrestricted else "green"
+    click.secho(f"{resident.id}: tools {tools.describe()}", fg=colour)
+    if manifest.workspace:
+        # A widening grant, so it is worth saying out loud even when nothing is wrong: this
+        # resident works somewhere other than the one directory its memory location names.
+        click.secho(f"{resident.id}: workspace {', '.join(manifest.workspace)}", fg="yellow")
+    return 0
+
+
 # --------------------------------------------------------------------------------------
 # doctor
 # --------------------------------------------------------------------------------------
@@ -497,6 +524,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
                 click.secho(f"{label} — ready", fg="green")
+            problems += _report_reach(resident)
             # Before the journal line, which probes by creating the directory it names: a
             # claimant with no working directory must be reported as doctor found it, not
             # as doctor left it.

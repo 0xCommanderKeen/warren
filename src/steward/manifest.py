@@ -3,8 +3,8 @@
 A resident is declared by two files in ``residents/<id>/``:
 
 ``manifest.yaml``
-    The structured declaration — soul identity, charter, and the five capability
-    dimensions burrow renders (skills, memory, routes, app grants) plus the
+    The structured declaration — soul identity, charter, and the capability
+    dimensions burrow renders (skills, memory, routes, app grants, tools) plus the
     steward-side execution blocks (runner, routines).
 ``soul.md``
     The free-form soul body, markdown with frontmatter, compatible in spirit with
@@ -35,6 +35,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    RootModel,
     StringConstraints,
     ValidationError,
     ValidationInfo,
@@ -52,6 +53,7 @@ __all__ = [
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
     "SCHEMA_VERSION",
+    "UNRESTRICTED_TOOLS",
     "VOICE_MAX_CHARS",
     "AppGrant",
     "Board",
@@ -63,6 +65,7 @@ __all__ = [
     "Escalation",
     "ManifestError",
     "Memory",
+    "PermissionMode",
     "Resident",
     "ResidentManifest",
     "Route",
@@ -72,7 +75,9 @@ __all__ = [
     "SkillGrant",
     "SoulDocument",
     "SoulIdentity",
+    "ToolGrant",
     "ValidationResult",
+    "WorkspacePath",
     "active_residents",
     "closest_match",
     "extract_voice",
@@ -119,6 +124,40 @@ CLOSE_OF_DAY = "close_of_day"
 
 #: Keep an over-firing diagnostic compact once its exact count stops being useful.
 MANY_FIRES_DISPLAY_THRESHOLD = 24
+
+#: The word a manifest writes instead of a list when a resident's tools are not bounded.
+#: Unlimited is *said* here rather than left as a silence, for the same reason ``budgets``
+#: reports a limit of ``null`` rather than omitting the gauge: "which residents can reach
+#: anything" is then one grep over the tree, not an audit of which key is absent from which
+#: file. It is also the one word that makes ``tools`` safe to require of every manifest.
+UNRESTRICTED_TOOLS = "unrestricted"
+
+#: A built-in tool name as ``claude --tools`` spells it — ``Read``, ``Glob``, ``WebFetch``.
+#: Names only. ``--tools`` takes names *from the built-in set*, not the rule syntax that
+#: ``--allowed-tools`` accepts, so ``Bash(git *)`` is not something that can be written
+#: here. The pattern forbids a comma inside a value too, which turns the near miss
+#: ``tools: Read,Glob`` — one string where a list was meant — into a diagnostic rather than
+#: a single tool name that will never match anything.
+TOOL_NAME_PATTERN = r"^[A-Za-z][A-Za-z0-9_]*$"
+
+#: How the claude CLI spells a tool that came from an MCP server. Refused inside a bounded
+#: list: see :func:`_check_tools_are_enforceable`.
+MCP_TOOL_PREFIX = "mcp__"
+
+#: A directory a session may reach beyond its own working directory.
+#:
+#: Absolute, because a relative path would resolve against the working directory — the one
+#: place the resident can already write — so "which directory did that grant name" would
+#: depend on where steward happened to be launched from rather than on what the manifest
+#: says. The character class is ``memory.path``'s and is there for the same reason: this
+#: value is interpolated into an argv, and for a provisioned resident into generated
+#: compose YAML, so it has to be data and never markup (steward #61).
+WORKSPACE_PATH_PATTERN = r"""^/[^\s'"`$;|&<>(){}\[\]!*?\\]*$"""
+
+#: The permission mode that auto-approves every call a session makes. Named because a
+#: manifest that bounds its tools and then declares this has drawn one boundary and dropped
+#: the other, which :func:`_check_tools_are_enforceable` refuses.
+BYPASS_PERMISSIONS = "bypassPermissions"
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
@@ -706,6 +745,85 @@ class AppGrant(_Model):
     )
 
 
+#: One directory in a ``workspace`` grant. Not stripped, like a tool name and a skill id:
+#: the contract is the exact string, and a path that only resolves after a trim is a path
+#: somebody typed wrong.
+WorkspacePath = Annotated[
+    str,
+    StringConstraints(strip_whitespace=False, pattern=WORKSPACE_PATH_PATTERN),
+]
+
+#: A single tool name inside a declared list. Whitespace is not stripped, for the same
+#: reason a skill id is not: the schema's contract is the exact string, and a name that
+#: only matches after a trim is a name somebody typed wrong.
+ToolName = Annotated[
+    str,
+    StringConstraints(strip_whitespace=False, pattern=TOOL_NAME_PATTERN),
+]
+
+
+class ToolGrant(RootModel[Literal["unrestricted"] | tuple[ToolName, ...]]):
+    """Which tools a session may reach: an exact list of names, or ``unrestricted``.
+
+    The capability dimension that used to be prose. Skills are granted and pruned, app
+    access is declared, budgets are capped and enforced — tools were said in a charter
+    (*"never send email without explicit approval"*) and a charter is not a boundary. This
+    is the declaration steward compiles into the argv that actually removes them.
+
+    Two spellings, and the word is not sugar for an absent key:
+
+    ``tools: unrestricted``
+        This resident reaches whatever its brain has. Byte for byte the argv steward built
+        before this field existed — the behaviour did not change, it merely became legible.
+    ``tools: [Read, Glob, Grep]``
+        This resident reaches these and nothing else. An empty list is a real declaration
+        too: a session that can think and reply and touch nothing.
+
+    Ask :attr:`bound` rather than reading :attr:`root`, because ``None`` (not bounded) and
+    ``()`` (bounded to nothing) are different answers and both of them happen.
+
+    The list branch is a **tuple**, not a list, and that is not a style preference. Every
+    other model here is ``frozen``, and over a ``list`` root ``frozen`` half-works: pydantic
+    stops attribute assignment while ``grant.root.append("Bash")`` quietly widens a bound
+    somebody already validated, and the model is unhashable on one branch and hashable on
+    the other. A boundary that can be edited after it was checked is not one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    @property
+    def unrestricted(self) -> bool:
+        """True when this manifest declines to bound the resident's tools."""
+        return self.root == UNRESTRICTED_TOOLS
+
+    @property
+    def bound(self) -> tuple[ToolName, ...] | None:
+        """The exact names a session may reach, or ``None`` when it is not bounded.
+
+        The ``None`` matters: an empty tuple is a resident declared with no tools at all,
+        which is a legal and occasionally useful thing to be, and a caller that read it as
+        "no bound declared" would hand that resident everything.
+        """
+        root = self.root
+        # The same question :attr:`unrestricted` asks — the string branch of the root union
+        # *is* the word — spelled so the type checker follows the narrowing into the return.
+        return None if isinstance(root, str) else root
+
+    def describe(self) -> str:
+        """One line for a report: the word, or the names in the order they were declared."""
+        bound = self.bound
+        if bound is None:
+            return UNRESTRICTED_TOOLS
+        return ", ".join(bound) or "no tools"
+
+
+#: The permission modes ``claude --permission-mode`` accepts (CLI 2.1.247, ``--help``).
+#: This was ``str | None`` and reached the flag unchecked, which made a typo not a failed
+#: validation but a session that died at its next fire with a commander error — at 7am,
+#: in a log nobody was reading. It is a closed set in the CLI, so it is one here.
+PermissionMode = Literal["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"]
+
+
 class Runner(_Model):
     """Which brain a resident runs on. Every session launch goes through this seam."""
 
@@ -715,7 +833,10 @@ class Runner(_Model):
         default=None,
         description="Argv template for kind=command; placeholders {prompt} and {workdir}.",
     )
-    permission_mode: str | None = None
+    permission_mode: PermissionMode | None = Field(
+        default=None,
+        description="Permission mode passed to the CLI; one of the modes it accepts.",
+    )
 
     @model_validator(mode="after")
     def _check_command_template(self) -> Self:
@@ -982,6 +1103,13 @@ class ResidentManifest(_Model):
     memory: Memory
     routes: list[Route] = Field(description="Declared inbound channels (may be empty).")
     app_grants: list[AppGrant] = Field(description="Declared app access (may be empty).")
+    tools: ToolGrant = Field(
+        description="Tool dimension: the names a session may reach, or 'unrestricted'.",
+    )
+    workspace: list[WorkspacePath] = Field(
+        default_factory=list,
+        description="Absolute directories a session may reach beyond its working directory.",
+    )
 
     runner: Runner = Field(default_factory=Runner)
     routines: list[Routine] = Field(default_factory=list)
@@ -1275,9 +1403,12 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "app_grants.status": "status: granted  (granted | pending | revoked)",
     "app_grants.scopes": "scopes: [gmail.readonly]",
     "app_grants.status_ref": "status_ref: https://myaccount.google.com/permissions",
+    "tools": "tools: [Read, Glob, Grep]  (or: tools: unrestricted)",
+    "workspace": "workspace: [/data/library/books]  (absolute paths)",
     "runner": "runner: {kind: claude, model: claude-opus-5}",
     "runner.kind": "kind: claude  (claude | codex | command | mock)",
     "runner.model": "model: claude-opus-5",
+    "runner.permission_mode": "permission_mode: acceptEdits  (a mode the CLI accepts)",
     "runner.command": "command: ['my-agent', '--prompt', '{prompt}', '--cwd', '{workdir}']",
     "routines": (
         "routines: [{id: daily-summary, schedule: '0 7 * * *', prompt: …, timeout_s: 900}]"
@@ -1710,6 +1841,136 @@ def _check_budget_is_enforceable(manifest: ResidentManifest, source: Path) -> li
     ]
 
 
+#: Runner kinds steward has no way to bound. ``codex exec`` takes no tool flag at all, and
+#: a ``command`` is whatever argv the manifest supplied — so a list under either reads as a
+#: boundary in the file and holds nothing at run time.
+#:
+#: ``mock`` is absent for the same reason it is absent from :data:`UNMETERED_RUNNER_KINDS`:
+#: it bounds nothing either, but it spawns nothing, so a bound over it is inert without
+#: being untruthful. This set is about boundaries that read green while a real session runs
+#: past them.
+UNBOUNDABLE_RUNNER_KINDS = frozenset({"codex", "command"})
+
+
+def _check_tools_are_enforceable(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a declared tool list steward would not actually be able to hold.
+
+    Errors rather than warnings, and at validation time, because every one of these fails
+    *silently*: the manifest reads as a bound, the session runs, and nothing at run time is
+    going to notice that the bound was never applied. It is the same argument
+    :func:`_check_budget_is_enforceable` makes about a daily cap under a runner that reports
+    no usage — a boundary steward cannot hold is worse than none, because somebody read it.
+
+    Three ways to write one:
+
+    - **A list under a runner steward cannot bound.** ``codex`` and ``command`` take no tool
+      flag; only ``claude`` compiles one (:meth:`steward.runners.ClaudeRunner.argv`).
+    - **A list beside ``permission_mode: bypassPermissions``.** The list itself is *not*
+      made inert by the bypass — measured against CLI 2.1.247, ``--tools`` removes a tool
+      whatever the mode, so ``--tools Read --permission-mode acceptEdits`` still has no
+      Bash. The contradiction is a different one, and it is real: this manifest went to the
+      trouble of naming which tools may exist and then waived approval on every call to the
+      ones that survive. One boundary drawn, the other dropped, in one file — and this is
+      the one moment somebody is reading both.
+    - **An ``mcp__…`` name inside a list.** Steward pairs a bound with
+      ``--strict-mcp-config``, which loads no MCP servers at all, so the name resolves to a
+      tool the session does not have. The CLI accepts the argument without complaint, which
+      is exactly what makes it worth refusing here.
+    """
+    bound = manifest.tools.bound
+    if bound is None:
+        return []
+    diagnostics: list[Diagnostic] = []
+    if manifest.runner.kind in UNBOUNDABLE_RUNNER_KINDS:
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path="tools",
+                problem=(
+                    f"runner kind {manifest.runner.kind!r} takes no tool flag, so this list "
+                    f"bounds nothing: the session reaches every tool its brain has while the "
+                    f"manifest reads as if it were held to {len(bound)}"
+                ),
+                example=(
+                    "tools: unrestricted  (the truth, said out loud), or "
+                    "runner: {kind: claude}  (the only kind steward can bound)"
+                ),
+            )
+        )
+    if manifest.runner.permission_mode == BYPASS_PERMISSIONS:
+        diagnostics.append(
+            Diagnostic(
+                file=source,
+                field_path="runner.permission_mode",
+                problem=(
+                    f"{BYPASS_PERMISSIONS!r} auto-approves every call to every tool that "
+                    f"survives the list above, so this manifest names which tools may exist "
+                    f"and then waives the approval on all of them"
+                ),
+                example=(
+                    "permission_mode: acceptEdits  (approves the edits a bounded session "
+                    "makes, and nothing else), or drop the list: tools: unrestricted"
+                ),
+            )
+        )
+    diagnostics.extend(
+        Diagnostic(
+            file=source,
+            field_path=f"tools[{index}]",
+            problem=(
+                f"{name!r} is an MCP tool, and steward pairs a bounded list with "
+                f"--strict-mcp-config, which loads no MCP servers at all; the session will "
+                f"not have it"
+            ),
+            example=(
+                "drop the mcp__ name, or tools: unrestricted if this resident really does "
+                "need the MCP servers configured on the machine it runs on"
+            ),
+        )
+        for index, name in enumerate(bound)
+        if name.startswith(MCP_TOOL_PREFIX)
+    )
+    return diagnostics
+
+
+def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a directory grant steward has no way to make.
+
+    ``workspace`` is the mirror image of ``tools``: ``tools`` narrows *what exists* in a
+    session, ``workspace`` widens *where it may act*. That is why one is required and the
+    other is not — an absent ``tools`` would have meant every tool, while an absent
+    ``workspace`` means no directory beyond the resident's own, which is a silence that
+    grants nothing and so is a silence this schema can live with.
+
+    It still has to be a grant steward can actually make. Only :meth:`ClaudeRunner.argv`
+    compiles ``--add-dir``; under ``codex`` or ``command`` the list would sit in the
+    manifest reading like access somebody granted while the session could not reach a byte
+    of it. Unlike the tools refusals this one fails loudly at run time — the resident simply
+    cannot open the files — but it fails at the resident's next fire, over a manifest that
+    read as if the access was there, and the manifest is where it should have been caught.
+
+    ``mock`` is exempt for the reason it is always exempt: it opens nothing.
+    """
+    if not manifest.workspace or manifest.runner.kind not in UNBOUNDABLE_RUNNER_KINDS:
+        return []
+    return [
+        Diagnostic(
+            file=source,
+            field_path="workspace",
+            problem=(
+                f"runner kind {manifest.runner.kind!r} takes no directory flag, so this "
+                f"grant reaches nothing: the session's access is whatever that brain "
+                f"allows, and the manifest reads as if {len(manifest.workspace)} "
+                f"director{'y' if len(manifest.workspace) == 1 else 'ies'} had been opened to it"
+            ),
+            example=(
+                "runner: {kind: claude}  (the only kind steward can widen), or drop the "
+                "grant and let the session work inside its own memory directory"
+            ),
+        )
+    ]
+
+
 def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     """Check that the delegation block says something, and does not say it about itself.
 
@@ -2002,6 +2263,8 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_board_route(manifest, source))
     diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
+    diagnostics.extend(_check_tools_are_enforceable(manifest, source))
+    diagnostics.extend(_check_workspace_is_reachable(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 

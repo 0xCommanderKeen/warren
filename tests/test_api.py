@@ -1779,6 +1779,26 @@ def test_a_resident_carries_the_set_a_session_would_actually_get(
     assert listed["effective_skills"] == body["effective_skills"]
 
 
+def test_a_resident_reports_which_tools_it_may_reach(api: ApiFactory) -> None:
+    """Alongside the other capability dimensions, so burrow can render it as one.
+
+    "Which residents are unbounded" should be one read of the fleet rather than a walk over
+    five manifest files, which is the same argument that put the word `unrestricted` in the
+    manifest instead of letting an absent key mean it.
+    """
+    unbounded = api().client.get("/residents/test-agent").json()
+    assert unbounded["tools"] == "unrestricted"
+
+    assert unbounded["workspace"] == []
+
+    bounded = valid_manifest()
+    bounded["tools"] = ["Read", "Glob"]
+    bounded["workspace"] = ["/data/library/books"]
+    body = api(manifest=bounded).client.get("/residents/test-agent").json()
+    assert body["tools"] == ["Read", "Glob"]
+    assert body["workspace"] == ["/data/library/books"]
+
+
 def test_the_skills_listing_needs_the_token_like_everything_else(api: ApiFactory) -> None:
     harness = api()
     anonymous = TestClient(harness.client.app)
