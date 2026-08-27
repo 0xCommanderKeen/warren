@@ -27,9 +27,10 @@ from datetime import datetime, timedelta
 
 from steward import events as ev
 from steward.input_bounds import SKILLS_MAX_ITEMS, validate_identifier, validate_work_text
+from steward.run_lifecycle import RunTransitions
 from steward.runners import RunResult
-from steward.store import STATUS_DONE, STATUS_FAILED, JobRecord, Store
-from steward.transitions.outcome import Transition, applied, refused, superseded
+from steward.store import STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED, JobRecord, Store
+from steward.transitions.outcome import APPLIED, Transition, applied, refused, superseded
 
 __all__ = ["LEASE_EXPIRED", "LEASE_LOST", "NOTHING_TO_CLAIM", "TaskTransitions"]
 
@@ -142,6 +143,7 @@ class TaskTransitions:
             claimant=claimant,
             skills=skills,
             lease_expires_at=ev.utc_now_iso(now + timedelta(seconds=lease_s)),
+            lease_duration_s=lease_s,
             now=ev.utc_now_iso(now),
         )
         if job is None:
@@ -172,6 +174,7 @@ class TaskTransitions:
             assignee=assignee,
             claimant=claimant,
             lease_expires_at=ev.utc_now_iso(now + timedelta(seconds=lease_s)),
+            lease_duration_s=lease_s,
             now=ev.utc_now_iso(now),
         )
         if job is None:
@@ -205,6 +208,7 @@ class TaskTransitions:
         result: RunResult,
         run_id: str,
         now: datetime,
+        announce: bool = True,
     ) -> Transition[JobRecord]:
         """Close a claimed task on the board and say how it went. Only its claimant may.
 
@@ -263,6 +267,8 @@ class TaskTransitions:
                 parent_task_id=job.parent_task_id,
                 run_id=run_id,
             )
+        if not announce:
+            return Transition(APPLIED, record=closed, fact=fact, reason=reason or "")
         return applied(self.emitter, closed, fact, reason or "")
 
     # -- the deadline --------------------------------------------------------------------
@@ -284,14 +290,60 @@ class TaskTransitions:
         conditional update refused it, so nothing was written here and nothing is said
         about it.
 
-        The event carries no ``run_id`` on purpose. This is the board mourning a claim,
-        not a session reporting back: steward does not know which session dropped it, and
-        naming one would answer that session's registry row — the very silence the
-        registry exists to catch — while the retry claimed moments later in this same pass
-        is exactly the row a guess would land on (steward #39).
+        New claims carry a durable run/owner binding, so their failure names the exact
+        dead ``run_id`` and is chosen in the same transaction that reopens the task.  A
+        pre-migration unbound claim keeps the legacy event without a run id; if it has a
+        possibly matching open run it is left untouched rather than guessed at.
         """
+        runs = RunTransitions(self.store)
+        # A previous process may have committed the expiry and died before publishing.
+        # Replaying the immutable terminal is part of the sweep, not watchdog invention.
+        runs.publish_pending(self.emitter, now=now)
         swept: list[Transition[JobRecord]] = []
-        for job in self.store.expire_leases(ev.utc_now_iso(now)):
+        moment = ev.utc_now_iso(now)
+        candidates = [
+            job
+            for job in self.store.jobs(STATUS_CLAIMED)
+            if job.lease_expires_at is not None and job.lease_expires_at <= moment
+        ]
+        legacy = {job.task_id: job for job in self.store.expire_leases(moment)}
+        for candidate in candidates:
+            job = legacy.get(candidate.task_id)
+            fact: ev.Event | None = None
+            if job is None and candidate.run_id and candidate.owner_token and candidate.claimed_at:
+                event_id = f"run-terminal:{candidate.run_id}"
+                fact = ev.task_failed_event(
+                    task_id=candidate.task_id,
+                    title=candidate.title,
+                    claimant=candidate.claimant or ev.API_AGENT_ID,
+                    project=self.project_of(candidate.claimant or ev.API_AGENT_ID),
+                    reason=LEASE_EXPIRED,
+                    parent_task_id=candidate.parent_task_id,
+                    run_id=candidate.run_id,
+                )
+                fact = ev.Event(
+                    type=fact.type,
+                    agent_id=fact.agent_id,
+                    project=fact.project,
+                    cwd=fact.cwd,
+                    ts=fact.ts,
+                    source=fact.source,
+                    v=fact.v,
+                    payload={**fact.payload, "event_id": event_id},
+                )
+                job = self.store.expire_task_attempt_and_claim_terminal(
+                    candidate.task_id,
+                    lease=candidate.claimed_at,
+                    run_id=candidate.run_id,
+                    owner_token=candidate.owner_token,
+                    event=fact.to_json(),
+                    event_id=event_id,
+                    now=moment,
+                )
+                if job is not None:
+                    runs.publish_pending(self.emitter, now=now)
+            if job is None:
+                continue
             claimant = job.claimant or ev.API_AGENT_ID
             log.warning(
                 "task %s (%s): lease held by %s expired at %s — back on the board",
@@ -300,18 +352,22 @@ class TaskTransitions:
                 claimant,
                 job.lease_expires_at,
             )
-            swept.append(
-                applied(
-                    self.emitter,
-                    job,
-                    ev.task_failed_event(
-                        task_id=job.task_id,
-                        title=job.title,
-                        claimant=claimant,
-                        project=self.project_of(claimant),
-                        reason=LEASE_EXPIRED,
-                        parent_task_id=job.parent_task_id,
-                    ),
+            if fact is not None:
+                # Publication was handled durably by RunTransitions above.
+                swept.append(Transition(APPLIED, record=job, fact=fact))
+            else:
+                swept.append(
+                    applied(
+                        self.emitter,
+                        job,
+                        ev.task_failed_event(
+                            task_id=job.task_id,
+                            title=job.title,
+                            claimant=claimant,
+                            project=self.project_of(claimant),
+                            reason=LEASE_EXPIRED,
+                            parent_task_id=job.parent_task_id,
+                        ),
+                    )
                 )
-            )
         return swept

@@ -50,7 +50,13 @@ from steward.transitions.outcome import (
     replayed,
 )
 
-__all__ = ["ALREADY_DECIDED", "PAST_DEADLINE", "UNKNOWN_REQUEST", "ApprovalTransitions"]
+__all__ = [
+    "ALREADY_DECIDED",
+    "DECISION_NOT_OFFERED",
+    "PAST_DEADLINE",
+    "UNKNOWN_REQUEST",
+    "ApprovalTransitions",
+]
 
 log = logging.getLogger("steward.transitions.approval")
 
@@ -63,6 +69,9 @@ PAST_DEADLINE = "this request expired and denies by default"
 
 #: Why a decision changed nothing: somebody already answered, and the first answer wins.
 ALREADY_DECIDED = "this request was already decided"
+
+#: Why a pending request refused an otherwise globally valid decision.
+DECISION_NOT_OFFERED = "this decision was not offered for this approval request"
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,24 +297,37 @@ class ApprovalTransitions:
         - **applied** — this call recorded the answer, and ``needs_human_resolved`` was
           emitted under the *resident's* identity, because the villager walking away from
           your door is the one who knocked;
-        - **refused** — there is no such request, and ``record`` is ``None``;
+        - **refused** — there is no such request (``record`` is ``None``), or the pending
+          request did not offer this decision (``record`` carries its offered set);
         - **expired** — the request exists and is *still pending*, which after a refused
           conditional write can only mean its deadline had passed. Deny-by-default has the
           last word and the sweep is what records it, so nothing is written or said here;
         - **replayed** — somebody already answered. A double-tapped notification changes
           nothing, reads back what was recorded, and emits nothing new.
 
-        The expired and replayed branches are told apart by the row's own status rather
-        than by re-reading the clock, which is what makes them stable under a sweep landing
-        between the write and the read.
+        Replay and expiry take precedence over offered-set validation: retrying a different
+        button still reads back the first answer, and a late click still denies by default.
+        The store's conditional write remains the final race guard after these preconditions.
         """
+        existing = self.store.approval(request_id)
+        if existing is None:
+            return refused(UNKNOWN_REQUEST)
+        if not existing.pending:
+            return replayed(existing, ALREADY_DECIDED)
+
+        moment = ev.utc_now_iso(now) if now is not None else ev.utc_now_iso()
+        if existing.expires_at is not None and existing.expires_at <= moment:
+            return expired(existing, PAST_DEADLINE)
+        if decision not in existing.options:
+            return refused(DECISION_NOT_OFFERED, existing)
+
         validate_approval_edit(edit)
         record, recorded = self.store.decide(
             request_id,
             decision,
             decided_by=decided_by,
             edit=edit,
-            now=ev.utc_now_iso(now) if now is not None else None,
+            now=moment,
         )
         if record is None:
             return refused(UNKNOWN_REQUEST)

@@ -2,6 +2,7 @@
 
 import json
 import re
+import time
 from pathlib import Path
 
 import pytest
@@ -494,3 +495,17 @@ def test_a_command_can_be_fed_a_payload_on_stdin(stub_bin: StubWriter, tmp_path:
 def test_a_command_with_no_stdin_sees_an_empty_one(stub_bin: StubWriter) -> None:
     stub_bin("echoback", "cat")
     assert r.run_argv(["echoback"]).stdout == ""
+
+
+def test_a_timed_out_command_does_not_leave_children_running(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    marker = tmp_path / "command-child-survived"
+    stub_bin("slow-control-plane", f"(sleep 1; touch {marker}) & sleep 30")
+
+    outcome = r.run_argv(["slow-control-plane"], timeout_s=0.2)
+
+    assert not outcome.ok
+    assert "did not answer" in outcome.summary()
+    time.sleep(1.1)
+    assert not marker.exists(), "a timed-out command must not leave its remote child running"

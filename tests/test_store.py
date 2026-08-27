@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from steward import health
 from steward.events import utc_now_iso
 from steward.store import (
     ORIGIN_UNATTRIBUTED,
@@ -632,6 +633,168 @@ def test_the_database_lives_beside_the_scheduler_state(
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state" / "scheduler.json"))
     assert default_db_path() == tmp_path / "state" / "steward.db"
+
+
+def test_the_store_waits_longer_than_sqlites_default(store: Store) -> None:
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15_000
+
+
+def test_health_failures_are_independent_durable_counted_and_corruption_tolerant(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "steward.db"
+    with Store(path) as store:
+        store.health.record(
+            kind="ledger_write", resident="hob", run_id="run-1", error="locked", now=EARLY
+        )
+        store.health.record(
+            kind="pause_enforcement",
+            resident="pip",
+            run_id="run-2",
+            error="disk full",
+            now=LATER,
+        )
+    with (tmp_path / "steward.db.health.jsonl").open("ab") as journal:
+        journal.write(b"not json\n")
+    with Store(path) as reopened:
+        failure = reopened.health.latest()
+    assert failure is not None
+    assert failure.count == 2
+    assert failure.kind == "pause_enforcement"
+    assert failure.resident == "pip"
+    assert failure.run_id == "run-2"
+    assert failure.error == "disk full"
+    assert failure.failed_at == LATER
+
+
+def test_first_health_failure_atomically_creates_and_syncs_the_journal_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    assert journal.path is not None
+    calls: list[tuple[str, object]] = []
+    real_fsync = health.os.fsync
+    real_replace = health.os.replace
+
+    def fsync(fd: int) -> None:
+        calls.append(("fsync", "directory" if health.os.fstat(fd).st_mode & 0o040000 else "file"))
+        real_fsync(fd)
+
+    def replace(source: str, destination: Path) -> None:
+        calls.append(("replace", destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(health.os, "fsync", fsync)
+    monkeypatch.setattr(health.os, "replace", replace)
+
+    journal.record(kind="ledger_write", resident="hob", run_id="first", error="locked", now=EARLY)
+
+    assert calls == [
+        ("fsync", "file"),
+        ("replace", journal.path),
+        ("fsync", "directory"),
+    ]
+    assert journal.path.read_text(encoding="utf-8") == (
+        '{"version":1,"count":1,"kind":"ledger_write","resident":"hob",'
+        '"run_id":"first","error":"locked",'
+        f'"failed_at":"{EARLY}"}}\n'
+    )
+
+
+@pytest.mark.parametrize("failed_operation", ["write", "fsync", "replace"])
+def test_failed_health_compaction_keeps_the_previous_evidence(
+    failed_operation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "steward.db"
+    journal = health.HealthJournal(path)
+    journal.record(kind="ledger_write", resident="hob", run_id="old", error="locked", now=EARLY)
+    assert journal.path is not None
+    old_evidence = journal.path.read_bytes()
+    monkeypatch.setattr(health, "COMPACT_AT_BYTES", len(old_evidence))
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"failed {failed_operation}")
+
+    monkeypatch.setattr(health.os, failed_operation, fail)
+
+    with pytest.raises(OSError, match=f"failed {failed_operation}"):
+        journal.record(
+            kind="pause_enforcement", resident="pip", run_id="new", error="disk full", now=LATER
+        )
+
+    assert journal.path.read_bytes() == old_evidence
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.run_id == "old"
+    assert list(tmp_path.glob(".steward.db.health.jsonl.*.tmp")) == []
+
+
+def test_health_append_atomically_repairs_a_torn_suffix(tmp_path: Path) -> None:
+    path = tmp_path / "steward.db"
+    journal = health.HealthJournal(path)
+    journal.record(kind="ledger_write", resident="hob", run_id="one", error="locked", now=EARLY)
+    journal.record(kind="ledger_write", resident="hob", run_id="two", error="locked", now=LATER)
+    assert journal.path is not None
+    with journal.path.open("ab") as stream:
+        stream.write(b'{"version":1,"count":3,"kind":"torn"')
+
+    journal.record(
+        kind="pause_enforcement", resident="pip", run_id="three", error="disk full", now=LATER
+    )
+
+    lines = journal.path.read_bytes().splitlines()
+    assert len(lines) == 3
+    assert all(line.endswith(b"}") for line in lines)
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.count == 3
+    assert latest.run_id == "three"
+
+
+def test_health_reader_adopts_a_journal_created_before_the_lock_sidecar(tmp_path: Path) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    assert journal.path is not None
+    journal.path.write_text(
+        '{"version":1,"count":7,"kind":"ledger_write","resident":"hob",'
+        '"run_id":"legacy","error":"locked","failed_at":"2026-08-24T09:00:00.000Z"}\n',
+        encoding="utf-8",
+    )
+
+    latest = journal.latest()
+
+    assert latest is not None
+    assert latest.count == 7
+    assert latest.run_id == "legacy"
+    assert journal.path.with_name(f"{journal.path.name}.lock").exists()
+
+
+def test_health_writers_keep_counting_across_atomic_replacements(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    monkeypatch.setattr(health, "COMPACT_AT_BYTES", 1)
+    writers = [
+        threading.Thread(
+            target=journal.record,
+            kwargs={
+                "kind": "ledger_write",
+                "resident": "hob",
+                "run_id": f"run-{index}",
+                "error": "locked",
+                "now": EARLY,
+            },
+        )
+        for index in range(20)
+    ]
+
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.count == len(writers)
 
 
 # -------------------------------------------------------------------------- the inbox

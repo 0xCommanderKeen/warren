@@ -20,6 +20,8 @@ typo in the JavaScript fails Python's test run instead of a panel at two in the 
 import copy
 import json
 import re
+import shutil
+import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -58,6 +60,17 @@ UI_DIR = REPO_ROOT / "ui"
 #: The three files the console is. Anything else in ``ui/`` would need a mention here and
 #: in the README, which is the point: a console you cannot list is a console nobody audits.
 UI_ASSETS = ("index.html", "app.css", "app.js")
+
+
+def test_ticket_polling_behavior() -> None:
+    """Exercise the real ticket closure with deterministic DOM and timer fakes."""
+    node = shutil.which("node")
+    assert node is not None, "the UI behavior tests require Node.js"
+    subprocess.run(  # noqa: S603 — fixed executable and repo-owned test script
+        [node, "--test", str(REPO_ROOT / "tests" / "ui_ticket.test.mjs")],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 @dataclass
@@ -656,6 +669,17 @@ def test_the_console_fetches_through_exactly_one_door() -> None:
     assert source.count("fetch(") == 1, "every request must go through the single call() helper"
 
 
+def test_the_approvals_panel_uses_the_servers_definition_of_pending() -> None:
+    """Expired unswept rows stay auditable, but must never get decision controls (#154)."""
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    panel = source.split("async function viewApprovals(")[1].split("\nfunction approvalCard(")[0]
+
+    assert 'query: { status: "pending" }' in panel
+    assert 'query: { status: "resolved" }' in panel
+    assert 'query: { status: "all" }' not in panel
+    assert "pending.map((item, index) => approvalCard(item, index))" in panel
+
+
 def test_the_console_pulls_in_nothing_from_the_network() -> None:
     # It runs on a NAS behind a tailnet. A CDN reference would be a blank page there.
     for asset in UI_ASSETS:
@@ -675,6 +699,12 @@ def test_the_console_never_claims_an_effect_the_api_did_not_confirm() -> None:
     for name in ("confirmRun", "confirmJob", "confirmApproval", "confirmDeclared"):
         body = source.split(f"function {name}(")[1].split("\n}")[0]
         assert "await call(" in body, f"{name} must read an outcome back from steward"
+
+
+def test_the_console_only_renders_decisions_the_request_offered() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    for decision in ("approve", "deny", "edit"):
+        assert f'offered.has("{decision}")' in source
 
 
 def test_the_deploy_switch_is_on_now_that_the_endpoint_is_real() -> None:
@@ -731,6 +761,18 @@ def test_the_console_badges_a_retired_resident_in_both_places() -> None:
     assert 'badge("retired", "fail")' in detail, "so must the detail header"
 
 
+def test_residents_choose_the_soonest_next_fire_by_instant() -> None:
+    """Mixed schedule zones must not turn wall-clock text into chronology."""
+    actually_later = "2026-08-26T09:30:00+00:00"
+    actually_sooner = "2026-08-26T10:00:00+02:00"
+    assert actually_later < actually_sooner  # The old lexicographic ordering was wrong.
+    assert datetime.fromisoformat(actually_sooner) < datetime.fromisoformat(actually_later)
+
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    listing = source.split("async function viewResidents(")[1].split("\nfunction gauge(")[0]
+    assert "Date.parse(a.next_fire) - Date.parse(b.next_fire)" in listing
+
+
 def test_the_console_reads_a_closed_inbox_as_closed() -> None:
     # A delegation route flipped to pending or disabled stops pickup, so a console that
     # badged it "inbox on" would show an open door with the post piling up behind it
@@ -749,6 +791,28 @@ def test_the_console_puts_text_in_as_text() -> None:
     source = (UI_DIR / "app.js").read_text(encoding="utf-8")
     for hazard in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval("):
         assert hazard not in source, f"ui/app.js uses {hazard}"
+
+
+def test_the_element_builder_applies_css_custom_and_ordinary_properties() -> None:
+    """The style helper honours both halves of CSSStyleDeclaration's interface."""
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    element_builder = source.split("function el(")[1].split("\n}\n", 1)[0]
+
+    assert 'name.startsWith("--")' in element_builder
+    assert "node.style.setProperty(name, setting)" in element_builder
+    assert "node.style[name] = setting" in element_builder
+
+
+def test_resident_accents_reach_the_elements_whose_css_consumes_them() -> None:
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    styles = (UI_DIR / "app.css").read_text(encoding="utf-8")
+    listing = source.split("async function viewResidents(")[1].split("\nfunction gauge(")[0]
+    detail = source.split("async function viewResident(")[1].split("\nfunction soulPanel(")[0]
+
+    assert '"--accent": resident.soul.accent' in listing
+    assert '"--accent": soul.accent' in detail
+    assert "a.row:hover { border-left-color: var(--accent, var(--ember)); }" in styles
+    assert "border-left: 3px solid var(--accent, var(--ember));" in styles
 
 
 def test_the_shell_is_valid_enough_to_boot() -> None:

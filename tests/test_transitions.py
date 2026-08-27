@@ -8,6 +8,7 @@ fact reaches the emitter on the winning branch, and that no fact reaches it on a
 
 import ast
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from steward import prompt as p
 from steward import transitions as tr
 from steward.approvals import NeedsHuman
 from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
+from steward.run_lifecycle import RunTransitions
 from steward.runners import Outcome, RunResult
 from steward.store import (
     STATUS_CLAIMED,
@@ -84,6 +86,27 @@ def claimed(tasks: tr.TaskTransitions, title: str = "sweep the hall") -> JobReco
     outcome = tasks.claim(claimant=CLAIMANT, project=PROJECT, skills=(), now=NOW, lease_s=1800)
     assert outcome.record is not None
     return outcome.record
+
+
+def bound_attempt(tasks: tr.TaskTransitions, *, run_id: str = "attempt-1") -> JobRecord:
+    """Claim and durably bind one board attempt for lease-liveness tests."""
+    job = claimed(tasks)
+    assert job.claimed_at
+    assert tasks.store.open_task_run(
+        task_id=job.task_id,
+        lease=job.claimed_at,
+        run_id=run_id,
+        kind="task",
+        agent_id=CLAIMANT,
+        project=PROJECT,
+        ref=job.task_id,
+        timeout_s=60,
+        owner_token=f"owner-{run_id}",
+        now=ev.utc_now_iso(NOW),
+    )
+    current = tasks.store.job(job.task_id)
+    assert current is not None
+    return current
 
 
 def ok(artifacts: tuple[str, ...] = ()) -> RunResult:
@@ -396,6 +419,131 @@ def test_an_expired_lease_goes_back_to_the_board_loudly_and_names_no_session(
     assert "run_id" not in event.payload, "the board mourns a claim, it does not answer a run"
 
 
+def test_live_bound_attempt_renews_job_and_survives_original_lease(
+    tasks: tr.TaskTransitions,
+) -> None:
+    job = bound_attempt(tasks)
+    later = NOW + timedelta(hours=1)
+    assert tasks.store.renew_task_run(
+        "attempt-1", owner_token="owner-attempt-1", now=ev.utc_now_iso(later)
+    )
+
+    assert tasks.expire_leases(now=later) == []
+    current = tasks.store.job(job.task_id)
+    assert current is not None
+    assert current.status == STATUS_CLAIMED
+
+
+def test_dead_bound_attempt_reopens_and_closes_its_exact_run(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    job = bound_attempt(tasks)
+    expired = tasks.expire_leases(now=NOW + timedelta(hours=1))
+
+    assert [item.require().task_id for item in expired] == [job.task_id]
+    current = tasks.store.job(job.task_id)
+    assert current is not None
+    assert current.status == STATUS_OPEN
+    assert tasks.store.open_runs() == []
+    terminal = sink.events[-1]
+    assert terminal.type == ev.TASK_FAILED
+    assert terminal.payload["run_id"] == "attempt-1"
+
+
+def test_concurrent_task_sweeps_choose_one_terminal(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    bound_attempt(tasks)
+    later = NOW + timedelta(hours=1)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: tasks.expire_leases(now=later), range(2)))
+
+    assert sum(len(result) for result in results) == 1
+    failures = [event for event in sink.events if event.type == ev.TASK_FAILED]
+    assert len(failures) == 1
+
+
+def test_late_finish_is_suppressed_and_retry_gets_new_run(tasks: tr.TaskTransitions) -> None:
+    old = bound_attempt(tasks)
+    tasks.expire_leases(now=NOW + timedelta(hours=1))
+    retry = tasks.claim(
+        claimant=CLAIMANT,
+        project=PROJECT,
+        skills=(),
+        now=NOW + timedelta(hours=1),
+        lease_s=1800,
+    ).require()
+    assert retry.claimed_at
+    assert retry.claimed_at != old.claimed_at
+    assert tasks.store.open_task_run(
+        task_id=retry.task_id,
+        lease=retry.claimed_at,
+        run_id="attempt-2",
+        kind="task",
+        agent_id=CLAIMANT,
+        project=PROJECT,
+        ref=retry.task_id,
+        owner_token="owner-attempt-2",
+        now=ev.utc_now_iso(NOW + timedelta(hours=1)),
+    )
+
+    late = ev.task_done_event(
+        task_id=old.task_id,
+        title=old.title,
+        claimant=CLAIMANT,
+        project=PROJECT,
+        run_id="attempt-1",
+    )
+    assert (
+        RunTransitions(tasks.store).task_session_claim(
+            old, late, result=ok(), claimant=CLAIMANT, owner_token="owner-attempt-1", now=NOW
+        )
+        is None
+    )
+    current = tasks.store.job(old.task_id)
+    assert current is not None
+    assert current.run_id == "attempt-2"
+
+
+def test_crash_after_atomic_task_expiry_is_replayed_by_next_sweep(
+    tasks: tr.TaskTransitions, sink: ev.NullEmitter
+) -> None:
+    job = bound_attempt(tasks)
+    assert job.claimed_at
+    assert job.run_id
+    assert job.owner_token
+    event_id = f"run-terminal:{job.run_id}"
+    fact = ev.task_failed_event(
+        task_id=job.task_id,
+        title=job.title,
+        claimant=CLAIMANT,
+        project=PROJECT,
+        reason=tt.LEASE_EXPIRED,
+        run_id=job.run_id,
+    )
+    fact = ev.Event(
+        type=fact.type,
+        agent_id=fact.agent_id,
+        project=fact.project,
+        ts=fact.ts,
+        payload={**fact.payload, "event_id": event_id},
+    )
+    assert tasks.store.expire_task_attempt_and_claim_terminal(
+        job.task_id,
+        lease=job.claimed_at,
+        run_id=job.run_id,
+        owner_token=job.owner_token,
+        event=fact.to_json(),
+        event_id=event_id,
+        now=ev.utc_now_iso(NOW + timedelta(hours=1)),
+    )
+    sink.events.clear()  # the simulated process died before emitting
+
+    assert tasks.expire_leases(now=NOW + timedelta(hours=1)) == []
+    assert [event.payload["run_id"] for event in sink.events] == [job.run_id]
+    assert tasks.store.open_runs() == []
+
+
 def test_a_sweep_with_nothing_to_reopen_says_nothing(
     tasks: tr.TaskTransitions, sink: ev.NullEmitter
 ) -> None:
@@ -625,6 +773,62 @@ def test_deciding_a_request_nobody_raised_is_refused(
     assert outcome.refused
     assert outcome.record is None
     assert sink.events == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (("deny", "edit"), "approve", None),
+        (("approve", "edit"), "deny", None),
+        (("approve", "deny"), "edit", {"subject": "shorter"}),
+    ],
+)
+def test_a_decision_the_request_did_not_offer_is_refused_without_a_write(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+    case: tuple[tuple[str, ...], str, dict[str, str] | None],
+) -> None:
+    offered, decision, edit = case
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", options=offered),
+        now=NOW,
+    )
+    request_id = raised.require().request_id
+    sink.events.clear()
+
+    outcome = approvals.decide(request_id, decision, edit=edit, now=NOW)
+
+    assert outcome.refused
+    assert outcome.record is not None
+    assert outcome.record.options == offered
+    assert store.approval(request_id).pending  # ty: ignore
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny", "edit"])
+def test_each_offered_decision_is_recorded(
+    approvals: tr.ApprovalTransitions,
+    manifest: ResidentManifest,
+    decision: str,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", options=(decision,)),
+        now=NOW,
+    )
+
+    outcome = approvals.decide(
+        raised.require().request_id,
+        decision,
+        edit={"subject": "shorter"} if decision == "edit" else None,
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.require().decision == decision
 
 
 def test_the_sweep_denies_a_passed_deadline_and_says_who_decided(
