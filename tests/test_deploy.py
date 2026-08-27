@@ -306,18 +306,20 @@ class Recorder:
         """Start with nothing recorded, answering ok or not as the test asked."""
         self.calls: list[tuple[str, ...]] = []
         self.stdin: list[bytes | None] = []
+        self.timeouts: list[float] = []
         self.ok = ok
 
     def __call__(
         self,
         argv: Sequence[str],
-        timeout_s: float = 20.0,  # noqa: ARG002 — part of the signature run_argv has
+        timeout_s: float = 20.0,
         *,
         stdin: bytes | None = None,
     ) -> CommandOutcome:
         """Record the call and answer without launching anything."""
         self.calls.append(tuple(argv))
         self.stdin.append(stdin)
+        self.timeouts.append(timeout_s)
         return CommandOutcome(argv=tuple(argv), exit_status=0 if self.ok else 1, stdout="hello\n")
 
 
@@ -327,8 +329,19 @@ def test_ssh_puts_the_user_and_host_in_front_of_every_command() -> None:
 
     transport.run(["docker", "ps"])
 
-    assert recorder.calls == [("ssh", "Miha@dxp2800", "docker", "ps")]
-    assert transport.plan(["docker", "ps"])[:2] == ("ssh", "Miha@dxp2800")
+    assert recorder.calls == [
+        (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "Miha@dxp2800",
+            "docker",
+            "ps",
+        )
+    ]
+    assert transport.plan(["docker", "ps"]) == recorder.calls[0]
     assert transport.describe() == "ssh Miha@dxp2800"
 
 
@@ -339,10 +352,43 @@ def test_ssh_ships_files_as_a_tar_on_stdin_because_scp_is_broken() -> None:
     outcome = transport.send({"a.txt": b"hello"}, "~/docker/x")
 
     assert outcome.ok
-    assert recorder.calls[0] == ("ssh", "Miha@dxp2800", "mkdir", "-p", "~/docker/x")
-    assert recorder.calls[1] == ("ssh", "Miha@dxp2800", "tar", "-xf", "-", "-C", "~/docker/x")
+    prefix = (
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=10",
+        "Miha@dxp2800",
+    )
+    assert recorder.calls == [
+        (*prefix, "mkdir", "-p", "~/docker/x"),
+        (*prefix, "tar", "-xf", "-", "-C", "~/docker/x"),
+    ]
+    assert recorder.stdin[0] is None
+    assert recorder.timeouts == [20.0, 120.0]
     with tarfile.open(fileobj=io.BytesIO(recorder.stdin[1] or b"")) as tar:
         assert tar.getnames() == ["a.txt"]
+
+
+@pytest.mark.parametrize(
+    ("remote", "timeout_s"),
+    [
+        (("docker", "compose", "pull"), 600.0),
+        (("docker", "compose", "up", "-d"), 300.0),
+        (("docker", "compose", "down"), 120.0),
+        (("docker", "compose", "-p", "pull", "up", "-d"), 300.0),
+        (("cat", "~/docker/x/docker-compose.yaml"), 20.0),
+        (("test", "-e", "~/docker/x/docker-compose.yaml"), 20.0),
+    ],
+)
+def test_ssh_uses_a_timeout_matched_to_the_remote_operation(
+    remote: tuple[str, ...], timeout_s: float
+) -> None:
+    recorder = Recorder()
+
+    SshTransport(command=recorder).run(remote)
+
+    assert recorder.timeouts == [timeout_s]
 
 
 def test_ssh_does_not_pipe_a_tar_into_a_directory_it_could_not_make() -> None:
