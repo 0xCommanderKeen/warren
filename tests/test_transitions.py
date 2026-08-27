@@ -766,6 +766,62 @@ def test_deciding_a_request_nobody_raised_is_refused(
     assert sink.events == []
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        (("deny", "edit"), "approve", None),
+        (("approve", "edit"), "deny", None),
+        (("approve", "deny"), "edit", {"subject": "shorter"}),
+    ],
+)
+def test_a_decision_the_request_did_not_offer_is_refused_without_a_write(
+    approvals: tr.ApprovalTransitions,
+    store: Store,
+    sink: ev.NullEmitter,
+    manifest: ResidentManifest,
+    case: tuple[tuple[str, ...], str, dict[str, str] | None],
+) -> None:
+    offered, decision, edit = case
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", options=offered),
+        now=NOW,
+    )
+    request_id = raised.require().request_id
+    sink.events.clear()
+
+    outcome = approvals.decide(request_id, decision, edit=edit, now=NOW)
+
+    assert outcome.refused
+    assert outcome.record is not None
+    assert outcome.record.options == offered
+    assert store.approval(request_id).pending  # ty: ignore
+    assert sink.events == []
+
+
+@pytest.mark.parametrize("decision", ["approve", "deny", "edit"])
+def test_each_offered_decision_is_recorded(
+    approvals: tr.ApprovalTransitions,
+    manifest: ResidentManifest,
+    decision: str,
+) -> None:
+    raised = approvals.raise_request(
+        manifest=manifest,
+        request=NeedsHuman(raw="", action="send_email", options=(decision,)),
+        now=NOW,
+    )
+
+    outcome = approvals.decide(
+        raised.require().request_id,
+        decision,
+        edit={"subject": "shorter"} if decision == "edit" else None,
+        now=NOW,
+    )
+
+    assert outcome.applied
+    assert outcome.require().decision == decision
+
+
 def test_the_sweep_denies_a_passed_deadline_and_says_who_decided(
     approvals: tr.ApprovalTransitions,
     store: Store,

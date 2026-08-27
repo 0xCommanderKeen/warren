@@ -229,6 +229,10 @@ The decision is recorded durably and emitted as `needs_human_resolved` with
 `{request_id, decision, decided_by, action}`, under the *resident's* agent id — the
 villager walking away from your door is the one who knocked.
 
+The decision must be one of that request's `options`. A globally known but unoffered
+decision is a `409` with `approval_decision_not_offered` and the request's `offered`
+set; the row remains pending and no resolution event is emitted.
+
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
 changes nothing, and emits nothing. An unknown `request_id` is `404`. A request that has

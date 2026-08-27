@@ -1458,6 +1458,7 @@ async function viewApprovals() {
 }
 
 function approvalCard(item, index) {
+  const offered = new Set(item.options || []);
   const errors = el("div", {});
   const editor = el("textarea", { rows: 8, style: { display: "none" } },
     JSON.stringify(item.detail || {}, null, 2));
@@ -1482,9 +1483,11 @@ function approvalCard(item, index) {
     }
   };
 
-  const editButton = el("button", { class: "ghost", type: "button" }, "Edit…");
+  const editButton = offered.has("edit")
+    ? el("button", { class: "ghost", type: "button" }, "Edit…")
+    : null;
   let editing = false;
-  editButton.addEventListener("click", () => {
+  if (editButton) editButton.addEventListener("click", () => {
     if (!editing) {
       editing = true;
       editor.style.display = "block";
@@ -1535,10 +1538,10 @@ function approvalCard(item, index) {
     el("div", {}, editor, editorError),
     errors,
     el("div", { class: "actions", style: { marginTop: "16px" } },
-      el("button", { class: "primary", type: "button",
-        on: { click: () => send("approve") } }, "Approve"),
-      el("button", { class: "danger", type: "button",
-        on: { click: () => send("deny") } }, "Deny"),
+      offered.has("approve") ? el("button", { class: "primary", type: "button",
+        on: { click: () => send("approve") } }, "Approve") : null,
+      offered.has("deny") ? el("button", { class: "danger", type: "button",
+        on: { click: () => send("deny") } }, "Deny") : null,
       editButton,
       el("span", { class: "note" },
         (item.options || []).length ? `options: ${item.options.join(", ")}` : null))

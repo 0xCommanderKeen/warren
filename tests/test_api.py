@@ -479,6 +479,69 @@ def test_an_edit_decision_carries_the_humans_version(api: ApiFactory) -> None:
     assert record.edit == {"subject": "shorter"}
 
 
+def test_a_decision_the_request_did_not_offer_is_a_truthful_conflict(api: ApiFactory) -> None:
+    harness = api()
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+        options=("approve", "deny"),
+    )
+
+    response = harness.client.post(
+        f"/approvals/{record.request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error": "approval_decision_not_offered",
+        "message": "decision 'edit' was not offered for this approval; use one of: approve, deny",
+        "offered": ["approve", "deny"],
+    }
+    pending = harness.store.approval(record.request_id)
+    assert pending is not None
+    assert pending.pending
+    assert pending.decision is None
+    assert pending.edit is None
+    assert harness.events("needs_human_resolved") == []
+
+
+def test_a_replay_wins_over_whether_the_retried_decision_was_offered(api: ApiFactory) -> None:
+    harness = api()
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+        options=("approve",),
+    )
+    harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+
+    replay = harness.client.post(
+        f"/approvals/{record.request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert replay.status_code == 200
+    assert replay.json()["decision"] == "approve"
+    assert len(harness.events("needs_human_resolved")) == 1
+
+
+def test_expiry_wins_over_whether_the_late_decision_was_offered(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _expired_pending(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "approval_expired"
+
+
 def test_deciding_an_unknown_request_is_404(api: ApiFactory) -> None:
     harness = api()
     response = harness.client.post("/approvals/no-such-request", json={"decision": "approve"})
@@ -1108,6 +1171,25 @@ def test_denying_the_budget_request_leaves_the_resident_paused(api: ApiFactory) 
     assert (
         harness.client.post("/residents/test-agent/routines/daily-summary/run").status_code == 409
     )
+
+
+def test_editing_a_budget_request_is_refused_and_leaves_the_resident_paused(
+    api: ApiFactory,
+) -> None:
+    harness = api(manifest=budgeted(daily_cost_usd=1.0))
+    spend(harness, 3.0)
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    request_id = harness.events("needs_human")[0]["payload"]["request_id"]
+
+    decided = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": {"cap": 10}}
+    )
+
+    assert decided.status_code == 409
+    assert decided.json()["detail"]["offered"] == ["approve", "deny"]
+    assert harness.store.approval(request_id).pending  # ty: ignore
+    assert harness.store.budget_pause("test-agent") is not None
+    assert harness.events("needs_human_resolved") == []
 
 
 def test_an_ordinary_approval_does_not_resume_anything(api: ApiFactory) -> None:
