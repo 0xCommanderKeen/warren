@@ -113,6 +113,7 @@ argv = sys.argv[3:]
 try:
     os.set_inheritable(status_fd, False)
     os.fchdir(workdir_fd)
+    os.close(workdir_fd)
     os.execvpe(argv[0], argv, os.environ)
 except OSError as exc:
     message = str(exc.strerror or exc).encode("utf-8", "replace")[:1000]

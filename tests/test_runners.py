@@ -65,9 +65,22 @@ def test_a_threaded_process_starts_in_the_descriptor_bound_admitted_directory(
     stop = threading.Event()
     background = threading.Thread(target=stop.wait)
     background.start()
+    target = """
+import errno
+import os
+import sys
+
+try:
+    os.fstat(int(sys.argv[1]))
+except OSError as exc:
+    assert exc.errno == errno.EBADF
+else:
+    raise AssertionError("admission descriptor leaked into target")
+print(os.stat(".").st_ino)
+"""
     spec = RunnerSpec(
         kind="command",
-        command=[sys.executable, "-c", "import os; print(os.stat('.').st_ino)", "{prompt}"],
+        command=[sys.executable, "-c", target, str(descriptor), "{prompt}"],
     )
     try:
         result = r.build_runner(spec).run(
