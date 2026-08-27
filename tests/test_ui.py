@@ -20,6 +20,8 @@ typo in the JavaScript fails Python's test run instead of a panel at two in the 
 import copy
 import json
 import re
+import shutil
+import subprocess
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -58,6 +60,17 @@ UI_DIR = REPO_ROOT / "ui"
 #: The three files the console is. Anything else in ``ui/`` would need a mention here and
 #: in the README, which is the point: a console you cannot list is a console nobody audits.
 UI_ASSETS = ("index.html", "app.css", "app.js")
+
+
+def test_ticket_polling_behavior() -> None:
+    """Exercise the real ticket closure with deterministic DOM and timer fakes."""
+    node = shutil.which("node")
+    assert node is not None, "the UI behavior tests require Node.js"
+    subprocess.run(  # noqa: S603 — fixed executable and repo-owned test script
+        [node, "--test", str(REPO_ROOT / "tests" / "ui_ticket.test.mjs")],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
 
 @dataclass
