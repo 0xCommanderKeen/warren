@@ -987,6 +987,48 @@ def test_the_board_refuses_a_resident_that_would_run_in_cwd(
     assert types(sink) == []
 
 
+def test_the_board_refuses_an_initial_symlink_without_touching_cwd(
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    store: Store,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A declared symlink is not authority to provision or launch from cwd (#133)."""
+    target = tmp_path / "memory-target"
+    target.mkdir()
+    memory = tmp_path / "memory"
+    memory.symlink_to(target, target_is_directory=True)
+    cwd = tmp_path / "cwd"
+    sentinel = cwd / ".claude" / "skills" / "keep.txt"
+    sentinel.parent.mkdir(parents=True)
+    sentinel.write_text("operator-owned", encoding="utf-8")
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
+    write_skill("research", defaults=True)
+    data = board_manifest(memory={"kind": "directory", "path": str(memory), "journal": "journal"})
+    data["skills"] = []
+    data["routines"] = []
+    resident = load_manifest(write_resident(data))
+    store.post_job(title="Do not follow or fall back", required_skills=["research"])
+    runner = ScriptedRunner()
+    dispatcher = b.Dispatcher(
+        residents=[resident],
+        store=store,
+        emitter=(sink := ev.NullEmitter()),
+        workdir=cwd,
+        library=library_for(tmp_path / "residents"),
+        runner_factory=lambda _spec: runner,
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert run.reports == ()
+    assert [job.status for job in store.jobs()] == ["open"]
+    assert types(sink) == []
+    assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+    assert runner.requests == []
+
+
 def test_a_memory_dir_that_vanishes_after_claim_fails_without_touching_cwd(
     write_resident: ResidentWriter,
     write_skill: SkillWriter,

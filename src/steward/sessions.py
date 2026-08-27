@@ -440,6 +440,9 @@ class ResidentSessions:
                     identity = self._observe_directory(candidate)
                 except FileNotFoundError:
                     identity = None
+                else:
+                    if identity is None:
+                        return Refusal(self._vanished_workdir_reason(resident))
                 workdir = resident.workdir(self.workdir) if identity is None else identity.canonical
             workdir = workdir.resolve(strict=identity is not None)
         except _DirectoryChangedError:
