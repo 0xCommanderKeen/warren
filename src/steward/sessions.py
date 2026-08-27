@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -72,6 +72,7 @@ class RunGuard(Protocol):
         result: RunResult,
         kind: str,
         run_id: str,
+        trigger: str = "",
         ref: str,
         origin: str,
         now: datetime | None = None,
@@ -197,6 +198,7 @@ class RoutineWake:
 
     routine: Routine
     run_id: str
+    trigger: str = "schedule"
 
     @property
     def timeout_s(self) -> int:
@@ -368,6 +370,8 @@ class ResidentSessions:
         guard: RunGuard | None = None,
         hooks: SessionHooks | LegacySessionHooks | None = None,
         residents: Sequence[Resident] = (),
+        clock: Callable[[], datetime] | None = None,
+        on_completed: Callable[[datetime], None] | None = None,
     ) -> None:
         """Assemble the lifecycle over its stable collaborators."""
         self.workdir = Path(workdir) if workdir is not None else Path.cwd()
@@ -376,6 +380,8 @@ class ResidentSessions:
         self.guard = guard
         self.hooks = hooks
         self.residents = tuple(residents)
+        self.clock = clock or (lambda: datetime.now(UTC))
+        self.on_completed = on_completed
 
     def admit(
         self, resident: Resident, *, now: datetime, rehearsal: bool = False
@@ -545,7 +551,13 @@ class ResidentSessions:
                 duration_s=wake.pre_run_failure_duration(time.monotonic() - started),
                 error=f"{type(exc).__name__}: {exc}",
             )
-        completed_at = admission.admitted_at + timedelta(seconds=result.duration_s)
+        # Runner duration is a measurement of the adapter's work, not a timestamp.
+        # Queueing, provisioning, exception handling, and adapter overhead all belong to
+        # the wall-clock interval, so read completion once after the runner answers and
+        # carry that one fact through every downstream close.
+        completed_at = self.clock()
+        if self.on_completed is not None:
+            self.on_completed(completed_at)
         self._account(resident, wake, result, completed_at)
         harvested = self._harvest(
             resident,
@@ -736,6 +748,7 @@ class ResidentSessions:
                 result=result,
                 kind=wake.kind,
                 run_id=wake.run_id,
+                trigger=wake.trigger if isinstance(wake, RoutineWake) else "",
                 ref=wake.ref,
                 origin=wake.origin_for(resident),
                 now=completed_at,

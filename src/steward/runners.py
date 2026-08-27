@@ -668,22 +668,35 @@ def run_argv(
     """
     parts = [str(part) for part in argv]
     try:
-        completed = subprocess.run(  # noqa: S603 — argv list, shell=False, no template
-            parts, input=stdin, capture_output=True, timeout=timeout_s, check=False
+        process = subprocess.Popen(  # noqa: S603 — argv list, shell=False, no template
+            parts,
+            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            # A separate group lets timeout cleanup reach ssh and the local processes it
+            # may have spawned. Windows has no POSIX session/process-group contract.
+            start_new_session=os.name == "posix",
         )
     except OSError as exc:
         return CommandOutcome(
             argv=tuple(parts), error=f"cannot launch {parts[0]!r}: {exc.strerror or exc}"
         )
+    try:
+        stdout, stderr = process.communicate(input=stdin, timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        _terminate(process)
+        stdout, stderr = _drain(process)
         return CommandOutcome(
-            argv=tuple(parts), error=f"{parts[0]!r} did not answer within {timeout_s:.0f}s"
+            argv=tuple(parts),
+            stdout=stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+            stderr=stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+            error=f"{parts[0]!r} did not answer within {timeout_s:.0f}s",
         )
     return CommandOutcome(
         argv=tuple(parts),
-        exit_status=completed.returncode,
-        stdout=completed.stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
-        stderr=completed.stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        exit_status=process.returncode,
+        stdout=stdout.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+        stderr=stderr.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
     )
 
 

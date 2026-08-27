@@ -26,7 +26,8 @@ They share **contracts, not code**:
 
 1. **The event protocol** — burrow's `docs/protocol.md`. Steward adds event types
    (`routine_started`, `routine_finished`, `routine_failed`, `task_posted`,
-   `task_claimed`, `task_done`, `task_failed`, `task_delegated`, `resident_restarted`,
+   `task_claimed`, `task_done`, `task_failed`, `task_session_finished`, `task_delegated`,
+   `resident_restarted`,
    structured `needs_human` payloads, `needs_human_resolved`) and burrow only ever renders
    them.
 2. **The resident manifest** — the versioned declaration of a resident's soul,
@@ -67,12 +68,15 @@ failing and lease expiry in `transitions/task.py`; raising, deciding and expirin
 `transitions/approval.py`; accepted handoffs in `transitions/delegation.py`; pause and
 resume in `transitions/budget.py`. Callers ask for the domain act and get its durable
 result — they no longer interpret a `rowcount`, choose an identity, or decide whether to
-emit. The invariant is one sentence: a fact reaches the emitter only on the branch where
-the write actually won, and exactly once. Refusals, replays, expiries and lost races write
-nothing and say nothing; the one deliberate exception, a repeat auto-deny, is named as its
-own outcome so it cannot happen anywhere by accident. Persistence and delivery stay two
-systems — there is no bus, no outbox, and no callback out of the store. The full matrix is
-`docs/transitions.md`.
+emit. The invariant is one sentence: a fact reaches the emitter only after the write
+actually won. Refusals, expiries and lost races write nothing and say nothing; the one
+deliberate exception, a repeat auto-deny, is named as its own outcome so it cannot happen
+anywhere by accident. Persistence and delivery stay two systems. Approval resolution is
+the one transition with a durable SQLite outbox: decisions are exactly once, while their
+announcements retry at least once and use `request_id` as the consumer idempotency key.
+The API lifecycle owns the retry worker; transient failures recover without a client
+replay or process restart, and completion effects wait for durable acknowledgement.
+The full matrix is `docs/transitions.md`.
 
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
 markdown entry into the location its own manifest declares, and the next session opens
@@ -198,6 +202,17 @@ a row per session, written where the opening event is emitted and closed where t
 one is. That row exists whatever happened to the events, so a session that died after its
 `routine_started` reached burrow is found — which it was not while the only thing the
 watchdog could read was the log of events burrow never received.
+
+Age alone is not death. Each registry row also carries a renewable ownership lease and
+the absolute path of the complete local event record. The scheduler and board renew the
+lease through the whole lifecycle, including accounting, harvesting, delegation, task
+closure, and terminal publication after the child exits. The live owner and watchdog race
+to store one immutable terminal event under a fencing token/stale-heartbeat condition.
+That chosen event has a stable identity, is replayed after either crash window, and closes
+only after a remote or fsynced local sink accepts it. Each row's own recorded event-log
+path is checked independently; missing, unreadable, or corrupt evidence blocks that path's
+rows without hiding healthy rows elsewhere. Legacy migrated rows with no known path are
+refused loudly. Only a malformed final line lacking a newline is treated as a torn append.
 
 ```console
 $ steward budget show                # today's spend against every declared cap
@@ -473,7 +488,8 @@ only fail should look like one before it is pressed.
 
 ## Development
 
-Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
+Python 3.14, Node.js 22, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest. Node runs the
+browser-free UI behavior tests as part of pytest; `.node-version` is the supported major.
 
 ```console
 make dev       # uv sync --all-groups
@@ -504,7 +520,7 @@ the scheduler and the API name the ones they need on startup.
 |---|---|---|
 | `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
-| `STEWARD_EVENTS_FALLBACK` | everything that emits | Where events are appended when burrow is unreachable, so nothing a session did is lost. Defaults to `~/.burrow/events.jsonl`. |
+| `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.burrow/events.jsonl`. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
 | `STEWARD_UI` | API | Directory of the management console's static files. Unset looks for `ui/` beside the package and then in the checkout. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
@@ -513,3 +529,32 @@ the scheduler and the API name the ones they need on startup.
 
 Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
 `--allow-open`, `--residents` — and the flag wins over the variable.
+
+Remote-bound events enter a durable queue before POST. Each retry keeps one
+`X-Burrow-Delivery-ID`, so a crash after Burrow accepts an event but before Steward
+retires it is deduplicated by current Burrow servers. Normal emits replay up to 16 older
+events, oldest first; operators can drain and inspect the queue explicitly:
+
+```console
+$ steward events flush
+delivered 7; retired-records 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/events.jsonl.pending
+```
+
+The pre-queue `events.jsonl` format recorded every event but no delivery outcome. It is
+therefore impossible to infer which historical ID-less lines need replay. `steward events
+flush --include-legacy` explicitly queues each distinct valid ID-less line with a stable
+ID. Repeating it while that ID is pending is a no-op. Once delivery retires the queue
+record, however, there is no durable legacy seen-set, so a later import can offer the same
+stable ID again; use the option only when possible duplicates of events originally
+delivered without IDs are acceptable. Legacy IDs hash canonical event content together
+with the normalized target URL, so JSON formatting changes keep the same ID while the
+same event sent to another village gets a different ID. Compatible old-ID records for
+one target and canonical event are sent as one POST and retired together: `delivered`
+and `--limit` count POST groups, while `retired-records` counts physical queue rows.
+History lines carrying a valid
+`steward_delivery_id` are modern and are skipped: their queue record already owns retry,
+or its acknowledged delivery was retired. Invalid or torn queue records are preserved in
+`.pending.corrupt`, reported, and make the command exit non-zero. A failed POST likewise
+leaves the suffix pending and exits non-zero.
+Records bound to a different historical `BURROW_URL` are not leaked to the current
+target; they remain pending, are counted as `foreign-target`, and also exit non-zero.

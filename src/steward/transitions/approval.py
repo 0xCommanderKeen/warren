@@ -23,7 +23,8 @@ it wrote.
 """
 
 import logging
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -38,20 +39,118 @@ from steward.approvals import (
     human_message,
     repeat_deny_window_s,
 )
+from steward.input_bounds import validate_approval_edit
 from steward.manifest import ResidentManifest
 from steward.store import DECIDED_BY_REPEAT, ApprovalRecord, Store
 from steward.transitions.outcome import (
     Transition,
     answered,
     applied,
+    deliver,
     expired,
     refused,
     replayed,
 )
 
-__all__ = ["ALREADY_DECIDED", "PAST_DEADLINE", "UNKNOWN_REQUEST", "ApprovalTransitions"]
+__all__ = [
+    "ALREADY_DECIDED",
+    "DECISION_NOT_OFFERED",
+    "PAST_DEADLINE",
+    "UNKNOWN_REQUEST",
+    "ApprovalOutboxWorker",
+    "ApprovalTransitions",
+]
 
 log = logging.getLogger("steward.transitions.approval")
+
+
+class ApprovalOutboxWorker:
+    """One wakeable, non-overlapping owner of announcement retries and completion."""
+
+    def __init__(
+        self,
+        transitions: "ApprovalTransitions",  # noqa: UP037 — class is declared below
+        complete: Callable[[ApprovalRecord, str], bool],
+        *,
+        poll_interval: float = 1.0,
+        close_timeout: float = 5.0,
+    ) -> None:
+        """Bind one transition seam and its idempotent post-ack completion."""
+        if poll_interval <= 0:
+            raise ValueError("approval outbox poll interval must be positive")
+        if close_timeout <= 0:
+            raise ValueError("approval outbox close timeout must be positive")
+        self.transitions = transitions
+        self.complete = complete
+        self.poll_interval = poll_interval
+        self.close_timeout = close_timeout
+        self._lifecycle_lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Start the single worker thread and request an immediate startup pass."""
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("approval outbox worker is already running")
+            self._wake = threading.Event()
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._run, name="approval-outbox", daemon=True)
+            self._thread.start()
+            self._wake.set()
+
+    def notify(self) -> None:
+        """Wake the worker because a producer committed new work."""
+        self._wake.set()
+
+    def close(self, timeout: float | None = None) -> None:
+        """Request shutdown, raising when an active pass cannot stop in time."""
+        with self._lifecycle_lock:
+            if self._thread is None:
+                return
+            self._stop.set()
+            self._wake.set()
+            self._thread.join(self.close_timeout if timeout is None else timeout)
+            if self._thread.is_alive():
+                raise TimeoutError(
+                    "approval outbox worker did not stop before its shutdown deadline"
+                )
+
+    @property
+    def alive(self) -> bool:
+        """Whether the lifecycle-owned thread is still running."""
+        return self._thread is not None and self._thread.is_alive()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            failed = False
+            try:
+                self.transitions.reconcile_announcements()
+                while not self._stop.is_set() and (
+                    claimed := self.transitions.store.claim_approval_effects()
+                ):
+                    record, token = claimed
+                    try:
+                        if not self.complete(record, token):
+                            self.transitions.store.release_approval_effects(
+                                record.request_id, token
+                            )
+                            break
+                    except Exception:
+                        self.transitions.store.release_approval_effects(record.request_id, token)
+                        raise
+            except Exception:
+                log.exception("approval outbox pass failed; it will retry")
+                failed = True
+            due = self.transitions.store.next_approval_work_at()
+            timeout = 0.1 if failed else self.poll_interval
+            if due is not None:
+                deadline = datetime.fromisoformat(due)
+                timeout = min(timeout, max(0.0, (deadline - datetime.now(UTC)).total_seconds()))
+            self._wake.wait(timeout)
+            self._wake.clear()
+
 
 #: Why a decision was refused outright: there is no such request to decide.
 UNKNOWN_REQUEST = "no such approval request"
@@ -62,6 +161,9 @@ PAST_DEADLINE = "this request expired and denies by default"
 
 #: Why a decision changed nothing: somebody already answered, and the first answer wins.
 ALREADY_DECIDED = "this request was already decided"
+
+#: Why a pending request refused an otherwise globally valid decision.
+DECISION_NOT_OFFERED = "this decision was not offered for this approval request"
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +373,7 @@ class ApprovalTransitions:
 
     # -- deciding ------------------------------------------------------------------------
 
-    def decide(
+    def decide(  # noqa: PLR0913 — mirrors the atomic store decision inputs
         self,
         request_id: str,
         decision: str,
@@ -279,6 +381,7 @@ class ApprovalTransitions:
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
         now: datetime | None = None,
+        request_log: tuple[str, str, str] | None = None,
     ) -> Transition[ApprovalRecord]:
         """Record one decision and close the loop in the log. The first decision wins.
 
@@ -287,42 +390,80 @@ class ApprovalTransitions:
         - **applied** — this call recorded the answer, and ``needs_human_resolved`` was
           emitted under the *resident's* identity, because the villager walking away from
           your door is the one who knocked;
-        - **refused** — there is no such request, and ``record`` is ``None``;
+        - **refused** — there is no such request (``record`` is ``None``), or the pending
+          request did not offer this decision (``record`` carries its offered set);
         - **expired** — the request exists and is *still pending*, which after a refused
           conditional write can only mean its deadline had passed. Deny-by-default has the
           last word and the sweep is what records it, so nothing is written or said here;
         - **replayed** — somebody already answered. A double-tapped notification changes
           nothing, reads back what was recorded, and emits nothing new.
 
-        The expired and replayed branches are told apart by the row's own status rather
-        than by re-reading the clock, which is what makes them stable under a sweep landing
-        between the write and the read.
+        Replay and expiry take precedence over offered-set validation: retrying a different
+        button still reads back the first answer, and a late click still denies by default.
+        The store's conditional write remains the final race guard after these preconditions.
         """
+        existing = self.store.approval(request_id)
+        if existing is None:
+            return refused(UNKNOWN_REQUEST)
+
+        moment = ev.utc_now_iso(now) if now is not None else ev.utc_now_iso()
+        if existing.pending:
+            if existing.expires_at is not None and existing.expires_at <= moment:
+                return expired(existing, PAST_DEADLINE)
+            if decision not in existing.options:
+                return refused(DECISION_NOT_OFFERED, existing)
+
+        validate_approval_edit(edit)
         record, recorded = self.store.decide(
             request_id,
             decision,
             decided_by=decided_by,
             edit=edit,
-            now=ev.utc_now_iso(now) if now is not None else None,
+            now=moment,
+            request_log=request_log,
         )
         if record is None:
             return refused(UNKNOWN_REQUEST)
         if recorded:
-            return applied(
-                self.emitter,
-                record,
-                ev.needs_human_resolved_event(
-                    request_id=record.request_id,
-                    decision=decision,
-                    action=record.action,
-                    agent_id=record.agent_id,
-                    project=record.project,
-                    decided_by=decided_by,
-                ),
-            )
+            fact = self._announce(request_id)
+            return Transition("applied", record=record, fact=fact)
         if record.pending:
             return expired(record, PAST_DEADLINE)
+        # A replay is also a recovery opportunity: the decision is still exactly once,
+        # but an announcement left pending by a dead process is retried.
+        recovered = self._announce(request_id)
+        if recovered is not None:
+            return Transition("replayed", record=record, fact=recovered, reason=ALREADY_DECIDED)
         return replayed(record, ALREADY_DECIDED)
+
+    def reconcile_announcements(self, *, limit: int | None = None) -> int:
+        """Retry durable decision announcements left behind by an earlier process."""
+        completed = 0
+        while limit is None or completed < limit:
+            if self._announce() is None:
+                break
+            completed += 1
+        return completed
+
+    def _announce(self, request_id: str | None = None) -> ev.Event | None:
+        claimed = self.store.claim_approval_announcement(request_id)
+        if claimed is None:
+            return None
+        record, token = claimed
+        fact = ev.needs_human_resolved_event(
+            request_id=record.request_id,
+            decision=record.decision or "deny",
+            action=record.action,
+            agent_id=record.agent_id,
+            project=record.project,
+            decided_by=record.decided_by or "expiry",
+        )
+        accepted = False
+        try:
+            accepted = deliver(self.emitter, fact)
+        finally:
+            self.store.finish_approval_announcement(record.request_id, token, accepted=accepted)
+        return fact if accepted else None
 
     # -- the deadline --------------------------------------------------------------------
 
@@ -354,17 +495,6 @@ class ApprovalTransitions:
                 record.expires_at,
             )
             swept.append(
-                applied(
-                    self.emitter,
-                    record,
-                    ev.needs_human_resolved_event(
-                        request_id=record.request_id,
-                        decision="deny",
-                        action=record.action,
-                        agent_id=record.agent_id,
-                        project=record.project,
-                        decided_by=record.decided_by or "expiry",
-                    ),
-                )
+                Transition("applied", record=record, fact=self._announce(record.request_id))
             )
         return swept

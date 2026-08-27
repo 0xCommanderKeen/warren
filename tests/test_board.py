@@ -12,6 +12,7 @@ import pytest
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
+from steward import budgets as bg
 from steward import events as ev
 from steward import sessions as ss
 from steward import watchdog as w
@@ -76,6 +77,7 @@ def make_dispatcher(
         runner: Runner | None = None,
         residents: list[Resident] | None = None,
         clock: Callable[[], datetime] | None = None,
+        guard: ss.RunGuard | None = None,
     ) -> b.Dispatcher:
         if residents is None:
             path = write_resident(manifest if manifest is not None else board_manifest())
@@ -87,6 +89,7 @@ def make_dispatcher(
             emitter=sink,
             workdir=tmp_path,
             runner_factory=lambda _spec: runner or ScriptedRunner(),
+            guard=guard,
             **kwargs,
         )
 
@@ -192,6 +195,47 @@ def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(
     assert not report.done
     assert report.reason is not None
     assert "no brain here" in report.reason
+    assert store.open_runs() == []
+
+
+def test_a_broken_timeout_guard_fails_each_claim_without_aborting_the_dispatch(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A guard failure is fail-closed, and one bad claim does not strand the resident's drain."""
+
+    class BrokenGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest, declared_s
+            raise RuntimeError("the timeout ledger is on fire")
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            return None
+
+    first = store.post_job(title="First")
+    second = store.post_job(title="Second")
+    manifest = board_manifest()
+    manifest["board"]["max_claims_per_wake"] = 2  # type: ignore[index]
+    runner = ScriptedRunner()
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(manifest))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        guard=BrokenGuard(),
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert [report.task.task_id for report in run.reports] == [first.task_id, second.task_id]
+    assert all(not report.done for report in run.reports)
+    assert all("budget unreadable" in (report.reason or "") for report in run.reports)
+    assert runner.requests == []
     assert store.open_runs() == []
 
 
@@ -474,11 +518,11 @@ def test_a_lease_from_a_resident_this_tree_never_heard_of_still_reopens(
 
 
 def test_a_claim_lost_mid_session_is_not_reported_as_done(
-    make_dispatcher: Dispatch, store: Store
+    make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter
 ) -> None:
     """The board keeps its own record; a resident cannot finish work it no longer holds."""
     job = store.post_job(title="Stolen away")
-    dispatcher = make_dispatcher()
+    dispatcher = make_dispatcher(guard=bg.BudgetGuard(store, sink))
     resident = dispatcher.residents[0]
     claimed = dispatcher.claim(resident, NOW)
     assert claimed is not None
@@ -489,6 +533,21 @@ def test_a_claim_lost_mid_session_is_not_reported_as_done(
     assert report.reason == "lease lost while the session was running"
     assert store.job(job.task_id) is not None
     assert store.jobs("open")[0].task_id == job.task_id
+    assert store.open_runs() == [], "the session reported back to the registry"
+    (entry,) = store.ledger(resident.id)
+    assert entry.ref == job.task_id
+    assert types(sink) == ["task_claimed", "task_session_finished"]
+    outcome = sink.events[-1]
+    assert outcome.payload == {
+        "task_id": job.task_id,
+        "title": job.title,
+        "claimant": resident.agent_id,
+        "run_id": entry.run_id,
+        "outcome": "ok",
+        "artifacts": [],
+        "duration_s": 0.0,
+        "reason": "lease lost while the session was running",
+    }
 
 
 # ------------------------------------------------------------------------ per wake-up
@@ -794,7 +853,7 @@ def test_the_second_claim_in_a_slow_dispatch_gets_a_full_lease(
     runner = LeaseSnooping(store)
     early = NOW
     late = NOW + timedelta(minutes=5)
-    ticks = iter([early, late])
+    ticks = iter([early, early, late, late])
     dispatcher = b.Dispatcher(
         residents=[resident],
         store=store,
@@ -1247,6 +1306,57 @@ def test_a_claimed_task_opens_and_closes_a_registry_row(
     assert store.open_runs() == [], "the task reported back, so its row is answered"
 
 
+def test_task_board_registry_and_ledger_share_actual_completion(
+    write_resident: ResidentWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = NOW + timedelta(minutes=4)
+    ticks = iter([NOW, completed])
+    closed_at: list[str | None] = []
+    original_close = store.mark_run_terminal_published
+
+    def close_run(run_id: str, event_id: str, *, now: str | None = None) -> bool:
+        closed_at.append(now)
+        return original_close(run_id, event_id, now=now)
+
+    monkeypatch.setattr(store, "mark_run_terminal_published", close_run)
+    store.post_job(title="Read the mail")
+
+    class Recording:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest
+            recorded.append(facts)
+            return None
+
+    recorded: list[dict[str, object]] = []
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(board_manifest()))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(RunResult(outcome=Outcome.OK, duration_s=2)),
+        guard=Recording(),
+        clock=lambda: next(ticks),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.task.finished_at == ev.utc_now_iso(completed)
+    assert recorded[0]["now"] == completed
+    assert closed_at == [ev.utc_now_iso(completed)]
+
+
 def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
     write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
@@ -1382,13 +1492,13 @@ def test_a_re_claimed_task_opens_a_second_row_of_its_own(
     # The lease nobody is holding runs out, so the task goes back on the board — the
     # sweep stamps real time, which is why the clock is pushed past it here — and the
     # next dispatch claims it again. That second session vanishes too.
-    store.expire_leases(ev.utc_now_iso(datetime.now(UTC) + timedelta(days=1)))
+    make_dispatcher(runner=Vanishing()).expire_leases(datetime.now(UTC) + timedelta(days=1))
     with pytest.raises(KeyboardInterrupt):
         make_dispatcher(runner=Vanishing()).dispatch(NOW + timedelta(hours=1))
 
     ids = {run.run_id for run in store.open_runs()}
-    assert first.run_id in ids, "the first session is still unaccounted for"
-    assert len(ids) == 2, "and so is the one that claimed the task after it"
+    assert first.run_id not in ids, "the sweep chose and published the first attempt's death"
+    assert len(ids) == 1, "the retry has a fresh, still-open run of its own"
     assert {run.ref for run in store.open_runs()} == {posted.task_id}
 
 
@@ -1416,11 +1526,12 @@ def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
     retried_at = NOW + timedelta(hours=1)
     with pytest.raises(KeyboardInterrupt):
         make_dispatcher(runner=Vanishing(), clock=lambda: retried_at).dispatch(retried_at)
-    assert len(store.open_runs()) == 2, "two sessions, both of them unaccounted for"
+    assert len(store.open_runs()) == 1, "the dead attempt closed and the retry remains watched"
 
     swept = [e for e in sink.events if e.payload.get("reason") == b.LEASE_EXPIRED]
-    assert [e.payload.get("run_id") for e in swept] == [None], "a sweep names no session"
-    assert swept[0].ts >= ev.utc_now_iso(retried_at), "and lands after the retry's row opens"
+    first_run_id = swept[0].payload.get("run_id")
+    assert first_run_id, "the sweep terminal names the exact dead attempt"
+    assert swept[0].ts >= ev.utc_now_iso(retried_at), "and is durably published by the sweep"
 
     log = tmp_path / "events.jsonl"
     log.write_text("\n".join(e.to_json() for e in sink.events) + "\n", encoding="utf-8")
@@ -1428,4 +1539,4 @@ def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
 
     retry = next(run for run in store.open_runs() if run.started_at == ev.utc_now_iso(retried_at))
     assert retry.run_id in {run.run_id for run in stale}, "the retry is found, not silenced"
-    assert w.answered_runs(log, store) == [], "and nothing quietly closes its row"
+    assert first_run_id != retry.run_id, "the predecessor's terminal cannot answer the retry"
