@@ -1,0 +1,35 @@
+{
+  "compressionlevel": -1,
+  "height": 12,
+  "infinite": false,
+  "layers": [
+    { "data": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1, 1,1,1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,2,2,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1], "height":12, "id":1, "name":"Terrain", "opacity":1, "type":"tilelayer", "visible":true, "width":20, "x":0, "y":0 },
+    { "data": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3, 3,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,0,3,0,0,3, 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3], "height":12, "id":2, "name":"Collision", "opacity":1, "type":"tilelayer", "visible":true, "width":20, "x":0, "y":0 },
+    { "data": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,2,2,2,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], "height":12, "id":4, "name":"Buildings", "opacity":1, "type":"tilelayer", "visible":true, "width":20, "x":0, "y":0 },
+    { "draworder":"topdown", "id":3, "name":"Places", "objects":[
+      {"height":0,"id":1,"name":"Home 0","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":0}],"type":"anchor","visible":true,"width":0,"x":96,"y":96},
+      {"height":0,"id":2,"name":"Home 1","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":1}],"type":"anchor","visible":true,"width":0,"x":304,"y":96},
+      {"height":0,"id":3,"name":"Home 2","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":2}],"type":"anchor","visible":true,"width":0,"x":464,"y":96},
+      {"height":0,"id":4,"name":"Home 3","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":3}],"type":"anchor","visible":true,"width":0,"x":560,"y":96},
+      {"height":0,"id":5,"name":"Home 4","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":4}],"type":"anchor","visible":true,"width":0,"x":96,"y":288},
+      {"height":0,"id":6,"name":"Home 5","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":5}],"type":"anchor","visible":true,"width":0,"x":304,"y":288},
+      {"height":0,"id":7,"name":"Home 6","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":6}],"type":"anchor","visible":true,"width":0,"x":464,"y":288},
+      {"height":0,"id":8,"name":"Home 7","point":true,"properties":[{"name":"kind","type":"string","value":"home"},{"name":"home","type":"int","value":7}],"type":"anchor","visible":true,"width":0,"x":560,"y":288},
+      {"height":0,"id":9,"name":"Lodge","point":true,"properties":[{"name":"kind","type":"string","value":"lodge"}],"type":"anchor","visible":true,"width":0,"x":320,"y":288},
+      {"height":0,"id":12,"name":"Home 0 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":0}],"type":"anchor","visible":true,"width":0,"x":96,"y":112},
+      {"height":0,"id":13,"name":"Home 1 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":1}],"type":"anchor","visible":true,"width":0,"x":304,"y":112},
+      {"height":0,"id":14,"name":"Home 2 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":2}],"type":"anchor","visible":true,"width":0,"x":464,"y":112},
+      {"height":0,"id":15,"name":"Home 3 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":3}],"type":"anchor","visible":true,"width":0,"x":560,"y":112},
+      {"height":0,"id":16,"name":"Home 4 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":4}],"type":"anchor","visible":true,"width":0,"x":96,"y":304},
+      {"height":0,"id":17,"name":"Home 5 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":5}],"type":"anchor","visible":true,"width":0,"x":304,"y":304},
+      {"height":0,"id":18,"name":"Home 6 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":6}],"type":"anchor","visible":true,"width":0,"x":464,"y":304},
+      {"height":0,"id":19,"name":"Home 7 door","point":true,"properties":[{"name":"kind","type":"string","value":"door"},{"name":"home","type":"int","value":7}],"type":"anchor","visible":true,"width":0,"x":560,"y":304},
+      {"height":0,"id":20,"name":"Lodge door","point":true,"properties":[{"name":"kind","type":"string","value":"lodge-door"}],"type":"anchor","visible":true,"width":0,"x":320,"y":304},
+      {"height":0,"id":10,"name":"Street start","point":true,"properties":[{"name":"kind","type":"string","value":"street"}],"type":"anchor","visible":true,"width":0,"x":320,"y":192},
+      {"height":0,"id":11,"name":"Work","point":true,"properties":[{"name":"kind","type":"string","value":"work"}],"type":"anchor","visible":true,"width":0,"x":112,"y":192}
+    ], "opacity":1, "type":"objectgroup", "visible":true, "x":0, "y":0 }
+  ],
+  "nextlayerid":5, "nextobjectid":21, "orientation":"orthogonal", "renderorder":"right-down", "tiledversion":"1.11.2", "tileheight":32,
+  "tilesets":[{"columns":3,"firstgid":1,"image":"village-tiles.svg","imageheight":32,"imagewidth":96,"margin":0,"name":"village-tiles","spacing":0,"tilecount":3,"tileheight":32,"tiles":[{"id":2,"properties":[{"name":"collides","type":"bool","value":true}]}],"tilewidth":32}],
+  "tilewidth":32, "type":"map", "version":"1.10", "width":20
+}

@@ -30,7 +30,7 @@ export function App({ envelope = fixture }) {
       </header>
 
       <section className="village" aria-label="Village">
-        <PhaserGame />
+        <PhaserGame snapshot={snapshot} />
         <div className="villagers" aria-label="Villagers">
           {snapshot.villagers.map((villager) => (
             <article className="villager" key={villager.id}>
