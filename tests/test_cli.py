@@ -1,10 +1,13 @@
 """The CLI is what CI gates on, so its exit codes are part of the contract."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from click.testing import CliRunner
@@ -32,6 +35,19 @@ from steward.store import Store
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+def scheduler_builder(engine: object, cleanup: Mock):
+    """Return a CLI builder double whose ownership boundary can be asserted."""
+
+    @contextmanager
+    def build(*_args: object, **_kwargs: object) -> Iterator[object]:
+        try:
+            yield engine
+        finally:
+            cleanup()
+
+    return build
 
 
 def test_validate_defaults_to_the_residents_tree(
@@ -806,24 +822,80 @@ def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
         tick=lambda: reports,
         run=lambda **_kwargs: reports,
     )
-    monkeypatch.setattr(cli, "_build_scheduler", lambda *_args, **_kwargs: engine)
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
 
     result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
 
     assert result.exit_code == expected, result.output
+    cleanup.assert_called_once_with()
 
 
-def test_scheduler_daemon_interrupt_is_a_clean_operator_stop(
-    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("command", "expected", "message"),
+    [(("tick",), 1, "Aborted!"), (("run",), 0, "stopped")],
+)
+def test_scheduler_commands_release_resources_on_interrupt(  # noqa: PLR0913, PLR0917
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    expected: int,
+    message: str,
 ) -> None:
     def interrupted(**_kwargs: object) -> list[object]:
         raise KeyboardInterrupt
 
-    engine = SimpleNamespace(scheduled=(), run=interrupted)
-    monkeypatch.setattr(cli, "_build_scheduler", lambda *_args, **_kwargs: engine)
-    result = runner.invoke(main, ["scheduler", "run", "--residents", str(tmp_path)])
-    assert result.exit_code == 0, result.output
-    assert "stopped" in result.output
+    engine = SimpleNamespace(
+        scheduled=(), require_ready=lambda: None, tick=interrupted, run=interrupted
+    )
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
+    result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
+    assert result.exit_code == expected, result.output
+    assert message in result.output
+    cleanup.assert_called_once_with()
+
+
+@pytest.mark.parametrize("command", [("tick",), ("run", "--max-ticks", "1")])
+def test_scheduler_commands_release_resources_on_scheduler_error(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+) -> None:
+    def failed(*_args: object, **_kwargs: object) -> list[object]:
+        raise cli.SchedulerError("scheduler broke")
+
+    engine = SimpleNamespace(scheduled=(), require_ready=lambda: None, tick=failed, run=failed)
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
+
+    result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output
+    assert "scheduler broke" in result.output
+    cleanup.assert_called_once_with()
+
+
+def test_scheduler_builder_closes_store_when_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Mock()
+    monkeypatch.setattr(cli, "_load_or_exit", lambda _residents: [])
+    monkeypatch.setattr(cli, "_open_store", lambda _db: store)
+    monkeypatch.setattr(cli.Dispatcher, "from_path", lambda *_args, **_kwargs: Mock())
+    monkeypatch.setattr(cli, "Scheduler", Mock(side_effect=cli.SchedulerError("build broke")))
+
+    with (
+        pytest.raises(cli.SchedulerError, match="build broke"),
+        cli._build_scheduler(
+            tmp_path, tmp_path / "state.json", tmp_path, tmp_path / "store.db", 60, dry_run=False
+        ),
+    ):
+        pass
+
+    store.close.assert_called_once_with()
 
 
 @pytest.mark.usefixtures("empty_path")
