@@ -11,6 +11,19 @@ import serve
 
 
 class ASGITransportContractTests(unittest.TestCase):
+    def test_both_ui_clients_are_served_side_by_side(self):
+        with TestClient(serve.app) as client:
+            village = client.get("/village/")
+            observatory = client.get("/observatory/")
+            transport = client.get("/village/state-transport.js")
+
+        self.assertEqual(village.status_code, 200)
+        self.assertIn("Burrow", village.text)
+        self.assertEqual(observatory.status_code, 200)
+        self.assertIn("Burrow Observatory", observatory.text)
+        self.assertEqual(transport.status_code, 200)
+        self.assertIn("createStateTransport", transport.text)
+
     def test_fastapi_openapi_names_public_wire_contracts(self):
         schema = serve.app.openapi()
         self.assertEqual(schema["info"]["title"], "Burrow Village API")

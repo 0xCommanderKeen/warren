@@ -1196,17 +1196,30 @@ async def retention_policy_file():
     )
 
 
-@app.get("/{asset_path:path}", include_in_schema=False)
-async def static_viewer(asset_path: str):
-    asset_path = asset_path or "index.html"
-    base = os.path.realpath(os.path.join(ROOT, "viewer"))
-    full = os.path.realpath(os.path.join(base, asset_path))
+def _static_file(base_name: str, asset_path: str):
+    base = os.path.realpath(os.path.join(ROOT, base_name))
+    full = os.path.realpath(os.path.join(base, asset_path or "index.html"))
     if not full.startswith(base + os.sep) or not os.path.isfile(full):
         return _error(404, "not found")
     return FileResponse(
         full,
         media_type=CTYPES.get(os.path.splitext(full)[1], "application/octet-stream"),
     )
+
+
+@app.get("/village/{asset_path:path}", include_in_schema=False)
+async def static_village(asset_path: str):
+    return _static_file("viewer", asset_path)
+
+
+@app.get("/observatory/{asset_path:path}", include_in_schema=False)
+async def static_observatory(asset_path: str):
+    return _static_file("observatory", asset_path)
+
+
+@app.get("/{asset_path:path}", include_in_schema=False)
+async def static_viewer(asset_path: str):
+    return _static_file("viewer", asset_path)
 
 
 def create_app(config: Config) -> FastAPI:

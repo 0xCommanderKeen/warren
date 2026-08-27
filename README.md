@@ -138,7 +138,7 @@ map of everything the fleet does.
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
-  residents.py hooks viewer villagers | ssh
+  residents.py hooks viewer observatory villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
   `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every

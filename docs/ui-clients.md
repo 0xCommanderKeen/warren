@@ -32,7 +32,7 @@ Run Burrow on its standard local port:
 uv run uvicorn serve:app --host 127.0.0.1 --port 8737
 ```
 
-Configure the experimental UI dev server to proxy both read endpoints to that backend. For
+Configure the Observatory dev server to proxy both read endpoints to that backend. For
 example, a Vite configuration can keep the client same-origin and avoid adding CORS policy:
 
 ```js
@@ -52,14 +52,23 @@ must stream the response instead of buffering it, must not impose a timeout shor
 15-second SSE keepalive interval, and must pass query parameters unchanged. The client then
 uses the default empty `baseUrl`.
 
-Captured snapshots in `tests/fixtures/state-contract/` let the village and experimental UI
+Captured snapshots in `tests/fixtures/state-contract/` let the village and Observatory
 render identical state without a live backend. Run `sh tests/ui-contract.sh` before using a
 fixture in either client.
+
+The checked-in read-only tracer bullet is available at `/observatory/` when Burrow serves
+the repository directly; the existing village remains at `/` and is also addressable at
+`/village/`. To point the experiment at a prefixed backend, open
+`/observatory/?backend=/burrow`. The Observatory renders residents, tasks, approvals,
+connection state, a filterable chronological feed of every retained per-agent history item,
+and selectable agent dossiers from complete snapshots only. It displays event evidence
+already carried by the snapshot but never reads `/events` or reduces that evidence into new
+domain state. It contains no Steward write client.
 
 ## Production
 
 Expose both clients and one backend under a single origin. This nginx shape serves the
-existing viewer at `/village/`, an independently built experiment at `/experimental/`, and
+existing viewer at `/village/`, the Observatory at `/observatory/`, and
 the shared state transport under `/burrow/`:
 
 ```nginx
@@ -68,9 +77,9 @@ location /village/ {
     try_files $uri $uri/ /village/index.html;
 }
 
-location /experimental/ {
-    alias /srv/burrow/experimental/;
-    try_files $uri $uri/ /experimental/index.html;
+location /observatory/ {
+    alias /srv/burrow/observatory/;
+    try_files $uri $uri/ /observatory/index.html;
 }
 
 location = /burrow/state {
@@ -97,4 +106,4 @@ location = /burrow/transport/status {
 Both clients set `baseUrl: "/burrow"`. The proxy preserves the SSE body, event type, query
 string, and connection lifetime, so the transport retains keepalive, reconnection,
 generation, cursor, and reset semantics. Routes for Steward writes are deliberately absent
-from the experimental client setup; the first UI lab remains read-only.
+from the Observatory client setup; the first UI lab remains read-only.
