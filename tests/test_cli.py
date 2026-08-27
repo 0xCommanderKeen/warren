@@ -1,9 +1,13 @@
 """The CLI is what CI gates on, so its exit codes are part of the contract."""
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from click.testing import CliRunner
@@ -33,6 +37,85 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def test_events_flush_reports_delivery_and_exits_cleanly(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter.from_env(
+        {
+            "BURROW_URL": "https://village.example",
+            "STEWARD_EVENTS_FALLBACK": str(fallback),
+        }
+    )
+    event = cli.ev.Event(type="routine_started", agent_id="a", project="p")
+    assert emitter._queue_record(event, "delivery-cli-0001")
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: True)
+
+    result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
+    assert result.exit_code == 0, result.output
+    assert "delivered 1; retired-records 1; pending 0; corrupt 0" in result.output
+
+
+def test_events_flush_failure_is_visible_and_nonzero(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        cli.ev.Event(type="routine_started", agent_id="a", project="p"),
+        "delivery-cli-0002",
+    )
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: False)
+
+    result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
+    assert result.exit_code == 1
+    assert "delivered 0; retired-records 0; pending 1" in result.output
+
+
+def test_events_flush_still_drains_pending_when_legacy_read_fails(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        cli.ev.Event(type="routine_started", agent_id="a", project="p"),
+        "delivery-cli-legacy-error",
+    )
+    monkeypatch.setattr(
+        cli.ev.EventEmitter,
+        "import_legacy",
+        lambda _self: cli.ev.ImportReport(errors=1, unknown=1),
+    )
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: True)
+
+    result = runner.invoke(
+        main,
+        ["events", "flush", "--fallback", str(fallback), "--include-legacy", "--format", "json"],
+    )
+    payload = json.loads(result.output)
+    assert result.exit_code == 1
+    assert payload["legacy_errors"] == 1
+    assert payload["legacy_unknown"] == 1
+    assert payload["delivered"] == 1
+    assert payload["pending"] == 0
+
+
+def scheduler_builder(engine: object, cleanup: Mock):
+    """Return a CLI builder double whose ownership boundary can be asserted."""
+
+    @contextmanager
+    def build(*_args: object, **_kwargs: object) -> Iterator[object]:
+        try:
+            yield engine
+        finally:
+            cleanup()
+
+    return build
+
+
 def test_validate_defaults_to_the_residents_tree(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -60,6 +143,19 @@ def test_validate_exits_non_zero_on_error(
     assert "app_grants" in result.output
     assert "required field is missing" in result.output
     assert "failed:" in result.output
+
+
+def test_validate_reports_invalid_utf8_without_a_traceback(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    manifest_path = tmp_path / "manifest.yaml"
+    manifest_path.write_bytes(b"\xff\xfe")
+
+    result = runner.invoke(main, ["validate", str(manifest_path)])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)
+    assert "manifest is not valid UTF-8" in result.output
 
 
 def test_validate_reports_json(runner: CliRunner, write_resident: ResidentWriter) -> None:
@@ -220,6 +316,37 @@ def test_help_lists_the_commands(runner: CliRunner) -> None:
 
 
 # ------------------------------------------------------------------------------- doctor
+
+
+def test_doctor_with_no_path_fails_when_it_found_nothing(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A health check that found no residents must not silently report healthy (#176)."""
+    (tmp_path / "residents").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+
+    result = runner.invoke(main, ["doctor", "--db", str(tmp_path / "steward.db")])
+
+    assert result.exit_code == 1, result.output
+    assert "failed:" in result.output
+    assert "this run validated nothing" in result.output
+    assert str((tmp_path / "residents").resolve()) in result.output
+
+
+def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicitly named empty tree is valid, but its warning must remain visible."""
+    empty = tmp_path / "drafts"
+    empty.mkdir()
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+
+    result = runner.invoke(main, ["doctor", str(empty), "--db", str(tmp_path / "steward.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "ok: 0 valid resident(s), 0 error(s), 1 warning(s)" in result.output
+    assert "no resident manifests found" in result.output
 
 
 def test_doctor_names_the_brain_and_the_next_fire(
@@ -773,6 +900,114 @@ def test_scheduler_run_stops_after_max_ticks(
     assert result.exit_code == 0, result.output
 
 
+@pytest.mark.parametrize("command", [("tick",), ("run", "--max-ticks", "1")])
+@pytest.mark.parametrize(
+    ("outcomes", "expected"),
+    [((True,), 0), ((True, False), 1), ((False,), 1), ((None,), 0)],
+)
+def test_scheduler_commands_carry_fire_outcomes(  # noqa: PLR0913, PLR0917
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    outcomes: tuple[bool | None, ...],
+    expected: int,
+) -> None:
+    reports = [
+        SimpleNamespace(
+            fired=ok is not None,
+            scheduled=SimpleNamespace(key=f"agent/routine-{index}"),
+            result=(
+                SimpleNamespace(ok=ok, duration_s=0.1, summary=lambda: "exit 7")
+                if ok is not None
+                else None
+            ),
+            skipped_reason="policy refusal" if ok is None else None,
+        )
+        for index, ok in enumerate(outcomes)
+    ]
+    engine = SimpleNamespace(
+        scheduled=(),
+        require_ready=lambda: None,
+        tick=lambda: reports,
+        run=lambda **_kwargs: reports,
+    )
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
+
+    result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
+
+    assert result.exit_code == expected, result.output
+    cleanup.assert_called_once_with()
+
+
+@pytest.mark.parametrize(
+    ("command", "expected", "message"),
+    [(("tick",), 1, "Aborted!"), (("run",), 0, "stopped")],
+)
+def test_scheduler_commands_release_resources_on_interrupt(  # noqa: PLR0913, PLR0917
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    expected: int,
+    message: str,
+) -> None:
+    def interrupted(**_kwargs: object) -> list[object]:
+        raise KeyboardInterrupt
+
+    engine = SimpleNamespace(
+        scheduled=(), require_ready=lambda: None, tick=interrupted, run=interrupted
+    )
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
+    result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
+    assert result.exit_code == expected, result.output
+    assert message in result.output
+    cleanup.assert_called_once_with()
+
+
+@pytest.mark.parametrize("command", [("tick",), ("run", "--max-ticks", "1")])
+def test_scheduler_commands_release_resources_on_scheduler_error(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+) -> None:
+    def failed(*_args: object, **_kwargs: object) -> list[object]:
+        raise cli.SchedulerError("scheduler broke")
+
+    engine = SimpleNamespace(scheduled=(), require_ready=lambda: None, tick=failed, run=failed)
+    cleanup = Mock()
+    monkeypatch.setattr(cli, "_build_scheduler", scheduler_builder(engine, cleanup))
+
+    result = runner.invoke(main, ["scheduler", *command, "--residents", str(tmp_path)])
+
+    assert result.exit_code == 1, result.output
+    assert "scheduler broke" in result.output
+    cleanup.assert_called_once_with()
+
+
+def test_scheduler_builder_closes_store_when_construction_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = Mock()
+    monkeypatch.setattr(cli, "_load_or_exit", lambda _residents: [])
+    monkeypatch.setattr(cli, "_open_store", lambda _db: store)
+    monkeypatch.setattr(cli.Dispatcher, "from_path", lambda *_args, **_kwargs: Mock())
+    monkeypatch.setattr(cli, "Scheduler", Mock(side_effect=cli.SchedulerError("build broke")))
+
+    with (
+        pytest.raises(cli.SchedulerError, match="build broke"),
+        cli._build_scheduler(
+            tmp_path, tmp_path / "state.json", tmp_path, tmp_path / "store.db", 60, dry_run=False
+        ),
+    ):
+        pass
+
+    store.close.assert_called_once_with()
+
+
 @pytest.mark.usefixtures("empty_path")
 def test_scheduler_refuses_to_start_without_the_declared_binary(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
@@ -1040,6 +1275,42 @@ def test_board_dispatch_with_an_empty_board_says_so(
     )
     assert result.exit_code == 0, result.output
     assert "nothing claimed" in result.output
+
+
+@pytest.mark.parametrize(("done", "expected"), [((True,), 0), ((True, False), 1), ((False,), 1)])
+def test_board_dispatch_carries_clean_partial_and_failed_outcomes(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    done: tuple[bool, ...],
+    expected: int,
+) -> None:
+    reports = tuple(
+        SimpleNamespace(
+            done=ok,
+            delegated=False,
+            resident_id="test-agent",
+            task=SimpleNamespace(
+                task_id=f"task-{index}", title="work", delegated=False, delegated_by=None
+            ),
+            reason=None if ok else "exit 7",
+            raised=(),
+            handed_over=(),
+        )
+        for index, ok in enumerate(done)
+    )
+    dispatch = SimpleNamespace(reopened=(), expired_approvals=(), reports=reports, planned=())
+    monkeypatch.setattr(
+        cli.Dispatcher,
+        "from_path",
+        lambda *_args, **_kwargs: SimpleNamespace(dispatch=lambda: dispatch),
+    )
+
+    result = runner.invoke(
+        main, ["board", "dispatch", "--residents", str(tmp_path), "--db", str(tmp_path / "b.db")]
+    )
+
+    assert result.exit_code == expected, result.output
 
 
 def test_board_dispatch_reports_the_deadlines_it_swept(
@@ -1545,7 +1816,13 @@ def test_budget_unpause_lifts_a_pause_and_says_what_it_was(
         resident = load_manifest(residents_dir / "test-agent" / "manifest.yaml")
         BudgetGuard(store).allow(resident.manifest)
 
-    result = runner.invoke(main, ["budget", "unpause", "test-agent", "--db", str(db)])
+    result = runner.invoke(
+        main,
+        [
+            "budget", "unpause", "test-agent", "--residents", str(residents_dir),
+            "--db", str(db),
+        ],
+    )  # fmt: skip
 
     assert result.exit_code == 0, result.output
     assert "test-agent resumed" in result.output
@@ -1555,12 +1832,44 @@ def test_budget_unpause_lifts_a_pause_and_says_what_it_was(
         assert store.approvals()[0].decision == "approve"
 
 
-def test_budget_unpause_on_a_running_resident_says_so(runner: CliRunner, tmp_path: Path) -> None:
+def test_budget_unpause_on_a_running_resident_is_a_successful_no_op(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
     result = runner.invoke(
-        main, ["budget", "unpause", "test-agent", "--db", str(tmp_path / "steward.db")]
+        main,
+        [
+            "budget",
+            "unpause",
+            "test-agent",
+            "--residents",
+            str(residents_dir),
+            "--db",
+            str(tmp_path / "steward.db"),
+        ],
     )
     assert result.exit_code == 0
     assert "is not paused by a budget" in result.output
+
+
+def test_budget_unpause_refuses_an_unknown_resident(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    result = runner.invoke(
+        main,
+        [
+            "budget",
+            "unpause",
+            "typo",
+            "--residents",
+            str(residents_dir),
+            "--db",
+            str(tmp_path / "steward.db"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "no valid resident 'typo'" in result.output
 
 
 def test_watchdog_tick_reports_a_quiet_pass(
@@ -1607,7 +1916,7 @@ def test_watchdog_tick_closes_a_run_that_never_reported_back(
         ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 1, result.output
     assert "closed run gone" in result.output
     emitted = [json.loads(line) for line in log.read_text().splitlines() if line.strip()]
     assert [e["type"] for e in emitted if e["payload"].get("run_id") == "gone"] == [
@@ -1652,6 +1961,57 @@ def test_watchdog_run_makes_the_passes_it_was_asked_for(
     assert last["passes"] == 2
 
 
+@pytest.mark.parametrize("command", [("tick",), ("run", "--max-passes", "1")])
+@pytest.mark.parametrize(("failure", "expected"), [(None, 0), ("gave_up", 1), ("paused", 1)])
+def test_watchdog_commands_carry_pass_outcomes(  # noqa: PLR0913, PLR0917
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: tuple[str, ...],
+    failure: str | None,
+    expected: int,
+) -> None:
+    health = SimpleNamespace(resident_id="test-agent", detail="could not restart")
+    report = SimpleNamespace(
+        gave_up=(health,) if failure == "gave_up" else (),
+        paused=("test-agent",) if failure == "paused" else (),
+        restarted=(),
+        buried=(),
+        reopened=(),
+        expired_approvals=(),
+        health=(),
+        __bool__=lambda: failure is not None,
+    )
+    dog = SimpleNamespace(tick=lambda: report, run=lambda **_kwargs: [report])
+    monkeypatch.setattr(cli.Watchdog, "from_path", lambda *_args, **_kwargs: dog)
+
+    result = runner.invoke(
+        main,
+        ["watchdog", *command, "--residents", str(tmp_path), "--db", str(tmp_path / "s.db")],
+    )
+
+    assert result.exit_code == expected, result.output
+
+
+def test_watchdog_daemon_interrupt_is_a_clean_operator_stop(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(**_kwargs: object) -> list[object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        cli.Watchdog,
+        "from_path",
+        lambda *_args, **_kwargs: SimpleNamespace(run=interrupted),
+    )
+    result = runner.invoke(
+        main,
+        ["watchdog", "run", "--residents", str(tmp_path), "--db", str(tmp_path / "s.db")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "stopped" in result.output
+
+
 def test_doctor_reports_the_budget_and_the_watchdog(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
@@ -1667,6 +2027,29 @@ def test_doctor_reports_the_budget_and_the_watchdog(
     assert result.exit_code == 0, result.output
     assert "test-agent: budget daily_cost_usd: 2 of 5" in result.output
     assert "watchdog: has never made a pass" in result.output
+
+
+def test_doctor_fails_loudly_when_completed_spend_was_dropped(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    stub_bin("claude", "exit 0")
+    data = budgeted_manifest()
+    data["runner"] = {"kind": "claude"}
+    residents_dir = write_resident(data).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.health.record(
+            kind="ledger_write",
+            resident="test-agent",
+            run_id="lost-run",
+            error="database is locked",
+        )
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code != 0
+    assert "budget health: 1 durable failure(s)" in result.output
+    assert "ledger_write for test-agent run lost-run" in result.output
 
 
 def test_doctor_says_a_paused_resident_will_not_fire_tonight(
@@ -2209,6 +2592,37 @@ def test_new_resident_reports_json_when_asked(
     assert payload["resident"] == "note-keeper"
     assert payload["provision"]["target"]["container"] == "steward-note-keeper"
     assert "cli-village-token" not in result.output
+
+
+@pytest.mark.parametrize("output_format", ["text", "json"])
+def test_new_resident_register_problems_exit_non_zero(
+    runner: CliRunner,
+    scratch_repo: ScratchRepo,
+    charter_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+) -> None:
+    report = SimpleNamespace(
+        register=SimpleNamespace(problems=("claude is not on PATH",)),
+        dry_run=False,
+        changed=True,
+        resident_id="note-keeper",
+        render=lambda: ["raised note-keeper", "register", "  claude is not on PATH"],
+        to_dict=lambda: {
+            "resident": "note-keeper",
+            "register": {"ok": False, "problems": ["claude is not on PATH"]},
+        },
+    )
+    monkeypatch.setattr(cli, "raise_resident", lambda *_args, **_kwargs: report)
+
+    result = runner.invoke(
+        main,
+        new_resident_argv(
+            scratch_repo, charter_file, "--format", output_format, "--no-deploy", "--no-commit"
+        ),
+    )
+
+    assert result.exit_code == 1, result.output
 
 
 def test_new_resident_can_skip_the_container_entirely(

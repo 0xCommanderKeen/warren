@@ -9,9 +9,10 @@ every pass is a village full of deaths that never happened.
 import copy
 import json
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -203,10 +204,61 @@ def test_a_half_written_line_is_skipped_not_raised_on(tmp_path: Path) -> None:
     """The fallback log is appended to by several processes; a torn last line is ordinary."""
     log = tmp_path / "events.jsonl"
     log.write_text(
-        started("gone", ts=NOW - timedelta(hours=2)) + "\n\n{not json at all\n",
+        started("gone", ts=NOW - timedelta(hours=2)) + "\n\n{not json at all",
         encoding="utf-8",
     )
     assert [r.run_id for r in w.scan_unbracketed(log, now=NOW)] == ["gone"]
+
+
+def test_a_complete_malformed_final_line_blocks_burial(tmp_path: Path) -> None:
+    """A newline says the append completed; corruption is not evidence of no close."""
+    log = tmp_path / "events.jsonl"
+    log.write_text(
+        started("gone", ts=NOW - timedelta(hours=2)) + "\n{not json}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(w.EventLogEvidenceError, match="unreadable line 2"):
+        w.scan_unbracketed(log, now=NOW)
+
+
+def test_each_registry_path_is_evaluated_independently(store: Store, tmp_path: Path) -> None:
+    """Corruption on one host's evidence cannot hide a stale row from another host."""
+    good = write_log(tmp_path / "good.jsonl")
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{complete corruption}\n", encoding="utf-8")
+    for run_id, path in (("good", good), ("bad", bad)):
+        store.open_run(
+            run_id=run_id,
+            kind="routine",
+            trigger="schedule",
+            agent_id="claude-code:test-agent",
+            ref="daily-summary",
+            timeout_s=60,
+            event_log_path=str(path.resolve()),
+            now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+        )
+
+    assert [run.run_id for run in w.scan_unbracketed(good, now=NOW, registry=store)] == ["good"]
+
+
+def test_migrated_empty_evidence_path_is_refused_loudly(
+    store: Store, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Version zero means the empty path predates canonical-path recording and is unknown."""
+    store.open_run(
+        run_id="legacy",
+        kind="routine",
+        trigger="schedule",
+        agent_id="claude-code:test-agent",
+        ref="daily-summary",
+        timeout_s=60,
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    with store._lock, store._conn:  # simulate the ALTER migration result
+        store._conn.execute("UPDATE open_runs SET evidence_version = 0 WHERE run_id = 'legacy'")
+
+    assert w.scan_unbracketed(write_log(tmp_path / "events.jsonl"), now=NOW, registry=store) == []
+    assert "migrate or close this legacy row" in caplog.text
 
 
 def test_a_missing_log_is_no_stale_runs(tmp_path: Path) -> None:
@@ -227,7 +279,8 @@ def test_a_run_only_the_registry_knows_about_is_still_found(store: Store, tmp_pa
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
 
-    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+    log = write_log(tmp_path / "events.jsonl")
+    stale = w.scan_unbracketed(log, now=NOW, registry=store)
 
     assert [run.run_id for run in stale] == ["delivered"]
     assert stale[0].routine == "daily-summary"
@@ -246,7 +299,7 @@ def test_a_registry_run_is_judged_against_the_timeout_it_was_given(
         timeout_s=60.0,
         now=ev.utc_now_iso(NOW - timedelta(seconds=150)),
     )
-    log = tmp_path / "nothing.jsonl"
+    log = write_log(tmp_path / "events.jsonl")
     # The manifest declares 900s; the registry says this run was only ever given 60, and
     # the registry is what a run past 60 + 120 seconds of grace is judged against.
     timeouts = {"claude-code:test-agent/daily-summary": 900.0}
@@ -267,6 +320,7 @@ def test_a_closed_registry_row_is_not_a_stale_run(store: Store, tmp_path: Path) 
         ref="daily-summary",
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
+    write_log(tmp_path / "events.jsonl")
     store.close_run("done", now=ev.utc_now_iso(NOW - timedelta(hours=1)))
 
     assert w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store) == []
@@ -289,10 +343,10 @@ def test_a_closing_event_in_the_log_answers_an_open_registry_row(
     assert w.scan_unbracketed(log, now=NOW, registry=store) == []
 
 
-def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
+def test_a_stale_task_without_a_run_specific_outcome_stays_pending(
     resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
-    """The board's lease sweep owns a task's death; the watchdog only answers the row."""
+    """The board owns the death; the watchdog cannot invent or silently publish it."""
     store.open_run(
         run_id="task-1",
         kind="task",
@@ -302,11 +356,12 @@ def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
         timeout_s=900.0,
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
+    write_log(tmp_path / "events.jsonl")
 
     report = build(resident, store, sink, tmp_path).tick(NOW)
 
-    assert [run.run_id for run in report.buried] == ["task-1"]
-    assert store.open_runs() == [], "the registry row is answered"
+    assert report.buried == ()
+    assert [run.run_id for run in store.open_runs()] == ["task-1"]
     assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
 
 
@@ -362,7 +417,8 @@ def test_a_second_attempt_at_one_task_is_watched_like_the_first(
     store.close_run("session-1", now=ev.utc_now_iso(NOW - timedelta(hours=3)))
     assert attempt("session-2", ago=timedelta(hours=2)), "the retry gets a row of its own"
 
-    stale = w.scan_unbracketed(tmp_path / "nothing.jsonl", now=NOW, registry=store)
+    log = write_log(tmp_path / "events.jsonl")
+    stale = w.scan_unbracketed(log, now=NOW, registry=store)
 
     assert [run.run_id for run in stale] == ["session-2"]
 
@@ -391,6 +447,7 @@ def test_the_close_of_a_dead_first_attempt_does_not_answer_the_retry(
         timeout_s=900.0,
         now=ev.utc_now_iso(opened),
     )
+    write_log(tmp_path / "events.jsonl")
     log = write_log(
         tmp_path / "events.jsonl",
         task_closed("task-1", ts=opened + timedelta(milliseconds=1), type="task_failed"),
@@ -475,6 +532,7 @@ def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(
         timeout_s=900.0,
         now=ev.utc_now_iso(NOW - timedelta(hours=2)),
     )
+    write_log(tmp_path / "events.jsonl")
     dog = build(resident, store, sink, tmp_path)
 
     first = dog.tick(NOW)
@@ -485,6 +543,123 @@ def test_a_buried_registry_run_is_closed_so_the_next_pass_stays_quiet(
     assert store.open_runs() == []
     failures = [e for e in sink.events if e.type == ev.ROUTINE_FAILED]
     assert [e.payload["run_id"] for e in failures] == ["gone"]
+
+
+def test_an_active_post_run_tail_keeps_ownership_and_cannot_be_buried(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Age says overdue, but a current lease says its owner is still finishing."""
+    log = write_log(tmp_path / "events.jsonl")
+    store.open_run(
+        run_id="tail",
+        kind="routine",
+        trigger="schedule",
+        agent_id=resident.agent_id,
+        project=resident.project,
+        ref="daily-summary",
+        timeout_s=60.0,
+        event_log_path=str(log.resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    assert store.renew_run("tail", now=ev.utc_now_iso(NOW))
+
+    report = build(resident, store, sink, tmp_path, fallback=log).tick(NOW)
+
+    assert report.buried == ()
+    assert [run.run_id for run in store.open_runs()] == ["tail"]
+    assert [event for event in sink.events if event.type == ev.ROUTINE_FAILED] == []
+
+
+def test_session_close_wins_after_scan_before_watchdog_transition(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A stale snapshot grants no authority; the conditional terminal transition decides."""
+    log = write_log(tmp_path / "events.jsonl")
+    store.open_run(
+        run_id="finishing",
+        kind="routine",
+        trigger="schedule",
+        agent_id=resident.agent_id,
+        project=resident.project,
+        ref="daily-summary",
+        timeout_s=60.0,
+        event_log_path=str(log.resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    dog = build(resident, store, sink, tmp_path, fallback=log)
+
+    class SessionWinsAtTransition:
+        def watchdog_close(self, run_id: str, **_kwargs: object) -> bool:
+            assert store.close_run(run_id, now=ev.utc_now_iso(NOW))
+            return False
+
+    dog.runs = cast("Any", SessionWinsAtTransition())
+
+    assert dog.bury_stale_runs(NOW) == []
+    assert [event for event in sink.events if event.type == ev.ROUTINE_FAILED] == []
+
+
+def test_concurrent_watchdogs_publish_exactly_one_terminal_event(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """The conditional registry close, not a process-local lock, arbitrates the race."""
+    log = write_log(tmp_path / "events.jsonl")
+    store.open_run(
+        run_id="gone",
+        kind="routine",
+        trigger="schedule",
+        agent_id=resident.agent_id,
+        project=resident.project,
+        ref="daily-summary",
+        timeout_s=60.0,
+        event_log_path=str(log.resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    dogs = [build(resident, store, sink, tmp_path, fallback=log) for _ in range(2)]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reports = list(pool.map(lambda dog: dog.bury_stale_runs(NOW), dogs))
+
+    assert sum(len(report) for report in reports) == 1
+    failures = [event for event in sink.events if event.type == ev.ROUTINE_FAILED]
+    assert [event.payload["run_id"] for event in failures] == ["gone"]
+
+
+@pytest.mark.parametrize("bad_log", ["missing", "unreadable"])
+def test_untrustworthy_event_evidence_refuses_burial(  # noqa: PLR0913, PLR0917
+    bad_log: str,
+    resident: Resident,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Silence from the wrong or unreadable record is not evidence of no close."""
+    expected = tmp_path / "expected.jsonl"
+    actual = expected
+    if bad_log == "unreadable":
+        actual = tmp_path / "a-directory"
+        actual.mkdir()
+    elif bad_log == "divergent":
+        write_log(expected)
+        actual = write_log(tmp_path / "other.jsonl")
+    store.open_run(
+        run_id="uncertain",
+        kind="routine",
+        trigger="schedule",
+        agent_id=resident.agent_id,
+        project=resident.project,
+        ref="daily-summary",
+        timeout_s=60.0,
+        event_log_path=str(expected.resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+
+    report = build(resident, store, sink, tmp_path, fallback=actual).tick(NOW)
+
+    assert report.buried == ()
+    assert [run.run_id for run in store.open_runs()] == ["uncertain"]
+    assert "refusing to bury" in caplog.text
 
 
 def test_an_unbracketed_run_is_closed_as_routine_failed_exactly_once(

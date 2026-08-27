@@ -149,6 +149,17 @@ def handoff(
     )
 
 
+def test_direct_handoff_callers_cannot_bypass_text_bounds(
+    make_delegator: MakeDelegator, store: Store, sink: ev.NullEmitter
+) -> None:
+    delegator = make_delegator()
+    oversized = handoff(title="x" * (dg.TITLE_MAX_CHARS + 1))
+    with pytest.raises(dg.DelegationError, match="character limit"):
+        delegator.delegate(sender=delegator.resident(SENDER), handoff=oversized)
+    assert store.jobs() == []
+    assert sink.events == []
+
+
 def sender_of(delegator: dg.Delegator, resident_id: str = SENDER) -> Resident:
     """Return one resident of the delegator's fleet, insisting it is there."""
     found = delegator.resident(resident_id)

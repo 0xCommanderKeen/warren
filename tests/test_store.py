@@ -2,12 +2,13 @@
 
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from steward import scheduler
+from steward import health, scheduler
 from steward.events import utc_now_iso
 from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE
 from steward.store import (
@@ -27,6 +28,202 @@ LATER = "2026-08-24T10:00:00.000Z"
 def store() -> Iterator[Store]:
     with Store(":memory:") as opened:
         yield opened
+
+
+def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE approvals (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, "
+        "project TEXT NOT NULL, action TEXT NOT NULL, message TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}', options TEXT NOT NULL DEFAULT '[]', "
+        "status TEXT NOT NULL DEFAULT 'pending', decision TEXT, decided_by TEXT, "
+        "decided_at TEXT, edit TEXT, expires_at TEXT, created_at TEXT NOT NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_announcements)")}
+    connection.close()
+    assert columns == {
+        "request_id",
+        "claimed_by",
+        "claimed_until",
+        "announced_at",
+        "attempts",
+        "next_attempt_at",
+        "effects_at",
+        "effects_claimed_by",
+        "effects_claimed_until",
+        "effects_attempts",
+        "effects_next_attempt_at",
+    }
+
+
+def test_an_existing_request_log_gains_approval_correlation(tmp_path: Path) -> None:
+    path = tmp_path / "old-requests.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE requests (request_id TEXT PRIMARY KEY, received_at TEXT NOT NULL, "
+        "method TEXT NOT NULL, path TEXT NOT NULL, outcome TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+    connection.close()
+    assert "approval_id" in columns
+
+
+def test_two_independent_connections_cannot_claim_one_announcement(tmp_path: Path) -> None:
+    path = tmp_path / "shared.db"
+    first, second = Store(path), Store(path)
+    try:
+        record = first.create_approval_request(
+            agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+        )
+        first.decide(record.request_id, "approve")
+        barrier = threading.Barrier(3)
+        claims: list[object] = []
+
+        def claim(opened: Store) -> None:
+            barrier.wait()
+            claims.append(opened.claim_approval_announcement())
+
+        threads = [threading.Thread(target=claim, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert sum(claim is not None for claim in claims) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def _acknowledged_budget_decision(store: Store) -> ApprovalRecord:
+    request = store.create_approval_request(
+        agent_id="claude-code:hob",
+        project="home",
+        action="budget_unpause",
+        message="carry on?",
+        resident="hob",
+    )
+    store.pause_resident(
+        resident="hob",
+        agent_id="claude-code:hob",
+        budget="daily_cost_usd",
+        spent=2,
+        cap=1,
+        reason="over",
+        request_id=request.request_id,
+        window_end=LATER,
+    )
+    decided, recorded = store.decide(request.request_id, "approve", decided_by="miha")
+    assert recorded
+    assert decided is not None
+    announcement = store.claim_approval_announcement(request.request_id)
+    assert announcement is not None
+    _, token = announcement
+    assert store.finish_approval_announcement(request.request_id, token, accepted=True)
+    return decided
+
+
+def test_budget_completion_and_marker_are_one_atomic_idempotent_act(store: Store) -> None:
+    record = _acknowledged_budget_decision(store)
+    claimed = store.claim_approval_effects(record.request_id)
+    assert claimed is not None
+    _, token = claimed
+
+    completed, resumed = store.complete_approval_effects(record, token)
+
+    assert completed
+    assert resumed == "hob"
+    assert store.budget_pause("hob") is None
+    assert store.budget_allowance("hob")["until"] == LATER  # ty: ignore
+    assert store.approval_announcement_state(record.request_id) == "complete"
+    assert store.complete_approval_effects(record, token) == (False, None)
+
+
+def test_approval_completion_finalizes_every_correlated_pending_request(store: Store) -> None:
+    request = store.create_approval_request(
+        agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+    )
+    record, recorded = store.decide(
+        request.request_id,
+        "approve",
+        request_log=("api-1", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert recorded
+    assert record is not None
+    replay, recorded = store.decide(
+        request.request_id,
+        "deny",
+        request_log=("api-2", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert not recorded
+    assert replay is not None
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded_announcement_pending",
+        "recorded_announcement_pending",
+    ]
+    announcement = store.claim_approval_announcement(request.request_id)
+    assert announcement is not None
+    _, token = announcement
+    assert store.finish_approval_announcement(request.request_id, token, accepted=True)
+    effects = store.claim_approval_effects(request.request_id)
+    assert effects is not None
+    effect_record, token = effects
+    assert store.complete_approval_effects(effect_record, token)[0]
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded",
+        "recorded",
+    ]
+
+
+def test_two_store_workers_cannot_apply_the_same_effects(tmp_path: Path) -> None:
+    path = tmp_path / "effects.db"
+    first, second = Store(path), Store(path)
+    try:
+        record = _acknowledged_budget_decision(first)
+        barrier = threading.Barrier(3)
+        claims: list[tuple[ApprovalRecord, str] | None] = []
+
+        def claim(opened: Store) -> None:
+            barrier.wait()
+            claims.append(opened.claim_approval_effects(record.request_id))
+
+        threads = [threading.Thread(target=claim, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert sum(claimed is not None for claimed in claims) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_abandoned_live_effects_lease_recovers_only_at_its_deadline(store: Store) -> None:
+    record = _acknowledged_budget_decision(store)
+    assert store.claim_approval_effects(record.request_id, lease_s=0.05) is not None
+    assert store.claim_approval_effects(record.request_id) is None
+    time.sleep(0.06)
+    recovered = store.claim_approval_effects(record.request_id)
+    assert recovered is not None
+    _, token = recovered
+    assert store.complete_approval_effects(record, token)[0]
 
 
 def _job(store: Store, task_id: str) -> JobRecord:
@@ -713,6 +910,168 @@ def test_the_database_lives_beside_the_scheduler_state(
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state" / "scheduler.json"))
     assert default_db_path() == tmp_path / "state" / "steward.db"
+
+
+def test_the_store_waits_longer_than_sqlites_default(store: Store) -> None:
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15_000
+
+
+def test_health_failures_are_independent_durable_counted_and_corruption_tolerant(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "steward.db"
+    with Store(path) as store:
+        store.health.record(
+            kind="ledger_write", resident="hob", run_id="run-1", error="locked", now=EARLY
+        )
+        store.health.record(
+            kind="pause_enforcement",
+            resident="pip",
+            run_id="run-2",
+            error="disk full",
+            now=LATER,
+        )
+    with (tmp_path / "steward.db.health.jsonl").open("ab") as journal:
+        journal.write(b"not json\n")
+    with Store(path) as reopened:
+        failure = reopened.health.latest()
+    assert failure is not None
+    assert failure.count == 2
+    assert failure.kind == "pause_enforcement"
+    assert failure.resident == "pip"
+    assert failure.run_id == "run-2"
+    assert failure.error == "disk full"
+    assert failure.failed_at == LATER
+
+
+def test_first_health_failure_atomically_creates_and_syncs_the_journal_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    assert journal.path is not None
+    calls: list[tuple[str, object]] = []
+    real_fsync = health.os.fsync
+    real_replace = health.os.replace
+
+    def fsync(fd: int) -> None:
+        calls.append(("fsync", "directory" if health.os.fstat(fd).st_mode & 0o040000 else "file"))
+        real_fsync(fd)
+
+    def replace(source: str, destination: Path) -> None:
+        calls.append(("replace", destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(health.os, "fsync", fsync)
+    monkeypatch.setattr(health.os, "replace", replace)
+
+    journal.record(kind="ledger_write", resident="hob", run_id="first", error="locked", now=EARLY)
+
+    assert calls == [
+        ("fsync", "file"),
+        ("replace", journal.path),
+        ("fsync", "directory"),
+    ]
+    assert journal.path.read_text(encoding="utf-8") == (
+        '{"version":1,"count":1,"kind":"ledger_write","resident":"hob",'
+        '"run_id":"first","error":"locked",'
+        f'"failed_at":"{EARLY}"}}\n'
+    )
+
+
+@pytest.mark.parametrize("failed_operation", ["write", "fsync", "replace"])
+def test_failed_health_compaction_keeps_the_previous_evidence(
+    failed_operation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "steward.db"
+    journal = health.HealthJournal(path)
+    journal.record(kind="ledger_write", resident="hob", run_id="old", error="locked", now=EARLY)
+    assert journal.path is not None
+    old_evidence = journal.path.read_bytes()
+    monkeypatch.setattr(health, "COMPACT_AT_BYTES", len(old_evidence))
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError(f"failed {failed_operation}")
+
+    monkeypatch.setattr(health.os, failed_operation, fail)
+
+    with pytest.raises(OSError, match=f"failed {failed_operation}"):
+        journal.record(
+            kind="pause_enforcement", resident="pip", run_id="new", error="disk full", now=LATER
+        )
+
+    assert journal.path.read_bytes() == old_evidence
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.run_id == "old"
+    assert list(tmp_path.glob(".steward.db.health.jsonl.*.tmp")) == []
+
+
+def test_health_append_atomically_repairs_a_torn_suffix(tmp_path: Path) -> None:
+    path = tmp_path / "steward.db"
+    journal = health.HealthJournal(path)
+    journal.record(kind="ledger_write", resident="hob", run_id="one", error="locked", now=EARLY)
+    journal.record(kind="ledger_write", resident="hob", run_id="two", error="locked", now=LATER)
+    assert journal.path is not None
+    with journal.path.open("ab") as stream:
+        stream.write(b'{"version":1,"count":3,"kind":"torn"')
+
+    journal.record(
+        kind="pause_enforcement", resident="pip", run_id="three", error="disk full", now=LATER
+    )
+
+    lines = journal.path.read_bytes().splitlines()
+    assert len(lines) == 3
+    assert all(line.endswith(b"}") for line in lines)
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.count == 3
+    assert latest.run_id == "three"
+
+
+def test_health_reader_adopts_a_journal_created_before_the_lock_sidecar(tmp_path: Path) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    assert journal.path is not None
+    journal.path.write_text(
+        '{"version":1,"count":7,"kind":"ledger_write","resident":"hob",'
+        '"run_id":"legacy","error":"locked","failed_at":"2026-08-24T09:00:00.000Z"}\n',
+        encoding="utf-8",
+    )
+
+    latest = journal.latest()
+
+    assert latest is not None
+    assert latest.count == 7
+    assert latest.run_id == "legacy"
+    assert journal.path.with_name(f"{journal.path.name}.lock").exists()
+
+
+def test_health_writers_keep_counting_across_atomic_replacements(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    monkeypatch.setattr(health, "COMPACT_AT_BYTES", 1)
+    writers = [
+        threading.Thread(
+            target=journal.record,
+            kwargs={
+                "kind": "ledger_write",
+                "resident": "hob",
+                "run_id": f"run-{index}",
+                "error": "locked",
+                "now": EARLY,
+            },
+        )
+        for index in range(20)
+    ]
+
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+
+    latest = journal.latest()
+    assert latest is not None
+    assert latest.count == len(writers)
 
 
 # -------------------------------------------------------------------------- the inbox
