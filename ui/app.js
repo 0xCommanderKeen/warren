@@ -635,7 +635,7 @@ async function viewResidents() {
     const routines = byResident.get(resident.id) || [];
     const upcoming = routines
       .filter((row) => row.next_fire)
-      .sort((a, b) => a.next_fire.localeCompare(b.next_fire))[0];
+      .sort((a, b) => Date.parse(a.next_fire) - Date.parse(b.next_fire))[0];
     const budget = resident.budget || {};
     add(rows, [el("a", {
       class: "row", href: `#/residents/${encodeURIComponent(resident.id)}`,

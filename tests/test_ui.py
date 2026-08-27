@@ -761,6 +761,18 @@ def test_the_console_badges_a_retired_resident_in_both_places() -> None:
     assert 'badge("retired", "fail")' in detail, "so must the detail header"
 
 
+def test_residents_choose_the_soonest_next_fire_by_instant() -> None:
+    """Mixed schedule zones must not turn wall-clock text into chronology."""
+    actually_later = "2026-08-26T09:30:00+00:00"
+    actually_sooner = "2026-08-26T10:00:00+02:00"
+    assert actually_later < actually_sooner  # The old lexicographic ordering was wrong.
+    assert datetime.fromisoformat(actually_sooner) < datetime.fromisoformat(actually_later)
+
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    listing = source.split("async function viewResidents(")[1].split("\nfunction gauge(")[0]
+    assert "Date.parse(a.next_fire) - Date.parse(b.next_fire)" in listing
+
+
 def test_the_console_reads_a_closed_inbox_as_closed() -> None:
     # A delegation route flipped to pending or disabled stops pickup, so a console that
     # badged it "inbox on" would show an open door with the post piling up behind it
