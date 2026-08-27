@@ -519,7 +519,7 @@ the scheduler and the API name the ones they need on startup.
 |---|---|---|
 | `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
-| `STEWARD_EVENTS_FALLBACK` | everything that emits | Where events are appended when burrow is unreachable, so nothing a session did is lost. Defaults to `~/.burrow/events.jsonl`. |
+| `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.burrow/events.jsonl`. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
 | `STEWARD_UI` | API | Directory of the management console's static files. Unset looks for `ui/` beside the package and then in the checkout. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
@@ -528,3 +528,32 @@ the scheduler and the API name the ones they need on startup.
 
 Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
 `--allow-open`, `--residents` — and the flag wins over the variable.
+
+Remote-bound events enter a durable queue before POST. Each retry keeps one
+`X-Burrow-Delivery-ID`, so a crash after Burrow accepts an event but before Steward
+retires it is deduplicated by current Burrow servers. Normal emits replay up to 16 older
+events, oldest first; operators can drain and inspect the queue explicitly:
+
+```console
+$ steward events flush
+delivered 7; retired-records 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/events.jsonl.pending
+```
+
+The pre-queue `events.jsonl` format recorded every event but no delivery outcome. It is
+therefore impossible to infer which historical ID-less lines need replay. `steward events
+flush --include-legacy` explicitly queues each distinct valid ID-less line with a stable
+ID. Repeating it while that ID is pending is a no-op. Once delivery retires the queue
+record, however, there is no durable legacy seen-set, so a later import can offer the same
+stable ID again; use the option only when possible duplicates of events originally
+delivered without IDs are acceptable. Legacy IDs hash canonical event content together
+with the normalized target URL, so JSON formatting changes keep the same ID while the
+same event sent to another village gets a different ID. Compatible old-ID records for
+one target and canonical event are sent as one POST and retired together: `delivered`
+and `--limit` count POST groups, while `retired-records` counts physical queue rows.
+History lines carrying a valid
+`steward_delivery_id` are modern and are skipped: their queue record already owns retry,
+or its acknowledged delivery was retired. Invalid or torn queue records are preserved in
+`.pending.corrupt`, reported, and make the command exit non-zero. A failed POST likewise
+leaves the suffix pending and exits non-zero.
+Records bound to a different historical `BURROW_URL` are not leaked to the current
+target; they remain pending, are counted as `foreign-target`, and also exit non-zero.

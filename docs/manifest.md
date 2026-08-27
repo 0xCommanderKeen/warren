@@ -289,11 +289,16 @@ $ steward scheduler tick --dry-run         # print what would fire, and the whol
 `--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
 manifest says. A rehearsal is not work.
 
-Events go to `BURROW_URL`/events with `Authorization: Bearer $BURROW_TOKEN` when set. A
-failed POST trips a short per-target circuit breaker and the event is appended to
-`$STEWARD_EVENTS_FALLBACK` (default `~/.burrow/events.jsonl`) instead — the same file
-burrow's own emitter falls back to. A village that cannot be reached loses no events,
-only their remoteness, and never slows a routine down.
+Events go to `BURROW_URL`/events with `Authorization: Bearer $BURROW_TOKEN` when set.
+Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
+`~/.burrow/events.jsonl`) as the watchdog's complete local record. Remote-bound events
+also enter its `.pending` sibling before POST and retain a stable Burrow delivery ID
+until acknowledged. A failed POST trips a short per-target circuit breaker and leaves
+the event queued; later emits and `steward events flush` replay oldest first. A village
+that cannot be reached loses no queued events, only their immediate remoteness.
+Legacy replay identity combines the normalized target URL with canonical event content.
+Formatting-equivalent old records for one target form one POST group; `--limit` and
+`delivered` count those groups, while `retired-records` counts removed queue rows.
 
 ## `board` — job board participation
 
