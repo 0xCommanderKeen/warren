@@ -240,9 +240,12 @@ should be able to read its own manifest and know which run closes its day. "Whic
 routine happens to fire last" depends on cron arithmetic, time zones, and which routines
 are enabled today — nobody can read that off the page, so nobody can check it.
 
-Two rules are enforced at validation, because both break "one entry per day":
+These rules are enforced at validation, because violating any of them breaks "one entry
+per day":
 
 - **At most one routine per resident may carry it.** A day that ends twice is not a day.
+- **The flagged routine must be enabled.** Disabled routines are omitted by the scheduler
+  and therefore cannot close any day.
 - **The flagged routine must fire once a day.** An hourly routine flagged `close_of_day`
   would rewrite the day twenty-four times and call the last one the day.
 

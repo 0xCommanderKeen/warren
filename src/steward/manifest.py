@@ -22,13 +22,14 @@ import re
 import zoneinfo
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from functools import cache
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 import yaml
-from croniter import croniter
+from croniter import CroniterBadDateError, croniter
 from pydantic import (
     BaseModel,
     BeforeValidator,
@@ -116,8 +117,8 @@ MAX_JOURNAL_KEEP = 3650
 #: The one legal value of a routine's ``journal:`` flag: the run that ends the day.
 CLOSE_OF_DAY = "close_of_day"
 
-#: Stop counting a closing routine's daily fires here; anything over one is already wrong.
-MAX_CLOSER_FIRES = 24
+#: Keep an over-firing diagnostic compact once its exact count stops being useful.
+MANY_FIRES_DISPLAY_THRESHOLD = 24
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 ACCENT_PATTERN = r"^#[0-9a-fA-F]{6}$"
@@ -1428,18 +1429,71 @@ def _check_routine_requirements(
     return diagnostics
 
 
-def _fires_per_day(routine: Routine) -> int:
-    """Count a routine's occurrences in one ordinary local day, capped so it terminates."""
-    zone = zoneinfo.ZoneInfo(routine.schedule_tz)
-    start = datetime(2026, 6, 15, 0, 0, tzinfo=zone)  # mid-year: no DST seam either side
-    end = start + timedelta(days=1)
-    cursor = croniter(routine.schedule, start - timedelta(seconds=1))
-    fires = 0
-    while fires <= MAX_CLOSER_FIRES:
-        if cursor.get_next(datetime) >= end:
-            break
-        fires += 1
-    return fires
+@cache
+def _gregorian_cron_days() -> tuple[tuple[int, int, int], ...]:
+    """Return every observable Gregorian ``(month, day, cron-weekday)`` tuple."""
+    cycle_start = datetime(2000, 1, 1, tzinfo=UTC)
+    representatives: set[tuple[int, int, int]] = set()
+    for offset in range(146_097):  # exactly one 400-year Gregorian cycle
+        day = cycle_start + timedelta(days=offset)
+        representatives.add((day.month, day.day, (day.weekday() + 1) % 7))
+    return tuple(sorted(representatives))
+
+
+def _cron_values(field: Sequence[int | str], lowest: int, highest: int) -> set[int]:
+    """Turn croniter's canonical field expansion into concrete matching values."""
+    if "*" in field:
+        return set(range(lowest, highest + 1))
+    return {value for value in field if isinstance(value, int)}
+
+
+def _daily_fire_range(routine: Routine) -> tuple[int, int]:
+    return _daily_fire_range_for_schedule(routine.schedule)
+
+
+@cache
+def _daily_fire_range_for_schedule(schedule: str) -> tuple[int, int]:
+    """Return the least and most fires over every distinct cron calendar day.
+
+    A five-field cron date predicate can observe only month, day-of-month, and weekday.
+    The Gregorian calendar repeats those alignments every 400 years (146,097 days), so
+    one representative of each ``(month, day, weekday)`` tuple is exhaustive.  There are
+    only 366 possible month/day pairs times seven weekdays: at most 2,562 probes rather
+    than 146,097.  Fixed-offset datetimes are deliberate: cron names local wall-clock
+    occurrences; DST resolution remains the scheduler's separate responsibility.
+    """
+    # croniter is the scheduler's semantic authority.  First let its iterator decide
+    # whether the complete expression can ever fire.  This matters for expressions such
+    # as February 31 with a weekday alternative: croniter considers the restricted,
+    # impossible DOM unsatisfiable rather than applying the usual DOM/DOW union.
+    try:
+        croniter(schedule, datetime(2000, 1, 1, tzinfo=UTC)).get_next(datetime)
+    except CroniterBadDateError:
+        return 0, 0
+
+    expanded, _ = croniter.expand(schedule)
+    minute, hour, dom, month, dow = expanded
+    fires_on_matching_day = len(_cron_values(minute, 0, 59)) * len(_cron_values(hour, 0, 23))
+    months = _cron_values(month, 1, 12)
+    month_days = _cron_values(dom, 1, 31)
+    weekdays = _cron_values(dow, 0, 6)
+    dom_wildcard = "*" in dom
+    dow_wildcard = "*" in dow
+
+    counts: list[int] = []
+    for candidate_month, candidate_day, candidate_weekday in _gregorian_cron_days():
+        date_matches = candidate_day in month_days
+        weekday_matches = candidate_weekday in weekdays
+        if dom_wildcard:
+            calendar_matches = weekday_matches
+        elif dow_wildcard:
+            calendar_matches = date_matches
+        else:
+            calendar_matches = date_matches or weekday_matches
+        counts.append(
+            fires_on_matching_day if candidate_month in months and calendar_matches else 0
+        )
+    return min(counts), max(counts)
 
 
 def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
@@ -1468,18 +1522,41 @@ def _check_close_of_day(manifest: ResidentManifest, source: Path) -> list[Diagno
         for index, routine in closers[1:]
     ]
     for index, routine in closers:
-        fires = _fires_per_day(routine)
-        if fires == 1:
+        if not routine.enabled:
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"routines[{index}].enabled",
+                    problem=(
+                        f"routine {routine.id!r} closes the day but is disabled and "
+                        "therefore cannot close any day"
+                    ),
+                    example="enabled: true",
+                )
+            )
             continue
-        many = f"{MAX_CLOSER_FIRES}+" if fires > MAX_CLOSER_FIRES else str(fires)
+        least, most = _daily_fire_range(routine)
+        if least == most == 1:
+            continue
+        if least == 0:
+            cadence = "does not fire every day"
+        elif least == most:
+            many = (
+                f"{MANY_FIRES_DISPLAY_THRESHOLD}+"
+                if most > MANY_FIRES_DISPLAY_THRESHOLD
+                else str(most)
+            )
+            cadence = f"fires {many} times a day"
+        else:
+            cadence = "fires more than once on some days"
         diagnostics.append(
             Diagnostic(
                 file=source,
                 field_path=f"routines[{index}].schedule",
                 problem=(
-                    f"routine {routine.id!r} closes the day but fires {many} times a day "
-                    f"in {routine.schedule_tz}; the journal is one entry per day, so the "
-                    f"closing routine has to run once"
+                    f"routine {routine.id!r} closes the day but {cadence} in "
+                    f"{routine.schedule_tz}; the journal is one entry per day, so the "
+                    f"closing routine has to run exactly once every day"
                 ),
                 example="schedule: '30 22 * * *'  (once, late)",
             )
