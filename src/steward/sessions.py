@@ -574,8 +574,6 @@ class ResidentSessions:
         memory = resident.manifest.memory
         if memory.kind != "directory":
             return None
-        if skills_home(resident.manifest.runner) is None or not self.library.configured:
-            return None
         if admission.declared_identity is None:
             return None
         candidate = Path(memory.path).expanduser()

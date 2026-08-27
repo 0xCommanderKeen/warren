@@ -1595,7 +1595,7 @@ def test_scheduler_refuses_a_same_path_replacement_immediately_before_provisioni
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path / "fallback",
         runner_factory=build_runner,
-        library=sk.load_library(tmp_path / "skills"),
+        library=sk.SkillLibrary(),
     )
     run = engine.sessions.run
 

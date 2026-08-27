@@ -32,7 +32,6 @@ exactly one file* — a rule worth keeping even for the processes that are not b
 """
 
 import contextlib
-import functools
 import hashlib
 import json
 import logging
@@ -42,6 +41,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -101,6 +101,26 @@ TOKENS_MAX = 1_000_000_000
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
 log = logging.getLogger("steward.runners")
+
+_DESCRIPTOR_CWD_HELPER = """
+import os
+import sys
+
+workdir_fd = int(sys.argv[1])
+status_fd = int(sys.argv[2])
+argv = sys.argv[3:]
+try:
+    os.set_inheritable(status_fd, False)
+    os.fchdir(workdir_fd)
+    os.execvpe(argv[0], argv, os.environ)
+except OSError as exc:
+    message = str(exc.strerror or exc).encode("utf-8", "replace")[:1000]
+    try:
+        os.write(status_fd, message)
+    except OSError:
+        pass
+    raise SystemExit(126) from None
+"""
 
 
 class Outcome(StrEnum):
@@ -293,29 +313,57 @@ class _ProcessRunner(Runner):
         argv = self.argv(request)
         env = {**os.environ, **request.env}
         workdir_fd = request.workdir_fd
-        change_directory = None if workdir_fd is None else functools.partial(os.fchdir, workdir_fd)
+        launch_argv = argv
+        status_reader: int | None = None
+        status_writer: int | None = None
+        inherited_fds: tuple[int, ...] = ()
+        if workdir_fd is not None:
+            status_reader, status_writer = os.pipe()
+            inherited_fds = (workdir_fd, status_writer)
+            launch_argv = [
+                sys.executable,
+                "-c",
+                _DESCRIPTOR_CWD_HELPER,
+                str(workdir_fd),
+                str(status_writer),
+                *argv,
+            ]
         started = time.monotonic()
         try:
-            # fchdir is the one async-signal-safe operation in the child hook. It is
-            # required here because Popen has no descriptor-valued cwd API.
             process = subprocess.Popen(  # noqa: S603 — argv + capability cwd
-                argv,
+                launch_argv,
                 cwd=(request.execution_workdir if request.workdir_fd is None else None),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
-                pass_fds=(() if workdir_fd is None else (workdir_fd,)),
-                preexec_fn=(  # noqa: PLW1509 — only async-signal-safe fchdir runs here
-                    change_directory
-                ),
+                pass_fds=inherited_fds,
             )
         except OSError as exc:
+            if status_reader is not None:
+                os.close(status_reader)
+            if status_writer is not None:
+                os.close(status_writer)
             return RunResult(
                 outcome=Outcome.FAILED,
                 duration_s=time.monotonic() - started,
                 error=f"cannot launch {argv[0]!r}: {exc.strerror or exc}",
             )
+
+        if status_writer is not None:
+            os.close(status_writer)
+        if status_reader is not None:
+            with os.fdopen(status_reader, "rb") as status:
+                helper_error = status.read(1000).decode("utf-8", "replace")
+            if helper_error:
+                raw_out, raw_err = process.communicate()
+                return RunResult(
+                    outcome=Outcome.FAILED,
+                    output=raw_out.decode("utf-8", "replace")[:OUTPUT_MAX_CHARS],
+                    exit_status=process.returncode,
+                    duration_s=time.monotonic() - started,
+                    error=f"cannot launch {argv[0]!r}: {helper_error}",
+                )
 
         try:
             raw_out, raw_err = process.communicate(timeout=request.timeout_s)

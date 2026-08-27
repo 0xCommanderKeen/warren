@@ -1004,7 +1004,7 @@ def test_a_memory_dir_that_vanishes_after_claim_fails_without_touching_cwd(
     monkeypatch.setattr(Path, "cwd", classmethod(lambda _cls: cwd))
     write_skill("research", defaults=True)
     data = board_manifest(memory={"kind": "directory", "path": str(memory), "journal": "journal"})
-    data["runner"] = {"kind": "claude", "model": "pretend"}
+    data["runner"] = {"kind": "command", "command": ["unused", "{prompt}"]}
     data["skills"] = []
     data["routines"] = []
     resident = load_manifest(write_resident(data))

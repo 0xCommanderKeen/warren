@@ -1,9 +1,11 @@
 """The runner seam: what each brain is actually told, and who may spawn one."""
 
+import inspect
 import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -50,13 +52,18 @@ def test_a_command_runner_without_a_template_refuses_to_exist() -> None:
     assert r.check_runner(spec) == "runner kind 'command' requires a command template"
 
 
-def test_a_process_starts_in_the_descriptor_bound_admitted_directory(tmp_path: Path) -> None:
+def test_a_threaded_process_starts_in_the_descriptor_bound_admitted_directory(
+    tmp_path: Path,
+) -> None:
     admitted = tmp_path / "work"
     admitted.mkdir()
     descriptor = os.open(admitted, os.O_RDONLY | os.O_DIRECTORY)
     admitted_inode = os.fstat(descriptor).st_ino
     admitted.rename(tmp_path / "old-work")
     admitted.mkdir()
+    stop = threading.Event()
+    background = threading.Thread(target=stop.wait)
+    background.start()
     spec = RunnerSpec(
         kind="command",
         command=[sys.executable, "-c", "import os; print(os.stat('.').st_ino)", "{prompt}"],
@@ -67,10 +74,29 @@ def test_a_process_starts_in_the_descriptor_bound_admitted_directory(tmp_path: P
         )
     finally:
         os.close(descriptor)
+        stop.set()
+        background.join()
 
     assert result.ok
+    assert "preexec_fn" not in inspect.getsource(r._ProcessRunner.run)
     assert int(result.output.strip()) == admitted_inode
     assert admitted.stat().st_ino != admitted_inode
+
+
+def test_a_descriptor_bound_launch_keeps_a_missing_binary_diagnostic(tmp_path: Path) -> None:
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    spec = RunnerSpec(kind="command", command=["missing-steward-test-binary", "{prompt}"])
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=10)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert not result.ok
+    assert result.error is not None
+    assert result.error.startswith("cannot launch 'missing-steward-test-binary':")
+    assert not result.error_is_child
 
 
 def test_describe_names_the_brain() -> None:
