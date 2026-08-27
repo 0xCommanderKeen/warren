@@ -410,6 +410,7 @@ def doctor(residents: Path, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
+        problems += _report_ledger_failures(store.ledger_failures())
         problems += _report_watchdog(store.last_watchdog_pass())
     problems += _report_scheduler(SchedulerState.load(default_state_path()))
 
@@ -588,6 +589,20 @@ def _report_watchdog(last: dict[str, Any] | None) -> int:
         fg="green",
     )
     return 0
+
+
+def _report_ledger_failures(failures: dict[str, Any] | None) -> int:
+    """Name spend steward could not persist; an understated budget is unhealthy."""
+    if failures is None:
+        return 0
+    click.secho(
+        f"ledger: {failures['failures']} completed run(s) were not recorded; latest "
+        f"{failures['last_resident']} run {failures['last_run_id']} at "
+        f"{failures['last_failed_at']}: {failures['last_error']}",
+        fg="red",
+        err=True,
+    )
+    return 1
 
 
 def _report_scheduler(state: SchedulerState) -> int:

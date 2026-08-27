@@ -22,6 +22,8 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
 - ``run_ledger`` — one row per finished session, with the tokens, money, and seconds it
   actually cost. This is what makes a daily budget survive a daemon restart: a cap that
   resets because the process bounced is not a cap (steward #8).
+- ``ledger_failures`` — the count and latest identity of completed sessions whose spend
+  could not be appended, so an understated budget remains visible after logs rotate.
 - ``budget_pauses`` — the residents steward has stopped firing, and the number that
   stopped them. One row per paused resident, inserted conditionally, which is what makes
   "exactly one knock at the door" true rather than hoped for.
@@ -160,6 +162,15 @@ CREATE TABLE IF NOT EXISTS run_ledger (
 
 CREATE INDEX IF NOT EXISTS run_ledger_window
     ON run_ledger (resident, recorded_at);
+
+CREATE TABLE IF NOT EXISTS ledger_failures (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    failures       INTEGER NOT NULL DEFAULT 0,
+    last_resident  TEXT NOT NULL DEFAULT '',
+    last_run_id    TEXT NOT NULL DEFAULT '',
+    last_error     TEXT NOT NULL DEFAULT '',
+    last_failed_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS budget_pauses (
     resident    TEXT PRIMARY KEY,
@@ -763,6 +774,10 @@ class Store:
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock, self._conn:
+            # The API, scheduler and CLI legitimately share this file. Make the wait
+            # explicit (and testable) instead of depending on sqlite3's constructor
+            # default, so a short-lived writer does not turn into missing spend.
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
@@ -1541,6 +1556,27 @@ class Store:
                 params,
             ).fetchall()
         return [LedgerEntry.from_row(row) for row in rows]
+
+    def record_ledger_failure(
+        self, *, resident: str, run_id: str, error: str, now: str | None = None
+    ) -> None:
+        """Persist that completed spend could not be ledgered for doctor to report."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO ledger_failures "
+                "(id, failures, last_resident, last_run_id, last_error, last_failed_at) "
+                "VALUES (1, 1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "failures = failures + 1, last_resident = excluded.last_resident, "
+                "last_run_id = excluded.last_run_id, last_error = excluded.last_error, "
+                "last_failed_at = excluded.last_failed_at",
+                (resident, run_id, error, now or utc_now_iso()),
+            )
+
+    def ledger_failures(self) -> dict[str, Any] | None:
+        """Return the durable dropped-write summary, if accounting ever failed."""
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM ledger_failures WHERE id = 1").fetchone()
+        return dict(row) if row is not None else None
 
     def spend_by_origin(
         self,

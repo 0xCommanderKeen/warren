@@ -590,6 +590,49 @@ def test_a_run_under_the_cap_records_without_pausing(store: Store, sink: ev.Null
     assert [e for e in sink.events if e.type == ev.NEEDS_HUMAN] == []
 
 
+def test_a_post_insert_pause_failure_does_not_claim_the_ledger_write_failed(
+    store: Store,
+    sink: ev.NullEmitter,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of(budget_manifest(daily_cost_usd=1.0))
+
+    def fail_pause(*_args: object, **_kwargs: object) -> None:
+        raise OSError("no pause")
+
+    monkeypatch.setattr(guard, "_pause", fail_pause)
+
+    entry = guard.record(manifest, result=spent(cost=2.0), run_id="spent", now=NOON)
+
+    assert entry.run_id == "spent"
+    assert [row.run_id for row in store.ledger()] == ["spent"]
+    assert "was recorded, but the post-run budget pause failed: no pause" in caplog.text
+    assert "could not record what this run cost" not in caplog.text
+
+
+def test_a_dropped_ledger_write_leaves_durable_health_evidence(
+    store: Store, sink: ev.NullEmitter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard = bg.BudgetGuard(store, sink)
+    manifest = manifest_of()
+
+    def fail_write(**_facts: object) -> None:
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(store, "record_run", fail_write)
+
+    with pytest.raises(OSError, match="database is locked"):
+        guard.record(manifest, result=spent(cost=2.0), run_id="lost", now=NOON)
+
+    failure = store.ledger_failures()
+    assert failure is not None
+    assert failure["failures"] == 1
+    assert failure["last_run_id"] == "lost"
+    assert failure["last_error"] == "database is locked"
+
+
 def test_a_carry_on_allowance_survives_a_later_over_cap_run(
     store: Store, sink: ev.NullEmitter
 ) -> None:

@@ -572,6 +572,7 @@ there is no endpoint that would let it. See the README for what it shows.
 | `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
 | `run_ledger` | one row per finished session: tokens, money, seconds, and whether the brain reported any of it |
+| `ledger_failures` | durable count and latest context for completed sessions whose spend could not be ledgered; `steward doctor` reports this as unhealthy |
 | `budget_pauses` | the residents steward has stopped, and the number that stopped them |
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |

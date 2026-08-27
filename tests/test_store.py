@@ -634,6 +634,26 @@ def test_the_database_lives_beside_the_scheduler_state(
     assert default_db_path() == tmp_path / "state" / "steward.db"
 
 
+def test_the_store_waits_for_a_competing_writer(store: Store) -> None:
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_ledger_failures_are_durable_and_counted(tmp_path: Path) -> None:
+    path = tmp_path / "steward.db"
+    with Store(path) as store:
+        store.record_ledger_failure(resident="hob", run_id="run-1", error="locked", now=EARLY)
+        store.record_ledger_failure(resident="pip", run_id="run-2", error="disk full", now=LATER)
+    with Store(path) as reopened:
+        assert reopened.ledger_failures() == {
+            "id": 1,
+            "failures": 2,
+            "last_resident": "pip",
+            "last_run_id": "run-2",
+            "last_error": "disk full",
+            "last_failed_at": LATER,
+        }
+
+
 # -------------------------------------------------------------------------- the inbox
 
 
