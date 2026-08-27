@@ -15,12 +15,15 @@ class ASGITransportContractTests(unittest.TestCase):
         with TestClient(serve.app) as client:
             village = client.get("/village/")
             observatory = client.get("/observatory/")
+            agent_page = client.get("/observatory/agents/keeper")
             transport = client.get("/village/state-transport.js")
 
         self.assertEqual(village.status_code, 200)
         self.assertIn("Burrow", village.text)
         self.assertEqual(observatory.status_code, 200)
         self.assertIn("Burrow Observatory", observatory.text)
+        self.assertEqual(agent_page.status_code, 200)
+        self.assertIn("id=\"agent-page\"", agent_page.text)
         self.assertEqual(transport.status_code, 200)
         self.assertIn("createStateTransport", transport.text)
 

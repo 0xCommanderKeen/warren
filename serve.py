@@ -1214,6 +1214,8 @@ async def static_village(asset_path: str):
 
 @app.get("/observatory/{asset_path:path}", include_in_schema=False)
 async def static_observatory(asset_path: str):
+    if asset_path.startswith("agents/"):
+        return _static_file("observatory", "index.html")
     return _static_file("observatory", asset_path)
 
 

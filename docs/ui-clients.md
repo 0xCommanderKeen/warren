@@ -63,7 +63,11 @@ the repository directly; the existing village remains at `/` and is also address
 connection state, a filterable chronological feed of every retained per-agent history item,
 and selectable agent dossiers from complete snapshots only. It displays event evidence
 already carried by the snapshot but never reads `/events` or reduces that evidence into new
-domain state. It contains no Steward write client.
+domain state. Created residents (`villagers[].residency == "resident"`) have permanent pages
+at `/observatory/agents/<uuid>`, whether their manifest matched by agent ID or project. Those pages collect every
+agent-related field, task, routine, approval, artifact, journal, and retained history item in
+the current snapshot. Visitors do not receive permanent URLs. It contains no Steward write
+client.
 
 ## Production
 
