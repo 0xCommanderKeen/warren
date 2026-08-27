@@ -88,6 +88,7 @@ charter:
 
 Each entry names a skill in the [skills library](#the-skills-library)
 (`skills/<id>/SKILL.md`). A bare string is shorthand for `{id: <string>}`.
+Skill IDs are exact: surrounding whitespace is invalid rather than silently removed.
 
 ```yaml
 skills:
@@ -989,6 +990,11 @@ Burrow reads the same files for display (burrow #35). The contract:
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
   this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
   the schema's `$id` says they are, so burrow can fetch a file rather than run a command.
+  This is a **shape contract**, not the full steward validator: it describes accepted
+  document types, fields, required values, and constraints JSON Schema can express.
+  `steward validate` remains authoritative for filesystem and fleet context (such as a
+  granted skill existing in the library) and semantic rules implemented in Python (such
+  as cron/time-zone validity and relationships between fields).
   `tests/test_schema_contract.py` fails when the committed copy drifts from the models —
   changing a field means regenerating with `make schema-write` and reading the diff for
   what it does to burrow's reader.
