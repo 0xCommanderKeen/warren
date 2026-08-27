@@ -362,7 +362,13 @@ class EventEmitter:
         return delivered
 
     def emit_durable(self, event: Event) -> bool:
-        """Publish and report whether either the remote or fsynced local record accepted it."""
+        """Deliver an event and report whether any durable sink accepted it.
+
+        Unlike :meth:`emit`'s historical remote-only receipt, this is the acknowledgement
+        durable outboxes need: a successful remote POST or a successful fallback append
+        is enough. Total transport and fallback failure remains non-raising but returns
+        ``False``, so the outbox stays pending.
+        """
         line = event.to_json()
         delivered = False
         if self.url and not self._breaker_open(self.url):
@@ -370,7 +376,8 @@ class EventEmitter:
                 delivered = True
             else:
                 self._trip_breaker(self.url)
-        return self._append_fallback(line) or delivered
+        persisted = self._append_fallback(line)
+        return delivered or persisted
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""

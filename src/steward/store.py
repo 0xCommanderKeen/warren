@@ -40,7 +40,7 @@ import threading
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
@@ -145,7 +145,22 @@ CREATE TABLE IF NOT EXISTS requests (
     method       TEXT NOT NULL,
     path         TEXT NOT NULL,
     outcome      TEXT NOT NULL,
-    detail       TEXT NOT NULL DEFAULT '{}'
+    detail       TEXT NOT NULL DEFAULT '{}',
+    approval_id  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS approval_announcements (
+    request_id    TEXT PRIMARY KEY REFERENCES approvals(request_id),
+    claimed_by    TEXT,
+    claimed_until TEXT,
+    announced_at  TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    effects_at    TEXT,
+    effects_claimed_by TEXT,
+    effects_claimed_until TEXT,
+    effects_attempts INTEGER NOT NULL DEFAULT 0,
+    effects_next_attempt_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS run_ledger (
@@ -266,6 +281,18 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
     },
+    "approval_announcements": {
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at": "TEXT",
+        "effects_at": "TEXT",
+        "effects_claimed_by": "TEXT",
+        "effects_claimed_until": "TEXT",
+        "effects_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "effects_next_attempt_at": "TEXT",
+    },
+    "requests": {
+        "approval_id": "TEXT",
+    },
     "run_ledger": {
         # Denormalized from the task the run came off (steward #45). Rolling spend up by
         # joining ``ref`` to ``jobs.task_id`` guessed: a routine whose ref happens to
@@ -292,6 +319,8 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
 _LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS approvals_denials
     ON approvals (resident, action, decided_at);
+CREATE INDEX IF NOT EXISTS requests_approval
+    ON requests (approval_id, outcome);
 """
 
 
@@ -1519,6 +1548,10 @@ class Store:
                 decided = self._conn.execute(
                     "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
                 ).fetchone()
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
                 expired.append(ApprovalRecord.from_row(decided))
         return expired
 
@@ -1584,7 +1617,7 @@ class Store:
                 marked += cursor.rowcount
         return marked
 
-    def decide(
+    def decide(  # noqa: PLR0913 — optional API ledger metadata joins the same transaction
         self,
         request_id: str,
         decision: str,
@@ -1592,6 +1625,7 @@ class Store:
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
         now: str | None = None,
+        request_log: tuple[str, str, str] | None = None,
     ) -> tuple[ApprovalRecord | None, bool]:
         """Record a decision. Returns the record and whether *this* call recorded it.
 
@@ -1631,10 +1665,255 @@ class Store:
                 ),
             )
             recorded = cursor.rowcount == 1
+            if recorded:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
             row = self._conn.execute(
                 "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
             ).fetchone()
+            if request_log is not None and row["status"] == STATUS_RESOLVED:
+                log_id, method, path = request_log
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO requests (request_id, received_at, method, path, "
+                    "outcome, detail, approval_id) VALUES (?, ?, ?, ?, "
+                    "CASE WHEN EXISTS (SELECT 1 FROM approval_announcements "
+                    "WHERE request_id = ? AND effects_at IS NOT NULL) THEN 'recorded' "
+                    "ELSE 'recorded_announcement_pending' END, ?, ?)",
+                    (
+                        log_id,
+                        moment,
+                        method,
+                        path,
+                        request_id,
+                        _dumps({"approval": request_id, "decision": row["decision"]}),
+                        request_id,
+                    ),
+                )
         return ApprovalRecord.from_row(row), recorded
+
+    def claim_approval_announcement(
+        self, request_id: str | None = None, *, lease_s: float = 30
+    ) -> tuple[ApprovalRecord, str] | None:
+        """Lease one unresolved approval announcement for emission.
+
+        The decision and queue row are committed atomically.  The lease prevents two
+        processes from announcing concurrently, while its deadline makes a process death
+        recoverable by the next API start or replay.
+        """
+        token = new_id()
+        now = datetime.now(UTC)
+        moment = utc_now_iso(now)
+        until = utc_now_iso(now + timedelta(seconds=lease_s))
+        with self._lock, self._conn:
+            params: tuple[str, ...] = (token, until, moment, moment)
+            if request_id is not None:
+                params += (request_id,)
+                requested = "AND request_id = ?"
+            else:
+                requested = ""
+            claim_sql = (
+                "UPDATE approval_announcements SET claimed_by = ?, claimed_until = ? "  # noqa: S608
+                "WHERE request_id = (SELECT request_id FROM approval_announcements "
+                "WHERE announced_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+                "AND (claimed_until IS NULL OR claimed_until <= ?) "
+                + requested
+                + " ORDER BY rowid LIMIT 1) AND announced_at IS NULL RETURNING request_id"
+            )
+            claimed = self._conn.execute(claim_sql, params).fetchone()
+            if claimed is None:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM approvals WHERE request_id = ?", (claimed["request_id"],)
+            ).fetchone()
+        return ApprovalRecord.from_row(row), token
+
+    def finish_approval_announcement(self, request_id: str, token: str, *, accepted: bool) -> bool:
+        """Acknowledge a claimed announcement, or release it for immediate retry."""
+        with self._lock, self._conn:
+            if accepted:
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET announced_at = ?, claimed_by = NULL, "
+                    "claimed_until = NULL WHERE request_id = ? AND claimed_by = ? "
+                    "AND announced_at IS NULL",
+                    (utc_now_iso(), request_id, token),
+                )
+            else:
+                attempts = (
+                    self._conn.execute(
+                        "SELECT attempts FROM approval_announcements WHERE request_id = ?",
+                        (request_id,),
+                    ).fetchone()["attempts"]
+                    + 1
+                )
+                delay = min(30.0, 0.1 * (2 ** min(attempts - 1, 8)))
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET claimed_by = NULL, claimed_until = NULL, "
+                    "attempts = ?, next_attempt_at = ? "
+                    "WHERE request_id = ? AND claimed_by = ? AND announced_at IS NULL",
+                    (
+                        attempts,
+                        utc_now_iso(datetime.now(UTC) + timedelta(seconds=delay)),
+                        request_id,
+                        token,
+                    ),
+                )
+        return cursor.rowcount == 1
+
+    def next_approval_announcement_at(self) -> str | None:
+        """Earliest retry or live lease deadline; ``None`` means no pending work."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
+                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END) AS due "
+                "FROM approval_announcements WHERE announced_at IS NULL",
+                (utc_now_iso(),),
+            ).fetchone()
+        return row["due"]
+
+    def approval_announcement_state(self, request_id: str) -> str | None:
+        """Return ``pending``, ``announced`` or ``complete`` for a queued decision."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT announced_at, effects_at FROM approval_announcements WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["announced_at"] is None:
+            return "pending"
+        return "complete" if row["effects_at"] is not None else "announced"
+
+    def claim_approval_effects(
+        self, request_id: str | None = None, *, lease_s: float = 30
+    ) -> tuple[ApprovalRecord, str] | None:
+        """Lease one acknowledged decision's completion effects across processes."""
+        token = new_id()
+        now = datetime.now(UTC)
+        moment = utc_now_iso(now)
+        until = utc_now_iso(now + timedelta(seconds=lease_s))
+        with self._lock, self._conn:
+            requested = "AND request_id = ?" if request_id is not None else ""
+            params: tuple[str, ...] = (token, until, moment, moment)
+            if request_id is not None:
+                params += (request_id,)
+            claim_sql = (
+                "UPDATE approval_announcements SET effects_claimed_by = ?, "  # noqa: S608
+                "effects_claimed_until = ? WHERE request_id = (SELECT request_id FROM "
+                "approval_announcements WHERE announced_at IS NOT NULL AND effects_at IS NULL "
+                "AND (effects_next_attempt_at IS NULL OR effects_next_attempt_at <= ?) "
+                "AND (effects_claimed_until IS NULL OR effects_claimed_until <= ?) "
+                + requested
+                + " ORDER BY rowid LIMIT 1) AND effects_at IS NULL RETURNING request_id"
+            )
+            claimed = self._conn.execute(claim_sql, params).fetchone()
+            if claimed is None:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM approvals WHERE request_id = ?", (claimed["request_id"],)
+            ).fetchone()
+        return ApprovalRecord.from_row(row), token
+
+    def complete_approval_effects(
+        self, record: ApprovalRecord, token: str
+    ) -> tuple[bool, str | None]:
+        """Apply completion and its marker in one transaction guarded by the effects lease.
+
+        Budget approval atomically removes the pause and grants its window allowance.
+        All other decisions have no completion mutation, but still atomically acquire the
+        durable marker. A stale worker cannot complete a lease another process recovered.
+        """
+        moment = utc_now_iso()
+        with self._lock, self._conn:
+            owned = self._conn.execute(
+                "SELECT 1 FROM approval_announcements WHERE request_id = ? "
+                "AND announced_at IS NOT NULL AND effects_at IS NULL AND effects_claimed_by = ?",
+                (record.request_id, token),
+            ).fetchone()
+            if owned is None:
+                return False, None
+            resumed: str | None = None
+            if record.action == "budget_unpause" and record.decision == "approve":
+                pause = self._conn.execute(
+                    "SELECT * FROM budget_pauses WHERE request_id = ?", (record.request_id,)
+                ).fetchone()
+                if pause is not None:
+                    resumed = pause["resident"]
+                    if pause["window_end"]:
+                        self._conn.execute(
+                            "INSERT INTO budget_allowances "
+                            "(resident, until, granted_by, reason, granted_at) "
+                            "VALUES (?, ?, ?, ?, ?) "
+                            "ON CONFLICT(resident) DO UPDATE SET until=excluded.until, "
+                            "granted_by=excluded.granted_by, reason=excluded.reason, "
+                            "granted_at=excluded.granted_at",
+                            (
+                                resumed,
+                                pause["window_end"],
+                                record.decided_by or "api",
+                                pause["reason"],
+                                moment,
+                            ),
+                        )
+                    self._conn.execute(
+                        "DELETE FROM budget_pauses WHERE resident = ? AND request_id = ?",
+                        (resumed, record.request_id),
+                    )
+            cursor = self._conn.execute(
+                "UPDATE approval_announcements SET effects_at = ?, effects_claimed_by = NULL, "
+                "effects_claimed_until = NULL WHERE request_id = ? AND effects_at IS NULL "
+                "AND effects_claimed_by = ?",
+                (moment, record.request_id, token),
+            )
+            if cursor.rowcount == 1:
+                self._conn.execute(
+                    "UPDATE requests SET outcome = 'recorded' WHERE approval_id = ? "
+                    "AND outcome = 'recorded_announcement_pending'",
+                    (record.request_id,),
+                )
+        return cursor.rowcount == 1, resumed
+
+    def release_approval_effects(self, request_id: str, token: str) -> bool:
+        """Release a failed effects claim with bounded exponential backoff."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT effects_attempts FROM approval_announcements WHERE request_id = ? "
+                "AND effects_claimed_by = ? AND effects_at IS NULL",
+                (request_id, token),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = row["effects_attempts"] + 1
+            delay = min(30.0, 0.1 * (2 ** min(attempts - 1, 8)))
+            cursor = self._conn.execute(
+                "UPDATE approval_announcements SET effects_claimed_by=NULL, "
+                "effects_claimed_until=NULL, effects_attempts=?, effects_next_attempt_at=? "
+                "WHERE request_id=? AND effects_claimed_by=? AND effects_at IS NULL",
+                (
+                    attempts,
+                    utc_now_iso(datetime.now(UTC) + timedelta(seconds=delay)),
+                    request_id,
+                    token,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def next_approval_work_at(self) -> str | None:
+        """Earliest announcement/effects retry or live-lease deadline."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(due) AS due FROM ("
+                "SELECT CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
+                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END AS due "
+                "FROM approval_announcements WHERE announced_at IS NULL UNION ALL "
+                "SELECT CASE WHEN effects_claimed_until IS NOT NULL THEN effects_claimed_until "
+                "WHEN effects_next_attempt_at IS NOT NULL THEN effects_next_attempt_at ELSE ? END "
+                "FROM approval_announcements WHERE announced_at IS NOT NULL "
+                "AND effects_at IS NULL)",
+                (utc_now_iso(), utc_now_iso()),
+            ).fetchone()
+        return row["due"]
 
     # -- the run ledger ----------------------------------------------------------------
 

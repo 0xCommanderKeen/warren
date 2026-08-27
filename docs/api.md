@@ -275,7 +275,17 @@ decider, and every timestamp, in one call. `404` for an id steward has never see
 
 The decision is recorded durably and emitted as `needs_human_resolved` with
 `{request_id, decision, decided_by, action}`, under the *resident's* agent id — the
-villager walking away from your door is the one who knocked.
+villager walking away from your door is the one who knocked. If no durable event sink
+accepts it immediately, the response and request log say
+`recorded_announcement_pending`; the lifecycle-owned worker retries without another
+client request or restart. Completion effects such as budget resume happen only after
+that acknowledgement and are themselves crash-recoverable. A replay consults the durable
+outbox row: it returns `recorded_announcement_pending` and wakes the worker while delivery
+is pending, but returns the ordinary idempotent `recorded` response after acknowledgement.
+Every accepted response returns its own request-log id as `request_id`, suitable for
+`GET /requests/{request_id}`, and names the gated request separately as
+`approval_request_id`. Each replay therefore has a distinct correlated request-log row;
+when recovery completes, all rows correlated to that approval become `recorded`.
 
 The decision must be one of that request's `options`. A globally known but unoffered
 decision is a `409` with `approval_decision_not_offered` and the request's `offered`
@@ -287,6 +297,10 @@ changes nothing, and emits nothing. An unknown `request_id` is `404`. A request 
 already **expired** is a `409` with `approval_expired` — distinct from the replay of an
 already-decided one. Deny-by-default has the last word; the late POST explicitly sweeps
 the row to `deny` and emits its resolution (steward #66, #143).
+
+The lifecycle worker reconciles announcement and completion-effects rows only after a
+decision or expiry transition has recorded them. It does not decide when deadlines expire;
+the existing approval sweep owns that transition.
 
 Requests are *created* by the session that reaches a gated action — through a
 `<needs-human>` block in its output or `steward approval raise`, both documented in

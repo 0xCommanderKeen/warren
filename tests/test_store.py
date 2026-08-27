@@ -2,6 +2,7 @@
 
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,6 +27,202 @@ LATER = "2026-08-24T10:00:00.000Z"
 def store() -> Iterator[Store]:
     with Store(":memory:") as opened:
         yield opened
+
+
+def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE approvals (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, "
+        "project TEXT NOT NULL, action TEXT NOT NULL, message TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}', options TEXT NOT NULL DEFAULT '[]', "
+        "status TEXT NOT NULL DEFAULT 'pending', decision TEXT, decided_by TEXT, "
+        "decided_at TEXT, edit TEXT, expires_at TEXT, created_at TEXT NOT NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_announcements)")}
+    connection.close()
+    assert columns == {
+        "request_id",
+        "claimed_by",
+        "claimed_until",
+        "announced_at",
+        "attempts",
+        "next_attempt_at",
+        "effects_at",
+        "effects_claimed_by",
+        "effects_claimed_until",
+        "effects_attempts",
+        "effects_next_attempt_at",
+    }
+
+
+def test_an_existing_request_log_gains_approval_correlation(tmp_path: Path) -> None:
+    path = tmp_path / "old-requests.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE requests (request_id TEXT PRIMARY KEY, received_at TEXT NOT NULL, "
+        "method TEXT NOT NULL, path TEXT NOT NULL, outcome TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}')"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(requests)")}
+    connection.close()
+    assert "approval_id" in columns
+
+
+def test_two_independent_connections_cannot_claim_one_announcement(tmp_path: Path) -> None:
+    path = tmp_path / "shared.db"
+    first, second = Store(path), Store(path)
+    try:
+        record = first.create_approval_request(
+            agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+        )
+        first.decide(record.request_id, "approve")
+        barrier = threading.Barrier(3)
+        claims: list[object] = []
+
+        def claim(opened: Store) -> None:
+            barrier.wait()
+            claims.append(opened.claim_approval_announcement())
+
+        threads = [threading.Thread(target=claim, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert sum(claim is not None for claim in claims) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def _acknowledged_budget_decision(store: Store) -> ApprovalRecord:
+    request = store.create_approval_request(
+        agent_id="claude-code:hob",
+        project="home",
+        action="budget_unpause",
+        message="carry on?",
+        resident="hob",
+    )
+    store.pause_resident(
+        resident="hob",
+        agent_id="claude-code:hob",
+        budget="daily_cost_usd",
+        spent=2,
+        cap=1,
+        reason="over",
+        request_id=request.request_id,
+        window_end=LATER,
+    )
+    decided, recorded = store.decide(request.request_id, "approve", decided_by="miha")
+    assert recorded
+    assert decided is not None
+    announcement = store.claim_approval_announcement(request.request_id)
+    assert announcement is not None
+    _, token = announcement
+    assert store.finish_approval_announcement(request.request_id, token, accepted=True)
+    return decided
+
+
+def test_budget_completion_and_marker_are_one_atomic_idempotent_act(store: Store) -> None:
+    record = _acknowledged_budget_decision(store)
+    claimed = store.claim_approval_effects(record.request_id)
+    assert claimed is not None
+    _, token = claimed
+
+    completed, resumed = store.complete_approval_effects(record, token)
+
+    assert completed
+    assert resumed == "hob"
+    assert store.budget_pause("hob") is None
+    assert store.budget_allowance("hob")["until"] == LATER  # ty: ignore
+    assert store.approval_announcement_state(record.request_id) == "complete"
+    assert store.complete_approval_effects(record, token) == (False, None)
+
+
+def test_approval_completion_finalizes_every_correlated_pending_request(store: Store) -> None:
+    request = store.create_approval_request(
+        agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+    )
+    record, recorded = store.decide(
+        request.request_id,
+        "approve",
+        request_log=("api-1", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert recorded
+    assert record is not None
+    replay, recorded = store.decide(
+        request.request_id,
+        "deny",
+        request_log=("api-2", "POST", f"/approvals/{request.request_id}"),
+    )
+    assert not recorded
+    assert replay is not None
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded_announcement_pending",
+        "recorded_announcement_pending",
+    ]
+    announcement = store.claim_approval_announcement(request.request_id)
+    assert announcement is not None
+    _, token = announcement
+    assert store.finish_approval_announcement(request.request_id, token, accepted=True)
+    effects = store.claim_approval_effects(request.request_id)
+    assert effects is not None
+    effect_record, token = effects
+    assert store.complete_approval_effects(effect_record, token)[0]
+    assert [store.request(log_id).outcome for log_id in ("api-1", "api-2")] == [  # ty: ignore
+        "recorded",
+        "recorded",
+    ]
+
+
+def test_two_store_workers_cannot_apply_the_same_effects(tmp_path: Path) -> None:
+    path = tmp_path / "effects.db"
+    first, second = Store(path), Store(path)
+    try:
+        record = _acknowledged_budget_decision(first)
+        barrier = threading.Barrier(3)
+        claims: list[tuple[ApprovalRecord, str] | None] = []
+
+        def claim(opened: Store) -> None:
+            barrier.wait()
+            claims.append(opened.claim_approval_effects(record.request_id))
+
+        threads = [threading.Thread(target=claim, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert sum(claimed is not None for claimed in claims) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_abandoned_live_effects_lease_recovers_only_at_its_deadline(store: Store) -> None:
+    record = _acknowledged_budget_decision(store)
+    assert store.claim_approval_effects(record.request_id, lease_s=0.05) is not None
+    assert store.claim_approval_effects(record.request_id) is None
+    time.sleep(0.06)
+    recovered = store.claim_approval_effects(record.request_id)
+    assert recovered is not None
+    _, token = recovered
+    assert store.complete_approval_effects(record, token)[0]
 
 
 def _job(store: Store, task_id: str) -> JobRecord:

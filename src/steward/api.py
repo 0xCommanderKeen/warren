@@ -52,7 +52,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from steward import delegation as dg
 from steward import events as ev
 from steward.board import Dispatcher
-from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
@@ -87,12 +87,13 @@ from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
     JOB_STATUSES,
     STATUS_OPEN,
+    ApprovalRecord,
     RequestRecord,
     Store,
     default_db_path,
     new_id,
 )
-from steward.transitions.approval import ApprovalTransitions
+from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
 
 __all__ = [
@@ -179,6 +180,8 @@ class ApiConfig:
     #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
     #: a directory with no ``index.html`` in it is not served at all.
     ui_dir: Path | None = None
+    approval_poll_interval_s: float = 1.0
+    approval_close_timeout_s: float = 5.0
 
     @classmethod
     def from_env(  # noqa: PLR0913 — one keyword per thing the environment can name
@@ -734,6 +737,18 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # One guard for the whole app: the run-now path refuses through it before it accepts
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
+
+    def complete_approval(record: ApprovalRecord, token: str) -> bool:
+        """Atomically apply idempotent post-announcement effects and their marker."""
+        completed, _resumed = db.complete_approval_effects(record, token)
+        return completed
+
+    outbox = ApprovalOutboxWorker(
+        approvals,
+        complete_approval,
+        poll_interval=settings.approval_poll_interval_s,
+        close_timeout=settings.approval_close_timeout_s,
+    )
     # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
     # respect (steward #W1): a run-now session's <needs-human>/<delegate> blocks are
     # harvested and its pending decisions are delivered into its preamble, exactly as they
@@ -765,7 +780,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        """Own the API-only approval sweep for exactly as long as the app lives."""
+        """Own approval announcement and expiry workers for the app's lifetime."""
+        outbox.start()
         stopped = asyncio.Event()
 
         async def expire_approvals() -> None:
@@ -788,6 +804,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             stopped.set()
             await worker
             _app.state.approval_expiry_task = None
+            outbox.close()
 
     app = FastAPI(
         title="steward",
@@ -817,6 +834,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     app.state.residents_dir = residents_dir
     app.state.library = library
     app.state.open_mode = token is None
+    app.state.approval_outbox = outbox
 
     def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return the id it is traceable by."""
@@ -1258,6 +1276,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
+        ledger_id = new_id()
         moment = now()
         decided = approvals.decide(
             request_id,
@@ -1265,6 +1284,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             decided_by=DECIDED_BY,
             edit=body.edit,
             now=moment,
+            request_log=(ledger_id, request.method, request.url.path),
         )
         record = decided.record
         if record is None:
@@ -1291,24 +1311,39 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                     "offered": list(record.options),
                 },
             )
-        if decided.replayed:
+        state = db.approval_announcement_state(request_id)
+        if decided.replayed and state != "pending":
             # The first decision won. A double-tapped notification changes nothing and
             # emitted nothing — it is told what was recorded.
             response.status_code = 200
             return {
-                "request_id": request_id,
+                "request_id": ledger_id,
+                "approval_request_id": request_id,
                 "status": "recorded",
                 "decision": record.decision,
                 "decided_by": record.decided_by,
                 "decided_at": record.decided_at,
                 "message": "this request was already decided; nothing changed",
             }
-        accept(request, "recorded", {"approval": request_id, "decision": body.decision})
+        # A replay that recovered an abandoned announcement must also finish the
+        # idempotent workflow below (notably budget unpause). The decision did not change,
+        # but this request completed work the dead first process did not.
+        announced = state in {"announced", "complete"}
+        outcome = "recorded" if announced else "recorded_announcement_pending"
+        outbox.notify()
         response.status_code = 202
-        resumed = _resume_if_budget(record.action, body.decision, request_id)
+        resumed = None
+        if announced:
+            claimed = db.claim_approval_effects(request_id)
+            if claimed is not None:
+                effect_record, token = claimed
+                completed, resumed = db.complete_approval_effects(effect_record, token)
+                if not completed:
+                    db.release_approval_effects(request_id, token)
         return {
-            "request_id": request_id,
-            "status": "recorded",
+            "request_id": ledger_id,
+            "approval_request_id": request_id,
+            "status": outcome,
             "decision": record.decision,
             "decided_by": record.decided_by,
             "decided_at": record.decided_at,
@@ -1316,30 +1351,14 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "message": (
                 f"recorded; {resumed} is no longer paused and fires on its next schedule"
                 if resumed
-                else "recorded; the resident acts on it when the blocked session reads it "
-                "or the parked work resumes on its next wake-up"
+                else (
+                    "recorded; the resident acts on it when the blocked session reads it "
+                    "or the parked work resumes on its next wake-up"
+                    if announced
+                    else "recorded; announcement pending and completion side effects are deferred"
+                )
             ),
         }
-
-    def _resume_if_budget(action: str, decision: str, request_id: str) -> str | None:
-        """Lift a budget pause when the human approved lifting it. Returns who resumed.
-
-        The unpause path the issue asks for, and it is the *same* approval machinery every
-        other gated action uses: a budget pause raises an ordinary ``needs_human``, and
-        answering it ``approve`` here is what resumes the resident. ``deny`` is a real
-        answer too — it leaves the resident paused, which is what the human just said.
-
-        ``decide=False`` because the decision has already been recorded and
-        ``needs_human_resolved`` already emitted, three lines up. Recording it twice would
-        put two answers in the log for one question.
-        """
-        if action != BUDGET_ACTION or decision != "approve":
-            return None
-        pause = db.pause_for_request(request_id)
-        if pause is None:
-            return None
-        guard.resume(pause.resident, decided_by=DECIDED_BY, decide=False)
-        return pause.resident
 
     # -- the request log -------------------------------------------------------------
 

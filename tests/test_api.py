@@ -111,6 +111,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
         transport: LocalTransport | None = None,
+        emitter: ev.Emitter | None = None,
         approval_expiry_interval_s: float = 30.0,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> Harness:
@@ -129,7 +130,9 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
                 workdir=tmp_path,
             ),
             store=store,
-            emitter=ev.EventEmitter(url=None, fallback=events_path),
+            emitter=(
+                emitter if emitter is not None else ev.EventEmitter(url=None, fallback=events_path)
+            ),
             runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
             nursery=nursery,
             transport=transport,
@@ -522,6 +525,10 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     assert response.status_code == 202
     assert response.json()["status"] == "recorded"
     assert response.json()["decision"] == "approve"
+    assert response.json()["approval_request_id"] == request_id
+    ledger_id = response.json()["request_id"]
+    assert ledger_id != request_id
+    assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == "recorded"
 
     resolved = harness.events("needs_human_resolved")
     assert len(resolved) == 1
@@ -534,21 +541,113 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     # Emitted as the villager who knocked, so burrow walks the right one from the door.
     assert resolved[0]["agent_id"] == "claude-code:test-agent"
     assert harness.client.get("/approvals").json()["approvals"] == []
+    assert [row.outcome for row in harness.store.requests()] == ["recorded"]
+
+
+def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) -> None:
+    harness = api()
+    worker = harness.client.app.state.approval_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTransitions:
+        def __init__(self) -> None:
+            self.store = harness.store
+
+        def reconcile_announcements(self) -> None:
+            entered.set()
+            release.wait()
+
+    worker.transitions = SlowTransitions()
+    worker.close_timeout = 0.01
+    with pytest.raises(TimeoutError, match="did not stop"), harness.client:
+        assert entered.wait(1.0)
+    assert worker.alive
+    release.set()
+    worker.close(timeout=1.0)
+
+
+def test_a_second_lifespan_drains_work_committed_after_the_first(api: ApiFactory) -> None:
+    harness = api()
+
+    with harness.client:
+        pass
+
+    approval_id = _pending(harness)
+    record, recorded = harness.store.decide(approval_id, "approve")
+    assert recorded
+    assert record is not None
+    assert harness.events("needs_human_resolved") == []
+
+    with harness.client:
+        for _ in range(100):
+            resolved = harness.events("needs_human_resolved")
+            if resolved:
+                break
+            threading.Event().wait(0.01)
+
+    assert [event["payload"]["request_id"] for event in resolved] == [approval_id]
 
 
 def test_a_second_decision_changes_nothing_and_emits_nothing(api: ApiFactory) -> None:
     harness = api()
     request_id = _pending(harness)
-    harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"})
+    first = harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"}).json()
 
     replay = harness.client.post(f"/approvals/{request_id}", json={"decision": "deny"})
     assert replay.status_code == 200
     assert replay.json()["decision"] == "approve"
+    assert replay.json()["approval_request_id"] == request_id
+    assert replay.json()["request_id"] != first["request_id"]
+    replay_ledger = harness.client.get(f"/requests/{replay.json()['request_id']}").json()
+    assert replay_ledger["outcome"] == "recorded"
     assert len(harness.events("needs_human_resolved")) == 1
 
     record = harness.store.approval(request_id)
     assert record is not None
     assert record.decision == "approve"
+
+
+def test_returned_decision_id_polls_pending_then_recorded_after_worker_recovery(
+    api: ApiFactory,
+) -> None:
+    """The response id names the ledger row the lifecycle worker later finalizes."""
+
+    class RecoveringEmitter:
+        def __init__(self) -> None:
+            self.available = threading.Event()
+            self.recovered = threading.Event()
+
+        def emit_durable(self, _event: ev.Event) -> bool:
+            if not self.available.is_set():
+                return False
+            self.recovered.set()
+            return True
+
+    emitter = RecoveringEmitter()
+    harness = api(emitter=emitter)
+    approval_id = _pending(harness)
+
+    with harness.client:
+        answer = harness.client.post(
+            f"/approvals/{approval_id}", json={"decision": "approve"}
+        ).json()
+        ledger_id = answer["request_id"]
+        assert answer["approval_request_id"] == approval_id
+        assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == (
+            "recorded_announcement_pending"
+        )
+
+        emitter.available.set()
+        harness.client.app.state.approval_outbox.notify()
+        assert emitter.recovered.wait(2.0)
+        for _ in range(100):
+            polled = harness.client.get(f"/requests/{ledger_id}").json()
+            if polled["outcome"] == "recorded":
+                break
+            threading.Event().wait(0.01)
+        assert polled["request_id"] == ledger_id
+        assert polled["outcome"] == "recorded"
 
 
 def test_an_edit_decision_carries_the_humans_version(api: ApiFactory) -> None:
@@ -1209,7 +1308,8 @@ def test_expiry_and_late_decisions_race_to_one_deny_and_one_event(api: ApiFactor
             )
         )
 
-    assert {response.status_code for response in responses} <= {200, 409}
+    # A loser may observe the durable decision while its announcement is still queued.
+    assert {response.status_code for response in responses} <= {200, 202, 409}
     record = harness.store.approval(request_id)
     assert record is not None
     assert record.decision == "deny"

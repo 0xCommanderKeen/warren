@@ -42,9 +42,36 @@ to *undo* a stop steward already applied, so the safe state is the current one. 
 them would throw away the only thing that can lift the stop while changing nothing for the
 better. They wait for a person, because only a person can answer them.
 
-**First decision wins.** Decisions are recorded with a conditional write. A replay — a
-double-tapped notification, a retried request — changes nothing, returns the recorded
-outcome, and emits nothing new.
+**First decision wins.** Decisions are recorded with a conditional write. In that same
+SQLite transaction steward queues the resolution announcement. A replay — a double-tapped
+notification or retried request — never changes the decision, but it may finish a still
+pending announcement left by a process that died after committing the answer. API startup
+also reconciles that queue, and a bounded background poll discovers work committed by
+other API processes; an exact
+retry or lease deadline can wake the worker sooner. Each accepted decision request is
+linked to the approval in the same transaction as the decision/outbox row, and completion
+updates every correlated pending request-log entry to `recorded`, so recovery does not
+depend on the same client returning. The API returns that per-call ledger id as
+`request_id` and the gated request's stable id as `approval_request_id`; repeated replays
+create distinct pollable ledger rows, all correlated to the same approval.
+
+Announcement delivery is at least once. A short SQLite lease prevents concurrent API
+processes from emitting the same queued item together; a dead process's lease expires and
+another process retries it. If a process dies after the receiver accepts the event but
+before SQLite records that acknowledgement, the retry can repeat the event. Consumers must
+therefore treat `needs_human_resolved.payload.request_id` as its idempotency key. The
+decision itself remains exactly once.
+
+After acknowledgement, completion effects use a separate SQLite lease, retry deadline,
+attempt counter, and backoff. This matters for multi-process serving: only the worker that
+owns the live effects token may finish it, and an abandoned token becomes claimable at its
+exact deadline. For a budget approval, deleting the pause, granting the window-scoped
+carry-on allowance, and marking completion are one SQLite transaction. A crash is therefore
+either wholly before that act or wholly after it; it cannot leave an unpaused resident
+without its allowance, or mark incomplete/refused work complete.
+The lifecycle worker only reconciles announcement/effects rows after the decision or
+expiry transition records them. Deadline detection and the expiry transition remain the
+approval sweep's responsibility.
 
 ## How a session asks
 
