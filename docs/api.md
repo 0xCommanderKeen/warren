@@ -210,11 +210,12 @@ must make, the block grammar, and the guardrails are in
 
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
-before the parameter existed, so a panel that never passed it sees exactly what it saw. A
-request past its `expires_at` but not yet swept is **not** returned under `pending`
-(steward #66): it denies by default, so listing it as still answerable would let a human
-click *approve* on something the sweep is about to close. It reappears under `resolved`
-once the deny is recorded.
+before the parameter existed, so a panel that never passed it sees exactly what it saw.
+The API's lifespan runs the ordinary expiry transition in the background, including when
+no scheduler, dispatcher, or watchdog daemon is running. It records the deny, emits
+`needs_human_resolved`, and leaves the decision ready for the resident's next wake-up.
+GET routes remain read-only: a pending-list read hides a row already past its deadline,
+but neither polling nor looking up an unknown id causes a sweep.
 
 `GET /approvals/{request_id}` is the audit query: request, full detail, decision,
 decider, and every timestamp, in one call. `404` for an id steward has never seen.
@@ -237,8 +238,8 @@ Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
 changes nothing, and emits nothing. An unknown `request_id` is `404`. A request that has
 already **expired** is a `409` with `approval_expired` — distinct from the replay of an
-already-decided one, because it was never decided: deny-by-default has the last word and the
-sweep records the deny (steward #66).
+already-decided one. Deny-by-default has the last word; the late POST explicitly sweeps
+the row to `deny` and emits its resolution (steward #66, #143).
 
 Requests are *created* by the session that reaches a gated action — through a
 `<needs-human>` block in its output or `steward approval raise`, both documented in

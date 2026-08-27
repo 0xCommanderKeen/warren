@@ -28,12 +28,14 @@ is anything to ask a human for a token with. Those three files contain no fleet 
 every byte the console displays it fetches from the endpoints above, with the token.
 """
 
+import asyncio
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hmac import compare_digest
@@ -103,6 +105,11 @@ log = logging.getLogger("steward.api")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8801
+
+#: ``serve`` keeps approval deadlines real even when no scheduler, dispatcher, or
+#: watchdog is resident. Kept here rather than in the transition: cadence is process
+#: lifecycle policy, while ``ApprovalTransitions.expire`` remains the atomic domain act.
+APPROVAL_EXPIRY_INTERVAL_S = 30.0
 
 TOKEN_ENV = "STEWARD_TOKEN"  # noqa: S105 — an env var name, not a credential
 CORS_ENV = "STEWARD_CORS_ORIGINS"
@@ -543,6 +550,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
     transport: Transport | None = None,
+    approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> FastAPI:
     """Build the API. Raises :class:`ApiError` rather than serving without a token.
 
@@ -606,6 +615,32 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         store=db,
     )
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Own the API-only approval sweep for exactly as long as the app lives."""
+        stopped = asyncio.Event()
+
+        async def expire_approvals() -> None:
+            while not stopped.is_set():
+                try:
+                    # Store access and event delivery are synchronous. Keep them off the
+                    # server loop; awaiting each pass also guarantees this worker never
+                    # overlaps itself when a slow emitter outlives the interval.
+                    await asyncio.to_thread(approvals.expire, now())
+                except Exception:
+                    log.exception("approval expiry sweep failed; will retry")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stopped.wait(), timeout=approval_expiry_interval_s)
+
+        worker = asyncio.create_task(expire_approvals(), name="steward-approval-expiry")
+        _app.state.approval_expiry_task = worker
+        try:
+            yield
+        finally:
+            stopped.set()
+            await worker
+            _app.state.approval_expiry_task = None
+
     app = FastAPI(
         title="steward",
         summary="The token-gated write path into the agent fleet burrow watches.",
@@ -616,6 +651,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         redoc_url=None,
         openapi_url=None,
         dependencies=[Depends(_auth_dependency(token))],
+        lifespan=lifespan,
     )
     if settings.cors_origins:
         app.add_middleware(
@@ -1043,10 +1079,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         exactly what it saw before. ``all`` is the audit view: request and decision in one
         row, which is how "what did I approve, and when" gets answered.
 
-        A request past its ``expires_at`` but not yet swept is **not** pending here (steward
-        #66): it denies by default, and a panel that listed it as still answerable would let
-        a human click *approve* on something the deny-by-default sweep is about to close. It
-        reappears under ``resolved`` once the approval sweep records the deny.
+        This route is a pure ledger read. The app lifespan owns deadline expiry, so an
+        API-only steward still resolves overdue requests without polling causing writes.
         """
         wanted = status or APPROVAL_STATUS_PENDING
         if wanted not in APPROVAL_STATUSES:
@@ -1058,8 +1092,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             )
         records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
         if wanted == APPROVAL_STATUS_PENDING:
-            now = ev.utc_now_iso()
-            records = [r for r in records if r.expires_at is None or r.expires_at > now]
+            moment = ev.utc_now_iso(now())
+            records = [r for r in records if r.expires_at is None or r.expires_at > moment]
         return {"status": wanted, "approvals": [record.to_dict() for record in records]}
 
     @app.get("/approvals/{request_id}")
@@ -1075,15 +1109,23 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
-        decided = approvals.decide(request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit)
+        moment = now()
+        decided = approvals.decide(
+            request_id,
+            body.decision,
+            decided_by=DECIDED_BY,
+            edit=body.edit,
+            now=moment,
+        )
         record = decided.record
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
         if decided.expired:
             # Deny-by-default has the last word — a click a minute past the deadline must
             # not slip an action through ahead of the sweep, which denies it and closes the
-            # loop in the log (steward #66). Distinct from an already-decided request, which
-            # comes back resolved and reads as a replay below.
+            # loop in the log (steward #66). Do that sweep here too: an API-only steward
+            # must not leave the refused request pending forever.
+            approvals.expire(moment)
             _refuse(
                 409,
                 "approval_expired",
