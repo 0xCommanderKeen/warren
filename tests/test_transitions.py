@@ -817,6 +817,30 @@ def test_worker_close_surfaces_a_slow_active_pass(store: Store) -> None:
     assert not worker.alive
 
 
+def test_worker_rejects_a_concurrent_second_start(store: Store) -> None:
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(store, ev.NullEmitter()), lambda _record, _token: True
+    )
+    worker.start()
+    try:
+        with pytest.raises(RuntimeError, match="already running"):
+            worker.start()
+    finally:
+        worker.close()
+
+
+def test_worker_can_close_before_its_first_start(store: Store) -> None:
+    worker = ApprovalOutboxWorker(
+        tr.ApprovalTransitions(store, ev.NullEmitter()), lambda _record, _token: True
+    )
+
+    worker.close()
+    worker.start()
+    worker.close()
+
+    assert not worker.alive
+
+
 def test_an_expired_request_can_never_be_approved(
     approvals: tr.ApprovalTransitions,
     store: Store,

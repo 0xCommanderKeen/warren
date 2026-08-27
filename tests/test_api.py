@@ -482,6 +482,28 @@ def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) ->
     worker.close(timeout=1.0)
 
 
+def test_a_second_lifespan_drains_work_committed_after_the_first(api: ApiFactory) -> None:
+    harness = api()
+
+    with harness.client:
+        pass
+
+    approval_id = _pending(harness)
+    record, recorded = harness.store.decide(approval_id, "approve")
+    assert recorded
+    assert record is not None
+    assert harness.events("needs_human_resolved") == []
+
+    with harness.client:
+        for _ in range(100):
+            resolved = harness.events("needs_human_resolved")
+            if resolved:
+                break
+            threading.Event().wait(0.01)
+
+    assert [event["payload"]["request_id"] for event in resolved] == [approval_id]
+
+
 def test_a_second_decision_changes_nothing_and_emits_nothing(api: ApiFactory) -> None:
     harness = api()
     request_id = _pending(harness)

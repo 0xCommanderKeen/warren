@@ -82,14 +82,21 @@ class ApprovalOutboxWorker:
         self.complete = complete
         self.poll_interval = poll_interval
         self.close_timeout = close_timeout
+        self._lifecycle_lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name="approval-outbox", daemon=True)
+        self._thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Start the single worker thread and request an immediate startup pass."""
-        self._thread.start()
-        self._wake.set()
+        with self._lifecycle_lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("approval outbox worker is already running")
+            self._wake = threading.Event()
+            self._stop = threading.Event()
+            self._thread = threading.Thread(target=self._run, name="approval-outbox", daemon=True)
+            self._thread.start()
+            self._wake.set()
 
     def notify(self) -> None:
         """Wake the worker because a producer committed new work."""
@@ -97,16 +104,21 @@ class ApprovalOutboxWorker:
 
     def close(self, timeout: float | None = None) -> None:
         """Request shutdown, raising when an active pass cannot stop in time."""
-        self._stop.set()
-        self._wake.set()
-        self._thread.join(self.close_timeout if timeout is None else timeout)
-        if self._thread.is_alive():
-            raise TimeoutError("approval outbox worker did not stop before its shutdown deadline")
+        with self._lifecycle_lock:
+            if self._thread is None:
+                return
+            self._stop.set()
+            self._wake.set()
+            self._thread.join(self.close_timeout if timeout is None else timeout)
+            if self._thread.is_alive():
+                raise TimeoutError(
+                    "approval outbox worker did not stop before its shutdown deadline"
+                )
 
     @property
     def alive(self) -> bool:
         """Whether the lifecycle-owned thread is still running."""
-        return self._thread.is_alive()
+        return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
         while not self._stop.is_set():
