@@ -73,6 +73,8 @@ deliberate exception, a repeat auto-deny, is named as its own outcome so it cann
 anywhere by accident. Persistence and delivery stay two systems. Approval resolution is
 the one transition with a durable SQLite outbox: decisions are exactly once, while their
 announcements retry at least once and use `request_id` as the consumer idempotency key.
+The API lifecycle owns the retry worker; transient failures recover without a client
+replay or process restart, and completion effects wait for durable acknowledgement.
 The full matrix is `docs/transitions.md`.
 
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short

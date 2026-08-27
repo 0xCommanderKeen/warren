@@ -146,7 +146,10 @@ CREATE TABLE IF NOT EXISTS approval_announcements (
     request_id    TEXT PRIMARY KEY REFERENCES approvals(request_id),
     claimed_by    TEXT,
     claimed_until TEXT,
-    announced_at  TEXT
+    announced_at  TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    effects_at    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS run_ledger (
@@ -253,6 +256,11 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
+    },
+    "approval_announcements": {
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at": "TEXT",
+        "effects_at": "TEXT",
     },
     "run_ledger": {
         # Denormalized from the task the run came off (steward #45). Rolling spend up by
@@ -771,6 +779,7 @@ class Store:
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock, self._conn:
+            self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
@@ -1457,7 +1466,7 @@ class Store:
         return ApprovalRecord.from_row(row), recorded
 
     def claim_approval_announcement(
-        self, request_id: str | None = None, *, lease_s: int = 30
+        self, request_id: str | None = None, *, lease_s: float = 30
     ) -> tuple[ApprovalRecord, str] | None:
         """Lease one unresolved approval announcement for emission.
 
@@ -1470,28 +1479,25 @@ class Store:
         moment = utc_now_iso(now)
         until = utc_now_iso(now + timedelta(seconds=lease_s))
         with self._lock, self._conn:
-            query = (
-                "SELECT request_id FROM approval_announcements "
-                "WHERE announced_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?)"
-            )
-            params: tuple[str, ...] = (moment,)
+            params: tuple[str, ...] = (token, until, moment, moment)
             if request_id is not None:
-                query += " AND request_id = ?"
                 params += (request_id,)
-            query += " ORDER BY rowid LIMIT 1"
-            queued = self._conn.execute(query, params).fetchone()
-            if queued is None:
-                return None
-            claimed = self._conn.execute(
-                "UPDATE approval_announcements SET claimed_by = ?, claimed_until = ? "
-                "WHERE request_id = ? AND announced_at IS NULL "
-                "AND (claimed_until IS NULL OR claimed_until <= ?)",
-                (token, until, queued["request_id"], moment),
+                requested = "AND request_id = ?"
+            else:
+                requested = ""
+            claim_sql = (
+                "UPDATE approval_announcements SET claimed_by = ?, claimed_until = ? "  # noqa: S608
+                "WHERE request_id = (SELECT request_id FROM approval_announcements "
+                "WHERE announced_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+                "AND (claimed_until IS NULL OR claimed_until <= ?) "
+                + requested
+                + " ORDER BY rowid LIMIT 1) AND announced_at IS NULL RETURNING request_id"
             )
-            if claimed.rowcount != 1:
+            claimed = self._conn.execute(claim_sql, params).fetchone()
+            if claimed is None:
                 return None
             row = self._conn.execute(
-                "SELECT * FROM approvals WHERE request_id = ?", (queued["request_id"],)
+                "SELECT * FROM approvals WHERE request_id = ?", (claimed["request_id"],)
             ).fetchone()
         return ApprovalRecord.from_row(row), token
 
@@ -1506,11 +1512,55 @@ class Store:
                     (utc_now_iso(), request_id, token),
                 )
             else:
-                cursor = self._conn.execute(
-                    "UPDATE approval_announcements SET claimed_by = NULL, claimed_until = NULL "
-                    "WHERE request_id = ? AND claimed_by = ? AND announced_at IS NULL",
-                    (request_id, token),
+                attempts = (
+                    self._conn.execute(
+                        "SELECT attempts FROM approval_announcements WHERE request_id = ?",
+                        (request_id,),
+                    ).fetchone()["attempts"]
+                    + 1
                 )
+                delay = min(30.0, 0.1 * (2 ** min(attempts - 1, 8)))
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET claimed_by = NULL, claimed_until = NULL, "
+                    "attempts = ?, next_attempt_at = ? "
+                    "WHERE request_id = ? AND claimed_by = ? AND announced_at IS NULL",
+                    (
+                        attempts,
+                        utc_now_iso(datetime.now(UTC) + timedelta(seconds=delay)),
+                        request_id,
+                        token,
+                    ),
+                )
+        return cursor.rowcount == 1
+
+    def next_approval_announcement_at(self) -> str | None:
+        """Earliest retry or live lease deadline; ``None`` means no pending work."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
+                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END) AS due "
+                "FROM approval_announcements WHERE announced_at IS NULL",
+                (utc_now_iso(),),
+            ).fetchone()
+        return row["due"]
+
+    def pending_approval_effects(self) -> list[ApprovalRecord]:
+        """Acknowledged announcements whose idempotent completion still needs running."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT a.* FROM approvals a JOIN approval_announcements q USING(request_id) "
+                "WHERE q.announced_at IS NOT NULL AND q.effects_at IS NULL ORDER BY a.decided_at"
+            ).fetchall()
+        return [ApprovalRecord.from_row(row) for row in rows]
+
+    def finish_approval_effects(self, request_id: str) -> bool:
+        """Mark post-ack completion finished, conditional for idempotent replays."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE approval_announcements SET effects_at = ? WHERE request_id = ? "
+                "AND announced_at IS NOT NULL AND effects_at IS NULL",
+                (utc_now_iso(), request_id),
+            )
         return cursor.rowcount == 1
 
     # -- the run ledger ----------------------------------------------------------------

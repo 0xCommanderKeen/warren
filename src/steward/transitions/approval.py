@@ -23,7 +23,8 @@ it wrote.
 """
 
 import logging
-from collections.abc import Mapping
+import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -50,9 +51,71 @@ from steward.transitions.outcome import (
     replayed,
 )
 
-__all__ = ["ALREADY_DECIDED", "PAST_DEADLINE", "UNKNOWN_REQUEST", "ApprovalTransitions"]
+__all__ = [
+    "ALREADY_DECIDED",
+    "PAST_DEADLINE",
+    "UNKNOWN_REQUEST",
+    "ApprovalOutboxWorker",
+    "ApprovalTransitions",
+]
 
 log = logging.getLogger("steward.transitions.approval")
+
+
+class ApprovalOutboxWorker:
+    """One wakeable, non-overlapping owner of announcement retries and completion."""
+
+    def __init__(
+        self,
+        transitions: "ApprovalTransitions",  # noqa: UP037 — class is declared below
+        complete: Callable[[ApprovalRecord], None],
+    ) -> None:
+        """Bind one transition seam and its idempotent post-ack completion."""
+        self.transitions = transitions
+        self.complete = complete
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="approval-outbox", daemon=True)
+
+    def start(self) -> None:
+        """Start the single worker thread and request an immediate startup pass."""
+        self._thread.start()
+        self._wake.set()
+
+    def notify(self) -> None:
+        """Wake the worker because a producer committed new work."""
+        self._wake.set()
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Request shutdown and wait for the active pass to finish."""
+        self._stop.set()
+        self._wake.set()
+        self._thread.join(timeout)
+
+    @property
+    def alive(self) -> bool:
+        """Whether the lifecycle-owned thread is still running."""
+        return self._thread.is_alive()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            failed = False
+            try:
+                self.transitions.reconcile_announcements()
+                for record in self.transitions.store.pending_approval_effects():
+                    self.complete(record)
+                    self.transitions.store.finish_approval_effects(record.request_id)
+            except Exception:
+                log.exception("approval outbox pass failed; it will retry")
+                failed = True
+            due = self.transitions.store.next_approval_announcement_at()
+            timeout = 0.1 if failed else None
+            if due is not None:
+                deadline = datetime.fromisoformat(due)
+                timeout = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+            self._wake.wait(timeout)
+            self._wake.clear()
+
 
 #: Why a decision was refused outright: there is no such request to decide.
 UNKNOWN_REQUEST = "no such approval request"

@@ -7,7 +7,9 @@ fact reaches the emitter on the winning branch, and that no fact reaches it on a
 """
 
 import ast
+import json
 import threading
+import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -33,6 +35,7 @@ from steward.store import (
 from steward.transitions import budget as tb
 from steward.transitions import outcome as to
 from steward.transitions import task as tt
+from steward.transitions.approval import ApprovalOutboxWorker
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 CLAIMANT = "claude-code:test-agent"
@@ -611,28 +614,31 @@ def test_a_committed_decision_retries_its_announcement_after_emitter_failure(
     sink.events.clear()
     replay = transitions.decide(raised.request_id, "deny", now=NOW)
     assert replay.replayed
-    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
+    assert sink.events == [], "a False legacy receipt leaves the announcement pending"
 
 
 def test_an_abandoned_post_emit_claim_is_recovered_once_after_its_lease(
-    store: Store, manifest: ResidentManifest
+    store: Store, manifest: ResidentManifest, tmp_path: Path
 ) -> None:
     transitions = tr.ApprovalTransitions(store, ev.NullEmitter())
     raised = transitions.raise_request(
         manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
     ).require()
     store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
-    abandoned = store.claim_approval_announcement(raised.request_id, lease_s=-1)
+    abandoned = store.claim_approval_announcement(raised.request_id, lease_s=0.05)
     assert abandoned is not None, "the simulated dead process emitted but never acknowledged"
 
-    sink = ev.NullEmitter()
+    time.sleep(0.06)
+    fallback = tmp_path / "approval-outbox-test.jsonl"
+    sink = ev.EventEmitter(fallback=fallback)
     assert tr.ApprovalTransitions(store, sink).reconcile_announcements() == 1
-    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
+    events = [json.loads(line) for line in fallback.read_text().splitlines()]
+    assert [event["payload"]["request_id"] for event in events] == [raised.request_id]
     assert tr.ApprovalTransitions(store, sink).reconcile_announcements() == 0
 
 
 def test_concurrent_reconcilers_claim_one_announcement_once(
-    store: Store, manifest: ResidentManifest
+    store: Store, manifest: ResidentManifest, tmp_path: Path
 ) -> None:
     raised = (
         tr.ApprovalTransitions(store, ev.NullEmitter())
@@ -640,7 +646,8 @@ def test_concurrent_reconcilers_claim_one_announcement_once(
         .require()
     )
     store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
-    sink = ev.NullEmitter()
+    fallback = tmp_path / "race-events.jsonl"
+    sink = ev.EventEmitter(fallback=fallback)
     barrier = threading.Barrier(3)
 
     def reconcile() -> None:
@@ -653,7 +660,44 @@ def test_concurrent_reconcilers_claim_one_announcement_once(
     barrier.wait()
     for thread in threads:
         thread.join()
-    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
+    events = [json.loads(line) for line in fallback.read_text().splitlines()]
+    assert [event["payload"]["request_id"] for event in events] == [raised.request_id]
+
+
+def test_worker_recovers_a_transient_failure_without_replay(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    class TransientEmitter:
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.accepted = threading.Event()
+
+        def emit(self, event: ev.Event) -> bool:
+            return self.emit_durable(event)
+
+        def emit_durable(self, event: ev.Event) -> bool:
+            del event
+            self.attempts += 1
+            if self.attempts == 1:
+                return False
+            self.accepted.set()
+            return True
+
+    raised = (
+        tr.ApprovalTransitions(store, ev.NullEmitter())
+        .raise_request(manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW)
+        .require()
+    )
+    store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
+    sink = TransientEmitter()
+    worker = ApprovalOutboxWorker(tr.ApprovalTransitions(store, sink), lambda _record: None)
+    worker.start()
+    try:
+        assert sink.accepted.wait(2.0)
+        assert sink.attempts == 2
+    finally:
+        worker.close()
+    assert not worker.alive
 
 
 def test_an_expired_request_can_never_be_approved(

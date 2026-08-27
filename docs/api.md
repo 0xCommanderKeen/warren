@@ -227,7 +227,11 @@ decider, and every timestamp, in one call. `404` for an id steward has never see
 
 The decision is recorded durably and emitted as `needs_human_resolved` with
 `{request_id, decision, decided_by, action}`, under the *resident's* agent id — the
-villager walking away from your door is the one who knocked.
+villager walking away from your door is the one who knocked. If no durable event sink
+accepts it immediately, the response and request log say
+`recorded_announcement_pending`; the lifecycle-owned worker retries without another
+client request or restart. Completion effects such as budget resume happen only after
+that acknowledgement and are themselves crash-recoverable.
 
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,

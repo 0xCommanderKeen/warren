@@ -197,8 +197,9 @@ def deliver(emitter: ev.Emitter, fact: ev.Event) -> bool:
     durable_emit = getattr(emitter, "emit_durable", None)
     if durable_emit is not None:
         return bool(durable_emit(fact))
-    emitter.emit(fact)
-    return True
+    # Legacy emitters have no stronger receipt than their return value.  In particular,
+    # ``False`` and ``None`` can never acknowledge durable work.
+    return emitter.emit(fact) is True
 
 
 def carried[RecordT, InnerT](

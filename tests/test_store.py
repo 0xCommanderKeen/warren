@@ -46,7 +46,42 @@ def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: P
     connection = sqlite3.connect(path)
     columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_announcements)")}
     connection.close()
-    assert columns == {"request_id", "claimed_by", "claimed_until", "announced_at"}
+    assert columns == {
+        "request_id",
+        "claimed_by",
+        "claimed_until",
+        "announced_at",
+        "attempts",
+        "next_attempt_at",
+        "effects_at",
+    }
+
+
+def test_two_independent_connections_cannot_claim_one_announcement(tmp_path: Path) -> None:
+    path = tmp_path / "shared.db"
+    first, second = Store(path), Store(path)
+    try:
+        record = first.create_approval_request(
+            agent_id="claude-code:hob", project="home", action="send_email", message="ask"
+        )
+        first.decide(record.request_id, "approve")
+        barrier = threading.Barrier(3)
+        claims: list[object] = []
+
+        def claim(opened: Store) -> None:
+            barrier.wait()
+            claims.append(opened.claim_approval_announcement())
+
+        threads = [threading.Thread(target=claim, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+        assert sum(claim is not None for claim in claims) == 1
+    finally:
+        first.close()
+        second.close()
 
 
 def _job(store: Store, task_id: str) -> JobRecord:
