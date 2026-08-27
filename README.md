@@ -135,7 +135,7 @@ map of everything the fleet does.
   with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py hooks viewer villagers | ssh

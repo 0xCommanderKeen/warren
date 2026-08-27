@@ -112,8 +112,7 @@ class StateHTTPTests(unittest.TestCase):
             return result.status
 
         def rotate():
-            with serve.LOG_LOCK:
-                return serve.rotate(os.path.getsize(self.events))
+            return self.running.server.event_log.rotate()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             posted = pool.submit(ingest)

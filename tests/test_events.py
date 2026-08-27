@@ -879,8 +879,7 @@ class EventsEndpointTest(unittest.TestCase):
                     "payload": {"tool": "Read", "detail": str(index)},
                 }
             )
-        with serve.LOG_LOCK:
-            archive = serve.rotate(os.path.getsize(self.events))
+        archive = self.server.event_log.rotate()
         self.assertIsNotNone(archive)
         self.assertGreater(
             os.path.getsize(self.events), int(old_cursor.rsplit(":", 1)[-1])

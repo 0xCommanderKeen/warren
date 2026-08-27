@@ -24,7 +24,6 @@ import dataclasses
 import datetime
 import email.header
 import fcntl
-import glob
 import hmac
 import json
 import os
@@ -49,11 +48,11 @@ from pydantic import BaseModel, ConfigDict, JsonValue, RootModel, model_validato
 from sse_starlette import EventSourceResponse, ServerSentEvent
 
 import notification_persistence
+import event_log
 import residents as resident_manifests
 import retention
 from state_coordinator import StateCoordinator
 from approval_protocol import structured_approval, thaw_json
-from hooks import durable
 from protocol import validate_event
 from config import Config
 
@@ -71,11 +70,6 @@ TOKEN = _DEFAULT_CONFIG.token
 ARCHIVE_DIR = ""
 MAX_LOG_BYTES = _DEFAULT_CONFIG.max_log_bytes
 
-# every read, append and rotation of the log goes through this, so an event can
-# never land in the gap between reading the log and swapping it out
-LOG_LOCK = threading.Lock()
-_rotate_floor = 0  # don't re-check until the log grows past this
-_log_generation = 0  # changes when rotation rewrites the live inode
 NOTIFY_URL = _DEFAULT_CONFIG.notify_url
 NOTIFY_TOKEN = _DEFAULT_CONFIG.notify_token
 NOTIFY_TIMEOUT = _DEFAULT_CONFIG.notify_timeout
@@ -398,10 +392,6 @@ def receiver_delivery_id(event):
     return notification_persistence.terminal_key(event)
 
 
-def _fsync_parent(path):
-    durable.fsync_parent(path)
-
-
 def persist_knock(event):
     """Durably journal notification work before the ingest acknowledges it."""
     if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
@@ -668,252 +658,23 @@ def transport_status():
     }
 
 
-def archive_dir():
-    """Where segments land: BURROW_ARCHIVE, else `archive/` beside the live log —
-    same volume in both local mode and the container's mounted /data."""
-    configured = _setting("archive_dir", ARCHIVE_DIR)
-    return (
-        str(configured)
-        if configured
-        else os.path.join(os.path.dirname(os.path.abspath(_events_path())), "archive")
-    )
+def _count_ingest_duplicate():
+    with _transport_lock:
+        _transport_counters["ingest_duplicates"] += 1
 
 
-def archive_path(now=None):
-    """<archive>/events-20260824T170430Z.jsonl, never overwriting a segment."""
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    into = archive_dir()
-    base, ext = os.path.splitext(os.path.basename(_events_path()))
-    stamp = now.strftime("%Y%m%dT%H%M%SZ")
-    path = os.path.join(into, base + "-" + stamp + ext)
-    n = 1
-    while os.path.exists(path):
-        path = os.path.join(into, "%s-%s-%d%s" % (base, stamp, n, ext))
-        n += 1
-    return path
-
-
-def rotate(size):
-    """Roll the live log into a dated archive and restart it from the tail the
-    village still needs. Call with LOG_LOCK held. Returns the archive path, or
-    None when there was nothing worth reclaiming."""
-    global _rotate_floor, _log_generation
-    # Keep the inode: local emitters may already have EVENTS open for append.
-    # An inode swap strands such descriptors in the archive. Advisory locking
-    # coordinates the bundled emitter, while retaining the inode also makes a
-    # descriptor that writes after rotation append to the new live contents.
-    with open(_events_path(), "r+b") as live:
-        fcntl.flock(live, fcntl.LOCK_EX)
-        original = live.read()
-        lines = original.decode("utf-8", errors="replace").splitlines()
-        tail = retention.carry_forward(
-            lines, int(time.time() * 1000), retention.POLICY
-        ).lines
-        data = "".join(line + "\n" for line in tail).encode("utf-8")
-        size = len(original)
-        if len(data) > size * 9 // 10:
-            _rotate_floor = size + max(
-                _setting("max_log_bytes", MAX_LOG_BYTES) // 10, 1
-            )
-            return None
-        os.makedirs(archive_dir(), exist_ok=True)
-        archive = archive_path()
-        with open(archive, "xb") as archived:
-            archived.write(original)
-            archived.flush()
-            os.fsync(archived.fileno())
-        _fsync_parent(archive)
-        live.seek(0)
-        live.write(data)
-        live.truncate()
-        live.flush()
-        os.fsync(live.fileno())
-        _log_generation += 1
-    _rotate_floor = 0
-    return archive
-
-
-def maybe_rotate():
-    """Size check on the live log. Call with LOG_LOCK held."""
-    max_log_bytes = _setting("max_log_bytes", MAX_LOG_BYTES)
-    if max_log_bytes <= 0:
-        return
-    try:
-        size = os.path.getsize(_events_path())
-    except OSError:
-        return
-    if size <= max(max_log_bytes, _rotate_floor):
-        return
-    try:
-        rotate(size)
-    except OSError:
-        pass  # a log we failed to rotate beats a dropped event
-
-
-def read_log():
-    """The live log, rotating it first if it has outgrown the threshold. Doing
-    the check here too keeps local mode bounded, where emitters append to the
-    file themselves and the server only ever reads it."""
-    with LOG_LOCK:
-        maybe_rotate()
-        try:
-            with open(_events_path(), "rb") as f:
-                return f.read()
-        except OSError:
-            return b""
+def _event_log():
+    runtime = _active_runtime.get()
+    if runtime is not None:
+        return runtime.event_log
+    return event_log.EventLog(_legacy_config(), _store(), _count_ingest_duplicate)
 
 
 def append_event(event):
-    """Append one event, then rotate if the log is now too big — in that order,
-    so an accepted POST is always in the live tail or in an archive."""
-    line = json.dumps(event, ensure_ascii=False) + "\n"
-    with LOG_LOCK:
-        events_path = _events_path()
-        os.makedirs(os.path.dirname(os.path.abspath(events_path)), exist_ok=True)
-        with open(
-            durable.lock_path(os.path.abspath(events_path)), "a+"
-        ) as process_lock:
-            fcntl.flock(process_lock, fcntl.LOCK_EX)
-            delivery_id = event.get("delivery_id")
-            remembered = _store().load_ledger(LEDGER_DELIVERY_IDS)
-            if delivery_id and delivery_id in remembered:
-                with _transport_lock:
-                    _transport_counters["ingest_duplicates"] += 1
-                return False
-            if delivery_id and _event_log_has_delivery_id(delivery_id):
-                # The event log is the canonical commit record. Repair a missing
-                # acceleration ledger left by a crash after the event fsync.
-                try:
-                    _store().remember(LEDGER_DELIVERY_IDS, delivery_id)
-                except OSError:
-                    pass
-                with _transport_lock:
-                    _transport_counters["ingest_duplicates"] += 1
-                return False
-            with open(events_path, "a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                os.fsync(f.fileno())
-            _fsync_parent(events_path)
-            if delivery_id:
-                _store().remember(LEDGER_DELIVERY_IDS, delivery_id)
-            maybe_rotate()
-            return True
+    return _event_log().append(event)
 
 
-def _event_log_has_delivery_id(delivery_id):
-    events_path = _events_path()
-    paths = [events_path]
-    base, ext = os.path.splitext(os.path.basename(events_path))
-    paths.extend(sorted(glob.glob(os.path.join(archive_dir(), base + "-*" + ext))))
-    for path in paths:
-        try:
-            with open(path, encoding="utf-8") as stream:
-                for line in stream:
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if (
-                        isinstance(event, dict)
-                        and event.get("delivery_id") == delivery_id
-                    ):
-                        return True
-        except OSError:
-            continue
-    return False
-
-
-def _reject_json_constant(value):
-    raise json.JSONDecodeError("non-standard JSON constant", value, 0)
-
-
-@dataclasses.dataclass(frozen=True)
-class EventCursor:
-    """Validated event-log position with explicit resume policy."""
-
-    boot_id: str | None = None
-    device: int = 0
-    inode: int = 0
-    generation: int = 0
-    offset: int = 0
-    reset_only: bool = False
-
-    MAX_ENCODED_BYTES = 160
-    MAX_INTEGER = (1 << 64) - 1
-
-    @classmethod
-    def initial(cls):
-        return cls()
-
-    @classmethod
-    def parse(cls, raw):
-        if not isinstance(raw, str) or not raw or len(raw) > cls.MAX_ENCODED_BYTES:
-            raise ValueError
-        parts = raw.split(":")
-        if len(parts) == 6 and parts[0] == "v1":
-            boot_id = parts[1]
-            if not re.fullmatch(r"[0-9a-f]{32}", boot_id):
-                raise ValueError
-            values = cls._parse_integers(parts[2:])
-            return cls(boot_id, *values)
-        if len(parts) in (3, 4):
-            values = cls._parse_integers(parts)
-            return cls(offset=values[-1], reset_only=True)
-        if len(parts) == 1:
-            return cls(offset=cls._parse_integers(parts)[0], reset_only=True)
-        raise ValueError
-
-    @classmethod
-    def _parse_integers(cls, fields):
-        values = []
-        for field in fields:
-            if (
-                not field
-                or len(field) > 20
-                or not field.isascii()
-                or not field.isdigit()
-            ):
-                raise ValueError
-            value = int(field)
-            if value > cls.MAX_INTEGER:
-                raise ValueError
-            values.append(value)
-        return values
-
-    @classmethod
-    def issued(cls, boot_id, stat, generation, offset):
-        device, inode = (stat.st_dev, stat.st_ino) if stat is not None else (0, 0)
-        return cls(boot_id, device, inode, generation, offset)
-
-    def resume(self, current, size):
-        """Return (offset, reset) against the current issued cursor identity."""
-        if self.boot_id is None and not self.reset_only:
-            return 0, False
-        identity_matches = (
-            self.boot_id == current.boot_id
-            and self.device == current.device
-            and self.inode == current.inode
-            and self.generation == current.generation
-        )
-        if self.reset_only or not identity_matches or self.offset > size:
-            return 0, True
-        return self.offset, False
-
-    def format(self):
-        if self.boot_id is None:
-            raise ValueError("only server-issued cursors can be formatted")
-        return ":".join(
-            str(part)
-            for part in (
-                "v1",
-                self.boot_id,
-                self.device,
-                self.inode,
-                self.generation,
-                self.offset,
-            )
-        )
+EventCursor = event_log.EventCursor
 
 
 class ProtocolEvent(BaseModel):
@@ -1153,6 +914,9 @@ class Runtime:
             ledger_limits=lambda: (config.ledger_records, config.ledger_bytes),
         )
         self.boot_id = secrets.token_hex(16)
+        self.event_log = event_log.EventLog(
+            config, self.notification_store, _count_ingest_duplicate
+        )
         self.state_coordinator = StateCoordinator(
             self.projection_inputs,
             read_residents,
@@ -1165,48 +929,10 @@ class Runtime:
         )
 
     def projection_inputs(self):
-        with LOG_LOCK:
-            maybe_rotate()
-            events = []
-            try:
-                with open(self.config.events, "rb") as stream:
-                    stat = os.fstat(stream.fileno())
-                    for line in stream:
-                        try:
-                            events.append(
-                                json.loads(line, parse_constant=_reject_json_constant)
-                            )
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            events.append(None)
-                    cursor = EventCursor.issued(
-                        self.boot_id, stat, _log_generation, stat.st_size
-                    ).format()
-            except FileNotFoundError:
-                cursor = EventCursor.issued(
-                    self.boot_id, None, _log_generation, 0
-                ).format()
-            return events, cursor, _log_generation
+        return self.event_log.projection_inputs(self.boot_id)
 
     def read_event_records(self, cursor):
-        with LOG_LOCK:
-            maybe_rotate()
-            records = []
-            try:
-                with open(self.config.events, "rb") as stream:
-                    stat = os.fstat(stream.fileno())
-                    current = EventCursor.issued(self.boot_id, stat, _log_generation, 0)
-                    offset, reset = cursor.resume(current, stat.st_size)
-                    stream.seek(offset)
-                    chunk = stream.read()
-                    end = chunk.rfind(b"\n") + 1
-                    for line in chunk[:end].splitlines(keepends=True):
-                        offset += len(line)
-                        records.append((offset, line))
-                    return records, dataclasses.replace(current, offset=offset), reset
-            except FileNotFoundError:
-                current = EventCursor.issued(self.boot_id, None, _log_generation, 0)
-                _, reset = cursor.resume(current, 0)
-                return records, current, reset
+        return self.event_log.read_records(self.boot_id, cursor)
 
 
 def lifespan(config):

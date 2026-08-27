@@ -62,3 +62,7 @@ class _ServerView:
     @property
     def state_coordinator(self):
         return self._application.state.runtime.state_coordinator
+
+    @property
+    def event_log(self):
+        return self._application.state.runtime.event_log
