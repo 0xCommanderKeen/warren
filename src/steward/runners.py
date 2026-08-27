@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from steward.manifest import Runner as RunnerSpec
+from steward.manifest import ToolGrant
 
 __all__ = [
     "COST_USD_MAX",
@@ -72,6 +73,7 @@ __all__ = [
     "RunnerError",
     "build_runner",
     "check_runner",
+    "check_tool_bound",
     "run_argv",
     "skills_home",
     "substitute",
@@ -145,6 +147,11 @@ class RunRequest:
     prompt: str
     workdir: Path
     timeout_s: int
+    #: Which tools this session may reach, straight off the manifest. Required, and with
+    #: no default on purpose: a request built without one would be an unbounded session
+    #: that nobody chose to make unbounded, which is the exact silence-as-a-grant this
+    #: field exists to end. Forgetting it is a type error, not a quiet grant.
+    tools: ToolGrant
     model: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
     workdir_fd: int | None = field(default=None, repr=False, compare=False)
@@ -157,7 +164,15 @@ class RunRequest:
     def key(self) -> str:
         """Return a stable digest of the request, so mock results are reproducible."""
         material = "\x00".join(
-            [self.prompt, str(self.workdir), str(self.timeout_s), self.model or ""]
+            [
+                self.prompt,
+                str(self.workdir),
+                str(self.timeout_s),
+                self.model or "",
+                # Two requests that differ only in what the session may touch are two
+                # different sessions, so they must not share a mock result.
+                self.tools.describe(),
+            ]
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -466,13 +481,40 @@ class ClaudeRunner(_ProcessRunner):
     skills_dir: ClassVar[str | None] = ".claude/skills"
 
     def argv(self, request: RunRequest) -> list[str]:
-        """Build the claude headless argv: prompt, model, JSON output, permissions."""
+        """Build the claude headless argv: prompt, model, JSON output, permissions, tools.
+
+        The tool bound is compiled here and nowhere else — ``--tools`` with the declared
+        names, and ``--strict-mcp-config`` beside it, always the pair. Measured against CLI
+        2.1.247, in an empty directory, under ``env -i HOME PATH TERM``:
+
+        - ``--allowed-tools Read`` and Bash still ran. It pre-approves permission *rules*
+          and removes nothing, so a bound compiled to it would read as a boundary in the
+          manifest and be inert at run time. It is not the mechanism, and
+          ``docs/manifest.md`` records that by name so it is not reached for later.
+        - ``--tools Read`` and Bash was gone — but the session still listed
+          ``mcp__spell__spell_search``, an MCP tool from the *calling machine's* config that
+          steward never declared. On its own, ``--tools`` bounds the built-in set and leaks
+          the host's servers straight through.
+        - ``--tools Read --strict-mcp-config`` and the session had exactly ``Read``. That
+          pair is the enforcement, which is why neither flag is emitted without the other.
+
+        Removal is independent of ``--permission-mode``: ``--tools Read --permission-mode
+        acceptEdits`` still had no Bash. A permissive mode cannot hand back a tool this
+        argv took away.
+
+        ``unrestricted`` emits neither flag, so an unbounded resident's argv is byte for
+        byte what it was before this field existed. An empty list emits ``--tools ""``,
+        which the CLI documents — and which measured out — as *no tools at all*.
+        """
         argv = [self.binary, "-p", request.prompt, "--output-format", "json"]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
         if self.spec.permission_mode:
             argv += ["--permission-mode", self.spec.permission_mode]
+        bound = request.tools.bound
+        if bound is not None:
+            argv += ["--tools", ",".join(bound), "--strict-mcp-config"]
         return argv
 
     def parse(self, result: RunResult, stdout: str) -> RunResult:
@@ -744,6 +786,62 @@ def check_runner(spec: RunnerSpec) -> str | None:
         return build_runner(spec).check()
     except RunnerError as exc:
         return str(exc)
+
+
+#: The two flags a bounded session is launched with. Both, or the bound does not hold:
+#: ``--tools`` alone leaves the host's MCP servers reachable (see
+#: :meth:`ClaudeRunner.argv`), and ``--strict-mcp-config`` alone bounds nothing.
+TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
+
+
+def _cli_help(binary: str) -> str | None:
+    """Return ``<binary> --help``, or ``None`` when the binary would not answer.
+
+    Deliberately not cached. The answer is a property of the installed CLI rather than of
+    the resident asking, so a cache looks free — but the only caller is ``steward doctor``,
+    which asks once per *bounded* resident and then exits, and a module-global cache over a
+    PATH lookup is a stale answer waiting to be given to somebody who just upgraded.
+    """
+    outcome = run_argv([binary, "--help"])
+    if not outcome.ok:
+        return None
+    return outcome.stdout + outcome.stderr
+
+
+def check_tool_bound(spec: RunnerSpec, tools: ToolGrant) -> str | None:
+    """Return why the *installed* brain cannot hold this manifest's tool bound, or ``None``.
+
+    The CLI is part of the boundary, and that is the part of it steward does not ship. A
+    ``claude`` old enough not to know ``--tools`` accepts the manifest, launches, and hands
+    the session everything — the declaration is still in the file, still readable, and no
+    longer true. Nothing at run time notices; the resident simply has tools it was not
+    granted. So the flag is probed, rather than the binary merely being found on PATH the
+    way :meth:`_ProcessRunner.check` finds it.
+
+    This matters most where it is least visible: a provisioned resident installs its own
+    CLI from a hand-written bootstrap in the image, pinned by ``CLAUDE_VERSION`` in the
+    Makefile, so the version enforcing a bound on the NAS is not the one on the laptop that
+    validated the manifest.
+
+    Unlike :func:`check_runner` this *does* start a process — ``<binary> --help``, which is
+    not a session and not a brain, and lands in this module for the same reason
+    :func:`run_argv` does: steward starts processes in exactly one file.
+    """
+    if tools.unrestricted or spec.kind != ClaudeRunner.kind:
+        # Nothing declared to enforce, or a kind that compiles no tool flag at all — which
+        # validation refuses to pair with a bound in the first place.
+        return None
+    binary = ClaudeRunner.binary
+    help_text = _cli_help(binary)
+    if help_text is None:
+        return f"cannot ask {binary!r} what it supports, so a declared tools bound is unproven"
+    missing = [flag for flag in TOOL_BOUND_FLAGS if flag not in help_text]
+    if missing:
+        return (
+            f"the installed {binary!r} does not support {', '.join(missing)}, so the "
+            f"declared tools bound would not be applied to this resident's sessions"
+        )
+    return None
 
 
 # --------------------------------------------------------------------------------------

@@ -529,6 +529,7 @@ class ResidentSessions:
                     prompt=prompt,
                     workdir=admission.workdir,
                     timeout_s=timeout_s,
+                    tools=resident.manifest.tools,
                     model=resident.manifest.runner.model,
                     env=wake.environment(resident),
                     workdir_fd=(

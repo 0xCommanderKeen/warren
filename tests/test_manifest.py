@@ -1,6 +1,7 @@
 """The manifest library: what passes, what fails, and how loudly it fails."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -85,12 +86,12 @@ def test_load_manifest_raises_with_diagnostics(write_resident: ResidentWriter) -
     assert excinfo.value.diagnostics[0].example
 
 
-# -------------------------------------------------------------- the five capability dimensions
+# ------------------------------------------------------------------ the capability dimensions
 
 
 @pytest.mark.parametrize(
     "dimension",
-    ["soul", "skills", "memory", "routes", "app_grants"],
+    ["soul", "skills", "memory", "routes", "app_grants", "tools"],
 )
 def test_missing_capability_dimension_fails(write_resident: ResidentWriter, dimension: str) -> None:
     data = valid_manifest()
@@ -123,6 +124,7 @@ def test_empty_dimensions_are_allowed_when_declared(write_resident: ResidentWrit
     data["routes"] = []
     data["app_grants"] = []
     data["routines"] = []
+    data["tools"] = []
     assert m.validate_manifest(write_resident(data)).ok
 
 
@@ -891,6 +893,208 @@ def test_split_frontmatter_is_the_one_definition_of_a_frontmatter_block() -> Non
     assert frontmatter == "name: hob"
     assert body.strip() == "body text"
     assert m.split_frontmatter("no frontmatter here") == (None, "no frontmatter here")
+
+
+# ---------------------------------------------------------------------- tools (steward #204)
+
+
+def tools_manifest(tools: object, **runner: object) -> dict[str, Any]:
+    """Build a valid manifest with one tools declaration and one runner block."""
+    data = valid_manifest()
+    data["tools"] = tools
+    if runner:
+        data["runner"] = runner
+    return data
+
+
+def test_unrestricted_is_a_declaration_not_an_absence(write_resident: ResidentWriter) -> None:
+    """The word has to *read* as unlimited, the way budgets reports a limit of null.
+
+    ``bound`` is ``None`` rather than an empty tuple, because "not bounded" and "bounded to
+    nothing" are different answers and a caller that confused them would hand an
+    unrestricted resident everything or a bounded one nothing.
+    """
+    resident = m.load_manifest(write_resident(tools_manifest("unrestricted")))
+
+    assert resident.manifest.tools.unrestricted
+    assert resident.manifest.tools.bound is None
+    assert resident.manifest.tools.describe() == "unrestricted"
+
+
+def test_a_declared_list_is_kept_in_the_order_it_was_written(
+    write_resident: ResidentWriter,
+) -> None:
+    resident = m.load_manifest(write_resident(tools_manifest(["Read", "Glob", "Grep"])))
+
+    assert not resident.manifest.tools.unrestricted
+    assert resident.manifest.tools.bound == ("Read", "Glob", "Grep")
+
+
+def test_a_resident_may_be_bounded_to_no_tools_at_all(write_resident: ResidentWriter) -> None:
+    """An empty list is a real declaration: a session that thinks, replies, and touches nothing."""
+    resident = m.load_manifest(write_resident(tools_manifest([])))
+
+    assert resident.manifest.tools.bound == ()
+    assert resident.manifest.tools.describe() == "no tools"
+
+
+@pytest.mark.parametrize(
+    ("written", "why"),
+    [
+        ("Read,Glob", "a comma-separated string is one name, not two"),
+        ("Read", "a bare name is not the shorthand; unrestricted is the only legal word"),
+        ("everything", "and no other word means unlimited"),
+    ],
+)
+def test_a_string_that_is_not_the_word_is_refused(
+    write_resident: ResidentWriter, written: str, why: str
+) -> None:
+    """`unrestricted` is the only string, so the near misses fail loudly rather than quietly.
+
+    `tools: Read,Glob` is the one somebody will actually type. Accepted as a one-element
+    list it would be a resident bounded to a tool that does not exist — which fails safe,
+    and silently, which is the half that matters.
+    """
+    result = m.validate_manifest(write_resident(tools_manifest(written)))
+
+    assert not result.ok, why
+    assert any(d.field_path.startswith("tools") for d in result.errors)
+
+
+@pytest.mark.parametrize("name", ["", "   ", "Bash(git *)", "read-inbox", "9Lives"])
+def test_a_name_that_is_not_a_tool_name_is_refused(
+    write_resident: ResidentWriter, name: str
+) -> None:
+    """`--tools` takes names from the built-in set, not the rule syntax `--allowed-tools` takes."""
+    result = m.validate_manifest(write_resident(tools_manifest([name])))
+
+    assert not result.ok
+    assert any(d.field_path.startswith("tools") for d in result.errors)
+
+
+@pytest.mark.parametrize("kind", ["codex", "command"])
+def test_a_bound_a_runner_cannot_hold_is_refused(write_resident: ResidentWriter, kind: str) -> None:
+    """The same refusal shape as a daily cap under a runner that reports no usage.
+
+    Only ``ClaudeRunner.argv`` compiles a tool flag. Under ``codex`` or ``command`` the list
+    would sit in the manifest reading like a boundary while the session reached everything
+    its brain has — and nothing at run time would ever notice.
+    """
+    runner: dict[str, object] = {"kind": kind}
+    if kind == "command":
+        runner["command"] = ["tool", "{prompt}"]
+    result = m.validate_manifest(write_resident(tools_manifest(["Read"], **runner)))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "tools"]
+    assert len(complaints) == 1
+    assert "bounds nothing" in complaints[0].problem
+    assert "unrestricted" in complaints[0].example
+
+
+@pytest.mark.parametrize("kind", ["codex", "command"])
+def test_unrestricted_is_legal_under_every_runner(
+    write_resident: ResidentWriter, kind: str
+) -> None:
+    """The refusal above is about a *bound*; saying "not bounded" is true under any brain."""
+    runner: dict[str, object] = {"kind": kind}
+    if kind == "command":
+        runner["command"] = ["tool", "{prompt}"]
+    assert m.validate_manifest(write_resident(tools_manifest("unrestricted", **runner))).ok
+
+
+def test_mock_may_declare_a_bound_because_it_spawns_nothing(
+    write_resident: ResidentWriter,
+) -> None:
+    """Exempt for the same reason it is exempt from the budget refusal: nothing runs."""
+    assert m.validate_manifest(write_resident(tools_manifest(["Read"], kind="mock"))).ok
+
+
+def test_a_bound_beside_bypass_permissions_is_refused(write_resident: ResidentWriter) -> None:
+    """One boundary drawn and the other dropped, in one file.
+
+    Not because the bypass makes the list inert — measured against CLI 2.1.247, ``--tools``
+    removes a tool whatever the permission mode is, and ``--tools Read --permission-mode
+    acceptEdits`` still had no Bash. The contradiction is that this manifest went to the
+    trouble of naming which tools may exist and then auto-approved every call to the ones
+    that survived.
+    """
+    data = tools_manifest(["Read", "Bash"], kind="claude", permission_mode="bypassPermissions")
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "runner.permission_mode"]
+    assert len(complaints) == 1
+    assert "waives the approval" in complaints[0].problem
+    assert "acceptEdits" in complaints[0].example
+
+
+def test_bypass_permissions_is_still_legal_without_a_bound(
+    write_resident: ResidentWriter,
+) -> None:
+    """The refusal is about the pair. A resident that declares neither boundary is honest."""
+    data = tools_manifest("unrestricted", kind="claude", permission_mode="bypassPermissions")
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_an_mcp_name_inside_a_bound_is_refused(write_resident: ResidentWriter) -> None:
+    """The CLI takes the argument without complaint, which is what makes it worth refusing.
+
+    Steward launches a bounded session with ``--strict-mcp-config``, which loads no MCP
+    servers at all — so an ``mcp__…`` name resolves to a tool the session does not have,
+    and the manifest reads as if the resident were granted it.
+    """
+    result = m.validate_manifest(
+        write_resident(tools_manifest(["Read", "mcp__spell__spell_search"]))
+    )
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "tools[1]"]
+    assert len(complaints) == 1
+    assert "strict-mcp-config" in complaints[0].problem
+
+
+def test_every_refusal_is_reported_at_once(write_resident: ResidentWriter) -> None:
+    """A manifest with three problems gets three diagnostics, not the first one repeatedly."""
+    data = tools_manifest(
+        ["Read", "mcp__spell__spell_search", "mcp__other__thing"],
+        kind="claude",
+        permission_mode="bypassPermissions",
+    )
+    result = m.validate_manifest(write_resident(data))
+
+    assert sorted(d.field_path for d in result.errors) == [
+        "runner.permission_mode",
+        "tools[1]",
+        "tools[2]",
+    ]
+
+
+@pytest.mark.parametrize("mode", ["acceptEdits", "auto", "bypassPermissions", "plan"])
+def test_the_permission_modes_the_cli_accepts_are_accepted(
+    write_resident: ResidentWriter, mode: str
+) -> None:
+    assert m.validate_manifest(
+        write_resident(tools_manifest("unrestricted", kind="claude", permission_mode=mode))
+    ).ok
+
+
+@pytest.mark.parametrize("mode", ["acceptedits", "bypass", "yolo", "acceptEdits "])
+def test_a_permission_mode_the_cli_would_reject_is_refused(
+    write_resident: ResidentWriter, mode: str
+) -> None:
+    """This was free text that reached ``--permission-mode`` unchecked.
+
+    A typo was not a failed validation but a session that died at its next fire with a
+    commander error — at 7am, in a log nobody was reading. The CLI takes a closed set, so
+    the manifest does too.
+    """
+    result = m.validate_manifest(
+        write_resident(tools_manifest("unrestricted", kind="claude", permission_mode=mode))
+    )
+
+    assert not result.ok
+    assert any(d.field_path == "runner.permission_mode" for d in result.errors)
 
 
 # ----------------------------------------------------------------------------- delegation

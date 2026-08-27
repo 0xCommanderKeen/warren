@@ -14,15 +14,20 @@ import pytest
 
 from conftest import StubWriter
 from steward import runners as r
+from steward.manifest import PermissionMode, ToolGrant
 from steward.manifest import Runner as RunnerSpec
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "steward"
 WORKDIR = "/var/tmp/work"  # noqa: S108 — a literal in a substitution test, never created
 PWNED = "/var/tmp/steward-pwned"  # noqa: S108 — the file a shell-injection test must not create
 
+#: What most of these tests declare, because most of them are about something else. The
+#: argv a bound produces has its own tests below.
+UNRESTRICTED = ToolGrant("unrestricted")
+
 
 def request_for(tmp_path: Path, prompt: str = "say hello", timeout_s: int = 10) -> r.RunRequest:
-    return r.RunRequest(prompt=prompt, workdir=tmp_path, timeout_s=timeout_s)
+    return r.RunRequest(tools=UNRESTRICTED, prompt=prompt, workdir=tmp_path, timeout_s=timeout_s)
 
 
 # ------------------------------------------------------------------------------- factory
@@ -85,7 +90,9 @@ print(os.stat(".").st_ino)
     )
     try:
         result = r.build_runner(spec).run(
-            r.RunRequest(prompt="", workdir=admitted, workdir_fd=descriptor, timeout_s=10)
+            r.RunRequest(
+                tools=UNRESTRICTED, prompt="", workdir=admitted, workdir_fd=descriptor, timeout_s=10
+            )
         )
     finally:
         os.close(descriptor)
@@ -103,7 +110,9 @@ def test_a_descriptor_bound_launch_keeps_a_missing_binary_diagnostic(tmp_path: P
     spec = RunnerSpec(kind="command", command=["missing-steward-test-binary", "{prompt}"])
     try:
         result = r.build_runner(spec).run(
-            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=10)
+            r.RunRequest(
+                tools=UNRESTRICTED, prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=10
+            )
         )
     finally:
         os.close(descriptor)
@@ -133,7 +142,7 @@ import os
 from pathlib import Path
 
 from steward import runners
-from steward.manifest import Runner
+from steward.manifest import Runner, ToolGrant
 
 os.close({closed_fd})
 workdir = Path({str(tmp_path)!r})
@@ -141,7 +150,13 @@ descriptor = os.open(workdir, os.O_RDONLY | os.O_DIRECTORY)
 try:
     result = runners.build_runner(
         Runner(kind="command", command={command!r})
-    ).run(runners.RunRequest(prompt="", workdir=workdir, workdir_fd=descriptor, timeout_s=10))
+    ).run(runners.RunRequest(
+        prompt="",
+        workdir=workdir,
+        workdir_fd=descriptor,
+        timeout_s=10,
+        tools=ToolGrant("unrestricted"),
+    ))
 finally:
     os.close(descriptor)
 Path({str(result_path)!r}).write_text(json.dumps({{
@@ -182,7 +197,9 @@ def test_descriptor_helper_ignores_hostile_python_startup(
     spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf ready", "{prompt}"])
     try:
         result = r.build_runner(spec).run(
-            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+            r.RunRequest(
+                tools=UNRESTRICTED, prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1
+            )
         )
     finally:
         os.close(descriptor)
@@ -218,7 +235,9 @@ time.sleep(30)
     spec = RunnerSpec(kind="command", command=["/bin/sh", "-c", "printf unreachable", "{prompt}"])
     try:
         result = r.build_runner(spec).run(
-            r.RunRequest(prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1)
+            r.RunRequest(
+                tools=UNRESTRICTED, prompt="", workdir=tmp_path, workdir_fd=descriptor, timeout_s=1
+            )
         )
     finally:
         os.close(descriptor)
@@ -295,7 +314,9 @@ def test_claude_runner_passes_prompt_model_and_cwd(
     workdir.mkdir()
 
     runner = r.build_runner(RunnerSpec(kind="claude", model="claude-opus-5"))
-    result = runner.run(r.RunRequest(prompt="write it", workdir=workdir, timeout_s=10))
+    result = runner.run(
+        r.RunRequest(tools=UNRESTRICTED, prompt="write it", workdir=workdir, timeout_s=10)
+    )
 
     argv = argv_dump.read_text().splitlines()
     assert argv == ["-p", "write it", "--output-format", "json", "--model", "claude-opus-5"]
@@ -316,6 +337,152 @@ def test_claude_runner_passes_permission_mode_when_declared(
     spec = RunnerSpec(kind="claude", permission_mode="acceptEdits")
     r.build_runner(spec).run(request_for(tmp_path))
     assert "--permission-mode\nacceptEdits" in (tmp_path / "argv.txt").read_text()
+
+
+# ------------------------------------------------------- the tool bound (steward #204)
+
+
+def claude_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: ToolGrant,
+    *,
+    model: str | None = None,
+    permission_mode: PermissionMode | None = None,
+) -> list[str]:
+    """Run a stubbed claude and return the argv it was actually handed."""
+    dump = tmp_path / "argv.txt"
+    monkeypatch.setenv("ARGV_DUMP", str(dump))
+    monkeypatch.setenv("CWD_DUMP", str(tmp_path / "cwd.txt"))
+    spec = RunnerSpec(kind="claude", model=model, permission_mode=permission_mode)
+    r.build_runner(spec).run(
+        r.RunRequest(prompt="say hello", workdir=tmp_path, timeout_s=10, tools=tools)
+    )
+    return dump.read_text().splitlines()
+
+
+def test_an_unrestricted_resident_gets_the_argv_it_always_got(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Migrating a resident to `tools: unrestricted` must change nothing about its run.
+
+    Every live resident is migrated that way, so this is the assertion that says the
+    migration is a change in what the manifest *says*, not in what steward *does*.
+    """
+    stub_bin("claude", CLAUDE_STUB)
+    argv = claude_argv(tmp_path, monkeypatch, UNRESTRICTED, model="claude-opus-5")
+
+    assert argv == ["-p", "say hello", "--output-format", "json", "--model", "claude-opus-5"]
+
+
+def test_a_bounded_resident_is_launched_with_the_names_and_strict_mcp(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pair, always: `--tools` alone leaves the host's MCP servers reachable."""
+    stub_bin("claude", CLAUDE_STUB)
+    argv = claude_argv(tmp_path, monkeypatch, ToolGrant(["Read", "Glob", "Grep"]))
+
+    assert argv[-3:] == ["--tools", "Read,Glob,Grep", "--strict-mcp-config"]
+
+
+def test_a_resident_bounded_to_nothing_says_so_on_the_command_line(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`tools: []` is a declaration, not an omission, and the CLI has a spelling for it.
+
+    `--tools ""` is documented as *disable all tools*, and it measures that way: a session
+    launched with it had none and answered by writing tool-call markup as plain text.
+    """
+    stub_bin("claude", CLAUDE_STUB)
+    argv = claude_argv(tmp_path, monkeypatch, ToolGrant([]))
+
+    assert argv[-3:] == ["--tools", "", "--strict-mcp-config"]
+
+
+def test_the_bound_survives_a_permissive_permission_mode(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both flags reach the CLI together; neither replaces the other.
+
+    Measured against CLI 2.1.247: `--tools Read --permission-mode acceptEdits` still had no
+    Bash. The two are different axes — which tools exist, and whether a call to one is
+    approved — which is why a manifest may carry both and steward passes both.
+    """
+    stub_bin("claude", CLAUDE_STUB)
+    argv = claude_argv(tmp_path, monkeypatch, ToolGrant(["Read"]), permission_mode="acceptEdits")
+
+    assert "--permission-mode" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert argv[-3:] == ["--tools", "Read", "--strict-mcp-config"]
+
+
+def test_two_requests_that_differ_only_in_tools_are_two_requests(tmp_path: Path) -> None:
+    """The mock digest has to see the bound, or a rehearsal reuses another session's answer."""
+
+    def request(tools: ToolGrant) -> r.RunRequest:
+        return r.RunRequest(prompt="p", workdir=tmp_path, timeout_s=10, tools=tools)
+
+    bounded = request(ToolGrant(["Read"]))
+
+    assert bounded.key() != request(ToolGrant(["Read", "Bash"])).key()
+    assert bounded.key() != request(UNRESTRICTED).key()
+
+
+# --------------------------------------------- whether the installed CLI can hold a bound
+
+#: A `claude --help` that knows both flags, and one that knows neither.
+HELP_STUB = 'echo "  --tools <tools...>  bound the built-in set"; echo "  --strict-mcp-config"'
+OLD_HELP_STUB = 'echo "  --allowed-tools <tools...>  pre-approve permission rules"'
+
+
+def test_an_unrestricted_resident_asks_the_cli_nothing(
+    stub_bin: StubWriter,
+) -> None:
+    """Nothing is declared, so there is nothing the installed CLI could fail to hold."""
+    stub_bin("claude", OLD_HELP_STUB)
+    assert r.check_tool_bound(RunnerSpec(kind="claude"), UNRESTRICTED) is None
+
+
+def test_a_cli_that_knows_the_flags_can_hold_the_bound(stub_bin: StubWriter) -> None:
+    stub_bin("claude", HELP_STUB)
+    assert r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"])) is None
+
+
+def test_a_cli_too_old_for_the_flags_is_a_complaint_not_a_silent_grant(
+    stub_bin: StubWriter,
+) -> None:
+    """The failure this catches is invisible at run time: the session just has more tools.
+
+    Validation cannot reach it — the manifest is perfectly valid, and the CLI it will run
+    against is not in the file. `steward doctor` is the only place the two meet.
+    """
+    stub_bin("claude", OLD_HELP_STUB)
+    complaint = r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"]))
+
+    assert complaint is not None
+    assert "--tools" in complaint
+    assert "--strict-mcp-config" in complaint
+
+
+def test_half_the_pair_is_still_a_complaint(stub_bin: StubWriter) -> None:
+    """`--tools` without `--strict-mcp-config` bounds the built-ins and leaks the host's MCP."""
+    stub_bin("claude", 'echo "  --tools <tools...>"')
+    complaint = r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"]))
+
+    assert complaint is not None
+    assert "--strict-mcp-config" in complaint
+    assert "--tools" not in complaint.split("does not support", 1)[1].split(",", 1)[0]
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_a_cli_that_will_not_answer_is_unproven_rather_than_assumed_fine() -> None:
+    assert "unproven" in (r.check_tool_bound(RunnerSpec(kind="claude"), ToolGrant(["Read"])) or "")
+
+
+def test_a_kind_that_compiles_no_tool_flag_is_not_probed(stub_bin: StubWriter) -> None:
+    """Validation already refuses a bound under codex/command; doctor does not re-litigate."""
+    stub_bin("claude", OLD_HELP_STUB)
+    assert r.check_tool_bound(RunnerSpec(kind="mock"), ToolGrant(["Read"])) is None
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)
@@ -524,7 +691,9 @@ def test_codex_runner_uses_exec_and_puts_the_prompt_last(
     monkeypatch.setenv("ARGV_DUMP", str(argv_dump))
 
     runner = r.build_runner(RunnerSpec(kind="codex", model="gpt-5-codex"))
-    result = runner.run(r.RunRequest(prompt="tidy up", workdir=tmp_path, timeout_s=10))
+    result = runner.run(
+        r.RunRequest(tools=UNRESTRICTED, prompt="tidy up", workdir=tmp_path, timeout_s=10)
+    )
 
     assert argv_dump.read_text().splitlines() == ["exec", "--model", "gpt-5-codex", "tidy up"]
     assert result.outcome is r.Outcome.OK
@@ -557,7 +726,9 @@ def test_shell_metacharacters_stay_one_argument(
     hostile = f"; rm -rf / && $(whoami) `id` | tee {PWNED}"
 
     spec = RunnerSpec(kind="command", command=["my-agent", "--prompt", "{prompt}"])
-    result = r.build_runner(spec).run(r.RunRequest(prompt=hostile, workdir=tmp_path, timeout_s=10))
+    result = r.build_runner(spec).run(
+        r.RunRequest(tools=UNRESTRICTED, prompt=hostile, workdir=tmp_path, timeout_s=10)
+    )
 
     assert result.outcome is r.Outcome.OK
     assert argv_dump.read_text().splitlines() == ["--prompt", hostile]
@@ -570,7 +741,9 @@ def test_command_runner_substitutes_the_workdir(
     stub_bin("my-agent", 'printf "%s\\n" "$@" > "$ARGV_DUMP"')
     monkeypatch.setenv("ARGV_DUMP", str(tmp_path / "argv.txt"))
     spec = RunnerSpec(kind="command", command=["my-agent", "{workdir}", "{prompt}"])
-    r.build_runner(spec).run(r.RunRequest(prompt="p", workdir=tmp_path, timeout_s=10))
+    r.build_runner(spec).run(
+        r.RunRequest(tools=UNRESTRICTED, prompt="p", workdir=tmp_path, timeout_s=10)
+    )
     assert (tmp_path / "argv.txt").read_text().splitlines() == [str(tmp_path), "p"]
 
 
@@ -642,6 +815,7 @@ def test_request_env_reaches_the_session(
     runner = r.build_runner(RunnerSpec(kind="claude"))
     runner.run(
         r.RunRequest(
+            tools=UNRESTRICTED,
             prompt="p",
             workdir=tmp_path,
             timeout_s=10,

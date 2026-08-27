@@ -400,8 +400,9 @@ skills/
 ```
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
-rules, escalation policy), and the five capability dimensions burrow renders — skills,
-memory, routes, app grants — plus the runner steward launches sessions through, the
+rules, escalation policy), and the capability dimensions burrow renders — skills,
+memory, routes, app grants, and the tools a session may reach — plus the runner steward
+launches sessions through, the
 routines it fires, whether the resident takes work off the job board, and whether it may
 hand work to another resident. Its `skills`
 are grants by name against the shared library — what this resident holds on top of the

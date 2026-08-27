@@ -101,11 +101,42 @@ def test_the_skeleton_declares_a_journal_directory_and_no_empty_deploy_block(
 def test_identity_is_derived_from_the_runner_when_nobody_says(tmp_path: Path) -> None:
     claude = declare_resident(spec(), tmp_path)
     codex = declare_resident(
-        spec(id="scribe-two", runner={"kind": "codex", "model": "gpt-5"}), tmp_path
+        # `unrestricted` and not the nursery's default empty list: steward compiles no tool
+        # flag for codex, so a list there would be a bound it cannot hold, and validation
+        # refuses one (test_the_nursery_cannot_declare_a_bound_it_could_not_hold).
+        spec(id="scribe-two", runner={"kind": "codex", "model": "gpt-5"}, tools="unrestricted"),
+        tmp_path,
     )
     assert claude.resident.manifest.agent_id == "claude-code:note-keeper"
     assert codex.resident.manifest.agent_id == "codex:scribe-two"
     assert codex.resident.manifest.runner.model == "gpt-5"
+
+
+def test_a_declared_resident_arrives_able_to_touch_nothing(tmp_path: Path) -> None:
+    """The nursery's tools default is an empty list, not `unrestricted`.
+
+    Every other capability dimension the nursery fills in defaults to *nothing granted*, and
+    tools is the dimension that rule was written for: a resident declared without a word
+    about its tools should arrive holding none and be widened deliberately, in a diff
+    somebody reads, rather than arriving able to reach everything because nobody said.
+    """
+    created = declare_resident(spec(), tmp_path)
+    manifest = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["tools"] == []
+    assert created.resident.manifest.tools.bound == ()
+
+
+def test_the_nursery_cannot_declare_a_bound_it_could_not_hold(tmp_path: Path) -> None:
+    """A codex resident has to say `unrestricted` out loud, and the refusal says why.
+
+    The skeleton is written and read back through the validator, so this is the same
+    refusal `steward validate` gives — reached one step earlier, before a manifest nobody
+    can use lands in git.
+    """
+    with pytest.raises(NurseryError, match="does not validate"):
+        declare_resident(spec(runner={"kind": "codex"}), tmp_path)
+    assert not (tmp_path / "note-keeper").exists()
 
 
 def test_a_project_scoped_resident_keeps_its_project(tmp_path: Path) -> None:

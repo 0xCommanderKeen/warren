@@ -88,6 +88,7 @@ from steward.manifest import (
     SkillGrant,
     SoulDocument,
     SoulIdentity,
+    ToolGrant,
     closest_match,
     load_manifest,
     validate_manifest,
@@ -174,6 +175,14 @@ class NewResident(BaseModel):
     memory: Memory | None = Field(default=None, description="Memory location; derived if absent.")
     routes: list[Route] = Field(default_factory=list, description="Declared inbound channels.")
     app_grants: list[AppGrant] = Field(default_factory=list, description="Declared app access.")
+    tools: ToolGrant = Field(
+        # An empty list, not ``unrestricted``. Every other capability dimension the nursery
+        # defaults is defaulted to *nothing granted*, and tools is the dimension that rule
+        # was written for: a resident declared without a word about its tools should arrive
+        # able to touch nothing and be widened deliberately, in a diff somebody reads.
+        default_factory=lambda: ToolGrant([]),
+        description="Tools a session may reach; defaults to none until declared.",
+    )
     runner: Runner = Field(default_factory=Runner, description="Which brain this resident runs on.")
     soul_body: str | None = Field(default=None, description="Opening paragraph of soul.md.")
     voice: str | None = Field(default=None, description="The soul's ## Voice section.")
@@ -251,6 +260,7 @@ def _manifest_model(spec: NewResident) -> ResidentManifest:
             memory=spec.resolved_memory(),
             routes=spec.routes,
             app_grants=spec.app_grants,
+            tools=spec.tools,
             runner=spec.runner,
             routines=[],
         )

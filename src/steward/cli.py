@@ -68,7 +68,7 @@ from steward.nursery import (
     retire_resident,
 )
 from steward.prompt import assemble_preamble
-from steward.runners import check_runner, skills_home
+from steward.runners import check_runner, check_tool_bound, skills_home
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -443,6 +443,28 @@ def _render_effective_set(
     click.secho(f"  runner {resident.manifest.runner.kind} — {where}", fg="bright_black")
 
 
+def _report_tools(resident: Resident) -> int:
+    """Say what a resident may reach, and whether the installed brain can hold it to that.
+
+    Printed for every resident rather than only the bounded ones, because "which residents
+    are unbounded" is a question this dimension exists to make answerable, and a report
+    that stayed quiet about the unbounded ones would answer it by omission.
+
+    The complaint underneath is the one thing validation cannot reach: a manifest declaring
+    a bound is *valid* on a machine whose ``claude`` is too old to apply it, and that
+    session runs unbounded with the declaration still sitting in the file. Red, and counted,
+    because it is a resident with tools nobody granted it.
+    """
+    tools = resident.manifest.tools
+    complaint = check_tool_bound(resident.manifest.runner, tools)
+    if complaint:
+        click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
+        return 1
+    colour = "yellow" if tools.unrestricted else "green"
+    click.secho(f"{resident.id}: tools {tools.describe()}", fg=colour)
+    return 0
+
+
 # --------------------------------------------------------------------------------------
 # doctor
 # --------------------------------------------------------------------------------------
@@ -497,6 +519,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
             else:
                 click.secho(f"{label} — ready", fg="green")
+            problems += _report_tools(resident)
             # Before the journal line, which probes by creating the directory it names: a
             # claimant with no working directory must be reported as doctor found it, not
             # as doctor left it.

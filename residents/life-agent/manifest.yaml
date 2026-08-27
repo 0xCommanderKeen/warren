@@ -107,6 +107,11 @@ app_grants:
       - calendar.readonly
     status_ref: https://myaccount.google.com/permissions
 
+# Not bounded yet. Narrowing a live resident is a separate, deliberate act — guessing
+# the list wrong breaks a routine at 7am — so this migration says what is true today and
+# each resident is narrowed afterwards, one at a time, on evidence.
+tools: unrestricted
+
 runner:
   kind: claude
   model: claude-opus-5

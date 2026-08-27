@@ -372,6 +372,59 @@ def test_doctor_fails_loudly_when_the_binary_is_missing(
     assert "not on PATH" in result.output
 
 
+#: A `claude --help` that knows how to bound a session, and one too old to.
+NEW_CLAUDE_HELP = 'echo "  --tools <tools...>"; echo "  --strict-mcp-config"'
+OLD_CLAUDE_HELP = 'echo "  --allowed-tools <tools...>"'
+
+
+def test_doctor_says_what_every_resident_may_reach(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    """Printed for the unbounded ones too: that is the question this dimension answers.
+
+    A report that only mentioned the bounded residents would answer "which of these can
+    reach anything" by omission, which is the silence the declaration exists to end.
+    """
+    stub_bin("claude", NEW_CLAUDE_HELP)
+    data = valid_manifest()
+    data["tools"] = ["Read", "Glob"]
+    bounded = runner.invoke(main, ["doctor", str(write_resident(data).parent)])
+
+    assert bounded.exit_code == 0
+    assert "test-agent: tools Read, Glob" in bounded.output
+
+    unbounded = runner.invoke(main, ["doctor", str(write_resident(valid_manifest()).parent)])
+    assert "test-agent: tools unrestricted" in unbounded.output
+
+
+def test_doctor_fails_when_the_installed_brain_cannot_hold_a_declared_bound(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    """The one failure validation cannot reach: the CLI is not in the manifest.
+
+    A `claude` too old to know `--tools` accepts the declaration, launches, and hands the
+    session everything — the boundary is still written down and no longer true. Nothing at
+    run time notices, so doctor is where the manifest and the installed binary meet.
+    """
+    stub_bin("claude", OLD_CLAUDE_HELP)
+    data = valid_manifest()
+    data["tools"] = ["Read"]
+    result = runner.invoke(main, ["doctor", str(write_resident(data).parent)])
+
+    assert result.exit_code == 1
+    assert "--tools" in result.output
+
+
+def test_doctor_does_not_ask_the_brain_about_a_resident_that_declared_no_bound(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    """An old CLI is only a problem for a resident that declared something it must hold."""
+    stub_bin("claude", OLD_CLAUDE_HELP)
+    result = runner.invoke(main, ["doctor", str(write_resident(valid_manifest()).parent)])
+
+    assert result.exit_code == 0
+
+
 def test_doctor_reports_an_invalid_tree(runner: CliRunner, write_resident: ResidentWriter) -> None:
     data = valid_manifest()
     del data["charter"]
