@@ -61,6 +61,10 @@ h1 { font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 400; letter-spacing: -0.0
 .charter-list li { border-left: 3px solid #6aa84f; padding-left: 0.65rem; }
 .charter-list h3 { margin: 0; font-size: 1rem; font-weight: 400; }
 .charter-list p { margin-top: 0.3rem; }
+.charter-fields { display: grid; gap: 0.35rem; margin: 0.75rem 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+.charter-fields div { display: grid; grid-template-columns: minmax(6rem, auto) 1fr; gap: 0.5rem; }
+.charter-fields dt { color: #785a25; }
+.charter-fields dd { display: grid; gap: 0.15rem; margin: 0; overflow-wrap: anywhere; }
 .panel-empty { line-height: 1.5; }
 
 @media (max-width: 600px) {

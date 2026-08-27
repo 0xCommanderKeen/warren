@@ -24,7 +24,7 @@ describe("Arcadia", () => {
       /dailyfinished · ok · 300sreport\.md · Keeper/,
     );
     expect(screen.getByRole("region", { name: "Charter journal" })).toHaveTextContent(
-      /KeeperkeeperMaintains Burrow\./,
+      /KeeperkeeperMaintains Burrow\.Manifestv1 · keeper\.resident\.jsonMatchclaude:keeperHome2Capabilitiestools: ReadRoutinesNone declared/,
     );
     expect(screen.getByRole("region", { name: "Journal observations" })).toHaveTextContent(
       /Keeper2026-08-27 · dailyjournals\/2026-08-27\.md/,

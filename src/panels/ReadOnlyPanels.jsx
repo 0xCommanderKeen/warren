@@ -71,6 +71,21 @@ export function ReadOnlyPanels({ snapshot }) {
                 <h3>{resident.meta.name}</h3>
                 <p>{resident.meta.role || "Role not declared"}</p>
                 <p>{resident.body || "No charter body declared."}</p>
+                <dl className="charter-fields">
+                  <div><dt>Manifest</dt><dd>v{resident.manifest_version} · {resident.file}</dd></div>
+                  <div><dt>Match</dt><dd>{resident.match.agent_id || resident.match.project || "Not declared"}</dd></div>
+                  <div><dt>Home</dt><dd>{resident.home}</dd></div>
+                  <div>
+                    <dt>Capabilities</dt>
+                    <dd>{Object.entries(resident.capabilities).map(([name, value]) => (
+                      <span key={name}>{name}: {Array.isArray(value) ? value.join(", ") : JSON.stringify(value)}</span>
+                    ))}</dd>
+                  </div>
+                  <div>
+                    <dt>Routines</dt>
+                    <dd>{resident.routines.length ? resident.routines.map((routine) => routine.id).join(", ") : "None declared"}</dd>
+                  </div>
+                </dl>
               </li>
             ))}
           </ul>
