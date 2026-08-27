@@ -205,6 +205,75 @@ def main() -> None:
     """Steward — the control plane for the agent fleet burrow watches."""
 
 
+@main.group("events")
+def events_group() -> None:
+    """Inspect and replay durable Burrow event delivery."""
+
+
+@events_group.command("flush")
+@click.option(
+    "--fallback",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Local watchdog log; its .pending sibling is the delivery queue.",
+)
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Maximum events to POST.")
+@click.option(
+    "--include-legacy",
+    is_flag=True,
+    help="First queue the complete old log; may duplicate events delivered without IDs.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def events_flush(
+    fallback: Path | None,
+    limit: int | None,
+    include_legacy: bool,  # noqa: FBT001 — click passes flags positionally
+    output_format: str,
+) -> None:
+    """Replay pending events oldest first using Burrow delivery IDs."""
+    emitter = ev.EventEmitter.from_env()
+    if fallback is not None:
+        emitter.fallback = fallback
+    if not emitter.url:
+        raise click.ClickException("BURROW_URL is not set; there is no remote target to flush")
+    imported = emitter.import_legacy() if include_legacy else ev.ImportReport()
+    report = emitter.flush(limit=limit)
+    payload = {
+        "delivered": report.delivered,
+        "pending": report.pending,
+        "corrupt": report.corrupt,
+        "foreign": report.foreign,
+        "failed": report.failed,
+        "busy": report.busy,
+        "legacy_queued": imported.queued,
+        "legacy_invalid": imported.invalid,
+        "legacy_failed": imported.failed,
+        "queue": str(emitter.queue),
+    }
+    if output_format == "json":
+        click.echo(json.dumps(payload, indent=2))
+    else:
+        click.echo(
+            f"delivered {report.delivered}; pending {report.pending}; "
+            f"corrupt {report.corrupt}; foreign-target {report.foreign}; queue {emitter.queue}"
+        )
+        if include_legacy:
+            click.echo(
+                f"legacy import queued {imported.queued}; invalid {imported.invalid}; "
+                f"failed {imported.failed}; "
+                "already-delivered ID-less events may appear again"
+            )
+    if (
+        report.failed
+        or report.corrupt
+        or report.foreign
+        or report.busy
+        or imported.invalid
+        or imported.failed
+    ):
+        raise click.exceptions.Exit(EXIT_INVALID)
+
+
 @main.command()
 @click.argument(
     "paths",

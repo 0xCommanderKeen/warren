@@ -12,8 +12,11 @@ out loud:
 > *this* call, and it is handed over exactly once.
 
 That sentence is the transition modules' whole job. Delivery after that is the emitter's business
-(`docs/api.md`, `steward/events.py`): a POST that fails still lands in the fallback log,
-emitting never raises, and no transition is rolled back because a village was unreachable.
+(`docs/api.md`, `steward/events.py`): a remote event is durably queued before POST, a
+failed POST remains queued for oldest-first replay, emitting never raises, and no
+transition is rolled back because a village was unreachable. Burrow's retained delivery
+ID authority suppresses retries after the acceptance/retirement crash window; this is
+not global exactly-once delivery after Burrow rotates that authority away.
 
 This document is the behavioral contract. Part 1 is the matrix — every transition, its
 guard, its outcomes, and its fact. Part 2 is the two interface designs that were compared.

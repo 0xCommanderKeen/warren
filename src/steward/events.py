@@ -22,17 +22,26 @@ scheduler is a long-lived process rather than a one-shot hook:
   back. Writing the closing event locally too keeps the local record complete, so a
   success is never buried as a failure. Consumers that read burrow read burrow; the
   local log is not a second delivery, only steward's own complete copy.
+- A remote-bound event first enters the sibling ``events.jsonl.pending`` durable queue
+  with a stable delivery ID. Replay is oldest-first, retires only acknowledged IDs by
+  atomic replacement, and uses Burrow's delivery-ID deduplication to close the
+  acknowledgement-before-retirement crash window. Corrupt/torn records are quarantined.
 
 Emitting never raises. A village that cannot be reached must not turn into a failed
 routine: that would be steward lying about its own work.
 """
 
+import contextlib
+import fcntl
 import hashlib
 import json
+import logging
 import os
+import re
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -55,6 +64,8 @@ __all__ = [
     "Emitter",
     "Event",
     "EventEmitter",
+    "FlushReport",
+    "ImportReport",
     "NullEmitter",
     "RunContext",
     "bounded_detail",
@@ -112,6 +123,10 @@ POST_TIMEOUT_S = 2.0
 BREAKER_SECONDS = 60.0
 LOOPBACK_BREAKER_SECONDS = 5.0
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]", "::1"})
+REPLAY_BATCH_SIZE = 16
+QUEUE_VERSION = 1
+
+log = logging.getLogger("steward.events")
 
 #: Errors travel into the village as one line of explanation, never a transcript.
 ERROR_MAX_CHARS = 500
@@ -264,6 +279,27 @@ class NullEmitter:
         return False
 
 
+@dataclass(frozen=True, slots=True)
+class FlushReport:
+    """Observable outcome of one durable replay pass."""
+
+    delivered: int = 0
+    pending: int = 0
+    corrupt: int = 0
+    foreign: int = 0
+    failed: bool = False
+    busy: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ImportReport:
+    """Outcome of explicitly copying a legacy complete log into the replay queue."""
+
+    queued: int = 0
+    invalid: int = 0
+    failed: int = 0
+
+
 def _is_loopback(url: str) -> bool:
     host = url.split("//", 1)[-1].split("/", maxsplit=1)[0].rsplit(":", 1)[0]
     return host in LOOPBACK_HOSTS
@@ -289,6 +325,11 @@ class EventEmitter:
         self._clock = clock
         self._breaker_until: dict[str, float] = {}
 
+    @property
+    def queue(self) -> Path:
+        """The durable remote-delivery queue, separate from the watchdog's local log."""
+        return self.fallback.with_name(f"{self.fallback.name}.pending")
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> EventEmitter:
         """Build an emitter from ``BURROW_URL``/``BURROW_TOKEN``/the fallback var."""
@@ -310,12 +351,14 @@ class EventEmitter:
         window = LOOPBACK_BREAKER_SECONDS if _is_loopback(url) else BREAKER_SECONDS
         self._breaker_until[url] = self._clock() + window
 
-    def _post(self, url: str, body: bytes) -> bool:
+    def _post(self, url: str, body: bytes, delivery_id: str = "") -> bool:
         if not url.startswith(("http://", "https://")):
             return False
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
+        if delivery_id:
+            headers["X-Burrow-Delivery-ID"] = delivery_id
         request = urllib.request.Request(  # noqa: S310 — scheme checked just above
             f"{url}/events", data=body, headers=headers, method="POST"
         )
@@ -325,14 +368,214 @@ class EventEmitter:
         except OSError, urllib.error.URLError, ValueError:
             return False
 
-    def _append_fallback(self, line: str) -> None:
+    @staticmethod
+    def _lock_path(path: Path) -> Path:
+        return path.with_name(f"{path.name}.lock")
+
+    @staticmethod
+    def _fsync_parent(path: Path) -> None:
+        descriptor = os.open(path.parent, os.O_RDONLY)
         try:
-            self.fallback.parent.mkdir(parents=True, exist_ok=True)
-            with self.fallback.open("a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def _append_line(self, path: Path, line: str, *, purpose: str) -> bool:
+        """Durably append one complete line under a stable cross-process lock."""
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock_path(path).open("a+") as lock_handle:
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+                try:
+                    pending = memoryview((line + "\n").encode("utf-8"))
+                    while pending:
+                        pending = pending[os.write(descriptor, pending) :]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                self._fsync_parent(path)
         except OSError:
-            # The village losing an event must never take a routine down with it.
-            pass
+            log.exception("could not persist event %s at %s", purpose, path)
+            return False
+        else:
+            return True
+
+    def _queue_record(self, event: Event, delivery_id: str) -> bool:
+        record = {
+            "queue_v": QUEUE_VERSION,
+            "delivery_id": delivery_id,
+            "target": self.url,
+            "event": event.to_dict(),
+        }
+        return self._append_line(
+            self.queue, json.dumps(record, ensure_ascii=False), purpose="for replay"
+        )
+
+    def _read_queue(self) -> tuple[list[dict[str, Any]], list[bytes]]:
+        try:
+            raw = self.queue.read_bytes()
+        except FileNotFoundError:
+            return [], []
+        except OSError:
+            log.exception("could not read event replay queue %s", self.queue)
+            return [], []
+        records: list[dict[str, Any]] = []
+        corrupt: list[bytes] = []
+        for line in raw.splitlines(keepends=True):
+            if not line.endswith(b"\n"):
+                corrupt.append(line)
+                continue
+            try:
+                value = json.loads(line)
+            except UnicodeDecodeError, json.JSONDecodeError:
+                corrupt.append(line)
+                continue
+            if not self._valid_queue_record(value):
+                corrupt.append(line)
+                continue
+            records.append(value)
+        return records, corrupt
+
+    @staticmethod
+    def _valid_queue_record(value: object) -> bool:
+        if not isinstance(value, dict) or value.get("queue_v") != QUEUE_VERSION:
+            return False
+        delivery_id = value.get("delivery_id")
+        target = value.get("target")
+        event = value.get("event")
+        return (
+            isinstance(delivery_id, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", delivery_id) is not None
+            and isinstance(target, str)
+            and target.startswith(("http://", "https://"))
+            and isinstance(event, dict)
+            and not validate_event(event)
+        )
+
+    def _rewrite_queue(self, retired: set[str]) -> None:
+        """Retire acknowledged IDs without overwriting concurrent appenders."""
+        self.queue.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path(self.queue).open("a+") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            records, corrupt = self._read_queue()
+            remaining = [r for r in records if str(r["delivery_id"]) not in retired]
+            if corrupt:
+                quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
+                for line in corrupt:
+                    self._append_line(
+                        quarantine,
+                        line.rstrip(b"\r\n").decode("utf-8", errors="replace"),
+                        purpose="corrupt replay evidence",
+                    )
+                log.error(
+                    "quarantined %d corrupt event queue line(s) at %s",
+                    len(corrupt),
+                    quarantine,
+                )
+            staging = self.queue.with_name(f".{self.queue.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                with staging.open("wb") as handle:
+                    for record in remaining:
+                        handle.write(json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                staging.replace(self.queue)
+                self._fsync_parent(self.queue)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    staging.unlink()
+
+    def _flush(self, *, limit: int | None = None, blocking: bool = True) -> FlushReport:
+        if not self.url:
+            return FlushReport()
+        lock_path = self.queue.with_name(f"{self.queue.name}.flush.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as flush_lock:
+            operation = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            try:
+                fcntl.flock(flush_lock, operation)
+            except BlockingIOError:
+                records, corrupt = self._read_queue()
+                return FlushReport(pending=len(records), corrupt=len(corrupt), busy=True)
+            records, corrupt = self._read_queue()
+            selected = records[:limit] if limit is not None else records
+            retired: set[str] = set()
+            failed = False
+            foreign = 0
+            for record in selected:
+                if record["target"] != self.url:
+                    foreign += 1
+                    continue
+                body = json.dumps(record["event"], ensure_ascii=False).encode("utf-8")
+                if not self._post(self.url, body, str(record["delivery_id"])):
+                    self._trip_breaker(self.url)
+                    failed = True
+                    break
+                retired.add(str(record["delivery_id"]))
+            if retired or corrupt:
+                self._rewrite_queue(retired)
+            remaining, remaining_corrupt = self._read_queue()
+            return FlushReport(
+                delivered=len(retired),
+                pending=len(remaining),
+                corrupt=len(corrupt) + len(remaining_corrupt),
+                foreign=foreign,
+                failed=failed,
+            )
+
+    def flush(self, *, limit: int | None = None, blocking: bool = True) -> FlushReport:
+        """Replay queued events oldest first; stop at failure and never raise."""
+        try:
+            return self._flush(limit=limit, blocking=blocking)
+        except OSError:
+            log.exception("could not flush event replay queue %s", self.queue)
+            records, corrupt = self._read_queue()
+            return FlushReport(pending=len(records), corrupt=len(corrupt), failed=True)
+
+    def import_legacy(self, path: Path | None = None) -> ImportReport:
+        """Queue every valid event in an old log, accepting possible remote duplicates.
+
+        Old records have no delivery outcome or delivery ID, so no implementation can
+        distinguish the ones a previous process POSTed successfully. Stable IDs make a
+        repeated import idempotent with a current Burrow, but cannot deduplicate the
+        original ID-less delivery.
+        """
+        source = path or self.fallback
+        if not self.url:
+            return ImportReport()
+        try:
+            lines = source.read_bytes().splitlines()
+        except FileNotFoundError:
+            return ImportReport()
+        queued = 0
+        invalid = 0
+        failed = 0
+        for index, raw in enumerate(lines):
+            try:
+                event = json.loads(raw)
+            except UnicodeDecodeError, json.JSONDecodeError:
+                invalid += 1
+                continue
+            if not isinstance(event, dict) or validate_event(event):
+                invalid += 1
+                continue
+            digest = hashlib.sha256(str(index).encode() + b"\0" + raw).hexdigest()
+            record = {
+                "queue_v": QUEUE_VERSION,
+                "delivery_id": f"legacy_{digest}",
+                "target": self.url,
+                "event": event,
+            }
+            if self._append_line(
+                self.queue,
+                json.dumps(record, ensure_ascii=False),
+                purpose="as an imported legacy event",
+            ):
+                queued += 1
+            else:
+                failed += 1
+        return ImportReport(queued=queued, invalid=invalid, failed=failed)
 
     def emit(self, event: Event) -> bool:
         """Deliver one event and keep a local copy. Returns remote reach. Never raises.
@@ -343,14 +586,27 @@ class EventEmitter:
         return value still reports only whether the event reached a remote target.
         """
         line = event.to_json()
-        delivered = False
-        if self.url and not self._breaker_open(self.url):
-            if self._post(self.url, line.encode("utf-8")):
-                delivered = True
-            else:
-                self._trip_breaker(self.url)
-        self._append_fallback(line)
-        return delivered
+        self._append_line(self.fallback, line, purpose="in the watchdog log")
+        if not self.url:
+            return False
+        if not self.url.startswith(("http://", "https://")):
+            self._trip_breaker(self.url)
+            return False
+        delivery_id = uuid.uuid4().hex
+        queued = self._queue_record(event, delivery_id)
+        if not queued:
+            # Best effort still gives a healthy server a chance; an outage is loudly logged.
+            if not self._breaker_open(self.url):
+                delivered = self._post(self.url, line.encode("utf-8"), delivery_id)
+                if not delivered:
+                    self._trip_breaker(self.url)
+                return delivered
+            return False
+        if self._breaker_open(self.url):
+            return False
+        self.flush(limit=REPLAY_BATCH_SIZE, blocking=False)
+        remaining, _ = self._read_queue()
+        return not any(r["delivery_id"] == delivery_id for r in remaining)
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""

@@ -321,9 +321,10 @@ def test_a_failed_post_trips_a_breaker_so_the_caller_is_never_slowed(
     )
     attempts: list[str] = []
 
-    def refuse(_self: ev.EventEmitter, url: str, body: bytes) -> bool:
+    def refuse(_self: ev.EventEmitter, url: str, body: bytes, delivery_id: str = "") -> bool:
         attempts.append(url)
         assert body
+        assert delivery_id
         return False
 
     monkeypatch.setattr(ev.EventEmitter, "_post", refuse)
@@ -350,13 +351,17 @@ def test_a_loopback_breaker_lets_go_sooner(tmp_path: Path, monkeypatch: pytest.M
 
 
 def test_a_reachable_burrow_gets_the_event_with_the_bearer_token(tmp_path: Path) -> None:
-    seen: list[tuple[str, dict]] = []
+    seen: list[tuple[str, str, dict]] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             length = int(self.headers["Content-Length"])
             seen.append(
-                (self.headers.get("Authorization", ""), json.loads(self.rfile.read(length)))
+                (
+                    self.headers.get("Authorization", ""),
+                    self.headers.get("X-Burrow-Delivery-ID", ""),
+                    json.loads(self.rfile.read(length)),
+                )
             )
             self.send_response(204)
             self.end_headers()
@@ -377,8 +382,9 @@ def test_a_reachable_burrow_gets_the_event_with_the_bearer_token(tmp_path: Path)
         server.shutdown()
         server.server_close()
 
-    (authorization, body) = seen[0]
+    (authorization, delivery_id, body) = seen[0]
     assert authorization == "Bearer s3cret"
+    assert len(delivery_id) == 32
     assert ev.validate_event(body) == ()
     # A delivered event is *also* kept locally: the fallback log is the watchdog's own
     # complete record, so a bracket is never split across a transient outage.
@@ -430,11 +436,171 @@ def test_no_url_means_straight_to_the_local_log(tmp_path: Path) -> None:
     assert len(fallback.read_text().splitlines()) == 2
 
 
-def test_an_unwritable_fallback_never_takes_a_routine_down(tmp_path: Path) -> None:
+def test_an_unwritable_fallback_never_takes_a_routine_down(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     blocked = tmp_path / "a-file"
     blocked.write_text("not a directory", encoding="utf-8")
     emitter = ev.EventEmitter(fallback=blocked / "events.jsonl")
     assert emitter.emit(context().started("schedule")) is False
+    assert "could not persist event in the watchdog log" in caplog.text
+
+
+def test_outage_is_replayed_after_restart_oldest_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    offline = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: False)
+    assert offline.emit(context().started("schedule")) is False
+    assert offline.emit(context().failed(error="no", duration_s=1)) is False
+
+    seen: list[tuple[str, str]] = []
+
+    def accept(_self: ev.EventEmitter, _url: str, body: bytes, delivery_id: str = "") -> bool:
+        seen.append((json.loads(body)["type"], delivery_id))
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    report = restarted.flush()
+    assert report == ev.FlushReport(delivered=2)
+    assert [kind for kind, _delivery_id in seen] == ["routine_started", "routine_failed"]
+    assert len({delivery_id for _kind, delivery_id in seen}) == 2
+
+
+def test_real_http_outage_then_recovery_drains_the_durable_queue(tmp_path: Path) -> None:
+    healthy = [False]
+    deliveries: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            deliveries.append(self.headers["X-Burrow-Delivery-ID"])
+            self.send_response(204 if healthy[0] else 503)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            """Quiet."""
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    fallback = tmp_path / "events.jsonl"
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        assert (
+            ev.EventEmitter(url=url, fallback=fallback).emit(context().started("schedule")) is False
+        )
+        healthy[0] = True
+        report = ev.EventEmitter(url=url, fallback=fallback).flush()
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert report.delivered == 1
+    assert deliveries[0] == deliveries[1]
+
+
+def test_partial_flush_retires_success_and_stops_at_first_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    events = [context().started("schedule"), context().failed(error="x", duration_s=1)]
+    for index, event in enumerate(events):
+        assert emitter._queue_record(event, f"delivery-{index:08d}")
+    attempts = 0
+
+    def partial(*_args: object) -> bool:
+        nonlocal attempts
+        attempts += 1
+        return attempts == 1
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", partial)
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.pending == 1
+    assert report.failed is True
+
+
+def test_corrupt_and_torn_queue_lines_are_quarantined_without_blocking_valid_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-00000000")
+    with emitter.queue.open("ab") as handle:
+        handle.write(b'not-json\n{"torn":')
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.pending == 0
+    assert report.corrupt == 2
+    assert emitter.queue.with_name(f"{emitter.queue.name}.corrupt").exists()
+
+
+def test_repeated_delivery_after_crash_uses_the_same_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-crash-window")
+    ids: list[str] = []
+
+    def accept(_self: ev.EventEmitter, _url: str, _body: bytes, delivery_id: str = "") -> bool:
+        ids.append(delivery_id)
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    original = emitter._rewrite_queue
+
+    def crash(_retired: set[str]) -> None:
+        raise OSError("simulated crash before retirement")
+
+    monkeypatch.setattr(emitter, "_rewrite_queue", crash)
+    assert emitter.flush().failed is True
+    monkeypatch.setattr(emitter, "_rewrite_queue", original)
+    assert emitter.flush().delivered == 1
+    assert ids == ["delivery-crash-window", "delivery-crash-window"]
+
+
+def test_concurrent_append_survives_a_flush_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-concurrent-old")
+    posting = threading.Event()
+    release = threading.Event()
+
+    def accept(*_args: object) -> bool:
+        posting.set()
+        assert release.wait(timeout=2)
+        return True
+
+    monkeypatch.setattr(ev.EventEmitter, "_post", accept)
+    worker = threading.Thread(target=emitter.flush)
+    worker.start()
+    assert posting.wait(timeout=2)
+    assert emitter._queue_record(
+        context().failed(error="later", duration_s=1), "delivery-concurrent-new"
+    )
+    release.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    remaining, corrupt = emitter._read_queue()
+    assert corrupt == []
+    assert [record["delivery_id"] for record in remaining] == ["delivery-concurrent-new"]
+
+
+def test_legacy_import_is_stable_explicit_and_reports_invalid_lines(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    fallback.write_text(event.to_json() + "\nnot-json\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    first = emitter.import_legacy()
+    second = emitter.import_legacy()
+    records, corrupt = emitter._read_queue()
+    assert first == second == ev.ImportReport(queued=1, invalid=1)
+    assert corrupt == []
+    assert len(records) == 2
+    assert records[0]["delivery_id"] == records[1]["delivery_id"]
 
 
 def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:

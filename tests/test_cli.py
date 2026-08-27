@@ -33,6 +33,43 @@ def runner() -> CliRunner:
     return CliRunner()
 
 
+def test_events_flush_reports_delivery_and_exits_cleanly(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter.from_env(
+        {
+            "BURROW_URL": "https://village.example",
+            "STEWARD_EVENTS_FALLBACK": str(fallback),
+        }
+    )
+    event = cli.ev.Event(type="routine_started", agent_id="a", project="p")
+    assert emitter._queue_record(event, "delivery-cli-0001")
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: True)
+
+    result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
+    assert result.exit_code == 0, result.output
+    assert "delivered 1; pending 0; corrupt 0" in result.output
+
+
+def test_events_flush_failure_is_visible_and_nonzero(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        cli.ev.Event(type="routine_started", agent_id="a", project="p"),
+        "delivery-cli-0002",
+    )
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: False)
+
+    result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
+    assert result.exit_code == 1
+    assert "delivered 0; pending 1" in result.output
+
+
 def test_validate_defaults_to_the_residents_tree(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
