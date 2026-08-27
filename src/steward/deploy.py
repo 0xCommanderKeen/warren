@@ -58,7 +58,13 @@ from typing import Any, Protocol
 import yaml
 
 from steward.manifest import MANIFEST_FILENAME, Resident, ResidentManifest
-from steward.runners import TRANSFER_TIMEOUT_S, CommandOutcome, PipedRun, run_argv
+from steward.runners import (
+    COMMAND_TIMEOUT_S,
+    TRANSFER_TIMEOUT_S,
+    CommandOutcome,
+    PipedRun,
+    run_argv,
+)
 
 __all__ = [
     "BUNDLE_NAMES",
@@ -144,6 +150,19 @@ BURROW_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a crede
 #: unreachable, auth denied, host-key mismatch. Every other status belongs to the remote
 #: command, so this is the one value that tells the two apart from the near side.
 SSH_FAILURE_STATUS = 255
+
+#: SSH must fail instead of asking a daemon (or an operator's terminal) for credentials.
+SSH_OPTIONS: tuple[str, ...] = (
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+)
+
+#: Compose operations do real lifecycle work and are not control-plane queries. Pull is
+#: longest because image size and registry speed dominate it; up may create containers;
+#: down only stops and removes an existing project.
+COMPOSE_TIMEOUTS: Mapping[str, float] = {"pull": 600.0, "up": 300.0, "down": 120.0}
 
 
 class TransportError(Exception):
@@ -499,11 +518,37 @@ class SshTransport:
 
     def plan(self, argv: Sequence[str]) -> tuple[str, ...]:
         """Return the ssh argv for a remote command, exactly as :meth:`run` would use it."""
-        return (self.ssh, self.target, *(str(part) for part in argv))
+        return (self.ssh, *SSH_OPTIONS, self.target, *(str(part) for part in argv))
 
     def run(self, argv: Sequence[str]) -> CommandOutcome:
-        """Run one command over ssh."""
-        return self.command(self.plan(argv))
+        """Run one command over ssh, bounded according to the work it performs."""
+        parts = tuple(str(part) for part in argv)
+        timeout_s = self._timeout_for(parts)
+        return self.command(self.plan(parts), timeout_s)
+
+    @staticmethod
+    def _timeout_for(argv: Sequence[str]) -> float:
+        """Give compose lifecycle operations room without weakening short queries."""
+        try:
+            compose = argv.index("compose")
+        except ValueError:
+            return COMMAND_TIMEOUT_S
+        if compose == 0 or argv[compose - 1] != "docker":
+            return COMMAND_TIMEOUT_S
+        # Find the compose subcommand, not an option value (a project may itself be named
+        # ``pull``). These are the value-taking options steward's compose argv emits.
+        value_options = {"-f", "--file", "--project-directory", "-p", "--project-name"}
+        cursor = compose + 1
+        while cursor < len(argv):
+            part = argv[cursor]
+            if part in value_options:
+                cursor += 2
+                continue
+            if part.startswith("-"):
+                cursor += 1
+                continue
+            return COMPOSE_TIMEOUTS.get(part, COMMAND_TIMEOUT_S)
+        return COMMAND_TIMEOUT_S
 
     def send(self, files: Mapping[str, bytes], path: str) -> CommandOutcome:
         """Create ``path`` and unpack the bundle into it, through one tar-over-ssh pipe.
