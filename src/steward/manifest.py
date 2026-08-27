@@ -118,8 +118,8 @@ VOICE_HEADING = "## Voice"
 #: total size of a preamble becomes something you can compute rather than hope about. Without
 #: these numbers the section framed as the last word is also the one section able to crowd
 #: out every bounded section above it (steward #147). Each is generous against what live
-#: residents actually write: the longest mission in the tree is 359 characters, the longest
-#: duty 190, the longest summary 76.
+#: residents actually write: across ``residents/`` the longest mission is 359 characters,
+#: the longest duty 90, the longest hard rule 92, the longest summary 72.
 CHARTER_MISSION_MAX_CHARS = 2000
 
 #: One duty, one hard rule, or one escalation trigger. A line, not an essay.

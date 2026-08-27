@@ -386,9 +386,7 @@ def test_secret_in_the_soul_body_is_rejected(write_resident: ResidentWriter) -> 
     "value",
     ["../secrets.md", "/etc/passwd", "souls/hob.md", "~/soul.md", "..", "a soul.md"],
 )
-def test_soul_file_is_a_name_and_never_a_path(
-    write_resident: ResidentWriter, value: str
-) -> None:
+def test_soul_file_is_a_name_and_never_a_path(write_resident: ResidentWriter, value: str) -> None:
     """It is joined onto the manifest's directory at three places, and pathlib obliges.
 
     An absolute value replaces the base entirely and `..` composes without normalisation,

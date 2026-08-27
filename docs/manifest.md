@@ -115,8 +115,8 @@ preamble something you hope about rather than compute. Both problems are settled
 refusing at validation — in a pull request, where a person can shorten the sentence — and
 that is why these numbers live in `manifest.py` rather than in `prompt.py` (steward #147).
 
-The caps are generous against practice: the longest mission in this repo is 359
-characters, the longest duty 190, the longest summary 76.
+The caps are generous against practice: across `residents/` the longest mission is 359
+characters, the longest duty 90, the longest hard rule 92, the longest summary 72.
 
 Charter and identity text is also **neutralized** on its way into a prompt, exactly like
 injected text: a run of three or more `=` (or of the box-drawing and long-bar codepoints

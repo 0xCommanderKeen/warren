@@ -717,6 +717,30 @@ def test_a_retirement_that_cannot_remove_the_token_says_so(
     assert "~/docker/steward-note-keeper/.env" in str(refusal.value)
 
 
+def test_a_host_that_dies_between_the_stop_and_the_removal_still_answers(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """`steward retire` answers a NurseryError; a raw TransportError would be a traceback."""
+    raise_into(scratch_repo, host)
+
+    class DiesOnRemoval(LocalTransport):
+        def run(self, argv: Sequence[str]) -> CommandOutcome:
+            if argv[0] == "rm":
+                raise TransportError("connection closed")
+            return super().run(argv)
+
+    with pytest.raises(NurseryError) as refusal:
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=DiesOnRemoval(root=host.root),
+        )
+
+    assert "BURROW_TOKEN" in str(refusal.value)
+    assert "could not be reached" in str(refusal.value)
+
+
 def test_the_retire_report_names_the_login_it_leaves_behind(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:

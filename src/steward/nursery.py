@@ -1022,13 +1022,24 @@ def _scrub_host(
     file, and ``BURROW_URL`` is interpolated as ``${BURROW_URL:?…}``, so scrubbing first
     would make the stop fail on a missing variable.
     """
-    outcome = conveyance.run(scrub)
+    left_behind = ", ".join(str(PurePosixPath(target.path) / name) for name in SCRUBBED_FILES)
+    try:
+        outcome = conveyance.run(scrub)
+    except TransportError as exc:
+        # Wrapped for the same reason the stop wraps it: `steward retire` answers a
+        # NurseryError with a message and a non-zero exit, and a raw TransportError from
+        # a connection that died between the stop and the removal would be a traceback.
+        raise NurseryError(
+            f"{resident_id} is retired and its container is stopped, but "
+            f"{target.user}@{target.host} could not be reached to remove its credentials: "
+            f"{exc}; re-run `steward retire {resident_id}` once the host is back, or "
+            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
+        ) from exc
     if not outcome.ok:
         raise NurseryError(
             f"{resident_id} is retired and its container is stopped, but the credentials "
             f"could not be removed from {target.user}@{target.host}: {outcome.summary()}; "
-            f"remove {', '.join(str(PurePosixPath(target.path) / n) for n in SCRUBBED_FILES)} "
-            f"by hand — the .env holds BURROW_TOKEN"
+            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
         )
     return True
 
