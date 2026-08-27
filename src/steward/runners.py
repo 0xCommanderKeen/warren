@@ -54,9 +54,13 @@ from typing import Any, ClassVar
 
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import ToolGrant
+from steward.session_auth import SESSION_TOKEN_ENV
 
 __all__ = [
     "COST_USD_MAX",
+    "SESSION_ENV_BASE",
+    "SESSION_ENV_PASSTHROUGH_ENV",
+    "SESSION_ENV_REFUSED",
     "TOKENS_MAX",
     "TRANSFER_TIMEOUT_S",
     "ClaudeRunner",
@@ -76,6 +80,7 @@ __all__ = [
     "check_runner",
     "required_flags",
     "run_argv",
+    "session_environment",
     "skills_home",
     "substitute",
 ]
@@ -102,6 +107,178 @@ COST_USD_MAX = 10_000.0
 #: The same ceiling for token counts, which are written to an 8-byte SQLite ``INTEGER``
 #: and summed. Generous by orders of magnitude against any real session.
 TOKENS_MAX = 1_000_000_000
+
+# --------------------------------------------------------------------------------------
+# the session environment (steward #41)
+# --------------------------------------------------------------------------------------
+
+#: What every session inherits from the process that launched it, by name.
+#:
+#: This list is the boundary. Until steward #41 the child environment was
+#: ``{**os.environ, **request.env}``, and a ``steward serve`` with auth on holds
+#: ``STEWARD_TOKEN`` in ``os.environ`` *by construction* — there is no ``--token`` flag —
+#: while ``POST /residents/{id}/routines/{id}/run`` fires sessions from inside that very
+#: process. So every locally launched session was carrying the master key into the API,
+#: which the CLI it was supposed to use instead calls "a credential no session should be
+#: holding" in the same repo. The token-free ``<needs-human>``/``<delegate>`` channels were
+#: a convention the sessions were never held to.
+#:
+#: An allowlist rather than a denylist, because the failure modes are not symmetric: a
+#: name missing from an allowlist is a session that cannot find something and says so,
+#: while a name missing from a denylist is a secret nobody notices leaving. The container
+#: launcher in steward #58 has to name its variables one at a time anyway (``docker exec
+#: -e``), so the two placements agree instead of diverging.
+#:
+#: Three groups, and the reason each is here:
+SESSION_ENV_BASE = (
+    # The shape of the machine. Without ``PATH`` there is no brain to launch at all, and
+    # ``HOME`` is where every CLI in this repo keeps its own credentials and settings —
+    # which is the point: the brain's auth comes off the disk, under the account steward
+    # runs as, rather than through a variable steward passes around.
+    "HOME",
+    "PATH",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+    # Locale and clock, so a session's own output and timestamps read the way the
+    # operator's do.
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    # How this host reaches the network at all. A NAS behind a proxy or with its own CA
+    # bundle would otherwise have every session fail at the first HTTPS call, and none of
+    # these is a credential.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    # Steward's own *configuration* — never its credentials. A session with shell access is
+    # expected to call ``steward delegate`` and ``steward approval raise``, and those
+    # commands open the same database and read the same caps the control plane does:
+    # ``STEWARD_STATE`` is where ``default_db_path`` looks, and the other three are read by
+    # ``max_depth``, ``repeat_deny_window_s`` and ``EventEmitter.from_env``. Drop them and a
+    # session's CLI quietly opens a different ``steward.db`` under its own working
+    # directory, or runs under a delegation depth cap nobody chose.
+    "STEWARD_EVENTS_FALLBACK",
+    "STEWARD_MAX_DELEGATION_DEPTH",
+    "STEWARD_REPEAT_DENY_WINDOW_H",
+    "STEWARD_STATE",
+    # Where the village is, so a session's own emitter posts to the same burrow. Its
+    # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
+    "BURROW_URL",
+)
+
+#: Names a runner adds for its own brain, on top of :data:`SESSION_ENV_BASE`.
+#:
+#: A session has to be able to authenticate to its own model provider — that credential is
+#: the session's fuel, not steward's master key, and a session that cannot buy tokens is
+#: not a bounded session but a broken one. Everything else about the brain (which model,
+#: which tools, which directory) is already declared in the manifest and passed as argv,
+#: so this stays to auth and endpoint.
+CLAUDE_ENV_NAMES = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_CUSTOM_HEADERS",
+    "AWS_REGION",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CONFIG_DIR",
+    "CLOUD_ML_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
+
+CODEX_ENV_NAMES = (
+    "CODEX_HOME",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+)
+
+#: The operator's named escape hatch: a comma-separated list of variables this fleet's
+#: sessions also need.
+#:
+#: An allowlist that cannot be extended is an allowlist that gets reverted the first time
+#: a real deployment needs one name nobody upstream thought of — a ``command`` runner
+#: template that shells out over ``ssh`` needs ``SSH_AUTH_SOCK``, and this repo documents
+#: that template as the multi-machine workaround. So the hatch exists, and it is a list of
+#: *names*: what a session may see stays a decision somebody wrote down, and ``steward``
+#: can print it.
+SESSION_ENV_PASSTHROUGH_ENV = "STEWARD_SESSION_ENV_PASSTHROUGH"
+
+#: Names the passthrough refuses to forward, however it is spelled.
+#:
+#: ``STEWARD_TOKEN`` is the whole reason steward #41 exists: it is the master key into
+#: steward's own API, where deciding an approval and delegating as any resident hang off
+#: the same shared secret, so there is no configuration in which a session legitimately
+#: holds it. ``STEWARD_SESSION_TOKEN`` is refused for the opposite reason — it must come
+#: from the mint at fire time, per run, and an operator-supplied one would be a credential
+#: with no run behind it and no expiry.
+#:
+#: ``BURROW_TOKEN`` is not in this set, and that is a narrower statement than it looks.
+#: It is off the default allowlist for its own reason — one shared ingest secret whose
+#: holder can post events as any ``agent_id`` — and a session should not be given it. What
+#: a session loses without it is nothing durable: the emitter queues its events in
+#: ``events.jsonl.pending`` and a control-plane ``steward events flush`` delivers them under
+#: the control plane's own credential, so the events arrive either way. Naming it here is
+#: therefore an operator buying *live* emission at the price of that shared secret, and
+#: steward does not refuse it only because the choice is legitimately theirs to get wrong.
+#: Per-resident ingest credentials are the real answer, and are their own issue.
+SESSION_ENV_REFUSED = frozenset({"STEWARD_TOKEN", SESSION_TOKEN_ENV})
+
+
+def passthrough_names(inherited: Mapping[str, str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split ``$STEWARD_SESSION_ENV_PASSTHROUGH`` into what it forwards and what it may not.
+
+    Returns ``(forwarded, refused)``. Refusals are returned rather than dropped so the
+    caller can say them out loud: an operator who listed ``STEWARD_TOKEN`` believes their
+    sessions have it, and silently not forwarding it would be a boundary that holds for the
+    wrong reason.
+    """
+    raw = (inherited.get(SESSION_ENV_PASSTHROUGH_ENV) or "").strip()
+    named = tuple(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
+    forwarded = tuple(name for name in named if name not in SESSION_ENV_REFUSED)
+    refused = tuple(name for name in named if name in SESSION_ENV_REFUSED)
+    return forwarded, refused
+
+
+def session_environment(
+    request: RunRequest,
+    *,
+    allowed: Sequence[str],
+    inherited: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the exact environment one session is launched with. Nothing else gets in.
+
+    Two sources, in this order: the allowlisted names this host actually has set, then
+    ``request.env`` — the facts steward *chose* to tell this session, which win, because a
+    resident's ``BURROW_AGENT_ID`` is its identity and not the launching process's.
+
+    An unset name is absent rather than empty. ``PATH=""`` is not "no preference", it is a
+    ``PATH`` with one entry, the current directory, and a session that cannot find its own
+    brain should fail saying so rather than exec something out of its workdir.
+    """
+    source = os.environ if inherited is None else inherited
+    forwarded, refused = passthrough_names(source)
+    for name in refused:
+        log.warning(
+            "%s names %s, which no session may hold; it is not being forwarded",
+            SESSION_ENV_PASSTHROUGH_ENV,
+            name,
+        )
+    names = (*allowed, *forwarded)
+    env = {name: source[name] for name in names if name in source}
+    env.update(request.env)
+    return env
+
 
 #: The two flags a bounded session is launched with. Both, or the bound does not hold:
 #: ``--tools`` alone leaves the host's MCP servers reachable (see :meth:`ClaudeRunner.argv`),
@@ -382,6 +559,12 @@ class _ProcessRunner(Runner):
     #: ``command`` runner only learns its binary from the manifest template.
     binary: str = ""
 
+    #: What this runner's brain needs from the launching environment, on top of
+    #: :data:`SESSION_ENV_BASE`. Empty by default, so a new runner kind starts with the
+    #: narrow environment and has to say what else it needs rather than inheriting the
+    #: control plane's.
+    env_names: ClassVar[tuple[str, ...]] = ()
+
     @abstractmethod
     def argv(self, request: RunRequest) -> list[str]:
         """Return the exact argv for this request. Never a shell string."""
@@ -401,11 +584,15 @@ class _ProcessRunner(Runner):
             )
         return None
 
+    def environment(self, request: RunRequest) -> dict[str, str]:
+        """Return this session's whole environment: the allowlist, then ``request.env``."""
+        return session_environment(request, allowed=(*SESSION_ENV_BASE, *self.env_names))
+
     def run(self, request: RunRequest) -> RunResult:
         """Launch the session, bound by its timeout, and report what happened."""
         started = time.monotonic()
         argv = self.argv(request)
-        env = {**os.environ, **request.env}
+        env = self.environment(request)
         workdir_fd = request.workdir_fd
         launch_argv = argv
         status_reader: int | None = None
@@ -496,6 +683,7 @@ class ClaudeRunner(_ProcessRunner):
 
     kind: ClassVar[str] = "claude"
     binary: str = "claude"
+    env_names: ClassVar[tuple[str, ...]] = CLAUDE_ENV_NAMES
     #: ``claude`` discovers skills under the working directory, so a granted skill is
     #: both injected into the prompt and written here before the run.
     skills_dir: ClassVar[str | None] = ".claude/skills"
@@ -592,6 +780,7 @@ class CodexRunner(_ProcessRunner):
 
     kind: ClassVar[str] = "codex"
     binary: str = "codex"
+    env_names: ClassVar[tuple[str, ...]] = CODEX_ENV_NAMES
 
     def argv(self, request: RunRequest) -> list[str]:
         """Build the codex headless argv."""

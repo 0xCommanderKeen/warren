@@ -527,9 +527,36 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
 | `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
+| `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a session may inherit, on top of the allowlist below. `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
 
 Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
 `--allow-open`, `--residents` — and the flag wins over the variable.
+
+### What a session inherits
+
+**A session does not get steward's environment.** It gets an allowlist
+(`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands it, and
+nothing else. The allowlist is the shape of the machine (`PATH`, `HOME`, locale, proxy and
+CA settings), steward's own *configuration* (`STEWARD_STATE`, `STEWARD_MAX_DELEGATION_DEPTH`,
+`BURROW_URL`, …) so a session's own `steward delegate` opens the same database under the
+same caps, and the brain's own provider credentials (`ANTHROPIC_API_KEY` for a `claude`
+runner, `OPENAI_API_KEY` for a `codex` one).
+
+Two names are deliberately missing, and neither is an oversight:
+
+- **`STEWARD_TOKEN`** is the master key into steward's own API — the same secret that
+  decides approvals and delegates as any resident. `steward approval raise` and
+  `steward delegate` exist precisely so a session never needs it, and until steward #41
+  every locally launched session was carrying it anyway.
+- **`BURROW_TOKEN`** is one shared ingest secret whose holder can post events as any
+  `agent_id`. A session without it loses nothing durable: its emitter queues events in
+  `events.jsonl.pending`, and a control-plane `steward events flush` delivers them under
+  the control plane's own credential — the events arrive either way. Naming it in
+  `STEWARD_SESSION_ENV_PASSTHROUGH` buys *live* emission at the price of handing every
+  session a secret that can impersonate every other resident. Prefer the flush.
+
+One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scoped
+credential — see [the API's two kinds of caller](docs/api.md#two-kinds-of-caller).
 
 Remote-bound events enter a durable queue before POST. Each retry keeps one
 `X-Burrow-Delivery-ID`, so a crash after Burrow accepts an event but before Steward

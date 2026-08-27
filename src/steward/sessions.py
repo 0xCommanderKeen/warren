@@ -23,6 +23,7 @@ from steward.manifest import ManifestError, Resident, ResidentManifest, Routine
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_delegated_prompt, assemble_routine_prompt, assemble_task_prompt
 from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner, skills_home
+from steward.session_auth import SESSION_TOKEN_ENV
 from steward.skills import (
     Skill,
     SkillError,
@@ -46,12 +47,25 @@ __all__ = [
     "SessionHooks",
     "SessionResult",
     "TaskWake",
+    "session_credential_env",
     "workdir_refusal",
 ]
 
 log = logging.getLogger("steward.sessions")
 
 type RunnerFactory = Callable[[RunnerSpec], Runner]
+
+
+def session_credential_env(credential: str) -> dict[str, str]:
+    """Name this run's own credential for the child, or say nothing at all.
+
+    One spelling for every kind of wake-up, so a routine session and a board session cannot
+    end up looking for their credential under different names. Absent rather than empty
+    when there is none: a session that finds ``STEWARD_SESSION_TOKEN=""`` would present it
+    and be told it is unauthorized, which reads like a revoked credential rather than like
+    a run that was never registered.
+    """
+    return {SESSION_TOKEN_ENV: credential} if credential else {}
 
 
 class RunGuard(Protocol):
@@ -199,6 +213,11 @@ class RoutineWake:
     routine: Routine
     run_id: str
     trigger: str = "schedule"
+    #: This run's own scoped API credential, or ``""`` when the run is not in the registry
+    #: (a rehearsal, or a steward with no store). Empty rather than absent because a
+    #: credential no row backs would authenticate nothing, and a session is better told
+    #: nothing than handed a dud (steward #41).
+    session_credential: str = ""
 
     @property
     def timeout_s(self) -> int:
@@ -231,6 +250,7 @@ class RoutineWake:
             "BURROW_PROJECT": resident.project,
             "STEWARD_ROUTINE": self.routine.id,
             "STEWARD_RUN_ID": self.run_id,
+            **session_credential_env(self.session_credential),
         }
 
     def pre_run_failure_duration(self, elapsed_s: float) -> float:
@@ -254,6 +274,9 @@ class _BoardWake:
     #: origin join reads (steward #124).
     run_id: str
     parent_task_id: str | None = None
+    #: This attempt's own scoped API credential. Per attempt, not per task: two claims of
+    #: one task are two sessions, and the second must not be able to present the first's.
+    session_credential: str = ""
 
     @property
     def ref(self) -> str:
@@ -276,6 +299,7 @@ class _BoardWake:
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "STEWARD_TASK_ID": self.task_id,
+            **session_credential_env(self.session_credential),
         }
         if self.parent_task_id:
             env["STEWARD_PARENT_TASK_ID"] = self.parent_task_id

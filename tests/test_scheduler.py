@@ -22,6 +22,11 @@ from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
 from steward.budgets import BudgetGuard
+from steward.session_auth import (
+    SESSION_CREDENTIAL_PREFIX,
+    SESSION_TOKEN_ENV,
+    SessionPrincipal,
+)
 from steward.store import Store
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
@@ -1842,6 +1847,64 @@ def _engine_with_registry(
         registry=store,
         runner_factory=runner_factory,
     )
+
+
+def test_a_fired_session_is_handed_a_credential_its_own_run_backs(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The whole of steward #41's second half, end to end: mint, store, resolve.
+
+    Asked *from inside the session*, which is the only moment that proves anything: the
+    run this fire actually opened is the row the credential resolves against, and it
+    resolves while the session is running rather than against a row the test made up. The
+    same question after the session reports back must answer nothing.
+    """
+    path = write_resident(manifest_with(HOURLY))
+    handed: list[str] = []
+    resolved: list[SessionPrincipal | None] = []
+
+    with Store(":memory:") as store:
+
+        def ask_from_inside(request: r.RunRequest) -> r.RunResult:
+            credential = request.env[SESSION_TOKEN_ENV]
+            handed.append(credential)
+            resolved.append(store.session_principal(credential, fresh_since=""))
+            return r.RunResult(outcome=r.Outcome.OK, output="done", exit_status=0)
+
+        engine = _engine_with_registry(
+            path, store, tmp_path, lambda _spec: r.MockRunner(behavior=ask_from_inside)
+        )
+
+        report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+        (credential,) = handed
+        (principal,) = resolved
+        assert credential.startswith(SESSION_CREDENTIAL_PREFIX)
+        assert principal is not None
+        assert principal.resident_id == "test-agent"
+        assert principal.run_id == report.run_id, "the row this fire opened, not another"
+
+        assert store.open_runs() == [], "and the run reported back"
+        assert store.session_principal(credential, fresh_since="") is None
+
+
+def test_a_registry_that_will_not_take_the_run_hands_over_no_credential(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A credential no row backs would 401; a session is better told nothing."""
+    path = write_resident(manifest_with(HOURLY))
+    mock = r.MockRunner()
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec: mock,
+    )
+
+    engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+    assert SESSION_TOKEN_ENV not in mock.requests[0].env
 
 
 def test_a_fire_opens_a_registry_row_and_closes_it(

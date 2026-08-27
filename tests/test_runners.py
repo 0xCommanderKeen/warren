@@ -8,7 +8,10 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -26,8 +29,30 @@ PWNED = "/var/tmp/steward-pwned"  # noqa: S108 — the file a shell-injection te
 UNRESTRICTED = ToolGrant("unrestricted")
 
 
-def request_for(tmp_path: Path, prompt: str = "say hello", timeout_s: int = 10) -> r.RunRequest:
-    return r.RunRequest(tools=UNRESTRICTED, prompt=prompt, workdir=tmp_path, timeout_s=timeout_s)
+def request_for(
+    tmp_path: Path,
+    prompt: str = "say hello",
+    timeout_s: int = 10,
+    env: Mapping[str, str] | None = None,
+) -> r.RunRequest:
+    return r.RunRequest(
+        tools=UNRESTRICTED,
+        prompt=prompt,
+        workdir=tmp_path,
+        timeout_s=timeout_s,
+        env=env or {},
+    )
+
+
+def dumps(tmp_path: Path) -> dict[str, str]:
+    """Where a stub should write the argv and cwd it was launched with.
+
+    Handed over in ``request.env`` rather than exported into the test process, because
+    since steward #41 a session inherits only :data:`steward.runners.SESSION_ENV_BASE` —
+    which is the behaviour under test, and a fixture that needed the old leak to work would
+    be a fixture asserting the leak.
+    """
+    return {"ARGV_DUMP": str(tmp_path / "argv.txt"), "CWD_DUMP": str(tmp_path / "cwd.txt")}
 
 
 # ------------------------------------------------------------------------------- factory
@@ -302,20 +327,22 @@ JSON
 """
 
 
-def test_claude_runner_passes_prompt_model_and_cwd(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_claude_runner_passes_prompt_model_and_cwd(stub_bin: StubWriter, tmp_path: Path) -> None:
     stub_bin("claude", CLAUDE_STUB)
     argv_dump = tmp_path / "argv.txt"
     cwd_dump = tmp_path / "cwd.txt"
-    monkeypatch.setenv("ARGV_DUMP", str(argv_dump))
-    monkeypatch.setenv("CWD_DUMP", str(cwd_dump))
     workdir = tmp_path / "work"
     workdir.mkdir()
 
     runner = r.build_runner(RunnerSpec(kind="claude", model="claude-opus-5"))
     result = runner.run(
-        r.RunRequest(tools=UNRESTRICTED, prompt="write it", workdir=workdir, timeout_s=10)
+        r.RunRequest(
+            tools=UNRESTRICTED,
+            prompt="write it",
+            workdir=workdir,
+            timeout_s=10,
+            env=dumps(tmp_path),
+        )
     )
 
     argv = argv_dump.read_text().splitlines()
@@ -329,13 +356,11 @@ def test_claude_runner_passes_prompt_model_and_cwd(
 
 
 def test_claude_runner_passes_permission_mode_when_declared(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     stub_bin("claude", CLAUDE_STUB)
-    monkeypatch.setenv("ARGV_DUMP", str(tmp_path / "argv.txt"))
-    monkeypatch.setenv("CWD_DUMP", str(tmp_path / "cwd.txt"))
     spec = RunnerSpec(kind="claude", permission_mode="acceptEdits")
-    r.build_runner(spec).run(request_for(tmp_path))
+    r.build_runner(spec).run(request_for(tmp_path, env=dumps(tmp_path)))
     assert "--permission-mode\nacceptEdits" in (tmp_path / "argv.txt").read_text()
 
 
@@ -345,7 +370,6 @@ def test_claude_runner_passes_permission_mode_when_declared(
 def claude_argv(  # noqa: PLR0913 — one keyword per thing a test wants to vary
     stub_bin: StubWriter,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     tools: ToolGrant,
     *,
     model: str | None = None,
@@ -358,9 +382,6 @@ def claude_argv(  # noqa: PLR0913 — one keyword per thing a test wants to vary
     accidentally reach a real ``claude`` on the developer's PATH.
     """
     stub_bin("claude", CLAUDE_STUB)
-    dump = tmp_path / "argv.txt"
-    monkeypatch.setenv("ARGV_DUMP", str(dump))
-    monkeypatch.setenv("CWD_DUMP", str(tmp_path / "cwd.txt"))
     spec = RunnerSpec(kind="claude", model=model, permission_mode=permission_mode)
     r.build_runner(spec).run(
         r.RunRequest(
@@ -369,48 +390,49 @@ def claude_argv(  # noqa: PLR0913 — one keyword per thing a test wants to vary
             timeout_s=10,
             tools=tools,
             workspace=workspace,
+            env=dumps(tmp_path),
         )
     )
-    return dump.read_text().splitlines()
+    return (tmp_path / "argv.txt").read_text().splitlines()
 
 
 def test_an_unrestricted_resident_gets_the_argv_it_always_got(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """Migrating a resident to `tools: unrestricted` must change nothing about its run.
 
     Every live resident is migrated that way, so this is the assertion that says the
     migration is a change in what the manifest *says*, not in what steward *does*.
     """
-    argv = claude_argv(stub_bin, tmp_path, monkeypatch, UNRESTRICTED, model="claude-opus-5")
+    argv = claude_argv(stub_bin, tmp_path, UNRESTRICTED, model="claude-opus-5")
 
     assert argv == ["-p", "say hello", "--output-format", "json", "--model", "claude-opus-5"]
 
 
 def test_a_bounded_resident_is_launched_with_the_names_and_strict_mcp(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """The pair, always: `--tools` alone leaves the host's MCP servers reachable."""
-    argv = claude_argv(stub_bin, tmp_path, monkeypatch, ToolGrant(["Read", "Glob", "Grep"]))
+    argv = claude_argv(stub_bin, tmp_path, ToolGrant(["Read", "Glob", "Grep"]))
 
     assert argv[-3:] == ["--tools", "Read,Glob,Grep", "--strict-mcp-config"]
 
 
 def test_a_resident_bounded_to_nothing_says_so_on_the_command_line(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """`tools: []` is a declaration, not an omission, and the CLI has a spelling for it.
 
     `--tools ""` is documented as *disable all tools*, and it measures that way: a session
     launched with it had none and answered by writing tool-call markup as plain text.
     """
-    argv = claude_argv(stub_bin, tmp_path, monkeypatch, ToolGrant([]))
+    argv = claude_argv(stub_bin, tmp_path, ToolGrant([]))
 
     assert argv[-3:] == ["--tools", "", "--strict-mcp-config"]
 
 
 def test_the_bound_survives_a_permissive_permission_mode(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """Both flags reach the CLI together; neither replaces the other.
 
@@ -418,9 +440,7 @@ def test_the_bound_survives_a_permissive_permission_mode(
     Bash. The two are different axes — which tools exist, and whether a call to one is
     approved — which is why a manifest may carry both and steward passes both.
     """
-    argv = claude_argv(
-        stub_bin, tmp_path, monkeypatch, ToolGrant(["Read"]), permission_mode="acceptEdits"
-    )
+    argv = claude_argv(stub_bin, tmp_path, ToolGrant(["Read"]), permission_mode="acceptEdits")
 
     assert "--permission-mode" in argv
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
@@ -440,7 +460,7 @@ def test_two_requests_that_differ_only_in_tools_are_two_requests(tmp_path: Path)
 
 
 def test_a_declared_workspace_reaches_argv_one_flag_at_a_time(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """One `--add-dir` per directory, not the variadic `--add-dir a b`.
 
@@ -449,21 +469,19 @@ def test_a_declared_workspace_reaches_argv_one_flag_at_a_time(
     directories read a file in each.
     """
     argv = claude_argv(
-        stub_bin, tmp_path, monkeypatch, UNRESTRICTED, workspace=("/data/library", "/data/incoming")
+        stub_bin, tmp_path, UNRESTRICTED, workspace=("/data/library", "/data/incoming")
     )
 
     assert argv[-4:] == ["--add-dir", "/data/library", "--add-dir", "/data/incoming"]
 
 
-def test_declaring_no_workspace_adds_nothing(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_declaring_no_workspace_adds_nothing(stub_bin: StubWriter, tmp_path: Path) -> None:
     """The default is the safe one: the session stays in the directory it was confined to."""
-    assert "--add-dir" not in claude_argv(stub_bin, tmp_path, monkeypatch, UNRESTRICTED)
+    assert "--add-dir" not in claude_argv(stub_bin, tmp_path, UNRESTRICTED)
 
 
 def test_a_bounded_session_can_still_be_given_somewhere_to_work(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """The two declarations are orthogonal and compile side by side.
 
@@ -473,7 +491,6 @@ def test_a_bounded_session_can_still_be_given_somewhere_to_work(
     argv = claude_argv(
         stub_bin,
         tmp_path,
-        monkeypatch,
         ToolGrant(["Bash", "Read"]),
         permission_mode="acceptEdits",
         workspace=("/data/library",),
@@ -602,7 +619,7 @@ JSON
     ],
 )
 def test_a_cost_steward_cannot_believe_is_recorded_as_unknown(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: str, why: str
+    stub_bin: StubWriter, tmp_path: Path, reported: str, why: str
 ) -> None:
     """The daily cap is computed from a number the model process supplies.
 
@@ -615,9 +632,10 @@ def test_a_cost_steward_cannot_believe_is_recorded_as_unknown(
     has a word for, rather than as a cost steward made up.
     """
     stub_bin("claude", HOSTILE_COST_STUB)
-    monkeypatch.setenv("COST", reported)
 
-    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+    result = r.build_runner(RunnerSpec(kind="claude")).run(
+        request_for(tmp_path, env={"COST": reported})
+    )
 
     assert result.outcome is r.Outcome.OK
     assert result.output == "the summary", "the run itself is untouched"
@@ -678,21 +696,20 @@ def test_a_cost_too_large_to_be_a_float_is_refused_not_raised(
     assert result.cost_usd is None
 
 
-def test_a_plausible_cost_still_gets_through(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_plausible_cost_still_gets_through(stub_bin: StubWriter, tmp_path: Path) -> None:
     """The bound is an absurdity ceiling, not a policy — ordinary money passes."""
     stub_bin("claude", HOSTILE_COST_STUB)
-    monkeypatch.setenv("COST", "12.5")
 
-    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+    result = r.build_runner(RunnerSpec(kind="claude")).run(
+        request_for(tmp_path, env={"COST": "12.5"})
+    )
 
     assert result.cost_usd == pytest.approx(12.5)
 
 
 @pytest.mark.parametrize("reported", ["-1", "999999999999999999999"])
 def test_a_token_count_steward_cannot_believe_is_recorded_as_unknown(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reported: str
+    stub_bin: StubWriter, tmp_path: Path, reported: str
 ) -> None:
     """Token counts are summed into an 8-byte column, so they are bounded too.
 
@@ -709,9 +726,9 @@ cat <<JSON
 JSON
 """,
     )
-    monkeypatch.setenv("TOKENS", reported)
-
-    result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
+    result = r.build_runner(RunnerSpec(kind="claude")).run(
+        request_for(tmp_path, env={"TOKENS": reported})
+    )
 
     assert (result.input_tokens, result.output_tokens) == (None, None)
     assert result.cost_usd is None, "and the cost that came with it is not believed either"
@@ -779,15 +796,20 @@ def test_a_failure_never_leaks_child_output_into_the_summary(
 
 
 def test_codex_runner_uses_exec_and_puts_the_prompt_last(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     stub_bin("codex", 'printf "%s\\n" "$@" > "$ARGV_DUMP"')
     argv_dump = tmp_path / "argv.txt"
-    monkeypatch.setenv("ARGV_DUMP", str(argv_dump))
 
     runner = r.build_runner(RunnerSpec(kind="codex", model="gpt-5-codex"))
     result = runner.run(
-        r.RunRequest(tools=UNRESTRICTED, prompt="tidy up", workdir=tmp_path, timeout_s=10)
+        r.RunRequest(
+            tools=UNRESTRICTED,
+            prompt="tidy up",
+            workdir=tmp_path,
+            timeout_s=10,
+            env=dumps(tmp_path),
+        )
     )
 
     assert argv_dump.read_text().splitlines() == ["exec", "--model", "gpt-5-codex", "tidy up"]
@@ -812,17 +834,20 @@ def test_a_prompt_can_never_smuggle_in_a_second_substitution() -> None:
     assert argv == ["tool", "{workdir}", "/secret"], "one pass only: a prompt is data"
 
 
-def test_shell_metacharacters_stay_one_argument(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_shell_metacharacters_stay_one_argument(stub_bin: StubWriter, tmp_path: Path) -> None:
     stub_bin("my-agent", 'printf "%s\\n" "$@" > "$ARGV_DUMP"')
     argv_dump = tmp_path / "argv.txt"
-    monkeypatch.setenv("ARGV_DUMP", str(argv_dump))
     hostile = f"; rm -rf / && $(whoami) `id` | tee {PWNED}"
 
     spec = RunnerSpec(kind="command", command=["my-agent", "--prompt", "{prompt}"])
     result = r.build_runner(spec).run(
-        r.RunRequest(tools=UNRESTRICTED, prompt=hostile, workdir=tmp_path, timeout_s=10)
+        r.RunRequest(
+            tools=UNRESTRICTED,
+            prompt=hostile,
+            workdir=tmp_path,
+            timeout_s=10,
+            env=dumps(tmp_path),
+        )
     )
 
     assert result.outcome is r.Outcome.OK
@@ -830,14 +855,13 @@ def test_shell_metacharacters_stay_one_argument(
     assert not Path(PWNED).exists()
 
 
-def test_command_runner_substitutes_the_workdir(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_command_runner_substitutes_the_workdir(stub_bin: StubWriter, tmp_path: Path) -> None:
     stub_bin("my-agent", 'printf "%s\\n" "$@" > "$ARGV_DUMP"')
-    monkeypatch.setenv("ARGV_DUMP", str(tmp_path / "argv.txt"))
     spec = RunnerSpec(kind="command", command=["my-agent", "{workdir}", "{prompt}"])
     r.build_runner(spec).run(
-        r.RunRequest(tools=UNRESTRICTED, prompt="p", workdir=tmp_path, timeout_s=10)
+        r.RunRequest(
+            tools=UNRESTRICTED, prompt="p", workdir=tmp_path, timeout_s=10, env=dumps(tmp_path)
+        )
     )
     assert (tmp_path / "argv.txt").read_text().splitlines() == [str(tmp_path), "p"]
 
@@ -902,11 +926,8 @@ def test_result_summary_reports_what_happened() -> None:
     assert r.RunResult(outcome=r.Outcome.FAILED, exit_status=2).summary() == "exit status 2"
 
 
-def test_request_env_reaches_the_session(
-    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_request_env_reaches_the_session(stub_bin: StubWriter, tmp_path: Path) -> None:
     stub_bin("claude", 'echo "$BURROW_AGENT_ID" > "$ARGV_DUMP"')
-    monkeypatch.setenv("ARGV_DUMP", str(tmp_path / "env.txt"))
     runner = r.build_runner(RunnerSpec(kind="claude"))
     runner.run(
         r.RunRequest(
@@ -914,10 +935,174 @@ def test_request_env_reaches_the_session(
             prompt="p",
             workdir=tmp_path,
             timeout_s=10,
-            env={"BURROW_AGENT_ID": "claude-code:life-agent"},
+            env={
+                "ARGV_DUMP": str(tmp_path / "env.txt"),
+                "BURROW_AGENT_ID": "claude-code:life-agent",
+            },
         )
     )
     assert (tmp_path / "env.txt").read_text().strip() == "claude-code:life-agent"
+
+
+# -------------------------------------------- the session environment (steward #41)
+
+#: A stub that reports its *whole* environment, one ``NAME=value`` per line. Every test in
+#: this group reads the child's real environment rather than steward's source: the
+#: acceptance criterion for steward #41 is what the process actually sees.
+ENV_DUMP_STUB = 'env > "$ENV_DUMP"'
+
+
+def child_env(
+    stub_bin: StubWriter,
+    tmp_path: Path,
+    *,
+    request: r.RunRequest | None = None,
+    kind: Literal["claude", "codex"] = "claude",
+) -> dict[str, str]:
+    """Launch a real stub and return the environment it was actually given."""
+    stub_bin(kind, ENV_DUMP_STUB)
+    dump = tmp_path / "env.txt"
+    asked = request or request_for(tmp_path)
+    handed = dict(asked.env)
+    handed["ENV_DUMP"] = str(dump)
+    result = r.build_runner(RunnerSpec(kind=kind)).run(replace(asked, env=handed))
+    assert result.outcome is r.Outcome.OK, result
+    observed: dict[str, str] = {}
+    for line in dump.read_text().splitlines():
+        name, separator, value = line.partition("=")
+        if separator:
+            observed[name] = value
+    return observed
+
+
+def test_a_session_never_sees_stewards_api_token(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The leak steward #41 is about, asserted against the child's own environment.
+
+    ``steward serve`` with auth on holds ``STEWARD_TOKEN`` in ``os.environ`` by
+    construction — there is no ``--token`` flag — and fires sessions from inside that
+    process. Every locally launched session was therefore carrying the master key into the
+    API, which is the credential the escalation boundary and the two-manifest delegation
+    rule both assume no session holds.
+    """
+    monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
+    monkeypatch.setenv("BURROW_TOKEN", "the-shared-ingest-secret")
+
+    observed = child_env(stub_bin, tmp_path)
+
+    assert "STEWARD_TOKEN" not in observed
+    assert "BURROW_TOKEN" not in observed
+    assert "the-master-key" not in observed.values()
+
+
+def test_a_session_sees_only_the_allowlist_and_what_steward_chose(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing ambient gets in, and everything deliberate does.
+
+    The second half matters as much as the first: an allowlist that also dropped
+    ``request.env`` would be a session with no identity, and ``BURROW_AGENT_ID`` is how
+    burrow knows which villager acted.
+    """
+    monkeypatch.setenv("SOME_UNRELATED_SECRET", "nope")
+    monkeypatch.setenv("STEWARD_STATE", "/state/scheduler.json")
+
+    observed = child_env(
+        stub_bin,
+        tmp_path,
+        request=request_for(tmp_path, env={"BURROW_AGENT_ID": "claude-code:life-agent"}),
+    )
+
+    assert "SOME_UNRELATED_SECRET" not in observed
+    assert observed["BURROW_AGENT_ID"] == "claude-code:life-agent"
+    assert observed["STEWARD_STATE"] == "/state/scheduler.json", (
+        "a session's own `steward delegate` has to open the same database"
+    )
+    assert observed["PATH"], "and it still has to be able to find its brain"
+
+
+def test_a_session_finds_its_brains_own_credential(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session that cannot buy tokens is not a bounded session, it is a broken one.
+
+    And each brain gets only its own: the provider credential is the session's fuel, so it
+    passes, but there is no reason a claude session should be holding an OpenAI key.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-fuel")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-fuel")
+
+    claude = child_env(stub_bin, tmp_path)
+    codex = child_env(stub_bin, tmp_path, kind="codex")
+
+    assert claude["ANTHROPIC_API_KEY"] == "anthropic-fuel"
+    assert "OPENAI_API_KEY" not in claude
+    assert codex["OPENAI_API_KEY"] == "openai-fuel"
+    assert "ANTHROPIC_API_KEY" not in codex
+
+
+def test_request_env_wins_over_the_launching_process(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resident's identity is its manifest's, not the launching process's."""
+    monkeypatch.setenv("BURROW_URL", "http://the-control-planes-village")
+
+    observed = child_env(
+        stub_bin,
+        tmp_path,
+        request=request_for(tmp_path, env={"BURROW_URL": "http://this-residents-village"}),
+    )
+
+    assert observed["BURROW_URL"] == "http://this-residents-village"
+
+
+def test_an_unset_allowlisted_name_is_absent_rather_than_empty(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``PATH=""`` is not "no preference", it is a PATH whose one entry is the cwd."""
+    monkeypatch.delenv("TZ", raising=False)
+
+    observed = child_env(stub_bin, tmp_path)
+
+    assert "TZ" not in observed
+
+
+def test_the_operator_can_name_extra_variables_a_session_needs(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch, without which the `ssh` command template stops working."""
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")  # noqa: S108 — a value, never opened
+    monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, " SSH_AUTH_SOCK , ")
+
+    observed = child_env(stub_bin, tmp_path)
+
+    assert observed["SSH_AUTH_SOCK"] == "/tmp/agent.sock"  # noqa: S108 — the same value
+
+
+def test_the_passthrough_refuses_the_master_key_and_says_so(
+    stub_bin: StubWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An operator who listed it believes their sessions have it; silence would be worse."""
+    monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
+    monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, "STEWARD_TOKEN,STEWARD_SESSION_TOKEN")
+
+    with caplog.at_level("WARNING"):
+        observed = child_env(stub_bin, tmp_path)
+
+    assert "STEWARD_TOKEN" not in observed
+    assert "STEWARD_SESSION_TOKEN" not in observed
+    assert "which no session may hold" in caplog.text
+
+
+def test_every_refused_name_is_a_name_the_allowlist_does_not_carry() -> None:
+    """The two lists cannot disagree: a refused name on the allowlist would be a hole."""
+    assert r.SESSION_ENV_REFUSED.isdisjoint(r.SESSION_ENV_BASE)
+    assert r.SESSION_ENV_REFUSED.isdisjoint(r.ClaudeRunner.env_names)
+    assert r.SESSION_ENV_REFUSED.isdisjoint(r.CodexRunner.env_names)
 
 
 # -------------------------------------------------------- the seam is the only seam

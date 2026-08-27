@@ -77,7 +77,12 @@ limits are documented here rather than advertised at `/openapi.json`.
 
 ## Auth
 
-One shared token, exactly like burrow's ingest auth.
+Two kinds of caller present two kinds of credential. A **human** presents
+`STEWARD_TOKEN` and may reach everything; a **session** presents the credential steward
+minted for its own run and may reach very little. See
+[Two kinds of caller](#two-kinds-of-caller) below.
+
+**The human token** is one shared secret, exactly like burrow's ingest auth.
 
 - `STEWARD_TOKEN` in steward's environment; `Authorization: Bearer <token>` on the
   request.
@@ -111,8 +116,80 @@ it fetches from the endpoints below, with the token, and a `401` on any of them 
 forget what it holds and ask again. See [`/ui`](#ui) at the end of this document.
 
 **Tailnet only.** The default bind is `127.0.0.1`; in deployment steward listens on
-its tailnet address and is never exposed to the public internet. One shared token is
-the whole of its auth, and that is only enough behind a private network.
+its tailnet address and is never exposed to the public internet. One shared human token is
+the whole of its auth against an operator — session credentials narrow what a *resident*
+may do, not what an intruder may — and that is only enough behind a private network.
+
+## Two kinds of caller
+
+`STEWARD_TOKEN` is a master key, not an identity: one shared secret, one constant-time
+compare, no principals. That is the right shape for a human operator and the wrong shape
+for a session — with it, the resident that *raises* an approval can also *decide* it, and
+a resident can sign a letter with any other resident's name. So a session gets its own
+credential instead (steward #41).
+
+| | human | session |
+|---|---|---|
+| credential | `STEWARD_TOKEN` | `$STEWARD_SESSION_TOKEN`, in the session's environment |
+| minted | by the operator, once | by steward, per run, at fire time |
+| identity | none — it is a shared secret | the resident whose run it is |
+| expires | when the operator rotates it | with the run: on close, timeout, or a stale lease |
+| may read | everything | everything |
+| may write | everything | `POST /delegate`, and nothing else |
+
+**What a session may reach.** Every `GET`, plus `POST /delegate`. Every other write path
+is `403 session_credential_forbidden`, and nothing is recorded — it is refused at the door,
+before a route runs. This is an allowlist, so a write path added later is refused until
+somebody decides otherwise.
+
+Reads are *not* narrowed, and that is a decision rather than an omission. A locally placed
+session already has `steward.db` and the residents tree on the same disk — that is how
+`steward delegate` and `steward approval raise` work at all — so narrowing what it may read
+over HTTP would move nothing it could not read directly.
+
+**And that cuts both ways, so say it plainly: this is a boundary, not a sandbox.** A
+session with shell access and `$STEWARD_STATE` can open `steward.db` and write to it — it
+can record an approval decision with `sqlite3` that the API would have refused it. What
+these refusals buy is that steward's *own* write path no longer treats a session as an
+operator: the API stops being the easy door, every refusal is logged, and a session that
+takes the other road has to do something no resident's charter describes. Real containment
+needs the session to have neither the database nor the residents tree, which is container
+placement's job, not this issue's.
+
+Three of those refusals name the act rather than the rule, because the act is the part
+worth knowing:
+
+- **`POST /approvals/{request_id}`** — deciding an approval is the human end of the
+  escalation boundary. A session that could decide would be answering its own knock, and
+  every guarantee downstream of "a human decided", expiry's deny-by-default included,
+  would only be as strong as the session not noticing.
+- **`POST /residents`** — declaring a resident is a human act.
+- **`POST /residents/{id}/routines/{routine}/run`** — firing a routine is a human act; a
+  session's own work arrives through the board and its inbox.
+
+**`POST /delegate` derives the sender from the credential.** Omitting `from` no longer
+means "a person asked" for a session caller: it means *this* resident, and its charter is
+checked exactly as a `<delegate>` block's would be. A body naming a different `from` is
+`403 sender_not_the_caller` rather than honoured. The chain needs no separate rule —
+`Delegator._resolve_parent` already derives the parent from the tasks the sender is
+actually holding (steward #67), so binding the sender binds the lineage with it.
+
+**The credential expires with its run**, on the run's own ownership lease: it is accepted
+while the run is open, no terminal fact has been chosen for it, and its heartbeat is fresher
+than the watchdog's grace window. There is no second clock. A credential that leaked into a
+transcript is worthless by the time anybody reads the transcript, and only its SHA-256 is
+stored, so a copy of `steward.db` yields no live credentials.
+
+**Raising an approval is not on this list, and does not need to be.** There is no endpoint
+to raise one at all — the routes are `GET /approvals`, `GET /approvals/{request_id}` and
+the human-only `POST /approvals/{request_id}`. A session raises through a `<needs-human>`
+block or `steward approval raise`, both of which are token-free and local. This credential
+buys denial and identity, not new reach.
+
+**`--allow-open` has no boundary**, and does not pretend to. There is no token to compare,
+so every caller is the human one and a session can reach any route with no header at all.
+The credential is still minted, so nothing about a run changes shape between modes — only
+what the API is able to enforce does.
 
 ## CORS
 
@@ -127,6 +204,9 @@ $ STEWARD_CORS_ORIGINS=http://village.local:8080 STEWARD_TOKEN=… steward serve
 ## Endpoints
 
 ### `POST /residents/{id}/routines/{routine}/run`
+
+**Human callers only.** A session credential is refused here — see
+[Two kinds of caller](#two-kinds-of-caller).
 
 Fire one routine now. Validated against the resident's manifest before anything is
 queued: an unknown resident or routine is a `404`, not an enqueue.
@@ -204,8 +284,10 @@ any board-enabled resident.
 
 ### `POST /delegate` · `GET /residents/{id}/inbox` · `GET /tasks/{id}/lineage`
 
-Hand work from one resident to another. The human path into delegation — a session uses
-the `<delegate>` block or `steward delegate`, neither of which holds this token.
+Hand work from one resident to another. The human path into delegation — a session usually
+uses the `<delegate>` block or `steward delegate`, neither of which holds a token at all.
+It is also the one write path a session credential reaches, and it behaves differently for
+one: see [Two kinds of caller](#two-kinds-of-caller).
 
 ```json
 {"from": "burrow-builder", "to": "life-agent", "route": "handoff",
@@ -220,6 +302,10 @@ both ends; **no resident is prompted**, and the receiver works it on its own nex
 would be for a block — a person must not be able to make a resident do what its own
 declaration forbids. Omit `from` and the *person* is the sender: the token is the
 permission, and the receiver's declared route is the whole of the agreement.
+
+**Unless the caller is a session**, in which case `from` is derived from its credential.
+Omitting it then means *this* resident rather than "a person asked", and naming a different
+resident is `403 sender_not_the_caller`.
 
 Steward is the sole arbiter, and a refusal writes nothing and emits nothing:
 
@@ -236,6 +322,7 @@ Steward is the sole arbiter, and a refusal writes nothing and emits nothing:
 | 409 | `route_inactive` | the route is `pending` or `disabled` |
 | 409 | `max_depth_exceeded` | the chain is already as long as steward allows |
 | 409 | `cycle` | the receiver is already somewhere in this task's lineage |
+| 403 | `sender_not_the_caller` | a session credential named a `from` that is not its own resident |
 
 `GET /residents/{id}/inbox` lists what is waiting for a resident — open by default,
 `?status=open|claimed|done|failed|all` to narrow, anything else a `422`. Each item carries
@@ -256,6 +343,9 @@ must make, the block grammar, and the guardrails are in
 [docs/delegation.md](delegation.md).
 
 ### `GET /approvals` · `GET /approvals/{request_id}` · `POST /approvals/{request_id}`
+
+The two reads are open to both kinds of caller; **the decision is human-only** — see
+[Two kinds of caller](#two-kinds-of-caller).
 
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
@@ -311,6 +401,9 @@ one. A request nobody answers before its `expires_at` resolves itself as `deny` 
 `decided_by: "expiry"`, and the resolution event lands like any other.
 
 ### `POST /residents`
+
+**Human callers only.** A session credential is refused here — see
+[Two kinds of caller](#two-kinds-of-caller).
 
 ```json
 {

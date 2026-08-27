@@ -8,6 +8,7 @@ codebase now uses. The seam's own contract, outcome by outcome, is in
 contract has to keep true.
 """
 
+import json
 import math
 import threading
 from collections.abc import Iterator
@@ -22,6 +23,7 @@ from steward import events as ev
 from steward import prompt as p
 from steward.input_bounds import EDIT_MAX_DEPTH
 from steward.manifest import SECRET_REDACTION, ResidentManifest, load_manifest
+from steward.session_auth import new_session_credential
 from steward.store import ApprovalRecord, Store
 from steward.transitions.approval import ApprovalTransitions
 
@@ -555,6 +557,35 @@ def test_a_decision_rendered_for_a_human_carries_no_secret(
         "cmd": ["curl -H 'Authorization: Bearer sk-ant-abcdef0123456789ghij'"],
         "tries": 2,
     }
+
+
+def test_a_session_credential_never_survives_into_an_approval_rendering(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    """The other rendering a leaked credential could reach (steward #41).
+
+    ``redact_decision`` is what a person reads in ``steward show``, and what the API serves
+    to a decider. A session that pasted its own credential into the request it raised must
+    not have it come back out here.
+    """
+    credential = new_session_credential()
+    record = store.create_approval_request(
+        agent_id="testy",
+        project="p",
+        action="call_the_api",
+        message=f"I was given {credential} — may I use it?",
+        resident=manifest.id,
+        detail={"header": f"Authorization: Bearer {credential}"},
+    )
+    store.decide(record.request_id, "edit", decided_by="miha", edit={"token": credential})
+    (decided,) = store.undelivered_decisions(manifest.id)
+
+    safe = ap.redact_decision(decided)
+
+    assert credential not in safe.message
+    assert credential not in json.dumps(safe.detail)
+    assert credential not in json.dumps(safe.edit)
+    assert "may I use it?" in safe.message
 
 
 def test_the_decisions_section_is_framed_as_a_record_not_an_order(

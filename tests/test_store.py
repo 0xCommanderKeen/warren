@@ -11,6 +11,7 @@ import pytest
 from steward import health, scheduler
 from steward.events import utc_now_iso
 from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE
+from steward.session_auth import credential_digest, new_session_credential
 from steward.store import (
     ORIGIN_UNATTRIBUTED,
     ApprovalRecord,
@@ -489,6 +490,40 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         assert migrated.last_watchdog_pass() is None
         # The run registry (#39) is a whole table too, and an old database gets it empty.
         assert migrated.open_runs() == []
+
+
+def test_a_run_registry_written_before_credentials_existed_still_opens(tmp_path: Path) -> None:
+    """``open_runs`` gained two columns (#41): an existing registry keeps its rows.
+
+    A live steward has a ``steward.db`` full of real runs, so the migration has to be an
+    ``ALTER TABLE`` and the index over the new column has to be created *after* it —
+    which is exactly what breaks if the index is put in the base schema by mistake. The
+    old row reads back with an empty digest, and the credential lookup must not match it.
+    """
+    path = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(path)
+    with legacy:
+        legacy.execute(
+            "CREATE TABLE open_runs (run_id TEXT PRIMARY KEY, kind TEXT NOT NULL "
+            "DEFAULT 'routine', agent_id TEXT NOT NULL, project TEXT NOT NULL DEFAULT '', "
+            "ref TEXT NOT NULL DEFAULT '', timeout_s REAL NOT NULL DEFAULT 0.0, "
+            "started_at TEXT NOT NULL, closed_at TEXT)"
+        )
+        legacy.execute(
+            "INSERT INTO open_runs (run_id, kind, agent_id, started_at) VALUES (?, ?, ?, ?)",
+            ("old-run", "routine", "claude-code:hob", EARLY),
+        )
+    legacy.close()
+
+    with Store(path) as migrated:
+        (run,) = migrated.open_runs()
+        assert run.run_id == "old-run"
+        assert run.resident_id == ""
+        assert migrated.session_principal("", fresh_since=EARLY) is None
+        credential = credentialed(migrated, run_id="new-run")
+        principal = migrated.session_principal(credential, fresh_since=EARLY)
+        assert principal is not None
+        assert principal.run_id == "new-run"
 
 
 def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) -> None:
@@ -1254,3 +1289,114 @@ def test_closing_a_run_nobody_opened_changes_nothing(store: Store) -> None:
     """A close with no row is a no-op, not a row invented to close."""
     assert not store.close_run("never-started")
     assert store.open_runs() == []
+
+
+# ------------------------------------------- scoped per-session credentials (steward #41)
+
+
+def credentialed(store: Store, *, run_id: str = "r1", now: str = LATER) -> str:
+    """Open a live run holding one freshly minted credential, and return the plaintext."""
+    credential = new_session_credential()
+    assert store.open_run(
+        run_id=run_id,
+        kind="routine",
+        trigger=TRIGGER_SCHEDULE,
+        agent_id="claude-code:hob",
+        project="household",
+        ref="daily-summary",
+        resident_id="hob",
+        session_credential=credential,
+        now=now,
+    )
+    return credential
+
+
+def test_a_credential_resolves_to_the_resident_whose_run_it_is(store: Store) -> None:
+    """The credential *is* the identity: the resident is read from the row, not a body."""
+    credential = credentialed(store)
+
+    principal = store.session_principal(credential, fresh_since=EARLY)
+
+    assert principal is not None
+    assert principal.resident_id == "hob"
+    assert principal.run_id == "r1"
+
+
+def test_only_the_digest_is_written(store: Store) -> None:
+    """A copy of steward.db must not yield live credentials."""
+    credential = credentialed(store)
+
+    (row,) = store._conn.execute("SELECT * FROM open_runs").fetchall()
+
+    assert credential not in set(dict(row).values())
+    assert row["session_credential_sha256"] == credential_digest(credential)
+
+
+def test_a_closed_run_authenticates_nothing(store: Store) -> None:
+    credential = credentialed(store)
+    assert store.close_run("r1")
+
+    assert store.session_principal(credential, fresh_since=EARLY) is None
+
+
+def test_a_chosen_terminal_fact_ends_the_credential_before_the_close(store: Store) -> None:
+    """A run whose end is decided is over, whether or not the event has been published."""
+    credential = credentialed(store)
+    assert store.claim_run_terminal("r1", event="{}", event_id="t:r1", owner_token="")
+
+    assert store.open_runs(), "the row is still open — publication has not happened yet"
+    assert store.session_principal(credential, fresh_since=EARLY) is None
+
+
+def test_a_stale_lease_ends_the_credential_before_the_watchdog_sweeps(store: Store) -> None:
+    """No second clock: the bound is the moment the watchdog *could* bury the run.
+
+    Deliberately not the condition ``renew_run`` renews under — that has no freshness
+    clause at all, so a live owner whose heartbeat thread was starved may still renew and
+    carry on. Burial is the clock that answers "is anybody still entitled to act as this
+    session", and it denies by default.
+    """
+    credential = credentialed(store, now=EARLY)
+
+    assert store.session_principal(credential, fresh_since=LATER) is None
+    assert store.open_runs(), "and nobody has swept the row yet"
+
+
+def test_a_credential_nobody_minted_is_nobody(store: Store) -> None:
+    credentialed(store)
+
+    assert store.session_principal(new_session_credential(), fresh_since=EARLY) is None
+
+
+def test_no_credential_is_not_a_master_key(store: Store) -> None:
+    """Every run opened without one stores the empty digest; it must never match."""
+    assert store.open_run(
+        run_id="r1", kind="routine", trigger=TRIGGER_SCHEDULE, agent_id="a:hob", now=LATER
+    )
+
+    assert store.session_principal("", fresh_since=EARLY) is None
+
+
+def test_a_task_attempt_credential_dies_with_the_binding_that_lost_the_race(
+    store: Store,
+) -> None:
+    """An inserted run is rolled back when the claim stamp no longer matches.
+
+    Its credential has to go with it: one that outlived a run nobody is watching would
+    authenticate a session steward never started.
+    """
+    credential = new_session_credential()
+
+    assert not store.open_task_run(
+        task_id="no-such-task",
+        lease=EARLY,
+        run_id="r1",
+        kind="task",
+        agent_id="claude-code:hob",
+        owner_token="owner",
+        resident_id="hob",
+        session_credential=credential,
+    )
+
+    assert store.open_runs() == []
+    assert store.session_principal(credential, fresh_since=EARLY) is None

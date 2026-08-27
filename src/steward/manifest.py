@@ -43,6 +43,8 @@ from pydantic import (
     model_validator,
 )
 
+from steward.session_auth import SESSION_CREDENTIAL_PATTERN
+
 __all__ = [
     "CLOSE_OF_DAY",
     "DEFAULT_BOARD_LEASE_S",
@@ -401,6 +403,11 @@ SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         "an inline JWT",
     ),
     (re.compile(r"://[^/\s:@]+:[^/\s@]{3,}@"), "an inline password in a URL"),
+    # Steward's own per-run session credential (steward #41). It is here rather than in a
+    # redaction-only list because both halves of the rule apply to it: a session must not
+    # be able to leak its credential into a burrow event, *and* a credential must never be
+    # committed into a manifest, a soul, or a skill.
+    (SESSION_CREDENTIAL_PATTERN, "an inline steward session credential"),
 )
 
 # A reference field holds a pointer (path, URL, scheme-prefixed handle). A long run of

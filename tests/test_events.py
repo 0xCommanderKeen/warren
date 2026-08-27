@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from steward import events as ev
+from steward.session_auth import new_session_credential
 
 
 def context() -> ev.RunContext:
@@ -162,6 +163,31 @@ def test_a_needs_human_knock_has_its_secrets_redacted_before_it_leaves() -> None
     assert "BURROW_TOKEN=[redacted:secret]" in payload["detail"]["env"]
     assert payload["detail"]["runs"] == 3
     assert payload["detail"]["nested"]["deeper"][0] == "ok"
+
+
+def test_a_session_cannot_leak_its_own_credential_into_a_knock() -> None:
+    """A bearer secret in the environment is readable by whoever holds it (steward #41).
+
+    A session can print its own credential into its own stdout, where the harvester and
+    the run log will see it. Expiry bounds the damage, but the credential must not survive
+    into an event either — so ``redact_secrets`` knows its shape, which is the whole reason
+    the credential carries a prefix instead of being one more anonymous random string.
+    """
+    credential = new_session_credential()
+    event = ev.needs_human_event(
+        message=f"steward gave me {credential} — should I use it?",
+        request_id="r1",
+        action="debug",
+        agent_id="claude-code:life-agent",
+        project="household",
+        detail={"bare": credential, "assigned": f"STEWARD_SESSION_TOKEN={credential}"},
+    )
+
+    payload = event.payload
+    assert credential not in json.dumps(payload)
+    assert "[redacted:secret]" in payload["message"]
+    assert "should I use it?" in payload["message"]
+    assert payload["detail"]["bare"] == "[redacted:secret]"
 
 
 def test_a_clean_needs_human_knock_is_byte_for_byte_unchanged() -> None:
