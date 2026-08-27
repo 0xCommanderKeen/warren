@@ -519,7 +519,7 @@ def test_partial_flush_retires_success_and_stops_at_first_failure(
     report = emitter.flush()
     assert report.delivered == 1
     assert report.pending == 1
-    assert report.failed is True
+    assert report.failed == 1
 
 
 def test_foreign_target_backlog_does_not_starve_current_target(
@@ -553,22 +553,41 @@ def test_corrupt_and_torn_queue_lines_are_quarantined_without_blocking_valid_rep
     assert emitter.queue.with_name(f"{emitter.queue.name}.corrupt").exists()
 
 
+def test_corrupt_quarantine_preserves_invalid_utf8_and_newline_bytes_exactly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    evidence = [b"bad-\xff\n", b'{"torn":']
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b"".join(evidence))
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+
+    assert emitter.flush().corrupt == 2
+    framed = emitter.queue.with_name(f"{emitter.queue.name}.corrupt").read_bytes()
+    assert framed == (
+        b"STEWARD-CORRUPT-V1 6\n"
+        + evidence[0]
+        + b"\nSTEWARD-CORRUPT-END\n"
+        + b"STEWARD-CORRUPT-V1 8\n"
+        + evidence[1]
+        + b"\nSTEWARD-CORRUPT-END\n"
+    )
+
+
 def test_failed_corrupt_quarantine_leaves_original_queue_authoritative(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
     emitter.queue.parent.mkdir(parents=True, exist_ok=True)
     emitter.queue.write_bytes(b"corrupt\n")
-    original = emitter._append_line
-
-    def refuse_quarantine(path: Path, line: str, *, purpose: str) -> bool:
-        if path.name.endswith(".corrupt"):
-            return False
-        return original(path, line, purpose=purpose)
-
-    monkeypatch.setattr(emitter, "_append_line", refuse_quarantine)
+    monkeypatch.setattr(
+        emitter,
+        "_append_corrupt_evidence",
+        lambda _chunks: (_ for _ in ()).throw(OSError("simulated quarantine failure")),
+    )
     report = emitter.flush()
-    assert report.failed is True
+    assert report.errors == 1
+    assert report.unknown == 1
     assert emitter.queue.read_bytes() == b"corrupt\n"
 
 
@@ -582,7 +601,9 @@ def test_queue_read_failure_is_not_reported_as_a_clean_drain(
         raise OSError("simulated unreadable queue")
 
     monkeypatch.setattr(emitter, "_read_queue_unlocked", unreadable)
-    assert emitter.flush().failed is True
+    report = emitter.flush()
+    assert report.errors == 1
+    assert report.unknown == 1
 
 
 def test_repeated_delivery_after_crash_uses_the_same_id(
@@ -603,7 +624,10 @@ def test_repeated_delivery_after_crash_uses_the_same_id(
         raise OSError("simulated crash before retirement")
 
     monkeypatch.setattr(emitter, "_rewrite_queue", crash)
-    assert emitter.flush().failed is True
+    report = emitter.flush()
+    assert report.delivered == 1
+    assert report.errors == 1
+    assert report.unknown == 1
     monkeypatch.setattr(emitter, "_rewrite_queue", original)
     assert emitter.flush().delivered == 1
     assert ids == ["delivery-crash-window", "delivery-crash-window"]
@@ -614,10 +638,46 @@ def test_queue_append_failure_never_posts_without_retry_authority(
 ) -> None:
     emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
     posts: list[object] = []
-    monkeypatch.setattr(emitter, "_queue_record", lambda *_args: False)
+    monkeypatch.setattr(emitter, "_queue_record", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(emitter, "_post", lambda *_args: posts.append(object()) or True)
     assert emitter.emit(context().started("schedule")) is False
     assert posts == []
+
+
+def test_history_failure_is_recovered_before_remote_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    event = context().started("schedule")
+    assert emitter._queue_record(event, "delivery-history-retry", history=False)
+    original = emitter._confirm_history
+    attempts = 0
+    posts: list[str] = []
+
+    def fail_once(record: dict[str, object]) -> bool:
+        nonlocal attempts
+        if attempts == 0:
+            attempts += 1
+            return False
+        return original(record)
+
+    monkeypatch.setattr(emitter, "_confirm_history", fail_once)
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": posts.append(delivery_id) or True,
+    )
+    first = emitter.flush()
+    assert first.delivered == 0
+    assert first.errors == 1
+    assert posts == []
+    assert emitter.queue.exists()
+
+    second = emitter.flush()
+    assert second.delivered == 1
+    assert posts == ["delivery-history-retry"]
+    history = [json.loads(line) for line in emitter.fallback.read_bytes().splitlines()]
+    assert [row["steward_delivery_id"] for row in history] == ["delivery-history-retry"]
 
 
 def test_concurrent_append_survives_a_flush_rewrite(
@@ -660,6 +720,23 @@ def test_legacy_import_is_stable_explicit_and_reports_invalid_lines(tmp_path: Pa
     assert corrupt == []
     assert len(records) == 2
     assert records[0]["delivery_id"] == records[1]["delivery_id"]
+
+
+def test_legacy_import_reports_non_missing_os_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "legacy.jsonl"
+    source.write_text("unreadable", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    original = Path.read_bytes
+
+    def deny(path: Path) -> bytes:
+        if path == source:
+            raise PermissionError("simulated")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny)
+    assert emitter.import_legacy(source) == ev.ImportReport(errors=1, unknown=1)
 
 
 def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:

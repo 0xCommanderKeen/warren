@@ -245,9 +245,13 @@ def events_flush(
         "foreign": report.foreign,
         "failed": report.failed,
         "busy": report.busy,
+        "errors": report.errors,
+        "unknown": report.unknown,
         "legacy_queued": imported.queued,
         "legacy_invalid": imported.invalid,
         "legacy_failed": imported.failed,
+        "legacy_errors": imported.errors,
+        "legacy_unknown": imported.unknown,
         "queue": str(emitter.queue),
     }
     if output_format == "json":
@@ -255,12 +259,15 @@ def events_flush(
     else:
         click.echo(
             f"delivered {report.delivered}; pending {report.pending}; "
-            f"corrupt {report.corrupt}; foreign-target {report.foreign}; queue {emitter.queue}"
+            f"corrupt {report.corrupt}; foreign-target {report.foreign}; "
+            f"failed {report.failed}; busy {report.busy}; errors {report.errors}; "
+            f"unknown {report.unknown}; queue {emitter.queue}"
         )
         if include_legacy:
             click.echo(
                 f"legacy import queued {imported.queued}; invalid {imported.invalid}; "
                 f"failed {imported.failed}; "
+                f"errors {imported.errors}; unknown {imported.unknown}; "
                 "already-delivered ID-less events may appear again"
             )
     if (
@@ -268,8 +275,12 @@ def events_flush(
         or report.corrupt
         or report.foreign
         or report.busy
+        or report.errors
+        or report.unknown
         or imported.invalid
         or imported.failed
+        or imported.errors
+        or imported.unknown
     ):
         raise click.exceptions.Exit(EXIT_INVALID)
 

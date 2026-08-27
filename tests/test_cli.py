@@ -70,6 +70,35 @@ def test_events_flush_failure_is_visible_and_nonzero(
     assert "delivered 0; pending 1" in result.output
 
 
+def test_events_flush_still_drains_pending_when_legacy_read_fails(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        cli.ev.Event(type="routine_started", agent_id="a", project="p"),
+        "delivery-cli-legacy-error",
+    )
+    monkeypatch.setattr(
+        cli.ev.EventEmitter,
+        "import_legacy",
+        lambda _self: cli.ev.ImportReport(errors=1, unknown=1),
+    )
+    monkeypatch.setattr(cli.ev.EventEmitter, "_post", lambda *_args: True)
+
+    result = runner.invoke(
+        main,
+        ["events", "flush", "--fallback", str(fallback), "--include-legacy", "--format", "json"],
+    )
+    payload = json.loads(result.output)
+    assert result.exit_code == 1
+    assert payload["legacy_errors"] == 1
+    assert payload["legacy_unknown"] == 1
+    assert payload["delivered"] == 1
+    assert payload["pending"] == 0
+
+
 def test_validate_defaults_to_the_residents_tree(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:

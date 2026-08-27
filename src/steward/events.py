@@ -287,8 +287,10 @@ class FlushReport:
     pending: int = 0
     corrupt: int = 0
     foreign: int = 0
-    failed: bool = False
-    busy: bool = False
+    failed: int = 0
+    busy: int = 0
+    errors: int = 0
+    unknown: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +300,8 @@ class ImportReport:
     queued: int = 0
     invalid: int = 0
     failed: int = 0
+    errors: int = 0
+    unknown: int = 0
 
 
 def _is_loopback(url: str) -> bool:
@@ -401,12 +405,13 @@ class EventEmitter:
         else:
             return True
 
-    def _queue_record(self, event: Event, delivery_id: str) -> bool:
+    def _queue_record(self, event: Event, delivery_id: str, *, history: bool = True) -> bool:
         record = {
             "queue_v": QUEUE_VERSION,
             "delivery_id": delivery_id,
             "target": self.url,
             "event": event.to_dict(),
+            "history": history,
         }
         return self._append_line(
             self.queue, json.dumps(record, ensure_ascii=False), purpose="for replay"
@@ -457,26 +462,43 @@ class EventEmitter:
             and isinstance(target, str)
             and target.startswith(("http://", "https://"))
             and isinstance(event, dict)
+            and isinstance(value.get("history", True), bool)
             and not validate_event(event)
         )
 
-    def _rewrite_queue(self, retired: set[str]) -> None:
+    def _append_corrupt_evidence(self, chunks: Sequence[bytes]) -> None:
+        """Append byte-exact corrupt chunks in independently parseable binary frames."""
+        quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
+        with self._lock_path(quarantine).open("a+") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            descriptor = os.open(quarantine, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                for chunk in chunks:
+                    header = f"STEWARD-CORRUPT-V1 {len(chunk)}\n".encode()
+                    for part in (header, chunk, b"\nSTEWARD-CORRUPT-END\n"):
+                        pending = memoryview(part)
+                        while pending:
+                            pending = pending[os.write(descriptor, pending) :]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._fsync_parent(quarantine)
+
+    def _rewrite_queue(
+        self, retired: set[str], *, history_confirmed: set[str] | None = None
+    ) -> None:
         """Retire acknowledged IDs without overwriting concurrent appenders."""
         self.queue.parent.mkdir(parents=True, exist_ok=True)
         with self._lock_path(self.queue).open("a+") as lock_handle:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
             records, corrupt = self._read_queue_unlocked()
+            for record in records:
+                if history_confirmed and str(record["delivery_id"]) in history_confirmed:
+                    record["history"] = True
             remaining = [r for r in records if str(r["delivery_id"]) not in retired]
             if corrupt:
+                self._append_corrupt_evidence(corrupt)
                 quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
-                for line in corrupt:
-                    preserved = self._append_line(
-                        quarantine,
-                        line.rstrip(b"\r\n").decode("utf-8", errors="replace"),
-                        purpose="corrupt replay evidence",
-                    )
-                    if not preserved:
-                        raise OSError("could not preserve corrupt replay evidence")
                 log.error(
                     "quarantined %d corrupt event queue line(s) at %s",
                     len(corrupt),
@@ -495,7 +517,51 @@ class EventEmitter:
                 with contextlib.suppress(FileNotFoundError):
                     staging.unlink()
 
-    def _flush(self, *, limit: int | None = None, blocking: bool = True) -> FlushReport:
+    @staticmethod
+    def _history_event(record: Mapping[str, Any]) -> dict[str, Any]:
+        event = dict(record["event"])
+        event["steward_delivery_id"] = record["delivery_id"]
+        return event
+
+    @staticmethod
+    def _history_contains(raw: bytes, delivery_id: str) -> bool:
+        for line in raw.splitlines():
+            try:
+                value = json.loads(line)
+            except UnicodeDecodeError, json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and value.get("steward_delivery_id") == delivery_id:
+                return True
+        return False
+
+    def _confirm_history(self, record: Mapping[str, Any]) -> bool:
+        delivery_id = str(record["delivery_id"])
+        if record.get("history", True):
+            return True
+        self.fallback.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock_path(self.fallback).open("a+") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            try:
+                raw = self.fallback.read_bytes()
+            except FileNotFoundError:
+                raw = b""
+            if self._history_contains(raw, delivery_id):
+                return True
+            descriptor = os.open(self.fallback, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                line = json.dumps(self._history_event(record), ensure_ascii=False).encode() + b"\n"
+                pending = memoryview(line)
+                while pending:
+                    pending = pending[os.write(descriptor, pending) :]
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._fsync_parent(self.fallback)
+            return True
+
+    def _flush(  # noqa: C901, PLR0912, PLR0915 — preserves each known partial count
+        self, *, limit: int | None = None, blocking: bool = True
+    ) -> FlushReport:
         if not self.url:
             return FlushReport()
         lock_path = self.queue.with_name(f"{self.queue.name}.flush.lock")
@@ -505,30 +571,77 @@ class EventEmitter:
             try:
                 fcntl.flock(flush_lock, operation)
             except BlockingIOError:
+                try:
+                    records, corrupt = self._read_queue()
+                except OSError:
+                    log.exception("could not inspect busy event replay queue %s", self.queue)
+                    return FlushReport(busy=1, errors=1, unknown=1)
+                return FlushReport(pending=len(records), corrupt=len(corrupt), busy=1)
+            try:
                 records, corrupt = self._read_queue()
-                return FlushReport(pending=len(records), corrupt=len(corrupt), busy=True)
-            records, corrupt = self._read_queue()
+            except OSError:
+                log.exception("could not read event replay queue %s", self.queue)
+                return FlushReport(errors=1, unknown=1)
             matching = [record for record in records if record["target"] == self.url]
             selected = matching[:limit] if limit is not None else matching
             retired: set[str] = set()
-            failed = False
+            failed = 0
+            errors = 0
+            history_confirmed: set[str] = set()
             foreign = sum(record["target"] != self.url for record in records)
             for record in selected:
+                try:
+                    history_ok = self._confirm_history(record)
+                except OSError:
+                    log.exception("could not inspect watchdog history %s", self.fallback)
+                    history_ok = False
+                if not history_ok:
+                    errors += 1
+                    break
+                if not record.get("history", True):
+                    history_confirmed.add(str(record["delivery_id"]))
                 body = json.dumps(record["event"], ensure_ascii=False).encode("utf-8")
                 if not self._post(self.url, body, str(record["delivery_id"])):
                     self._trip_breaker(self.url)
-                    failed = True
+                    failed += 1
                     break
                 retired.add(str(record["delivery_id"]))
-            if retired or corrupt:
-                self._rewrite_queue(retired)
-            remaining, remaining_corrupt = self._read_queue()
+            if retired or corrupt or history_confirmed:
+                try:
+                    if history_confirmed:
+                        self._rewrite_queue(retired, history_confirmed=history_confirmed)
+                    else:
+                        self._rewrite_queue(retired)
+                except OSError:
+                    log.exception("could not compact event replay queue %s", self.queue)
+                    return FlushReport(
+                        delivered=len(retired),
+                        pending=len(records),
+                        corrupt=len(corrupt),
+                        foreign=foreign,
+                        failed=failed,
+                        errors=errors + 1,
+                        unknown=1,
+                    )
+            try:
+                remaining, remaining_corrupt = self._read_queue()
+            except OSError:
+                log.exception("could not confirm event replay queue %s", self.queue)
+                return FlushReport(
+                    delivered=len(retired),
+                    corrupt=len(corrupt),
+                    foreign=foreign,
+                    failed=failed,
+                    errors=errors + 1,
+                    unknown=1,
+                )
             return FlushReport(
                 delivered=len(retired),
                 pending=len(remaining),
                 corrupt=len(corrupt) + len(remaining_corrupt),
                 foreign=foreign,
                 failed=failed,
+                errors=errors,
             )
 
     def flush(self, *, limit: int | None = None, blocking: bool = True) -> FlushReport:
@@ -537,7 +650,7 @@ class EventEmitter:
             return self._flush(limit=limit, blocking=blocking)
         except OSError:
             log.exception("could not flush event replay queue %s", self.queue)
-            return FlushReport(failed=True)
+            return FlushReport(errors=1, unknown=1)
 
     def import_legacy(self, path: Path | None = None) -> ImportReport:
         """Queue every valid event in an old log, accepting possible remote duplicates.
@@ -554,6 +667,9 @@ class EventEmitter:
             lines = source.read_bytes().splitlines()
         except FileNotFoundError:
             return ImportReport()
+        except OSError:
+            log.exception("could not read legacy event log %s", source)
+            return ImportReport(errors=1, unknown=1)
         queued = 0
         invalid = 0
         failed = 0
@@ -592,17 +708,36 @@ class EventEmitter:
         return value still reports only whether the event reached a remote target.
         """
         line = event.to_json()
-        self._append_line(self.fallback, line, purpose="in the watchdog log")
         if not self.url:
+            self._append_line(self.fallback, line, purpose="in the watchdog log")
             return False
         if not self.url.startswith(("http://", "https://")):
+            self._append_line(self.fallback, line, purpose="in the watchdog log")
             self._trip_breaker(self.url)
             return False
         delivery_id = uuid.uuid4().hex
-        queued = self._queue_record(event, delivery_id)
+        queued = self._queue_record(event, delivery_id, history=False)
         if not queued:
             # Posting without durable retry authority would make an ambiguous response
-            # unrecoverable. The complete local log remains available for explicit import.
+            # unrecoverable. Keep the complete local log available for explicit import.
+            self._append_line(self.fallback, line, purpose="in the watchdog log")
+            return False
+        # History is reconciled by flush before POST. A crash at any point leaves the
+        # queue as authority; its stable marker makes a repeated append detectable.
+        try:
+            records, _ = self._read_queue()
+        except OSError:
+            log.exception("could not recover queued event history from %s", self.queue)
+            return False
+        own_record = next(
+            (record for record in records if record["delivery_id"] == delivery_id), None
+        )
+        try:
+            history_ok = own_record is not None and self._confirm_history(own_record)
+        except OSError:
+            log.exception("could not inspect watchdog history %s", self.fallback)
+            history_ok = False
+        if not history_ok:
             return False
         if self._breaker_open(self.url):
             return False
