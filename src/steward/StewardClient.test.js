@@ -88,6 +88,33 @@ describe("Steward client", () => {
     expect(client.confirm({ tasks: [{ id: "task-1" }] })).toBe(true);
   });
 
+  it("does not confuse a historical routine run with confirmation of a new write", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(202, {
+      status: "accepted", request_id: "request-1", resident: "keeper", routine: "daily",
+    }));
+    const client = createStewardClient({ fetch });
+    client.setCredentials({ token: "secret" });
+    const oldRun = { run_id: "old", routine: "daily", trigger: "manual", agent_id: "claude:keeper" };
+    client.confirm({ generation: "g", cursor: 4, routines: [oldRun] });
+
+    await client.runRoutine("keeper", "daily");
+
+    expect(client.confirm({ generation: "g", cursor: 5, routines: [oldRun] })).toBe(false);
+    expect(client.confirm({ generation: "g", cursor: 6, routines: [oldRun, { ...oldRun, run_id: "new" }] })).toBe(true);
+  });
+
+  it("reconciles an ambiguous receipt when it retained an exact identity", async () => {
+    const fetch = vi.fn().mockResolvedValue(response(202, {
+      status: "unexpected", task_id: "task-1",
+    }));
+    const client = createStewardClient({ fetch });
+    client.setCredentials({ token: "secret" });
+
+    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({ ambiguous: true });
+
+    expect(client.confirm({ tasks: [{ id: "task-1" }] })).toBe(true);
+  });
+
   it("surfaces a network failure as ambiguous", async () => {
     const client = createStewardClient({ fetch: vi.fn().mockRejectedValue(new Error("offline")) });
     client.setCredentials({ token: "secret" });
@@ -99,7 +126,7 @@ describe("Steward client", () => {
 
   it("owns resident, routine, and approval writes without changing village state", async () => {
     const fetch = vi.fn()
-      .mockResolvedValueOnce(response(201, { status: "accepted", request_id: "n-1", id: "keeper" }))
+      .mockResolvedValueOnce(response(201, { status: "accepted", request_id: "n-1", id: "keeper", changed: true }))
       .mockResolvedValueOnce(response(202, { status: "accepted", request_id: "r-1", resident: "keeper", routine: "daily" }))
       .mockResolvedValueOnce(response(202, { status: "recorded", request_id: "a-2", approval_request_id: "a-1", decision: "approve" }));
     const client = createStewardClient({ fetch });

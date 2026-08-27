@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import fixture from "./contract/fixtures/complete-v1.json";
 import { parseSnapshot } from "./contract/parseSnapshot.js";
 import { PhaserGame } from "./game/PhaserGame.jsx";
@@ -5,7 +6,14 @@ import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 
 const mono = "font-mono text-xs uppercase tracking-[0.12em]";
 
-export function App({ envelope = fixture }) {
+function StewardSnapshotBridge({ client, snapshot }) {
+  useEffect(() => {
+    client?.confirm(snapshot);
+  }, [client, snapshot]);
+  return null;
+}
+
+export function App({ envelope = fixture, stewardClient = null }) {
   if (envelope === null) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
@@ -31,6 +39,7 @@ export function App({ envelope = fixture }) {
 
   return (
     <main className="min-h-screen bg-[#eee5d1] p-[clamp(1rem,3vw,2.5rem)] font-serif text-[#15241c]">
+      <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
       <header className="mx-auto mb-4 flex max-w-7xl items-end justify-between max-sm:flex-col max-sm:items-start max-sm:gap-2">
         <div>
           <p className={mono}>Burrow · generation {snapshot.generation}</p>

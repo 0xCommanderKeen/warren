@@ -19,7 +19,7 @@ The Steward URL is supplied when the client is created. Its bearer token is supp
 
 Writes are deliberately non-optimistic. A valid Steward receipt leaves the client in `awaiting_confirmation`; the village continues to render Burrow's last complete snapshot. Pass later Burrow snapshots to `confirm`. Only the matching projected job, approval, routine run, or resident appearance releases the write lock. The client never reads Burrow's internal `/events` endpoint.
 
-Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work.
+Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. If an ambiguous receipt still contains an exact usable identity, a later matching Burrow snapshot can reconcile it without another write.
 
 ## Development
 
