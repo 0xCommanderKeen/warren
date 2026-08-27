@@ -40,10 +40,26 @@ import threading
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
 from steward.events import utc_now_iso
+from steward.health import HealthJournal
+from steward.runs import (
+    RUN_DELEGATED,
+    RUN_KINDS,
+    RUN_ROUTINE,
+    RUN_TASK,
+    RUN_TRIGGERS,
+    validate_kind_trigger,
+)
+from steward.runs import (
+    TRIGGER_MANUAL as RUN_TRIGGER_MANUAL,
+)
+from steward.runs import (
+    TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE,
+)
 from steward.scheduler import default_state_path
 
 __all__ = [
@@ -52,7 +68,13 @@ __all__ = [
     "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
+    "RUN_DELEGATED",
     "RUN_KINDS",
+    "RUN_ROUTINE",
+    "RUN_TASK",
+    "RUN_TRIGGERS",
+    "RUN_TRIGGER_MANUAL",
+    "RUN_TRIGGER_SCHEDULE",
     "STATUS_OPEN",
     "ApprovalRecord",
     "JobRecord",
@@ -86,15 +108,13 @@ STATUS_FAILED = "failed"
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
 
+
+class _AtomicTaskCloseLostError(Exception):
+    """Rollback sentinel for a task/run close that lost either conditional write."""
+
+
 #: Every status a task on the board can be in. The board reports these and no others.
 JOB_STATUSES = (STATUS_OPEN, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED)
-
-#: Why a session ran. The ledger keeps them apart so "what did the board cost me this
-#: week" and "what did Hob's own routines cost me" are two answerable questions.
-RUN_ROUTINE = "routine"
-RUN_TASK = "task"
-RUN_DELEGATED = "delegated"
-RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED)
 
 #: Where spend lands when no task — and so no delegation origin — stands behind the run.
 #: A resident's own routines are the ordinary case, and they are named rather than
@@ -138,7 +158,22 @@ CREATE TABLE IF NOT EXISTS requests (
     method       TEXT NOT NULL,
     path         TEXT NOT NULL,
     outcome      TEXT NOT NULL,
-    detail       TEXT NOT NULL DEFAULT '{}'
+    detail       TEXT NOT NULL DEFAULT '{}',
+    approval_id  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS approval_announcements (
+    request_id    TEXT PRIMARY KEY REFERENCES approvals(request_id),
+    claimed_by    TEXT,
+    claimed_until TEXT,
+    announced_at  TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    effects_at    TEXT,
+    effects_claimed_by TEXT,
+    effects_claimed_until TEXT,
+    effects_attempts INTEGER NOT NULL DEFAULT 0,
+    effects_next_attempt_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS run_ledger (
@@ -146,6 +181,7 @@ CREATE TABLE IF NOT EXISTS run_ledger (
     resident      TEXT NOT NULL,
     agent_id      TEXT NOT NULL,
     kind          TEXT NOT NULL,
+    trigger       TEXT NOT NULL DEFAULT '',
     run_id        TEXT NOT NULL,
     ref           TEXT NOT NULL DEFAULT '',
     origin        TEXT NOT NULL DEFAULT '',
@@ -208,11 +244,20 @@ CREATE TABLE IF NOT EXISTS unbracketed_runs (
 CREATE TABLE IF NOT EXISTS open_runs (
     run_id     TEXT PRIMARY KEY,
     kind       TEXT NOT NULL DEFAULT 'routine',
+    trigger    TEXT NOT NULL DEFAULT '',
     agent_id   TEXT NOT NULL,
     project    TEXT NOT NULL DEFAULT '',
     ref        TEXT NOT NULL DEFAULT '',
     timeout_s  REAL NOT NULL DEFAULT 0.0,
     started_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL DEFAULT '',
+    event_log_path TEXT NOT NULL DEFAULT '',
+    evidence_version INTEGER NOT NULL DEFAULT 1,
+    owner_token TEXT NOT NULL DEFAULT '',
+    terminal_event TEXT,
+    terminal_event_id TEXT,
+    terminal_claimed_at TEXT,
+    terminal_published_at TEXT,
     closed_at  TEXT
 );
 
@@ -241,10 +286,27 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "parent_task_id": "TEXT",
         "origin": "TEXT",
         "depth": "INTEGER NOT NULL DEFAULT 0",
+        # The currently leased attempt.  These are cleared together when the attempt
+        # finishes or is swept; a retry therefore cannot inherit its predecessor's run.
+        "run_id": "TEXT",
+        "owner_token": "TEXT",
+        "lease_duration_s": "REAL",
     },
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
         "delivered_at": "TEXT",
+    },
+    "approval_announcements": {
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "next_attempt_at": "TEXT",
+        "effects_at": "TEXT",
+        "effects_claimed_by": "TEXT",
+        "effects_claimed_until": "TEXT",
+        "effects_attempts": "INTEGER NOT NULL DEFAULT 0",
+        "effects_next_attempt_at": "TEXT",
+    },
+    "requests": {
+        "approval_id": "TEXT",
     },
     "run_ledger": {
         # Denormalized from the task the run came off (steward #45). Rolling spend up by
@@ -252,6 +314,18 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         # equal some task's id would have inherited that task's bill. The row says what
         # it descends from, so the ledger is self-describing and a join cannot misread it.
         "origin": "TEXT NOT NULL DEFAULT ''",
+        "trigger": "TEXT NOT NULL DEFAULT ''",
+    },
+    "open_runs": {
+        "trigger": "TEXT NOT NULL DEFAULT ''",
+        "heartbeat_at": "TEXT NOT NULL DEFAULT ''",
+        "event_log_path": "TEXT NOT NULL DEFAULT ''",
+        "evidence_version": "INTEGER NOT NULL DEFAULT 0",
+        "owner_token": "TEXT NOT NULL DEFAULT ''",
+        "terminal_event": "TEXT",
+        "terminal_event_id": "TEXT",
+        "terminal_claimed_at": "TEXT",
+        "terminal_published_at": "TEXT",
     },
 }
 
@@ -262,6 +336,8 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
 _LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS approvals_denials
     ON approvals (resident, action, decided_at);
+CREATE INDEX IF NOT EXISTS requests_approval
+    ON requests (approval_id, outcome);
 """
 
 
@@ -324,6 +400,9 @@ class JobRecord:
     #: to one root rather than to the last hop. See :mod:`steward.delegation`.
     origin: str | None = None
     depth: int = 0
+    run_id: str | None = None
+    owner_token: str | None = None
+    lease_duration_s: float | None = None
 
     @property
     def claimable_by(self) -> frozenset[str]:
@@ -359,6 +438,9 @@ class JobRecord:
             parent_task_id=row["parent_task_id"],
             origin=row["origin"],
             depth=row["depth"] or 0,
+            run_id=row["run_id"],
+            owner_token=row["owner_token"],
+            lease_duration_s=row["lease_duration_s"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -384,6 +466,7 @@ class JobRecord:
             "parent_task_id": self.parent_task_id,
             "origin": self.origin,
             "depth": self.depth,
+            "run_id": self.run_id,
         }
 
 
@@ -477,6 +560,7 @@ class LedgerEntry:
     resident: str
     agent_id: str
     kind: str
+    trigger: str
     run_id: str
     recorded_at: str
     ref: str = ""
@@ -504,6 +588,7 @@ class LedgerEntry:
             resident=row["resident"],
             agent_id=row["agent_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             run_id=row["run_id"],
             recorded_at=row["recorded_at"],
             ref=row["ref"],
@@ -523,6 +608,7 @@ class LedgerEntry:
             "resident": self.resident,
             "agent_id": self.agent_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "run_id": self.run_id,
             "ref": self.ref,
             "origin": self.origin,
@@ -668,6 +754,7 @@ class OpenRun:
     #: are two runs with two ids; what they have in common lives in ``ref``.
     run_id: str
     kind: str
+    trigger: str
     agent_id: str
     started_at: str
     project: str = ""
@@ -675,6 +762,14 @@ class OpenRun:
     #: Not unique — every attempt at one task carries the same ``ref``.
     ref: str = ""
     timeout_s: float = 0.0
+    heartbeat_at: str = ""
+    event_log_path: str = ""
+    evidence_version: int = 0
+    owner_token: str = ""
+    terminal_event: str | None = None
+    terminal_event_id: str | None = None
+    terminal_claimed_at: str | None = None
+    terminal_published_at: str | None = None
     closed_at: str | None = None
 
     @property
@@ -688,11 +783,20 @@ class OpenRun:
         return cls(
             run_id=row["run_id"],
             kind=row["kind"],
+            trigger=row["trigger"],
             agent_id=row["agent_id"],
             started_at=row["started_at"],
             project=row["project"],
             ref=row["ref"],
             timeout_s=row["timeout_s"],
+            heartbeat_at=row["heartbeat_at"],
+            event_log_path=row["event_log_path"],
+            evidence_version=row["evidence_version"],
+            owner_token=row["owner_token"],
+            terminal_event=row["terminal_event"],
+            terminal_event_id=row["terminal_event_id"],
+            terminal_claimed_at=row["terminal_claimed_at"],
+            terminal_published_at=row["terminal_published_at"],
             closed_at=row["closed_at"],
         )
 
@@ -701,11 +805,14 @@ class OpenRun:
         return {
             "run_id": self.run_id,
             "kind": self.kind,
+            "trigger": self.trigger,
             "agent_id": self.agent_id,
             "project": self.project,
             "ref": self.ref,
             "timeout_s": self.timeout_s,
             "started_at": self.started_at,
+            "heartbeat_at": self.heartbeat_at,
+            "event_log_path": self.event_log_path,
             "closed_at": self.closed_at,
         }
 
@@ -753,16 +860,21 @@ class RequestRecord:
 class Store:
     """The one durable memory the API writes to. Safe to share across threads."""
 
-    def __init__(self, path: Path | str | None = None) -> None:
+    def __init__(self, path: Path | str | None = None, *, busy_timeout_ms: int = 15_000) -> None:
         """Open (and migrate) the database at ``path``; ``:memory:`` for a scratch one."""
         self.path = Path(path) if path is not None and path != ":memory:" else path
         if isinstance(self.path, Path):
             self.path.parent.mkdir(parents=True, exist_ok=True)
         target = str(self.path) if self.path is not None else ":memory:"
         self._lock = threading.Lock()
+        self.health = HealthJournal(self.path if isinstance(self.path, Path) else None)
         self._conn = sqlite3.connect(target, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock, self._conn:
+            # The API, scheduler and CLI legitimately share this file. Make the wait
+            # explicit (and testable) instead of depending on sqlite3's constructor
+            # default, so a short-lived writer does not turn into missing spend.
+            self._conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
@@ -977,6 +1089,7 @@ class Store:
         claimant: str,
         skills: Iterable[str],
         lease_expires_at: str,
+        lease_duration_s: float | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
         """Atomically claim the oldest open task this claimant is qualified for.
@@ -1014,12 +1127,14 @@ class Store:
                     continue
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = ?, claimed_at = ?, "
-                    "lease_expires_at = ? WHERE task_id = ? AND status = ?",
+                    "lease_expires_at = ?, lease_duration_s = ?, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ?",
                     (
                         STATUS_CLAIMED,
                         claimant,
                         moment,
                         lease_expires_at,
+                        lease_duration_s,
                         record.task_id,
                         STATUS_OPEN,
                     ),
@@ -1038,6 +1153,7 @@ class Store:
         assignee: str,
         claimant: str,
         lease_expires_at: str,
+        lease_duration_s: float | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
         """Atomically pick up the oldest item waiting in one resident's inbox.
@@ -1065,12 +1181,14 @@ class Store:
                 record = JobRecord.from_row(row)
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = ?, claimed_at = ?, "
-                    "lease_expires_at = ? WHERE task_id = ? AND status = ? AND assignee = ?",
+                    "lease_expires_at = ?, lease_duration_s = ?, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ? AND assignee = ?",
                     (
                         STATUS_CLAIMED,
                         claimant,
                         moment,
                         lease_expires_at,
+                        lease_duration_s,
                         record.task_id,
                         STATUS_OPEN,
                         assignee,
@@ -1112,7 +1230,7 @@ class Store:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
-                "finished_at = ?, lease_expires_at = NULL "
+                "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
                 "WHERE task_id = ? AND status = ? AND claimant = ? "
                 "AND (? IS NULL OR claimed_at = ?)",
                 (
@@ -1133,6 +1251,72 @@ class Store:
             row = self._conn.execute("SELECT * FROM jobs WHERE task_id = ?", (task_id,)).fetchone()
         return JobRecord.from_row(row)
 
+    def finish_job_and_claim_run_terminal(  # noqa: PLR0913
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        event: str,
+        event_id: str,
+        status: str,
+        claimant: str,
+        outcome: str | None = None,
+        reason: str | None = None,
+        artifacts: Sequence[str] = (),
+        lease: str | None = None,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Close one claim and choose its immutable terminal fact in one transaction."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                if owner_token is not None:
+                    run = self._conn.execute(
+                        "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                        "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                        "AND terminal_event IS NULL AND owner_token = ?",
+                        (event, event_id, moment, run_id, owner_token),
+                    )
+                else:
+                    run = self._conn.execute(
+                        "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                        "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                        "AND terminal_event IS NULL AND heartbeat_at <= ?",
+                        (event, event_id, moment, run_id, stale_before),
+                    )
+                if run.rowcount == 0:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                job = self._conn.execute(
+                    "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
+                    "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
+                    "WHERE task_id = ? AND status = ? AND claimant = ? "
+                    "AND (? IS NULL OR claimed_at = ?) AND run_id = ? AND owner_token = ?",
+                    (
+                        status,
+                        outcome,
+                        reason,
+                        _dumps(list(artifacts)),
+                        moment,
+                        task_id,
+                        STATUS_CLAIMED,
+                        claimant,
+                        lease,
+                        lease,
+                        run_id,
+                        owner_token,
+                    ),
+                )
+                if job.rowcount == 0:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                row = self._conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
+                ).fetchone()
+        except _AtomicTaskCloseLostError:
+            return None
+        return JobRecord.from_row(row)
+
     def expire_leases(self, now: str | None = None) -> list[JobRecord]:
         """Reopen every claimed task whose lease has run out, and say who dropped it.
 
@@ -1151,14 +1335,79 @@ class Store:
             ).fetchall()
             for row in rows:
                 record = JobRecord.from_row(row)
+                if record.run_id is not None:
+                    # Bound attempts need a run-specific terminal choice; callers using
+                    # the legacy API must not split those two durable facts.
+                    continue
+                # An upgraded database may contain a claimed job and its still-open run
+                # from before the association columns existed.  Silence is safer than
+                # reopening underneath a possibly live owner; a later operator/sweep can
+                # resolve the legacy row once the run is answered.
+                legacy = self._conn.execute(
+                    "SELECT 1 FROM open_runs WHERE kind IN (?, ?) AND ref = ? "
+                    "AND closed_at IS NULL LIMIT 1",
+                    (RUN_TASK, RUN_DELEGATED, record.task_id),
+                ).fetchone()
+                if legacy is not None:
+                    continue
                 cursor = self._conn.execute(
                     "UPDATE jobs SET status = ?, claimant = NULL, claimed_at = NULL, "
-                    "lease_expires_at = NULL WHERE task_id = ? AND status = ?",
-                    (STATUS_OPEN, record.task_id, STATUS_CLAIMED),
+                    "lease_expires_at = NULL, lease_duration_s = NULL WHERE task_id = ? "
+                    "AND status = ? AND claimed_at = ?",
+                    (STATUS_OPEN, record.task_id, STATUS_CLAIMED, record.claimed_at),
                 )
                 if cursor.rowcount == 1:
                     expired.append(record)
         return expired
+
+    def expire_task_attempt_and_claim_terminal(  # noqa: PLR0913
+        self,
+        task_id: str,
+        *,
+        lease: str,
+        run_id: str,
+        owner_token: str,
+        event: str,
+        event_id: str,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Atomically reopen one dead attempt and choose its exact run failure."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                row = self._conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ? AND status = ? AND claimed_at = ? "
+                    "AND run_id = ? AND owner_token = ? AND lease_expires_at <= ?",
+                    (task_id, STATUS_CLAIMED, lease, run_id, owner_token, moment),
+                ).fetchone()
+                if row is None:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                run = self._conn.execute(
+                    "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                    "terminal_claimed_at = ? WHERE run_id = ? AND owner_token = ? "
+                    "AND closed_at IS NULL AND terminal_event IS NULL",
+                    (event, event_id, moment, run_id, owner_token),
+                )
+                job = self._conn.execute(
+                    "UPDATE jobs SET status = ?, claimant = NULL, claimed_at = NULL, "
+                    "lease_expires_at = NULL, lease_duration_s = NULL, run_id = NULL, "
+                    "owner_token = NULL WHERE task_id = ? AND status = ? AND claimed_at = ? "
+                    "AND run_id = ? AND owner_token = ? AND lease_expires_at <= ?",
+                    (
+                        STATUS_OPEN,
+                        task_id,
+                        STATUS_CLAIMED,
+                        lease,
+                        run_id,
+                        owner_token,
+                        moment,
+                    ),
+                )
+                if run.rowcount != 1 or job.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return None
+        return JobRecord.from_row(row)
 
     # -- approvals -------------------------------------------------------------------
 
@@ -1322,6 +1571,10 @@ class Store:
                 decided = self._conn.execute(
                     "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
                 ).fetchone()
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
                 expired.append(ApprovalRecord.from_row(decided))
         return expired
 
@@ -1387,7 +1640,7 @@ class Store:
                 marked += cursor.rowcount
         return marked
 
-    def decide(
+    def decide(  # noqa: PLR0913 — optional API ledger metadata joins the same transaction
         self,
         request_id: str,
         decision: str,
@@ -1395,6 +1648,7 @@ class Store:
         decided_by: str = "api",
         edit: Mapping[str, Any] | None = None,
         now: str | None = None,
+        request_log: tuple[str, str, str] | None = None,
     ) -> tuple[ApprovalRecord | None, bool]:
         """Record a decision. Returns the record and whether *this* call recorded it.
 
@@ -1434,10 +1688,255 @@ class Store:
                 ),
             )
             recorded = cursor.rowcount == 1
+            if recorded:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
             row = self._conn.execute(
                 "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
             ).fetchone()
+            if request_log is not None and row["status"] == STATUS_RESOLVED:
+                log_id, method, path = request_log
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO requests (request_id, received_at, method, path, "
+                    "outcome, detail, approval_id) VALUES (?, ?, ?, ?, "
+                    "CASE WHEN EXISTS (SELECT 1 FROM approval_announcements "
+                    "WHERE request_id = ? AND effects_at IS NOT NULL) THEN 'recorded' "
+                    "ELSE 'recorded_announcement_pending' END, ?, ?)",
+                    (
+                        log_id,
+                        moment,
+                        method,
+                        path,
+                        request_id,
+                        _dumps({"approval": request_id, "decision": row["decision"]}),
+                        request_id,
+                    ),
+                )
         return ApprovalRecord.from_row(row), recorded
+
+    def claim_approval_announcement(
+        self, request_id: str | None = None, *, lease_s: float = 30
+    ) -> tuple[ApprovalRecord, str] | None:
+        """Lease one unresolved approval announcement for emission.
+
+        The decision and queue row are committed atomically.  The lease prevents two
+        processes from announcing concurrently, while its deadline makes a process death
+        recoverable by the next API start or replay.
+        """
+        token = new_id()
+        now = datetime.now(UTC)
+        moment = utc_now_iso(now)
+        until = utc_now_iso(now + timedelta(seconds=lease_s))
+        with self._lock, self._conn:
+            params: tuple[str, ...] = (token, until, moment, moment)
+            if request_id is not None:
+                params += (request_id,)
+                requested = "AND request_id = ?"
+            else:
+                requested = ""
+            claim_sql = (
+                "UPDATE approval_announcements SET claimed_by = ?, claimed_until = ? "  # noqa: S608
+                "WHERE request_id = (SELECT request_id FROM approval_announcements "
+                "WHERE announced_at IS NULL AND (next_attempt_at IS NULL OR next_attempt_at <= ?) "
+                "AND (claimed_until IS NULL OR claimed_until <= ?) "
+                + requested
+                + " ORDER BY rowid LIMIT 1) AND announced_at IS NULL RETURNING request_id"
+            )
+            claimed = self._conn.execute(claim_sql, params).fetchone()
+            if claimed is None:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM approvals WHERE request_id = ?", (claimed["request_id"],)
+            ).fetchone()
+        return ApprovalRecord.from_row(row), token
+
+    def finish_approval_announcement(self, request_id: str, token: str, *, accepted: bool) -> bool:
+        """Acknowledge a claimed announcement, or release it for immediate retry."""
+        with self._lock, self._conn:
+            if accepted:
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET announced_at = ?, claimed_by = NULL, "
+                    "claimed_until = NULL WHERE request_id = ? AND claimed_by = ? "
+                    "AND announced_at IS NULL",
+                    (utc_now_iso(), request_id, token),
+                )
+            else:
+                attempts = (
+                    self._conn.execute(
+                        "SELECT attempts FROM approval_announcements WHERE request_id = ?",
+                        (request_id,),
+                    ).fetchone()["attempts"]
+                    + 1
+                )
+                delay = min(30.0, 0.1 * (2 ** min(attempts - 1, 8)))
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET claimed_by = NULL, claimed_until = NULL, "
+                    "attempts = ?, next_attempt_at = ? "
+                    "WHERE request_id = ? AND claimed_by = ? AND announced_at IS NULL",
+                    (
+                        attempts,
+                        utc_now_iso(datetime.now(UTC) + timedelta(seconds=delay)),
+                        request_id,
+                        token,
+                    ),
+                )
+        return cursor.rowcount == 1
+
+    def next_approval_announcement_at(self) -> str | None:
+        """Earliest retry or live lease deadline; ``None`` means no pending work."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
+                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END) AS due "
+                "FROM approval_announcements WHERE announced_at IS NULL",
+                (utc_now_iso(),),
+            ).fetchone()
+        return row["due"]
+
+    def approval_announcement_state(self, request_id: str) -> str | None:
+        """Return ``pending``, ``announced`` or ``complete`` for a queued decision."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT announced_at, effects_at FROM approval_announcements WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["announced_at"] is None:
+            return "pending"
+        return "complete" if row["effects_at"] is not None else "announced"
+
+    def claim_approval_effects(
+        self, request_id: str | None = None, *, lease_s: float = 30
+    ) -> tuple[ApprovalRecord, str] | None:
+        """Lease one acknowledged decision's completion effects across processes."""
+        token = new_id()
+        now = datetime.now(UTC)
+        moment = utc_now_iso(now)
+        until = utc_now_iso(now + timedelta(seconds=lease_s))
+        with self._lock, self._conn:
+            requested = "AND request_id = ?" if request_id is not None else ""
+            params: tuple[str, ...] = (token, until, moment, moment)
+            if request_id is not None:
+                params += (request_id,)
+            claim_sql = (
+                "UPDATE approval_announcements SET effects_claimed_by = ?, "  # noqa: S608
+                "effects_claimed_until = ? WHERE request_id = (SELECT request_id FROM "
+                "approval_announcements WHERE announced_at IS NOT NULL AND effects_at IS NULL "
+                "AND (effects_next_attempt_at IS NULL OR effects_next_attempt_at <= ?) "
+                "AND (effects_claimed_until IS NULL OR effects_claimed_until <= ?) "
+                + requested
+                + " ORDER BY rowid LIMIT 1) AND effects_at IS NULL RETURNING request_id"
+            )
+            claimed = self._conn.execute(claim_sql, params).fetchone()
+            if claimed is None:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM approvals WHERE request_id = ?", (claimed["request_id"],)
+            ).fetchone()
+        return ApprovalRecord.from_row(row), token
+
+    def complete_approval_effects(
+        self, record: ApprovalRecord, token: str
+    ) -> tuple[bool, str | None]:
+        """Apply completion and its marker in one transaction guarded by the effects lease.
+
+        Budget approval atomically removes the pause and grants its window allowance.
+        All other decisions have no completion mutation, but still atomically acquire the
+        durable marker. A stale worker cannot complete a lease another process recovered.
+        """
+        moment = utc_now_iso()
+        with self._lock, self._conn:
+            owned = self._conn.execute(
+                "SELECT 1 FROM approval_announcements WHERE request_id = ? "
+                "AND announced_at IS NOT NULL AND effects_at IS NULL AND effects_claimed_by = ?",
+                (record.request_id, token),
+            ).fetchone()
+            if owned is None:
+                return False, None
+            resumed: str | None = None
+            if record.action == "budget_unpause" and record.decision == "approve":
+                pause = self._conn.execute(
+                    "SELECT * FROM budget_pauses WHERE request_id = ?", (record.request_id,)
+                ).fetchone()
+                if pause is not None:
+                    resumed = pause["resident"]
+                    if pause["window_end"]:
+                        self._conn.execute(
+                            "INSERT INTO budget_allowances "
+                            "(resident, until, granted_by, reason, granted_at) "
+                            "VALUES (?, ?, ?, ?, ?) "
+                            "ON CONFLICT(resident) DO UPDATE SET until=excluded.until, "
+                            "granted_by=excluded.granted_by, reason=excluded.reason, "
+                            "granted_at=excluded.granted_at",
+                            (
+                                resumed,
+                                pause["window_end"],
+                                record.decided_by or "api",
+                                pause["reason"],
+                                moment,
+                            ),
+                        )
+                    self._conn.execute(
+                        "DELETE FROM budget_pauses WHERE resident = ? AND request_id = ?",
+                        (resumed, record.request_id),
+                    )
+            cursor = self._conn.execute(
+                "UPDATE approval_announcements SET effects_at = ?, effects_claimed_by = NULL, "
+                "effects_claimed_until = NULL WHERE request_id = ? AND effects_at IS NULL "
+                "AND effects_claimed_by = ?",
+                (moment, record.request_id, token),
+            )
+            if cursor.rowcount == 1:
+                self._conn.execute(
+                    "UPDATE requests SET outcome = 'recorded' WHERE approval_id = ? "
+                    "AND outcome = 'recorded_announcement_pending'",
+                    (record.request_id,),
+                )
+        return cursor.rowcount == 1, resumed
+
+    def release_approval_effects(self, request_id: str, token: str) -> bool:
+        """Release a failed effects claim with bounded exponential backoff."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT effects_attempts FROM approval_announcements WHERE request_id = ? "
+                "AND effects_claimed_by = ? AND effects_at IS NULL",
+                (request_id, token),
+            ).fetchone()
+            if row is None:
+                return False
+            attempts = row["effects_attempts"] + 1
+            delay = min(30.0, 0.1 * (2 ** min(attempts - 1, 8)))
+            cursor = self._conn.execute(
+                "UPDATE approval_announcements SET effects_claimed_by=NULL, "
+                "effects_claimed_until=NULL, effects_attempts=?, effects_next_attempt_at=? "
+                "WHERE request_id=? AND effects_claimed_by=? AND effects_at IS NULL",
+                (
+                    attempts,
+                    utc_now_iso(datetime.now(UTC) + timedelta(seconds=delay)),
+                    request_id,
+                    token,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def next_approval_work_at(self) -> str | None:
+        """Earliest announcement/effects retry or live-lease deadline."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MIN(due) AS due FROM ("
+                "SELECT CASE WHEN claimed_until IS NOT NULL THEN claimed_until "
+                "WHEN next_attempt_at IS NOT NULL THEN next_attempt_at ELSE ? END AS due "
+                "FROM approval_announcements WHERE announced_at IS NULL UNION ALL "
+                "SELECT CASE WHEN effects_claimed_until IS NOT NULL THEN effects_claimed_until "
+                "WHEN effects_next_attempt_at IS NOT NULL THEN effects_next_attempt_at ELSE ? END "
+                "FROM approval_announcements WHERE announced_at IS NOT NULL "
+                "AND effects_at IS NULL)",
+                (utc_now_iso(), utc_now_iso()),
+            ).fetchone()
+        return row["due"]
 
     # -- the run ledger ----------------------------------------------------------------
 
@@ -1448,6 +1947,7 @@ class Store:
         agent_id: str,
         kind: str,
         run_id: str,
+        trigger: str = "",
         ref: str = "",
         origin: str = "",
         outcome: str = "",
@@ -1469,11 +1969,13 @@ class Store:
         later: a caller that knows the chain says so, and the row stops depending on a
         join that can only guess.
         """
+        validate_kind_trigger(kind, trigger)
         entry = LedgerEntry(
             entry_id=new_id(),
             resident=resident,
             agent_id=agent_id,
             kind=kind,
+            trigger=trigger,
             run_id=run_id,
             ref=ref,
             origin=origin,
@@ -1487,14 +1989,15 @@ class Store:
         )
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, run_id, ref, "
+                "INSERT INTO run_ledger (entry_id, resident, agent_id, kind, trigger, run_id, ref, "
                 "origin, outcome, input_tokens, output_tokens, cost_usd, duration_s, "
-                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "usage_known, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.entry_id,
                     entry.resident,
                     entry.agent_id,
                     entry.kind,
+                    entry.trigger,
                     entry.run_id,
                     entry.ref,
                     entry.origin,
@@ -1806,9 +2309,12 @@ class Store:
         run_id: str,
         kind: str,
         agent_id: str,
+        trigger: str = "",
         project: str = "",
         ref: str = "",
         timeout_s: float = 0.0,
+        event_log_path: str = "",
+        owner_token: str = "",
         now: str | None = None,
     ) -> bool:
         """Record that a session has started. Returns whether this call opened the row.
@@ -1825,11 +2331,196 @@ class Store:
         insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
         thing the session was about goes; several rows may share one.
         """
+        validate_kind_trigger(kind, trigger)
+        with self._lock, self._conn:
+            opened_at = now or utc_now_iso()
+            cursor = self._conn.execute(
+                "INSERT INTO open_runs (run_id, kind, trigger, agent_id, project, ref, timeout_s, "
+                "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                (
+                    run_id,
+                    kind,
+                    trigger,
+                    agent_id,
+                    project,
+                    ref,
+                    float(timeout_s),
+                    opened_at,
+                    opened_at,
+                    event_log_path,
+                    owner_token,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def open_task_run(  # noqa: PLR0913
+        self,
+        *,
+        task_id: str,
+        lease: str,
+        run_id: str,
+        kind: str,
+        agent_id: str,
+        project: str = "",
+        ref: str = "",
+        timeout_s: float = 0.0,
+        event_log_path: str = "",
+        owner_token: str,
+        now: str | None = None,
+    ) -> bool:
+        """Open and bind a task attempt in one transaction.
+
+        The claim stamp fences the binding.  A swept/retried job cannot accidentally be
+        attached to the late predecessor, and an inserted run is rolled back when the
+        binding loses that race.
+        """
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                opened = self._conn.execute(
+                    "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
+                    "started_at, heartbeat_at, event_log_path, evidence_version, owner_token) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(run_id) DO NOTHING",
+                    (
+                        run_id,
+                        kind,
+                        agent_id,
+                        project,
+                        ref,
+                        float(timeout_s),
+                        moment,
+                        moment,
+                        event_log_path,
+                        owner_token,
+                    ),
+                )
+                if opened.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                bound = self._conn.execute(
+                    "UPDATE jobs SET run_id = ?, owner_token = ? WHERE task_id = ? "
+                    "AND status = ? AND claimed_at = ? AND run_id IS NULL",
+                    (run_id, owner_token, task_id, STATUS_CLAIMED, lease),
+                )
+                if bound.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return False
+        return True
+
+    def renew_task_run(
+        self,
+        run_id: str,
+        *,
+        owner_token: str,
+        now: str | None = None,
+    ) -> bool:
+        """Atomically renew the run heartbeat and its exact job attempt lease."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                row = self._conn.execute(
+                    "SELECT task_id, claimed_at, lease_duration_s FROM jobs WHERE run_id = ? "
+                    "AND owner_token = ? AND status = ?",
+                    (run_id, owner_token, STATUS_CLAIMED),
+                ).fetchone()
+                if row is None or row["lease_duration_s"] is None:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                lease_end = utc_now_iso(
+                    datetime.fromisoformat(moment)
+                    + timedelta(seconds=float(row["lease_duration_s"]))
+                )
+                run = self._conn.execute(
+                    "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                    "AND terminal_event IS NULL AND owner_token = ?",
+                    (moment, run_id, owner_token),
+                )
+                job = self._conn.execute(
+                    "UPDATE jobs SET lease_expires_at = ? WHERE task_id = ? AND status = ? "
+                    "AND claimed_at = ? AND run_id = ? AND owner_token = ?",
+                    (
+                        lease_end,
+                        row["task_id"],
+                        STATUS_CLAIMED,
+                        row["claimed_at"],
+                        run_id,
+                        owner_token,
+                    ),
+                )
+                if run.rowcount != 1 or job.rowcount != 1:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+        except _AtomicTaskCloseLostError:
+            return False
+        return True
+
+    def renew_run(self, run_id: str, *, owner_token: str = "", now: str | None = None) -> bool:
+        """Renew an open run's ownership lease; a terminal run stays terminal."""
         with self._lock, self._conn:
             cursor = self._conn.execute(
-                "INSERT INTO open_runs (run_id, kind, agent_id, project, ref, timeout_s, "
-                "started_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id) DO NOTHING",
-                (run_id, kind, agent_id, project, ref, float(timeout_s), now or utc_now_iso()),
+                "UPDATE open_runs SET heartbeat_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND terminal_event IS NULL AND owner_token = ?",
+                (now or utc_now_iso(), run_id, owner_token),
+            )
+            return cursor.rowcount == 1
+
+    def close_stale_run(self, run_id: str, *, stale_before: str, now: str | None = None) -> bool:
+        """Atomically close a run only if its ownership lease remains expired."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET closed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND heartbeat_at <= ?",
+                (now or utc_now_iso(), run_id, stale_before),
+            )
+            return cursor.rowcount == 1
+
+    def claim_run_terminal(  # noqa: PLR0913 - authority is owner token or stale cutoff
+        self,
+        run_id: str,
+        *,
+        event: str,
+        event_id: str,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> bool:
+        """Choose one immutable terminal fact, by the live owner or an expired watchdog."""
+        with self._lock, self._conn:
+            prefix = (
+                "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                "AND terminal_event IS NULL AND "
+            )
+            if owner_token is not None:
+                cursor = self._conn.execute(
+                    prefix + "owner_token = ?",
+                    (event, event_id, now or utc_now_iso(), run_id, owner_token),
+                )
+            else:
+                cursor = self._conn.execute(
+                    prefix + "heartbeat_at <= ?",
+                    (event, event_id, now or utc_now_iso(), run_id, stale_before),
+                )
+            return cursor.rowcount == 1
+
+    def terminal_runs(self) -> list[OpenRun]:
+        """Return chosen terminal facts that still need durable publication/finalization."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM open_runs WHERE terminal_event IS NOT NULL AND closed_at IS NULL "
+                "ORDER BY terminal_claimed_at, rowid"
+            ).fetchall()
+        return [OpenRun.from_row(row) for row in rows]
+
+    def mark_run_terminal_published(
+        self, run_id: str, event_id: str, *, now: str | None = None
+    ) -> bool:
+        """Finalize only the immutable chosen event identified by ``event_id``."""
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET terminal_published_at = COALESCE(terminal_published_at, ?), "
+                "closed_at = ? WHERE run_id = ? AND terminal_event_id = ? AND closed_at IS NULL",
+                (moment, moment, run_id, event_id),
             )
             return cursor.rowcount == 1
 

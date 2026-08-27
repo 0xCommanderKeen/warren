@@ -591,6 +591,77 @@ def test_unreadable_manifest_fails(tmp_path: Path) -> None:
     assert "cannot read manifest" in problem_for(result, "<file>")
 
 
+def test_manifest_that_is_not_utf8_fails_with_a_diagnostic(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_bytes(b"\xff\xfe")
+
+    result = m.validate_manifest(path)
+
+    assert "not valid UTF-8" in problem_for(result, "<file>")
+    assert result.errors[0].file == path
+
+
+def test_manifest_read_failure_is_a_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text("id: test-agent\n", encoding="utf-8")
+    read_text = Path.read_text
+
+    def fail_manifest_read(
+        candidate: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if candidate == path:
+            raise OSError("file vanished during validation")
+        return read_text(candidate, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", fail_manifest_read)
+
+    result = m.validate_manifest(path)
+
+    assert "cannot read manifest" in problem_for(result, "<file>")
+    assert result.errors[0].file == path
+
+
+def test_soul_that_is_not_utf8_fails_with_a_diagnostic(write_resident: ResidentWriter) -> None:
+    manifest_path = write_resident()
+    soul_path = manifest_path.parent / "soul.md"
+    soul_path.write_bytes(b"\xff\xfe")
+
+    result = m.validate_manifest(manifest_path)
+
+    assert "not valid UTF-8" in problem_for(result, "soul.file")
+    assert result.errors[0].file == soul_path
+
+
+def test_soul_read_failure_after_existence_check_is_a_diagnostic(
+    write_resident: ResidentWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = write_resident()
+    soul_path = manifest_path.parent / "soul.md"
+    read_text = Path.read_text
+
+    def fail_soul_read(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        if path == soul_path:
+            raise OSError("file vanished during validation")
+        return read_text(path, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "read_text", fail_soul_read)
+
+    result = m.validate_manifest(manifest_path)
+
+    assert "cannot read soul file" in problem_for(result, "soul.file")
+    assert result.errors[0].file == soul_path
+
+
 # ---------------------------------------------------------------------------- tree walking
 
 
