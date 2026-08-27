@@ -1225,14 +1225,20 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
     @app.get("/tasks/{task_id}/lineage")
     def get_lineage(task_id: str) -> dict[str, Any]:
-        """Return the whole chain this task belongs to, root first. The audit query."""
+        """Return the whole chain this task belongs to, root first. The audit query.
+
+        ``chain`` is the root and everything delegated out of it, depth-first, so the
+        answer does not depend on which member of the chain was named (steward #202).
+        ``origin`` and ``depth`` still describe the task that was asked about.
+        """
         chain = db.lineage(task_id)
         if not chain:
             _refuse(404, "unknown_task", f"no task {task_id!r}")
+        asked = next((item for item in chain if item.task_id == task_id), chain[0])
         return {
             "task_id": task_id,
-            "origin": chain[-1].origin,
-            "depth": chain[-1].depth,
+            "origin": asked.origin,
+            "depth": asked.depth,
             "chain": [item.to_dict() for item in chain],
         }
 

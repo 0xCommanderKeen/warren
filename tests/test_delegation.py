@@ -536,6 +536,73 @@ def test_a_task_nobody_delegated_is_a_chain_of_one(store: Store) -> None:
     assert store.lineage("nobody") == []
 
 
+def test_lineage_is_the_same_chain_from_every_member(
+    make_delegator: MakeDelegator, store: Store
+) -> None:
+    """The audit query cannot depend on which end of the chain you happen to hold.
+
+    Operators only ever hold the root — ``POST /delegate`` hands it back — and asking
+    about it used to report a chain of one for work that had fanned out (#202).
+    """
+    delegator = three_way(make_delegator)
+    root = store.post_job(title="The thing a human actually asked for")
+    first = delegator.delegate(
+        sender=delegator.resident(SENDER), handoff=handoff(), parent_task_id=root.task_id
+    )
+    second = delegator.delegate(
+        sender=delegator.resident(RECEIVER),
+        handoff=handoff(to="third-agent"),
+        parent_task_id=first.task_id,
+    )
+
+    expected = [root.task_id, first.task_id, second.task_id]
+    for named in expected:
+        assert [item.task_id for item in store.lineage(named)] == expected, (
+            f"asking about {named} told a different story"
+        )
+
+
+def test_lineage_carries_every_branch_of_a_fan_out(
+    make_delegator: MakeDelegator, store: Store
+) -> None:
+    """A manager who hands two letters out has two descendants, not the last one."""
+    delegator = three_way(make_delegator)
+    root = store.post_job(title="Tidy the library")
+    left = delegator.delegate(
+        sender=delegator.resident(SENDER), handoff=handoff(), parent_task_id=root.task_id
+    )
+    right = delegator.delegate(
+        sender=delegator.resident(SENDER),
+        handoff=handoff(title="The other half"),
+        parent_task_id=root.task_id,
+    )
+
+    chain = store.lineage(root.task_id)
+    assert [item.task_id for item in chain] == [root.task_id, left.task_id, right.task_id]
+    assert [item.depth for item in chain] == [0, 1, 1]
+
+
+def test_lineage_survives_a_parent_cycle(store: Store) -> None:
+    """A hand-edited loop is a corrupt database, not a hang."""
+    first = store.post_job(title="One")
+    second = store.delegate_job(
+        title="Two",
+        assignee="receiver-agent",
+        delegated_by="test-agent",
+        route="inbox",
+        parent_task_id=first.task_id,
+    )
+    # Forging the corruption is the point: no public call can write a parent cycle.
+    with store._lock, store._conn:
+        store._conn.execute(
+            "UPDATE jobs SET parent_task_id = ? WHERE task_id = ?",
+            (second.task_id, first.task_id),
+        )
+
+    chain = store.lineage(first.task_id)
+    assert {item.task_id for item in chain} == {first.task_id, second.task_id}
+
+
 def test_an_inbox_survives_a_restart(tmp_path: Path, fleet: Fleet) -> None:
     """Durable means durable: the letter is still there after steward is restarted."""
     residents = fleet(sender_manifest(), receiver_manifest())

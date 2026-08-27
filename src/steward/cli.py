@@ -1350,7 +1350,9 @@ def task_group() -> None:
 def task_lineage(task_id: str, db: Path | None, output_format: str) -> None:
     """Print the whole chain a task belongs to, root first. The audit query.
 
-    A task nobody delegated is a chain of one, which is a real answer and not an error.
+    Naming any member of a chain prints the same chain: the root it descends from, and
+    every task delegated out of that root, indented by depth. A task nobody delegated,
+    and who delegated to nobody, is a chain of one — a real answer and not an error.
     """
     with _open_store(db) as store:
         chain = store.lineage(task_id)
@@ -1360,7 +1362,8 @@ def task_lineage(task_id: str, db: Path | None, output_format: str) -> None:
     if output_format == "json":
         click.echo(json.dumps([item.to_dict() for item in chain], indent=2))
         return
-    click.secho(f"origin {chain[-1].origin or 'unrecorded'}", fg="cyan", bold=True)
+    asked = next((item for item in chain if item.task_id == task_id), chain[0])
+    click.secho(f"origin {asked.origin or 'unrecorded'}", fg="cyan", bold=True)
     for item in chain:
         _render_lineage_hop(item)
 

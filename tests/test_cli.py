@@ -2433,6 +2433,39 @@ def test_task_lineage_prints_the_whole_chain(
     assert missing.exit_code == 1
 
 
+def test_task_lineage_from_the_root_still_shows_the_descendants(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The root is the only id POST /delegate hands back, so it must answer too (#202)."""
+    residents_dir = delegation_fleet(write_resident)
+    db = tmp_path / "delegation.db"
+    with Store(db) as store:
+        root = store.post_job(title="The root task")
+        child = store.delegate_job(
+            title="The handed-over half",
+            assignee="receiver-agent",
+            delegated_by="test-agent",
+            route="inbox",
+            parent_task_id=root.task_id,
+            origin=f"task:{root.task_id}",
+        )
+    _ = residents_dir
+
+    from_root = runner.invoke(main, ["task", "lineage", root.task_id, "--db", str(db)])
+    assert from_root.exit_code == 0, from_root.output
+    assert "The handed-over half" in from_root.output
+    assert "test-agent → receiver-agent" in from_root.output
+
+    def ids(task_id: str) -> list[str]:
+        raw = runner.invoke(
+            main, ["task", "lineage", task_id, "--db", str(db), "--format", "json"]
+        ).output
+        return [item["task_id"] for item in json.loads(raw)]
+
+    assert ids(root.task_id) == [root.task_id, child.task_id]
+    assert ids(child.task_id) == ids(root.task_id)
+
+
 def test_board_list_marks_a_letter_as_a_letter(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
