@@ -140,8 +140,10 @@ async function call(name, options = {}) {
       method: options.method || "GET",
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: options.signal,
     });
   } catch (cause) {
+    if (options.signal && options.signal.aborted) throw cause;
     setLink("bad", "unreachable");
     throw new ApiError(0, "unreachable", `the API did not answer: ${cause.message}`, null);
   }
@@ -202,7 +204,12 @@ function el(tag, attrs, ...children) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs || {})) {
     if (value === null || value === undefined || value === false) continue;
-    if (key === "style") Object.assign(node.style, value);
+    if (key === "style") {
+      for (const [name, setting] of Object.entries(value)) {
+        if (name.startsWith("--")) node.style.setProperty(name, setting);
+        else node.style[name] = setting;
+      }
+    }
     else if (key === "on") for (const [type, fn] of Object.entries(value)) node.addEventListener(type, fn);
     else if (key === "class") node.className = value;
     else node.setAttribute(key, value === true ? "" : String(value));
@@ -348,9 +355,9 @@ setInterval(() => document.querySelectorAll("time[data-clock]").forEach(tickCloc
  * ticked — is a third answer, not a missing one. A read that fails is `null` here, which
  * every caller below renders as "unknown" rather than as bad news.
  */
-async function schedulerLiveness() {
+async function schedulerLiveness(signal) {
   try {
-    return (await call("routines")).scheduler || null;
+    return (await call("routines", { signal })).scheduler || null;
   } catch {
     return null;
   }
@@ -415,20 +422,30 @@ const POLL_MS = 2000;
 const POLL_LIMIT = 90;      // three minutes of asking, then it says so and stops
 
 function ticket({ what, requestId, why, confirm, refused }) {
+  let cancelled = false;
+  let pollTimer = null;
+  let controller = null;
   const state = el("span", { class: "state" }, "asked");
   const reason = el("div", { class: "why" }, why || "steward accepted the request.");
+  const dismiss = () => {
+    cancelled = true;
+    if (pollTimer !== null) clearTimeout(pollTimer);
+    if (controller !== null) controller.abort();
+    node.remove();
+  };
   const node = el("div", { class: "tick", "data-state": "asked" },
     el("div", { class: "top" },
       el("span", { class: "what" }, what),
       el("span", { class: "actions" }, state,
         el("button", { class: "dismiss", type: "button", title: "dismiss",
-          on: { click: () => node.remove() } }, "×"))),
+          on: { click: dismiss } }, "×"))),
     reason,
     requestId ? el("div", { class: "rid" }, `request ${requestId}`) : null
   );
   ledger.append(node);
 
   const settle = (verdict) => {
+    if (cancelled || !node.isConnected) return;
     node.dataset.state = verdict.state;
     state.textContent = verdict.state;
     reason.textContent = verdict.why;
@@ -450,34 +467,46 @@ function ticket({ what, requestId, why, confirm, refused }) {
 
   let tries = 0;
   const poll = async () => {
+    if (cancelled) return;
     tries += 1;
     let verdict = null;
+    const activeController = new AbortController();
+    controller = activeController;
     try {
-      verdict = await confirm();
-    } catch (error) {
-      if (error === REPROMPT) return;
-      settle({ state: "failed", why: `could not read back what happened: ${error.message}` });
-      return;
+      try {
+        verdict = await confirm(activeController.signal);
+      } catch (error) {
+        if (cancelled) return;
+        if (error === REPROMPT) return;
+        settle({ state: "failed", why: `could not read back what happened: ${error.message}` });
+        return;
+      }
+      if (cancelled) return;
+      if (verdict) { settle(verdict); return; }
+      if (tries >= POLL_LIMIT) {
+        // Three minutes of silence used to be explained with a guess. Ask steward instead:
+        // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
+        // are very different reasons for the same silence.
+        const scheduler = await schedulerLiveness(activeController.signal);
+        if (!cancelled && node.isConnected) {
+          reason.textContent = "accepted, and steward has recorded no outcome in three " +
+            "minutes. " + schedulerBlame(scheduler);
+        }
+        return;
+      }
+      pollTimer = setTimeout(poll, POLL_MS);
+    } finally {
+      if (controller === activeController) controller = null;
     }
-    if (verdict) { settle(verdict); return; }
-    if (tries >= POLL_LIMIT) {
-      // Three minutes of silence used to be explained with a guess. Ask steward instead:
-      // its heartbeat is a fact, and "a scheduler ticked a second ago" and "none ever has"
-      // are very different reasons for the same silence.
-      reason.textContent = "accepted, and steward has recorded no outcome in three " +
-        "minutes. " + schedulerBlame(await schedulerLiveness());
-      return;
-    }
-    setTimeout(poll, POLL_MS);
   };
-  setTimeout(poll, 600);
+  pollTimer = setTimeout(poll, 600);
   return node;
 }
 
 /** Confirm a run-now the only honest way: read the request log steward wrote it into. */
 function confirmRun(requestId) {
-  return async () => {
-    const record = await call("request", { params: { request_id: requestId } });
+  return async (signal) => {
+    const record = await call("request", { params: { request_id: requestId }, signal });
     if (record.outcome === "queued") return null;
     const detail = record.detail || {};
     if (record.outcome === "ran") {
@@ -492,8 +521,8 @@ function confirmRun(requestId) {
 
 /** Confirm a posted job by finding it on the board steward keeps. */
 function confirmJob(taskId) {
-  return async () => {
-    const board = await call("jobs");
+  return async (signal) => {
+    const board = await call("jobs", { signal });
     const job = (board.jobs || []).find((item) => item.task_id === taskId);
     if (!job) return null;
     return {
@@ -506,8 +535,8 @@ function confirmJob(taskId) {
 
 /** Confirm a decision by polling the exact request-log id the POST returned. */
 function confirmApproval(requestId) {
-  return async () => {
-    const record = await call("request", { params: { request_id: requestId } });
+  return async (signal) => {
+    const record = await call("request", { params: { request_id: requestId }, signal });
     if (record.outcome === "recorded_announcement_pending") return null;
     return {
       state: record.outcome === "recorded" ? "confirmed" : "failed",
@@ -524,8 +553,8 @@ function confirmApproval(requestId) {
  * report rather than assumed from the status code.
  */
 function confirmDeclared(answer) {
-  return async () => {
-    const listing = await call("residents");
+  return async (signal) => {
+    const listing = await call("residents", { signal });
     const found = (listing.residents || []).some((item) => item.id === answer.id);
     if (!found) return null;
 
@@ -606,7 +635,7 @@ async function viewResidents() {
     const routines = byResident.get(resident.id) || [];
     const upcoming = routines
       .filter((row) => row.next_fire)
-      .sort((a, b) => a.next_fire.localeCompare(b.next_fire))[0];
+      .sort((a, b) => Date.parse(a.next_fire) - Date.parse(b.next_fire))[0];
     const budget = resident.budget || {};
     add(rows, [el("a", {
       class: "row", href: `#/residents/${encodeURIComponent(resident.id)}`,
@@ -1411,10 +1440,12 @@ async function viewRoutines() {
  * ---------------------------------------------------------------------------------- */
 
 async function viewApprovals() {
-  const data = await call("approvals", { query: { status: "all" } });
-  const all = data.approvals || [];
-  const pending = all.filter((item) => item.status === "pending");
-  const decided = all.filter((item) => item.status !== "pending").reverse();
+  const [waiting, history] = await Promise.all([
+    call("approvals", { query: { status: "pending" } }),
+    call("approvals", { query: { status: "resolved" } }),
+  ]);
+  const pending = waiting.approvals || [];
+  const decided = (history.approvals || []).reverse();
 
   const out = frag(
     head("Approvals",
@@ -1458,6 +1489,7 @@ async function viewApprovals() {
 }
 
 function approvalCard(item, index) {
+  const offered = new Set(item.options || []);
   const errors = el("div", {});
   const editor = el("textarea", { rows: 8, style: { display: "none" } },
     JSON.stringify(item.detail || {}, null, 2));
@@ -1482,9 +1514,11 @@ function approvalCard(item, index) {
     }
   };
 
-  const editButton = el("button", { class: "ghost", type: "button" }, "Edit…");
+  const editButton = offered.has("edit")
+    ? el("button", { class: "ghost", type: "button" }, "Edit…")
+    : null;
   let editing = false;
-  editButton.addEventListener("click", () => {
+  if (editButton) editButton.addEventListener("click", () => {
     if (!editing) {
       editing = true;
       editor.style.display = "block";
@@ -1535,10 +1569,10 @@ function approvalCard(item, index) {
     el("div", {}, editor, editorError),
     errors,
     el("div", { class: "actions", style: { marginTop: "16px" } },
-      el("button", { class: "primary", type: "button",
-        on: { click: () => send("approve") } }, "Approve"),
-      el("button", { class: "danger", type: "button",
-        on: { click: () => send("deny") } }, "Deny"),
+      offered.has("approve") ? el("button", { class: "primary", type: "button",
+        on: { click: () => send("approve") } }, "Approve") : null,
+      offered.has("deny") ? el("button", { class: "danger", type: "button",
+        on: { click: () => send("deny") } }, "Deny") : null,
       editButton,
       el("span", { class: "note" },
         (item.options || []).length ? `options: ${item.options.join(", ")}` : null))

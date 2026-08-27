@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from croniter import croniter
 
 from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
 from steward import events as ev
@@ -964,6 +965,164 @@ def test_a_routine_that_fires_hourly_may_not_close_the_day(write_resident: Resid
         s.load_scheduled(path.parent)
 
 
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 * * 1",  # weekly, including the Monday the old probe happened to use
+        "30 22 31 * *",  # month-end
+        "30 22 * 6 *",  # every day, but only in June
+        "30 22 1-30 * 0,2-6",  # 2024 is covered; Monday 2025-03-31 is not
+    ],
+)
+def test_a_close_of_day_routine_must_fire_every_day(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match="does not fire every day"):
+        s.load_scheduled(path.parent)
+
+
+def test_a_routine_that_fires_once_each_day_may_close_it(
+    write_resident: ResidentWriter,
+) -> None:
+    path = write_resident(manifest_with(CLOSER))
+    scheduled = s.load_scheduled(path.parent)
+    assert scheduled[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize("weekday", ["6/1", "7/1"])
+def test_croniter_stepped_weekday_aliases_that_mean_daily_may_close_the_day(
+    write_resident: ResidentWriter, weekday: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": f"30 22 * * {weekday}"}))
+    scheduled = s.load_scheduled(path.parent)
+    assert scheduled[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 31/1 * *",  # max day-of-month / 1 is croniter's wildcard
+        "30 22 * 12/1 *",  # max month / 1 is croniter's wildcard
+    ],
+)
+def test_croniter_stepped_field_maxima_that_mean_daily_may_close_the_day(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    assert s.load_scheduled(path.parent)[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
+    ("schedule", "cadence"),
+    [("59/1 22 * * *", r"fires 24\+ times"), ("0 23/1 * * *", "fires 24 times")],
+)
+def test_croniter_stepped_clock_maxima_that_mean_wildcard_cannot_close_the_day(
+    write_resident: ResidentWriter, schedule: str, cadence: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match=cadence):
+        s.load_scheduled(path.parent)
+
+
+@pytest.mark.parametrize(
+    ("schedule", "cadence"),
+    [
+        ("*,5 22 * * *", r"fires 24\+ times"),
+        ("30 *,5 * * *", "fires 24 times"),
+    ],
+)
+def test_a_wildcard_with_redundant_clock_members_still_over_fires(
+    write_resident: ResidentWriter, schedule: str, cadence: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    with pytest.raises(s.SchedulerError, match=cadence):
+        s.load_scheduled(path.parent)
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 *,5 * *",
+        "30 22 * *,5 *",
+        "30 22 * * *,1",
+    ],
+)
+def test_a_wildcard_with_redundant_calendar_members_still_means_daily(
+    write_resident: ResidentWriter, schedule: str
+) -> None:
+    path = write_resident(manifest_with({**CLOSER, "schedule": schedule}))
+    assert s.load_scheduled(path.parent)[0].routine.journal == "close_of_day"
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        "30 22 * * *",
+        "30 22 * * 7/1",
+        "30 22 * * 6/1",
+        "30 22 * * 1/2",
+        "30 22 31/1 * *",
+        "30 22 * 12/1 *",
+        "30 22 1-30 * 0,2-6",
+        "30 22 */2 2-11/3 1-6/2",
+        "*,5 22 * * *",
+        "30 *,5 * * *",
+        "30 22 *,5 * *",
+        "30 22 * *,5 *",
+        "30 22 * * *,1",
+        "0 */2,1 31 2 1",  # impossible DOM in a restricted month suppresses the DOW arm
+    ],
+)
+def test_calendar_cadence_matches_croniter_over_every_gregorian_alignment(
+    schedule: str,
+) -> None:
+    representatives: dict[tuple[int, int, int], datetime] = {}
+    moment = datetime(2000, 1, 1, 22, 30, tzinfo=UTC)
+    for offset in range(146_097):
+        candidate = moment + timedelta(days=offset)
+        key = (candidate.month, candidate.day, (candidate.weekday() + 1) % 7)
+        representatives.setdefault(key, candidate)
+
+    minute, hour, *_ = schedule.split()
+    clock_schedule = f"{minute} {hour} * * *"
+    clock_day = datetime(2000, 1, 1, tzinfo=UTC)
+    matching_clocks = [
+        clock_day + timedelta(minutes=offset)
+        for offset in range(24 * 60)
+        if croniter.match(clock_schedule, clock_day + timedelta(minutes=offset))
+    ]
+    matching_clock = matching_clocks[0]
+    expected = [
+        len(matching_clocks)
+        * int(
+            croniter.match(
+                schedule,
+                candidate.replace(hour=matching_clock.hour, minute=matching_clock.minute),
+            )
+        )
+        for candidate in representatives.values()
+    ]
+    assert m._daily_fire_range(routine(schedule=schedule)) == (min(expected), max(expected))
+
+
+def test_impossible_month_day_has_no_fires_even_with_a_matching_weekday() -> None:
+    assert m._daily_fire_range(routine(schedule="0 */2,1 31 2 1")) == (0, 0)
+
+
+def test_a_disabled_routine_cannot_close_the_day(write_resident: ResidentWriter) -> None:
+    path = write_resident(manifest_with({**CLOSER, "enabled": False}))
+    with pytest.raises(s.SchedulerError, match=r"disabled.*cannot close any day"):
+        s.load_scheduled(path.parent)
+
+
+def test_the_gregorian_cadence_bound_has_one_probe_per_observable_calendar_day() -> None:
+    days = m._gregorian_cron_days()
+    assert len(days) == 366 * 7
+    assert len(set(days)) == len(days)
+    assert (3, 31, 1) in days  # Monday 2025-03-31, the cross-year regression case
+
+
 def test_an_edited_voice_takes_effect_on_the_next_load(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -1690,3 +1849,34 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
 
     assert report.fired
     assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]
+
+
+def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The registry terminal transition is won before either closing event is emitted."""
+    path = write_resident(manifest_with(HOURLY))
+
+    class WatchdogWon:
+        def open_run(self, **_kwargs: object) -> bool:
+            return True
+
+        def renew_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+        def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+    sink = ev.NullEmitter()
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=sink,
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        registry=WatchdogWon(),
+    )
+
+    report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
+
+    assert report.fired
+    assert [event.type for event in sink.events] == [ev.ROUTINE_STARTED]

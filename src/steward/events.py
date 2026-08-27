@@ -263,6 +263,11 @@ class NullEmitter:
         self.events.append(event)
         return False
 
+    def emit_durable(self, event: Event) -> bool:
+        """Treat the explicit in-memory test record as the durable sink for arbitration tests."""
+        self.events.append(event)
+        return True
+
 
 def _is_loopback(url: str) -> bool:
     host = url.split("//", 1)[-1].split("/", maxsplit=1)[0].rsplit(":", 1)[0]
@@ -330,6 +335,8 @@ class EventEmitter:
             self.fallback.parent.mkdir(parents=True, exist_ok=True)
             with self.fallback.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         except OSError:
             # The village losing an event must never take a routine down with it.
             return False

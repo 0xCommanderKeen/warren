@@ -88,6 +88,7 @@ charter:
 
 Each entry names a skill in the [skills library](#the-skills-library)
 (`skills/<id>/SKILL.md`). A bare string is shorthand for `{id: <string>}`.
+Skill IDs are exact: surrounding whitespace is invalid rather than silently removed.
 
 ```yaml
 skills:
@@ -239,9 +240,12 @@ should be able to read its own manifest and know which run closes its day. "Whic
 routine happens to fire last" depends on cron arithmetic, time zones, and which routines
 are enabled today — nobody can read that off the page, so nobody can check it.
 
-Two rules are enforced at validation, because both break "one entry per day":
+These rules are enforced at validation, because violating any of them breaks "one entry
+per day":
 
 - **At most one routine per resident may carry it.** A day that ends twice is not a day.
+- **The flagged routine must be enabled.** Disabled routines are omitted by the scheduler
+  and therefore cannot close any day.
 - **The flagged routine must fire once a day.** An hourly routine flagged `close_of_day`
   would rewrite the day twenty-four times and call the last one the day.
 
@@ -928,6 +932,18 @@ steward watchdog tick            # one pass: probe, sweep, bury stale runs, chec
 
 Exit code is non-zero on any error, so CI can gate on it.
 
+Outcome-bearing commands use the same stable process codes: `0` means the requested
+one-shot work completed without a failed session or an unresolved watchdog intervention;
+`1` means invalid input, failed started work, a watchdog give-up or newly tripped budget,
+or a `new-resident` registration check that found problems. Click reserves `2` for command
+line usage errors. Empty work, dry runs, policy skips, successful deadline cleanup, and an
+idempotent `budget unpause` of a known resident that is already running are successful
+no-ops. An unknown resident is invalid.
+
+The `scheduler run` and `watchdog run` daemons do not stop on an individual recoverable
+pass. When bounded by `--max-ticks` / `--max-passes`, they return the aggregate outcome of
+those passes; an operator interrupt of an unbounded daemon is a clean stop.
+
 The same path is importable, and returns structured diagnostics rather than printed text:
 
 ```python
@@ -977,6 +993,11 @@ Burrow reads the same files for display (burrow #35). The contract:
 - `steward schema` emits the JSON Schema, so burrow can validate without depending on
   this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
   the schema's `$id` says they are, so burrow can fetch a file rather than run a command.
+  This is a **shape contract**, not the full steward validator: it describes accepted
+  document types, fields, required values, and constraints JSON Schema can express.
+  `steward validate` remains authoritative for filesystem and fleet context (such as a
+  granted skill existing in the library) and semantic rules implemented in Python (such
+  as cron/time-zone validity and relationships between fields).
   `tests/test_schema_contract.py` fails when the committed copy drifts from the models —
   changing a field means regenerating with `make schema-write` and reading the diff for
   what it does to burrow's reader.

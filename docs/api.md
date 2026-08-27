@@ -40,6 +40,41 @@ Every accepted mutating request is logged to `.steward/state/steward.db` with it
 outcome, so a queued action that later failed is traceable. A failure surfaces as a
 truthful event (`routine_failed`, `needs_human`) and never as a synthesized success.
 
+## Body validation
+
+Malformed bodies and bodies outside these limits are FastAPI/Pydantic `422` responses.
+Validation happens before a route runs, so a rejected body writes no request or domain
+row, emits no event, and reaches no resident prompt. The limits are repeated at the
+durable transition/delegation seams where a CLI or an in-process caller can otherwise
+bypass HTTP validation.
+
+| body | field | limit |
+|---|---|---|
+| `POST /jobs` | `title`, `detail` | 200 and 8,000 Unicode characters |
+| `POST /jobs` | `required_skills` | 100 items; each identifier 100 characters |
+| `POST /delegate` | `title`, `detail` | 200 and 8,000 Unicode characters |
+| `POST /delegate` | `to`, `route`, `from`, `parent_task_id` | 100 characters each |
+| `POST /approvals/{id}` | `edit` | 16 KiB compact UTF-8 JSON; 8 container levels; 100 members/items per container; 1,000 values; strings 8,000 and keys 200 characters |
+
+The work-text limits deliberately match the `<delegate>` block grammar, so the same
+task cannot grow larger depending on which door it entered through. Identifier limits
+comfortably cover resident/route slugs and steward's generated IDs while bounding lookup
+and near-match work. Approval edits get a structural budget as well as a serialized byte
+budget because they are stored verbatim and rendered into the resident's next prompt;
+the validator walks iteratively before serializing, so deeply nested input does not cause
+recursive validation work.
+
+These are all API bodies: `JobPost`, `HandoffPost`, `ApprovalDecision`, and
+`ResidentPost`. `ResidentPost` inherits the shared `NewResident` declaration model used
+by the CLI, including its manifest/domain validation; it writes reviewable manifest and
+soul files rather than job/event/prompt payloads, so its broader declaration prose is not
+part of the work-envelope limits above. Route path and query parameters are separate
+inputs and retain their endpoint-specific validation. SQLite stores these values in
+`TEXT` columns and supplies no length constraint itself.
+
+The OpenAPI schema and interactive docs are disabled, as described below, so these
+limits are documented here rather than advertised at `/openapi.json`.
+
 ## Auth
 
 One shared token, exactly like burrow's ingest auth.
@@ -52,6 +87,18 @@ One shared token, exactly like burrow's ingest auth.
   refuses to start, naming the variable, unless `--allow-open` says out loud that this
   is local development.
 - Anything else is `401`, and nothing is queued, stored, or emitted.
+- Exactly one `Authorization` header is required. Duplicate fields are `401`, even when
+  one or both values contain the right token, so intermediaries cannot disagree about
+  which credential wins.
+
+Approval-decision request bodies have a 128 KiB wire limit, enforced while ASGI chunks
+arrive and before JSON parsing. Six times the 16 KiB semantic edit budget admits the
+worst legal JSON spelling, where each ASCII content byte is written as a six-byte
+`\uXXXX` escape; two further edit budgets cover the escaped decision/envelope and
+bounded formatting slack. Arbitrary whitespace, duplicate-key padding, malformed JSON,
+and oversized strings remain bounded. Crossing the wire limit returns
+`413 approval_body_too_large`; structurally or semantically invalid bodies within it
+return `422`. Neither refusal has side effects.
 
 Reads are gated too. Every endpoint here is a write path except the resident views and
 the skills listing, and gating those as well is simpler than explaining which is which
@@ -210,11 +257,12 @@ must make, the block grammar, and the guardrails are in
 
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
-before the parameter existed, so a panel that never passed it sees exactly what it saw. A
-request past its `expires_at` but not yet swept is **not** returned under `pending`
-(steward #66): it denies by default, so listing it as still answerable would let a human
-click *approve* on something the sweep is about to close. It reappears under `resolved`
-once the deny is recorded.
+before the parameter existed, so a panel that never passed it sees exactly what it saw.
+The API's lifespan runs the ordinary expiry transition in the background, including when
+no scheduler, dispatcher, or watchdog daemon is running. It records the deny, emits
+`needs_human_resolved`, and leaves the decision ready for the resident's next wake-up.
+GET routes remain read-only: a pending-list read hides a row already past its deadline,
+but neither polling nor looking up an unknown id causes a sweep.
 
 `GET /approvals/{request_id}` is the audit query: request, full detail, decision,
 decider, and every timestamp, in one call. `404` for an id steward has never seen.
@@ -239,12 +287,16 @@ Every accepted response returns its own request-log id as `request_id`, suitable
 `approval_request_id`. Each replay therefore has a distinct correlated request-log row;
 when recovery completes, all rows correlated to that approval become `recorded`.
 
+The decision must be one of that request's `options`. A globally known but unoffered
+decision is a `409` with `approval_decision_not_offered` and the request's `offered`
+set; the row remains pending and no resolution event is emitted.
+
 Decisions are idempotent: the first one wins. `202` the first time; a replay (a
 double-tapped notification, a retried request) is `200`, returns the recorded outcome,
 changes nothing, and emits nothing. An unknown `request_id` is `404`. A request that has
 already **expired** is a `409` with `approval_expired` — distinct from the replay of an
-already-decided one, because it was never decided: deny-by-default has the last word and the
-sweep records the deny (steward #66).
+already-decided one. Deny-by-default has the last word; the late POST explicitly sweeps
+the row to `deny` and emits its resolution (steward #66, #143).
 
 The lifecycle worker reconciles announcement and completion-effects rows only after a
 decision or expiry transition has recorded them. It does not decide when deadlines expire;
@@ -590,6 +642,12 @@ there is no endpoint that would let it. See the README for what it shows.
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
 | `watchdog_passes` | when the watchdog last swept, which is how `doctor` can say nothing is watching |
+
+Budget accounting has one deliberately separate durable file: `steward.db.health.jsonl`.
+It records a bounded, redacted error when a completed run cannot be ledgered or its
+post-run pause cannot be enforced. It is independent of SQLite so a persistent database
+lock cannot hide its own failure; `steward doctor` reports any entry as unhealthy. SQLite
+writes wait up to 15 seconds for a competing writer before this evidence is recorded.
 | `unbracketed_runs` | the runs steward buried on their session's behalf, so nobody is mourned twice |
 
 SQLite rather than a JSON file because the two interesting writes are both

@@ -202,6 +202,17 @@ one is. That row exists whatever happened to the events, so a session that died 
 `routine_started` reached burrow is found — which it was not while the only thing the
 watchdog could read was the log of events burrow never received.
 
+Age alone is not death. Each registry row also carries a renewable ownership lease and
+the absolute path of the complete local event record. The scheduler and board renew the
+lease through the whole lifecycle, including accounting, harvesting, delegation, task
+closure, and terminal publication after the child exits. The live owner and watchdog race
+to store one immutable terminal event under a fencing token/stale-heartbeat condition.
+That chosen event has a stable identity, is replayed after either crash window, and closes
+only after a remote or fsynced local sink accepts it. Each row's own recorded event-log
+path is checked independently; missing, unreadable, or corrupt evidence blocks that path's
+rows without hiding healthy rows elsewhere. Legacy migrated rows with no known path are
+refused loudly. Only a malformed final line lacking a newline is treated as a torn append.
+
 ```console
 $ steward budget show                # today's spend against every declared cap
 $ steward budget unpause life-agent  # or approve the knock from burrow's panel
@@ -476,7 +487,8 @@ only fail should look like one before it is pressed.
 
 ## Development
 
-Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
+Python 3.14, Node.js 22, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest. Node runs the
+browser-free UI behavior tests as part of pytest; `.node-version` is the supported major.
 
 ```console
 make dev       # uv sync --all-groups
