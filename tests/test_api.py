@@ -6,30 +6,47 @@ file. That last piece is what lets a test assert the thing the contract actually
 promises: not that a request returned 202, but that the matching protocol event landed.
 """
 
+import asyncio
 import copy
 import datetime as dt
 import json
+import logging
 import re
 import threading
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import events as ev
 from steward import journal
-from steward.api import ApiConfig, ApiError, create_app
+from steward.api import ApiConfig, ApiError, _ApprovalBodyDepthMiddleware, create_app
 from steward.deploy import LocalTransport
+from steward.input_bounds import (
+    APPROVAL_BODY_MAX_BYTES,
+    DETAIL_MAX_CHARS,
+    EDIT_MAX_BYTES,
+    EDIT_MAX_CONTAINER_ITEMS,
+    EDIT_MAX_DEPTH,
+    EDIT_MAX_KEY_CHARS,
+    EDIT_MAX_STRING_CHARS,
+    IDENTIFIER_MAX_CHARS,
+    SKILLS_MAX_ITEMS,
+    TITLE_MAX_CHARS,
+)
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
 from steward.nursery import raise_resident
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.scheduler import FireReport, ScheduledRoutine
 from steward.store import Store
+from steward.transitions.approval import ApprovalTransitions
 
 TOKEN = "a-shared-secret"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -94,6 +111,9 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
         transport: LocalTransport | None = None,
+        emitter: ev.Emitter | None = None,
+        approval_expiry_interval_s: float = 30.0,
+        now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> Harness:
         residents_dir = tmp_path / "residents"
         residents_dir.mkdir(exist_ok=True)
@@ -110,10 +130,14 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
                 workdir=tmp_path,
             ),
             store=store,
-            emitter=ev.EventEmitter(url=None, fallback=events_path),
+            emitter=(
+                emitter if emitter is not None else ev.EventEmitter(url=None, fallback=events_path)
+            ),
             runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
             nursery=nursery,
             transport=transport,
+            approval_expiry_interval_s=approval_expiry_interval_s,
+            now=now,
         )
         harness = Harness(
             client=TestClient(app, headers=dict(AUTH) if token else {}),
@@ -211,6 +235,30 @@ def test_the_token_is_compared_in_constant_time(
         == 401
     )
     assert calls == [(same_length.encode(), TOKEN.encode())]
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [f"Bearer {TOKEN}", "Bearer wrong"],
+        ["Bearer wrong", f"Bearer {TOKEN}"],
+        [f"Bearer {TOKEN}", f"Bearer {TOKEN}"],
+    ],
+)
+def test_duplicate_authorization_is_401_before_deep_body(
+    api: ApiFactory, values: list[str]
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_000 + "0" + "]" * 1_000 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw,
+        headers=[("content-type", "application/json"), *[("authorization", v) for v in values]],
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "unauthorized"
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
 
 
 # --------------------------------------------------------------------------------------
@@ -378,6 +426,46 @@ def test_a_job_needs_a_title(api: ApiFactory) -> None:
     assert harness.store.jobs() == []
 
 
+@pytest.mark.parametrize(
+    ("field", "at_limit", "over_limit"),
+    [
+        ("title", "x" * TITLE_MAX_CHARS, "x" * (TITLE_MAX_CHARS + 1)),
+        ("detail", "x" * DETAIL_MAX_CHARS, "x" * (DETAIL_MAX_CHARS + 1)),
+    ],
+)
+def test_job_text_bounds_are_exact_and_rejections_have_no_effect(
+    api: ApiFactory, field: str, at_limit: str, over_limit: str
+) -> None:
+    refused = api()
+    response = refused.client.post("/jobs", json={"title": "work", field: over_limit})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "string_too_long"
+    assert refused.store.jobs() == []
+    assert refused.store.requests() == []
+    assert refused.events() == []
+
+    accepted = api()
+    assert accepted.client.post("/jobs", json={"title": "work", field: at_limit}).status_code == 202
+    assert len(accepted.store.jobs()) == 1
+    assert len(accepted.events("task_posted")) == 1
+
+
+def test_required_skill_bounds_are_exact_and_side_effect_free(api: ApiFactory) -> None:
+    skills = [f"s{i}" for i in range(SKILLS_MAX_ITEMS - 1)] + ["x" * IDENTIFIER_MAX_CHARS]
+    for invalid in (["x" * (IDENTIFIER_MAX_CHARS + 1)], ["x"] * (SKILLS_MAX_ITEMS + 1)):
+        refused = api()
+        response = refused.client.post("/jobs", json={"title": "work", "required_skills": invalid})
+        assert response.status_code == 422
+        assert refused.store.jobs() == []
+        assert refused.store.requests() == []
+        assert refused.events() == []
+    accepted = api()
+    assert (
+        accepted.client.post("/jobs", json={"title": "work", "required_skills": skills}).status_code
+        == 202
+    )
+
+
 def test_the_board_can_be_narrowed_to_one_status(api: ApiFactory) -> None:
     harness = api()
     claimed_id = harness.client.post("/jobs", json={"title": "Claimed"}).json()["task_id"]
@@ -437,6 +525,10 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     assert response.status_code == 202
     assert response.json()["status"] == "recorded"
     assert response.json()["decision"] == "approve"
+    assert response.json()["approval_request_id"] == request_id
+    ledger_id = response.json()["request_id"]
+    assert ledger_id != request_id
+    assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == "recorded"
 
     resolved = harness.events("needs_human_resolved")
     assert len(resolved) == 1
@@ -449,21 +541,113 @@ def test_a_decision_is_recorded_and_emits_needs_human_resolved(api: ApiFactory) 
     # Emitted as the villager who knocked, so burrow walks the right one from the door.
     assert resolved[0]["agent_id"] == "claude-code:test-agent"
     assert harness.client.get("/approvals").json()["approvals"] == []
+    assert [row.outcome for row in harness.store.requests()] == ["recorded"]
+
+
+def test_lifespan_surfaces_an_outbox_worker_that_cannot_stop(api: ApiFactory) -> None:
+    harness = api()
+    worker = harness.client.app.state.approval_outbox
+    entered = threading.Event()
+    release = threading.Event()
+
+    class SlowTransitions:
+        def __init__(self) -> None:
+            self.store = harness.store
+
+        def reconcile_announcements(self) -> None:
+            entered.set()
+            release.wait()
+
+    worker.transitions = SlowTransitions()
+    worker.close_timeout = 0.01
+    with pytest.raises(TimeoutError, match="did not stop"), harness.client:
+        assert entered.wait(1.0)
+    assert worker.alive
+    release.set()
+    worker.close(timeout=1.0)
+
+
+def test_a_second_lifespan_drains_work_committed_after_the_first(api: ApiFactory) -> None:
+    harness = api()
+
+    with harness.client:
+        pass
+
+    approval_id = _pending(harness)
+    record, recorded = harness.store.decide(approval_id, "approve")
+    assert recorded
+    assert record is not None
+    assert harness.events("needs_human_resolved") == []
+
+    with harness.client:
+        for _ in range(100):
+            resolved = harness.events("needs_human_resolved")
+            if resolved:
+                break
+            threading.Event().wait(0.01)
+
+    assert [event["payload"]["request_id"] for event in resolved] == [approval_id]
 
 
 def test_a_second_decision_changes_nothing_and_emits_nothing(api: ApiFactory) -> None:
     harness = api()
     request_id = _pending(harness)
-    harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"})
+    first = harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"}).json()
 
     replay = harness.client.post(f"/approvals/{request_id}", json={"decision": "deny"})
     assert replay.status_code == 200
     assert replay.json()["decision"] == "approve"
+    assert replay.json()["approval_request_id"] == request_id
+    assert replay.json()["request_id"] != first["request_id"]
+    replay_ledger = harness.client.get(f"/requests/{replay.json()['request_id']}").json()
+    assert replay_ledger["outcome"] == "recorded"
     assert len(harness.events("needs_human_resolved")) == 1
 
     record = harness.store.approval(request_id)
     assert record is not None
     assert record.decision == "approve"
+
+
+def test_returned_decision_id_polls_pending_then_recorded_after_worker_recovery(
+    api: ApiFactory,
+) -> None:
+    """The response id names the ledger row the lifecycle worker later finalizes."""
+
+    class RecoveringEmitter:
+        def __init__(self) -> None:
+            self.available = threading.Event()
+            self.recovered = threading.Event()
+
+        def emit_durable(self, _event: ev.Event) -> bool:
+            if not self.available.is_set():
+                return False
+            self.recovered.set()
+            return True
+
+    emitter = RecoveringEmitter()
+    harness = api(emitter=emitter)
+    approval_id = _pending(harness)
+
+    with harness.client:
+        answer = harness.client.post(
+            f"/approvals/{approval_id}", json={"decision": "approve"}
+        ).json()
+        ledger_id = answer["request_id"]
+        assert answer["approval_request_id"] == approval_id
+        assert harness.client.get(f"/requests/{ledger_id}").json()["outcome"] == (
+            "recorded_announcement_pending"
+        )
+
+        emitter.available.set()
+        harness.client.app.state.approval_outbox.notify()
+        assert emitter.recovered.wait(2.0)
+        for _ in range(100):
+            polled = harness.client.get(f"/requests/{ledger_id}").json()
+            if polled["outcome"] == "recorded":
+                break
+            threading.Event().wait(0.01)
+        assert polled["request_id"] == ledger_id
+        assert polled["outcome"] == "recorded"
 
 
 def test_an_edit_decision_carries_the_humans_version(api: ApiFactory) -> None:
@@ -477,6 +661,461 @@ def test_an_edit_decision_carries_the_humans_version(api: ApiFactory) -> None:
     record = harness.store.approval(request_id)
     assert record is not None
     assert record.edit == {"subject": "shorter"}
+
+
+def _nested_edit(depth: int) -> dict[str, Any]:
+    value: dict[str, Any] = {"leaf": "ok"}
+    for _ in range(depth - 1):
+        value = {"next": value}
+    return value
+
+
+def test_edit_accepts_every_structural_boundary(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    edit = _nested_edit(EDIT_MAX_DEPTH)
+    edit["members"] = {str(i): i for i in range(EDIT_MAX_CONTAINER_ITEMS)}
+    edit["long-key" * 0 + "k" * EDIT_MAX_KEY_CHARS] = "x" * EDIT_MAX_STRING_CHARS
+    response = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": edit}
+    )
+    assert response.status_code == 202
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param(_nested_edit(EDIT_MAX_DEPTH + 1), id="depth"),
+        pytest.param({str(i): i for i in range(EDIT_MAX_CONTAINER_ITEMS + 1)}, id="object-members"),
+        pytest.param({"items": list(range(EDIT_MAX_CONTAINER_ITEMS + 1))}, id="array-items"),
+        pytest.param({"k" * (EDIT_MAX_KEY_CHARS + 1): "x"}, id="key"),
+        pytest.param({"text": "x" * (EDIT_MAX_STRING_CHARS + 1)}, id="string"),
+        pytest.param({"emoji": "🦉" * 5_000}, id="multibyte-serialized-bytes"),
+    ],
+)
+def test_invalid_edits_are_422_before_write_event_or_prompt(
+    api: ApiFactory, edit: dict[str, Any]
+) -> None:
+    prompts: list[str] = []
+
+    def record(request: RunRequest) -> RunResult:
+        prompts.append(request.prompt)
+        return RunResult(outcome=Outcome.OK, output="done")
+
+    harness = api(behavior=record)
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": edit}
+    )
+    assert response.status_code == 422
+    record_after = harness.store.approval(request_id)
+    assert record_after is not None
+    assert record_after.pending
+    assert record_after.edit is None
+    assert harness.store.requests() == []
+    assert harness.events() == []
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    harness.settle()
+    assert prompts
+    assert "the human edited it to" not in prompts[0]
+
+
+def test_edit_serialized_byte_boundary_is_exact(api: ApiFactory) -> None:
+    # Compact JSON overhead for these three keys is 22 bytes.
+    edit = {"a": "x" * 8_000, "b": "x" * 8_000, "c": "x" * (EDIT_MAX_BYTES - 16_022)}
+    assert (
+        len(json.dumps(edit, ensure_ascii=False, separators=(",", ":")).encode()) == EDIT_MAX_BYTES
+    )
+    harness = api()
+    request_id = _pending(harness)
+    assert (
+        harness.client.post(
+            f"/approvals/{request_id}", json={"decision": "edit", "edit": edit}
+        ).status_code
+        == 202
+    )
+
+
+def test_wire_cap_accepts_near_maximum_edit_with_ascii_content_unicode_escaped(
+    api: ApiFactory,
+) -> None:
+    # Every content byte is legally written as a six-byte escape. This is the wire
+    # expansion that a ratio based only on non-ASCII UTF-8 misses.
+    edit = {"a": "a" * 8_000, "b": "a" * 8_000, "c": "a" * (EDIT_MAX_BYTES - 16_022)}
+    compact = json.dumps(edit, ensure_ascii=False, separators=(",", ":"))
+    assert len(compact.encode()) == EDIT_MAX_BYTES
+    escaped_edit = compact.replace("a", r"\u0061")
+    raw = f'{{"decision":"edit","edit":{escaped_edit}}}'.encode()
+    assert 98_000 < len(raw) <= APPROVAL_BODY_MAX_BYTES
+
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 202
+    assert harness.store.approval(request_id).edit == edit  # ty: ignore[unresolved-attribute]
+
+
+def test_unicode_escaped_wire_form_does_not_bypass_semantic_edit_limit(api: ApiFactory) -> None:
+    edit = {"a": "a" * 8_000, "b": "a" * 8_000, "c": "a" * (EDIT_MAX_BYTES - 16_021)}
+    compact = json.dumps(edit, ensure_ascii=False, separators=(",", ":"))
+    assert len(compact.encode()) == EDIT_MAX_BYTES + 1
+    escaped_edit = compact.replace("a", r"\u0061")
+    raw = f'{{"decision":"edit","edit":{escaped_edit}}}'.encode()
+    assert len(raw) <= APPROVAL_BODY_MAX_BYTES
+
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+
+
+@pytest.mark.parametrize(
+    ("character", "counts"),
+    [
+        pytest.param("\u0080", (8_000, 184), id="bmp"),
+        pytest.param("🦉", (4_092, 0), id="surrogate-pair"),
+    ],
+)
+@pytest.mark.parametrize("wire_encoding", ["utf8", "ascii"])
+def test_wire_cap_accepts_equivalent_near_maximum_utf8_edits(
+    api: ApiFactory, wire_encoding: str, character: str, counts: tuple[int, int]
+) -> None:
+    # U+0080 is the worst JSON escaping ratio: two compact UTF-8 bytes become six ASCII
+    # bytes; astral characters use two \uXXXX escapes. Both edits are one byte below
+    # the semantic serialized limit in compact UTF-8.
+    edit = {"a": character * counts[0], "b": character * counts[1]}
+    assert len(json.dumps(edit, ensure_ascii=False, separators=(",", ":")).encode()) == 16_383
+    raw = json.dumps(
+        {"decision": "edit", "edit": edit},
+        ensure_ascii=wire_encoding == "ascii",
+        separators=(",", ":"),
+    ).encode()
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 202
+
+
+def test_approval_wire_body_boundary_and_oversize_inputs_have_no_effect(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    prefix = b'{"decision":"approve","padding":"'
+    suffix = b'"}'
+    exact = prefix + b" " * (APPROVAL_BODY_MAX_BYTES - len(prefix) - len(suffix)) + suffix
+    assert len(exact) == APPROVAL_BODY_MAX_BYTES
+    assert (
+        harness.client.post(
+            f"/approvals/{request_id}", content=exact, headers={"content-type": "application/json"}
+        ).status_code
+        == 422
+    )
+
+    for raw in (b" " * (APPROVAL_BODY_MAX_BYTES + 1), b'"' + b"x" * APPROVAL_BODY_MAX_BYTES):
+        response = harness.client.post(
+            f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+        )
+        assert response.status_code == 413
+        assert response.json()["detail"]["error"] == "approval_body_too_large"
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.store.requests() == []
+    assert harness.events() == []
+
+
+def test_approval_wire_limit_stops_receiving_at_first_oversize_chunk() -> None:
+    received = 0
+    downstream: list[bytes] = []
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"x" * APPROVAL_BODY_MAX_BYTES, "more_body": True},
+            {"type": "http.request", "body": b"!", "more_body": True},
+            {"type": "http.request", "body": b"never-read", "more_body": False},
+        ]
+    )
+
+    async def receive() -> Message:
+        nonlocal received
+        received += 1
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append((await receive())["body"])
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert received == 2
+    assert downstream == []
+    assert sent[0]["status"] == 413
+
+
+def test_approval_wire_limit_accepts_exact_streaming_boundary() -> None:
+    chunks = [b"x" * (APPROVAL_BODY_MAX_BYTES - 1), b"!"]
+    messages = iter(
+        [
+            {"type": "http.request", "body": chunks[0], "more_body": True},
+            {"type": "http.request", "body": chunks[1], "more_body": False},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert downstream == [{"type": "http.request", "body": b"".join(chunks), "more_body": False}]
+
+
+def test_approval_middleware_replays_normal_chunks_then_preserves_disconnect() -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b'{"decision":', "more_body": True},
+            {"type": "http.request", "body": b'"approve"}', "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+    asyncio.run(_ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send))
+    assert downstream == [
+        {"type": "http.request", "body": b'{"decision":"approve"}', "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+
+
+def test_approval_middleware_replays_partial_body_then_disconnect_without_waiting() -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b'{"decision":', "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+    downstream: list[Message] = []
+
+    async def receive() -> Message:
+        return next(messages)
+
+    async def app(_scope: Scope, receive: Receive, _send: Send) -> None:
+        downstream.append(await receive())
+        downstream.append(await receive())
+
+    async def send(_message: Message) -> None:
+        pass
+
+    scope: Scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/approvals/id",
+        "headers": [(b"authorization", f"Bearer {TOKEN}".encode())],
+    }
+
+    async def exercise() -> None:
+        await asyncio.wait_for(
+            _ApprovalBodyDepthMiddleware(app, token=TOKEN)(scope, receive, send), timeout=0.1
+        )
+
+    asyncio.run(exercise())
+    assert downstream == [
+        {"type": "http.request", "body": b'{"decision":', "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+
+
+def test_deep_raw_approval_json_is_422_before_materialization(api: ApiFactory) -> None:
+    prompts: list[str] = []
+
+    def record(request: RunRequest) -> RunResult:
+        prompts.append(request.prompt)
+        return RunResult(outcome=Outcome.OK, output="done")
+
+    harness = api(behavior=record)
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_100 + "0" + "]" * 1_100 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "edit"]
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.store.requests() == []
+    assert harness.events() == []
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    harness.settle()
+    assert prompts
+    assert "the human edited it to" not in prompts[0]
+
+
+def test_raw_depth_guard_is_quote_escape_and_utf8_aware(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    edit = _nested_edit(EDIT_MAX_DEPTH)
+    edit["text"] = '🦉 braces { [ and an escaped quote: " still text } ]'
+    raw = json.dumps({"decision": "edit", "edit": edit}, ensure_ascii=False)
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw.encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 202
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
+def test_non_finite_api_edit_numbers_are_422_without_effect(api: ApiFactory, number: str) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = f'{{"decision":"edit","edit":{{"value":{number}}}}}'
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+    assert harness.events() == []
+
+
+@pytest.mark.parametrize("raw", ["", '{"decision":'])
+def test_raw_guard_leaves_empty_and_malformed_json_to_standard_validation(
+    api: ApiFactory, raw: str
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}", content=raw, headers={"content-type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert harness.store.approval(request_id).pending  # ty: ignore[unresolved-attribute]
+
+
+def test_raw_guard_preserves_json_content_types_and_duplicate_key_semantics(
+    api: ApiFactory,
+) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content='{"decision":"deny","decision":"approve"}',
+        headers={"content-type": "application/vnd.api+json"},
+    )
+    assert response.status_code == 202
+    assert harness.store.approval(request_id).decision == "approve"  # ty: ignore[unresolved-attribute]
+
+
+def test_unauthorized_deep_approval_body_still_uses_the_auth_error(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _pending(harness)
+    raw = '{"decision":"edit","edit":' + "[" * 1_100 + "0" + "]" * 1_100 + "}"
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        content=raw,
+        headers={"content-type": "application/json", "authorization": "Bearer wrong"},
+    )
+    assert response.status_code == 401
+    assert response.json()["detail"]["error"] == "unauthorized"
+
+
+def test_a_decision_the_request_did_not_offer_is_a_truthful_conflict(api: ApiFactory) -> None:
+    harness = api()
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+        options=("approve", "deny"),
+    )
+
+    response = harness.client.post(
+        f"/approvals/{record.request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error": "approval_decision_not_offered",
+        "message": "decision 'edit' was not offered for this approval; use one of: approve, deny",
+        "offered": ["approve", "deny"],
+    }
+    pending = harness.store.approval(record.request_id)
+    assert pending is not None
+    assert pending.pending
+    assert pending.decision is None
+    assert pending.edit is None
+    assert harness.events("needs_human_resolved") == []
+
+
+def test_a_replay_wins_over_whether_the_retried_decision_was_offered(api: ApiFactory) -> None:
+    harness = api()
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email",
+        options=("approve",),
+    )
+    harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+
+    replay = harness.client.post(
+        f"/approvals/{record.request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert replay.status_code == 200
+    assert replay.json()["decision"] == "approve"
+    assert len(harness.events("needs_human_resolved")) == 1
+
+
+def test_expiry_wins_over_whether_the_late_decision_was_offered(api: ApiFactory) -> None:
+    harness = api()
+    request_id = _expired_pending(harness)
+
+    response = harness.client.post(
+        f"/approvals/{request_id}",
+        json={"decision": "edit", "edit": {"subject": "shorter"}},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "approval_expired"
 
 
 def test_deciding_an_unknown_request_is_404(api: ApiFactory) -> None:
@@ -511,16 +1150,97 @@ def _expired_pending(harness: Harness) -> str:
     return record.request_id
 
 
-def test_an_expired_request_is_not_listed_as_pending(api: ApiFactory) -> None:
-    """A deadline that has passed denies by default; pending must not offer it to a human (#66)."""
+def test_approval_gets_are_read_only_even_for_unknown_ids(api: ApiFactory) -> None:
+    """Neither polling nor an attacker-chosen missing id may sweep the ledger."""
     harness = api()
     request_id = _expired_pending(harness)
 
     assert harness.client.get("/approvals").json()["approvals"] == []
-    assert harness.client.get("/approvals?status=pending").json()["approvals"] == []
-    # It is still in the ledger — the audit view sees everything, decided or not.
-    listed_all = harness.client.get("/approvals?status=all").json()["approvals"]
-    assert [record["request_id"] for record in listed_all] == [request_id]
+    assert harness.client.get("/approvals/never-existed").status_code == 404
+    record = harness.store.approval(request_id)
+    assert record is not None
+    assert record.pending
+    assert harness.events("needs_human_resolved") == []
+
+
+def test_api_lifespan_alone_expires_and_stops_cleanly(api: ApiFactory) -> None:
+    """Serve owns expiry even when none of steward's daemons are running (#143)."""
+    moment = dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC)
+    harness = api(now=lambda: moment, approval_expiry_interval_s=0.01)
+    request_id = _expired_pending(harness)
+
+    with harness.client:
+        task = harness.client.app.state.approval_expiry_task
+        for _ in range(100):
+            record = harness.store.approval(request_id)
+            if record is not None and not record.pending and harness.events("needs_human_resolved"):
+                break
+            threading.Event().wait(0.01)
+        assert record is not None
+        assert record.decision == "deny"
+        assert record.decided_by == "expiry"
+        assert len(harness.events("needs_human_resolved")) == 1
+        assert not task.done()
+
+    assert task.done()
+    assert harness.client.app.state.approval_expiry_task is None
+
+
+def test_expiry_loop_logs_a_failed_pass_and_keeps_running(
+    api: ApiFactory, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    original = ApprovalTransitions.expire
+    calls = 0
+
+    def flaky(self: ApprovalTransitions, now: dt.datetime | None = None) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary expiry failure")
+        return original(self, now)
+
+    monkeypatch.setattr(ApprovalTransitions, "expire", flaky)
+    harness = api(
+        now=lambda: dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC),
+        approval_expiry_interval_s=0.01,
+    )
+    request_id = _expired_pending(harness)
+
+    with caplog.at_level(logging.ERROR, logger="steward.api"), harness.client:
+        for _ in range(100):
+            record = harness.store.approval(request_id)
+            if record is not None and not record.pending:
+                break
+            threading.Event().wait(0.01)
+
+    assert record is not None
+    assert record.decision == "deny"
+    assert calls >= 2
+    assert "approval expiry sweep failed; will retry" in caplog.text
+
+
+def test_expiry_loop_never_overlaps_a_slow_pass(
+    api: ApiFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    def slow(_self: ApprovalTransitions, _now: dt.datetime | None = None) -> list[Any]:
+        nonlocal calls
+        calls += 1
+        entered.set()
+        release.wait(timeout=10.0)
+        return []
+
+    monkeypatch.setattr(ApprovalTransitions, "expire", slow)
+    harness = api(approval_expiry_interval_s=0.001)
+
+    with harness.client:
+        assert entered.wait(timeout=10.0)
+        threading.Event().wait(0.03)
+        assert calls == 1
+        release.set()
 
 
 def test_an_expired_request_cannot_be_decided(api: ApiFactory) -> None:
@@ -531,11 +1251,92 @@ def test_an_expired_request_cannot_be_decided(api: ApiFactory) -> None:
     response = harness.client.post(f"/approvals/{request_id}", json={"decision": "approve"})
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "approval_expired"
-    # Nothing was recorded and nothing emitted: it is still pending, for the sweep to deny.
+    # The late answer loses, but this API request also closes the overdue row.
     record = harness.store.approval(request_id)
     assert record is not None
-    assert record.pending
-    assert harness.events("needs_human_resolved") == []
+    assert record.decision == "deny"
+    assert record.decided_by == "expiry"
+    assert len(harness.events("needs_human_resolved")) == 1
+    assert [r.request_id for r in harness.store.undelivered_decisions("test-agent")] == [request_id]
+
+
+def test_post_uses_the_app_clock_to_deny_an_expired_request_before_the_sweep(
+    api: ApiFactory,
+) -> None:
+    """The request-time guard holds even before the lifespan worker has started (#143)."""
+    moment = dt.datetime(2030, 8, 27, 12, tzinfo=dt.UTC)
+    harness = api(now=lambda: moment)
+    record = harness.store.create_approval_request(
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        action="send_email",
+        message="Testy wants to send an email after its deadline",
+        resident="test-agent",
+        expires_at=ev.utc_now_iso(moment - dt.timedelta(seconds=1)),
+    )
+
+    late = harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+    replay = harness.client.post(f"/approvals/{record.request_id}", json={"decision": "approve"})
+
+    assert late.status_code == 409
+    assert late.json()["detail"]["error"] == "approval_expired"
+    assert replay.status_code == 200
+    assert replay.json()["decision"] == "deny"
+    decided = harness.store.approval(record.request_id)
+    assert decided is not None
+    assert decided.decision == "deny"
+    assert decided.decided_by == "expiry"
+    assert decided.decided_at == ev.utc_now_iso(moment)
+    resolved = harness.events("needs_human_resolved")
+    assert len(resolved) == 1
+    assert resolved[0]["payload"]["decision"] == "deny"
+    assert resolved[0]["payload"]["decided_by"] == "expiry"
+
+
+def test_expiry_and_late_decisions_race_to_one_deny_and_one_event(api: ApiFactory) -> None:
+    """Concurrent API traffic cannot duplicate or replace the expiry decision (#143)."""
+    harness = api()
+    request_id = _expired_pending(harness)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        responses = list(
+            pool.map(
+                lambda decision: harness.client.post(
+                    f"/approvals/{request_id}", json={"decision": decision}
+                ),
+                ["approve", "deny"] * 4,
+            )
+        )
+
+    # A loser may observe the durable decision while its announcement is still queued.
+    assert {response.status_code for response in responses} <= {200, 202, 409}
+    record = harness.store.approval(request_id)
+    assert record is not None
+    assert record.decision == "deny"
+    assert record.decided_by == "expiry"
+    assert len(harness.events("needs_human_resolved")) == 1
+
+
+def test_an_api_swept_deny_reaches_the_resident_on_its_next_wake(api: ApiFactory) -> None:
+    """Serve-only expiry leaves the ordinary exactly-once delivery path intact (#143)."""
+    prompts: list[str] = []
+
+    def record_prompt(request: RunRequest) -> RunResult:
+        prompts.append(request.prompt)
+        return RunResult(outcome=Outcome.OK, output="understood")
+
+    harness = api(behavior=record_prompt, approval_expiry_interval_s=0.01)
+    _expired_pending(harness)
+    with harness.client:
+        for _ in range(100):
+            if harness.events("needs_human_resolved"):
+                break
+            threading.Event().wait(0.01)
+        harness.client.post("/residents/test-agent/routines/daily-summary/run")
+        harness.settle()
+
+    assert any("send_email: deny" in prompt for prompt in prompts)
+    assert harness.store.undelivered_decisions("test-agent") == []
 
 
 def test_run_now_harvests_an_approval_block(api: ApiFactory) -> None:
@@ -641,6 +1442,19 @@ def test_a_broken_manifest_is_named_rather_than_hidden(api: ApiFactory) -> None:
 
     assert body["residents"] == []
     assert "memory" in body["errors"][0]
+
+
+def test_an_invalid_utf8_soul_is_named_rather_than_crashing(api: ApiFactory) -> None:
+    harness = api()
+    soul_path = harness.residents_dir / "test-agent" / "soul.md"
+    soul_path.write_bytes(b"\xff\xfe")
+
+    response = harness.client.get("/residents")
+
+    assert response.status_code == 200
+    assert response.json()["residents"] == []
+    assert str(soul_path) in response.json()["errors"][0]
+    assert "soul file is not valid UTF-8" in response.json()["errors"][0]
 
 
 def test_one_resident_is_served_whole(api: ApiFactory) -> None:
@@ -989,6 +1803,7 @@ def spend(harness: Harness, cost: float, *, resident: str = "test-agent") -> Non
         resident=resident,
         agent_id="claude-code:test-agent",
         kind="routine",
+        trigger="schedule",
         run_id="already-ran",
         cost_usd=cost,
         input_tokens=10,
@@ -1110,6 +1925,25 @@ def test_denying_the_budget_request_leaves_the_resident_paused(api: ApiFactory) 
     )
 
 
+def test_editing_a_budget_request_is_refused_and_leaves_the_resident_paused(
+    api: ApiFactory,
+) -> None:
+    harness = api(manifest=budgeted(daily_cost_usd=1.0))
+    spend(harness, 3.0)
+    harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    request_id = harness.events("needs_human")[0]["payload"]["request_id"]
+
+    decided = harness.client.post(
+        f"/approvals/{request_id}", json={"decision": "edit", "edit": {"cap": 10}}
+    )
+
+    assert decided.status_code == 409
+    assert decided.json()["detail"]["offered"] == ["approve", "deny"]
+    assert harness.store.approval(request_id).pending  # ty: ignore
+    assert harness.store.budget_pause("test-agent") is not None
+    assert harness.events("needs_human_resolved") == []
+
+
 def test_an_ordinary_approval_does_not_resume_anything(api: ApiFactory) -> None:
     """Only a budget request lifts a budget pause; nothing else is mistaken for one."""
     harness = api()
@@ -1138,6 +1972,7 @@ def test_a_run_now_lands_on_the_ledger(api: ApiFactory) -> None:
     entries = harness.store.ledger("test-agent")
     assert len(entries) == 1
     assert entries[0].kind == "routine"
+    assert entries[0].trigger == "manual"
     assert entries[0].ref == "daily-summary"
     assert entries[0].cost_usd == pytest.approx(0.5)
     assert entries[0].tokens == 10
@@ -1268,6 +2103,32 @@ def test_delegating_from_an_unknown_resident_is_404(
 def test_a_handoff_needs_a_title(api: ApiFactory, write_resident: ResidentWriter) -> None:
     harness = with_receiver(api, write_resident)
     assert harness.client.post("/delegate", json={**HANDOFF, "title": ""}).status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("field", "limit"),
+    [
+        ("title", TITLE_MAX_CHARS),
+        ("detail", DETAIL_MAX_CHARS),
+        ("to", IDENTIFIER_MAX_CHARS),
+        ("route", IDENTIFIER_MAX_CHARS),
+        ("from", IDENTIFIER_MAX_CHARS),
+        ("parent_task_id", IDENTIFIER_MAX_CHARS),
+    ],
+)
+def test_handoff_fields_have_exact_422_bounds(
+    api: ApiFactory, write_resident: ResidentWriter, field: str, limit: int
+) -> None:
+    refused = with_receiver(api, write_resident)
+    response = refused.client.post("/delegate", json={**HANDOFF, field: "x" * (limit + 1)})
+    assert response.status_code == 422
+    assert refused.store.jobs() == []
+    assert refused.store.requests() == []
+    assert refused.events() == []
+
+    at_limit = with_receiver(api, write_resident)
+    accepted_by_validation = at_limit.client.post("/delegate", json={**HANDOFF, field: "x" * limit})
+    assert accepted_by_validation.status_code != 422
 
 
 def test_the_inbox_lists_what_is_waiting(api: ApiFactory, write_resident: ResidentWriter) -> None:

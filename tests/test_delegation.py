@@ -149,6 +149,17 @@ def handoff(
     )
 
 
+def test_direct_handoff_callers_cannot_bypass_text_bounds(
+    make_delegator: MakeDelegator, store: Store, sink: ev.NullEmitter
+) -> None:
+    delegator = make_delegator()
+    oversized = handoff(title="x" * (dg.TITLE_MAX_CHARS + 1))
+    with pytest.raises(dg.DelegationError, match="character limit"):
+        delegator.delegate(sender=delegator.resident(SENDER), handoff=oversized)
+    assert store.jobs() == []
+    assert sink.events == []
+
+
 def sender_of(delegator: dg.Delegator, resident_id: str = SENDER) -> Resident:
     """Return one resident of the delegator's fleet, insisting it is there."""
     found = delegator.resident(resident_id)
@@ -1213,6 +1224,7 @@ def test_a_paused_receiver_leaves_its_post_on_the_mat(
         resident=residents[1].manifest.id,
         agent_id=residents[1].manifest.agent_id or "",
         kind="routine",
+        trigger="schedule",
         run_id="earlier",
         cost_usd=4.0,
         now=ev.utc_now_iso(NOW),
@@ -1314,6 +1326,7 @@ def test_a_resident_on_both_lists_is_paused_once_not_knocked_at_twice(
         resident=residents[1].manifest.id,
         agent_id=residents[1].manifest.agent_id or "",
         kind="routine",
+        trigger="schedule",
         run_id="earlier",
         cost_usd=9.0,
         now=ev.utc_now_iso(NOW),

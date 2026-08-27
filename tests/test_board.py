@@ -1066,13 +1066,13 @@ def test_task_board_registry_and_ledger_share_actual_completion(
     completed = NOW + timedelta(minutes=4)
     ticks = iter([NOW, completed])
     closed_at: list[str | None] = []
-    original_close = store.close_run
+    original_close = store.mark_run_terminal_published
 
-    def close_run(run_id: str, *, now: str | None = None) -> bool:
+    def close_run(run_id: str, event_id: str, *, now: str | None = None) -> bool:
         closed_at.append(now)
-        return original_close(run_id, now=now)
+        return original_close(run_id, event_id, now=now)
 
-    monkeypatch.setattr(store, "close_run", close_run)
+    monkeypatch.setattr(store, "mark_run_terminal_published", close_run)
     store.post_job(title="Read the mail")
 
     class Recording:
@@ -1242,13 +1242,13 @@ def test_a_re_claimed_task_opens_a_second_row_of_its_own(
     # The lease nobody is holding runs out, so the task goes back on the board — the
     # sweep stamps real time, which is why the clock is pushed past it here — and the
     # next dispatch claims it again. That second session vanishes too.
-    store.expire_leases(ev.utc_now_iso(datetime.now(UTC) + timedelta(days=1)))
+    make_dispatcher(runner=Vanishing()).expire_leases(datetime.now(UTC) + timedelta(days=1))
     with pytest.raises(KeyboardInterrupt):
         make_dispatcher(runner=Vanishing()).dispatch(NOW + timedelta(hours=1))
 
     ids = {run.run_id for run in store.open_runs()}
-    assert first.run_id in ids, "the first session is still unaccounted for"
-    assert len(ids) == 2, "and so is the one that claimed the task after it"
+    assert first.run_id not in ids, "the sweep chose and published the first attempt's death"
+    assert len(ids) == 1, "the retry has a fresh, still-open run of its own"
     assert {run.ref for run in store.open_runs()} == {posted.task_id}
 
 
@@ -1276,11 +1276,12 @@ def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
     retried_at = NOW + timedelta(hours=1)
     with pytest.raises(KeyboardInterrupt):
         make_dispatcher(runner=Vanishing(), clock=lambda: retried_at).dispatch(retried_at)
-    assert len(store.open_runs()) == 2, "two sessions, both of them unaccounted for"
+    assert len(store.open_runs()) == 1, "the dead attempt closed and the retry remains watched"
 
     swept = [e for e in sink.events if e.payload.get("reason") == b.LEASE_EXPIRED]
-    assert [e.payload.get("run_id") for e in swept] == [None], "a sweep names no session"
-    assert swept[0].ts >= ev.utc_now_iso(retried_at), "and lands after the retry's row opens"
+    first_run_id = swept[0].payload.get("run_id")
+    assert first_run_id, "the sweep terminal names the exact dead attempt"
+    assert swept[0].ts >= ev.utc_now_iso(retried_at), "and is durably published by the sweep"
 
     log = tmp_path / "events.jsonl"
     log.write_text("\n".join(e.to_json() for e in sink.events) + "\n", encoding="utf-8")
@@ -1288,4 +1289,4 @@ def test_one_dispatch_that_reopens_and_re_claims_still_leaves_the_retry_watched(
 
     retry = next(run for run in store.open_runs() if run.started_at == ev.utc_now_iso(retried_at))
     assert retry.run_id in {run.run_id for run in stale}, "the retry is found, not silenced"
-    assert w.answered_runs(log, store) == [], "and nothing quietly closes its row"
+    assert first_run_id != retry.run_id, "the predecessor's terminal cannot answer the retry"

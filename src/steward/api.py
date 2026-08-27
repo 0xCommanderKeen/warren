@@ -28,28 +28,42 @@ is anything to ask a human for a token with. Those three files contain no fleet 
 every byte the console displays it fetches from the endpoints above, with the token.
 """
 
+import asyncio
 import logging
 import os
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hmac import compare_digest
 from pathlib import Path
-from typing import Any, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import delegation as dg
 from steward import events as ev
 from steward.board import Dispatcher
-from steward.budgets import BUDGET_ACTION, PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.deploy import Transport
+from steward.input_bounds import (
+    APPROVAL_BODY_MAX_BYTES,
+    DETAIL_MAX_CHARS,
+    EDIT_MAX_DEPTH,
+    IDENTIFIER_MAX_CHARS,
+    SKILLS_MAX_ITEMS,
+    TITLE_MAX_CHARS,
+    validate_approval_edit,
+    validate_json_container_depth,
+)
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
 from steward.nursery import (
@@ -73,12 +87,13 @@ from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
     JOB_STATUSES,
     STATUS_OPEN,
+    ApprovalRecord,
     RequestRecord,
     Store,
     default_db_path,
     new_id,
 )
-from steward.transitions.approval import ApprovalTransitions
+from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
 
 __all__ = [
@@ -103,6 +118,11 @@ log = logging.getLogger("steward.api")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8801
+
+#: ``serve`` keeps approval deadlines real even when no scheduler, dispatcher, or
+#: watchdog is resident. Kept here rather than in the transition: cadence is process
+#: lifecycle policy, while ``ApprovalTransitions.expire`` remains the atomic domain act.
+APPROVAL_EXPIRY_INTERVAL_S = 30.0
 
 TOKEN_ENV = "STEWARD_TOKEN"  # noqa: S105 — an env var name, not a credential
 CORS_ENV = "STEWARD_CORS_ORIGINS"
@@ -160,6 +180,8 @@ class ApiConfig:
     #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
     #: a directory with no ``index.html`` in it is not served at all.
     ui_dir: Path | None = None
+    approval_poll_interval_s: float = 1.0
+    approval_close_timeout_s: float = 5.0
 
     @classmethod
     def from_env(  # noqa: PLR0913 — one keyword per thing the environment can name
@@ -251,11 +273,20 @@ class _Body(BaseModel):
 class JobPost(_Body):
     """A task a human wants the fleet to pick up."""
 
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the claimant needs to know.")
-    required_skills: list[str] = Field(
-        default_factory=list,
-        description="Skills a resident must be granted before it may claim this.",
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the claimant needs to know.",
+    )
+    required_skills: list[Annotated[str, Field(min_length=1, max_length=IDENTIFIER_MAX_CHARS)]] = (
+        Field(
+            default_factory=list,
+            max_length=SKILLS_MAX_ITEMS,
+            description="Skills a resident must be granted before it may claim this.",
+        )
     )
 
 
@@ -283,23 +314,45 @@ class ApprovalDecision(_Body):
         default=None, description="The modified detail, for decision=edit."
     )
 
+    @field_validator("edit")
+    @classmethod
+    def _bounded_edit(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        validate_approval_edit(value)
+        return value
+
 
 class HandoffPost(_Body):
     """Work handed to one named resident, through a route that resident declares."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
 
-    to: str = Field(min_length=1, description="The resident id receiving the work.")
-    route: str = Field(min_length=1, description="A delegation route that resident declares.")
-    title: str = Field(min_length=1, description="One line naming the work.")
-    detail: str = Field(default="", description="Everything the receiver needs to know.")
+    to: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The resident id receiving the work.",
+    )
+    route: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="A delegation route that resident declares.",
+    )
+    title: str = Field(
+        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
+    )
+    detail: str = Field(
+        default="",
+        max_length=DETAIL_MAX_CHARS,
+        description="Everything the receiver needs to know.",
+    )
     sender: str | None = Field(
         default=None,
         alias="from",
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The resident handing the work over. Omit it when a person is.",
     )
     parent_task_id: str | None = Field(
         default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
         description="The task this work descends from, for lineage and attribution.",
     )
 
@@ -517,12 +570,7 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     """Build the bearer-token gate every endpoint hangs off."""
 
     def require_token(request: Request) -> None:
-        if token is None:
-            return
-        scheme, _, presented = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not compare_digest(
-            presented.strip().encode("utf-8"), token.encode("utf-8")
-        ):
+        if not _authorized(request.scope.get("headers", []), token):
             raise HTTPException(
                 status_code=401,
                 detail={
@@ -535,6 +583,116 @@ def _auth_dependency(token: str | None) -> Callable[[Request], None]:
     return require_token
 
 
+def _authorized(headers: Sequence[tuple[bytes, bytes]], token: str | None) -> bool:
+    """Apply the API's one bearer policy to raw ASGI headers.
+
+    Exactly one Authorization field is accepted.  Rejecting duplicates avoids proxy and
+    framework disagreement over first/last/comma-joined semantics.  All presented bearer
+    tokens reach the same constant-time comparison used by the route dependency.
+    """
+    if token is None:
+        return True
+    values = [value for key, value in headers if key.lower() == b"authorization"]
+    if len(values) != 1:
+        return False
+    scheme, separator, presented = values[0].partition(b" ")
+    return (
+        separator == b" "
+        and scheme.lower() == b"bearer"
+        and compare_digest(presented.strip(), token.encode("utf-8"))
+    )
+
+
+class _ApprovalBodyDepthMiddleware:
+    """Bound approval JSON while receiving, before recursive materialisation."""
+
+    def __init__(self, app: ASGIApp, *, token: str | None) -> None:
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:  # noqa: C901
+        path = scope.get("path", "")
+        is_decision = (
+            scope.get("type") == "http"
+            and scope.get("method") == "POST"
+            and path.startswith("/approvals/")
+            and "/" not in path.removeprefix("/approvals/")
+        )
+        if not is_decision or not _authorized(scope.get("headers", []), self.token):
+            await self.app(scope, receive, send)
+            return
+
+        body = bytearray()
+        complete = False
+        terminal: Message | None = None
+        saw_request = False
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                terminal = message
+                break
+            saw_request = True
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > APPROVAL_BODY_MAX_BYTES:
+                response = JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": {
+                            "error": "approval_body_too_large",
+                            "message": (
+                                "approval request body exceeds the "
+                                f"{APPROVAL_BODY_MAX_BYTES} byte wire limit"
+                            ),
+                        }
+                    },
+                )
+                await response(scope, receive, send)
+                return
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                complete = True
+                break
+        try:
+            # The request object is level one; an eight-level edit is therefore level nine.
+            if complete:
+                validate_json_container_depth(body, EDIT_MAX_DEPTH + 1)
+        except ValueError as error:
+            response = JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [
+                        {
+                            "type": "value_error",
+                            "loc": ["body", "edit"],
+                            "msg": f"Value error, {error}",
+                            "input": None,
+                        }
+                    ]
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        replayed_body = False
+        replayed_terminal = False
+
+        async def replay() -> Message:
+            nonlocal replayed_body, replayed_terminal
+            if saw_request and not replayed_body:
+                replayed_body = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": not complete,
+                }
+            if terminal is not None and not replayed_terminal:
+                replayed_terminal = True
+                return terminal
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collaborator is a seam
     config: ApiConfig | None = None,
     *,
@@ -543,6 +701,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
     transport: Transport | None = None,
+    approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> FastAPI:
     """Build the API. Raises :class:`ApiError` rather than serving without a token.
 
@@ -577,6 +737,18 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # One guard for the whole app: the run-now path refuses through it before it accepts
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
+
+    def complete_approval(record: ApprovalRecord, token: str) -> bool:
+        """Atomically apply idempotent post-announcement effects and their marker."""
+        completed, _resumed = db.complete_approval_effects(record, token)
+        return completed
+
+    outbox = ApprovalOutboxWorker(
+        approvals,
+        complete_approval,
+        poll_interval=settings.approval_poll_interval_s,
+        close_timeout=settings.approval_close_timeout_s,
+    )
     # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
     # respect (steward #W1): a run-now session's <needs-human>/<delegate> blocks are
     # harvested and its pending decisions are delivered into its preamble, exactly as they
@@ -606,6 +778,34 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         store=db,
     )
 
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        """Own approval announcement and expiry workers for the app's lifetime."""
+        outbox.start()
+        stopped = asyncio.Event()
+
+        async def expire_approvals() -> None:
+            while not stopped.is_set():
+                try:
+                    # Store access and event delivery are synchronous. Keep them off the
+                    # server loop; awaiting each pass also guarantees this worker never
+                    # overlaps itself when a slow emitter outlives the interval.
+                    await asyncio.to_thread(approvals.expire, now())
+                except Exception:
+                    log.exception("approval expiry sweep failed; will retry")
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stopped.wait(), timeout=approval_expiry_interval_s)
+
+        worker = asyncio.create_task(expire_approvals(), name="steward-approval-expiry")
+        _app.state.approval_expiry_task = worker
+        try:
+            yield
+        finally:
+            stopped.set()
+            await worker
+            _app.state.approval_expiry_task = None
+            outbox.close()
+
     app = FastAPI(
         title="steward",
         summary="The token-gated write path into the agent fleet burrow watches.",
@@ -616,7 +816,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         redoc_url=None,
         openapi_url=None,
         dependencies=[Depends(_auth_dependency(token))],
+        lifespan=lifespan,
     )
+    app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -632,6 +834,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     app.state.residents_dir = residents_dir
     app.state.library = library
     app.state.open_mode = token is None
+    app.state.approval_outbox = outbox
 
     def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return the id it is traceable by."""
@@ -1043,10 +1246,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         exactly what it saw before. ``all`` is the audit view: request and decision in one
         row, which is how "what did I approve, and when" gets answered.
 
-        A request past its ``expires_at`` but not yet swept is **not** pending here (steward
-        #66): it denies by default, and a panel that listed it as still answerable would let
-        a human click *approve* on something the deny-by-default sweep is about to close. It
-        reappears under ``resolved`` once the approval sweep records the deny.
+        This route is a pure ledger read. The app lifespan owns deadline expiry, so an
+        API-only steward still resolves overdue requests without polling causing writes.
         """
         wanted = status or APPROVAL_STATUS_PENDING
         if wanted not in APPROVAL_STATUSES:
@@ -1058,8 +1259,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             )
         records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
         if wanted == APPROVAL_STATUS_PENDING:
-            now = ev.utc_now_iso()
-            records = [r for r in records if r.expires_at is None or r.expires_at > now]
+            moment = ev.utc_now_iso(now())
+            records = [r for r in records if r.expires_at is None or r.expires_at > moment]
         return {"status": wanted, "approvals": [record.to_dict() for record in records]}
 
     @app.get("/approvals/{request_id}")
@@ -1075,39 +1276,74 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id: str, body: ApprovalDecision, request: Request, response: Response
     ) -> dict[str, Any]:
         """Record a decision, once. A replay reads back what was already recorded."""
-        decided = approvals.decide(request_id, body.decision, decided_by=DECIDED_BY, edit=body.edit)
+        ledger_id = new_id()
+        moment = now()
+        decided = approvals.decide(
+            request_id,
+            body.decision,
+            decided_by=DECIDED_BY,
+            edit=body.edit,
+            now=moment,
+            request_log=(ledger_id, request.method, request.url.path),
+        )
         record = decided.record
         if record is None:
             _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
         if decided.expired:
             # Deny-by-default has the last word — a click a minute past the deadline must
             # not slip an action through ahead of the sweep, which denies it and closes the
-            # loop in the log (steward #66). Distinct from an already-decided request, which
-            # comes back resolved and reads as a replay below.
+            # loop in the log (steward #66). Do that sweep here too: an API-only steward
+            # must not leave the refused request pending forever.
+            approvals.expire(moment)
             _refuse(
                 409,
                 "approval_expired",
                 f"approval request {request_id!r} expired at {record.expires_at} and denies "
                 f"by default; it can no longer be decided",
             )
-        if decided.replayed:
+        if decided.refused:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "approval_decision_not_offered",
+                    "message": f"decision {body.decision!r} was not offered for this approval; "
+                    f"use one of: {', '.join(record.options)}",
+                    "offered": list(record.options),
+                },
+            )
+        state = db.approval_announcement_state(request_id)
+        if decided.replayed and state != "pending":
             # The first decision won. A double-tapped notification changes nothing and
             # emitted nothing — it is told what was recorded.
             response.status_code = 200
             return {
-                "request_id": request_id,
+                "request_id": ledger_id,
+                "approval_request_id": request_id,
                 "status": "recorded",
                 "decision": record.decision,
                 "decided_by": record.decided_by,
                 "decided_at": record.decided_at,
                 "message": "this request was already decided; nothing changed",
             }
-        accept(request, "recorded", {"approval": request_id, "decision": body.decision})
+        # A replay that recovered an abandoned announcement must also finish the
+        # idempotent workflow below (notably budget unpause). The decision did not change,
+        # but this request completed work the dead first process did not.
+        announced = state in {"announced", "complete"}
+        outcome = "recorded" if announced else "recorded_announcement_pending"
+        outbox.notify()
         response.status_code = 202
-        resumed = _resume_if_budget(record.action, body.decision, request_id)
+        resumed = None
+        if announced:
+            claimed = db.claim_approval_effects(request_id)
+            if claimed is not None:
+                effect_record, token = claimed
+                completed, resumed = db.complete_approval_effects(effect_record, token)
+                if not completed:
+                    db.release_approval_effects(request_id, token)
         return {
-            "request_id": request_id,
-            "status": "recorded",
+            "request_id": ledger_id,
+            "approval_request_id": request_id,
+            "status": outcome,
             "decision": record.decision,
             "decided_by": record.decided_by,
             "decided_at": record.decided_at,
@@ -1115,30 +1351,14 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "message": (
                 f"recorded; {resumed} is no longer paused and fires on its next schedule"
                 if resumed
-                else "recorded; the resident acts on it when the blocked session reads it "
-                "or the parked work resumes on its next wake-up"
+                else (
+                    "recorded; the resident acts on it when the blocked session reads it "
+                    "or the parked work resumes on its next wake-up"
+                    if announced
+                    else "recorded; announcement pending and completion side effects are deferred"
+                )
             ),
         }
-
-    def _resume_if_budget(action: str, decision: str, request_id: str) -> str | None:
-        """Lift a budget pause when the human approved lifting it. Returns who resumed.
-
-        The unpause path the issue asks for, and it is the *same* approval machinery every
-        other gated action uses: a budget pause raises an ordinary ``needs_human``, and
-        answering it ``approve`` here is what resumes the resident. ``deny`` is a real
-        answer too — it leaves the resident paused, which is what the human just said.
-
-        ``decide=False`` because the decision has already been recorded and
-        ``needs_human_resolved`` already emitted, three lines up. Recording it twice would
-        put two answers in the log for one question.
-        """
-        if action != BUDGET_ACTION or decision != "approve":
-            return None
-        pause = db.pause_for_request(request_id)
-        if pause is None:
-            return None
-        guard.resume(pause.resident, decided_by=DECIDED_BY, decide=False)
-        return pause.resident
 
     # -- the request log -------------------------------------------------------------
 

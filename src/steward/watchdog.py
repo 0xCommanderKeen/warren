@@ -43,6 +43,7 @@ to sweep, buries unbracketed runs, and checks every resident's budget so a cap t
 on a day nothing was scheduled.
 """
 
+import dataclasses
 import json
 import logging
 import time
@@ -50,13 +51,14 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.board import Dispatcher, DispatchRun
 from steward.budgets import BudgetGuard
 from steward.manifest import Resident, active_residents, validate_path
+from steward.run_lifecycle import RunTransitions
 from steward.runners import CommandRun, run_argv
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
 from steward.store import (
@@ -76,6 +78,7 @@ __all__ = [
     "NEVER_REPORTED_BACK",
     "RESTART_FAILED_ACTION",
     "DockerSupervisor",
+    "EventLogEvidenceError",
     "Health",
     "LocalProbe",
     "ProcessSupervisor",
@@ -119,6 +122,10 @@ RESTART_FAILED_ACTION = "resident_restart_failed"
 #: round: an unanswered row costs one quiet burial, a wrongly answered one costs the
 #: outage this file exists to find.
 _CLOSING_TYPES = frozenset({ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED, ev.TASK_DONE, ev.TASK_FAILED})
+
+
+class EventLogEvidenceError(RuntimeError):
+    """The complete local close evidence cannot be read safely."""
 
 
 # --------------------------------------------------------------------------------------
@@ -221,6 +228,10 @@ class StaleRun:
     #: The deadline this run was actually given, when steward wrote it down. ``0`` means
     #: it did not, and the scan falls back to the declared timeout.
     timeout_s: float = 0.0
+    heartbeat_at: datetime | None = None
+    event_log_path: str = ""
+    evidence_version: int = 0
+    registered: bool = False
 
     def age_s(self, now: datetime) -> float:
         """How long this run has been unaccounted for, in seconds."""
@@ -275,8 +286,42 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     mean "you may hang forever". A registry row that carries its own timeout is judged
     against that instead: it is the deadline the session was actually given.
     """
-    started = {run.run_id: run for run in _from_registry(registry)}
-    logged = _from_log(path)
+    registered = _from_registry(registry)
+    started = {run.run_id: run for run in registered}
+    scans: dict[str, _LogScan] = {}
+    unsafe: set[str] = set()
+    for run in registered:
+        if not run.event_log_path and run.evidence_version == 0:
+            log.warning(
+                "refusing to bury run %s: no recorded event log path; "
+                "migrate or close this legacy row",
+                run.run_id,
+            )
+            unsafe.add(run.run_id)
+            continue
+        current = run
+        if not current.event_log_path:
+            current = dataclasses.replace(current, event_log_path=str(path.resolve()))
+            started[current.run_id] = current
+        try:
+            if current.event_log_path not in scans:
+                scans[current.event_log_path] = _from_log(
+                    Path(current.event_log_path), required=True
+                )
+        except EventLogEvidenceError as exc:
+            log.warning(
+                "refusing to bury runs recorded against %s: %s", current.event_log_path, exc
+            )
+            unsafe.add(current.run_id)
+    try:
+        logged = _from_log(path, required=False)
+    except EventLogEvidenceError as exc:
+        # This default path is evidence only for legacy/unregistered runs. Corruption
+        # there cannot veto independent registered runs tied to other per-run paths.
+        if not registered:
+            raise
+        log.warning("could not scan legacy/unregistered runs in %s: %s", path, exc)
+        logged = _LogScan(started={}, closed_runs={})
     # The registry wins where both know a run; a closing event in the log wins over both,
     # because a run whose finish steward actually emitted did report back, however the
     # row it should have answered ended up.
@@ -287,12 +332,13 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
     return [
         run
         for run in started.values()
-        if not logged.answers(run)
+        if run.run_id not in unsafe
+        and not (scans[run.event_log_path].answers(run) if run.registered else logged.answers(run))
         and run.age_s(now) > _deadline_s(run, deadlines, default_timeout_s) + grace_s
     ]
 
 
-def answered_runs(path: Path, registry: Store | None = None) -> list[StaleRun]:
+def answered_runs(_path: Path, registry: Store | None = None) -> list[StaleRun]:
     """Return the open registry rows the fallback log already holds a closing event for.
 
     The other half of :func:`scan_unbracketed`'s answer, and a separate question because
@@ -303,8 +349,33 @@ def answered_runs(path: Path, registry: Store | None = None) -> list[StaleRun]:
     re-read and re-filtered on every pass for ever, and ``open_runs`` — the watchdog's new
     source of truth — slowly fills with sessions that are long over.
     """
-    logged = _from_log(path)
-    return [run for run in _from_registry(registry) if logged.answers(run)]
+    rows = _from_registry(registry)
+    scans: dict[str, _LogScan] = {}
+    answered = []
+    for run in rows:
+        if not run.event_log_path and run.evidence_version == 0:
+            log.warning(
+                "refusing to close run %s: no recorded event log path; migrate this legacy row",
+                run.run_id,
+            )
+            continue
+        current = run
+        if not current.event_log_path:
+            current = dataclasses.replace(current, event_log_path=str(_path.resolve()))
+        try:
+            if current.event_log_path not in scans:
+                scans[current.event_log_path] = _from_log(
+                    Path(current.event_log_path), required=True
+                )
+            scan = scans[current.event_log_path]
+        except EventLogEvidenceError as exc:
+            log.warning(
+                "refusing to close runs recorded against %s: %s", current.event_log_path, exc
+            )
+            continue
+        if scan.answers(current):
+            answered.append(current)
+    return answered
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,33 +397,76 @@ class _LogScan:
     """
 
     started: dict[str, StaleRun]
-    closed_runs: set[str]
+    closed_runs: dict[str, set[str]]
 
     def answers(self, run: StaleRun) -> bool:
         """Say whether the log holds a closing event for *this session*."""
-        return run.run_id in self.closed_runs
+        expected = (
+            {ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED}
+            if run.kind == RUN_ROUTINE
+            else {ev.TASK_DONE, ev.TASK_FAILED}
+        )
+        return bool(self.closed_runs.get(run.run_id, set()) & expected)
 
 
-def _from_log(path: Path) -> _LogScan:
+def _from_log(  # noqa: C901, PLR0912
+    path: Path, *, required: bool = False
+) -> _LogScan:
     """Return what the fallback log says started, and what it says closed.
 
-    A malformed line is skipped, not raised on: this file is append-only from several
-    processes, and a half-written last line is an ordinary thing to find.
+    A half-written final line is ignored because appenders can be interrupted. Any
+    earlier malformed line refuses the scan: corruption is not evidence of no close.
     """
-    scan = _LogScan(started={}, closed_runs=set())
+    scan = _LogScan(started={}, closed_runs={})
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except FileNotFoundError:
+        if required:
+            raise EventLogEvidenceError(f"event log does not exist: {path}") from None
         return scan
-    for line in text.splitlines():
-        event = _parse_line(line)
-        if event is None:
+    except OSError as exc:
+        raise EventLogEvidenceError(f"could not read event log {path}: {exc}") from exc
+    lines = text.splitlines()
+    torn_final = bool(text) and not text.endswith("\n")
+    for index, line in enumerate(lines):
+        if not line.strip():
             continue
-        payload = event.get("payload")
-        payload = payload if isinstance(payload, Mapping) else {}
+        try:
+            decoded = json.loads(line.strip())
+        except ValueError:
+            if index == len(lines) - 1 and torn_final:
+                continue
+            raise EventLogEvidenceError(
+                f"event log {path} has an unreadable line {index + 1}"
+            ) from None
+        if not isinstance(decoded, Mapping):
+            raise EventLogEvidenceError(f"event log {path} has a non-event line {index + 1}")
+        event = decoded
+        problems = ev.validate_event(event)
+        if event.get("source") != ev.EVENT_SOURCE:
+            problems += (f"source must be {ev.EVENT_SOURCE!r}",)
+        if event.get("type") not in ev.EVENT_TYPES:
+            problems += (f"unknown event type {event.get('type')!r}",)
+        if problems:
+            raise EventLogEvidenceError(
+                f"event log {path} has an invalid event on line {index + 1}: " + "; ".join(problems)
+            )
+        payload = cast("Mapping[str, Any]", event["payload"])
         kind = event.get("type")
         if kind in _CLOSING_TYPES:
-            _add(scan.closed_runs, payload.get("run_id"))
+            run_id = payload.get("run_id")
+            if run_id is not None:
+                subject = "task_id" if kind in {ev.TASK_DONE, ev.TASK_FAILED} else "routine"
+                if (
+                    not isinstance(run_id, str)
+                    or not run_id
+                    or not isinstance(payload.get(subject), str)
+                    or not payload.get(subject)
+                ):
+                    raise EventLogEvidenceError(
+                        f"event log {path} has invalid {kind} payload on line {index + 1}"
+                    )
+                scan.closed_runs.setdefault(run_id, set()).add(cast("str", kind))
             continue
         if kind != ev.ROUTINE_STARTED:
             continue
@@ -399,14 +513,13 @@ def _deadline_s(run: StaleRun, timeouts: Mapping[str, float], default_s: float) 
 
 
 def _from_registry(registry: Store | None) -> list[StaleRun]:
-    """Return every run steward's own store still has open. A broken store is no runs."""
+    """Return every open registry run, refusing to turn a read failure into silence."""
     if registry is None:
         return []
     try:
         rows: list[OpenRun] = registry.open_runs()
-    except Exception as exc:  # noqa: BLE001 — an unreadable registry is not a dead pass
-        log.warning("could not read the run registry: %s", exc)
-        return []
+    except Exception as exc:
+        raise EventLogEvidenceError(f"could not read the run registry: {exc}") from exc
     runs = []
     for row in rows:
         moment = _parse_ts(row.started_at)
@@ -421,6 +534,10 @@ def _from_registry(registry: Store | None) -> list[StaleRun]:
                 started_at=moment,
                 kind=row.kind,
                 timeout_s=row.timeout_s,
+                heartbeat_at=_parse_ts(row.heartbeat_at),
+                event_log_path=row.event_log_path,
+                evidence_version=row.evidence_version,
+                registered=True,
             )
         )
     return runs
@@ -703,6 +820,7 @@ class Watchdog:
         #: The seam a give-up knocks through, built once from this watchdog's own store
         #: and emitter, like every other owner of a transitions seam.
         self.approvals = ApprovalTransitions(store=store, emitter=self.emitter)
+        self.runs = RunTransitions(store)
         self.supervisors: tuple[ProcessSupervisor, ...] = (
             tuple(supervisors)
             if supervisors is not None
@@ -938,7 +1056,7 @@ class Watchdog:
 
     # -- burying runs that vanished ----------------------------------------------------
 
-    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:
+    def bury_stale_runs(self, now: datetime) -> list[StaleRun]:  # noqa: C901
         """Close every unbracketed run with the ``routine_failed`` its session never sent.
 
         The store's primary key on ``run_id`` is what makes this exactly-once: a run that
@@ -955,16 +1073,47 @@ class Watchdog:
         already answered is not a death, but leaving its row open would keep it in
         ``open_runs`` for ever, so it is closed quietly instead.
         """
-        self._close_answered(now)
+        try:
+            self._close_answered(now)
+            stale = scan_unbracketed(
+                self.fallback,
+                now=now,
+                registry=self.store,
+                timeouts=timeouts_for(self.residents),
+                grace_s=self.grace_s,
+            )
+        except EventLogEvidenceError as exc:
+            log.warning("refusing to bury runs without trustworthy close evidence: %s", exc)
+            return []
         buried: list[StaleRun] = []
-        for run in scan_unbracketed(
-            self.fallback,
-            now=now,
-            registry=self.store,
-            timeouts=timeouts_for(self.residents),
-            grace_s=self.grace_s,
-        ):
-            if not self.store.close_unbracketed_run(
+        if hasattr(self.runs, "publish_pending"):
+            self.runs.publish_pending(self.emitter, now=now)
+        for run in stale:
+            # A task death belongs to the lease sweep. If that sweep has not produced a
+            # run-specific terminal fact, leave the run pending; a generic routine death
+            # would be the wrong protocol and finalizing it without a sink would lose it.
+            if run.registered and run.kind != RUN_ROUTINE:
+                continue
+            terminal = ev.routine_failed_event(
+                agent_id=run.agent_id,
+                project=run.project or run.agent_id,
+                routine=run.routine,
+                run_id=run.run_id,
+                error=NEVER_REPORTED_BACK,
+            )
+            if run.registered and hasattr(self.runs, "watchdog_claim"):
+                registry_lost = not self.runs.watchdog_claim(
+                    run.run_id, terminal, now=now, grace_s=self.grace_s
+                )
+            elif run.registered:
+                registry_lost = not self.runs.watchdog_close(
+                    run.run_id, now=now, grace_s=self.grace_s
+                )
+            else:
+                registry_lost = False
+            if registry_lost:
+                continue
+            if not run.registered and not self.store.close_unbracketed_run(
                 run_id=run.run_id,
                 agent_id=run.agent_id,
                 routine=run.routine,
@@ -972,9 +1121,6 @@ class Watchdog:
                 now=ev.utc_now_iso(now),
             ):
                 continue
-            # The registry row is answered too, or the next pass reads the same run as a
-            # fresh outage and the resident it belongs to never looks up again.
-            self.store.close_run(run.run_id, now=ev.utc_now_iso(now))
             log.warning(
                 "%s: run %s of %r started %.0fs ago and never reported back — closing it",
                 run.agent_id,
@@ -983,15 +1129,10 @@ class Watchdog:
                 run.age_s(now),
             )
             if run.kind == RUN_ROUTINE:
-                self.emitter.emit(
-                    ev.routine_failed_event(
-                        agent_id=run.agent_id,
-                        project=run.project or run.agent_id,
-                        routine=run.routine,
-                        run_id=run.run_id,
-                        error=NEVER_REPORTED_BACK,
-                    )
-                )
+                if run.registered:
+                    self.runs.publish_pending(self.emitter, now=now)
+                else:
+                    self.emitter.emit(terminal)
             buried.append(run)
         return buried
 
