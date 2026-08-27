@@ -393,6 +393,25 @@ class EventEmitter:
             path.parent.mkdir(parents=True, exist_ok=True)
             with self._lock_path(path).open("a+") as lock_handle:
                 fcntl.flock(lock_handle, fcntl.LOCK_EX)
+                try:
+                    raw = path.read_bytes()
+                except FileNotFoundError:
+                    raw = b""
+                if path == self.queue and raw and not raw.endswith(b"\n"):
+                    boundary = raw.rfind(b"\n") + 1
+                    torn = raw[boundary:]
+                    self._append_corrupt_evidence([torn])
+                    staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                    try:
+                        with staging.open("wb") as handle:
+                            handle.write(raw[:boundary])
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        staging.replace(path)
+                        self._fsync_parent(path)
+                    finally:
+                        with contextlib.suppress(FileNotFoundError):
+                            staging.unlink()
                 descriptor = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
                 try:
                     pending = memoryview((line + "\n").encode("utf-8"))
@@ -471,7 +490,11 @@ class EventEmitter:
 
     def _append_corrupt_evidence(self, chunks: Sequence[bytes]) -> None:
         """Append byte-exact corrupt chunks in independently parseable binary frames."""
-        quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
+        self._append_corrupt_evidence_at(self.queue, chunks)
+
+    def _append_corrupt_evidence_at(self, path: Path, chunks: Sequence[bytes]) -> None:
+        """Append byte-exact corrupt chunks associated with ``path``."""
+        quarantine = path.with_name(f"{path.name}.corrupt")
         with self._lock_path(quarantine).open("a+") as lock_handle:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
             descriptor = os.open(quarantine, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
@@ -525,6 +548,14 @@ class EventEmitter:
         event = dict(record["event"])
         event["steward_delivery_id"] = record["delivery_id"]
         return event
+
+    @staticmethod
+    def _event_fingerprint(event: Mapping[str, Any]) -> str:
+        """Identify event content independently of legacy line position/formatting."""
+        canonical = json.dumps(
+            dict(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     @staticmethod
     def _history_contains(raw: bytes, delivery_id: str) -> bool:
@@ -585,20 +616,33 @@ class EventEmitter:
             except OSError:
                 log.exception("could not read event replay queue %s", self.queue)
                 return FlushReport(errors=1, unknown=1)
-            matching: list[dict[str, Any]] = []
-            seen_matching: set[str] = set()
+            matching: list[tuple[dict[str, Any], set[str]]] = []
+            matching_groups: dict[tuple[str, str], set[str]] = {}
             for record in records:
                 delivery_id = str(record["delivery_id"])
-                if record["target"] == self.url and delivery_id not in seen_matching:
-                    matching.append(record)
-                    seen_matching.add(delivery_id)
+                if record["target"] != self.url:
+                    continue
+                key = (
+                    (
+                        "legacy-content",
+                        self._event_fingerprint(record["event"]),
+                    )
+                    if delivery_id.startswith("legacy_")
+                    else ("delivery-id", delivery_id)
+                )
+                ids = matching_groups.get(key)
+                if ids is None:
+                    ids = set()
+                    matching_groups[key] = ids
+                    matching.append((record, ids))
+                ids.add(delivery_id)
             selected = matching[:limit] if limit is not None else matching
             retired: set[str] = set()
             failed = 0
             errors = 0
             history_confirmed: set[str] = set()
             foreign = sum(record["target"] != self.url for record in records)
-            for record in selected:
+            for record, equivalent_ids in selected:
                 try:
                     history_ok = self._confirm_history(record)
                 except OSError:
@@ -614,7 +658,7 @@ class EventEmitter:
                     self._trip_breaker(self.url)
                     failed += 1
                     break
-                retired.add(str(record["delivery_id"]))
+                retired.update(equivalent_ids)
             if retired or corrupt or history_confirmed:
                 try:
                     if history_confirmed:
@@ -695,7 +739,7 @@ class EventEmitter:
         skipped_modern = 0
         corrupt = 0
         seen_source: set[str] = set()
-        for index, raw in enumerate(lines):
+        for raw in lines:
             try:
                 event = json.loads(raw)
             except UnicodeDecodeError, json.JSONDecodeError:
@@ -710,13 +754,8 @@ class EventEmitter:
                 continue
             digest = hashlib.sha256(raw).hexdigest()
             delivery_id = f"legacy_{digest}"
-            old_digest = hashlib.sha256(str(index).encode() + b"\0" + raw).hexdigest()
-            old_delivery_id = f"legacy_{old_digest}"
-            if delivery_id in seen_source:
-                candidates.append((delivery_id, event, old_delivery_id))
-                continue
-            seen_source.add(delivery_id)
-            candidates.append((delivery_id, event, old_delivery_id))
+            fingerprint = self._event_fingerprint(event)
+            candidates.append((delivery_id, event, fingerprint))
 
         self.queue.parent.mkdir(parents=True, exist_ok=True)
         imported = 0
@@ -726,10 +765,19 @@ class EventEmitter:
             fcntl.flock(queue_lock, fcntl.LOCK_EX)
             records, _queue_corrupt = self._read_queue_unlocked()
             pending_ids = {str(record["delivery_id"]) for record in records}
+            pending_content = {
+                (str(record["target"]), self._event_fingerprint(record["event"]))
+                for record in records
+            }
             descriptor = os.open(self.queue, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
             try:
-                for delivery_id, event, old_delivery_id in candidates:
-                    if delivery_id in pending_ids or old_delivery_id in pending_ids:
+                for delivery_id, event, fingerprint in candidates:
+                    content_key = (str(self.url), fingerprint)
+                    if (
+                        delivery_id in pending_ids
+                        or fingerprint in seen_source
+                        or content_key in pending_content
+                    ):
                         skipped_duplicate += 1
                         continue
                     record = {
@@ -748,6 +796,8 @@ class EventEmitter:
                         log.exception("could not persist event as an imported legacy event")
                         continue
                     pending_ids.add(delivery_id)
+                    pending_content.add(content_key)
+                    seen_source.add(fingerprint)
                     imported += 1
                 os.fsync(descriptor)
             finally:

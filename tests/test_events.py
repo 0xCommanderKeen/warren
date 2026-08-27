@@ -1,5 +1,6 @@
 """Emitting: the shape burrow accepts, and what happens when burrow is not there."""
 
+import hashlib
 import json
 import socket
 import threading
@@ -644,6 +645,63 @@ def test_queue_append_failure_never_posts_without_retry_authority(
     assert posts == []
 
 
+def test_queue_append_quarantines_torn_tail_and_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    old = context().started("schedule")
+    new = context().failed(error="later", duration_s=1)
+    assert emitter._queue_record(old, "delivery-complete-old")
+    with emitter.queue.open("ab") as handle:
+        handle.write(b'{"torn":')
+
+    results: list[bool] = []
+    writers = [
+        threading.Thread(
+            target=lambda delivery_id=delivery_id: results.append(
+                emitter._queue_record(new, delivery_id)
+            )
+        )
+        for delivery_id in ("delivery-after-torn-a", "delivery-after-torn-b")
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(timeout=2)
+    assert not any(writer.is_alive() for writer in writers)
+    assert results == [True, True]
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        ev.EventEmitter,
+        "_post",
+        lambda _self, _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert restarted.flush() == ev.FlushReport(delivered=3)
+    assert attempts[0] == "delivery-complete-old"
+    assert set(attempts[1:]) == {"delivery-after-torn-a", "delivery-after-torn-b"}
+    quarantine = emitter.queue.with_name(f"{emitter.queue.name}.corrupt").read_bytes()
+    assert quarantine == (b'STEWARD-CORRUPT-V1 8\n{"torn":\nSTEWARD-CORRUPT-END\n')
+
+
+def test_queue_append_rejects_new_record_when_torn_tail_quarantine_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b'{"torn":')
+    monkeypatch.setattr(
+        emitter,
+        "_append_corrupt_evidence",
+        lambda _chunks: (_ for _ in ()).throw(OSError("simulated quarantine failure")),
+    )
+
+    assert emitter._queue_record(context().started("schedule"), "delivery-not-accepted") is False
+    assert emitter.queue.read_bytes() == b'{"torn":'
+
+
 def test_history_failure_is_recovered_before_remote_delivery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -759,6 +817,28 @@ def test_flush_posts_an_old_duplicate_queue_id_once_and_retires_every_copy(
     assert emitter.flush() == ev.FlushReport(delivered=1)
     assert attempts == ["delivery-old-duplicate"]
     assert emitter._read_queue() == ([], [])
+
+
+def test_legacy_import_dedupes_old_index_id_by_event_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    raw = event.to_json().encode()
+    old_index_one_id = "legacy_" + hashlib.sha256(b"1\0" + raw).hexdigest()
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(event, old_index_one_id)
+    fallback.write_bytes(raw + b"\n")
+
+    assert emitter.import_legacy() == ev.ImportReport(scanned=1, skipped_duplicate=1)
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        ev.EventEmitter,
+        "_post",
+        lambda _self, _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+    assert emitter.flush() == ev.FlushReport(delivered=1)
+    assert attempts == [old_index_one_id]
 
 
 def test_legacy_import_can_repeat_after_retirement_but_reuses_the_stable_id(
