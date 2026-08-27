@@ -38,6 +38,7 @@ __all__ = [
     "answered",
     "applied",
     "carried",
+    "deliver",
     "expired",
     "refused",
     "replayed",
@@ -187,8 +188,17 @@ def applied[RecordT](
     row and in the fact, which is the point of passing it back rather than rebuilding it.
     """
     if fact is not None:
-        emitter.emit(fact)
+        deliver(emitter, fact)
     return Transition(APPLIED, record=record, fact=fact, reason=reason)
+
+
+def deliver(emitter: ev.Emitter, fact: ev.Event) -> bool:
+    """Hand a fact to an emitter, with a durable receipt when it offers one."""
+    durable_emit = getattr(emitter, "emit_durable", None)
+    if durable_emit is not None:
+        return bool(durable_emit(fact))
+    emitter.emit(fact)
+    return True
 
 
 def carried[RecordT, InnerT](

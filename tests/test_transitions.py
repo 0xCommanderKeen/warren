@@ -7,6 +7,7 @@ fact reaches the emitter on the winning branch, and that no fact reaches it on a
 """
 
 import ast
+import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -581,6 +582,78 @@ def test_a_second_decision_is_a_replay_that_changes_and_says_nothing(
     assert outcome.record.decision == "approve", "the first decision wins"
     assert store.approval(raised.record.request_id).decision == "approve"  # ty: ignore
     assert sink.events == []
+
+
+class FailingEmitter:
+    """Emitter seam that simulates a process-visible transport failure."""
+
+    def emit(self, event: ev.Event) -> bool:
+        """Fail before accepting the event."""
+        del event
+        raise OSError("injected emitter failure")
+
+
+def test_a_committed_decision_retries_its_announcement_after_emitter_failure(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    sink = ev.NullEmitter()
+    transitions = tr.ApprovalTransitions(store, sink)
+    raised = transitions.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    ).require()
+
+    with pytest.raises(OSError, match="injected"):
+        tr.ApprovalTransitions(store, FailingEmitter()).decide(
+            raised.request_id, "approve", now=NOW
+        )
+
+    assert store.approval(raised.request_id).decision == "approve"  # ty: ignore
+    sink.events.clear()
+    replay = transitions.decide(raised.request_id, "deny", now=NOW)
+    assert replay.replayed
+    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
+
+
+def test_an_abandoned_post_emit_claim_is_recovered_once_after_its_lease(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    transitions = tr.ApprovalTransitions(store, ev.NullEmitter())
+    raised = transitions.raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    ).require()
+    store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
+    abandoned = store.claim_approval_announcement(raised.request_id, lease_s=-1)
+    assert abandoned is not None, "the simulated dead process emitted but never acknowledged"
+
+    sink = ev.NullEmitter()
+    assert tr.ApprovalTransitions(store, sink).reconcile_announcements() == 1
+    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
+    assert tr.ApprovalTransitions(store, sink).reconcile_announcements() == 0
+
+
+def test_concurrent_reconcilers_claim_one_announcement_once(
+    store: Store, manifest: ResidentManifest
+) -> None:
+    raised = (
+        tr.ApprovalTransitions(store, ev.NullEmitter())
+        .raise_request(manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW)
+        .require()
+    )
+    store.decide(raised.request_id, "approve", now=ev.utc_now_iso(NOW))
+    sink = ev.NullEmitter()
+    barrier = threading.Barrier(3)
+
+    def reconcile() -> None:
+        barrier.wait()
+        tr.ApprovalTransitions(store, sink).reconcile_announcements()
+
+    threads = [threading.Thread(target=reconcile) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join()
+    assert [event.payload["request_id"] for event in sink.events] == [raised.request_id]
 
 
 def test_an_expired_request_can_never_be_approved(

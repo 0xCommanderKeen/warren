@@ -325,14 +325,16 @@ class EventEmitter:
         except OSError, urllib.error.URLError, ValueError:
             return False
 
-    def _append_fallback(self, line: str) -> None:
+    def _append_fallback(self, line: str) -> bool:
         try:
             self.fallback.parent.mkdir(parents=True, exist_ok=True)
             with self.fallback.open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
         except OSError:
             # The village losing an event must never take a routine down with it.
-            pass
+            return False
+        else:
+            return True
 
     def emit(self, event: Event) -> bool:
         """Deliver one event and keep a local copy. Returns remote reach. Never raises.
@@ -351,6 +353,24 @@ class EventEmitter:
                 self._trip_breaker(self.url)
         self._append_fallback(line)
         return delivered
+
+    def emit_durable(self, event: Event) -> bool:
+        """Deliver an event and report whether any durable sink accepted it.
+
+        Unlike :meth:`emit`'s historical remote-only receipt, this is the acknowledgement
+        durable outboxes need: a successful remote POST or a successful fallback append
+        is enough. Total transport and fallback failure remains non-raising but returns
+        ``False``, so the outbox stays pending.
+        """
+        line = event.to_json()
+        delivered = False
+        if self.url and not self._breaker_open(self.url):
+            if self._post(self.url, line.encode("utf-8")):
+                delivered = True
+            else:
+                self._trip_breaker(self.url)
+        persisted = self._append_fallback(line)
+        return delivered or persisted
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""

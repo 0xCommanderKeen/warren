@@ -40,6 +40,7 @@ import threading
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
@@ -139,6 +140,13 @@ CREATE TABLE IF NOT EXISTS requests (
     path         TEXT NOT NULL,
     outcome      TEXT NOT NULL,
     detail       TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS approval_announcements (
+    request_id    TEXT PRIMARY KEY REFERENCES approvals(request_id),
+    claimed_by    TEXT,
+    claimed_until TEXT,
+    announced_at  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS run_ledger (
@@ -1322,6 +1330,10 @@ class Store:
                 decided = self._conn.execute(
                     "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
                 ).fetchone()
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
                 expired.append(ApprovalRecord.from_row(decided))
         return expired
 
@@ -1434,10 +1446,72 @@ class Store:
                 ),
             )
             recorded = cursor.rowcount == 1
+            if recorded:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO approval_announcements (request_id) VALUES (?)",
+                    (request_id,),
+                )
             row = self._conn.execute(
                 "SELECT * FROM approvals WHERE request_id = ?", (request_id,)
             ).fetchone()
         return ApprovalRecord.from_row(row), recorded
+
+    def claim_approval_announcement(
+        self, request_id: str | None = None, *, lease_s: int = 30
+    ) -> tuple[ApprovalRecord, str] | None:
+        """Lease one unresolved approval announcement for emission.
+
+        The decision and queue row are committed atomically.  The lease prevents two
+        processes from announcing concurrently, while its deadline makes a process death
+        recoverable by the next API start or replay.
+        """
+        token = new_id()
+        now = datetime.now(UTC)
+        moment = utc_now_iso(now)
+        until = utc_now_iso(now + timedelta(seconds=lease_s))
+        with self._lock, self._conn:
+            query = (
+                "SELECT request_id FROM approval_announcements "
+                "WHERE announced_at IS NULL AND (claimed_until IS NULL OR claimed_until <= ?)"
+            )
+            params: tuple[str, ...] = (moment,)
+            if request_id is not None:
+                query += " AND request_id = ?"
+                params += (request_id,)
+            query += " ORDER BY rowid LIMIT 1"
+            queued = self._conn.execute(query, params).fetchone()
+            if queued is None:
+                return None
+            claimed = self._conn.execute(
+                "UPDATE approval_announcements SET claimed_by = ?, claimed_until = ? "
+                "WHERE request_id = ? AND announced_at IS NULL "
+                "AND (claimed_until IS NULL OR claimed_until <= ?)",
+                (token, until, queued["request_id"], moment),
+            )
+            if claimed.rowcount != 1:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM approvals WHERE request_id = ?", (queued["request_id"],)
+            ).fetchone()
+        return ApprovalRecord.from_row(row), token
+
+    def finish_approval_announcement(self, request_id: str, token: str, *, accepted: bool) -> bool:
+        """Acknowledge a claimed announcement, or release it for immediate retry."""
+        with self._lock, self._conn:
+            if accepted:
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET announced_at = ?, claimed_by = NULL, "
+                    "claimed_until = NULL WHERE request_id = ? AND claimed_by = ? "
+                    "AND announced_at IS NULL",
+                    (utc_now_iso(), request_id, token),
+                )
+            else:
+                cursor = self._conn.execute(
+                    "UPDATE approval_announcements SET claimed_by = NULL, claimed_until = NULL "
+                    "WHERE request_id = ? AND claimed_by = ? AND announced_at IS NULL",
+                    (request_id, token),
+                )
+        return cursor.rowcount == 1
 
     # -- the run ledger ----------------------------------------------------------------
 

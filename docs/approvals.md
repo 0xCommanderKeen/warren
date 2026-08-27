@@ -40,9 +40,18 @@ to *undo* a stop steward already applied, so the safe state is the current one. 
 them would throw away the only thing that can lift the stop while changing nothing for the
 better. They wait for a person, because only a person can answer them.
 
-**First decision wins.** Decisions are recorded with a conditional write. A replay — a
-double-tapped notification, a retried request — changes nothing, returns the recorded
-outcome, and emits nothing new.
+**First decision wins.** Decisions are recorded with a conditional write. In that same
+SQLite transaction steward queues the resolution announcement. A replay — a double-tapped
+notification or retried request — never changes the decision, but it may finish a still
+pending announcement left by a process that died after committing the answer. API startup
+also reconciles that queue, so recovery does not depend on the same client returning.
+
+Announcement delivery is at least once. A short SQLite lease prevents concurrent API
+processes from emitting the same queued item together; a dead process's lease expires and
+another process retries it. If a process dies after the receiver accepts the event but
+before SQLite records that acknowledgement, the retry can repeat the event. Consumers must
+therefore treat `needs_human_resolved.payload.request_id` as its idempotency key. The
+decision itself remains exactly once.
 
 ## How a session asks
 

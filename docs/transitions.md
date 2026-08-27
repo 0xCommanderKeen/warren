@@ -154,10 +154,10 @@ the way it learns of any other.
 |---|---|
 | **owner** | `ApprovalTransitions.decide`, called by `POST /approvals/{id}` and by the budget resume |
 | **guard** | `UPDATE … WHERE request_id=? AND status='pending' AND (expires_at IS NULL OR expires_at > now)` |
-| **outcomes** | applied (`recorded=True`) · refused (`record is None` — no such request) · **expired** (`recorded=False` and the row is still `pending`: past the deadline, `409 approval_expired`, deny-by-default keeps the last word) · **replayed** (`recorded=False` and the row is resolved: the first decision won; `200`, read back, nothing emitted) |
+| **outcomes** | applied (`recorded=True`) · refused (`record is None` — no such request) · **expired** (`recorded=False` and the row is still `pending`: past the deadline, `409 approval_expired`, deny-by-default keeps the last word) · **replayed** (`recorded=False` and the row is resolved: the first decision won; `200`, read back; it may retry that decision's still-pending announcement) |
 | **before → after** | `pending` → `resolved`, `decision`, `decided_by`, `decided_at`, `edit` |
 | **fact** | `needs_human_resolved`, `agent_id = record.agent_id`, `project = record.project`, payload `{request_id, decision, decided_by, action}` — emitted under the *resident's* identity, because the villager walking away from your door is the one who knocked |
-| **ordering** | store → emit → request-log `accept` → budget resume (the resume is a workflow concern, not part of this transition) |
+| **ordering** | atomic decision + outbox row → leased emit → outbox acknowledgement → request-log `accept` → budget resume. Startup reconciles abandoned outbox rows. A crash after emit and before acknowledgement may repeat the event, so `payload.request_id` is the consumer idempotency key; the decision remains exactly once and announcement delivery is at least once. |
 
 #### A3 — expire (deny by default)
 

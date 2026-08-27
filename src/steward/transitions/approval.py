@@ -44,6 +44,7 @@ from steward.transitions.outcome import (
     Transition,
     answered,
     applied,
+    deliver,
     expired,
     refused,
     replayed,
@@ -308,21 +309,45 @@ class ApprovalTransitions:
         if record is None:
             return refused(UNKNOWN_REQUEST)
         if recorded:
-            return applied(
-                self.emitter,
-                record,
-                ev.needs_human_resolved_event(
-                    request_id=record.request_id,
-                    decision=decision,
-                    action=record.action,
-                    agent_id=record.agent_id,
-                    project=record.project,
-                    decided_by=decided_by,
-                ),
-            )
+            fact = self._announce(request_id)
+            return Transition("applied", record=record, fact=fact)
         if record.pending:
             return expired(record, PAST_DEADLINE)
+        # A replay is also a recovery opportunity: the decision is still exactly once,
+        # but an announcement left pending by a dead process is retried.
+        recovered = self._announce(request_id)
+        if recovered is not None:
+            return Transition("replayed", record=record, fact=recovered, reason=ALREADY_DECIDED)
         return replayed(record, ALREADY_DECIDED)
+
+    def reconcile_announcements(self, *, limit: int | None = None) -> int:
+        """Retry durable decision announcements left behind by an earlier process."""
+        completed = 0
+        while limit is None or completed < limit:
+            if self._announce() is None:
+                break
+            completed += 1
+        return completed
+
+    def _announce(self, request_id: str | None = None) -> ev.Event | None:
+        claimed = self.store.claim_approval_announcement(request_id)
+        if claimed is None:
+            return None
+        record, token = claimed
+        fact = ev.needs_human_resolved_event(
+            request_id=record.request_id,
+            decision=record.decision or "deny",
+            action=record.action,
+            agent_id=record.agent_id,
+            project=record.project,
+            decided_by=record.decided_by or "expiry",
+        )
+        accepted = False
+        try:
+            accepted = deliver(self.emitter, fact)
+        finally:
+            self.store.finish_approval_announcement(record.request_id, token, accepted=accepted)
+        return fact if accepted else None
 
     # -- the deadline --------------------------------------------------------------------
 
@@ -354,17 +379,6 @@ class ApprovalTransitions:
                 record.expires_at,
             )
             swept.append(
-                applied(
-                    self.emitter,
-                    record,
-                    ev.needs_human_resolved_event(
-                        request_id=record.request_id,
-                        decision="deny",
-                        action=record.action,
-                        agent_id=record.agent_id,
-                        project=record.project,
-                        decided_by=record.decided_by or "expiry",
-                    ),
-                )
+                Transition("applied", record=record, fact=self._announce(record.request_id))
             )
         return swept

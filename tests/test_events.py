@@ -435,6 +435,12 @@ def test_an_unwritable_fallback_never_takes_a_routine_down(tmp_path: Path) -> No
     blocked.write_text("not a directory", encoding="utf-8")
     emitter = ev.EventEmitter(fallback=blocked / "events.jsonl")
     assert emitter.emit(context().started("schedule")) is False
+    assert emitter.emit_durable(context().started("schedule")) is False
+
+
+def test_a_fallback_append_is_a_durable_outbox_receipt(tmp_path: Path) -> None:
+    emitter = ev.EventEmitter(fallback=tmp_path / "events.jsonl")
+    assert emitter.emit_durable(context().started("schedule")) is True
 
 
 def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:

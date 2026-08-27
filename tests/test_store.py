@@ -27,6 +27,28 @@ def store() -> Iterator[Store]:
         yield opened
 
 
+def test_an_existing_database_gains_the_approval_announcement_outbox(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE approvals (request_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, "
+        "project TEXT NOT NULL, action TEXT NOT NULL, message TEXT NOT NULL, "
+        "detail TEXT NOT NULL DEFAULT '{}', options TEXT NOT NULL DEFAULT '[]', "
+        "status TEXT NOT NULL DEFAULT 'pending', decision TEXT, decided_by TEXT, "
+        "decided_at TEXT, edit TEXT, expires_at TEXT, created_at TEXT NOT NULL)"
+    )
+    connection.commit()
+    connection.close()
+
+    with Store(path):
+        pass
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_announcements)")}
+    connection.close()
+    assert columns == {"request_id", "claimed_by", "claimed_until", "announced_at"}
+
+
 def _job(store: Store, task_id: str) -> JobRecord:
     found = store.job(task_id)
     assert found is not None

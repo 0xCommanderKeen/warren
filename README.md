@@ -67,12 +67,13 @@ failing and lease expiry in `transitions/task.py`; raising, deciding and expirin
 `transitions/approval.py`; accepted handoffs in `transitions/delegation.py`; pause and
 resume in `transitions/budget.py`. Callers ask for the domain act and get its durable
 result — they no longer interpret a `rowcount`, choose an identity, or decide whether to
-emit. The invariant is one sentence: a fact reaches the emitter only on the branch where
-the write actually won, and exactly once. Refusals, replays, expiries and lost races write
-nothing and say nothing; the one deliberate exception, a repeat auto-deny, is named as its
-own outcome so it cannot happen anywhere by accident. Persistence and delivery stay two
-systems — there is no bus, no outbox, and no callback out of the store. The full matrix is
-`docs/transitions.md`.
+emit. The invariant is one sentence: a fact reaches the emitter only after the write
+actually won. Refusals, expiries and lost races write nothing and say nothing; the one
+deliberate exception, a repeat auto-deny, is named as its own outcome so it cannot happen
+anywhere by accident. Persistence and delivery stay two systems. Approval resolution is
+the one transition with a durable SQLite outbox: decisions are exactly once, while their
+announcements retry at least once and use `request_id` as the consumer idempotency key.
+The full matrix is `docs/transitions.md`.
 
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
 markdown entry into the location its own manifest declares, and the next session opens

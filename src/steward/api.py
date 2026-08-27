@@ -73,6 +73,7 @@ from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
     JOB_STATUSES,
     STATUS_OPEN,
+    STATUS_RESOLVED,
     RequestRecord,
     Store,
     default_db_path,
@@ -577,6 +578,18 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # One guard for the whole app: the run-now path refuses through it before it accepts
     # anything, and the scheduler behind that path ledgers through the same object.
     guard = BudgetGuard(db, sink)
+    # A decision and its announcement are separate systems. Reclaim any durable
+    # announcement a previous process abandoned, then converge the idempotent workflow
+    # implied by already-approved budget requests. Client replay remains another recovery
+    # path, but neither announcement nor unpause depends on it.
+    approvals.reconcile_announcements()
+    for resolved in db.approvals(status=STATUS_RESOLVED):
+        if resolved.action == BUDGET_ACTION and resolved.decision == "approve":
+            pause = db.pause_for_request(resolved.request_id)
+            if pause is not None:
+                guard.resume(
+                    pause.resident, decided_by=resolved.decided_by or DECIDED_BY, decide=False
+                )
     # The same WakeHooks the scheduler daemon runs with, so a manual fire is a fire in every
     # respect (steward #W1): a run-now session's <needs-human>/<delegate> blocks are
     # harvested and its pending decisions are delivered into its preamble, exactly as they
@@ -1090,7 +1103,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"approval request {request_id!r} expired at {record.expires_at} and denies "
                 f"by default; it can no longer be decided",
             )
-        if decided.replayed:
+        if decided.replayed and decided.fact is None:
             # The first decision won. A double-tapped notification changes nothing and
             # emitted nothing — it is told what was recorded.
             response.status_code = 200
@@ -1102,9 +1115,13 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 "decided_at": record.decided_at,
                 "message": "this request was already decided; nothing changed",
             }
-        accept(request, "recorded", {"approval": request_id, "decision": body.decision})
+        # A replay that recovered an abandoned announcement must also finish the
+        # idempotent workflow below (notably budget unpause). The decision did not change,
+        # but this request completed work the dead first process did not.
+        final_decision = record.decision or body.decision
+        accept(request, "recorded", {"approval": request_id, "decision": final_decision})
         response.status_code = 202
-        resumed = _resume_if_budget(record.action, body.decision, request_id)
+        resumed = _resume_if_budget(record.action, final_decision, request_id)
         return {
             "request_id": request_id,
             "status": "recorded",
