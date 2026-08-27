@@ -412,13 +412,10 @@ class EventEmitter:
             self.queue, json.dumps(record, ensure_ascii=False), purpose="for replay"
         )
 
-    def _read_queue(self) -> tuple[list[dict[str, Any]], list[bytes]]:
+    def _read_queue_unlocked(self) -> tuple[list[dict[str, Any]], list[bytes]]:
         try:
             raw = self.queue.read_bytes()
         except FileNotFoundError:
-            return [], []
-        except OSError:
-            log.exception("could not read event replay queue %s", self.queue)
             return [], []
         records: list[dict[str, Any]] = []
         corrupt: list[bytes] = []
@@ -436,6 +433,16 @@ class EventEmitter:
                 continue
             records.append(value)
         return records, corrupt
+
+    def _read_queue(self) -> tuple[list[dict[str, Any]], list[bytes]]:
+        """Read one authority snapshot without racing a cooperating appender."""
+        try:
+            self.queue.stat()
+        except FileNotFoundError:
+            return [], []
+        with self._lock_path(self.queue).open("a+") as lock_handle:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            return self._read_queue_unlocked()
 
     @staticmethod
     def _valid_queue_record(value: object) -> bool:
@@ -458,16 +465,18 @@ class EventEmitter:
         self.queue.parent.mkdir(parents=True, exist_ok=True)
         with self._lock_path(self.queue).open("a+") as lock_handle:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
-            records, corrupt = self._read_queue()
+            records, corrupt = self._read_queue_unlocked()
             remaining = [r for r in records if str(r["delivery_id"]) not in retired]
             if corrupt:
                 quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
                 for line in corrupt:
-                    self._append_line(
+                    preserved = self._append_line(
                         quarantine,
                         line.rstrip(b"\r\n").decode("utf-8", errors="replace"),
                         purpose="corrupt replay evidence",
                     )
+                    if not preserved:
+                        raise OSError("could not preserve corrupt replay evidence")
                 log.error(
                     "quarantined %d corrupt event queue line(s) at %s",
                     len(corrupt),
@@ -499,14 +508,12 @@ class EventEmitter:
                 records, corrupt = self._read_queue()
                 return FlushReport(pending=len(records), corrupt=len(corrupt), busy=True)
             records, corrupt = self._read_queue()
-            selected = records[:limit] if limit is not None else records
+            matching = [record for record in records if record["target"] == self.url]
+            selected = matching[:limit] if limit is not None else matching
             retired: set[str] = set()
             failed = False
-            foreign = 0
+            foreign = sum(record["target"] != self.url for record in records)
             for record in selected:
-                if record["target"] != self.url:
-                    foreign += 1
-                    continue
                 body = json.dumps(record["event"], ensure_ascii=False).encode("utf-8")
                 if not self._post(self.url, body, str(record["delivery_id"])):
                     self._trip_breaker(self.url)
@@ -530,8 +537,7 @@ class EventEmitter:
             return self._flush(limit=limit, blocking=blocking)
         except OSError:
             log.exception("could not flush event replay queue %s", self.queue)
-            records, corrupt = self._read_queue()
-            return FlushReport(pending=len(records), corrupt=len(corrupt), failed=True)
+            return FlushReport(failed=True)
 
     def import_legacy(self, path: Path | None = None) -> ImportReport:
         """Queue every valid event in an old log, accepting possible remote duplicates.
@@ -595,17 +601,17 @@ class EventEmitter:
         delivery_id = uuid.uuid4().hex
         queued = self._queue_record(event, delivery_id)
         if not queued:
-            # Best effort still gives a healthy server a chance; an outage is loudly logged.
-            if not self._breaker_open(self.url):
-                delivered = self._post(self.url, line.encode("utf-8"), delivery_id)
-                if not delivered:
-                    self._trip_breaker(self.url)
-                return delivered
+            # Posting without durable retry authority would make an ambiguous response
+            # unrecoverable. The complete local log remains available for explicit import.
             return False
         if self._breaker_open(self.url):
             return False
         self.flush(limit=REPLAY_BATCH_SIZE, blocking=False)
-        remaining, _ = self._read_queue()
+        try:
+            remaining, _ = self._read_queue()
+        except OSError:
+            log.exception("could not confirm event delivery from replay queue %s", self.queue)
+            return False
         return not any(r["delivery_id"] == delivery_id for r in remaining)
 
     def emit_many(self, events: Sequence[Event]) -> None:

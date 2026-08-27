@@ -522,6 +522,22 @@ def test_partial_flush_retires_success_and_stops_at_first_failure(
     assert report.failed is True
 
 
+def test_foreign_target_backlog_does_not_starve_current_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    old = ev.EventEmitter(url="https://old.example", fallback=fallback)
+    for index in range(ev.REPLAY_BATCH_SIZE + 1):
+        assert old._queue_record(context().started("schedule"), f"foreign-{index:016d}")
+    current = ev.EventEmitter(url="https://current.example", fallback=fallback)
+    assert current._queue_record(context().started("schedule"), "delivery-current-0001")
+    monkeypatch.setattr(ev.EventEmitter, "_post", lambda *_args: True)
+    report = current.flush(limit=ev.REPLAY_BATCH_SIZE)
+    assert report.delivered == 1
+    assert report.foreign == ev.REPLAY_BATCH_SIZE + 1
+    assert report.pending == ev.REPLAY_BATCH_SIZE + 1
+
+
 def test_corrupt_and_torn_queue_lines_are_quarantined_without_blocking_valid_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -535,6 +551,38 @@ def test_corrupt_and_torn_queue_lines_are_quarantined_without_blocking_valid_rep
     assert report.pending == 0
     assert report.corrupt == 2
     assert emitter.queue.with_name(f"{emitter.queue.name}.corrupt").exists()
+
+
+def test_failed_corrupt_quarantine_leaves_original_queue_authoritative(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    emitter.queue.parent.mkdir(parents=True, exist_ok=True)
+    emitter.queue.write_bytes(b"corrupt\n")
+    original = emitter._append_line
+
+    def refuse_quarantine(path: Path, line: str, *, purpose: str) -> bool:
+        if path.name.endswith(".corrupt"):
+            return False
+        return original(path, line, purpose=purpose)
+
+    monkeypatch.setattr(emitter, "_append_line", refuse_quarantine)
+    report = emitter.flush()
+    assert report.failed is True
+    assert emitter.queue.read_bytes() == b"corrupt\n"
+
+
+def test_queue_read_failure_is_not_reported_as_a_clean_drain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    assert emitter._queue_record(context().started("schedule"), "delivery-unreadable")
+
+    def unreadable() -> tuple[list[dict[str, object]], list[bytes]]:
+        raise OSError("simulated unreadable queue")
+
+    monkeypatch.setattr(emitter, "_read_queue_unlocked", unreadable)
+    assert emitter.flush().failed is True
 
 
 def test_repeated_delivery_after_crash_uses_the_same_id(
@@ -559,6 +607,17 @@ def test_repeated_delivery_after_crash_uses_the_same_id(
     monkeypatch.setattr(emitter, "_rewrite_queue", original)
     assert emitter.flush().delivered == 1
     assert ids == ["delivery-crash-window", "delivery-crash-window"]
+
+
+def test_queue_append_failure_never_posts_without_retry_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    posts: list[object] = []
+    monkeypatch.setattr(emitter, "_queue_record", lambda *_args: False)
+    monkeypatch.setattr(emitter, "_post", lambda *_args: posts.append(object()) or True)
+    assert emitter.emit(context().started("schedule")) is False
+    assert posts == []
 
 
 def test_concurrent_append_survives_a_flush_rewrite(
