@@ -1,0 +1,20 @@
+@import "tailwindcss";
+@import "./legacy.css";
+@import "./interaction.css";
+@import "./visitor-modal.css";
+
+@font-face {
+  font-family: Cousine;
+  src: url("/fonts/CousineSnapshot.ttf");
+  font-display: swap;
+}
+
+#root,
+.app-shell {
+  min-height: 100vh;
+}
+
+button,
+select {
+  font: inherit;
+}

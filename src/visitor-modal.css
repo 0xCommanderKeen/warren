@@ -1,0 +1,39 @@
+.agent-drawer {
+  inset: 7vh 5vw;
+  top: 7vh;
+  right: 5vw;
+  width: auto;
+  height: auto;
+  padding: 30px clamp(24px, 4vw, 56px) 56px;
+  border: 1px solid var(--line);
+  box-shadow: 0 30px 120px #000b;
+  opacity: 0;
+  transform: translateY(28px) scale(.985);
+  pointer-events: none;
+  transition: opacity .25s ease, transform .35s cubic-bezier(.22, 1, .36, 1);
+}
+
+.agent-drawer.open {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.agent-drawer .drawer-close {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 10px;
+  background: #121612;
+}
+
+.agent-drawer .agent-page-hero h1 {
+  font-size: clamp(52px, 7vw, 112px);
+}
+
+@media (max-width: 700px) {
+  .agent-drawer {
+    inset: 2vh 2vw;
+    padding: 20px 16px 42px;
+  }
+}
