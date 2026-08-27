@@ -18,5 +18,5 @@ export function PhaserGame({ snapshot, onSceneReady }) {
     return () => EventBus.off("current-scene-ready", onSceneReady);
   }, [onSceneReady]);
 
-  return <div className="village__canvas" ref={host} aria-hidden="true" />;
+  return <div className="absolute inset-0 [&_canvas]:block [&_canvas]:[image-rendering:pixelated]" ref={host} aria-hidden="true" />;
 }
