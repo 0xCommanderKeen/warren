@@ -1,5 +1,6 @@
 """The skills library: what parses, what a resident actually holds, and what lands on disk."""
 
+import os
 from pathlib import Path
 
 import pytest
@@ -323,6 +324,20 @@ def test_a_changed_skill_body_is_rewritten(tmp_path: Path) -> None:
     result = sk.materialize(improved, tmp_path, ".claude/skills")
     assert result.written == ("research",)
     assert "Do it well." in (tmp_path / ".claude/skills/research/SKILL.md").read_text("utf-8")
+
+
+def test_rewriting_a_hardlinked_skill_does_not_clobber_the_external_inode(tmp_path: Path) -> None:
+    victim = tmp_path / "outside.txt"
+    victim.write_text("precious", encoding="utf-8")
+    target = tmp_path / ".claude/skills/research/SKILL.md"
+    target.parent.mkdir(parents=True)
+    os.link(victim, target)
+
+    sk.materialize(granted("research"), tmp_path, ".claude/skills")
+
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert target.read_text(encoding="utf-8").startswith("---\nname: research\n")
+    assert target.stat().st_ino != victim.stat().st_ino
 
 
 def test_a_skill_no_longer_granted_is_removed(tmp_path: Path) -> None:

@@ -737,6 +737,7 @@ class Dispatcher:
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
+        owns_admission = admission is None
         admitted = admission or self.sessions.admit(resident, now=moment)
         if isinstance(admitted, Refusal):
             result = RunResult(outcome=Outcome.FAILED, error=admitted.reason)
@@ -786,6 +787,8 @@ class Dispatcher:
             session = self.sessions.run(admitted, wake)
         finally:
             self._registry_run.reset(token)
+            if owns_admission:
+                admitted.close()
         result = session.require_result()
 
         # The shared lifecycle contains and returns from every ordinary accounting or
@@ -954,22 +957,26 @@ class Dispatcher:
         if self.sweep_only:
             return DispatchRun(reopened=tuple(reopened), expired_approvals=tuple(expired_approvals))
         admissions, refusals = self._claim_admissions(moment)
-        reports = self._drain(
-            delegation_residents(self.residents),
-            moment,
-            refusals,
-            admissions,
-            pick=self.take_delivery,
-            count_for=lambda _r: self.max_delegations_per_wake,
-        )
-        reports += self._drain(
-            board_residents(self.residents),
-            moment,
-            refusals,
-            admissions,
-            pick=self.claim,
-            count_for=lambda r: r.manifest.board.max_claims_per_wake,
-        )
+        try:
+            reports = self._drain(
+                delegation_residents(self.residents),
+                moment,
+                refusals,
+                admissions,
+                pick=self.take_delivery,
+                count_for=lambda _r: self.max_delegations_per_wake,
+            )
+            reports += self._drain(
+                board_residents(self.residents),
+                moment,
+                refusals,
+                admissions,
+                pick=self.claim,
+                count_for=lambda r: r.manifest.board.max_claims_per_wake,
+            )
+        finally:
+            for admission in admissions.values():
+                admission.close()
         return DispatchRun(
             reopened=tuple(reopened),
             expired_approvals=tuple(expired_approvals),

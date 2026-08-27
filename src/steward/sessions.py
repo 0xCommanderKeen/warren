@@ -12,6 +12,7 @@ import os
 import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -126,6 +127,22 @@ class Refusal:
     reason: str
 
 
+@dataclass(slots=True)
+class _DirectoryCapability:
+    """One close-once descriptor pinning an admitted directory's lifetime."""
+
+    descriptor: int
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            descriptor, self.descriptor = self.descriptor, -1
+            with suppress(OSError):
+                os.close(descriptor)
+
+    def __del__(self) -> None:
+        self.close()
+
+
 @dataclass(frozen=True, slots=True)
 class _DirectoryIdentity:
     """The POSIX identity of one consistently observed declared directory.
@@ -139,6 +156,11 @@ class _DirectoryIdentity:
     device: int
     inode: int
     file_type: int
+    capability: _DirectoryCapability = field(repr=False, compare=False)
+
+    @property
+    def descriptor(self) -> int:
+        return self.capability.descriptor
 
 
 class _DirectoryChangedError(OSError):
@@ -162,6 +184,11 @@ class Admission:
     def timeout_for(self, declared_s: int) -> int:
         """Resolve one declared timeout once, then return that answer consistently."""
         return self._resolve_timeout(declared_s)
+
+    def close(self) -> None:
+        """Release the directory capability retained for this admission."""
+        if self.declared_identity is not None:
+            self.declared_identity.capability.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,13 +408,15 @@ class ResidentSessions:
                 refusal = f"budget unreadable: {type(exc).__name__}: {exc}"
             if refusal is not None:
                 return Refusal(refusal)
-        refusal = workdir_refusal(resident, self.workdir, self.library)
-        if refusal is not None:
-            return Refusal(refusal)
         resolved = self._resolve_admitted_workdir(resident)
         if isinstance(resolved, Refusal):
             return resolved
         workdir, identity = resolved
+        refusal = workdir_refusal(resident, self.workdir, self.library)
+        if refusal is not None:
+            if identity is not None:
+                identity.capability.close()
+            return Refusal(refusal)
         return Admission(
             resident,
             workdir,
@@ -411,9 +440,7 @@ class ResidentSessions:
                     identity = self._observe_directory(candidate)
                 except FileNotFoundError:
                     identity = None
-                workdir = (
-                    identity.canonical if identity is not None else resident.workdir(self.workdir)
-                )
+                workdir = resident.workdir(self.workdir) if identity is None else identity.canonical
             workdir = workdir.resolve(strict=identity is not None)
         except _DirectoryChangedError:
             return Refusal(self._changed_workdir_reason(resident))
@@ -432,13 +459,26 @@ class ResidentSessions:
         before = candidate.stat(follow_symlinks=False)
         if not stat.S_ISDIR(before.st_mode):
             return None
-        canonical = candidate.resolve(strict=True)
-        after = candidate.stat(follow_symlinks=False)
-        before_identity = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
-        after_identity = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
-        if before_identity != after_identity or not stat.S_ISDIR(after.st_mode):
+        descriptor = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            pinned = os.fstat(descriptor)
+            canonical = candidate.resolve(strict=True)
+            after = candidate.stat(follow_symlinks=False)
+            before_identity = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+            pinned_identity = (pinned.st_dev, pinned.st_ino, stat.S_IFMT(pinned.st_mode))
+            after_identity = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+            changed = (
+                before_identity != pinned_identity
+                or pinned_identity != after_identity
+                or not stat.S_ISDIR(after.st_mode)
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if changed:
+            os.close(descriptor)
             raise _DirectoryChangedError("declared directory changed while it was inspected")
-        return _DirectoryIdentity(canonical, *after_identity)
+        return _DirectoryIdentity(canonical, *after_identity, _DirectoryCapability(descriptor))
 
     def run(
         self,
@@ -482,6 +522,11 @@ class ResidentSessions:
                     timeout_s=timeout_s,
                     model=resident.manifest.runner.model,
                     env=wake.environment(resident),
+                    workdir_fd=(
+                        admission.declared_identity.descriptor
+                        if admission.declared_identity is not None
+                        else None
+                    ),
                 )
             )
         except SkillError as exc:
@@ -542,9 +587,12 @@ class ResidentSessions:
             return Refusal(self._vanished_workdir_reason(resident))
         if observed is None:
             return Refusal(self._vanished_workdir_reason(resident))
-        if observed != admission.declared_identity:
-            return Refusal(self._changed_workdir_reason(resident))
-        return None
+        try:
+            if observed != admission.declared_identity:
+                return Refusal(self._changed_workdir_reason(resident))
+            return None
+        finally:
+            observed.capability.close()
 
     def _require_revalidated(self, admission: Admission) -> None:
         """Turn a late workdir refusal into the lifecycle's provision-failure path."""
@@ -577,32 +625,14 @@ class ResidentSessions:
         skills = self._skills_for(resident)
         subdir = skills_home(resident.manifest.runner)
         if subdir is not None and self.library.configured:
-            workdir_fd: int | None = None
             try:
                 if admission.declared_identity is not None:
-                    workdir_fd = os.open(
-                        admission.declared_identity.canonical,
-                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                    )
-                    observed = os.fstat(workdir_fd)
-                    identity = (
-                        observed.st_dev,
-                        observed.st_ino,
-                        stat.S_IFMT(observed.st_mode),
-                    )
-                    expected = (
-                        admission.declared_identity.device,
-                        admission.declared_identity.inode,
-                        admission.declared_identity.file_type,
-                    )
-                    if identity != expected:
-                        raise SkillError(self._changed_workdir_reason(resident))
+                    workdir_fd = admission.declared_identity.descriptor
+                else:
+                    workdir_fd = None
                 result = materialize(skills, admission.workdir, subdir, workdir_fd=workdir_fd)
             except OSError as exc:
                 raise SkillError(self._vanished_workdir_reason(resident)) from exc
-            finally:
-                if workdir_fd is not None:
-                    os.close(workdir_fd)
             log.debug("%s: skills %s", resident.id, result.summary())
         return skills
 

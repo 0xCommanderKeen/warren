@@ -32,6 +32,7 @@ exactly one file* — a rule worth keeping even for the processes that are not b
 """
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -123,6 +124,12 @@ class RunRequest:
     timeout_s: int
     model: str | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+    workdir_fd: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def execution_workdir(self) -> str:
+        """Return the declared path exposed to command-template substitution."""
+        return str(self.workdir)
 
     def key(self) -> str:
         """Return a stable digest of the request, so mock results are reproducible."""
@@ -285,15 +292,23 @@ class _ProcessRunner(Runner):
         """Launch the session, bound by its timeout, and report what happened."""
         argv = self.argv(request)
         env = {**os.environ, **request.env}
+        workdir_fd = request.workdir_fd
+        change_directory = None if workdir_fd is None else functools.partial(os.fchdir, workdir_fd)
         started = time.monotonic()
         try:
-            process = subprocess.Popen(  # noqa: S603 — argv list, shell=False, no template
+            # fchdir is the one async-signal-safe operation in the child hook. It is
+            # required here because Popen has no descriptor-valued cwd API.
+            process = subprocess.Popen(  # noqa: S603 — argv + capability cwd
                 argv,
-                cwd=str(request.workdir),
+                cwd=(request.execution_workdir if request.workdir_fd is None else None),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
+                pass_fds=(() if workdir_fd is None else (workdir_fd,)),
+                preexec_fn=(  # noqa: PLW1509 — only async-signal-safe fchdir runs here
+                    change_directory
+                ),
             )
         except OSError as exc:
             return RunResult(
@@ -429,7 +444,7 @@ class CommandRunner(_ProcessRunner):
 
     def argv(self, request: RunRequest) -> list[str]:
         """Substitute the two allowed placeholders; everything else stays literal."""
-        return substitute(self.template, prompt=request.prompt, workdir=str(request.workdir))
+        return substitute(self.template, prompt=request.prompt, workdir=request.execution_workdir)
 
     def check(self) -> str | None:
         """Report a template whose executable is not on PATH."""

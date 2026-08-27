@@ -1,7 +1,9 @@
 """The runner seam: what each brain is actually told, and who may spawn one."""
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,29 @@ def test_a_command_runner_without_a_template_refuses_to_exist() -> None:
     spec = RunnerSpec(kind="mock")
     object.__setattr__(spec, "kind", "command")
     assert r.check_runner(spec) == "runner kind 'command' requires a command template"
+
+
+def test_a_process_starts_in_the_descriptor_bound_admitted_directory(tmp_path: Path) -> None:
+    admitted = tmp_path / "work"
+    admitted.mkdir()
+    descriptor = os.open(admitted, os.O_RDONLY | os.O_DIRECTORY)
+    admitted_inode = os.fstat(descriptor).st_ino
+    admitted.rename(tmp_path / "old-work")
+    admitted.mkdir()
+    spec = RunnerSpec(
+        kind="command",
+        command=[sys.executable, "-c", "import os; print(os.stat('.').st_ino)", "{prompt}"],
+    )
+    try:
+        result = r.build_runner(spec).run(
+            r.RunRequest(prompt="", workdir=admitted, workdir_fd=descriptor, timeout_s=10)
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.ok
+    assert int(result.output.strip()) == admitted_inode
+    assert admitted.stat().st_ino != admitted_inode
 
 
 def test_describe_names_the_brain() -> None:

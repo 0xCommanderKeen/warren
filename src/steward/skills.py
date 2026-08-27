@@ -28,6 +28,7 @@ fails validation exactly like a manifest would.
 
 import os
 import re
+import secrets
 import shutil
 import stat
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -623,14 +624,25 @@ def _write_skill(root_fd: int, root: Path, name: str, document: str) -> bool:
                 with os.fdopen(target_fd, encoding="utf-8") as stream:
                     if stream.read() == document:
                         return False
-            target_fd = os.open(
-                SKILL_FILENAME,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-                0o666,
-                dir_fd=skill_fd,
-            )
-            with os.fdopen(target_fd, "w", encoding="utf-8") as stream:
-                stream.write(document)
+            temporary = f".{SKILL_FILENAME}.{secrets.token_hex(8)}.tmp"
+            try:
+                target_fd = os.open(
+                    temporary,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o666,
+                    dir_fd=skill_fd,
+                )
+                with os.fdopen(target_fd, "w", encoding="utf-8") as stream:
+                    stream.write(document)
+                os.replace(
+                    temporary,
+                    SKILL_FILENAME,
+                    src_dir_fd=skill_fd,
+                    dst_dir_fd=skill_fd,
+                )
+            finally:
+                with suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=skill_fd)
         finally:
             os.close(skill_fd)
     except OSError as exc:

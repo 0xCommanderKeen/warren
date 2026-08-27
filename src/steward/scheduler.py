@@ -928,7 +928,10 @@ class Scheduler:
 
         wake = RoutineWake(item.routine, run_id)
         if self.dry_run:
-            session = self.sessions.run(admission, wake)
+            try:
+                session = self.sessions.run(admission, wake)
+            finally:
+                admission.close()
             return FireReport(
                 scheduled=item,
                 run_id=run_id,
@@ -954,7 +957,10 @@ class Scheduler:
         self.emitter.emit(context.started(trigger))
         self._open_run(item, run_id, timeout_s, moment)
 
-        session = self.sessions.run(admission, wake)
+        try:
+            session = self.sessions.run(admission, wake)
+        finally:
+            admission.close()
         result = session.require_result()
         if result.ok:
             self.emitter.emit(

@@ -409,6 +409,49 @@ def test_provisioning_refuses_a_replacement_during_identity_observation(
     assert "filesystem identity changed" in refusal.reason
 
 
+def test_admission_fails_closed_when_declared_memory_vanishes_during_capture(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A capture race cannot downgrade a declared directory into process cwd."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    sentinel = tmp_path / "keep.txt"
+    sentinel.write_text("untouched", encoding="utf-8")
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK))
+    monkeypatch.chdir(tmp_path)
+    sessions = ResidentSessions(
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+        runner_factory=lambda _spec: runner,
+    )
+    real_open = os.open
+
+    def vanish_before_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if Path(path) == memory:
+            memory.rmdir()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(sessions_module.os, "open", vanish_before_open)
+
+    admission = sessions.admit(resident, now=NOW)
+
+    assert isinstance(admission, Refusal)
+    assert runner.requests == []
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+    assert not (tmp_path / ".claude").exists()
+
+
 def test_missing_skills_fail_before_decisions_are_consumed(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
