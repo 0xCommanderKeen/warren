@@ -100,6 +100,7 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
         workdir=tmp_path,
         runner_factory=lambda _spec: runner,
         guard=guard,
+        clock=lambda: NOW + timedelta(seconds=5),
     )
 
     admission = sessions.admit(resident, now=NOW)
@@ -137,6 +138,37 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
     assert guard.timeout_calls == 1
 
 
+def test_completion_uses_one_actual_clock_read_not_runner_duration(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Duration measures the runner; completion is the wall-clock fact after it returns."""
+    resident = load_manifest(write_resident(valid_manifest()))
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK, duration_s=5))
+    guard = _RecordingGuard()
+    completed = NOW + timedelta(minutes=3)
+    reads: list[None] = []
+
+    def clock() -> datetime:
+        reads.append(None)
+        return completed
+
+    sessions = ResidentSessions(
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        guard=guard,
+        clock=clock,
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+
+    result = sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-1"))
+
+    assert result.completed_at == completed
+    assert result.require_result().duration_s == 5
+    assert guard.records[0]["now"] == completed
+    assert len(reads) == 1
+
+
 def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
@@ -153,6 +185,7 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
         runner_factory=lambda _spec: runner,
         guard=guard,
         hooks=hooks,
+        clock=lambda: NOW + timedelta(seconds=7),
     )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
@@ -280,7 +313,10 @@ def test_journal_and_harvest_failures_do_not_escape_or_erase_the_run_result(
 
     monkeypatch.setattr("steward.sessions.journal.latest_entry", unreadable)
     sessions = ResidentSessions(
-        workdir=tmp_path, runner_factory=lambda _spec: runner, hooks=BrokenHooks()
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        hooks=BrokenHooks(),
+        clock=lambda: NOW + timedelta(seconds=60),
     )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
@@ -383,7 +419,7 @@ def test_board_runner_exceptions_preserve_their_zero_duration_result(
     def broken_factory(_spec) -> Runner:
         raise RuntimeError("runner construction failed")
 
-    sessions = ResidentSessions(workdir=tmp_path, runner_factory=broken_factory)
+    sessions = ResidentSessions(workdir=tmp_path, runner_factory=broken_factory, clock=lambda: NOW)
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
 

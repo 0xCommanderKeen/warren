@@ -1645,6 +1645,56 @@ def test_a_fire_opens_a_registry_row_and_closes_it(
         assert store.open_runs() == [], "the run reported back, so its row is answered"
 
 
+def test_scheduler_registry_and_ledger_share_actual_completion(
+    write_resident: ResidentWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = datetime(2026, 8, 24, 10, 15, tzinfo=UTC)
+    completed = started + timedelta(minutes=4)
+    path = write_resident(manifest_with(HOURLY))
+    recorded: list[dict[str, object]] = []
+
+    class RecordingGuard:
+        def allow(self, manifest: m.ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: m.ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: m.ResidentManifest, **facts: object) -> object:
+            del manifest
+            recorded.append(facts)
+            return None
+
+    with Store(":memory:") as store:
+        closed_at: list[str | None] = []
+        original_close = store.close_run
+
+        def close_run(run_id: str, *, now: str | None = None) -> bool:
+            closed_at.append(now)
+            return original_close(run_id, now=now)
+
+        monkeypatch.setattr(store, "close_run", close_run)
+        engine = s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+            registry=store,
+            guard=RecordingGuard(),
+            runner_factory=lambda _spec: r.MockRunner(
+                behavior=lambda _request: r.RunResult(outcome=r.Outcome.OK, duration_s=2)
+            ),
+            clock=lambda: completed,
+        )
+
+        engine.fire(engine.scheduled[0], now=started)
+
+    assert recorded[0]["now"] == completed
+    assert closed_at == [ev.utc_now_iso(completed)]
+
+
 def test_a_run_that_never_finishes_leaves_its_row_open(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:

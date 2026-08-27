@@ -793,7 +793,7 @@ def test_the_second_claim_in_a_slow_dispatch_gets_a_full_lease(
     runner = LeaseSnooping(store)
     early = NOW
     late = NOW + timedelta(minutes=5)
-    ticks = iter([early, late])
+    ticks = iter([early, early, late, late])
     dispatcher = b.Dispatcher(
         residents=[resident],
         store=store,
@@ -1054,6 +1054,57 @@ def test_a_claimed_task_opens_and_closes_a_registry_row(
 
     assert len(run.reports) == 1
     assert store.open_runs() == [], "the task reported back, so its row is answered"
+
+
+def test_task_board_registry_and_ledger_share_actual_completion(
+    write_resident: ResidentWriter,
+    store: Store,
+    sink: ev.NullEmitter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = NOW + timedelta(minutes=4)
+    ticks = iter([NOW, completed])
+    closed_at: list[str | None] = []
+    original_close = store.close_run
+
+    def close_run(run_id: str, *, now: str | None = None) -> bool:
+        closed_at.append(now)
+        return original_close(run_id, now=now)
+
+    monkeypatch.setattr(store, "close_run", close_run)
+    store.post_job(title="Read the mail")
+
+    class Recording:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest
+            recorded.append(facts)
+            return None
+
+    recorded: list[dict[str, object]] = []
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(board_manifest()))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: ScriptedRunner(RunResult(outcome=Outcome.OK, duration_s=2)),
+        guard=Recording(),
+        clock=lambda: next(ticks),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.task.finished_at == ev.utc_now_iso(completed)
+    assert recorded[0]["now"] == completed
+    assert closed_at[0] == ev.utc_now_iso(completed)
 
 
 def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(

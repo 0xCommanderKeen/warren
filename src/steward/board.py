@@ -50,7 +50,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from functools import cached_property
 from pathlib import Path
 from typing import cast
@@ -66,13 +66,8 @@ from steward.manifest import (
     active_residents,
     validate_path,
 )
-from steward.manifest import (
-    Runner as RunnerSpec,
-)
 from steward.runners import (
     Outcome,
-    Runner,
-    RunRequest,
     RunResult,
     build_runner,
     check_runner,
@@ -137,7 +132,6 @@ class _RegistryRun:
 
     run_id: str
     task_id: str
-    started_at: datetime
 
 
 def _close_registry(store: Store, run: _RegistryRun, moment: datetime) -> None:
@@ -148,42 +142,14 @@ def _close_registry(store: Store, run: _RegistryRun, moment: datetime) -> None:
         log.warning("could not record that task %s reported back: %s", run.task_id, exc)
 
 
-class _RegistryClosingRunner(Runner):
-    """Close a board run at the existing runner seam, before shared bookkeeping."""
-
-    def __init__(self, runner: Runner, store: Store, registry_run: _RegistryRun) -> None:
-        super().__init__()
-        self.runner = runner
-        self.store = store
-        self.registry_run = registry_run
-
-    def run(self, request: RunRequest) -> RunResult:
-        """Retain vanished-run semantics while closing every answered runner promptly."""
-        try:
-            result = self.runner.run(request)
-        except Exception:
-            _close_registry(self.store, self.registry_run, self.registry_run.started_at)
-            raise
-        _close_registry(
-            self.store,
-            self.registry_run,
-            self.registry_run.started_at + timedelta(seconds=result.duration_s),
-        )
-        return result
-
-
 class _RegistryClosingGuard:
-    """Preserve board registry ordering when a session fails before a runner exists."""
+    """Delegate board admission and accounting through the common guard contract."""
 
     def __init__(
         self,
         guard: RunGuard | None,
-        store: Store,
-        registry_run: ContextVar[_RegistryRun | None],
     ) -> None:
         self.guard = guard
-        self.store = store
-        self.registry_run = registry_run
 
     def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
         """Delegate admission policy when the dispatcher has one."""
@@ -206,10 +172,7 @@ class _RegistryClosingGuard:
         origin: str,
         now: datetime | None = None,
     ) -> object:
-        """Close any pre-run failure before handing accounting to the real guard."""
-        registry_run = self.registry_run.get()
-        if registry_run is not None:
-            _close_registry(self.store, registry_run, now or registry_run.started_at)
+        """Hand accounting to the real guard after the completion hook closes registry."""
         if self.guard is None:
             return None
         return self.guard.record(
@@ -472,12 +435,20 @@ class Dispatcher:
         """Build the shared lifecycle from the dispatcher's existing dependencies."""
         self.sessions = ResidentSessions(
             workdir=self.workdir,
-            runner_factory=self._registry_runner,
+            runner_factory=self.runner_factory,
             library=self.library,
-            guard=_RegistryClosingGuard(self.guard, self.store, self._registry_run),
+            guard=_RegistryClosingGuard(self.guard),
             hooks=self,
             residents=self.residents,
+            clock=self.clock,
+            on_completed=self._close_active_registry,
         )
+
+    def _close_active_registry(self, moment: datetime) -> None:
+        """Close the current watched session at the completion fact the lifecycle read."""
+        registry_run = self._registry_run.get()
+        if registry_run is not None:
+            _close_registry(self.store, registry_run, moment)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -780,7 +751,7 @@ class Dispatcher:
         timeout_s = admitted.timeout_for(declared_s)
         self._open_run(resident, job, run_id, timeout_s, moment)
 
-        registry_run = _RegistryRun(run_id, job.task_id, moment)
+        registry_run = _RegistryRun(run_id, job.task_id)
         token = self._registry_run.set(registry_run)
         try:
             session = self.sessions.run(admitted, wake)
@@ -797,7 +768,7 @@ class Dispatcher:
             resident,
             job,
             result,
-            moment,
+            session.completed_at or moment,
             cast("tuple[ApprovalRecord, ...]", session.raised),
             handed=cast("tuple[dg.Delivery, ...]", session.handed_over),
             run_id=run_id,
@@ -849,14 +820,6 @@ class Dispatcher:
                 run_id,
                 job.task_id,
             )
-
-    def _registry_runner(self, spec: RunnerSpec) -> Runner:
-        """Wrap the real adapter when this context is working a watched board run."""
-        runner = self.runner_factory(spec)
-        registry_run = self._registry_run.get()
-        if registry_run is None:
-            return runner
-        return _RegistryClosingRunner(runner, self.store, registry_run)
 
     def _record(  # noqa: PLR0913 — one parameter per fact the report is built from
         self,
