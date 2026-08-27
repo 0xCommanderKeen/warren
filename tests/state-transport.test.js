@@ -4,8 +4,9 @@ const assert = require("assert");
 const { createStateTransport, validateEnvelope } = require("../viewer/state-transport.js");
 
 function snapshot(generation, cursor, villagers = []) {
-  return { schema_version: 1, generation, cursor, evaluated_at: "2026-08-26T12:00:00.000Z",
-    villagers, residents: [], artifacts: [], tasks: [], approvals: [], journals: [], routines: [],
+  return { schema_version: 1, generation, cursor, log_generation: 1,
+    evaluated_at: "2026-08-26T12:00:00.000Z",
+    villagers, residents: [], diagnostic_residents: [], artifacts: [], tasks: [], approvals: [], journals: [], routines: [],
     diagnostics: [], capacity: {}, capabilities: {} };
 }
 

@@ -151,7 +151,9 @@ map of everything the fleet does.
   is unavailable and retries SSE every two seconds.
   Snapshot generations and cursors are explicit. A stale cursor receives one
   atomic reset snapshot; the browser never folds raw events. Raw `/events`
-  retrieval remains an internal diagnostic and audit interface.
+  retrieval remains an internal diagnostic and audit interface. The public UI
+  read contract, checked-in OpenAPI, fixtures, and versioning policy are documented
+  in [docs/state-contract.md](docs/state-contract.md).
 - **Mac emitter** — the installed `burrow-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
   `~/.claude/settings.json` hooks
@@ -370,6 +372,7 @@ them for rendering. There is no browser domain reducer and no build step:
 python3 -m unittest tests.test_village_state tests.test_state_coordinator
 node tests/state-transport.test.js
 node tests/browser-state-runtime.test.js
+sh tests/ui-contract.sh
 ```
 
 Projection tests use fixed evaluation times so stale and absent clock boundaries

@@ -7,13 +7,14 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.BurrowStateTransport = api;
 })(typeof globalThis === "object" ? globalThis : this, function () {
-  const COLLECTIONS = ["villagers", "residents", "artifacts", "tasks", "approvals",
-    "journals", "routines", "diagnostics"];
+  const COLLECTIONS = ["villagers", "residents", "diagnostic_residents", "artifacts",
+    "tasks", "approvals", "journals", "routines", "diagnostics"];
 
   function validateSnapshot(value) {
     if (!value || Object.getPrototypeOf(value) !== Object.prototype) return "snapshot must be an object";
     if (value.schema_version !== 1) return "unsupported snapshot schema";
     if (!Number.isSafeInteger(value.generation) || value.generation < 0) return "invalid generation";
+    if (!Number.isSafeInteger(value.log_generation) || value.log_generation < 0) return "invalid log generation";
     if (typeof value.cursor !== "string") return "invalid cursor";
     if (typeof value.evaluated_at !== "string" || !Number.isFinite(Date.parse(value.evaluated_at))) {
       return "invalid evaluation time";
