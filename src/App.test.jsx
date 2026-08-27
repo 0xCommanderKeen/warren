@@ -92,4 +92,12 @@ describe("Arcadia", () => {
     expect(screen.queryByText("Future Villager")).not.toBeInTheDocument();
     expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
   });
+
+  it("offers each valid Burrow snapshot to the Steward confirmation boundary", () => {
+    const stewardClient = { confirm: vi.fn() };
+
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+
+    expect(stewardClient.confirm).toHaveBeenCalledWith(fixture.snapshot);
+  });
 });
