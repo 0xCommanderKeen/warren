@@ -575,6 +575,7 @@ class Scheduler:
         hooks: WakeHooks | None = None,
         guard: RunGuard | None = None,
         registry: RunRegistry | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
@@ -584,6 +585,7 @@ class Scheduler:
         # No registry means the watchdog is back to reading the fallback log for runs
         # that vanished — which is what it read before steward #39, and no worse.
         self.registry = registry
+        self.clock = clock or (lambda: datetime.now(UTC))
         self.run_transitions = (
             RunTransitions(cast("RunStore", registry)) if registry is not None else None
         )
@@ -608,6 +610,7 @@ class Scheduler:
             library=self.library,
             guard=guard,
             hooks=hooks,
+            clock=self.clock,
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()

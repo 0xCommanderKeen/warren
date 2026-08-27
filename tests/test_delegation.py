@@ -1170,6 +1170,7 @@ def guarded_dispatcher(  # noqa: PLR0913, PLR0917 — the collaborators an entry
         workdir=workdir,
         runner_factory=lambda _spec: runner or ScriptedRunner(),
         guard=guard,
+        clock=lambda: NOW,
     )
 
 

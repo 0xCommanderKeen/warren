@@ -377,6 +377,7 @@ class Dispatcher:
             guard=self.guard,
             hooks=self,
             residents=self.residents,
+            clock=self.clock,
         )
         self.run_transitions = RunTransitions(self.store)
 
