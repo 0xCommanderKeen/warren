@@ -874,6 +874,19 @@ def test_a_broken_manifest_is_named_rather_than_hidden(api: ApiFactory) -> None:
     assert "memory" in body["errors"][0]
 
 
+def test_an_invalid_utf8_soul_is_named_rather_than_crashing(api: ApiFactory) -> None:
+    harness = api()
+    soul_path = harness.residents_dir / "test-agent" / "soul.md"
+    soul_path.write_bytes(b"\xff\xfe")
+
+    response = harness.client.get("/residents")
+
+    assert response.status_code == 200
+    assert response.json()["residents"] == []
+    assert str(soul_path) in response.json()["errors"][0]
+    assert "soul file is not valid UTF-8" in response.json()["errors"][0]
+
+
 def test_one_resident_is_served_whole(api: ApiFactory) -> None:
     harness = api()
     body = harness.client.get("/residents/test-agent").json()
