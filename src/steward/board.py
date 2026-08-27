@@ -1001,10 +1001,15 @@ class Dispatcher:
             if resident.id in refusals:
                 continue
             for _ in range(count_for(resident)):
+                admission = admissions[resident.id]
+                refusal = self.sessions.revalidate(admission)
+                if refusal is not None:
+                    log.warning("%s: not working — %s", resident.id, refusal.reason)
+                    break
                 job = pick(resident, self.clock())
                 if job is None:
                     break
-                reports.append(self.work(resident, job, moment, admission=admissions[resident.id]))
+                reports.append(self.work(resident, job, moment, admission=admission))
         return reports
 
     def _claimants(self) -> list[Resident]:

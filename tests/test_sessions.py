@@ -231,6 +231,39 @@ def test_admission_refuses_an_unsafe_current_working_directory(
     assert "current working directory" in admission.reason
 
 
+@pytest.mark.parametrize("replacement", ["file", "symlink"])
+def test_provisioning_refuses_a_declared_directory_replaced_after_admission(
+    replacement: str,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+) -> None:
+    """A stable admitted path cannot be replaced before destructive provisioning (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "configured-skills"),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    memory.rmdir()
+    if replacement == "file":
+        memory.write_text("not a directory", encoding="utf-8")
+    else:
+        target = tmp_path / "other"
+        target.mkdir()
+        memory.symlink_to(target, target_is_directory=True)
+
+    refusal = sessions.revalidate(admission)
+
+    assert isinstance(refusal, Refusal)
+    assert "no longer the directory" in refusal.reason
+
+
 def test_missing_skills_fail_before_decisions_are_consumed(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:

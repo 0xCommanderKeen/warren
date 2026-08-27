@@ -132,6 +132,7 @@ class Admission:
     workdir: Path
     admitted_at: datetime
     rehearsal: bool = False
+    declared_workdir: Path | None = None
     _resolve_timeout: Callable[[int], int] = field(
         default=lambda declared_s: declared_s, repr=False, compare=False
     )
@@ -361,12 +362,32 @@ class ResidentSessions:
         refusal = workdir_refusal(resident, self.workdir, self.library)
         if refusal is not None:
             return Refusal(refusal)
+        resolved = self._resolve_admitted_workdir(resident)
+        if isinstance(resolved, Refusal):
+            return resolved
+        workdir, declared_workdir = resolved
         return Admission(
             resident,
-            resident.workdir(self.workdir),
+            workdir,
             now,
+            declared_workdir=declared_workdir,
             _resolve_timeout=resolve_timeout,
         )
+
+    def _resolve_admitted_workdir(self, resident: Resident) -> tuple[Path, Path | None] | Refusal:
+        """Resolve the chosen directory and remember when it was the declared memory."""
+        workdir = resident.workdir(self.workdir)
+        declared_workdir: Path | None = None
+        try:
+            memory = resident.manifest.memory
+            if memory.kind == "directory":
+                candidate = Path(memory.path).expanduser()
+                if not candidate.is_symlink() and candidate.is_dir():
+                    declared_workdir = candidate.resolve(strict=True)
+            workdir = workdir.resolve(strict=declared_workdir is not None)
+        except OSError:
+            return Refusal(self._vanished_workdir_reason(resident))
+        return workdir, declared_workdir
 
     def run(
         self,
@@ -390,6 +411,7 @@ class ResidentSessions:
         started = time.monotonic()
         prompt = ""
         try:
+            self._require_revalidated(admission)
             skills = self._provision(resident, admission.workdir)
             journal_entry = self._journal_for(resident)
             decisions = self._decisions_for(resident)
@@ -441,6 +463,46 @@ class ResidentSessions:
             journal_path,
             harvested.raised,
             harvested.handed_over,
+        )
+
+    def revalidate(self, admission: Admission) -> Refusal | None:
+        """Refuse when an admitted resident's declared workdir is no longer stable.
+
+        Admission and provisioning are separate operations.  A mounted memory directory
+        can disappear, stop being a directory, or be replaced by a symlink between them;
+        in all three cases resolving the resident again would silently select the process
+        cwd.  Keep the exact directory admitted earlier and require it to remain the same
+        real directory immediately before anything may materialize there.
+        """
+        resident = admission.resident
+        memory = resident.manifest.memory
+        if memory.kind != "directory":
+            return None
+        if skills_home(resident.manifest.runner) is None or not self.library.configured:
+            return None
+        if admission.declared_workdir is None:
+            return None
+        candidate = Path(memory.path).expanduser()
+        try:
+            if candidate.is_symlink() or not candidate.is_dir():
+                return Refusal(self._vanished_workdir_reason(resident))
+            if candidate.resolve(strict=True) != admission.declared_workdir:
+                return Refusal(self._vanished_workdir_reason(resident))
+        except OSError:
+            return Refusal(self._vanished_workdir_reason(resident))
+        return None
+
+    def _require_revalidated(self, admission: Admission) -> None:
+        """Turn a late workdir refusal into the lifecycle's provision-failure path."""
+        refusal = self.revalidate(admission)
+        if refusal is not None:
+            raise SkillError(refusal.reason)
+
+    def _vanished_workdir_reason(self, resident: Resident) -> str:
+        return (
+            f"memory.path {resident.manifest.memory.path!r} is no longer the directory "
+            "admitted for this session; steward refuses to fall back to the current "
+            "working directory"
         )
 
     def _skills_for(self, resident: Resident) -> tuple[Skill, ...]:
