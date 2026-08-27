@@ -642,9 +642,92 @@ def test_retiring_stops_the_container_and_records_the_decision(
 
     assert report.marked
     assert report.stopped
-    assert host.calls[-1][-2:] == ("down", "--remove-orphans")
+    assert host.calls[-2][-2:] == ("down", "--remove-orphans")
     assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
     assert report.commit == scratch_repo.head()
+
+
+def test_retiring_removes_the_token_from_the_host(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """`.env` holds BURROW_TOKEN, and a retired resident is not supposed to act (#157)."""
+    raise_into(scratch_repo, host)
+    host.calls.clear()
+
+    report = retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+
+    assert report.scrubbed
+    assert host.calls[-1] == (
+        "rm",
+        "-f",
+        "~/docker/steward-note-keeper/.env",
+        "~/docker/steward-note-keeper/docker-compose.yaml",
+    )
+
+
+def test_the_token_is_removed_only_after_the_container_is_down(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """`docker compose down` reads the .env: `${BURROW_URL:?…}` errors when it is gone."""
+    raise_into(scratch_repo, host)
+    host.calls.clear()
+
+    retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+
+    down = next(index for index, call in enumerate(host.calls) if "down" in call)
+    scrub = next(index for index, call in enumerate(host.calls) if call[0] == "rm")
+    assert down < scrub
+
+
+def test_retirement_still_keeps_the_memory_and_the_declaration(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Steward removes what steward rewrites on provision, and nothing else (#157)."""
+    raise_into(scratch_repo, host)
+
+    retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+
+    removed = {part for call in host.calls if call[0] == "rm" for part in call[2:]}
+    assert not any(name in path for path in removed for name in ("memory", "claude", "soul.md"))
+    assert not any("manifest.yaml" in path for path in removed)
+
+
+def test_a_retirement_that_cannot_remove_the_token_says_so(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A retired resident whose ingest token is still on the host is not a quiet outcome."""
+    raise_into(scratch_repo, host)
+    host.fail_on = "rm"
+
+    with pytest.raises(NurseryError) as refusal:
+        retire_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=host,
+        )
+
+    assert "BURROW_TOKEN" in str(refusal.value)
+    assert "~/docker/steward-note-keeper/.env" in str(refusal.value)
+
+
+def test_the_retire_report_names_the_login_it_leaves_behind(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """claude/ is a credential steward never wrote; the report says it is still there."""
+    raise_into(scratch_repo, host)
+
+    report = retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+
+    assert "claude/" in "\n".join(report.render())
 
 
 def test_a_retired_resident_keeps_its_files_and_keeps_validating(
@@ -852,7 +935,10 @@ def test_a_dry_run_retirement_stops_and_commits_nothing(
     assert host.calls == []
     assert scratch_repo.head() == before
     assert not validate_tree(scratch_repo.residents).residents[0].retired
-    assert "down --remove-orphans" in "\n".join(report.render())
+    rendered = "\n".join(report.render())
+    assert "down --remove-orphans" in rendered
+    # A rehearsal prints the exact argv a real run would use, the removal included.
+    assert "rm -f ~/docker/steward-note-keeper/.env" in rendered
 
 
 def test_retiring_without_deploy_marks_but_reaches_no_host(
@@ -878,6 +964,9 @@ def test_retiring_without_deploy_marks_but_reaches_no_host(
     assert report.commit == scratch_repo.head()
     assert validate_tree(scratch_repo.residents).residents[0].retired
     assert "deploy skipped" in report.note
+    # Reaching no host means removing nothing, and the note says which credential stays.
+    assert not report.scrubbed
+    assert "BURROW_TOKEN" in report.note
 
 
 def test_a_retire_dry_run_plans_the_mark_before_the_stop(

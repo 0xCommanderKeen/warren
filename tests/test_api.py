@@ -1463,7 +1463,9 @@ def test_an_edit_carrying_stewards_own_redaction_marker_is_refused(api: ApiFacto
 
     assert response.status_code == 422
     assert m.SECRET_REDACTION in json.dumps(response.json())
-    assert harness.store.approval(request_id).pending  # nothing was decided
+    still_open = harness.store.approval(request_id)
+    assert still_open is not None
+    assert still_open.pending  # nothing was decided
 
 
 def test_an_edit_that_replaces_the_withheld_value_is_accepted(api: ApiFactory) -> None:

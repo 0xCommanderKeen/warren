@@ -2950,7 +2950,10 @@ def test_retire_stops_the_container_and_commits_the_decision(
     assert "note-keeper is retired" in result.output
     assert "no event was emitted on its behalf" in result.output
     assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
-    assert nas.calls[-1][-2:] == ("down", "--remove-orphans")
+    assert nas.calls[-2][-2:] == ("down", "--remove-orphans")
+    # …and the token goes with it, once the container that was reading it is gone (#157).
+    assert nas.calls[-1][:2] == ("rm", "-f")
+    assert "claude/" in result.output
 
 
 def test_retire_no_deploy_marks_and_commits_but_reaches_no_host(

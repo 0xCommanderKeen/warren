@@ -808,6 +808,31 @@ projection rules do the rest. Steward forges no `session_ended` on its behalf.
 Bringing one back is a person's decision written down: set `retired: false`, commit, and
 run `steward new-resident` again to put the container up.
 
+### What retirement removes from the host, and what it leaves
+
+**Steward removes on retire exactly what steward rewrites on provision.** That is two
+files under `~/docker/<container>/`, deleted after the container is down:
+
+| removed | why |
+|---|---|
+| `.env` | it holds `BURROW_URL` and **`BURROW_TOKEN`** — a village ingest token belonging to a resident that is no longer allowed to act |
+| `docker-compose.yaml` | inert without the `.env`, and worse than inert: `BURROW_URL` is interpolated as `${BURROW_URL:?…}`, so a compose file left beside a removed `.env` makes the *next* `docker compose down` fail on a variable instead of reporting an already-stopped container |
+
+Both come back byte for byte on the next provision, so removing them costs the way back
+above nothing. The removal runs **after** `docker compose down` for the same interpolation
+reason, and `--no-deploy` reaches no host at all — its report says so, and says the `.env`
+is still there.
+
+Everything else stays, because retirement is not deletion: `manifest.yaml`, `soul.md`, and
+`memory/` with the resident's journal and durable knowledge.
+
+`claude/` also stays, and this one is a deliberate call rather than an oversight. It is
+bind-mounted to `/root/.claude` and holds whatever credentials a `docker exec … claude`
+login wrote. Steward created the empty directory and never wrote its contents, and a
+re-provision does not restore them — so deleting it would make the way back silently
+require a re-login. The retire report names it instead, so an operator who wants it gone
+knows there is a step left rather than finding out later.
+
 ## The watchdog
 
 `steward watchdog run` (or `tick` for one pass, under external cron) keeps unattended
