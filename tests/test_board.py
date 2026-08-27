@@ -194,6 +194,47 @@ def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(
     assert store.open_runs() == []
 
 
+def test_a_broken_timeout_guard_fails_each_claim_without_aborting_the_dispatch(
+    write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A guard failure is fail-closed, and one bad claim does not strand the resident's drain."""
+
+    class BrokenGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return None
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest, declared_s
+            raise RuntimeError("the timeout ledger is on fire")
+
+        def record(self, manifest: ResidentManifest, **facts: object) -> object:
+            del manifest, facts
+            return None
+
+    first = store.post_job(title="First")
+    second = store.post_job(title="Second")
+    manifest = board_manifest()
+    manifest["board"]["max_claims_per_wake"] = 2  # type: ignore[index]
+    runner = ScriptedRunner()
+    dispatcher = b.Dispatcher(
+        residents=[load_manifest(write_resident(manifest))],
+        store=store,
+        emitter=sink,
+        workdir=tmp_path,
+        runner_factory=lambda _spec: runner,
+        guard=BrokenGuard(),
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert [report.task.task_id for report in run.reports] == [first.task_id, second.task_id]
+    assert all(not report.done for report in run.reports)
+    assert all("budget unreadable" in (report.reason or "") for report in run.reports)
+    assert runner.requests == []
+    assert store.open_runs() == []
+
+
 def test_artifacts_a_run_names_are_recorded_against_the_task(
     make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter
 ) -> None:
