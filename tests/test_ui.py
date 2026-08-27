@@ -669,6 +669,17 @@ def test_the_console_fetches_through_exactly_one_door() -> None:
     assert source.count("fetch(") == 1, "every request must go through the single call() helper"
 
 
+def test_the_approvals_panel_uses_the_servers_definition_of_pending() -> None:
+    """Expired unswept rows stay auditable, but must never get decision controls (#154)."""
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    panel = source.split("async function viewApprovals(")[1].split("\nfunction approvalCard(")[0]
+
+    assert 'query: { status: "pending" }' in panel
+    assert 'query: { status: "resolved" }' in panel
+    assert 'query: { status: "all" }' not in panel
+    assert "pending.map((item, index) => approvalCard(item, index))" in panel
+
+
 def test_the_console_pulls_in_nothing_from_the_network() -> None:
     # It runs on a NAS behind a tailnet. A CDN reference would be a blank page there.
     for asset in UI_ASSETS:
