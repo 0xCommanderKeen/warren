@@ -82,6 +82,7 @@ from steward.runners import (
     build_runner,
     check_runner,
 )
+from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE, validate_kind_trigger
 from steward.sessions import (
     Refusal,
     ResidentSessions,
@@ -142,11 +143,6 @@ HEARTBEAT_EVERY_S = MAX_SLEEP_S
 #: :data:`HEARTBEAT_EVERY_S`, and a fire is still honest work up to ``catchup_s`` late, so
 #: a heartbeat older than the two together could not have fired anything on time anyway.
 STALE_TICK_AFTER_S = HEARTBEAT_EVERY_S + DEFAULT_CATCHUP_S
-
-#: Why a run happened. ``schedule`` is the clock coming round; ``manual`` is a human
-#: asking for it now through the API. The ledger has to be able to tell them apart.
-TRIGGER_SCHEDULE = "schedule"
-TRIGGER_MANUAL = "manual"
 
 STATE_VERSION = 0
 
@@ -892,8 +888,7 @@ class Scheduler:
         ``trigger`` is protocol data, not an arbitrary label; reject unknown values before
         opening a run or emitting an event that persistence could not represent.
         """
-        if trigger not in (TRIGGER_SCHEDULE, TRIGGER_MANUAL):
-            raise ValueError(f"invalid routine trigger: {trigger!r}")
+        validate_kind_trigger("routine", trigger)
         run_id = str(uuid.uuid4())
         moment = now or datetime.now(UTC)
         if not self._claim(item.key):

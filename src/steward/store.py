@@ -44,6 +44,20 @@ from pathlib import Path
 from typing import Any, Self
 
 from steward.events import utc_now_iso
+from steward.runs import (
+    RUN_DELEGATED,
+    RUN_KINDS,
+    RUN_ROUTINE,
+    RUN_TASK,
+    RUN_TRIGGERS,
+    validate_kind_trigger,
+)
+from steward.runs import (
+    TRIGGER_MANUAL as RUN_TRIGGER_MANUAL,
+)
+from steward.runs import (
+    TRIGGER_SCHEDULE as RUN_TRIGGER_SCHEDULE,
+)
 from steward.scheduler import default_state_path
 
 __all__ = [
@@ -52,8 +66,13 @@ __all__ = [
     "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
+    "RUN_DELEGATED",
     "RUN_KINDS",
+    "RUN_ROUTINE",
+    "RUN_TASK",
     "RUN_TRIGGERS",
+    "RUN_TRIGGER_MANUAL",
+    "RUN_TRIGGER_SCHEDULE",
     "STATUS_OPEN",
     "ApprovalRecord",
     "JobRecord",
@@ -89,19 +108,6 @@ STATUS_RESOLVED = "resolved"
 
 #: Every status a task on the board can be in. The board reports these and no others.
 JOB_STATUSES = (STATUS_OPEN, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED)
-
-#: Why a session ran. The ledger keeps them apart so "what did the board cost me this
-#: week" and "what did Hob's own routines cost me" are two answerable questions.
-RUN_ROUTINE = "routine"
-RUN_TASK = "task"
-RUN_DELEGATED = "delegated"
-RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED)
-
-#: Who asked for a routine session. Empty means the trigger was not recorded (legacy
-#: rows) or does not apply (board/delegated work); it must not be guessed as scheduled.
-RUN_TRIGGER_SCHEDULE = "schedule"
-RUN_TRIGGER_MANUAL = "manual"
-RUN_TRIGGERS = ("", RUN_TRIGGER_SCHEDULE, RUN_TRIGGER_MANUAL)
 
 #: Where spend lands when no task — and so no delegation origin — stands behind the run.
 #: A resident's own routines are the ordinary case, and they are named rather than
@@ -1489,8 +1495,7 @@ class Store:
         later: a caller that knows the chain says so, and the row stops depending on a
         join that can only guess.
         """
-        if trigger not in RUN_TRIGGERS:
-            raise ValueError(f"invalid run trigger: {trigger!r}")
+        validate_kind_trigger(kind, trigger)
         entry = LedgerEntry(
             entry_id=new_id(),
             resident=resident,
@@ -1850,8 +1855,7 @@ class Store:
         insert was quietly dropped, and the retry ran unwatched. ``ref`` is where the
         thing the session was about goes; several rows may share one.
         """
-        if trigger not in RUN_TRIGGERS:
-            raise ValueError(f"invalid run trigger: {trigger!r}")
+        validate_kind_trigger(kind, trigger)
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "INSERT INTO open_runs (run_id, kind, trigger, agent_id, project, ref, timeout_s, "

@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from steward import scheduler
 from steward.events import utc_now_iso
+from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE
 from steward.store import (
     ORIGIN_UNATTRIBUTED,
     ApprovalRecord,
@@ -359,24 +361,57 @@ def test_a_registry_written_before_trigger_existed_keeps_the_run_unknown(tmp_pat
         assert run.trigger == ""
 
 
-def test_run_triggers_are_validated_before_writing(store: Store) -> None:
-    with pytest.raises(ValueError, match="invalid run trigger"):
+@pytest.mark.parametrize(
+    ("kind", "trigger"),
+    [
+        ("routine", TRIGGER_SCHEDULE),
+        ("routine", TRIGGER_MANUAL),
+        ("task", ""),
+        ("delegated", ""),
+    ],
+)
+@pytest.mark.parametrize("write", ["record_run", "open_run"])
+def test_every_valid_kind_trigger_pair_can_be_written(
+    store: Store, kind: str, trigger: str, write: str
+) -> None:
+    if write == "record_run":
         store.record_run(
-            resident="hob",
-            agent_id="a:hob",
-            kind="routine",
-            run_id="bad-ledger",
-            trigger="button-ish",
+            resident="hob", agent_id="a:hob", kind=kind, run_id="valid", trigger=trigger
         )
-    with pytest.raises(ValueError, match="invalid run trigger"):
-        store.open_run(
-            run_id="bad-registry",
-            kind="routine",
-            agent_id="a:hob",
-            trigger="button-ish",
-        )
+        assert [(row.kind, row.trigger) for row in store.ledger()] == [(kind, trigger)]
+    else:
+        assert store.open_run(run_id="valid", kind=kind, agent_id="a:hob", trigger=trigger)
+        assert [(row.kind, row.trigger) for row in store.open_runs()] == [(kind, trigger)]
+
+
+@pytest.mark.parametrize(
+    ("kind", "trigger"),
+    [
+        ("routine", ""),
+        ("routine", "button-ish"),
+        ("task", TRIGGER_SCHEDULE),
+        ("task", TRIGGER_MANUAL),
+        ("delegated", TRIGGER_SCHEDULE),
+        ("delegated", TRIGGER_MANUAL),
+        ("unknown", ""),
+    ],
+)
+@pytest.mark.parametrize("write", ["record_run", "open_run"])
+def test_invalid_kind_trigger_pairs_are_rejected_before_writing(
+    store: Store, kind: str, trigger: str, write: str
+) -> None:
+    kwargs = {"agent_id": "a:hob", "kind": kind, "run_id": "bad", "trigger": trigger}
+    if write == "record_run":
+        kwargs["resident"] = "hob"
+    with pytest.raises(ValueError, match=r"invalid (run kind|trigger)"):
+        getattr(store, write)(**kwargs)
     assert store.ledger() == []
     assert store.open_runs() == []
+
+
+def test_scheduler_exports_the_shared_trigger_vocabulary() -> None:
+    assert scheduler.TRIGGER_SCHEDULE is TRIGGER_SCHEDULE
+    assert scheduler.TRIGGER_MANUAL is TRIGGER_MANUAL
 
 
 # ------------------------------------------------------------------------ approvals
@@ -732,6 +767,7 @@ def test_a_run_recorded_without_an_origin_is_named_rather_than_dropped(store: St
         resident="hob",
         agent_id="a:hob",
         kind="routine",
+        trigger=TRIGGER_SCHEDULE,
         run_id="r",
         ref="daily-summary",
         cost_usd=2.0,
@@ -758,6 +794,7 @@ def test_a_ref_that_collides_with_a_task_id_does_not_inherit_that_task(store: St
         resident="hob",
         agent_id="a:hob",
         kind="routine",
+        trigger=TRIGGER_SCHEDULE,
         run_id="r",
         ref=task.task_id,  # a routine whose id collides with a real task's
         origin="resident:hob",
@@ -816,6 +853,7 @@ def test_an_opened_run_is_open_until_it_is_closed(store: Store) -> None:
     assert store.open_run(
         run_id="r1",
         kind="routine",
+        trigger=TRIGGER_SCHEDULE,
         agent_id="claude-code:hob",
         project="household",
         ref="daily-summary",
@@ -834,14 +872,20 @@ def test_an_opened_run_is_open_until_it_is_closed(store: Store) -> None:
 
 def test_one_run_id_is_one_run(store: Store) -> None:
     """A second open of the same id is a repeat, not a second session."""
-    assert store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=EARLY)
-    assert not store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=LATER)
+    assert store.open_run(
+        run_id="r1", kind="routine", trigger=TRIGGER_SCHEDULE, agent_id="a:hob", now=EARLY
+    )
+    assert not store.open_run(
+        run_id="r1", kind="routine", trigger=TRIGGER_SCHEDULE, agent_id="a:hob", now=LATER
+    )
     assert [run.started_at for run in store.open_runs()] == [EARLY]
 
 
 def test_a_run_is_closed_once_however_late_its_session_reports(store: Store) -> None:
     """A run the watchdog already buried is not re-answered by a session that turned up."""
-    store.open_run(run_id="r1", kind="routine", agent_id="a:hob", now=EARLY)
+    store.open_run(
+        run_id="r1", kind="routine", trigger=TRIGGER_SCHEDULE, agent_id="a:hob", now=EARLY
+    )
 
     assert store.close_run("r1", now=EARLY)
     assert not store.close_run("r1", now=LATER)

@@ -989,6 +989,7 @@ def spend(harness: Harness, cost: float, *, resident: str = "test-agent") -> Non
         resident=resident,
         agent_id="claude-code:test-agent",
         kind="routine",
+        trigger="schedule",
         run_id="already-ran",
         cost_usd=cost,
         input_tokens=10,

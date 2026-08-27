@@ -1357,6 +1357,7 @@ def ledger_a_run(db: Path, cost: float, *, resident: str = "test-agent") -> None
             resident=resident,
             agent_id="claude-code:test-agent",
             kind="routine",
+            trigger="schedule",
             run_id="already-ran",
             ref="daily-summary",
             origin=f"resident:{resident}",
@@ -1522,6 +1523,7 @@ def test_budget_show_names_the_gap_when_a_brain_reported_nothing(
             resident="test-agent",
             agent_id="claude-code:test-agent",
             kind="routine",
+            trigger="schedule",
             run_id="quiet",
             usage_known=False,
         )
