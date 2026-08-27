@@ -51,7 +51,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from steward import events as ev
 from steward.approvals import NeedsHuman
@@ -304,15 +304,24 @@ def scan_unbracketed(  # noqa: PLR0913 — every knob is keyword-only and indepe
             current = dataclasses.replace(current, event_log_path=str(path.resolve()))
             started[current.run_id] = current
         try:
-            scans.setdefault(
-                current.event_log_path, _from_log(Path(current.event_log_path), required=True)
-            )
+            if current.event_log_path not in scans:
+                scans[current.event_log_path] = _from_log(
+                    Path(current.event_log_path), required=True
+                )
         except EventLogEvidenceError as exc:
             log.warning(
                 "refusing to bury runs recorded against %s: %s", current.event_log_path, exc
             )
             unsafe.add(current.run_id)
-    logged = _from_log(path, required=False)
+    try:
+        logged = _from_log(path, required=False)
+    except EventLogEvidenceError as exc:
+        # This default path is evidence only for legacy/unregistered runs. Corruption
+        # there cannot veto independent registered runs tied to other per-run paths.
+        if not registered:
+            raise
+        log.warning("could not scan legacy/unregistered runs in %s: %s", path, exc)
+        logged = _LogScan(started={}, closed_runs={})
     # The registry wins where both know a run; a closing event in the log wins over both,
     # because a run whose finish steward actually emitted did report back, however the
     # row it should have answered ended up.
@@ -354,9 +363,11 @@ def answered_runs(_path: Path, registry: Store | None = None) -> list[StaleRun]:
         if not current.event_log_path:
             current = dataclasses.replace(current, event_log_path=str(_path.resolve()))
         try:
-            scan = scans.setdefault(
-                current.event_log_path, _from_log(Path(current.event_log_path), required=True)
-            )
+            if current.event_log_path not in scans:
+                scans[current.event_log_path] = _from_log(
+                    Path(current.event_log_path), required=True
+                )
+            scan = scans[current.event_log_path]
         except EventLogEvidenceError as exc:
             log.warning(
                 "refusing to close runs recorded against %s: %s", current.event_log_path, exc
@@ -386,20 +397,27 @@ class _LogScan:
     """
 
     started: dict[str, StaleRun]
-    closed_runs: set[str]
+    closed_runs: dict[str, set[str]]
 
     def answers(self, run: StaleRun) -> bool:
         """Say whether the log holds a closing event for *this session*."""
-        return run.run_id in self.closed_runs
+        expected = (
+            {ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED}
+            if run.kind == RUN_ROUTINE
+            else {ev.TASK_DONE, ev.TASK_FAILED}
+        )
+        return bool(self.closed_runs.get(run.run_id, set()) & expected)
 
 
-def _from_log(path: Path, *, required: bool = False) -> _LogScan:
+def _from_log(  # noqa: C901, PLR0912
+    path: Path, *, required: bool = False
+) -> _LogScan:
     """Return what the fallback log says started, and what it says closed.
 
     A half-written final line is ignored because appenders can be interrupted. Any
     earlier malformed line refuses the scan: corruption is not evidence of no close.
     """
-    scan = _LogScan(started={}, closed_runs=set())
+    scan = _LogScan(started={}, closed_runs={})
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -411,16 +429,44 @@ def _from_log(path: Path, *, required: bool = False) -> _LogScan:
     lines = text.splitlines()
     torn_final = bool(text) and not text.endswith("\n")
     for index, line in enumerate(lines):
-        event = _parse_line(line)
-        if event is None:
-            if line.strip() and not (index == len(lines) - 1 and torn_final):
-                raise EventLogEvidenceError(f"event log {path} has an unreadable line {index + 1}")
+        if not line.strip():
             continue
-        payload = event.get("payload")
-        payload = payload if isinstance(payload, Mapping) else {}
+        try:
+            decoded = json.loads(line.strip())
+        except ValueError:
+            if index == len(lines) - 1 and torn_final:
+                continue
+            raise EventLogEvidenceError(
+                f"event log {path} has an unreadable line {index + 1}"
+            ) from None
+        if not isinstance(decoded, Mapping):
+            raise EventLogEvidenceError(f"event log {path} has a non-event line {index + 1}")
+        event = decoded
+        problems = ev.validate_event(event)
+        if event.get("source") != ev.EVENT_SOURCE:
+            problems += (f"source must be {ev.EVENT_SOURCE!r}",)
+        if event.get("type") not in ev.EVENT_TYPES:
+            problems += (f"unknown event type {event.get('type')!r}",)
+        if problems:
+            raise EventLogEvidenceError(
+                f"event log {path} has an invalid event on line {index + 1}: " + "; ".join(problems)
+            )
+        payload = cast("Mapping[str, Any]", event["payload"])
         kind = event.get("type")
         if kind in _CLOSING_TYPES:
-            _add(scan.closed_runs, payload.get("run_id"))
+            run_id = payload.get("run_id")
+            if run_id is not None:
+                subject = "task_id" if kind in {ev.TASK_DONE, ev.TASK_FAILED} else "routine"
+                if (
+                    not isinstance(run_id, str)
+                    or not run_id
+                    or not isinstance(payload.get(subject), str)
+                    or not payload.get(subject)
+                ):
+                    raise EventLogEvidenceError(
+                        f"event log {path} has invalid {kind} payload on line {index + 1}"
+                    )
+                scan.closed_runs.setdefault(run_id, set()).add(cast("str", kind))
             continue
         if kind != ev.ROUTINE_STARTED:
             continue
@@ -1043,6 +1089,11 @@ class Watchdog:
         if hasattr(self.runs, "publish_pending"):
             self.runs.publish_pending(self.emitter, now=now)
         for run in stale:
+            # A task death belongs to the lease sweep. If that sweep has not produced a
+            # run-specific terminal fact, leave the run pending; a generic routine death
+            # would be the wrong protocol and finalizing it without a sink would lose it.
+            if run.registered and run.kind != RUN_ROUTINE:
+                continue
             terminal = ev.routine_failed_event(
                 agent_id=run.agent_id,
                 project=run.project or run.agent_id,
@@ -1062,10 +1113,6 @@ class Watchdog:
                 registry_lost = False
             if registry_lost:
                 continue
-            if run.registered and run.kind != RUN_ROUTINE:
-                self.store.mark_run_terminal_published(
-                    run.run_id, f"run-terminal:{run.run_id}", now=ev.utc_now_iso(now)
-                )
             if not run.registered and not self.store.close_unbracketed_run(
                 run_id=run.run_id,
                 agent_id=run.agent_id,

@@ -638,21 +638,31 @@ class Dispatcher:
         declared_s = (
             self.delegation_timeout_s if job.delegated else resident.manifest.board.timeout_s
         )
+        run_id = new_id()
+        owner_token = new_owner_token()
         admitted = admission or self.sessions.admit(resident, now=moment)
         if isinstance(admitted, Refusal):
             result = RunResult(outcome=Outcome.FAILED, error=admitted.reason)
-            return self._record(
-                resident,
-                job,
-                result,
-                moment,
-                (),
-                run_id=new_id(),
+            watched = self._open_run(resident, job, run_id, declared_s, moment, owner_token)
+            ownership = (
+                self.run_transitions.owned(run_id, owner_token)
+                if watched
+                else contextlib.nullcontext()
             )
+            with ownership:
+                return self._finish(
+                    resident,
+                    job,
+                    result,
+                    moment,
+                    (),
+                    run_id=run_id,
+                    owner_token=owner_token,
+                    watched=watched,
+                )
         # This session's own id, and not the task's: a task claimed, dropped on a dead
         # lease and claimed again is *two* sessions, and the registry has to be able to
         # hold both of them open at once (steward #39).
-        run_id = new_id()
         if job.delegated:
             wake = DelegatedWake(
                 task_id=job.task_id,
@@ -679,7 +689,6 @@ class Dispatcher:
         # The deadline this session actually gets, read once: the run registry is judged
         # against it, and the runner is given it.
         timeout_s = admitted.timeout_for(declared_s)
-        owner_token = new_owner_token()
         watched = self._open_run(resident, job, run_id, timeout_s, moment, owner_token)
 
         ownership = (
@@ -688,46 +697,89 @@ class Dispatcher:
         with ownership:
             session = self.sessions.run(admitted, wake)
             result = session.require_result()
-            report = self._record(
+            return self._finish(
                 resident,
                 job,
                 result,
-                moment,
+                session.completed_at or moment,
                 cast("tuple[ApprovalRecord, ...]", session.raised),
                 handed=cast("tuple[dg.Delivery, ...]", session.handed_over),
                 run_id=run_id,
+                owner_token=owner_token,
+                watched=watched,
             )
-            terminal = (
-                ev.task_done_event(
-                    task_id=job.task_id,
-                    title=job.title,
+
+    def _finish(  # noqa: PLR0913
+        self,
+        resident: Resident,
+        job: JobRecord,
+        result: RunResult,
+        moment: datetime,
+        raised: Sequence[ApprovalRecord],
+        *,
+        run_id: str,
+        owner_token: str,
+        watched: bool,
+        handed: Sequence[dg.Delivery] = (),
+    ) -> BoardReport:
+        """Atomically commit a board outcome with its replayable terminal fact."""
+        terminal = (
+            ev.task_done_event(
+                task_id=job.task_id,
+                title=job.title,
+                claimant=resident.agent_id,
+                project=resident.project,
+                artifacts=result.artifacts,
+                parent_task_id=job.parent_task_id,
+                run_id=run_id,
+            )
+            if result.ok
+            else ev.task_failed_event(
+                task_id=job.task_id,
+                title=job.title,
+                claimant=resident.agent_id,
+                project=resident.project,
+                reason=f"{result.outcome}: {result.summary()}",
+                parent_task_id=job.parent_task_id,
+                run_id=run_id,
+            )
+        )
+        if watched:
+            recorded = self.run_transitions.task_session_claim(
+                job,
+                terminal,
+                result=result,
+                claimant=resident.agent_id,
+                owner_token=owner_token,
+                now=moment,
+            )
+            if recorded is not None:
+                self.run_transitions.publish_pending(self.emitter, now=moment)
+                return BoardReport(
+                    resident_id=resident.id,
                     claimant=resident.agent_id,
-                    project=resident.project,
+                    task=recorded,
+                    status=recorded.status,
+                    result=result,
+                    reason=None if result.ok else f"{result.outcome}: {result.summary()}",
                     artifacts=result.artifacts,
-                    parent_task_id=job.parent_task_id,
-                    run_id=run_id,
+                    raised=tuple(raised),
+                    handed_over=tuple(handed),
                 )
-                if result.ok
-                else ev.task_failed_event(
-                    task_id=job.task_id,
-                    title=job.title,
-                    claimant=resident.agent_id,
-                    project=resident.project,
-                    reason=f"{result.outcome}: {result.summary()}",
-                    parent_task_id=job.parent_task_id,
-                    run_id=run_id,
-                )
+            return BoardReport(
+                resident_id=resident.id,
+                claimant=resident.agent_id,
+                task=job,
+                status=STATUS_FAILED,
+                result=result,
+                reason="lease lost while the session was running",
+                raised=tuple(raised),
+                handed_over=tuple(handed),
             )
-            if watched:
-                self.run_transitions.session_claim(
-                    run_id, terminal, owner_token=owner_token, now=session.completed_at or moment
-                )
-                self.run_transitions.publish_pending(
-                    self.emitter, now=session.completed_at or moment
-                )
-            elif report.reason != "lease lost while the session was running":
-                self.emitter.emit(terminal)
-            return report
+        report = self._record(resident, job, result, moment, raised, run_id=run_id, handed=handed)
+        if report.reason != "lease lost while the session was running":
+            self.emitter.emit(terminal)
+        return report
 
     # -- the run registry ---------------------------------------------------------------
 

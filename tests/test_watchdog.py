@@ -337,10 +337,10 @@ def test_a_closing_event_in_the_log_answers_an_open_registry_row(
     assert w.scan_unbracketed(log, now=NOW, registry=store) == []
 
 
-def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
+def test_a_stale_task_without_a_run_specific_outcome_stays_pending(
     resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
-    """The board's lease sweep owns a task's death; the watchdog only answers the row."""
+    """The board owns the death; the watchdog cannot invent or silently publish it."""
     store.open_run(
         run_id="task-1",
         kind="task",
@@ -354,8 +354,8 @@ def test_a_stale_task_is_closed_in_the_registry_but_not_mourned_twice(
 
     report = build(resident, store, sink, tmp_path).tick(NOW)
 
-    assert [run.run_id for run in report.buried] == ["task-1"]
-    assert store.open_runs() == [], "the registry row is answered"
+    assert report.buried == ()
+    assert [run.run_id for run in store.open_runs()] == ["task-1"]
     assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
 
 

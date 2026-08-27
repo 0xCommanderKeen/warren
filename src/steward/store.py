@@ -86,6 +86,11 @@ STATUS_FAILED = "failed"
 STATUS_PENDING = "pending"
 STATUS_RESOLVED = "resolved"
 
+
+class _AtomicTaskCloseLostError(Exception):
+    """Rollback sentinel for a task/run close that lost either conditional write."""
+
+
 #: Every status a task on the board can be in. The board reports these and no others.
 JOB_STATUSES = (STATUS_OPEN, STATUS_CLAIMED, STATUS_DONE, STATUS_FAILED)
 
@@ -1167,6 +1172,70 @@ class Store:
             if cursor.rowcount == 0:
                 return None
             row = self._conn.execute("SELECT * FROM jobs WHERE task_id = ?", (task_id,)).fetchone()
+        return JobRecord.from_row(row)
+
+    def finish_job_and_claim_run_terminal(  # noqa: PLR0913
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        event: str,
+        event_id: str,
+        status: str,
+        claimant: str,
+        outcome: str | None = None,
+        reason: str | None = None,
+        artifacts: Sequence[str] = (),
+        lease: str | None = None,
+        owner_token: str | None = None,
+        stale_before: str | None = None,
+        now: str | None = None,
+    ) -> JobRecord | None:
+        """Close one claim and choose its immutable terminal fact in one transaction."""
+        moment = now or utc_now_iso()
+        try:
+            with self._lock, self._conn:
+                if owner_token is not None:
+                    run = self._conn.execute(
+                        "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                        "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                        "AND terminal_event IS NULL AND owner_token = ?",
+                        (event, event_id, moment, run_id, owner_token),
+                    )
+                else:
+                    run = self._conn.execute(
+                        "UPDATE open_runs SET terminal_event = ?, terminal_event_id = ?, "
+                        "terminal_claimed_at = ? WHERE run_id = ? AND closed_at IS NULL "
+                        "AND terminal_event IS NULL AND heartbeat_at <= ?",
+                        (event, event_id, moment, run_id, stale_before),
+                    )
+                if run.rowcount == 0:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                job = self._conn.execute(
+                    "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
+                    "finished_at = ?, lease_expires_at = NULL "
+                    "WHERE task_id = ? AND status = ? AND claimant = ? "
+                    "AND (? IS NULL OR claimed_at = ?)",
+                    (
+                        status,
+                        outcome,
+                        reason,
+                        _dumps(list(artifacts)),
+                        moment,
+                        task_id,
+                        STATUS_CLAIMED,
+                        claimant,
+                        lease,
+                        lease,
+                    ),
+                )
+                if job.rowcount == 0:
+                    raise _AtomicTaskCloseLostError  # noqa: TRY301
+                row = self._conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
+                ).fetchone()
+        except _AtomicTaskCloseLostError:
+            return None
         return JobRecord.from_row(row)
 
     def expire_leases(self, now: str | None = None) -> list[JobRecord]:

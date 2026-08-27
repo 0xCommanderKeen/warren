@@ -116,6 +116,34 @@ class RunTransitions:
             )
         )
 
+    def task_session_claim(  # noqa: PLR0913
+        self,
+        job: Any,  # noqa: ANN401
+        event: ev.Event,
+        *,
+        result: Any,  # noqa: ANN401
+        claimant: str,
+        owner_token: str,
+        now: datetime,
+    ) -> Any | None:  # noqa: ANN401
+        """Atomically finish a board claim and choose the exact fact that reports it."""
+        event_id = f"run-terminal:{event.payload['run_id']}"
+        event = _identified(event, event_id)
+        return cast("Any", self.store).finish_job_and_claim_run_terminal(
+            job.task_id,
+            run_id=event.payload["run_id"],
+            event=event.to_json(),
+            event_id=event_id,
+            status="done" if result.ok else "failed",
+            claimant=claimant,
+            outcome=str(result.outcome),
+            reason=None if result.ok else f"{result.outcome}: {result.summary()}",
+            artifacts=result.artifacts,
+            lease=job.claimed_at,
+            owner_token=owner_token,
+            now=ev.utc_now_iso(now),
+        )
+
     def watchdog_claim(
         self, run_id: str, event: ev.Event, *, now: datetime, grace_s: float
     ) -> bool:
