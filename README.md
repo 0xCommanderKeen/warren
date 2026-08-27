@@ -1,2 +1,32 @@
-# arcadia
-A persistent pixel-art village inhabited by autonomous AI agents.
+# Arcadia
+
+Arcadia is the village client for [Burrow](https://github.com/0xCommanderKeen/burrow). React owns the interface and Phaser owns the canvas, connected through the EventBus bridge supplied by `phaserjs/template-react`.
+
+This repository consumes Burrow's complete, versioned `StateEnvelope` contract. The vendored [`complete-v1.json`](src/contract/fixtures/complete-v1.json) is the current compatibility fixture. Arcadia accepts `snapshot` and `reset` envelopes whose `snapshot.schema_version` is `1`, then renders `snapshot.villagers` directly. It rejects unsupported schema versions before applying any state.
+
+Arcadia is allowed to read only these Burrow endpoints:
+
+- `GET /state` — complete snapshots, or `204` when unchanged.
+- `GET /state/stream` — server-sent `snapshot` and `reset` envelopes.
+
+It does not consume `/events` or recreate Burrow's projection decisions. During development, Vite proxies both allowed paths (the `/state` prefix) to `http://127.0.0.1:8737`; set `BURROW_URL` to use another Burrow origin.
+
+## Development
+
+Requires Node.js 24 and pnpm 11.
+
+```sh
+pnpm install
+pnpm dev
+```
+
+The initial screen deliberately uses the vendored fixture. A later transport slice can replace that import with either allowed endpoint without changing the parser or renderer.
+
+## Verification
+
+```sh
+pnpm test
+pnpm build
+```
+
+`pnpm test` parses Burrow's complete fixture and checks that an unsupported contract version produces a visible error instead of a partially rendered village.
