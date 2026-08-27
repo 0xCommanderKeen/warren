@@ -54,13 +54,19 @@ class HealthJournal:
         lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
             try:
-                latest = _latest(fd)
-                size = os.fstat(fd).st_size
-                torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
-            finally:
-                os.close(fd)
+                fd = os.open(self.path, os.O_RDWR | os.O_APPEND)
+            except FileNotFoundError:
+                latest = None
+                size = 0
+                torn = False
+            else:
+                try:
+                    latest = _latest(fd)
+                    size = os.fstat(fd).st_size
+                    torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
+                finally:
+                    os.close(fd)
             record = {
                 "version": 1,
                 "count": (latest.count if latest else 0) + 1,
@@ -71,7 +77,9 @@ class HealthJournal:
                 "failed_at": now or utc_now_iso(),
             }
             line = json.dumps(record, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-            if torn or size + len(line) > COMPACT_AT_BYTES:
+            if size == 0:
+                _atomic_replace(self.path, line)
+            elif torn or size + len(line) > COMPACT_AT_BYTES:
                 if torn and size + len(line) <= COMPACT_AT_BYTES:
                     existing = self.path.read_bytes()
                     payload = existing[: existing.rfind(b"\n") + 1] + line

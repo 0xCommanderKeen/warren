@@ -667,6 +667,40 @@ def test_health_failures_are_independent_durable_counted_and_corruption_tolerant
     assert failure.failed_at == LATER
 
 
+def test_first_health_failure_atomically_creates_and_syncs_the_journal_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    journal = health.HealthJournal(tmp_path / "steward.db")
+    assert journal.path is not None
+    calls: list[tuple[str, object]] = []
+    real_fsync = health.os.fsync
+    real_replace = health.os.replace
+
+    def fsync(fd: int) -> None:
+        calls.append(("fsync", "directory" if health.os.fstat(fd).st_mode & 0o040000 else "file"))
+        real_fsync(fd)
+
+    def replace(source: str, destination: Path) -> None:
+        calls.append(("replace", destination))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(health.os, "fsync", fsync)
+    monkeypatch.setattr(health.os, "replace", replace)
+
+    journal.record(kind="ledger_write", resident="hob", run_id="first", error="locked", now=EARLY)
+
+    assert calls == [
+        ("fsync", "file"),
+        ("replace", journal.path),
+        ("fsync", "directory"),
+    ]
+    assert journal.path.read_text(encoding="utf-8") == (
+        '{"version":1,"count":1,"kind":"ledger_write","resident":"hob",'
+        '"run_id":"first","error":"locked",'
+        f'"failed_at":"{EARLY}"}}\n'
+    )
+
+
 @pytest.mark.parametrize("failed_operation", ["write", "fsync", "replace"])
 def test_failed_health_compaction_keeps_the_previous_evidence(
     failed_operation: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
