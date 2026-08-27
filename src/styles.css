@@ -1,0 +1,48 @@
+:root {
+  color: #15241c;
+  background: #eee5d1;
+  font-family: Georgia, "Times New Roman", serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+
+.app-shell { min-height: 100vh; padding: clamp(1rem, 3vw, 2.5rem); }
+
+.masthead { display: flex; align-items: end; justify-content: space-between; max-width: 1280px; margin: 0 auto 1rem; }
+
+h1, h2, p { margin: 0; }
+
+h1 { font-size: clamp(2.5rem, 7vw, 5rem); font-weight: 400; letter-spacing: -0.06em; }
+
+.eyebrow, .status, .villager__state { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; }
+
+.village { position: relative; max-width: 1280px; min-height: 68vh; margin: auto; overflow: hidden; border: 1px solid #1d3328; background: #d8c59e; box-shadow: 10px 10px 0 #1d3328; }
+
+.village__canvas { position: absolute; inset: 0; opacity: 0.16; }
+
+.villagers { position: relative; z-index: 1; display: grid; gap: 0.75rem; width: min(26rem, calc(100% - 2rem)); padding: 1rem; }
+
+.villager { display: grid; grid-template-columns: auto 1fr auto; gap: 0.9rem; align-items: center; padding: 0.9rem; border: 1px solid #1d3328; background: rgb(250 246 235 / 92%); }
+
+.villager__mark { width: 0.85rem; height: 2.75rem; background: var(--villager-accent, #6a7b67); }
+
+.villager h2 { font-size: 1.3rem; font-weight: 400; }
+
+.villager p { color: #566158; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+
+.villager__state { color: #785a25; }
+
+.app-shell--error { display: grid; place-items: center; background: #2a1817; color: #f4dfcc; }
+
+.contract-error { max-width: 42rem; border-left: 5px solid #d96b54; padding: 1.25rem 1.5rem; }
+
+.contract-error h1 { margin: 0.5rem 0 1rem; font-size: clamp(2rem, 5vw, 4rem); }
+
+@media (max-width: 600px) {
+  .masthead { align-items: start; flex-direction: column; gap: 0.5rem; }
+  .villager { grid-template-columns: auto 1fr; }
+  .villager__state { grid-column: 2; }
+}
