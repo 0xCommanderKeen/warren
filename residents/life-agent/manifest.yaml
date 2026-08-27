@@ -116,6 +116,22 @@ runner:
   kind: claude
   model: claude-opus-5
 
+# A ceiling, not a forecast. Hob is opus with twenty-six scheduled runs a day — the hourly
+# inbox-read plus the two bookends — before board claims and anything Maren hands him, so
+# the number has to sit well clear of a busy day: a cap that trips at mid-morning does not
+# protect the household, it stops it. Ten dollars is roughly three times what a heavy day
+# should come to. A routine that loops or a delegation chain that fans out reaches it and
+# knocks, which is the point — until now there was no threshold for the pause machinery to
+# trip on at all (steward #159), and an uncapped resident and a cap that cannot fire look
+# identical from the console.
+#
+# It is a judgement, not a measurement: no opus resident has ever run through the ledger,
+# so the only spend steward has ever recorded is Pip's ($0.02 a run, on haiku). Revisit
+# with `steward budget show` after the first week of the pilot (#29) and set it from what
+# a real week costs.
+budgets:
+  daily_cost_usd: 10.0
+
 # Where Hob actually runs today — read off the running container, not aspirational
 # (steward #52). This block exists so the watchdog can supervise the resident that has
 # been up longest: without `deploy.container` it reports Hob as *unsupervised*, which was

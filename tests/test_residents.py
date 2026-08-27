@@ -71,6 +71,19 @@ def test_no_shipped_resident_declares_a_journal_it_cannot_keep() -> None:
         assert journal.journal_complaint(resident.manifest) is None, resident.id
 
 
+def test_every_shipped_resident_declares_a_daily_cost_cap() -> None:
+    """An absent cap and a cap that cannot trip read exactly the same from the console.
+
+    Absent budgets stay legal and are reported honestly as ``"limit": null`` — but for a
+    resident steward actually fires, absent means the pause machinery has no threshold to
+    trip on, however wrong the day is going (steward #159).
+    """
+    for resident in m.validate_tree(RESIDENTS_DIR).residents:
+        assert resident.manifest.budgets.daily_cost_usd is not None, (
+            f"{resident.id} runs uncapped: nothing bounds what a day may cost"
+        )
+
+
 def test_shipped_souls_have_voices_within_the_cap() -> None:
     for resident in m.validate_tree(RESIDENTS_DIR).residents:
         assert resident.soul.voice, f"{resident.id} has no ## Voice section"
