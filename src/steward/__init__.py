@@ -24,8 +24,10 @@ from steward.delegation import DelegationError, Delegator, Handoff, extract_hand
 from steward.events import Event, EventEmitter, NullEmitter
 from steward.journal import (
     JournalEntry,
+    cap_entry,
     journal_complaint,
     latest_entry,
+    latest_entry_text,
     read_entries,
     resolve_journal_dir,
 )
@@ -141,6 +143,7 @@ __all__ = [
     "assemble_routine_prompt",
     "assemble_task_prompt",
     "build_runner",
+    "cap_entry",
     "claimable_skills",
     "create_app",
     "day_window",
@@ -151,6 +154,7 @@ __all__ = [
     "extract_requests",
     "journal_complaint",
     "latest_entry",
+    "latest_entry_text",
     "library_for",
     "load_library",
     "load_manifest",
