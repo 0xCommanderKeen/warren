@@ -986,6 +986,18 @@ def test_legacy_import_reports_non_missing_os_errors(
     assert emitter.import_legacy(source) == ev.ImportReport(errors=1, unknown=1)
 
 
+def test_an_unwritable_fallback_is_not_a_durable_outbox_receipt(tmp_path: Path) -> None:
+    blocked = tmp_path / "a-file"
+    blocked.write_text("not a directory", encoding="utf-8")
+    emitter = ev.EventEmitter(fallback=blocked / "events.jsonl")
+    assert emitter.emit_durable(context().started("schedule")) is False
+
+
+def test_a_fallback_append_is_a_durable_outbox_receipt(tmp_path: Path) -> None:
+    emitter = ev.EventEmitter(fallback=tmp_path / "events.jsonl")
+    assert emitter.emit_durable(context().started("schedule")) is True
+
+
 def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:
     emitter = ev.EventEmitter(url="file:///etc/passwd", fallback=tmp_path / "e.jsonl")
     assert emitter.emit(context().started("schedule")) is False

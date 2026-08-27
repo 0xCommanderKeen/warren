@@ -1,4 +1,5 @@
 UV ?= uv
+PYTHON ?= $(UV) run python
 
 # --------------------------------------------------------------------------------------
 # the resident runtime image (docker/resident/)
@@ -88,11 +89,16 @@ image-ship:
 # Refuses when burrow's own copy is uncommitted: a provenance line naming a commit that
 # does not contain these bytes would be worse than no provenance line at all.
 vendor-emitter:
-	@test -d "$(BURROW)/.git" || { echo "no burrow checkout at $(BURROW); pass BURROW=/path/to/burrow"; exit 1; }
-	@git -C "$(BURROW)" diff --quiet -- hooks/emit.py || { echo "$(BURROW)/hooks/emit.py has uncommitted changes; commit them in burrow first"; exit 1; }
-	@commit=$$(git -C "$(BURROW)" log -1 --format=%H -- hooks/emit.py); \
+	@git -C "$(BURROW)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no burrow checkout at $(BURROW); pass BURROW=/path/to/burrow"; exit 1; }
+	@git -C "$(BURROW)" cat-file -e HEAD:hooks/emit.py 2>/dev/null && \
+	 git -C "$(BURROW)" diff --quiet HEAD -- hooks/emit.py || { echo "$(BURROW)/hooks/emit.py has uncommitted changes; commit them in burrow first"; exit 1; }
+	@set -eu; \
+	 commit=$$(git -C "$(BURROW)" log -1 --format=%H -- hooks/emit.py); \
 	 when=$$(git -C "$(BURROW)" log -1 --format=%cs -- hooks/emit.py); \
-	 sum=$$(shasum -a 256 "$(BURROW)/hooks/emit.py" | cut -d' ' -f1); \
+	 test -n "$$commit"; \
+	 test -n "$$when"; \
+	 sum=$$($(PYTHON) -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$(BURROW)/hooks/emit.py"); \
+	 test -n "$$sum"; \
 	 { \
 	   echo "# Vendored from burrow. DO NOT EDIT HERE — edit hooks/emit.py in burrow and"; \
 	   echo "# re-run \`make vendor-emitter BURROW=/path/to/burrow\` in steward."; \

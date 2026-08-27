@@ -278,6 +278,11 @@ class NullEmitter:
         self.events.append(event)
         return False
 
+    def emit_durable(self, event: Event) -> bool:
+        """Treat the explicit in-memory test record as the durable sink for arbitration tests."""
+        self.events.append(event)
+        return True
+
 
 @dataclass(frozen=True, slots=True)
 class FlushReport:
@@ -930,6 +935,24 @@ class EventEmitter:
             log.exception("could not confirm event delivery from replay queue %s", self.queue)
             return False
         return not any(r["delivery_id"] == delivery_id for r in remaining)
+
+    def emit_durable(self, event: Event) -> bool:
+        """Deliver an event and report whether any durable sink accepted it.
+
+        Unlike :meth:`emit`'s historical remote-only receipt, this is the acknowledgement
+        durable outboxes need: a successful remote POST or a successful fallback append
+        is enough. Total transport and fallback failure remains non-raising but returns
+        ``False``, so the outbox stays pending.
+        """
+        line = event.to_json()
+        delivered = False
+        if self.url and not self._breaker_open(self.url):
+            if self._post(self.url, line.encode("utf-8")):
+                delivered = True
+            else:
+                self._trip_breaker(self.url)
+        persisted = self._append_line(self.fallback, line, purpose="in the watchdog log")
+        return delivered or persisted
 
     def emit_many(self, events: Sequence[Event]) -> None:
         """Deliver several events in order."""

@@ -117,7 +117,7 @@ the way it learns of any other.
 | **before → after** | `claimed` → `open`, `claimant=NULL`, `claimed_at=NULL`, `lease_expires_at=NULL` |
 | **outcomes** | applied per swept row, and only that: a row that changed under the sweep never reaches the seam, because `Store.expire_leases` appends a record only on `rowcount==1` and drops the rest. `Dispatcher.expire_leases` still guards on `.wrote` before `require()`, so a seam that one day *does* surface the lost race cannot turn it into a `ValueError` mid-dispatch |
 | **returns** | `list[Transition[JobRecord]]`, one per lease swept — a sweep is a batch of transitions and says so; `Dispatcher.expire_leases` reads the rows off. Building a transition and dropping it would make `outcome.applied` a fire-and-forget emit conduit |
-| **fact** | `task_failed` with `reason='lease_expired'`, `agent_id = job.claimant or steward:api`, `project` resolved from the fleet or `steward`, `parent_task_id` when set, and **no `run_id`** — this is the board mourning a claim, not a session reporting back, and naming a session would answer a registry row this sweep knows nothing about (#39) |
+| **fact** | `task_failed` with `reason='lease_expired'`, `agent_id = job.claimant or steward:api`, `project` resolved from the fleet or `steward`, `parent_task_id` when set, and the exact attempt `run_id` for bound claims. Reopening the job and choosing that run terminal are one transaction; legacy unbound claims retain the old ID-less fact, while a legacy claim with a possibly matching open run is left untouched rather than guessed at. |
 | **row shape emitted from** | the row *as it was when the lease died* (claimant still named), not the reopened row |
 | **callers** | `Dispatcher.dispatch`, including `sweep_only` (scheduler tick, watchdog pass) |
 
@@ -156,11 +156,11 @@ the way it learns of any other.
 | | |
 |---|---|
 | **owner** | `ApprovalTransitions.decide`, called by `POST /approvals/{id}` and by the budget resume |
-| **guard** | `UPDATE … WHERE request_id=? AND status='pending' AND (expires_at IS NULL OR expires_at > now)` |
-| **outcomes** | applied (`recorded=True`) · refused (`record is None` — no such request) · **expired** (`recorded=False` and the row is still `pending`: past the deadline, `409 approval_expired`, deny-by-default keeps the last word) · **replayed** (`recorded=False` and the row is resolved: the first decision won; `200`, read back, nothing emitted) |
+| **guard** | the request exists, is still pending and unexpired, and `decision` is in its persisted `options`; then `UPDATE … WHERE request_id=? AND status='pending' AND (expires_at IS NULL OR expires_at > now)` |
+| **outcomes** | applied (`recorded=True`) · refused (`record is None` — no such request; or a pending row carrying the offered set — decision not offered, `409 approval_decision_not_offered`) · **expired** (`recorded=False` and the row is still `pending`: past the deadline, `409 approval_expired`, deny-by-default keeps the last word) · **replayed** (`recorded=False` and the row is resolved: the first decision won; `200`, read back; it may retry that decision's still-pending announcement) |
 | **before → after** | `pending` → `resolved`, `decision`, `decided_by`, `decided_at`, `edit` |
 | **fact** | `needs_human_resolved`, `agent_id = record.agent_id`, `project = record.project`, payload `{request_id, decision, decided_by, action}` — emitted under the *resident's* identity, because the villager walking away from your door is the one who knocked |
-| **ordering** | store → emit → request-log `accept` → budget resume (the resume is a workflow concern, not part of this transition) |
+| **ordering** | atomic decision + outbox row + correlated API request-log row → atomic leased claim → emit → durable acknowledgement → idempotent completion effects (including budget resume) + request-log completion → durable effects marker. The API returns the per-call ledger id as `request_id` and the stable approval id as `approval_request_id`; every replay gets its own correlated, pollable row, and completion finalizes all such rows. The API lifecycle owns one wakeable worker: after a decision or expiry transition has queued rows, it drains immediately on startup/new local work, polls at a bounded interval for commits from other processes, retries transient failures with bounded exponential backoff, and wakes sooner at an exact retry or lease deadline. It does not detect deadline expiry; the approval sweep owns that transition. Shutdown raises if an active pass exceeds its configured deadline. A crash after emit and before acknowledgement may repeat the event, so `payload.request_id` is the consumer idempotency key; a crash after acknowledgement resumes from the separate effects marker. Decisions are exactly once; announcements are at least once. |
 
 #### A3 — expire (deny by default)
 
@@ -200,13 +200,34 @@ the way it learns of any other.
 | **already answered** | a person may have denied the unpause from a panel and somebody may then lift the same pause from a terminal. The pause still lifts — a terminal is a person too — but the inner A2 comes back **replayed**, the approval log keeps the deny, and nothing new is emitted. That is logged at `WARNING`, and the inner transition is kept on `Transition.via` so a caller can render it rather than seeing only "applied, silently" |
 | **callers** | `steward budget unpause` (`decide=True`), `POST /approvals/{id}` via `_resume_if_budget` (`decide=False`) |
 
-### 1.4 What is deliberately *not* in the matrix
+### 1.4 Run-close arbitration
+
+Routine events remain outside the domain-row matrix, but their terminal transition has a
+named seam in `steward.run_lifecycle`. Opening a registry row begins a renewable ownership
+lease fenced by an unguessable owner token. The session renews it through accounting,
+harvesting, delegation, the domain-row close, and the event tail. At the terminal seam the
+owner or a stale-heartbeat watchdog atomically stores one immutable event and stable event
+identity. Any process may replay that chosen fact; the row closes only after the remote or
+fsynced local sink accepts it. A crash before emit and a crash after emit but before close
+therefore recover the same outcome at least once, never a contradictory outcome.
+
+Each row names its own canonical evidence file. Watchdogs group rows by that path, so a
+missing, unreadable, or corrupt file blocks only its rows. A malformed final record is
+ignored only when the file lacks its terminating newline (a torn append); a complete
+malformed line blocks burial. Schema-migrated rows with no path are legacy-unknown and are
+refused loudly until an operator migrates or closes them.
+
+The lease deliberately does not record or probe a PID. Scheduler, board, and watchdog can
+run in different processes, hosts, containers, and PID namespaces; a PID is neither a
+portable identity nor durable proof. A timestamp renewed through the shared SQLite store
+is the liveness fact all those deployments can verify.
+
+### 1.5 What is deliberately *not* in the matrix
 
 Routine bracketing (`routine_started` / `routine_finished` / `routine_failed`) and
-`resident_restarted` are transitions of a *run*, not of a durable domain row: the run
-registry row and the event are already paired inside the scheduler and the watchdog, and
-#123 names them out of scope. They are listed here so the omission is a decision rather
-than an oversight. The watchdog's give-up *knock* is in scope, because it is an A1.
+`resident_restarted` are transitions of a *run*, not of the task/approval/budget domain
+rows in this matrix. The run registry and terminal ownership seam above pair the close;
+the watchdog's give-up *knock* remains in scope here because it is an A1.
 
 ---
 

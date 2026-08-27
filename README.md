@@ -67,12 +67,15 @@ failing and lease expiry in `transitions/task.py`; raising, deciding and expirin
 `transitions/approval.py`; accepted handoffs in `transitions/delegation.py`; pause and
 resume in `transitions/budget.py`. Callers ask for the domain act and get its durable
 result — they no longer interpret a `rowcount`, choose an identity, or decide whether to
-emit. The invariant is one sentence: a fact reaches the emitter only on the branch where
-the write actually won, and exactly once. Refusals, replays, expiries and lost races write
-nothing and say nothing; the one deliberate exception, a repeat auto-deny, is named as its
-own outcome so it cannot happen anywhere by accident. Persistence and delivery stay two
-systems — there is no bus, no outbox, and no callback out of the store. The full matrix is
-`docs/transitions.md`.
+emit. The invariant is one sentence: a fact reaches the emitter only after the write
+actually won. Refusals, expiries and lost races write nothing and say nothing; the one
+deliberate exception, a repeat auto-deny, is named as its own outcome so it cannot happen
+anywhere by accident. Persistence and delivery stay two systems. Approval resolution is
+the one transition with a durable SQLite outbox: decisions are exactly once, while their
+announcements retry at least once and use `request_id` as the consumer idempotency key.
+The API lifecycle owns the retry worker; transient failures recover without a client
+replay or process restart, and completion effects wait for durable acknowledgement.
+The full matrix is `docs/transitions.md`.
 
 **The journal and the soul voice** (#5, #9). A resident closes its day by writing a short
 markdown entry into the location its own manifest declares, and the next session opens
@@ -198,6 +201,17 @@ a row per session, written where the opening event is emitted and closed where t
 one is. That row exists whatever happened to the events, so a session that died after its
 `routine_started` reached burrow is found — which it was not while the only thing the
 watchdog could read was the log of events burrow never received.
+
+Age alone is not death. Each registry row also carries a renewable ownership lease and
+the absolute path of the complete local event record. The scheduler and board renew the
+lease through the whole lifecycle, including accounting, harvesting, delegation, task
+closure, and terminal publication after the child exits. The live owner and watchdog race
+to store one immutable terminal event under a fencing token/stale-heartbeat condition.
+That chosen event has a stable identity, is replayed after either crash window, and closes
+only after a remote or fsynced local sink accepts it. Each row's own recorded event-log
+path is checked independently; missing, unreadable, or corrupt evidence blocks that path's
+rows without hiding healthy rows elsewhere. Legacy migrated rows with no known path are
+refused loudly. Only a malformed final line lacking a newline is treated as a torn append.
 
 ```console
 $ steward budget show                # today's spend against every declared cap
@@ -473,7 +487,8 @@ only fail should look like one before it is pressed.
 
 ## Development
 
-Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
+Python 3.14, Node.js 22, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest. Node runs the
+browser-free UI behavior tests as part of pytest; `.node-version` is the supported major.
 
 ```console
 make dev       # uv sync --all-groups
