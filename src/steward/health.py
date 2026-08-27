@@ -10,6 +10,8 @@ operation; ``fsync`` makes a returned write durable across a restart.
 import fcntl
 import json
 import os
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -48,10 +50,17 @@ class HealthJournal:
         if self.path is None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            latest = _latest(fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                latest = _latest(fd)
+                size = os.fstat(fd).st_size
+                torn = size > 0 and os.pread(fd, 1, size - 1) != b"\n"
+            finally:
+                os.close(fd)
             record = {
                 "version": 1,
                 "count": (latest.count if latest else 0) + 1,
@@ -62,31 +71,73 @@ class HealthJournal:
                 "failed_at": now or utc_now_iso(),
             }
             line = json.dumps(record, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
-            if os.fstat(fd).st_size + len(line) > COMPACT_AT_BYTES:
-                os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_END)
-            view = memoryview(line)
-            while view:
-                view = view[os.write(fd, view) :]
-            os.fsync(fd)
+            if torn or size + len(line) > COMPACT_AT_BYTES:
+                if torn and size + len(line) <= COMPACT_AT_BYTES:
+                    existing = self.path.read_bytes()
+                    payload = existing[: existing.rfind(b"\n") + 1] + line
+                else:
+                    payload = line
+                _atomic_replace(self.path, payload)
+            else:
+                fd = os.open(self.path, os.O_WRONLY | os.O_APPEND)
+                try:
+                    _write_all(fd, line)
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     def latest(self) -> HealthFailure | None:
         """Read the newest valid record from a bounded tail, skipping corrupt lines."""
         if self.path is None:
             return None
-        try:
-            fd = os.open(self.path, os.O_RDONLY)
-        except FileNotFoundError:
+        if not self.path.parent.exists():
             return None
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH)
-            return _latest(fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            try:
+                fd = os.open(self.path, os.O_RDONLY)
+            except FileNotFoundError:
+                return None
+            try:
+                return _latest(fd)
+            finally:
+                os.close(fd)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte, including when the OS accepts only a prefix."""
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view) :]
+
+
+def _atomic_replace(path: Path, data: bytes) -> None:
+    """Durably replace ``path`` without ever mutating its current inode."""
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+            _write_all(fd, data)
+            os.fsync(fd)
+        finally:
             os.close(fd)
+        os.replace(temporary, path)  # noqa: PTH105 — explicit atomic-replace syscall
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with suppress(FileNotFoundError):
+            Path(temporary).unlink()
 
 
 def _latest(fd: int) -> HealthFailure | None:
