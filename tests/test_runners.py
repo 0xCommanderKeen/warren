@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -111,6 +112,63 @@ def test_a_descriptor_bound_launch_keeps_a_missing_binary_diagnostic(tmp_path: P
     assert result.error is not None
     assert result.error.startswith("cannot launch 'missing-steward-test-binary':")
     assert not result.error_is_child
+
+
+@pytest.mark.parametrize("closed_fd", [1, 2])
+@pytest.mark.parametrize("scenario", ["launch", "missing"])
+def test_descriptor_launch_survives_a_parent_with_closed_standard_streams(
+    tmp_path: Path, closed_fd: int, scenario: str
+) -> None:
+    """Helper capabilities cannot be consumed by Popen's stdout/stderr remapping."""
+    missing_binary = scenario == "missing"
+    result_path = tmp_path / f"result-{closed_fd}-{scenario}.json"
+    command = (
+        ["missing-steward-test-binary", "{prompt}"]
+        if missing_binary
+        else ["/bin/sh", "-c", "pwd", "{prompt}"]
+    )
+    harness = f"""
+import json
+import os
+from pathlib import Path
+
+from steward import runners
+from steward.manifest import Runner
+
+os.close({closed_fd})
+workdir = Path({str(tmp_path)!r})
+descriptor = os.open(workdir, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    result = runners.build_runner(
+        Runner(kind="command", command={command!r})
+    ).run(runners.RunRequest(prompt="", workdir=workdir, workdir_fd=descriptor, timeout_s=10))
+finally:
+    os.close(descriptor)
+Path({str(result_path)!r}).write_text(json.dumps({{
+    "ok": result.ok,
+    "output": result.output.strip(),
+    "error": result.error,
+    "error_is_child": result.error_is_child,
+}}))
+"""
+    completed = subprocess.run(  # noqa: S603 — fixed interpreter and generated harness
+        [sys.executable, "-c", harness],
+        cwd=SRC.parents[1],
+        env={**os.environ, "PYTHONPATH": str(SRC.parent)},
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode()
+    observed = json.loads(result_path.read_text())
+    if missing_binary:
+        assert not observed["ok"]
+        assert observed["error"].startswith("cannot launch 'missing-steward-test-binary':")
+        assert "No such file or directory" in observed["error"]
+        assert not observed["error_is_child"]
+    else:
+        assert observed["ok"], observed
+        assert observed["output"] == str(tmp_path)
 
 
 def test_descriptor_helper_ignores_hostile_python_startup(

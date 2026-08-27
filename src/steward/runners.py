@@ -32,6 +32,7 @@ exactly one file* — a rule worth keeping even for the processes that are not b
 """
 
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -289,6 +290,11 @@ def _remaining(started: float, timeout_s: int) -> float:
     return max(0.0, started + timeout_s - time.monotonic())
 
 
+def _duplicate_for_helper(fd: int) -> int:
+    """Return an owned close-on-exec duplicate outside the standard-stream range."""
+    return fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 3)
+
+
 def _timeout_result(
     process: subprocess.Popen[bytes], *, started: float, timeout_s: int
 ) -> RunResult:
@@ -362,28 +368,36 @@ class _ProcessRunner(Runner):
 
     def run(self, request: RunRequest) -> RunResult:
         """Launch the session, bound by its timeout, and report what happened."""
+        started = time.monotonic()
         argv = self.argv(request)
         env = {**os.environ, **request.env}
         workdir_fd = request.workdir_fd
         launch_argv = argv
         status_reader: int | None = None
         status_writer: int | None = None
+        helper_fds: tuple[int, ...] = ()
         inherited_fds: tuple[int, ...] = ()
-        if workdir_fd is not None:
-            status_reader, status_writer = os.pipe()
-            inherited_fds = (workdir_fd, status_writer)
-            launch_argv = [
-                sys.executable,
-                "-I",
-                "-S",
-                "-c",
-                _DESCRIPTOR_CWD_HELPER,
-                str(workdir_fd),
-                str(status_writer),
-                *argv,
-            ]
-        started = time.monotonic()
         try:
+            if workdir_fd is not None:
+                helper_workdir = _duplicate_for_helper(workdir_fd)
+                helper_fds = (helper_workdir,)
+                status_reader, raw_status_writer = os.pipe()
+                try:
+                    status_writer = _duplicate_for_helper(raw_status_writer)
+                finally:
+                    os.close(raw_status_writer)
+                helper_fds += (status_writer,)
+                inherited_fds = helper_fds
+                launch_argv = [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    _DESCRIPTOR_CWD_HELPER,
+                    str(helper_workdir),
+                    str(status_writer),
+                    *argv,
+                ]
             process = subprocess.Popen(  # noqa: S603 — argv + capability cwd
                 launch_argv,
                 cwd=(request.execution_workdir if request.workdir_fd is None else None),
@@ -396,16 +410,16 @@ class _ProcessRunner(Runner):
         except OSError as exc:
             if status_reader is not None:
                 os.close(status_reader)
-            if status_writer is not None:
-                os.close(status_writer)
+            for fd in helper_fds:
+                os.close(fd)
             return RunResult(
                 outcome=Outcome.FAILED,
                 duration_s=time.monotonic() - started,
                 error=f"cannot launch {argv[0]!r}: {exc.strerror or exc}",
             )
 
-        if status_writer is not None:
-            os.close(status_writer)
+        for fd in helper_fds:
+            os.close(fd)
         if status_reader is not None:
             launch_failure = _await_descriptor_launch(
                 status_reader,
