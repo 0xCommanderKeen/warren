@@ -1104,7 +1104,7 @@ def test_task_board_registry_and_ledger_share_actual_completion(
 
     assert report.task.finished_at == ev.utc_now_iso(completed)
     assert recorded[0]["now"] == completed
-    assert closed_at[0] == ev.utc_now_iso(completed)
+    assert closed_at == [ev.utc_now_iso(completed)]
 
 
 def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(

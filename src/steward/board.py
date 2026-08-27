@@ -759,11 +759,9 @@ class Dispatcher:
             self._registry_run.reset(token)
         result = session.require_result()
 
-        # The shared lifecycle contains and returns from every ordinary accounting or
-        # harvest failure, so reaching here means this board-owned registry row can close
-        # before the board records its task-specific conclusion. A process that vanishes
-        # inside the lifecycle deliberately leaves the row open for the watchdog.
-        _close_registry(self.store, registry_run, session.completed_at or moment)
+        # ResidentSessions owns answered-run closure through ``on_completed``. It does so
+        # before accounting, while a BaseException that vanishes from the lifecycle never
+        # reaches that hook and deliberately leaves the row open for the watchdog.
         return self._record(
             resident,
             job,
