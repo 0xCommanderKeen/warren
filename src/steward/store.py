@@ -333,11 +333,15 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
 #: once :meth:`Store._add_missing_columns` has added them. ``approvals_denials`` is what
 #: keeps the repeat-deny guard (:mod:`steward.transitions.approval`) a lookup rather than a
 #: table scan on every knock: the table has grown one row per ask since phase 3.
+#: ``jobs_lineage`` is what :meth:`Store.lineage` walks down: without it, finding a task's
+#: children is a scan of the whole board once per level of the tree.
 _LATE_INDEXES = """
 CREATE INDEX IF NOT EXISTS approvals_denials
     ON approvals (resident, action, decided_at);
 CREATE INDEX IF NOT EXISTS requests_approval
     ON requests (approval_id, outcome);
+CREATE INDEX IF NOT EXISTS jobs_lineage
+    ON jobs (parent_task_id);
 """
 
 
@@ -1058,14 +1062,53 @@ class Store:
         return int(row[0])
 
     def lineage(self, task_id: str) -> list[JobRecord]:
-        """Return the chain this task belongs to, root first, ending at the task itself.
+        """Return the whole chain this task belongs to: its root and every descendant.
 
-        Walks ``parent_task_id`` upwards, which is the only direction the chain is written
-        in, and stops on an id it has already seen — a database somebody hand-edited into
-        a loop is a corrupt database, not an infinite loop in a CLI. A task nobody
-        delegated is a chain of one, which is a real answer.
+        Depth-first from the root, oldest sibling first, so rendering by
+        :attr:`JobRecord.depth` reads as the tree it is.
+
+        The chain is only ever *written* upwards — a row records the parent it came from —
+        so the root is found by walking ``parent_task_id`` up from the named task. But the
+        answer has to be the same whichever member of the chain is named, and it was not:
+        walking up alone returned the root by itself, reporting "nothing was delegated" for
+        work that had in fact fanned out. That is the id operators actually hold, because
+        ``POST /delegate`` hands the root back, so the audit query was wrong on exactly its
+        commonest input (steward #202). The walk up is therefore followed by a walk down
+        over the same column.
+
+        Both walks stop on an id already seen: a database somebody hand-edited into a loop
+        is a corrupt database, not an infinite loop in a CLI. A task nobody delegated, and
+        who delegated to nobody, is a chain of one — a real answer, not an error.
         """
+        path = self.ancestry(task_id)
+        if not path:
+            return []
+        root = path[0]
         chain: list[JobRecord] = []
+        seen: set[str] = {root.task_id}
+        stack: list[JobRecord] = [root]
+        while stack:
+            item = stack.pop()
+            chain.append(item)
+            children = [kid for kid in self._children(item.task_id) if kid.task_id not in seen]
+            seen.update(kid.task_id for kid in children)
+            stack.extend(reversed(children))
+        return chain
+
+    def ancestry(self, task_id: str) -> list[JobRecord]:
+        """Return the path this task actually travelled: root first, ending at the task.
+
+        The hops a piece of work has already been through, and deliberately *not*
+        :meth:`lineage`. The delegation cycle guard asks which residents this task has
+        already passed through, and branches delegated out of a shared parent are not on
+        its path — answering that with the whole tree would refuse a manager's second
+        letter to a worker its first letter had already reached (steward #202).
+
+        A dangling parent — a row whose parent was deleted out from under it — ends the
+        walk at the highest row that does exist, which is the most of the path there is
+        left to tell. An empty list means the board has never heard of ``task_id``.
+        """
+        path: list[JobRecord] = []
         seen: set[str] = set()
         cursor: str | None = task_id
         while cursor is not None and cursor not in seen:
@@ -1073,9 +1116,23 @@ class Store:
             record = self.job(cursor)
             if record is None:
                 break
-            chain.append(record)
+            path.append(record)
             cursor = record.parent_task_id
-        return list(reversed(chain))
+        return list(reversed(path))
+
+    def _children(self, task_id: str) -> list[JobRecord]:
+        """Return the tasks delegated directly out of this one, oldest first.
+
+        ``rowid`` breaks the tie rather than ``task_id``: two letters written in the same
+        second share a ``created_at``, and ordering those by a random uuid would shuffle
+        siblings around between one run of the audit query and the next.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE parent_task_id = ? ORDER BY created_at, rowid",
+                (task_id,),
+            ).fetchall()
+        return [JobRecord.from_row(row) for row in rows]
 
     def job(self, task_id: str) -> JobRecord | None:
         """Return one task, or ``None`` when the board has never heard of it."""

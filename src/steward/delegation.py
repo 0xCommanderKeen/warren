@@ -630,7 +630,7 @@ class Delegator:
         self._check_route(receiver, handoff.route)
 
         parent = self._resolve_parent(sender, parent_task_id)
-        chain = self.store.lineage(parent.task_id) if parent is not None else []
+        chain = self.store.ancestry(parent.task_id) if parent is not None else []
         depth = (parent.depth if parent is not None else 0) + 1
         self._check_depth(depth)
         self._check_cycle(chain, sender_id, receiver.id)

@@ -2194,6 +2194,12 @@ def test_lineage_answers_where_a_task_came_from(
     assert body["depth"] == 1
     assert harness.client.get("/tasks/nobody/lineage").status_code == 404
 
+    from_root = harness.client.get(f"/tasks/{root}/lineage").json()
+    assert [item["task_id"] for item in from_root["chain"]] == [root, child], (
+        "the root is the id POST /delegate hands back; it must see its descendants (#202)"
+    )
+    assert from_root["depth"] == 0, "origin and depth still describe the task asked about"
+
 
 def test_delegation_needs_the_token_like_everything_else(api: ApiFactory) -> None:
     harness = api()
