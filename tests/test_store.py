@@ -634,24 +634,36 @@ def test_the_database_lives_beside_the_scheduler_state(
     assert default_db_path() == tmp_path / "state" / "steward.db"
 
 
-def test_the_store_waits_for_a_competing_writer(store: Store) -> None:
-    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+def test_the_store_waits_longer_than_sqlites_default(store: Store) -> None:
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 15_000
 
 
-def test_ledger_failures_are_durable_and_counted(tmp_path: Path) -> None:
+def test_health_failures_are_independent_durable_counted_and_corruption_tolerant(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "steward.db"
     with Store(path) as store:
-        store.record_ledger_failure(resident="hob", run_id="run-1", error="locked", now=EARLY)
-        store.record_ledger_failure(resident="pip", run_id="run-2", error="disk full", now=LATER)
+        store.health.record(
+            kind="ledger_write", resident="hob", run_id="run-1", error="locked", now=EARLY
+        )
+        store.health.record(
+            kind="pause_enforcement",
+            resident="pip",
+            run_id="run-2",
+            error="disk full",
+            now=LATER,
+        )
+    with (tmp_path / "steward.db.health.jsonl").open("ab") as journal:
+        journal.write(b"not json\n")
     with Store(path) as reopened:
-        assert reopened.ledger_failures() == {
-            "id": 1,
-            "failures": 2,
-            "last_resident": "pip",
-            "last_run_id": "run-2",
-            "last_error": "disk full",
-            "last_failed_at": LATER,
-        }
+        failure = reopened.health.latest()
+    assert failure is not None
+    assert failure.count == 2
+    assert failure.kind == "pause_enforcement"
+    assert failure.resident == "pip"
+    assert failure.run_id == "run-2"
+    assert failure.error == "disk full"
+    assert failure.failed_at == LATER
 
 
 # -------------------------------------------------------------------------- the inbox

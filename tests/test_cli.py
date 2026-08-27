@@ -1676,15 +1676,18 @@ def test_doctor_fails_loudly_when_completed_spend_was_dropped(
     residents_dir = write_resident(data).parent.parent
     db = tmp_path / "steward.db"
     with Store(db) as store:
-        store.record_ledger_failure(
-            resident="test-agent", run_id="lost-run", error="database is locked"
+        store.health.record(
+            kind="ledger_write",
+            resident="test-agent",
+            run_id="lost-run",
+            error="database is locked",
         )
 
     result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
 
     assert result.exit_code != 0
-    assert "ledger: 1 completed run(s) were not recorded" in result.output
-    assert "test-agent run lost-run" in result.output
+    assert "budget health: 1 durable failure(s)" in result.output
+    assert "ledger_write for test-agent run lost-run" in result.output
 
 
 def test_doctor_says_a_paused_resident_will_not_fire_tonight(

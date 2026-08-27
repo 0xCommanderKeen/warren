@@ -595,7 +595,8 @@ class BudgetGuard:
             # This is a second, best-effort transaction: a transient lock may have
             # cleared, leaving a durable warning even though the spend itself was lost.
             try:
-                self.store.record_ledger_failure(
+                self.store.health.record(
+                    kind="ledger_write",
                     resident=manifest.id,
                     run_id=run_id,
                     error=str(exc),
@@ -610,6 +611,16 @@ class BudgetGuard:
         try:
             self._pause_if_over(manifest, now)
         except Exception as exc:  # noqa: BLE001 — spend is durable; pausing is independent
+            try:
+                self.store.health.record(
+                    kind="pause_enforcement",
+                    resident=manifest.id,
+                    run_id=run_id,
+                    error=str(exc),
+                    now=ev.utc_now_iso(now) if now is not None else None,
+                )
+            except Exception:
+                log.exception("%s: could not persist the pause failure either", manifest.id)
             log.warning(
                 "%s: run %s was recorded, but the post-run budget pause failed: %s",
                 manifest.id,

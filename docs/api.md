@@ -572,11 +572,16 @@ there is no endpoint that would let it. See the README for what it shows.
 | `approvals` | the request, its full detail, the decision, and whether it was delivered |
 | `requests` | every accepted mutating request and what became of it |
 | `run_ledger` | one row per finished session: tokens, money, seconds, and whether the brain reported any of it |
-| `ledger_failures` | durable count and latest context for completed sessions whose spend could not be ledgered; `steward doctor` reports this as unhealthy |
 | `budget_pauses` | the residents steward has stopped, and the number that stopped them |
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
 | `watchdog_passes` | when the watchdog last swept, which is how `doctor` can say nothing is watching |
+
+Budget accounting has one deliberately separate durable file: `steward.db.health.jsonl`.
+It records a bounded, redacted error when a completed run cannot be ledgered or its
+post-run pause cannot be enforced. It is independent of SQLite so a persistent database
+lock cannot hide its own failure; `steward doctor` reports any entry as unhealthy. SQLite
+writes wait up to 15 seconds for a competing writer before this evidence is recorded.
 | `unbracketed_runs` | the runs steward buried on their session's behalf, so nobody is mourned twice |
 
 SQLite rather than a JSON file because the two interesting writes are both
