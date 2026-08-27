@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import ResidentWriter, valid_manifest
+from steward import sessions as sessions_module
 from steward.manifest import ResidentManifest, load_manifest
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.sessions import (
@@ -18,7 +19,7 @@ from steward.sessions import (
     SessionHarvest,
     TaskWake,
 )
-from steward.skills import Skill, SkillLibrary
+from steward.skills import Materialization, Skill, SkillLibrary
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
@@ -289,6 +290,47 @@ def test_provisioning_refuses_a_declared_directory_recreated_at_the_same_path(
 
     assert isinstance(refusal, Refusal)
     assert "filesystem identity changed" in refusal.reason
+
+
+def test_materialization_stays_bound_when_workdir_is_replaced_after_revalidation(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing the pathname cannot redirect descriptor-relative mutations (#133)."""
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    moved = tmp_path / "admitted-memory"
+    data = valid_manifest()
+    data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
+    data["runner"] = {"kind": "claude"}
+    resident = load_manifest(write_resident(data))
+    skills = {
+        name: Skill(name, f"{name} carefully.", "Do it.")
+        for name in ("daily-summary", "write-journal")
+    }
+    sessions = ResidentSessions(
+        workdir=tmp_path / "fallback",
+        library=SkillLibrary(path=tmp_path / "skills", skills=skills),
+        runner_factory=lambda _spec: _CapturingRunner(RunResult(outcome=Outcome.OK)),
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    real_materialize = sessions_module.materialize
+
+    def replace_then_materialize(skills, workdir, subdir, *, workdir_fd=None) -> Materialization:
+        memory.rename(moved)
+        memory.mkdir()
+        (memory / "replacement.txt").write_text("untouched", encoding="utf-8")
+        return real_materialize(skills, workdir, subdir, workdir_fd=workdir_fd)
+
+    monkeypatch.setattr(sessions_module, "materialize", replace_then_materialize)
+
+    result = sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-1"))
+
+    assert result.require_result().outcome is Outcome.OK
+    assert (moved / ".claude/skills/daily-summary/SKILL.md").is_file()
+    assert sorted(path.name for path in memory.iterdir()) == ["replacement.txt"]
 
 
 def test_provisioning_refuses_when_the_admitted_directory_moves_filesystems(

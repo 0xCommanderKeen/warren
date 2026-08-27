@@ -8,6 +8,7 @@ harvest.
 """
 
 import logging
+import os
 import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -462,7 +463,7 @@ class ResidentSessions:
         prompt = ""
         try:
             self._require_revalidated(admission)
-            skills = self._provision(resident, admission.workdir)
+            skills = self._provision(admission)
             journal_entry = self._journal_for(resident)
             decisions = self._decisions_for(resident)
             prompt = self._prompt(
@@ -568,14 +569,40 @@ class ResidentSessions:
     def _skills_for(self, resident: Resident) -> tuple[Skill, ...]:
         return effective_skills(resident.manifest, self.library)
 
-    def _provision(self, resident: Resident, workdir: Path) -> tuple[Skill, ...]:
+    def _provision(self, admission: Admission) -> tuple[Skill, ...]:
+        resident = admission.resident
         missing = missing_skills(resident.manifest, self.library)
         if missing:
             raise SkillError(describe_missing(resident.id, missing, self.library))
         skills = self._skills_for(resident)
         subdir = skills_home(resident.manifest.runner)
         if subdir is not None and self.library.configured:
-            result = materialize(skills, workdir, subdir)
+            workdir_fd: int | None = None
+            try:
+                if admission.declared_identity is not None:
+                    workdir_fd = os.open(
+                        admission.declared_identity.canonical,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    )
+                    observed = os.fstat(workdir_fd)
+                    identity = (
+                        observed.st_dev,
+                        observed.st_ino,
+                        stat.S_IFMT(observed.st_mode),
+                    )
+                    expected = (
+                        admission.declared_identity.device,
+                        admission.declared_identity.inode,
+                        admission.declared_identity.file_type,
+                    )
+                    if identity != expected:
+                        raise SkillError(self._changed_workdir_reason(resident))
+                result = materialize(skills, admission.workdir, subdir, workdir_fd=workdir_fd)
+            except OSError as exc:
+                raise SkillError(self._vanished_workdir_reason(resident)) from exc
+            finally:
+                if workdir_fd is not None:
+                    os.close(workdir_fd)
             log.debug("%s: skills %s", resident.id, result.summary())
         return skills
 
