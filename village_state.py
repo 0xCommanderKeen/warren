@@ -124,6 +124,9 @@ def _description(event):
         return f"{payload.get('tool', 'tool')} failed"
     if kind == "artifact_produced":
         return f"crafted {payload.get('artifact', 'something')}"
+    if kind == "heartbeat":
+        tool = payload.get("tool")
+        return f"finished {tool}" if tool else "working"
     if kind == "needs_human":
         return f"needs you: {payload.get('message', '(no message)')}"
     if kind == "session_ended":
@@ -509,6 +512,8 @@ def project_village(
     for agent_id in sorted(by_agent):
         history = by_agent[agent_id]
         last = history[-1][1]
+        visible_history = [item for item in history if item[1]["type"] != "heartbeat"]
+        visible_last = visible_history[-1][1] if visible_history else last
         age = (now - _instant(last["ts"])).total_seconds()
         pending = pending_by_agent[agent_id]
         if not pending and (
@@ -536,7 +541,7 @@ def project_village(
                 else "working"
             )
         )
-        recent = [item for _, item in history[-policy.events_per_villager :]]
+        recent = [item for _, item in visible_history[-policy.events_per_villager :]]
         mood = _mood(agent_id, history, approvals)
         resident = manifest is not None
         villagers.append(
@@ -553,8 +558,10 @@ def project_village(
                 "project": last["project"],
                 "cwd": last.get("cwd", ""),
                 "last_ts": last["ts"],
-                "last_line": _description(last),
-                "place": _place(last) if state in {"working", "stale"} else None,
+                "last_line": _description(visible_last),
+                "place": _place(visible_last)
+                if state in {"working", "stale"}
+                else None,
                 "lineage": {
                     key: last["payload"][key]
                     for key in ("parent_agent_id", "agent_type")

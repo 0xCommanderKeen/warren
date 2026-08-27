@@ -451,13 +451,13 @@ const grid = fill => Array.from({ length: MAPH }, () => Array(MAPW).fill(fill));
    which door a delegating villager is already standing at. */
 const { destinationFor, destinationKey, DELEGATION } = BurrowDestinations;
 
-/* Two halves of one identity: `PLACE_OF_VERB` in projection.js decides which
- * place a villager belongs at, `PLACES` above decides where that place stands.
+/* Two halves of one identity: the snapshot's `place` decides which place a
+ * villager belongs at, while `PLACES` above decides where that place stands.
  * Nothing but the string joins them, so a typo or a one-sided rename would send
  * every researcher home and say nothing about it. `destinationFor` degrades
  * that way on purpose — better a villager at home than an exception — so the
  * join is checked out loud at startup (`reportPlaces`) and in
- * tests/test_places.js. `delegation` is exempt: it is the one projected place
+ * `delegation` is exempt: it is the one projected place
  * that is deliberately not a building. */
 function unmappedPlaces() {
   return [...new Set(Object.values(PLACE_OF_VERB))]

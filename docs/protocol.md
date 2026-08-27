@@ -229,9 +229,9 @@ runtime polls this report through its live status interface.
 
 ### Strict v0 validation contract
 
-An event is accepted and projected only when all of these checks pass. HTTP
-ingestion uses `protocol.validate_event`; browser ingestion uses `validateEvent`
-in `viewer/projection.js`. Both adapters run the same fixture matrix in
+An event is accepted and projected only when all of these checks pass.
+`protocol.validate_event` is the single validator used by HTTP ingestion and
+`village_state.project_village`; its fixture matrix lives in
 `tests/fixtures/protocol-v0-validation.json`.
 The stricter journal observation fields are additionally shared through
 `tests/fixtures/journal-observations.json`.
@@ -648,9 +648,8 @@ The villager's state is decided by its **latest** event:
 - no event for 12 hours → dropped from ordinary village activity. A valid structured
   approval is the exception: its villager remains at the door until its exact close.
 
-These rules have exactly one implementation: `reduce()` in `viewer/projection.js`,
-loaded by the viewer and exercised by `tests/projection.test.js` (`node --test`,
-see the README).
+These rules have exactly one implementation:
+`village_state.project_village()`, exercised by `tests/test_village_state.py`.
 
 ### Why `heartbeat` and not another `tool_called`
 
@@ -665,9 +664,8 @@ projection ignore heartbeats when deciding what to *show*.
 
 ## Operational mood glyph
 
-`viewer/moods.js` is the sole mood reducer. Its public derivation is
-`deriveMoods(validatedAppendOrderedEvents) -> Map<agent_id, Mood>`: it has no
-clock, manifest, DOM, random input, or configurable threshold. Each agent's
+`village_state._mood()` is the sole mood reducer. It consumes validated,
+append-ordered events and has no DOM, random input, or client-owned threshold. Each agent's
 greatest retained valid timestamp is anchor `A`; every displayed duration is
 non-negative **log age as of A**. Consequently an unchanged log is byte-stable
 across wall-clock ticks, and events for another agent cannot age a mood.
@@ -701,7 +699,7 @@ lower-risk range. Precedence is insufficient `?`, need older than 6h `!`,
 failure streak 3 `×`, saturated work `▲`, then total `≥4` steady `●`, `1..3`
 active `◆`, or `≤0` watchful `◇`.
 
-`retainMoodWitnesses()` and `retention.carry_forward(...).witnesses["moods"]` independently preserve
+`retention.carry_forward(...).witnesses["moods"]` preserves
 the anchor, the complete append-ordered terminal frontier currently in
 `(A-24h,A]`, one maximum-weight event per relevant bucket, latest interaction,
 approval/plain-knock authority, and six threshold witnesses selected from the
@@ -857,10 +855,9 @@ and some verbs belong to a shared building rather than the villager's own house:
 | delegating                   | another villager's door       |
 | every other / unknown verb   | the villager's home work spot |
 
-The mapping is `PLACE_OF_VERB` in `viewer/projection.js`. It consumes the
-classification from the existing `VERBS` table, so tool names have one source of
-truth. The post office is ready for email/inbox adapters: they classify their tool
-as `emailing` in `VERBS` and inherit the shared location without viewer changes.
+The mapping is `_place()` in `village_state.py`; tool names and their public
+snapshot locations therefore have one Python source of truth. The post office is
+ready for email/inbox adapters through their `Email` and `Inbox` tool names.
 
 A place is a destination, not a name: the viewer resolves each one to a
 `{ kind }` value — `home`, `door`, `{ building, id }` or `{ plot }` — in

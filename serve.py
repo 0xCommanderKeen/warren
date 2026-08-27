@@ -246,8 +246,7 @@ _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
 def js_hash(s):
-    """The viewer's hashCode, verbatim, so a nameless villager is called the same
-    thing in the notification as it is on screen."""
+    """Return the stable signed 32-bit identity hash over UTF-16 code units."""
     h = 0
     encoded = s.encode("utf-16-be", errors="surrogatepass")
     for index in range(0, len(encoded), 2):
@@ -259,7 +258,7 @@ def js_hash(s):
 
 
 def villager_names(events):
-    """Resolve names for a fleet exactly as the viewer does.
+    """Resolve stable names for a fleet.
 
     Souls and fallback names are unique within the fleet, so resolving an event in
     isolation can disagree with the name on screen.

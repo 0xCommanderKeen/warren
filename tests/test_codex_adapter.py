@@ -14,6 +14,8 @@ import tempfile
 import unittest
 import importlib.util
 
+from village_state import project_village
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EMIT = ROOT / "hooks" / "emit.py"
@@ -83,19 +85,7 @@ class CodexEndToEndTest(unittest.TestCase):
         )
 
     def project(self, events):
-        script = """
-const { reduce } = require('./viewer/projection.js');
-const events = JSON.parse(process.argv[1]);
-process.stdout.write(JSON.stringify(reduce(events, Date.now(), [])));
-"""
-        result = subprocess.run(
-            ["node", "-e", script, json.dumps(events)],
-            cwd=ROOT,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        return json.loads(result.stdout)
+        return project_village(events, [], "2026-08-27T12:00:00.000Z")["villagers"]
 
     def test_captured_turn_reaches_the_existing_projection(self):
         events = self.deliver(self.hooks[:-1])

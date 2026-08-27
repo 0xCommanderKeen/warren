@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import pathlib
 import unittest
 
 import retention
@@ -34,6 +35,68 @@ RESIDENT = {
 
 
 class VillageProjectionTests(unittest.TestCase):
+    def test_invalid_protocol_events_never_enter_the_snapshot(self):
+        fixtures = json.loads(
+            (
+                pathlib.Path(__file__).parent / "fixtures/protocol-v0-validation.json"
+            ).read_text()
+        )
+        invalid = [item["event"] for item in fixtures if not item["valid"]]
+        state = project_village(invalid, [], NOW, ProjectionPolicy())
+        self.assertEqual([], state["villagers"])
+        self.assertEqual(len(invalid), len(state["diagnostics"]))
+
+    def test_failed_tool_is_an_explicit_terminal_activity_state(self):
+        state = project_village(
+            [event("tool_failed", tool="Bash", error="exit code 1")],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [villager] = state["villagers"]
+        self.assertEqual("failed", villager["state"])
+        self.assertEqual("Bash failed", villager["last_line"])
+        self.assertIsNone(villager["place"])
+
+    def test_heartbeat_refreshes_liveness_without_replacing_visible_activity(self):
+        state = project_village(
+            [
+                event("task_started", minutes=-120, prompt="make build"),
+                event("tool_called", minutes=-115, tool="Bash"),
+                event("heartbeat", minutes=-2, tool="Bash"),
+            ],
+            [],
+            NOW,
+        )
+        [villager] = state["villagers"]
+        self.assertEqual("working", villager["state"])
+        self.assertEqual("using Bash", villager["last_line"])
+        self.assertEqual("workshop", villager["place"])
+        self.assertEqual(
+            ["task_started", "tool_called"],
+            [item["type"] for item in villager["history"]],
+        )
+        self.assertEqual(
+            event("heartbeat", minutes=-2, tool="Bash")["ts"], villager["last_ts"]
+        )
+
+    def test_tool_places_are_owned_by_the_python_projection(self):
+        expected = {
+            "Read": "library",
+            "WebSearch": "library",
+            "Bash": "workshop",
+            "Email": "post-office",
+            "Agent": "delegation",
+            "Unknown": None,
+        }
+        for index, (tool, place) in enumerate(expected.items()):
+            with self.subTest(tool=tool):
+                state = project_village(
+                    [event("tool_called", agent=f"agent-{index}", tool=tool)],
+                    [],
+                    NOW,
+                )
+                self.assertEqual(place, state["villagers"][0]["place"])
+
     def test_projects_resident_and_visitor_identity_and_lifecycle(self):
         state = project_village(
             [

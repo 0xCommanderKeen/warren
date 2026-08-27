@@ -102,7 +102,7 @@ class Retention(Sequence[str]):
 
 
 def _canonical_json_string(value):
-    """ASCII JSON string escaping shared with viewer/projection.js."""
+    """Return canonical compact ASCII JSON string escaping."""
     encoded = ['"']
     short = {0x08: "\\b", 0x09: "\\t", 0x0A: "\\n", 0x0C: "\\f", 0x0D: "\\r"}
     for character in value:
@@ -395,8 +395,7 @@ def _capsule_identity_equal(left, right):
 
 
 def event_ms(event):
-    """Event timestamp as epoch ms; 0 when missing or unparseable — the viewer's
-    `Date.parse(ts) || 0`, which puts the villager outside the drop window."""
+    """Return event time in epoch ms, or zero when missing or invalid."""
     ts = event.get("ts")
     if not isinstance(ts, str):
         return 0
@@ -410,7 +409,7 @@ def event_ms(event):
 
 
 def _task_event_identity(event):
-    """Stable final tie-breaker mirrored from viewer/job-board.js.
+    """Return the stable final tie-breaker for equal-time task transitions.
 
     Steward identifiers and payload text are protocol strings.  Compact JSON
     keeps array ordering significant without depending on Python's whitespace.
@@ -1143,8 +1142,8 @@ def _exact_capsule_authority(capsule, raw_events):
 
 def _routine_start_tie(event):
     payload = event["payload"]
-    # Python strings compare by Unicode scalar value. This fieldwise tuple is
-    # mirrored explicitly by routine-lifecycle.js (never delimiter encoded).
+    # Python strings compare by Unicode scalar value. Compare this fieldwise
+    # tuple directly; it is never delimiter encoded.
     return (
         event["source"],
         event["agent_id"],
@@ -1164,7 +1163,7 @@ def _routine_terminal_tie(event):
 
 
 def _current_routine(indexed_events):
-    """Mirror routine-lifecycle.js canonical current-run authority."""
+    """Select the canonical current-run authority."""
     runs = collections.defaultdict(list)
     for index, event in indexed_events:
         if event["type"].startswith("routine_"):
