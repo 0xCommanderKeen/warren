@@ -840,6 +840,13 @@ re-provision does not restore them — so deleting it would make the way back si
 require a re-login. The retire report names it instead, so an operator who wants it gone
 knows there is a step left rather than finding out later.
 
+Removing the file is the narrow lever. The broad one is **rotating `BURROW_TOKEN` fleet-wide**,
+and it is the right lever whenever a retirement was a response to something rather than a
+tidy-up: steward writes one token into every resident's `.env` from its own environment, so
+a copy that leaked from one host is a copy that works for all of them. Rotation is a burrow-
+side change plus a re-provision of every live resident (`steward new-resident` again, which
+rewrites each `.env`); steward has no command for it, and retiring one resident does not do it.
+
 ## The watchdog
 
 `steward watchdog run` (or `tick` for one pass, under external cron) keeps unattended
