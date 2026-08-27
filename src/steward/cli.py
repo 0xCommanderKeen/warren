@@ -41,8 +41,9 @@ from steward.deploy import TransportError
 from steward.health import HealthFailure
 from steward.journal import (
     JournalEntry,
+    cap_entry,
     journal_complaint,
-    latest_entry,
+    latest_entry_text,
     read_entries,
     resolve_journal_dir,
 )
@@ -853,15 +854,19 @@ def show_command(resident_id: str, residents: Path, db: Path | None, output_form
     ever seen by a validator — so both go out through ``redact_secrets``, like anything else
     steward emits. This output is made to be pasted into a review; a review must not be
     where a live key goes.
+
+    The journal is read **whole, redacted, and only then capped** (steward #209). The order
+    is the fix: a cap applied first can cut a secret in half and destroy the shape the
+    detector matches on, and a half-secret is not half-safe.
     """
     resident = _resident_or_exit(residents, resident_id)
     try:
-        journal_entry = latest_entry(resident.manifest, source=resident.path)
+        journal_entry = latest_entry_text(resident.manifest, source=resident.path)
     except ManifestError as exc:
         click.secho(f"{resident.path}: {exc}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
     if journal_entry is not None:
-        journal_entry = redact_secrets(journal_entry)
+        journal_entry = cap_entry(redact_secrets(journal_entry))
 
     skills = effective_skills(resident.manifest, library_for(residents))
     with _open_store(db) as store:

@@ -26,7 +26,7 @@ from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
 from steward.journal import latest_entry, write_entry
 from steward.manifest import load_manifest
-from steward.prompt import assemble_preamble
+from steward.prompt import JOURNAL_MAX_CHARS, assemble_preamble
 from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState
 from steward.skills import effective_skills, library_for
 from steward.store import Store
@@ -823,6 +823,48 @@ def test_show_redacts_a_secret_the_resident_journaled(
     assert result.exit_code == 0, result.output
     assert "sk-ant-" not in result.output
     assert "[redacted:secret]" in result.output
+
+
+def test_show_redacts_the_journal_before_it_caps_it(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A cap applied first destroys the shape the detector matches on (steward #209).
+
+    `redact_secrets` finds a PEM block by its BEGIN *and* END markers. Cut the entry at
+    the injection cap first and a block straddling the cut loses its END, so only its
+    lone BEGIN is replaced and the key material prints intact — right after a
+    `[redacted:secret]` that makes it look as though the scrub worked.
+    """
+    path = write_resident(journaling_resident(tmp_path))
+    manifest = load_manifest(path).manifest
+    key_body = "MIIEowIBAAKCAQEA" + "Zx9Kq3" * 200
+    entry = (
+        "x" * (JOURNAL_MAX_CHARS - 200)
+        + f"-----BEGIN RSA PRIVATE KEY-----\n{key_body}\n-----END RSA PRIVATE KEY-----"
+    )
+    write_entry(manifest, date(2026, 8, 24), "close-of-day", entry)
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "MIIEowIBAAKCAQEA" not in result.output
+    assert "Zx9Kq3" not in result.output
+    assert "[redacted:secret]" in result.output
+
+
+def test_a_redacted_journal_is_still_capped(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Redacting first must not be a way around the cap the preview still owes."""
+    path = write_resident(journaling_resident(tmp_path))
+    manifest = load_manifest(path).manifest
+    write_entry(manifest, date(2026, 8, 24), "close-of-day", "y" * (JOURNAL_MAX_CHARS * 2))
+
+    result = runner.invoke(main, ["show", "test-agent", *show_args(path, tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "[truncated at the injection cap]" in result.output
+    assert "y" * (JOURNAL_MAX_CHARS + 1) not in result.output
 
 
 def test_show_redacts_a_secret_a_decision_carries(

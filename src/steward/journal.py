@@ -59,6 +59,7 @@ __all__ = [
     "JOURNAL_OPEN",
     "CloseOfDay",
     "JournalEntry",
+    "cap_entry",
     "close_of_day_instruction",
     "close_of_day_routine",
     "entry_header",
@@ -66,6 +67,7 @@ __all__ = [
     "extract_block",
     "journal_complaint",
     "latest_entry",
+    "latest_entry_text",
     "local_day",
     "persist_close_of_day",
     "read_entries",
@@ -308,20 +310,25 @@ def read_entries(
     return entries
 
 
-def latest_entry(
+def latest_entry_text(
     manifest: ResidentManifest,
-    cap_chars: int = JOURNAL_MAX_CHARS,
     *,
     source: Path | None = None,
 ) -> str | None:
-    """Return the most recent *surviving* entry, truncated at the injection cap.
+    """Return the most recent *surviving* entry, rendered whole and uncapped.
 
     "Surviving" is the load-bearing word. If last night's session died before it
     journaled, this returns the night before's entry; if the resident has never
     written one, it returns ``None``. Steward never fills the gap in.
 
-    The cap is :data:`~steward.prompt.JOURNAL_MAX_CHARS` — a journal is a note to
-    tomorrow, not a transcript, and it is paid for on every single session launch.
+    Split out of :func:`latest_entry` so a caller that has to **transform** the entry can
+    do that to the whole text and cap afterwards (steward #209). A cap applied first can
+    destroy the very shape a detector matches on: ``redact_secrets`` finds a PEM block by
+    its ``BEGIN`` *and* ``END`` markers, so a block straddling the cut loses its ``END``,
+    stops matching, and leaves live key bytes standing next to the ``[redacted:secret]``
+    that replaced its lone ``BEGIN`` — which reads as though the scrub worked. The events
+    egress has held redact-then-bound since steward #65; this is what lets the journal
+    egress hold it too.
     """
     entries = read_entries(manifest, 1, source=source)
     if not entries:
@@ -330,10 +337,37 @@ def latest_entry(
     dateline = f"{entry.date.isoformat()}"
     if entry.routine:
         dateline += f" — written at the close of {entry.routine}"
-    rendered = f"{dateline}\n\n{entry.text}"
+    return f"{dateline}\n\n{entry.text}"
+
+
+def cap_entry(rendered: str, cap_chars: int = JOURNAL_MAX_CHARS) -> str:
+    """Cut a rendered entry down to the injection cap, saying so when it cuts.
+
+    The cap is :data:`~steward.prompt.JOURNAL_MAX_CHARS` — a journal is a note to
+    tomorrow, not a transcript, and it is paid for on every single session launch.
+    """
     if len(rendered) <= cap_chars:
         return rendered
     return rendered[:cap_chars].rstrip() + "\n\n[truncated at the injection cap]"
+
+
+def latest_entry(
+    manifest: ResidentManifest,
+    cap_chars: int = JOURNAL_MAX_CHARS,
+    *,
+    source: Path | None = None,
+) -> str | None:
+    """Return the most recent surviving entry, truncated at the injection cap.
+
+    What every session-launch path injects, and it is unchanged: :func:`latest_entry_text`
+    read whole, then :func:`cap_entry` applied. A caller that has to redact reaches for
+    those two directly and puts its own step between them — never here, because a preamble
+    hands a resident back its own writing and scrubbing that would misquote it.
+    """
+    rendered = latest_entry_text(manifest, source=source)
+    if rendered is None:
+        return None
+    return cap_entry(rendered, cap_chars)
 
 
 def write_entry(
