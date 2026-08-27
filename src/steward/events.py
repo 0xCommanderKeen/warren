@@ -297,8 +297,11 @@ class FlushReport:
 class ImportReport:
     """Outcome of explicitly copying a legacy complete log into the replay queue."""
 
-    queued: int = 0
-    invalid: int = 0
+    scanned: int = 0
+    imported: int = 0
+    skipped_modern: int = 0
+    skipped_duplicate: int = 0
+    corrupt: int = 0
     failed: int = 0
     errors: int = 0
     unknown: int = 0
@@ -582,7 +585,13 @@ class EventEmitter:
             except OSError:
                 log.exception("could not read event replay queue %s", self.queue)
                 return FlushReport(errors=1, unknown=1)
-            matching = [record for record in records if record["target"] == self.url]
+            matching: list[dict[str, Any]] = []
+            seen_matching: set[str] = set()
+            for record in records:
+                delivery_id = str(record["delivery_id"])
+                if record["target"] == self.url and delivery_id not in seen_matching:
+                    matching.append(record)
+                    seen_matching.add(delivery_id)
             selected = matching[:limit] if limit is not None else matching
             retired: set[str] = set()
             failed = 0
@@ -653,51 +662,105 @@ class EventEmitter:
             return FlushReport(errors=1, unknown=1)
 
     def import_legacy(self, path: Path | None = None) -> ImportReport:
-        """Queue every valid event in an old log, accepting possible remote duplicates.
+        """Queue each distinct ID-less event in an old log once while it is pending.
 
-        Old records have no delivery outcome or delivery ID, so no implementation can
-        distinguish the ones a previous process POSTed successfully. Stable IDs make a
-        repeated import idempotent with a current Burrow, but cannot deduplicate the
-        original ID-less delivery.
+        A history record with a valid ``steward_delivery_id`` is modern: its matching
+        queue record is already replay authority, or it was acknowledged and retired.
+        Requeueing it under a legacy hash would escape that dedupe domain, so it is
+        skipped. ID-less records receive content-stable IDs and are deduplicated under
+        the history and queue locks. Once such a record is delivered and retired there
+        is no durable local seen-set, so a later import can still queue it again.
         """
         source = path or self.fallback
         if not self.url:
             return ImportReport()
+        source.parent.mkdir(parents=True, exist_ok=True)
         try:
-            lines = source.read_bytes().splitlines()
-        except FileNotFoundError:
-            return ImportReport()
+            with self._lock_path(source).open("a+") as source_lock:
+                fcntl.flock(source_lock, fcntl.LOCK_EX)
+                try:
+                    lines = source.read_bytes().splitlines()
+                except FileNotFoundError:
+                    return ImportReport()
+                return self._import_legacy_lines(lines)
         except OSError:
             log.exception("could not read legacy event log %s", source)
             return ImportReport(errors=1, unknown=1)
-        queued = 0
-        invalid = 0
-        failed = 0
+
+    def _import_legacy_lines(  # noqa: PLR0915 — preserves every import outcome count
+        self, lines: Sequence[bytes]
+    ) -> ImportReport:
+        """Import one source snapshot while its caller retains the history lock."""
+        candidates: list[tuple[str, dict[str, Any], str]] = []
+        skipped_modern = 0
+        corrupt = 0
+        seen_source: set[str] = set()
         for index, raw in enumerate(lines):
             try:
                 event = json.loads(raw)
             except UnicodeDecodeError, json.JSONDecodeError:
-                invalid += 1
+                corrupt += 1
                 continue
             if not isinstance(event, dict) or validate_event(event):
-                invalid += 1
+                corrupt += 1
                 continue
-            digest = hashlib.sha256(str(index).encode() + b"\0" + raw).hexdigest()
-            record = {
-                "queue_v": QUEUE_VERSION,
-                "delivery_id": f"legacy_{digest}",
-                "target": self.url,
-                "event": event,
-            }
-            if self._append_line(
-                self.queue,
-                json.dumps(record, ensure_ascii=False),
-                purpose="as an imported legacy event",
-            ):
-                queued += 1
-            else:
-                failed += 1
-        return ImportReport(queued=queued, invalid=invalid, failed=failed)
+            modern_id = event.get("steward_delivery_id")
+            if isinstance(modern_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", modern_id):
+                skipped_modern += 1
+                continue
+            digest = hashlib.sha256(raw).hexdigest()
+            delivery_id = f"legacy_{digest}"
+            old_digest = hashlib.sha256(str(index).encode() + b"\0" + raw).hexdigest()
+            old_delivery_id = f"legacy_{old_digest}"
+            if delivery_id in seen_source:
+                candidates.append((delivery_id, event, old_delivery_id))
+                continue
+            seen_source.add(delivery_id)
+            candidates.append((delivery_id, event, old_delivery_id))
+
+        self.queue.parent.mkdir(parents=True, exist_ok=True)
+        imported = 0
+        skipped_duplicate = 0
+        failed = 0
+        with self._lock_path(self.queue).open("a+") as queue_lock:
+            fcntl.flock(queue_lock, fcntl.LOCK_EX)
+            records, _queue_corrupt = self._read_queue_unlocked()
+            pending_ids = {str(record["delivery_id"]) for record in records}
+            descriptor = os.open(self.queue, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                for delivery_id, event, old_delivery_id in candidates:
+                    if delivery_id in pending_ids or old_delivery_id in pending_ids:
+                        skipped_duplicate += 1
+                        continue
+                    record = {
+                        "queue_v": QUEUE_VERSION,
+                        "delivery_id": delivery_id,
+                        "target": self.url,
+                        "event": event,
+                    }
+                    line = json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n"
+                    pending = memoryview(line)
+                    try:
+                        while pending:
+                            pending = pending[os.write(descriptor, pending) :]
+                    except OSError:
+                        failed += 1
+                        log.exception("could not persist event as an imported legacy event")
+                        continue
+                    pending_ids.add(delivery_id)
+                    imported += 1
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._fsync_parent(self.queue)
+        return ImportReport(
+            scanned=len(lines),
+            imported=imported,
+            skipped_modern=skipped_modern,
+            skipped_duplicate=skipped_duplicate,
+            corrupt=corrupt,
+            failed=failed,
+        )
 
     def emit(self, event: Event) -> bool:
         """Deliver one event and keep a local copy. Returns remote reach. Never raises.

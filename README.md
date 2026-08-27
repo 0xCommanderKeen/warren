@@ -525,10 +525,15 @@ delivered 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/even
 ```
 
 The pre-queue `events.jsonl` format recorded every event but no delivery outcome. It is
-therefore impossible to infer which historical lines need replay. `steward events flush
---include-legacy` explicitly queues all valid lines with stable IDs; use it only when
-possible duplicates of events originally delivered without IDs are acceptable. Invalid
-or torn queue records are preserved in `.pending.corrupt`, reported, and make the command
-exit non-zero. A failed POST likewise leaves the suffix pending and exits non-zero.
+therefore impossible to infer which historical ID-less lines need replay. `steward events
+flush --include-legacy` explicitly queues each distinct valid ID-less line with a stable
+ID. Repeating it while that ID is pending is a no-op. Once delivery retires the queue
+record, however, there is no durable legacy seen-set, so a later import can offer the same
+stable ID again; use the option only when possible duplicates of events originally
+delivered without IDs are acceptable. History lines carrying a valid
+`steward_delivery_id` are modern and are skipped: their queue record already owns retry,
+or its acknowledged delivery was retired. Invalid or torn queue records are preserved in
+`.pending.corrupt`, reported, and make the command exit non-zero. A failed POST likewise
+leaves the suffix pending and exits non-zero.
 Records bound to a different historical `BURROW_URL` are not leaked to the current
 target; they remain pending, are counted as `foreign-target`, and also exit non-zero.

@@ -708,7 +708,7 @@ def test_concurrent_append_survives_a_flush_rewrite(
     assert [record["delivery_id"] for record in remaining] == ["delivery-concurrent-new"]
 
 
-def test_legacy_import_is_stable_explicit_and_reports_invalid_lines(tmp_path: Path) -> None:
+def test_legacy_import_is_idempotent_while_records_are_pending(tmp_path: Path) -> None:
     fallback = tmp_path / "events.jsonl"
     event = context().started("schedule")
     fallback.write_text(event.to_json() + "\nnot-json\n", encoding="utf-8")
@@ -716,10 +716,70 @@ def test_legacy_import_is_stable_explicit_and_reports_invalid_lines(tmp_path: Pa
     first = emitter.import_legacy()
     second = emitter.import_legacy()
     records, corrupt = emitter._read_queue()
-    assert first == second == ev.ImportReport(queued=1, invalid=1)
+    assert first == ev.ImportReport(scanned=2, imported=1, corrupt=1)
+    assert second == ev.ImportReport(scanned=2, skipped_duplicate=1, corrupt=1)
     assert corrupt == []
-    assert len(records) == 2
-    assert records[0]["delivery_id"] == records[1]["delivery_id"]
+    assert len(records) == 1
+
+
+def test_legacy_import_skips_modern_history_and_duplicate_source_lines(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    legacy = context().started("schedule").to_dict()
+    modern = context().failed(error="x", duration_s=1).to_dict()
+    modern["steward_delivery_id"] = "delivery-already-modern"
+    fallback.write_text(
+        "\n".join(json.dumps(row) for row in (legacy, legacy, modern)) + "\n",
+        encoding="utf-8",
+    )
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+
+    assert emitter.import_legacy() == ev.ImportReport(
+        scanned=3, imported=1, skipped_modern=1, skipped_duplicate=1
+    )
+    records, corrupt = emitter._read_queue()
+    assert corrupt == []
+    assert len(records) == 1
+    assert records[0]["event"] == legacy
+
+
+def test_flush_posts_an_old_duplicate_queue_id_once_and_retires_every_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    emitter = ev.EventEmitter(url="https://village.example", fallback=tmp_path / "events.jsonl")
+    event = context().started("schedule")
+    assert emitter._queue_record(event, "delivery-old-duplicate")
+    assert emitter._queue_record(event, "delivery-old-duplicate")
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    assert emitter.flush() == ev.FlushReport(delivered=1)
+    assert attempts == ["delivery-old-duplicate"]
+    assert emitter._read_queue() == ([], [])
+
+
+def test_legacy_import_can_repeat_after_retirement_but_reuses_the_stable_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    attempts: list[str] = []
+    monkeypatch.setattr(
+        emitter,
+        "_post",
+        lambda _url, _body, delivery_id="": attempts.append(delivery_id) or True,
+    )
+
+    assert emitter.import_legacy().imported == 1
+    assert emitter.flush().delivered == 1
+    assert emitter.import_legacy().imported == 1
+    assert emitter.flush().delivered == 1
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
 
 
 def test_legacy_import_reports_non_missing_os_errors(

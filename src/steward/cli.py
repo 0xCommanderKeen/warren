@@ -247,8 +247,11 @@ def events_flush(
         "busy": report.busy,
         "errors": report.errors,
         "unknown": report.unknown,
-        "legacy_queued": imported.queued,
-        "legacy_invalid": imported.invalid,
+        "legacy_scanned": imported.scanned,
+        "legacy_imported": imported.imported,
+        "legacy_skipped_modern": imported.skipped_modern,
+        "legacy_skipped_duplicate": imported.skipped_duplicate,
+        "legacy_corrupt": imported.corrupt,
         "legacy_failed": imported.failed,
         "legacy_errors": imported.errors,
         "legacy_unknown": imported.unknown,
@@ -265,7 +268,9 @@ def events_flush(
         )
         if include_legacy:
             click.echo(
-                f"legacy import queued {imported.queued}; invalid {imported.invalid}; "
+                f"legacy import scanned {imported.scanned}; imported {imported.imported}; "
+                f"skipped-modern {imported.skipped_modern}; "
+                f"skipped-duplicate {imported.skipped_duplicate}; corrupt {imported.corrupt}; "
                 f"failed {imported.failed}; "
                 f"errors {imported.errors}; unknown {imported.unknown}; "
                 "already-delivered ID-less events may appear again"
@@ -277,7 +282,7 @@ def events_flush(
         or report.busy
         or report.errors
         or report.unknown
-        or imported.invalid
+        or imported.corrupt
         or imported.failed
         or imported.errors
         or imported.unknown
