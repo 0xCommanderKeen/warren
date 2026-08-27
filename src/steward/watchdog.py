@@ -118,7 +118,15 @@ RESTART_FAILED_ACTION = "resident_restart_failed"
 #: written by a steward older than that change — answers nothing, which is the safe way
 #: round: an unanswered row costs one quiet burial, a wrongly answered one costs the
 #: outage this file exists to find.
-_CLOSING_TYPES = frozenset({ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED, ev.TASK_DONE, ev.TASK_FAILED})
+_CLOSING_TYPES = frozenset(
+    {
+        ev.ROUTINE_FINISHED,
+        ev.ROUTINE_FAILED,
+        ev.TASK_DONE,
+        ev.TASK_FAILED,
+        ev.TASK_SESSION_FINISHED,
+    }
+)
 
 
 # --------------------------------------------------------------------------------------

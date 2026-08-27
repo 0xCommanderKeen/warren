@@ -199,9 +199,10 @@ the way it learns of any other.
 
 ### 1.4 What is deliberately *not* in the matrix
 
-Routine bracketing (`routine_started` / `routine_finished` / `routine_failed`) and
+Run bracketing (`routine_started` / `routine_finished` / `routine_failed`, plus
+`task_session_finished` when a board session reports after losing its lease) and
 `resident_restarted` are transitions of a *run*, not of a durable domain row: the run
-registry row and the event are already paired inside the scheduler and the watchdog, and
+registry row and the event are already paired inside the scheduler, board, and watchdog, and
 #123 names them out of scope. They are listed here so the omission is a decision rather
 than an oversight. The watchdog's give-up *knock* is in scope, because it is an A1.
 

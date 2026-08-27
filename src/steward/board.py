@@ -897,6 +897,19 @@ class Dispatcher:
                 resident.id,
                 job.task_id,
             )
+            self.emitter.emit(
+                ev.task_session_finished_event(
+                    task_id=job.task_id,
+                    title=job.title,
+                    claimant=resident.agent_id,
+                    project=resident.project,
+                    run_id=run_id,
+                    outcome=str(result.outcome),
+                    artifacts=result.artifacts,
+                    duration_s=result.duration_s,
+                    reason=closed.reason,
+                )
+            )
             return BoardReport(
                 resident_id=resident.id,
                 claimant=resident.agent_id,

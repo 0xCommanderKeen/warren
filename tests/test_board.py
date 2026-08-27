@@ -11,6 +11,7 @@ import pytest
 from conftest import ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
+from steward import budgets as bg
 from steward import events as ev
 from steward import sessions as ss
 from steward import watchdog as w
@@ -75,6 +76,7 @@ def make_dispatcher(
         runner: Runner | None = None,
         residents: list[Resident] | None = None,
         clock: Callable[[], datetime] | None = None,
+        guard: ss.RunGuard | None = None,
     ) -> b.Dispatcher:
         if residents is None:
             path = write_resident(manifest if manifest is not None else board_manifest())
@@ -86,6 +88,7 @@ def make_dispatcher(
             emitter=sink,
             workdir=tmp_path,
             runner_factory=lambda _spec: runner or ScriptedRunner(),
+            guard=guard,
             **kwargs,
         )
 
@@ -473,11 +476,11 @@ def test_a_lease_from_a_resident_this_tree_never_heard_of_still_reopens(
 
 
 def test_a_claim_lost_mid_session_is_not_reported_as_done(
-    make_dispatcher: Dispatch, store: Store
+    make_dispatcher: Dispatch, store: Store, sink: ev.NullEmitter
 ) -> None:
     """The board keeps its own record; a resident cannot finish work it no longer holds."""
     job = store.post_job(title="Stolen away")
-    dispatcher = make_dispatcher()
+    dispatcher = make_dispatcher(guard=bg.BudgetGuard(store, sink))
     resident = dispatcher.residents[0]
     claimed = dispatcher.claim(resident, NOW)
     assert claimed is not None
@@ -488,6 +491,21 @@ def test_a_claim_lost_mid_session_is_not_reported_as_done(
     assert report.reason == "lease lost while the session was running"
     assert store.job(job.task_id) is not None
     assert store.jobs("open")[0].task_id == job.task_id
+    assert store.open_runs() == [], "the session reported back to the registry"
+    (entry,) = store.ledger(resident.id)
+    assert entry.ref == job.task_id
+    assert types(sink) == ["task_claimed", "task_session_finished"]
+    outcome = sink.events[-1]
+    assert outcome.payload == {
+        "task_id": job.task_id,
+        "title": job.title,
+        "claimant": resident.agent_id,
+        "run_id": entry.run_id,
+        "outcome": "ok",
+        "artifacts": [],
+        "duration_s": 0.0,
+        "reason": "lease lost while the session was running",
+    }
 
 
 # ------------------------------------------------------------------------ per wake-up
