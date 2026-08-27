@@ -19,6 +19,7 @@ pressure for the browser's live transport status.
 """
 
 import collections
+import contextvars
 import dataclasses
 import datetime
 import email.header
@@ -54,34 +55,35 @@ from state_coordinator import StateCoordinator
 from approval_protocol import structured_approval, thaw_json
 from hooks import durable
 from protocol import validate_event
+from config import Config
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 8737
-HOST = os.environ.get("BURROW_HOST", "127.0.0.1")
+# Deprecated default-value aliases remain for direct function callers during the
+# notification-store extraction. Runtime HTTP traffic uses ``Runtime.config``.
+_DEFAULT_CONFIG = Config()
+PORT = _DEFAULT_CONFIG.port
+HOST = _DEFAULT_CONFIG.host
 ROOT = os.path.dirname(os.path.abspath(__file__))
-EVENTS = os.environ.get("BURROW_EVENTS") or os.path.expanduser("~/.burrow/events.jsonl")
+EVENTS = str(_DEFAULT_CONFIG.events)
 
 MAX_EVENT_BYTES = 64 * 1024
-VILLAGERS_DIR = os.environ.get("BURROW_VILLAGERS") or os.path.join(ROOT, "villagers")
-TOKEN = (os.environ.get("BURROW_TOKEN") or "").strip()
-ARCHIVE_DIR = os.environ.get("BURROW_ARCHIVE") or ""
-MAX_LOG_BYTES = int(os.environ.get("BURROW_MAX_LOG") or 5 * 1024 * 1024)
+VILLAGERS_DIR = str(_DEFAULT_CONFIG.villagers_dir)
+TOKEN = _DEFAULT_CONFIG.token
+ARCHIVE_DIR = ""
+MAX_LOG_BYTES = _DEFAULT_CONFIG.max_log_bytes
 
 # every read, append and rotation of the log goes through this, so an event can
 # never land in the gap between reading the log and swapping it out
 LOG_LOCK = threading.Lock()
 _rotate_floor = 0  # don't re-check until the log grows past this
 _log_generation = 0  # changes when rotation rewrites the live inode
-NOTIFY_URL = (os.environ.get("BURROW_NOTIFY_URL") or "").strip()
-NOTIFY_TOKEN = (os.environ.get("BURROW_NOTIFY_TOKEN") or "").strip()
-try:
-    NOTIFY_TIMEOUT = float(os.environ.get("BURROW_NOTIFY_TIMEOUT") or 5)
-except ValueError:
-    NOTIFY_TIMEOUT = 5.0
+NOTIFY_URL = _DEFAULT_CONFIG.notify_url
+NOTIFY_TOKEN = _DEFAULT_CONFIG.notify_token
+NOTIFY_TIMEOUT = _DEFAULT_CONFIG.notify_timeout
 NOTIFY_MEMORY = 512  # how many knocks we remember, to not knock twice
 NOTIFY_WORKERS = 2
 NOTIFY_QUEUE = 64
-KNOCK_RECORDS = int(os.environ.get("BURROW_KNOCK_RECORDS") or 1024)
-KNOCK_BYTES = int(os.environ.get("BURROW_KNOCK_BYTES") or 5 * 1024 * 1024)
+KNOCK_RECORDS = _DEFAULT_CONFIG.knock_records
+KNOCK_BYTES = _DEFAULT_CONFIG.knock_bytes
 LEDGER_RECORDS = KNOCK_RECORDS
 LEDGER_BYTES = KNOCK_BYTES
 KNOCK_LOCK_SHARDS = 32
@@ -91,6 +93,53 @@ LEDGER_NOTIFIED = notification_persistence.NOTIFIED
 LEDGER_NOTIFY_DROPPED = notification_persistence.DROPPED
 LEDGER_KINDS = notification_persistence.KINDS
 DROP_SECONDS = 12 * 60 * 60
+_active_runtime = contextvars.ContextVar("burrow_runtime", default=None)
+
+
+def _setting(name, fallback):
+    runtime = _active_runtime.get()
+    return getattr(runtime.config, name) if runtime is not None else fallback
+
+
+def _events_path():
+    return str(_setting("events", EVENTS))
+
+
+def _villagers_path():
+    return str(_setting("villagers_dir", VILLAGERS_DIR))
+
+
+def _store():
+    runtime = _active_runtime.get()
+    return runtime.notification_store if runtime is not None else _notification_store
+
+
+def _legacy_config():
+    """Compatibility adapter for direct callers pending notification-store #72."""
+    return dataclasses.replace(
+        _DEFAULT_CONFIG,
+        host=HOST,
+        port=PORT,
+        events=os.path.abspath(EVENTS),
+        villagers_dir=os.path.abspath(VILLAGERS_DIR),
+        token=TOKEN,
+        archive_dir=os.path.abspath(ARCHIVE_DIR) if ARCHIVE_DIR else None,
+        max_event_bytes=MAX_EVENT_BYTES,
+        max_log_bytes=MAX_LOG_BYTES,
+        notify_url=NOTIFY_URL,
+        notify_token=NOTIFY_TOKEN,
+        notify_timeout=NOTIFY_TIMEOUT,
+        notify_workers=NOTIFY_WORKERS,
+        notify_queue=NOTIFY_QUEUE,
+        knock_records=KNOCK_RECORDS,
+        knock_bytes=KNOCK_BYTES,
+        ledger_records=LEDGER_RECORDS,
+        ledger_bytes=LEDGER_BYTES,
+        knock_lock_shards=KNOCK_LOCK_SHARDS,
+        drop_seconds=DROP_SECONDS,
+    )
+
+
 VIEWER_EVENT_TYPES = {
     "task_started",
     "tool_called",
@@ -114,13 +163,14 @@ CTYPES = {
 def read_villagers():
     """Validated residents plus legacy soul files for v0 client compatibility."""
     out = read_residents()["residents"]
-    if not os.path.isdir(VILLAGERS_DIR):
+    villagers_dir = _villagers_path()
+    if not os.path.isdir(villagers_dir):
         return out
-    for fn in sorted(os.listdir(VILLAGERS_DIR)):
+    for fn in sorted(os.listdir(villagers_dir)):
         if not fn.endswith(".md") or fn.startswith("."):
             continue
         try:
-            with open(os.path.join(VILLAGERS_DIR, fn), encoding="utf-8") as f:
+            with open(os.path.join(villagers_dir, fn), encoding="utf-8") as f:
                 text = f.read()
         except (OSError, UnicodeDecodeError):
             continue
@@ -139,7 +189,7 @@ def read_villagers():
 
 def read_residents():
     """Load valid resident declarations and actionable validation diagnostics."""
-    return resident_manifests.load_resident_manifests(VILLAGERS_DIR)
+    return resident_manifests.load_resident_manifests(_villagers_path())
 
 
 # ————— knocks: push a needs_human event to a webhook —————
@@ -187,10 +237,16 @@ _transport_counters = {
     "notify_dropped": 0,
 }
 _notification_store = notification_persistence.NotificationPersistence(
-    lambda: EVENTS,
-    lambda: (KNOCK_RECORDS, KNOCK_BYTES),
+    _events_path,
+    lambda: (
+        _setting("knock_records", KNOCK_RECORDS),
+        _setting("knock_bytes", KNOCK_BYTES),
+    ),
     KNOCK_LOCK_SHARDS,
-    ledger_limits=lambda: (LEDGER_RECORDS, LEDGER_BYTES),
+    ledger_limits=lambda: (
+        _setting("ledger_records", LEDGER_RECORDS),
+        _setting("ledger_bytes", LEDGER_BYTES),
+    ),
 )
 _delivery_ids_by_log = _notification_store.caches[LEDGER_DELIVERY_IDS]
 _notified_by_log = _notification_store.caches[LEDGER_NOTIFIED]
@@ -305,7 +361,7 @@ def _fleet_events(event):
     """Read the same bounded event window as the viewer and include this event."""
     events = []
     try:
-        with open(EVENTS, encoding="utf-8") as stream:
+        with open(_events_path(), encoding="utf-8") as stream:
             lines = collections.deque(
                 stream, maxlen=retention.POLICY["viewer_line_limit"]
             )
@@ -331,7 +387,9 @@ def _fleet_events(event):
             event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
         except (TypeError, ValueError):
             event_time = 0
-        if item is event or time.time() - event_time <= DROP_SECONDS:
+        if item is event or time.time() - event_time <= _setting(
+            "drop_seconds", DROP_SECONDS
+        ):
             visible_agents.add(agent_id)
     return [item for item in events if str(item["agent_id"]) in visible_agents]
 
@@ -358,15 +416,15 @@ def terminal_knock_keys(event):
 
 
 def _ledger_path(kind):
-    return _notification_store.ledger_path(kind)
+    return _store().ledger_path(kind)
 
 
 def _notification_lock_path(shard):
-    return _notification_store.notification_lock_path(shard)
+    return _store().notification_lock_path(shard)
 
 
 def _load_ledger(kind, cache):
-    return _notification_store.load_ledger(kind, cache)
+    return _store().load_ledger(kind, cache)
 
 
 def _remember_durable_batch(kind, cache, keys, preserve_existing=()):
@@ -377,23 +435,23 @@ def _remember_durable_batch(kind, cache, keys, preserve_existing=()):
     already exist must remain represented; otherwise the authoritative file
     and cache are left unchanged.
     """
-    return _notification_store.remember_batch(
+    return _store().remember_batch(
         kind, keys, preserve_existing=preserve_existing, cache=cache
     )
 
 
 def _remember_durable(kind, cache, key):
     """Atomically retain one key in a bounded ordered durable ledger."""
-    _notification_store.remember(kind, key, cache)
+    _store().remember(kind, key, cache)
 
 
 def _ledger_contains(kind, key):
     """Read terminal authority afresh; process caches are never authoritative."""
-    return _notification_store.contains(kind, key)
+    return _store().contains(kind, key)
 
 
 def _knock_delivery_lock(key):
-    return _notification_store.delivery_lock_path(key)
+    return _store().delivery_lock_path(key)
 
 
 def receiver_delivery_id(event):
@@ -406,11 +464,11 @@ def _fsync_parent(path):
 
 
 def _knock_journal_paths(path):
-    return _notification_store.journal_paths(path)
+    return _store().journal_paths(path)
 
 
 def _read_knock_keys(path):
-    return _notification_store.read_journal_keys(path)
+    return _store().read_journal_keys(path)
 
 
 def _compact_knocks_locked(path, addition=None):
@@ -419,34 +477,34 @@ def _compact_knocks_locked(path, addition=None):
     Capacity victims receive a durable terminal-drop entry before the compacted
     authority is published, so a crash or restart cannot make them eligible.
     """
-    return _notification_store.compact_locked(path, addition)
+    return _store().compact_locked(path, addition)
 
 
 def _publish_knock_compaction(path, lines):
     """Durably replace journal authority while its stable lock is held."""
-    return _notification_store.publish_compaction(path, lines)
+    return _store().publish_compaction(path, lines)
 
 
 def _commit_knock_terminal(event, kind):
     """Commit terminal outcome while preserving every retained source."""
-    return _notification_store.commit_terminal(event, kind)
+    return _store().commit_terminal(event, kind)
 
 
 def persist_knock(event):
     """Durably journal notification work before the ingest acknowledges it."""
-    if not NOTIFY_URL or event.get("type") != "needs_human":
+    if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
         return True
-    return _notification_store.journal(event)
+    return _store().journal(event)
 
 
 def _persist_knock_attempt(event, attempts):
     """Append a durable retry-state transition to the knock journal."""
-    return _notification_store.record_attempt(event, attempts)
+    return _store().record_attempt(event, attempts)
 
 
 def claim_knock(event):
     """Claim a knock unless it is in flight or has already been delivered."""
-    if not NOTIFY_URL or event.get("type") != "needs_human":
+    if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
         return False
     key = terminal_knock_key(event)
     with _notified_lock:
@@ -507,8 +565,9 @@ def notify(event):
             "Priority": "high",
             "X-Burrow-Delivery-ID": receiver_delivery_id(event),
         }
-        if NOTIFY_TOKEN:
-            headers["Authorization"] = "Bearer " + NOTIFY_TOKEN
+        notify_token = _setting("notify_token", NOTIFY_TOKEN)
+        if notify_token:
+            headers["Authorization"] = "Bearer " + notify_token
         if structured:
             detail = thaw_json(structured.detail)
             body_text = json.dumps(detail, ensure_ascii=False, sort_keys=True)
@@ -516,9 +575,14 @@ def notify(event):
             body_text = f"{name} · {project}\n{message}"
         body = body_text.encode("utf-8")
         req = urllib.request.Request(
-            NOTIFY_URL, data=body, headers=headers, method="POST"
+            _setting("notify_url", NOTIFY_URL),
+            data=body,
+            headers=headers,
+            method="POST",
         )
-        with urllib.request.urlopen(req, timeout=NOTIFY_TIMEOUT):
+        with urllib.request.urlopen(
+            req, timeout=_setting("notify_timeout", NOTIFY_TIMEOUT)
+        ):
             pass
         return True
     except Exception:
@@ -632,7 +696,7 @@ def _recover_knocks():
     Re-reading them after a crash is safe because ``claim_knock`` consults those
     durable ledgers and the in-flight set before queueing.
     """
-    for generation, complete, events in _notification_store.recover():
+    for generation, complete, events in _store().recover():
         for event in events:
             if not claim_knock(event):
                 continue
@@ -644,7 +708,7 @@ def _recover_knocks():
                     _transport_counters["notify_saturated"] += 1
                 return
         try:
-            _notification_store.retire_replay_if_terminal(generation, complete, events)
+            _store().retire_replay_if_terminal(generation, complete, events)
         except OSError:
             # Retirement failure leaves replay authority for the next recovery.
             pass
@@ -658,7 +722,7 @@ def ensure_knock_workers():
         if _knock_workers_started:
             return
         _knock_worker_stop.clear()
-        for index in range(NOTIFY_WORKERS):
+        for index in range(_setting("notify_workers", NOTIFY_WORKERS)):
             worker = threading.Thread(
                 target=_knock_worker, name=f"burrow-knock-{index}", daemon=True
             )
@@ -687,7 +751,7 @@ def transport_status():
     """Bounded machine-readable diagnostics for the browser live-status module."""
     with _transport_lock:
         counters = dict(_transport_counters)
-    delivered, dropped = _notification_store.terminal_counts()
+    delivered, dropped = _store().terminal_counts()
     return {
         "ingest": {
             "duplicates": counters["ingest_duplicates"],
@@ -695,10 +759,10 @@ def transport_status():
             "durable": True,
         },
         "notifications": {
-            "configured": bool(NOTIFY_URL),
+            "configured": bool(_setting("notify_url", NOTIFY_URL)),
             "queued": _knock_queue.qsize(),
-            "queue_capacity": NOTIFY_QUEUE,
-            "workers": NOTIFY_WORKERS,
+            "queue_capacity": _setting("notify_queue", NOTIFY_QUEUE),
+            "workers": _setting("notify_workers", NOTIFY_WORKERS),
             "delivered": delivered,
             "failed": counters["notify_failed"],
             "retried": counters["notify_retried"],
@@ -711,8 +775,11 @@ def transport_status():
 def archive_dir():
     """Where segments land: BURROW_ARCHIVE, else `archive/` beside the live log —
     same volume in both local mode and the container's mounted /data."""
-    return ARCHIVE_DIR or os.path.join(
-        os.path.dirname(os.path.abspath(EVENTS)), "archive"
+    configured = _setting("archive_dir", ARCHIVE_DIR)
+    return (
+        str(configured)
+        if configured
+        else os.path.join(os.path.dirname(os.path.abspath(_events_path())), "archive")
     )
 
 
@@ -720,7 +787,7 @@ def archive_path(now=None):
     """<archive>/events-20260824T170430Z.jsonl, never overwriting a segment."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     into = archive_dir()
-    base, ext = os.path.splitext(os.path.basename(EVENTS))
+    base, ext = os.path.splitext(os.path.basename(_events_path()))
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     path = os.path.join(into, base + "-" + stamp + ext)
     n = 1
@@ -739,7 +806,7 @@ def rotate(size):
     # An inode swap strands such descriptors in the archive. Advisory locking
     # coordinates the bundled emitter, while retaining the inode also makes a
     # descriptor that writes after rotation append to the new live contents.
-    with open(EVENTS, "r+b") as live:
+    with open(_events_path(), "r+b") as live:
         fcntl.flock(live, fcntl.LOCK_EX)
         original = live.read()
         lines = original.decode("utf-8", errors="replace").splitlines()
@@ -749,7 +816,9 @@ def rotate(size):
         data = "".join(line + "\n" for line in tail).encode("utf-8")
         size = len(original)
         if len(data) > size * 9 // 10:
-            _rotate_floor = size + max(MAX_LOG_BYTES // 10, 1)
+            _rotate_floor = size + max(
+                _setting("max_log_bytes", MAX_LOG_BYTES) // 10, 1
+            )
             return None
         os.makedirs(archive_dir(), exist_ok=True)
         archive = archive_path()
@@ -770,13 +839,14 @@ def rotate(size):
 
 def maybe_rotate():
     """Size check on the live log. Call with LOG_LOCK held."""
-    if MAX_LOG_BYTES <= 0:
+    max_log_bytes = _setting("max_log_bytes", MAX_LOG_BYTES)
+    if max_log_bytes <= 0:
         return
     try:
-        size = os.path.getsize(EVENTS)
+        size = os.path.getsize(_events_path())
     except OSError:
         return
-    if size <= max(MAX_LOG_BYTES, _rotate_floor):
+    if size <= max(max_log_bytes, _rotate_floor):
         return
     try:
         rotate(size)
@@ -791,7 +861,7 @@ def read_log():
     with LOG_LOCK:
         maybe_rotate()
         try:
-            with open(EVENTS, "rb") as f:
+            with open(_events_path(), "rb") as f:
                 return f.read()
         except OSError:
             return b""
@@ -802,8 +872,11 @@ def append_event(event):
     so an accepted POST is always in the live tail or in an archive."""
     line = json.dumps(event, ensure_ascii=False) + "\n"
     with LOG_LOCK:
-        os.makedirs(os.path.dirname(os.path.abspath(EVENTS)), exist_ok=True)
-        with open(durable.lock_path(os.path.abspath(EVENTS)), "a+") as process_lock:
+        events_path = _events_path()
+        os.makedirs(os.path.dirname(os.path.abspath(events_path)), exist_ok=True)
+        with open(
+            durable.lock_path(os.path.abspath(events_path)), "a+"
+        ) as process_lock:
             fcntl.flock(process_lock, fcntl.LOCK_EX)
             delivery_id = event.get("delivery_id")
             remembered = _load_ledger(LEDGER_DELIVERY_IDS, _delivery_ids_by_log)
@@ -823,11 +896,11 @@ def append_event(event):
                 with _transport_lock:
                     _transport_counters["ingest_duplicates"] += 1
                 return False
-            with open(EVENTS, "a", encoding="utf-8") as f:
+            with open(events_path, "a", encoding="utf-8") as f:
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
-            _fsync_parent(EVENTS)
+            _fsync_parent(events_path)
             if delivery_id:
                 _remember_durable(
                     LEDGER_DELIVERY_IDS, _delivery_ids_by_log, delivery_id
@@ -837,8 +910,9 @@ def append_event(event):
 
 
 def _event_log_has_delivery_id(delivery_id):
-    paths = [EVENTS]
-    base, ext = os.path.splitext(os.path.basename(EVENTS))
+    events_path = _events_path()
+    paths = [events_path]
+    base, ext = os.path.splitext(os.path.basename(events_path))
     paths.extend(sorted(glob.glob(os.path.join(archive_dir(), base + "-*" + ext))))
     for path in paths:
         try:
@@ -1178,7 +1252,14 @@ class ResidentReport(BaseModel):
 class Runtime:
     """Process-local transport state; storage and projection remain synchronous."""
 
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
+        self.notification_store = notification_persistence.NotificationPersistence(
+            lambda: str(config.events),
+            lambda: (config.knock_records, config.knock_bytes),
+            config.knock_lock_shards,
+            ledger_limits=lambda: (config.ledger_records, config.ledger_bytes),
+        )
         self.boot_id = secrets.token_hex(16)
         self.state_coordinator = StateCoordinator(
             self.projection_inputs,
@@ -1196,7 +1277,7 @@ class Runtime:
             maybe_rotate()
             events = []
             try:
-                with open(EVENTS, "rb") as stream:
+                with open(self.config.events, "rb") as stream:
                     stat = os.fstat(stream.fileno())
                     for line in stream:
                         try:
@@ -1219,7 +1300,7 @@ class Runtime:
             maybe_rotate()
             records = []
             try:
-                with open(EVENTS, "rb") as stream:
+                with open(self.config.events, "rb") as stream:
                     stat = os.fstat(stream.fileno())
                     current = EventCursor.issued(self.boot_id, stat, _log_generation, 0)
                     offset, reset = cursor.resume(current, stat.st_size)
@@ -1236,18 +1317,27 @@ class Runtime:
                 return records, current, reset
 
 
-@asynccontextmanager
-async def lifespan(application):
-    runtime = Runtime()
-    application.state.runtime = runtime
-    await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
-    if NOTIFY_URL:
-        await anyio.to_thread.run_sync(ensure_knock_workers)
-    try:
-        yield
-    finally:
-        if NOTIFY_URL:
-            await anyio.to_thread.run_sync(stop_knock_workers)
+def lifespan(config):
+    @asynccontextmanager
+    async def application_lifespan(application):
+        resolved = config() if callable(config) else config
+        runtime = Runtime(resolved)
+        application.state.runtime = runtime
+        application.state.config = resolved
+        token = _active_runtime.set(runtime)
+        try:
+            await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
+            if resolved.notify_url:
+                await anyio.to_thread.run_sync(ensure_knock_workers)
+            try:
+                yield
+            finally:
+                if resolved.notify_url:
+                    await anyio.to_thread.run_sync(stop_knock_workers)
+        finally:
+            _active_runtime.reset(token)
+
+    return application_lifespan
 
 
 with open(os.path.join(ROOT, "pyproject.toml"), "rb") as _project_file:
@@ -1257,8 +1347,9 @@ with open(os.path.join(ROOT, "pyproject.toml"), "rb") as _project_file:
 app = FastAPI(
     title="Burrow Village API",
     version=PROJECT_VERSION,
-    lifespan=lifespan,
+    lifespan=lifespan(_legacy_config),
 )
+app.state.config = _DEFAULT_CONFIG
 
 
 def _openapi():
@@ -1321,15 +1412,25 @@ async def guard_event_ingest(request: Request, call_next):
         or int(lengths[0]) <= 0
     ):
         return _error(400, "invalid content length")
-    if int(lengths[0]) > MAX_EVENT_BYTES:
+    config = request.app.state.config
+    if int(lengths[0]) > config.max_event_bytes:
         return _error(413, "event too large")
     presented = request.headers.get("x-burrow-token") or ""
     scheme, _, value = (request.headers.get("authorization") or "").partition(" ")
     if scheme.lower() == "bearer":
         presented = value.strip() or presented
-    if TOKEN and not hmac.compare_digest(presented, TOKEN):
+    if config.token and not hmac.compare_digest(presented, config.token):
         return _error(401, "unauthorized")
     return await call_next(request)
+
+
+@app.middleware("http")
+async def bind_runtime(request: Request, call_next):
+    token = _active_runtime.set(request.app.state.runtime)
+    try:
+        return await call_next(request)
+    finally:
+        _active_runtime.reset(token)
 
 
 @app.post(
@@ -1490,14 +1591,53 @@ async def static_viewer(asset_path: str):
     )
 
 
-def serve_forever():
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+def create_app(config: Config) -> FastAPI:
+    """Construct an isolated HTTP application and its runtime wiring."""
+    application = FastAPI(
+        title=app.title,
+        version=app.version,
+        lifespan=lifespan(config),
+    )
+    application.state.config = config
+    application.router.routes.extend(app.router.routes)
+    for middleware in reversed(app.user_middleware):
+        application.add_middleware(
+            middleware.cls, *middleware.args, **middleware.kwargs
+        )
+    application.add_exception_handler(RequestValidationError, request_validation_error)
+
+    def application_openapi():
+        if application.openapi_schema:
+            return application.openapi_schema
+        schema = get_openapi(
+            title=application.title,
+            version=application.version,
+            routes=application.routes,
+        )
+        schema.setdefault("components", {}).setdefault("schemas", {})[
+            "ErrorResponse"
+        ] = ErrorResponse.model_json_schema(ref_template="#/components/schemas/{model}")
+        application.openapi_schema = schema
+        return schema
+
+    application.openapi = application_openapi
+    return application
+
+
+def serve_forever(config: Config) -> None:
+    uvicorn.run(
+        create_app(config), host=config.host, port=config.port, log_level="warning"
+    )
 
 
 if __name__ == "__main__":
-    print(f"burrow village at http://{HOST}:{PORT}, log at {EVENTS}")
-    if NOTIFY_URL:
-        print(f"knocks will be pushed to {NOTIFY_URL}")
-    if MAX_LOG_BYTES > 0:
-        print(f"rotating past {MAX_LOG_BYTES} bytes into {archive_dir()}")
-    serve_forever()
+    config = Config.from_env(os.environ, sys.argv[1:])
+    print(
+        f"burrow village at http://{config.host}:{config.port}, log at {config.events}"
+    )
+    if config.notify_url:
+        print(f"knocks will be pushed to {config.notify_url}")
+    if config.max_log_bytes > 0:
+        configured_archive = config.archive_dir or config.events.parent / "archive"
+        print(f"rotating past {config.max_log_bytes} bytes into {configured_archive}")
+    serve_forever(config)

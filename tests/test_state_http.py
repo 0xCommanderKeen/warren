@@ -1,4 +1,5 @@
 import concurrent.futures
+import datetime as dt
 import http.client
 import json
 import os
@@ -27,8 +28,14 @@ class StateHTTPTests(unittest.TestCase):
         for patcher in self.patchers:
             patcher.start()
             self.addCleanup(patcher.stop)
+        initial_event = event("tool_called", tool="Read")
+        initial_event["ts"] = (
+            dt.datetime.now(dt.UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         with open(self.events, "w", encoding="utf-8") as stream:
-            stream.write(json.dumps(event("tool_called", tool="Read")) + "\n")
+            stream.write(json.dumps(initial_event) + "\n")
         self.running = RunningServer(serve)
         self.addCleanup(self.running.stop)
 

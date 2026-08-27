@@ -773,7 +773,7 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertNotEqual(headers["X-Burrow-Cursor"], cursor)
 
     def test_two_server_instances_have_distinct_boot_identities(self):
-        other = serve.Runtime()
+        other = serve.Runtime(serve.Config())
         self.assertRegex(self.server.boot_id, r"^[0-9a-f]{32}$")
         self.assertNotEqual(self.server.boot_id, other.boot_id)
 
