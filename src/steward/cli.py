@@ -240,6 +240,7 @@ def events_flush(
     report = emitter.flush(limit=limit)
     payload = {
         "delivered": report.delivered,
+        "retired_records": report.retired_records,
         "pending": report.pending,
         "corrupt": report.corrupt,
         "foreign": report.foreign,
@@ -261,7 +262,8 @@ def events_flush(
         click.echo(json.dumps(payload, indent=2))
     else:
         click.echo(
-            f"delivered {report.delivered}; pending {report.pending}; "
+            f"delivered {report.delivered}; retired-records {report.retired_records}; "
+            f"pending {report.pending}; "
             f"corrupt {report.corrupt}; foreign-target {report.foreign}; "
             f"failed {report.failed}; busy {report.busy}; errors {report.errors}; "
             f"unknown {report.unknown}; queue {emitter.queue}"

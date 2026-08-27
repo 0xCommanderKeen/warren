@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -465,7 +466,7 @@ def test_outage_is_replayed_after_restart_oldest_first(
     monkeypatch.setattr(ev.EventEmitter, "_post", accept)
     restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
     report = restarted.flush()
-    assert report == ev.FlushReport(delivered=2)
+    assert report == ev.FlushReport(delivered=2, retired_records=2)
     assert [kind for kind, _delivery_id in seen] == ["routine_started", "routine_failed"]
     assert len({delivery_id for _kind, delivery_id in seen}) == 2
 
@@ -679,7 +680,7 @@ def test_queue_append_quarantines_torn_tail_and_survives_restart(
     )
 
     restarted = ev.EventEmitter(url="https://village.example", fallback=fallback)
-    assert restarted.flush() == ev.FlushReport(delivered=3)
+    assert restarted.flush() == ev.FlushReport(delivered=3, retired_records=3)
     assert attempts[0] == "delivery-complete-old"
     assert set(attempts[1:]) == {"delivery-after-torn-a", "delivery-after-torn-b"}
     quarantine = emitter.queue.with_name(f"{emitter.queue.name}.corrupt").read_bytes()
@@ -814,7 +815,7 @@ def test_flush_posts_an_old_duplicate_queue_id_once_and_retires_every_copy(
         lambda _url, _body, delivery_id="": attempts.append(delivery_id) or True,
     )
 
-    assert emitter.flush() == ev.FlushReport(delivered=1)
+    assert emitter.flush() == ev.FlushReport(delivered=1, retired_records=2)
     assert attempts == ["delivery-old-duplicate"]
     assert emitter._read_queue() == ([], [])
 
@@ -837,7 +838,7 @@ def test_legacy_import_dedupes_old_index_id_by_event_content(
         "_post",
         lambda _self, _url, _body, delivery_id="": attempts.append(delivery_id) or True,
     )
-    assert emitter.flush() == ev.FlushReport(delivered=1)
+    assert emitter.flush() == ev.FlushReport(delivered=1, retired_records=1)
     assert attempts == [old_index_one_id]
 
 
@@ -860,6 +861,112 @@ def test_legacy_import_can_repeat_after_retirement_but_reuses_the_stable_id(
     assert emitter.flush().delivered == 1
     assert len(attempts) == 2
     assert attempts[0] == attempts[1]
+
+
+def test_legacy_id_is_canonical_and_target_bound_after_retirement(tmp_path: Path) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule").to_dict()
+    fallback.write_text(json.dumps(event) + "\n", encoding="utf-8")
+    first = ev.EventEmitter(url="https://a.example/", fallback=fallback)
+    assert first.import_legacy().imported == 1
+    records, _ = first._read_queue()
+    first_id = records[0]["delivery_id"]
+    first._rewrite_queue({first._record_identity(records[0])})
+
+    fallback.write_text(json.dumps(event, sort_keys=True) + "\n", encoding="utf-8")
+    assert first.import_legacy().imported == 1
+    records, _ = first._read_queue()
+    assert records[0]["delivery_id"] == first_id
+    first._rewrite_queue({first._record_identity(records[0])})
+
+    second = ev.EventEmitter(url="https://b.example", fallback=fallback)
+    assert second.import_legacy().imported == 1
+    records, _ = second._read_queue()
+    assert records[0]["delivery_id"] != first_id
+
+
+def test_legacy_import_atomic_commit_preserves_authority_on_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        context().failed(error="foreign", duration_s=1), "foreign-existing-record"
+    )
+    original = emitter.queue.read_bytes() + b"corrupt\n"
+    emitter.queue.write_bytes(original)
+    original_replace = Path.replace
+
+    def fail_queue_replace(path: Path, target: Path) -> Path:
+        if target == emitter.queue:
+            raise OSError("simulated replace failure")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", fail_queue_replace)
+    report = emitter.import_legacy()
+    assert report.imported == 0
+    assert report.failed == 1
+    assert report.errors == 1
+    assert emitter.queue.read_bytes() == original
+
+
+def test_legacy_import_partial_temp_write_failure_leaves_original_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    fallback.write_text(context().started("schedule").to_json() + "\n", encoding="utf-8")
+    emitter = ev.EventEmitter(url="https://village.example", fallback=fallback)
+    assert emitter._queue_record(
+        context().failed(error="existing", duration_s=1), "existing-authority-record"
+    )
+    original = emitter.queue.read_bytes()
+    real_write = os.write
+    writes = 0
+
+    def partial_then_fail(descriptor: int, data: bytes | memoryview) -> int:
+        nonlocal writes
+        writes += 1
+        if writes == 1:
+            return real_write(descriptor, data[:7])
+        raise OSError("simulated failure after partial temp write")
+
+    monkeypatch.setattr(os, "write", partial_then_fail)
+    report = emitter.import_legacy()
+    assert report.imported == 0
+    assert report.failed == 1
+    assert report.errors == 1
+    assert emitter.queue.read_bytes() == original
+
+
+def test_flush_limit_counts_post_groups_and_keeps_same_id_for_other_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fallback = tmp_path / "events.jsonl"
+    event = context().started("schedule")
+    current = ev.EventEmitter(url="https://a.example", fallback=fallback)
+    old_one = "legacy_" + hashlib.sha256(b"old-one").hexdigest()
+    old_two = "legacy_" + hashlib.sha256(b"old-two").hexdigest()
+    assert current._queue_record(event, old_one)
+    assert current._queue_record(event, old_two)
+    foreign = ev.EventEmitter(url="https://b.example", fallback=fallback)
+    assert foreign._queue_record(event, old_one)
+    posts: list[str] = []
+    monkeypatch.setattr(
+        current,
+        "_post",
+        lambda _u, _b, delivery_id="": posts.append(delivery_id) or True,
+    )
+
+    report = current.flush(limit=1)
+    assert report.delivered == 1
+    assert report.retired_records == 2
+    assert posts == [old_one]
+    records, corrupt = current._read_queue()
+    assert corrupt == []
+    assert [(record["target"], record["delivery_id"]) for record in records] == [
+        ("https://b.example", old_one)
+    ]
 
 
 def test_legacy_import_reports_non_missing_os_errors(

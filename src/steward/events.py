@@ -284,6 +284,7 @@ class FlushReport:
     """Observable outcome of one durable replay pass."""
 
     delivered: int = 0
+    retired_records: int = 0
     pending: int = 0
     corrupt: int = 0
     foreign: int = 0
@@ -511,7 +512,10 @@ class EventEmitter:
             self._fsync_parent(quarantine)
 
     def _rewrite_queue(
-        self, retired: set[str], *, history_confirmed: set[str] | None = None
+        self,
+        retired: set[tuple[str, str, str]],
+        *,
+        history_confirmed: set[tuple[str, str, str]] | None = None,
     ) -> None:
         """Retire acknowledged IDs without overwriting concurrent appenders."""
         self.queue.parent.mkdir(parents=True, exist_ok=True)
@@ -519,9 +523,9 @@ class EventEmitter:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
             records, corrupt = self._read_queue_unlocked()
             for record in records:
-                if history_confirmed and str(record["delivery_id"]) in history_confirmed:
+                if history_confirmed and self._record_identity(record) in history_confirmed:
                     record["history"] = True
-            remaining = [r for r in records if str(r["delivery_id"]) not in retired]
+            remaining = [r for r in records if self._record_identity(r) not in retired]
             if corrupt:
                 self._append_corrupt_evidence(corrupt)
                 quarantine = self.queue.with_name(f"{self.queue.name}.corrupt")
@@ -556,6 +560,25 @@ class EventEmitter:
             dict(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
+
+    @classmethod
+    def _record_identity(cls, record: Mapping[str, Any]) -> tuple[str, str, str]:
+        """Name one exact queue record without allowing cross-target ID collisions."""
+        return (
+            str(record["target"]),
+            str(record["delivery_id"]),
+            cls._event_fingerprint(record["event"]),
+        )
+
+    def _legacy_delivery_id(self, event: Mapping[str, Any]) -> str:
+        """Return the stable legacy ID for canonical content at this normalized target."""
+        if self.url is None:  # pragma: no cover - import_legacy refuses this configuration
+            raise ValueError("legacy delivery IDs require a target")
+        canonical = json.dumps(
+            dict(event), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        digest = hashlib.sha256(self.url.encode("utf-8") + b"\0" + canonical).hexdigest()
+        return f"legacy_{digest}"
 
     @staticmethod
     def _history_contains(raw: bytes, delivery_id: str) -> bool:
@@ -616,31 +639,33 @@ class EventEmitter:
             except OSError:
                 log.exception("could not read event replay queue %s", self.queue)
                 return FlushReport(errors=1, unknown=1)
-            matching: list[tuple[dict[str, Any], set[str]]] = []
-            matching_groups: dict[tuple[str, str], set[str]] = {}
+            matching: list[tuple[dict[str, Any], set[tuple[str, str, str]]]] = []
+            matching_groups: dict[tuple[str, str, str], set[tuple[str, str, str]]] = {}
             for record in records:
                 delivery_id = str(record["delivery_id"])
                 if record["target"] != self.url:
                     continue
                 key = (
                     (
+                        str(record["target"]),
                         "legacy-content",
                         self._event_fingerprint(record["event"]),
                     )
                     if delivery_id.startswith("legacy_")
-                    else ("delivery-id", delivery_id)
+                    else (str(record["target"]), "delivery-id", delivery_id)
                 )
                 ids = matching_groups.get(key)
                 if ids is None:
                     ids = set()
                     matching_groups[key] = ids
                     matching.append((record, ids))
-                ids.add(delivery_id)
+                ids.add(self._record_identity(record))
             selected = matching[:limit] if limit is not None else matching
-            retired: set[str] = set()
+            retired: set[tuple[str, str, str]] = set()
+            delivered = 0
             failed = 0
             errors = 0
-            history_confirmed: set[str] = set()
+            history_confirmed: set[tuple[str, str, str]] = set()
             foreign = sum(record["target"] != self.url for record in records)
             for record, equivalent_ids in selected:
                 try:
@@ -652,13 +677,15 @@ class EventEmitter:
                     errors += 1
                     break
                 if not record.get("history", True):
-                    history_confirmed.add(str(record["delivery_id"]))
+                    history_confirmed.add(self._record_identity(record))
                 body = json.dumps(record["event"], ensure_ascii=False).encode("utf-8")
                 if not self._post(self.url, body, str(record["delivery_id"])):
                     self._trip_breaker(self.url)
                     failed += 1
                     break
                 retired.update(equivalent_ids)
+                delivered += 1
+            retired_records = sum(self._record_identity(record) in retired for record in records)
             if retired or corrupt or history_confirmed:
                 try:
                     if history_confirmed:
@@ -668,7 +695,8 @@ class EventEmitter:
                 except OSError:
                     log.exception("could not compact event replay queue %s", self.queue)
                     return FlushReport(
-                        delivered=len(retired),
+                        delivered=delivered,
+                        retired_records=retired_records,
                         pending=len(records),
                         corrupt=len(corrupt),
                         foreign=foreign,
@@ -681,7 +709,8 @@ class EventEmitter:
             except OSError:
                 log.exception("could not confirm event replay queue %s", self.queue)
                 return FlushReport(
-                    delivered=len(retired),
+                    delivered=delivered,
+                    retired_records=retired_records,
                     corrupt=len(corrupt),
                     foreign=foreign,
                     failed=failed,
@@ -689,7 +718,8 @@ class EventEmitter:
                     unknown=1,
                 )
             return FlushReport(
-                delivered=len(retired),
+                delivered=delivered,
+                retired_records=retired_records,
                 pending=len(remaining),
                 corrupt=len(corrupt) + len(remaining_corrupt),
                 foreign=foreign,
@@ -731,7 +761,7 @@ class EventEmitter:
             log.exception("could not read legacy event log %s", source)
             return ImportReport(errors=1, unknown=1)
 
-    def _import_legacy_lines(  # noqa: PLR0915 — preserves every import outcome count
+    def _import_legacy_lines(  # noqa: C901, PLR0912, PLR0915 — explicit outcome accounting
         self, lines: Sequence[bytes]
     ) -> ImportReport:
         """Import one source snapshot while its caller retains the history lock."""
@@ -752,8 +782,7 @@ class EventEmitter:
             if isinstance(modern_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", modern_id):
                 skipped_modern += 1
                 continue
-            digest = hashlib.sha256(raw).hexdigest()
-            delivery_id = f"legacy_{digest}"
+            delivery_id = self._legacy_delivery_id(event)
             fingerprint = self._event_fingerprint(event)
             candidates.append((delivery_id, event, fingerprint))
 
@@ -761,20 +790,27 @@ class EventEmitter:
         imported = 0
         skipped_duplicate = 0
         failed = 0
-        with self._lock_path(self.queue).open("a+") as queue_lock:
-            fcntl.flock(queue_lock, fcntl.LOCK_EX)
-            records, _queue_corrupt = self._read_queue_unlocked()
-            pending_ids = {str(record["delivery_id"]) for record in records}
-            pending_content = {
-                (str(record["target"]), self._event_fingerprint(record["event"]))
-                for record in records
-            }
-            descriptor = os.open(self.queue, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-            try:
+        committed = False
+        try:
+            with self._lock_path(self.queue).open("a+") as queue_lock:
+                fcntl.flock(queue_lock, fcntl.LOCK_EX)
+                try:
+                    original = self.queue.read_bytes()
+                except FileNotFoundError:
+                    original = b""
+                records, _queue_corrupt = self._read_queue_unlocked()
+                pending_ids = {
+                    (str(record["target"]), str(record["delivery_id"])) for record in records
+                }
+                pending_content = {
+                    (str(record["target"]), self._event_fingerprint(record["event"]))
+                    for record in records
+                }
+                staged: list[bytes] = []
                 for delivery_id, event, fingerprint in candidates:
                     content_key = (str(self.url), fingerprint)
                     if (
-                        delivery_id in pending_ids
+                        (str(self.url), delivery_id) in pending_ids
                         or fingerprint in seen_source
                         or content_key in pending_content
                     ):
@@ -786,23 +822,56 @@ class EventEmitter:
                         "target": self.url,
                         "event": event,
                     }
-                    line = json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n"
-                    pending = memoryview(line)
-                    try:
-                        while pending:
-                            pending = pending[os.write(descriptor, pending) :]
-                    except OSError:
-                        failed += 1
-                        log.exception("could not persist event as an imported legacy event")
-                        continue
-                    pending_ids.add(delivery_id)
+                    staged.append(json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n")
+                    pending_ids.add((str(self.url), delivery_id))
                     pending_content.add(content_key)
                     seen_source.add(fingerprint)
                     imported += 1
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            self._fsync_parent(self.queue)
+                if staged:
+                    separator = b"\n" if original and not original.endswith(b"\n") else b""
+                    staging = self.queue.with_name(f".{self.queue.name}.{uuid.uuid4().hex}.tmp")
+                    try:
+                        descriptor = os.open(staging, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                        try:
+                            pending = memoryview(original + separator + b"".join(staged))
+                            while pending:
+                                written = os.write(descriptor, pending)
+                                if written <= 0:
+                                    raise OSError("short write while staging legacy import")
+                                pending = pending[written:]
+                            os.fsync(descriptor)
+                        finally:
+                            os.close(descriptor)
+                        staging.replace(self.queue)
+                        committed = True
+                        self._fsync_parent(self.queue)
+                    finally:
+                        with contextlib.suppress(FileNotFoundError):
+                            staging.unlink()
+        except OSError:
+            log.exception("could not atomically commit imported legacy events")
+            if committed:
+                return ImportReport(
+                    scanned=len(lines),
+                    imported=imported,
+                    skipped_modern=skipped_modern,
+                    skipped_duplicate=skipped_duplicate,
+                    corrupt=corrupt,
+                    errors=1,
+                    unknown=1,
+                )
+            failed = imported
+            imported = 0
+            return ImportReport(
+                scanned=len(lines),
+                imported=0,
+                skipped_modern=skipped_modern,
+                skipped_duplicate=skipped_duplicate,
+                corrupt=corrupt,
+                failed=failed,
+                errors=1,
+                unknown=1,
+            )
         return ImportReport(
             scanned=len(lines),
             imported=imported,

@@ -292,6 +292,9 @@ also enter its `.pending` sibling before POST and retain a stable Burrow deliver
 until acknowledged. A failed POST trips a short per-target circuit breaker and leaves
 the event queued; later emits and `steward events flush` replay oldest first. A village
 that cannot be reached loses no queued events, only their immediate remoteness.
+Legacy replay identity combines the normalized target URL with canonical event content.
+Formatting-equivalent old records for one target form one POST group; `--limit` and
+`delivered` count those groups, while `retired-records` counts removed queue rows.
 
 ## `board` — job board participation
 

@@ -521,7 +521,7 @@ events, oldest first; operators can drain and inspect the queue explicitly:
 
 ```console
 $ steward events flush
-delivered 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/events.jsonl.pending
+delivered 7; retired-records 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/events.jsonl.pending
 ```
 
 The pre-queue `events.jsonl` format recorded every event but no delivery outcome. It is
@@ -530,7 +530,12 @@ flush --include-legacy` explicitly queues each distinct valid ID-less line with 
 ID. Repeating it while that ID is pending is a no-op. Once delivery retires the queue
 record, however, there is no durable legacy seen-set, so a later import can offer the same
 stable ID again; use the option only when possible duplicates of events originally
-delivered without IDs are acceptable. History lines carrying a valid
+delivered without IDs are acceptable. Legacy IDs hash canonical event content together
+with the normalized target URL, so JSON formatting changes keep the same ID while the
+same event sent to another village gets a different ID. Compatible old-ID records for
+one target and canonical event are sent as one POST and retired together: `delivered`
+and `--limit` count POST groups, while `retired-records` counts physical queue rows.
+History lines carrying a valid
 `steward_delivery_id` are modern and are skipped: their queue record already owns retry,
 or its acknowledged delivery was retired. Invalid or torn queue records are preserved in
 `.pending.corrupt`, reported, and make the command exit non-zero. A failed POST likewise

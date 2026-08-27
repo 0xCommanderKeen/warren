@@ -50,7 +50,7 @@ def test_events_flush_reports_delivery_and_exits_cleanly(
 
     result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
     assert result.exit_code == 0, result.output
-    assert "delivered 1; pending 0; corrupt 0" in result.output
+    assert "delivered 1; retired-records 1; pending 0; corrupt 0" in result.output
 
 
 def test_events_flush_failure_is_visible_and_nonzero(
@@ -67,7 +67,7 @@ def test_events_flush_failure_is_visible_and_nonzero(
 
     result = runner.invoke(main, ["events", "flush", "--fallback", str(fallback)])
     assert result.exit_code == 1
-    assert "delivered 0; pending 1" in result.output
+    assert "delivered 0; retired-records 0; pending 1" in result.output
 
 
 def test_events_flush_still_drains_pending_when_legacy_read_fails(
