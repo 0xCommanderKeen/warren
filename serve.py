@@ -248,14 +248,6 @@ _notification_store = notification_persistence.NotificationPersistence(
         _setting("ledger_bytes", LEDGER_BYTES),
     ),
 )
-_delivery_ids_by_log = _notification_store.caches[LEDGER_DELIVERY_IDS]
-_notified_by_log = _notification_store.caches[LEDGER_NOTIFIED]
-_dropped_by_log = _notification_store.caches[LEDGER_NOTIFY_DROPPED]
-_knocks_by_log = _notification_store.caches[LEDGER_KNOCKS]
-_knock_journal_lock = _notification_store.journal_lock
-_ledger_lock = _notification_store.ledger_lock
-_knock_attempts = _notification_store.attempts
-_knock_attempts_lock = _notification_store.attempts_lock
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
@@ -401,93 +393,13 @@ def villager_name(event):
     )
 
 
-def knock_key(event):
-    return notification_persistence.knock_key(event)
-
-
-def terminal_knock_key(event):
-    """Fixed-size non-sensitive key for every durable terminal boundary."""
-    return notification_persistence.terminal_key(event)
-
-
-def terminal_knock_keys(event):
-    """Current identity plus only migration aliases proven to be exact."""
-    return notification_persistence.terminal_keys(event)
-
-
-def _ledger_path(kind):
-    return _store().ledger_path(kind)
-
-
-def _notification_lock_path(shard):
-    return _store().notification_lock_path(shard)
-
-
-def _load_ledger(kind, cache):
-    return _store().load_ledger(kind, cache)
-
-
-def _remember_durable_batch(kind, cache, keys, preserve_existing=()):
-    """Atomically retain a bounded ordered batch under a stable process lock.
-
-    A successful batch may evict the oldest prior entries, matching single-key
-    ledger retention.  The complete requested batch and any named keys that
-    already exist must remain represented; otherwise the authoritative file
-    and cache are left unchanged.
-    """
-    return _store().remember_batch(
-        kind, keys, preserve_existing=preserve_existing, cache=cache
-    )
-
-
-def _remember_durable(kind, cache, key):
-    """Atomically retain one key in a bounded ordered durable ledger."""
-    _store().remember(kind, key, cache)
-
-
-def _ledger_contains(kind, key):
-    """Read terminal authority afresh; process caches are never authoritative."""
-    return _store().contains(kind, key)
-
-
-def _knock_delivery_lock(key):
-    return _store().delivery_lock_path(key)
-
-
 def receiver_delivery_id(event):
     """Stable non-sensitive ASCII projection of the internal knock identity."""
-    return terminal_knock_key(event)
+    return notification_persistence.terminal_key(event)
 
 
 def _fsync_parent(path):
     durable.fsync_parent(path)
-
-
-def _knock_journal_paths(path):
-    return _store().journal_paths(path)
-
-
-def _read_knock_keys(path):
-    return _store().read_journal_keys(path)
-
-
-def _compact_knocks_locked(path, addition=None):
-    """Publish one bounded latest-state generation while ``path.lock`` is held.
-
-    Capacity victims receive a durable terminal-drop entry before the compacted
-    authority is published, so a crash or restart cannot make them eligible.
-    """
-    return _store().compact_locked(path, addition)
-
-
-def _publish_knock_compaction(path, lines):
-    """Durably replace journal authority while its stable lock is held."""
-    return _store().publish_compaction(path, lines)
-
-
-def _commit_knock_terminal(event, kind):
-    """Commit terminal outcome while preserving every retained source."""
-    return _store().commit_terminal(event, kind)
 
 
 def persist_knock(event):
@@ -497,22 +409,17 @@ def persist_knock(event):
     return _store().journal(event)
 
 
-def _persist_knock_attempt(event, attempts):
-    """Append a durable retry-state transition to the knock journal."""
-    return _store().record_attempt(event, attempts)
-
-
 def claim_knock(event):
     """Claim a knock unless it is in flight or has already been delivered."""
     if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
         return False
-    key = terminal_knock_key(event)
+    key = notification_persistence.terminal_key(event)
     with _notified_lock:
-        delivered = _load_ledger(LEDGER_NOTIFIED, _notified_by_log)
-        dropped = _load_ledger(LEDGER_NOTIFY_DROPPED, _dropped_by_log)
+        delivered = _store().load_ledger(LEDGER_NOTIFIED)
+        dropped = _store().load_ledger(LEDGER_NOTIFY_DROPPED)
         if any(
             candidate in delivered or candidate in dropped
-            for candidate in terminal_knock_keys(event)
+            for candidate in notification_persistence.terminal_keys(event)
         ):
             return False
         if key in _notified or key in _notifying:
@@ -525,11 +432,11 @@ def claim_knock(event):
 
 def finish_knock(event, delivered):
     """Release an attempt, remembering only successful deliveries."""
-    key = terminal_knock_key(event)
+    key = notification_persistence.terminal_key(event)
     with _notified_lock:
         _notifying.discard(key)
         if delivered:
-            if not _commit_knock_terminal(event, LEDGER_NOTIFIED):
+            if not _store().commit_terminal(event, LEDGER_NOTIFIED):
                 # Without a durable acknowledgement the event remains eligible
                 # for recovery; never pretend volatile success is final.
                 return False
@@ -596,26 +503,22 @@ def deliver_knock(event):
     durable outcome. The shard suppresses concurrent duplicates; a receiver
     acceptance followed by a process crash can still cause a later retry.
     """
-    key = terminal_knock_key(event)
-    path = _knock_delivery_lock(key)
+    key = notification_persistence.terminal_key(event)
+    path = _store().delivery_lock_path(key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if any(
-            _ledger_contains(LEDGER_NOTIFIED, candidate)
-            or _ledger_contains(LEDGER_NOTIFY_DROPPED, candidate)
-            for candidate in terminal_knock_keys(event)
+            _store().contains(LEDGER_NOTIFIED, candidate)
+            or _store().contains(LEDGER_NOTIFY_DROPPED, candidate)
+            for candidate in notification_persistence.terminal_keys(event)
         ):
             finish_knock(event, False)
             return True
         delivered = notify(event)
         if delivered:
-            if not _commit_knock_terminal(event, LEDGER_NOTIFIED):
+            if not _store().commit_terminal(event, LEDGER_NOTIFIED):
                 delivered = False
-        if not delivered:
-            with _knock_attempts_lock:
-                next_attempt = _knock_attempts.get(key, 0) + 1
-            _persist_knock_attempt(event, next_attempt)
         finish_knock(event, False)
     with _transport_lock:
         key = "notify_delivered" if delivered else "notify_failed"
@@ -636,29 +539,23 @@ def notify_async(event):
 
 
 def _process_knock(event):
-    key = terminal_knock_key(event)
-    with _knock_attempts_lock:
-        prior_attempts = _knock_attempts.get(key, 0)
-    if prior_attempts >= 3:
-        if not _commit_knock_terminal(event, LEDGER_NOTIFY_DROPPED):
+    if _store().attempts_exhausted(event):
+        if not _store().commit_terminal(event, LEDGER_NOTIFY_DROPPED):
             finish_knock(event, False)
             return
         finish_knock(event, False)
-        with _knock_attempts_lock:
-            _knock_attempts.pop(key, None)
+        _store().clear_attempts(event)
         _recover_knocks()
         return
 
     delivered = deliver_knock(event)
     if delivered:
-        with _knock_attempts_lock:
-            _knock_attempts.pop(key, None)
+        _store().clear_attempts(event)
     else:
-        with _knock_attempts_lock:
-            attempts = _knock_attempts.get(key, 0) + 1
-            _knock_attempts[key] = attempts
-        durable_attempt = _persist_knock_attempt(event, attempts)
-        if attempts < 3 and durable_attempt and claim_knock(event):
+        attempts = _store().next_attempt(event)
+        durable_attempt = _store().record_attempt(event, attempts)
+        exhausted = _store().attempts_exhausted(event)
+        if not exhausted and durable_attempt and claim_knock(event):
             try:
                 _knock_queue.put_nowait(event)
                 with _transport_lock:
@@ -667,11 +564,10 @@ def _process_knock(event):
                 finish_knock(event, False)
                 with _transport_lock:
                     _transport_counters["notify_saturated"] += 1
-        elif attempts >= 3 and durable_attempt:
-            if not _commit_knock_terminal(event, LEDGER_NOTIFY_DROPPED):
+        elif exhausted and durable_attempt:
+            if not _store().commit_terminal(event, LEDGER_NOTIFY_DROPPED):
                 return
-            with _knock_attempts_lock:
-                _knock_attempts.pop(key, None)
+            _store().clear_attempts(event)
         elif not durable_attempt:
             return
     _recover_knocks()
@@ -879,7 +775,7 @@ def append_event(event):
         ) as process_lock:
             fcntl.flock(process_lock, fcntl.LOCK_EX)
             delivery_id = event.get("delivery_id")
-            remembered = _load_ledger(LEDGER_DELIVERY_IDS, _delivery_ids_by_log)
+            remembered = _store().load_ledger(LEDGER_DELIVERY_IDS)
             if delivery_id and delivery_id in remembered:
                 with _transport_lock:
                     _transport_counters["ingest_duplicates"] += 1
@@ -888,9 +784,7 @@ def append_event(event):
                 # The event log is the canonical commit record. Repair a missing
                 # acceleration ledger left by a crash after the event fsync.
                 try:
-                    _remember_durable(
-                        LEDGER_DELIVERY_IDS, _delivery_ids_by_log, delivery_id
-                    )
+                    _store().remember(LEDGER_DELIVERY_IDS, delivery_id)
                 except OSError:
                     pass
                 with _transport_lock:
@@ -902,9 +796,7 @@ def append_event(event):
                 os.fsync(f.fileno())
             _fsync_parent(events_path)
             if delivery_id:
-                _remember_durable(
-                    LEDGER_DELIVERY_IDS, _delivery_ids_by_log, delivery_id
-                )
+                _store().remember(LEDGER_DELIVERY_IDS, delivery_id)
             maybe_rotate()
             return True
 

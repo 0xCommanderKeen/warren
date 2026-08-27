@@ -38,6 +38,49 @@ class NotificationPersistenceInterfaceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid notification lock shard"):
                 store.notification_lock_path(4)
 
+    def test_store_owns_attempt_progression_and_process_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = os.path.join(directory, "events.jsonl")
+            store = NotificationPersistence(lambda: events, lambda: (8, 4096), 4)
+            event = {
+                "agent_id": "a",
+                "ts": "t",
+                "type": "needs_human",
+                "payload": {"message": "help"},
+                "delivery_id": "attempt-test",
+            }
+
+            self.assertEqual(store.next_attempt(event), 1)
+            self.assertEqual(store.next_attempt(event), 2)
+            self.assertFalse(store.attempts_exhausted(event))
+            self.assertEqual(store.next_attempt(event), 3)
+            self.assertTrue(store.attempts_exhausted(event))
+
+            store.clear_attempts(event)
+            self.assertFalse(store.attempts_exhausted(event))
+            self.assertEqual(store.next_attempt(event), 1)
+            store.reset_process_state()
+            self.assertEqual(store.next_attempt(event), 1)
+
+    def test_recovery_restores_attempt_policy_through_the_store_interface(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = os.path.join(directory, "events.jsonl")
+            store = NotificationPersistence(lambda: events, lambda: (8, 4096), 4)
+            event = {
+                "agent_id": "a",
+                "ts": "t",
+                "type": "needs_human",
+                "payload": {"message": "help"},
+                "delivery_id": "recovered-attempt-test",
+            }
+
+            self.assertTrue(store.record_attempt(event, 2))
+            store.reset_process_state()
+            self.assertEqual(store.recover()[0][2], [event])
+            self.assertFalse(store.attempts_exhausted(event))
+            self.assertEqual(store.next_attempt(event), 3)
+            self.assertTrue(store.attempts_exhausted(event))
+
 
 if __name__ == "__main__":
     unittest.main()

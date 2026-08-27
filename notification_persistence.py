@@ -147,11 +147,11 @@ class NotificationPersistence:
         self._limits = limits
         self._ledger_limits = ledger_limits or limits
         self.lock_shards = lock_shards
-        self.journal_lock = threading.RLock()
-        self.ledger_lock = threading.RLock()
-        self.attempts = {}
-        self.attempts_lock = threading.Lock()
-        self.caches = {kind: {} for kind in KINDS}
+        self._journal_lock = threading.RLock()
+        self._ledger_lock = threading.RLock()
+        self._attempts = {}
+        self._attempts_lock = threading.Lock()
+        self._caches = {kind: {} for kind in KINDS}
 
     def ledger_path(self, kind):
         if kind not in KINDS:
@@ -174,12 +174,12 @@ class NotificationPersistence:
     def journal_paths(path):
         return [path] + durable.replay_paths(path)
 
-    def load_ledger(self, kind, cache=None):
-        cache = self.caches[kind] if cache is None else cache
+    def load_ledger(self, kind):
+        cache = self._caches[kind]
         path = self.ledger_path(kind)
         remembered = set()
         try:
-            with self.ledger_lock, open(durable.lock_path(path), "a+") as lock:
+            with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_SH)
                 try:
                     with open(path, encoding="utf-8") as stream:
@@ -193,12 +193,12 @@ class NotificationPersistence:
         cache[path] = remembered
         return remembered
 
-    def remember_batch(self, kind, keys, preserve_existing=(), cache=None):
-        cache = self.caches[kind] if cache is None else cache
+    def remember_batch(self, kind, keys, preserve_existing=()):
+        cache = self._caches[kind]
         path = self.ledger_path(kind)
         records, byte_limit = self._ledger_limits()
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with self.ledger_lock, open(durable.lock_path(path), "a+") as lock:
+        with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             remembered = collections.OrderedDict()
             try:
@@ -237,13 +237,13 @@ class NotificationPersistence:
             cache[path] = retained
             return retained
 
-    def remember(self, kind, key, cache=None):
-        self.remember_batch(kind, (key,), cache=cache)
+    def remember(self, kind, key):
+        self.remember_batch(kind, (key,))
 
     def contains(self, kind, key):
         try:
             path = self.ledger_path(kind)
-            with self.ledger_lock, open(durable.lock_path(path), "a+") as lock:
+            with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
                 fcntl.flock(lock, fcntl.LOCK_SH)
                 try:
                     with open(path, encoding="utf-8") as stream:
@@ -367,7 +367,7 @@ class NotificationPersistence:
         path = self.journal_path()
         key = terminal_key(event)
         try:
-            with self.journal_lock:
+            with self._journal_lock:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(durable.lock_path(path), "a+") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -381,7 +381,7 @@ class NotificationPersistence:
     def journal(self, event):
         path = self.journal_path()
         try:
-            with self.journal_lock:
+            with self._journal_lock:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(durable.lock_path(path), "a+") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -390,7 +390,7 @@ class NotificationPersistence:
                         known = self.compact_locked(
                             path, {"event": event, "attempts": 0}
                         )
-                    self.caches[KNOCKS][path] = known
+                    self._caches[KNOCKS][path] = known
             return True
         except OSError:
             return False
@@ -398,7 +398,7 @@ class NotificationPersistence:
     def record_attempt(self, event, attempts):
         path = self.journal_path()
         try:
-            with self.journal_lock:
+            with self._journal_lock:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(durable.lock_path(path), "a+") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -411,7 +411,7 @@ class NotificationPersistence:
         """Hand off journal authority and return parsed replay generations."""
         path = self.journal_path()
         try:
-            with self.journal_lock:
+            with self._journal_lock:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(durable.lock_path(path), "a+") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -463,10 +463,10 @@ class NotificationPersistence:
                             events[key] = (attempts, event)
             except OSError:
                 continue
-            with self.attempts_lock:
+            with self._attempts_lock:
                 for attempts, event in events.values():
                     key = terminal_key(event)
-                    self.attempts[key] = max(self.attempts.get(key, 0), attempts)
+                    self._attempts[key] = max(self._attempts.get(key, 0), attempts)
             recovered.append(
                 (generation, complete, [item[1] for item in events.values()])
             )
@@ -483,3 +483,31 @@ class NotificationPersistence:
 
     def terminal_counts(self):
         return len(self.load_ledger(NOTIFIED)), len(self.load_ledger(DROPPED))
+
+    def next_attempt(self, event):
+        """Advance and return this notification's process-local attempt count."""
+        key = terminal_key(event)
+        with self._attempts_lock:
+            attempts = self._attempts.get(key, 0) + 1
+            self._attempts[key] = attempts
+            return attempts
+
+    def attempts_exhausted(self, event, limit=3):
+        """Return whether retry policy has reached its terminal attempt limit."""
+        key = terminal_key(event)
+        with self._attempts_lock:
+            return self._attempts.get(key, 0) >= limit
+
+    def clear_attempts(self, event):
+        """Forget process-local retry state after a terminal outcome."""
+        key = terminal_key(event)
+        with self._attempts_lock:
+            self._attempts.pop(key, None)
+
+    def reset_process_state(self):
+        """Discard non-authoritative caches and attempts, as on process restart."""
+        with self._attempts_lock:
+            self._attempts.clear()
+        with self._ledger_lock:
+            for cache in self._caches.values():
+                cache.clear()

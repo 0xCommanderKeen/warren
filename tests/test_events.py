@@ -9,6 +9,7 @@ import unittest
 import socket
 from unittest import mock
 
+import notification_persistence as knocks
 import serve
 from tests.http_test_support import RunningServer
 
@@ -33,7 +34,7 @@ def _race_knock(events, observed, event, gate):
 def _terminalize_knock(events, event, kind, gate):
     serve.EVENTS = events
     gate.wait()
-    serve._commit_knock_terminal(event, kind)
+    serve._store().commit_terminal(event, kind)
 
 
 class EventsEndpointTest(unittest.TestCase):
@@ -170,7 +171,6 @@ class EventsEndpointTest(unittest.TestCase):
                 with open(candidate, encoding="utf-8") as stream:
                     records += sum(1 for line in stream if line.strip())
             self.assertLessEqual(records, 2)
-            serve._dropped_by_log.clear()  # simulate restart
             self.assertFalse(serve.claim_knock(events[0]))
 
     def test_legacy_multiline_oversize_key_is_terminal_across_restart(self):
@@ -185,21 +185,20 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "LEDGER_BYTES", 128),
         ):
             self.assertTrue(serve.persist_knock(event))
-            key = serve.terminal_knock_key(event)
-            serve._remember_durable("notify-dropped", serve._dropped_by_log, key)
+            key = knocks.terminal_key(event)
+            serve._store().remember("notify-dropped", key)
             with open(self.events + ".notify-dropped", "rb") as stream:
                 ledger = stream.read()
             self.assertNotIn(b"\x00", ledger)
             self.assertEqual(len(ledger.splitlines()), 1)
             self.assertTrue(ledger.decode("ascii").strip().startswith("burrow-sha256-"))
-            serve._dropped_by_log.clear()
             self.assertFalse(serve.claim_knock(event))
 
     def test_ledger_paths_reject_unknown_domain_kinds(self):
         with self.assertRaisesRegex(ValueError, "invalid durable ledger kind"):
-            serve._ledger_path("notify-lock-00")
+            serve._store().ledger_path("notify-lock-00")
         with self.assertRaisesRegex(ValueError, "invalid notification lock shard"):
-            serve._notification_lock_path(serve.KNOCK_LOCK_SHARDS)
+            serve._store().notification_lock_path(serve.KNOCK_LOCK_SHARDS)
 
     def test_terminal_commit_failure_preserves_knock_capacity_victim(self):
         first = self.valid_event(
@@ -221,7 +220,7 @@ class EventsEndpointTest(unittest.TestCase):
             self.assertFalse(serve.persist_knock(second))
             with open(self.events + ".knocks", encoding="utf-8") as stream:
                 retained = json.loads(next(stream))["event"]
-            self.assertEqual(serve.knock_key(retained), serve.knock_key(first))
+            self.assertEqual(knocks.knock_key(retained), knocks.knock_key(first))
 
     def test_terminal_eviction_during_compaction_preserves_all_victim_authority(self):
         path = self.events + ".knocks"
@@ -238,9 +237,7 @@ class EventsEndpointTest(unittest.TestCase):
         for candidate, event in authority:
             with open(candidate, "w", encoding="utf-8") as stream:
                 stream.write(json.dumps({"event": event, "attempts": 0}) + "\n")
-        serve._remember_durable(
-            "notify-dropped", serve._dropped_by_log, serve.terminal_knock_key(older)
-        )
+        serve._store().remember("notify-dropped", knocks.terminal_key(older))
         ledger_path = self.events + ".notify-dropped"
         with open(ledger_path, "rb") as stream:
             ledger_before = stream.read()
@@ -251,14 +248,13 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "LEDGER_BYTES", 100000),
         ):
             with self.assertRaises(OSError):
-                serve._compact_knocks_locked(path, {"event": events[2], "attempts": 0})
+                serve._store().compact_locked(path, {"event": events[2], "attempts": 0})
         with open(ledger_path, "rb") as stream:
             self.assertEqual(stream.read(), ledger_before)
         for candidate, event in authority:
             with open(candidate, encoding="utf-8") as stream:
                 self.assertEqual(json.loads(next(stream))["event"], event)
 
-        serve._dropped_by_log.clear()
         serve._notifying.clear()
         with mock.patch.object(serve, "NOTIFY_URL", "unavailable"):
             self.assertFalse(serve.claim_knock(older))
@@ -277,9 +273,7 @@ class EventsEndpointTest(unittest.TestCase):
         for event in victims + [older]:
             with open(path, "a", encoding="utf-8") as stream:
                 stream.write(json.dumps({"event": event, "attempts": 0}) + "\n")
-        serve._remember_durable(
-            "notify-dropped", serve._dropped_by_log, serve.terminal_knock_key(older)
-        )
+        serve._store().remember("notify-dropped", knocks.terminal_key(older))
 
         with (
             mock.patch.object(serve, "KNOCK_RECORDS", 2),
@@ -287,7 +281,7 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "LEDGER_RECORDS", 2),
             mock.patch.object(serve, "LEDGER_BYTES", 100000),
         ):
-            serve._compact_knocks_locked(path, {"event": addition, "attempts": 0})
+            serve._store().compact_locked(path, {"event": addition, "attempts": 0})
 
         with open(path, encoding="utf-8") as stream:
             retained = [json.loads(line)["event"] for line in stream]
@@ -296,10 +290,9 @@ class EventsEndpointTest(unittest.TestCase):
         )
         with open(self.events + ".notify-dropped", encoding="utf-8") as stream:
             terminal = set(stream.read().splitlines())
-        self.assertIn(serve.terminal_knock_key(older), terminal)
-        self.assertIn(serve.terminal_knock_key(victims[0]), terminal)
+        self.assertIn(knocks.terminal_key(older), terminal)
+        self.assertIn(knocks.terminal_key(victims[0]), terminal)
 
-        serve._dropped_by_log.clear()
         serve._notifying.clear()
         with mock.patch.object(serve, "NOTIFY_URL", "unavailable"):
             self.assertFalse(serve.claim_knock(older))
@@ -316,14 +309,12 @@ class EventsEndpointTest(unittest.TestCase):
         replay = path + ".replay.old"
         with open(replay, "w", encoding="utf-8") as stream:
             stream.write(json.dumps({"event": replay_pending, "attempts": 0}) + "\n")
-        serve._remember_durable(
-            "notify-dropped", serve._dropped_by_log, serve.terminal_knock_key(terminal)
-        )
+        serve._store().remember("notify-dropped", knocks.terminal_key(terminal))
 
         real_publish = serve._notification_store.publish_compaction
 
         def fail_final_compaction(candidate, lines):
-            if [key for key, _ in lines] == [serve.knock_key(addition)]:
+            if [key for key, _ in lines] == [knocks.knock_key(addition)]:
                 raise OSError("injected final publication failure")
             return real_publish(candidate, lines)
 
@@ -339,7 +330,7 @@ class EventsEndpointTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(OSError, "injected final publication failure"):
-                serve._compact_knocks_locked(path, {"event": addition, "attempts": 0})
+                serve._store().compact_locked(path, {"event": addition, "attempts": 0})
 
         on_disk = []
         for candidate in (path, replay):
@@ -353,7 +344,7 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertEqual(on_disk, [pending, replay_pending])
         self.assertNotIn(addition, on_disk)
         self.assertTrue(
-            all(serve.terminal_knock_key(event) in terminal_keys for event in on_disk)
+            all(knocks.terminal_key(event) in terminal_keys for event in on_disk)
         )
 
         with (
@@ -362,7 +353,7 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "LEDGER_RECORDS", 8),
             mock.patch.object(serve, "LEDGER_BYTES", 100000),
         ):
-            serve._compact_knocks_locked(path, {"event": addition, "attempts": 0})
+            serve._store().compact_locked(path, {"event": addition, "attempts": 0})
         with open(path, encoding="utf-8") as stream:
             self.assertEqual([json.loads(line)["event"] for line in stream], [addition])
         self.assertFalse(os.path.exists(replay))
@@ -379,7 +370,7 @@ class EventsEndpointTest(unittest.TestCase):
             with open(candidate, "w", encoding="utf-8") as stream:
                 stream.write(json.dumps({"event": event, "attempts": 0}) + "\n")
         serve._notification_store.remember_batch(
-            "notify-dropped", [serve.terminal_knock_key(event) for event in terminals]
+            "notify-dropped", [knocks.terminal_key(event) for event in terminals]
         )
         with open(self.events + ".notify-dropped", "rb") as stream:
             ledger_before = stream.read()
@@ -400,7 +391,7 @@ class EventsEndpointTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(OSError, "injected prune failure"):
-                serve._compact_knocks_locked(path, {"event": addition, "attempts": 0})
+                serve._store().compact_locked(path, {"event": addition, "attempts": 0})
 
         with open(self.events + ".notify-dropped", "rb") as stream:
             self.assertEqual(stream.read(), ledger_before)
@@ -412,7 +403,7 @@ class EventsEndpointTest(unittest.TestCase):
             self.assertTrue(
                 all(
                     serve._notification_store.contains(
-                        "notify-dropped", serve.terminal_knock_key(event)
+                        "notify-dropped", knocks.terminal_key(event)
                     )
                     for event in retained
                 )
@@ -422,7 +413,7 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "KNOCK_RECORDS", 1),
             mock.patch.object(serve, "KNOCK_BYTES", 100000),
         ):
-            serve._compact_knocks_locked(path, {"event": addition, "attempts": 0})
+            serve._store().compact_locked(path, {"event": addition, "attempts": 0})
         with open(path, encoding="utf-8") as stream:
             self.assertEqual([json.loads(line)["event"] for line in stream], [addition])
         self.assertFalse(os.path.exists(generations[1]))
@@ -441,15 +432,15 @@ class EventsEndpointTest(unittest.TestCase):
         ):
             self.assertTrue(serve.persist_knock(events[0]))
             self.assertTrue(serve.persist_knock(events[1]))
-            self.assertTrue(serve._commit_knock_terminal(events[0], "notified"))
-            self.assertTrue(serve._commit_knock_terminal(events[2], "notified"))
-            self.assertTrue(serve._commit_knock_terminal(events[1], "notified"))
-        serve._notified_by_log.clear()
+            self.assertTrue(serve._store().commit_terminal(events[0], "notified"))
+            self.assertTrue(serve._store().commit_terminal(events[2], "notified"))
+            self.assertTrue(serve._store().commit_terminal(events[1], "notified"))
         serve._notifying.clear()
         self.assertFalse(serve.claim_knock(events[0]))
         self.assertFalse(serve.claim_knock(events[1]))
         self.assertNotIn(
-            serve.knock_key(events[0]), serve._read_knock_keys(self.events + ".knocks")
+            knocks.knock_key(events[0]),
+            serve._store().read_journal_keys(self.events + ".knocks"),
         )
 
     def test_terminal_commit_crash_copy_converges_without_losing_suppression(self):
@@ -470,12 +461,13 @@ class EventsEndpointTest(unittest.TestCase):
                 "publish_compaction",
                 side_effect=crash_after_ledger,
             ):
-                self.assertTrue(serve._commit_knock_terminal(event, "notify-dropped"))
+                self.assertTrue(serve._store().commit_terminal(event, "notify-dropped"))
             self.assertFalse(serve.claim_knock(event))
             serve._notifying.clear()
             serve._recover_knocks()
         self.assertNotIn(
-            serve.knock_key(event), serve._read_knock_keys(self.events + ".knocks")
+            knocks.knock_key(event),
+            serve._store().read_journal_keys(self.events + ".knocks"),
         )
 
     def test_concurrent_terminal_commits_are_counted_once_from_durable_ledgers(self):
@@ -495,16 +487,13 @@ class EventsEndpointTest(unittest.TestCase):
         for process in processes:
             process.join(10)
             self.assertEqual(process.exitcode, 0)
-        serve._dropped_by_log.clear()
         self.assertEqual(serve.transport_status()["notifications"]["dropped"], 1)
 
     def test_terminal_status_survives_process_counter_reset(self):
         delivered = self.valid_event(type="needs_human", delivery_id="status-delivered")
         dropped = self.valid_event(type="needs_human", delivery_id="status-dropped")
-        self.assertTrue(serve._commit_knock_terminal(delivered, "notified"))
-        self.assertTrue(serve._commit_knock_terminal(dropped, "notify-dropped"))
-        serve._notified_by_log.clear()
-        serve._dropped_by_log.clear()
+        self.assertTrue(serve._store().commit_terminal(delivered, "notified"))
+        self.assertTrue(serve._store().commit_terminal(dropped, "notify-dropped"))
         with mock.patch.dict(
             serve._transport_counters, {"notify_delivered": 0, "notify_dropped": 0}
         ):
@@ -553,7 +542,7 @@ class EventsEndpointTest(unittest.TestCase):
 
             with mock.patch.object(serve.os, "replace", side_effect=inspect_pending):
                 with open(path + ".lock", "a+"):
-                    serve._compact_knocks_locked(path)
+                    serve._store().compact_locked(path)
             self.assertEqual(
                 max(count for _, count in observed), 3 * serve.KNOCK_RECORDS
             )
@@ -568,10 +557,10 @@ class EventsEndpointTest(unittest.TestCase):
         dropped_before = serve._transport_counters["notify_dropped"]
         real_remember = serve._notification_store.remember
 
-        def fail_drop(kind, key, cache=None):
+        def fail_drop(kind, key):
             if kind == "notify-dropped":
                 raise OSError("ledger unavailable")
-            return real_remember(kind, key, cache)
+            return real_remember(kind, key)
 
         with (
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
@@ -596,7 +585,7 @@ class EventsEndpointTest(unittest.TestCase):
 
         # Simulate two fresh processes by recovering the durable attempts each time.
         for _ in range(2):
-            serve._knock_attempts.clear()
+            serve._store().clear_attempts(event)
             serve._notifying.clear()
             with (
                 mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
@@ -618,7 +607,7 @@ class EventsEndpointTest(unittest.TestCase):
                 serve._transport_counters["notify_dropped"], dropped_before
             )
 
-        serve._knock_attempts.clear()
+        serve._store().clear_attempts(event)
         serve._notifying.clear()
         with (
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
@@ -656,9 +645,10 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertEqual(
             serve._transport_counters["notify_saturated"], saturated_before + 1
         )
-        self.assertNotIn(serve.terminal_knock_key(event), serve._notifying)
+        self.assertNotIn(knocks.terminal_key(event), serve._notifying)
         self.assertIn(
-            serve.knock_key(event), serve._read_knock_keys(self.events + ".knocks")
+            knocks.knock_key(event),
+            serve._store().read_journal_keys(self.events + ".knocks"),
         )
 
     def test_ingest_rejects_the_shared_protocol_contract_without_appending(self):
