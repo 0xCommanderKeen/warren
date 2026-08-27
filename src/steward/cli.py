@@ -3,7 +3,8 @@
 import json
 import logging
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -828,6 +829,7 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
     return function
 
 
+@contextmanager
 def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     residents: Path,
     state: Path | None,
@@ -836,28 +838,35 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     catchup_seconds: float,
     *,
     dry_run: bool,
-) -> Scheduler:
+) -> Iterator[Scheduler]:
     scheduled = _load_or_exit(residents)
     # A rehearsal touches no database: it must not claim a task, deliver a decision, deny
     # one by expiry, or spend a budget. With no hooks and no guard the scheduler simply
     # fires routines, as it did before the board, approvals, and budgets existed.
-    if dry_run:
-        hooks, guard, registry = None, None, None
-    else:
-        registry = _open_store(db)
-        guard = BudgetGuard(registry, ev.EventEmitter.from_env())
-        hooks = Dispatcher.from_path(residents, registry, workdir=workdir, guard=guard)
-    return Scheduler(
-        scheduled,
-        state=SchedulerState.load(state if state is not None else default_state_path()),
-        workdir=workdir,
-        catchup_s=catchup_seconds,
-        dry_run=dry_run,
-        library=library_for(residents),
-        hooks=hooks,
-        guard=guard,
-        registry=registry,
-    )
+    registry = None
+    try:
+        if dry_run:
+            hooks, guard = None, None
+        else:
+            registry = _open_store(db)
+            guard = BudgetGuard(registry, ev.EventEmitter.from_env())
+            hooks = Dispatcher.from_path(residents, registry, workdir=workdir, guard=guard)
+        yield Scheduler(
+            scheduled,
+            state=SchedulerState.load(state if state is not None else default_state_path()),
+            workdir=workdir,
+            catchup_s=catchup_seconds,
+            dry_run=dry_run,
+            library=library_for(residents),
+            hooks=hooks,
+            guard=guard,
+            registry=registry,
+        )
+    finally:
+        # This store is owned by the CLI assembly above. Scheduler also accepts injected
+        # registries, so cleanup belongs here rather than on Scheduler itself.
+        if registry is not None:
+            registry.close()
 
 
 def _open_store(db: Path | None) -> Store:
@@ -883,6 +892,17 @@ def _report_fires(reports: Sequence[FireReport], *, dry_run: bool) -> None:
             click.secho(f"failed {report.scheduled.key}: {detail}", fg="red", err=True)
 
 
+def _fires_failed(reports: Sequence[FireReport]) -> bool:
+    """Return whether work that actually started failed.
+
+    A skip is an honest scheduling decision (overlap, pause, or catch-up policy), not a
+    process failure.  Dry runs never reach this predicate.
+    """
+    return any(
+        report.fired and (report.result is None or not report.result.ok) for report in reports
+    )
+
+
 @scheduler.command("tick")
 @_scheduler_options
 def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
@@ -895,20 +915,24 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
 ) -> None:
     """Fire everything due right now, sweep the board, then exit. Good under cron."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    engine = _build_scheduler(residents, state, workdir, db, catchup_seconds, dry_run=dry_run)
-    if dry_run:
-        reports = [engine.fire(item) for item in engine.scheduled]
-    else:
-        try:
-            engine.require_ready()
-            # tick() raises too, on a STEWARD_STATE it cannot persist: a fire it could not
-            # record is a fire that would repeat on the next tick, so it must stop the cron
-            # run non-zero rather than fire blind and let cron think all is well.
-            reports = engine.tick()
-        except SchedulerError as exc:
-            click.secho(str(exc), fg="red", err=True)
+    with _build_scheduler(
+        residents, state, workdir, db, catchup_seconds, dry_run=dry_run
+    ) as engine:
+        if dry_run:
+            reports = [engine.fire(item) for item in engine.scheduled]
+        else:
+            try:
+                engine.require_ready()
+                # tick() raises too, on a STEWARD_STATE it cannot persist: a fire it could
+                # not record would repeat on the next tick, so the cron run must stop
+                # non-zero rather than fire blind and pretend all is well.
+                reports = engine.tick()
+            except SchedulerError as exc:
+                click.secho(str(exc), fg="red", err=True)
+                sys.exit(EXIT_INVALID)
+        _report_fires(reports, dry_run=dry_run)
+        if not dry_run and _fires_failed(reports):
             sys.exit(EXIT_INVALID)
-    _report_fires(reports, dry_run=dry_run)
 
 
 @scheduler.command("run")
@@ -925,19 +949,25 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
 ) -> None:
     """Run the scheduler daemon: sleep to the next due routine, fire, repeat."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    engine = _build_scheduler(residents, state, workdir, db, catchup_seconds, dry_run=dry_run)
-    if dry_run:
-        _report_fires([engine.fire(item) for item in engine.scheduled], dry_run=True)
-        return
-    try:
-        reports = engine.run(max_ticks=max_ticks)
-    except SchedulerError as exc:
-        click.secho(str(exc), fg="red", err=True)
-        sys.exit(EXIT_INVALID)
-    except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon
-        click.echo("stopped")
-        return
-    _report_fires(reports, dry_run=False)
+    with _build_scheduler(
+        residents, state, workdir, db, catchup_seconds, dry_run=dry_run
+    ) as engine:
+        if dry_run:
+            _report_fires([engine.fire(item) for item in engine.scheduled], dry_run=True)
+            return
+        try:
+            reports = engine.run(max_ticks=max_ticks)
+        except SchedulerError as exc:
+            click.secho(str(exc), fg="red", err=True)
+            sys.exit(EXIT_INVALID)
+        except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon
+            click.echo("stopped")
+            return
+        _report_fires(reports, dry_run=False)
+        # An unbounded daemon never reaches here: recoverable fire failures are reported and
+        # the loop stays alive. A bounded run is a one-shot command and carries its aggregate.
+        if _fires_failed(reports):
+            sys.exit(EXIT_INVALID)
 
 
 # --------------------------------------------------------------------------------------
@@ -1021,6 +1051,8 @@ def board_dispatch(
         return
     for report in run.reports:
         _report_board(report)
+    if any(not report.done for report in run.reports):
+        sys.exit(EXIT_INVALID)
 
 
 def _report_board(report: BoardReport) -> None:
@@ -1513,14 +1545,16 @@ def _render_origins(statuses: Sequence[BudgetStatus], origins: Sequence[OriginSp
 
 @budget.command("unpause")
 @click.argument("resident_id")
+@_RESIDENTS_OPTION
 @_DB_OPTION
-def budget_unpause(resident_id: str, db: Path | None) -> None:
+def budget_unpause(resident_id: str, residents: Path, db: Path | None) -> None:
     """Lift a budget pause and let this resident run again.
 
     The same act as approving the ``needs_human`` the pause raised, from a terminal
     instead of a panel: the request is resolved as ``approve``, ``needs_human_resolved``
     is emitted, and the village sees one answer to one question either way.
     """
+    _resident_or_exit(residents, resident_id)
     with _open_store(db) as store:
         pause = BudgetGuard(store, ev.EventEmitter.from_env()).resume(resident_id, decided_by="cli")
     if pause is None:
@@ -1572,6 +1606,11 @@ def _report_pass(report: WatchdogPass) -> None:
         click.echo("nothing to intervene in")
 
 
+def _watchdog_failed(report: WatchdogPass) -> bool:
+    """Return whether the pass ended with work requiring human recovery."""
+    return bool(report.gave_up or report.paused)
+
+
 @watchdog.command("tick")
 @_RESIDENTS_OPTION
 @_DB_OPTION
@@ -1583,8 +1622,10 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
         report = Watchdog.from_path(residents, store).tick()
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
-        return
-    _report_pass(report)
+    else:
+        _report_pass(report)
+    if _watchdog_failed(report):
+        sys.exit(EXIT_INVALID)
 
 
 @watchdog.command("run")
@@ -1614,6 +1655,10 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
             return
     for report in passes:
         _report_pass(report)
+    # As with scheduler run, only a returning (bounded) daemon invocation summarizes its
+    # passes into an exit status.  An individual recoverable pass never kills the daemon.
+    if any(_watchdog_failed(report) for report in passes):
+        sys.exit(EXIT_INVALID)
 
 
 # --------------------------------------------------------------------------------------
@@ -1873,8 +1918,10 @@ def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per o
         sys.exit(EXIT_INVALID)
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
-        return
-    _report_nursery(report)
+    else:
+        _report_nursery(report)
+    if report.register is not None and report.register.problems:
+        sys.exit(EXIT_INVALID)
 
 
 def _report_retire(report: RetireReport) -> None:
