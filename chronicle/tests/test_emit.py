@@ -1103,6 +1103,112 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         with open(quarantines[0], "rb") as stream:
             self.assertEqual(stream.read(), torn)
 
+    def _torn_journal(self, record):
+        """A journal whose valid prefix is followed by a half-written record."""
+        journal = emit.OUTBOX + ".journal.torn-write"
+        os.makedirs(os.path.dirname(journal), exist_ok=True)
+        torn = b'{"target":"unfinished'
+        with open(journal, "wb") as stream:
+            stream.write((json.dumps(record) + "\n").encode("utf-8"))
+            stream.write(torn)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return journal, torn
+
+    def test_journal_compaction_quarantines_torn_suffix_before_retiring_it(self):
+        """The contended path keeps evidence before erasure, like the main one.
+
+        Asserted as the literal operation sequence rather than the end state:
+        the quarantine file, holding the torn bytes, must already exist at the
+        instant the journal that carried them is unlinked (docs/spool.md, G3).
+        """
+        record = {
+            "target": "target-key",
+            "delivery_id": "delivery-id",
+            "event": self.EVENT,
+        }
+        journal, torn = self._torn_journal(record)
+        durable = emit.durable
+        operations = []
+        evidence_at_retire = []
+        real_replace = durable.os.replace
+        real_unlink = durable.os.unlink
+        real_quarantine_tail = durable.Spool.quarantine_tail
+
+        def replace(source, target):
+            operations.append("replace")
+            real_replace(source, target)
+
+        def unlink(target):
+            if target == journal:
+                operations.append("retire")
+                for path in sorted(glob.glob(emit.OUTBOX + ".torn.*")):
+                    with open(path, "rb") as sample:
+                        evidence_at_retire.append(sample.read())
+            real_unlink(target)
+
+        def quarantine_tail(spool, tail, source=None):
+            operations.append("quarantine")
+            return real_quarantine_tail(spool, tail, source)
+
+        with (
+            mock.patch.object(durable.os, "replace", side_effect=replace),
+            mock.patch.object(durable.os, "unlink", side_effect=unlink),
+            mock.patch.object(durable.Spool, "quarantine_tail", quarantine_tail),
+            mock.patch.object(
+                durable,
+                "fsync_parent",
+                side_effect=lambda _path: operations.append("dir-fsync"),
+            ),
+        ):
+            self.assertEqual(emit._journal_outbox([]), 0)
+
+        self.assertEqual(
+            operations,
+            ["replace", "dir-fsync", "quarantine", "dir-fsync", "retire", "dir-fsync"],
+        )
+        self.assertEqual(evidence_at_retire, [torn])
+        self.assertFalse(os.path.exists(journal))
+        self.assertEqual(
+            [item["delivery_id"] for item in emit._read_durable_outbox_snapshot()],
+            ["delivery-id"],
+        )
+
+    def test_crash_between_journal_quarantine_and_discard_keeps_the_evidence(self):
+        """A crash in the window leaves the torn bytes and the record readable."""
+        record = {
+            "target": "target-key",
+            "delivery_id": "delivery-id",
+            "event": self.EVENT,
+        }
+        journal, torn = self._torn_journal(record)
+        durable = emit.durable
+        real_unlink = durable.os.unlink
+
+        class Crash(Exception):
+            """Not an OSError: _journal_outbox degrades on those, not on this."""
+
+        def unlink(target):
+            if target == journal:
+                raise Crash("power lost between quarantine and discard")
+            real_unlink(target)
+
+        with mock.patch.object(durable.os, "unlink", side_effect=unlink):
+            with self.assertRaises(Crash):
+                emit._journal_outbox([])
+
+        quarantines = glob.glob(emit.OUTBOX + ".torn.*")
+        self.assertEqual(len(quarantines), 1)
+        with open(quarantines[0], "rb") as stream:
+            self.assertEqual(stream.read(), torn)
+        # The interrupted retirement leaves the record in two durable homes,
+        # which every reader dedupes (G2/G9).
+        self.assertTrue(os.path.exists(journal))
+        self.assertEqual(
+            [item["delivery_id"] for item in emit._read_durable_outbox_snapshot()],
+            ["delivery-id"],
+        )
+
     def test_torn_tail_quarantine_reclaims_old_files_to_documented_caps(self):
         with (
             mock.patch.object(emit, "OUTBOX_TORN_FILES", 2),

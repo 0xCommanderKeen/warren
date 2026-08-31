@@ -77,16 +77,24 @@ survive the deletion of the file they came from.
 Order is publish → quarantine → retire, and it is deliberate: quarantining before
 publication would keep the evidence but risk having no durable authority at all.
 
-- `_update_outbox`: `for journal, torn in journals: if torn: _quarantine_outbox_tail(torn)`
-  sits between `publish_staged` and `retire_files`.
-- `_compact_deferred_locked`: same position, via `_quarantine_deferred_tail`.
+The outbox's two writers and the deferred spool all reach it the same way — a
+`quarantine=` argument of `(source, torn)` pairs on `Spool.publish`, which does
+the copy between `publish_staged` and `retire_files`:
 
-**Two sites deviate, on purpose or by omission:**
+- `_update_outbox`: `quarantine=journals`, the pairs it read under the main lock.
+- `_journal_outbox`: the pairs it read under the transaction lock, quarantined
+  onto the same spool root before the journals are retired. Until warren#253 this
+  site **discarded the torn bytes without quarantining them**, so evidence was
+  lost on the lock-contention path but not on the main path. The Spool migration
+  preserved that verbatim rather than smuggle a behaviour change into a refactor;
+  #253 then made the change deliberately, with the operation-sequence test
+  `test_journal_compaction_quarantines_torn_suffix_before_retiring_it` and a
+  crash-window test pinning the order.
+- `_compact_deferred_locked`: the same argument, with `torn_at_source=True` so
+  the sample is named after the generation rather than the spool (delta 7).
 
-- `_journal_outbox` reads its inputs as `valid, _ = _read_outbox_journal(journal)`
-  and **discards the torn bytes without quarantining them**, then retires the
-  journal. Evidence is lost on the lock-contention path but not on the main path.
-  This is preserved as-is; changing it is a behaviour change, not a refactor.
+**One site still deviates, by omission:**
+
 - The knock journal never quarantines. `prune_terminal_generations` *retains*
   unparseable lines verbatim inside the generation (`except ValueError:
   retained.append(line)`), and `recover` marks the generation `complete=False`
@@ -204,7 +212,10 @@ when nothing changed, which no other site does.
 after a caller-supplied ack), G8, G9. These are nine-tenths of the duplicated
 code and all of the subtle ordering.
 
-**Does not unify (stays in an adapter, documented):**
+**Does not unify (stays in an adapter, documented):** seven, one fewer than this
+analysis first recorded. warren#253 closed the eighth by making `_journal_outbox`
+quarantine its torn suffixes like every other site — deliberately, as a behaviour
+change with its own tests, which is exactly why the migration had left it alone.
 
 1. **The outbox's three-lock protocol.** Thread lock → blocking transaction lock →
    *non-blocking* main lock, with an entirely separate journal-writing path taken
@@ -250,9 +261,7 @@ code and all of the subtle ordering.
    The two terminal ledgers read with `SKIP_DAMAGE` and then *refuse to write*
    when the generation was not whole — see "Two things the migration got wrong
    first" below.
-7. **`_journal_outbox`'s silent torn discard** (G3 deviation above), preserved
-   verbatim.
-8. **Where a quarantine file is named.** The outbox names every sample after the
+7. **Where a quarantine file is named.** The outbox names every sample after the
    spool (`primary-outbox.jsonl.torn.*`) even when the bytes came from a journal;
    the deferred spool names it after the generation the bytes came from
    (`events.jsonl.deferred.replay.<id>.torn.*`). Both roots are globbed by
