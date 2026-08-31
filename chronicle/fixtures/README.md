@@ -80,7 +80,9 @@ The final idle events send both villagers home.
 `tests/fixtures/codex-hooks.jsonl` and `tests/fixtures/claude-subagents.jsonl` are
 redacted hook-shape fixtures. Their end-to-end adapter tests prove parent/child
 lineage, independent villager identities, and matching-child stop behavior for both
-runners. `tests/residents.test.js` folds fixed events with and without canonical
-manifest records to prove Resident promotion, exact-identity priority, stable homes,
-and the shared Visitor lodge without modifying event history. Checked-in manifests
-are validated end to end by `tests/test_residents.py`.
+runners. Resident promotion, exact-identity priority, stable homes and the shared
+Visitor lodge used to be folded from fixed events by `tests/residents.test.js`;
+that test went with the viewer (warren#219) and
+`tests/test_village_state.py::test_projects_resident_and_visitor_identity_and_lifecycle`
+now proves the same projection in Python, still without modifying event history.
+Checked-in manifests are validated end to end by `tests/test_residents.py`.
