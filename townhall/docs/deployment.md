@@ -91,13 +91,24 @@ second public origin and keeps browser routing independent of API location.
 ## Serving under a path prefix
 
 `vite.config.js` sets no `base`, so the prefix has to be supplied at build time
-(`--base=/observatory/`, as above) and the router in `src/App.jsx` reads and writes
-`window.location.pathname` with no prefix stripping. Mounting the build under any prefix —
-`/observatory/`, `/townhall/`, anything — means building with `base` set to that prefix and
-teaching the router to strip it. An nginx `alias` on its own gets you an `index.html` whose
-assets 404.
+(`--base=/observatory/`, as above). That flag is still required: it is what makes the
+asset URLs in `index.html` resolve, and an nginx `alias` on its own gets you an
+`index.html` whose assets 404.
 
-Deep links are the loose end: assets resolve from `base`, but `src/App.jsx` treats
-`window.location.pathname` as an app route, so under a prefix it sees `/observatory/agents/…`
-rather than `/agents/…`. Whoever moves `base` into `vite.config.js` should strip
-`import.meta.env.BASE_URL` in the same change.
+**The router half is done** (warren#215). It used to be the loose end: assets resolved
+from `base`, but the router read `window.location.pathname` raw, so under the mount it saw
+`/observatory/agents/…`, matched nothing, and every deep link and in-app link was broken.
+`src/routes.js` now takes the prefix as an argument — `withBase` writes it onto every link,
+`stripBase` takes it off before matching, and a path outside the mount is `null` rather
+than a route guessed out of somebody else's URL. `src/navigation.jsx` feeds it
+`import.meta.env.BASE_URL`, which Vite fills in from the `--base` the build was made with,
+so the two halves cannot disagree. `src/routes.test.js` exercises both mounts and
+`src/App.test.jsx` asserts rendered `href`s carry the prefix.
+
+So mounting under a different prefix — `/townhall/`, anything — is now only two things:
+build with `--base=` set to it, and point nginx at it. Nothing in the app needs editing.
+
+Moving `base: "/observatory/"` into `vite.config.js` would make a flagless `pnpm build`
+correct too, and now carries no routing risk. It is deliberately still not done, because
+it would also move `pnpm dev` to `http://localhost:5173/observatory/`, and the mount path
+belongs to arcadia's runbook rather than to this one.

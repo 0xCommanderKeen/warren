@@ -10,6 +10,22 @@ export default defineConfig({
         target: process.env.BURROW_URL || "http://127.0.0.1:8737",
         changeOrigin: true,
       },
+      // Steward's write routes, so `pnpm dev` reaches them same-origin exactly as the
+      // deployed nginx does. The token is still typed by a human at runtime.
+      ...Object.fromEntries(
+        ["/residents", "/skills", "/reload", "/jobs", "/approvals", "/routines", "/requests"].map(
+          (path) => [
+            path,
+            { target: process.env.STEWARD_URL || "http://127.0.0.1:8801", changeOrigin: true },
+          ],
+        ),
+      ),
     },
+  },
+  test: {
+    // The write surface is a set of forms; a form is not tested by reading it.
+    environment: "jsdom",
+    globals: false,
+    restoreMocks: true,
   },
 });

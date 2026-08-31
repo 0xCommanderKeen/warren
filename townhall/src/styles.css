@@ -1,5 +1,31 @@
 @import "tailwindcss";
 
+/* townhall — the warren control panel.
+ *
+ * The look is the steward operator console's, ported from `steward/ui/app.css` onto this
+ * stack rather than redesigned (warren#225): a night desk, not a dashboard. Warm ink on
+ * near-black, hairline rules, an old-style serif for the things a person reads and a
+ * monospace for every single fact, because a fact that shifts width when it changes is a
+ * fact you stop trusting.
+ *
+ * Colour carries exactly one meaning: amber/ember is a thing you can press, wait is asked
+ * but unconfirmed, live is steward's log saying it happened, fail is steward's log saying
+ * it did not. Nothing is green because nothing is fine until steward's own answer says so.
+ *
+ * ONE deliberate departure from the console, and it is a correction rather than a taste:
+ * the console's audit (#152) measured its quietest body text at 2.86:1 against the ground,
+ * which fails WCAG AA. The palette below keeps the console's hue and its three-step
+ * hierarchy and lifts the two grey steps until both clear 4.5:1 on every surface they are
+ * used on. Measured against --color-void (L 0.0033):
+ *
+ *   ink   #e8dfc8  14.8:1     dim  #9a9382  6.4:1     faint  #888275  5.2:1
+ *   ember #e0864a   7.2:1     wait #d8b45e  9.9:1     live   #86a97c  7.5:1
+ *   fail  #cf6650   5.3:1
+ *
+ * faint against --color-raise, the lightest panel, is 4.7:1 — still AA. The old values
+ * were dim #8b8474 (5.3:1, passing) and faint #5d5a51 (2.86:1, the failure).
+ */
+
 @font-face {
   font-family: "Cousine Observatory";
   src: url("/fonts/CousineSnapshot.ttf") format("truetype");
@@ -7,37 +33,118 @@
 }
 
 @theme {
-  --font-mono: "Cousine Observatory", ui-monospace, monospace;
+  /* surfaces */
+  --color-void: #0a0b0e;
+  --color-deep: #101217;
+  --color-deeper: #0d0f13;
+  --color-raise: #171a21;
+
+  /* text, all AA on every surface above */
+  --color-ink: #e8dfc8;
+  --color-dim: #9a9382;
+  --color-faint: #888275;
+  --color-read: #d8d0bb; /* long-form prose: journals, souls, quoted voice */
+
+  /* meaning */
+  --color-ember: #e0864a;
+  --color-ember-lit: #eb9557;
+  --color-wait: #d8b45e;
+  --color-live: #86a97c;
+  --color-fail: #cf6650;
+  --color-on-ember: #15100b;
+
+  /* hairlines */
+  --color-rule: rgba(232, 223, 200, 0.11);
+  --color-rule-2: rgba(232, 223, 200, 0.055);
+  --color-rule-lit: rgba(232, 223, 200, 0.26);
+
+  --font-mono: "Cousine Observatory", ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+    Consolas, "Liberation Mono", monospace;
+  --font-serif: ui-serif, "Iowan Old Style", "Hoefler Text", "Palatino Linotype", Palatino,
+    "Book Antiqua", Georgia, serif;
+  /* The fleet page's own face, kept because that page keeps its own look. */
   --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+
+  /* The console breaks its rail here, so this build does too. */
+  --breakpoint-rail: 880px;
 }
 
 @layer base {
   * { box-sizing: border-box; }
-  html { background: #080b0f; color-scheme: dark; }
-  body { margin: 0; min-width: 320px; min-height: 100vh; }
-  button, select { font: inherit; }
+  html {
+    background: var(--color-void);
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    min-width: 320px;
+    min-height: 100vh;
+    color: var(--color-ink);
+    font: 400 13px/1.55 var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, select, input, textarea { font: inherit; }
   button, a { -webkit-tap-highlight-color: transparent; }
+  :focus-visible { outline: 2px solid var(--color-ember); outline-offset: 2px; }
+  ::placeholder { color: var(--color-faint); }
 }
 
+/* Atmosphere: a slow warm bloom from the top left, and a static grain so the flat panels
+   have a surface. Both are pure CSS and both are cheap — this must work on a NAS with the
+   internet unplugged. */
+.grain {
+  background:
+    radial-gradient(1100px 620px at 8% -8%, rgba(224, 134, 74, 0.07), transparent 62%),
+    radial-gradient(760px 520px at 96% 104%, rgba(134, 169, 124, 0.045), transparent 60%);
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  opacity: 0.5;
+  background-image: repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.014) 0 1px, transparent 1px 3px);
+}
+
+.rail-gradient { background: linear-gradient(180deg, var(--color-deeper), #0a0b0e 70%); }
+
+/* Staggered arrival: one orchestrated entrance per view, and nothing after. */
+.rise { animation: rise 0.34s cubic-bezier(0.2, 0.7, 0.3, 1) backwards; }
+@keyframes rise { from { opacity: 0; transform: translateY(7px); } }
+
+.breathe { animation: breathe 1.5s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: 0.28; } }
+
+/* The section rule that grows to fill whatever the label leaves. */
+.section-rule::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--color-rule-2);
+}
+
+/* The fleet page keeps its own sky. */
 .star-field {
   z-index: 0;
-  opacity: .55;
+  opacity: 0.55;
   background-image:
-    radial-gradient(circle at 18% 14%, rgba(121, 215, 208, .08), transparent 22rem),
-    radial-gradient(circle at 77% 30%, rgba(243, 179, 61, .08), transparent 28rem),
-    radial-gradient(circle, rgba(255, 255, 255, .18) .6px, transparent .8px);
+    radial-gradient(circle at 18% 14%, rgba(121, 215, 208, 0.08), transparent 22rem),
+    radial-gradient(circle at 77% 30%, rgba(243, 179, 61, 0.08), transparent 28rem),
+    radial-gradient(circle, rgba(255, 255, 255, 0.18) 0.6px, transparent 0.8px);
   background-size: auto, auto, 31px 31px;
   mask-image: linear-gradient(to bottom, black, transparent 90%);
 }
 
 .orbit-sweep {
-  background: conic-gradient(from 210deg, transparent 0 65%, rgba(243, 179, 61, .22) 82%, transparent 89%);
+  background: conic-gradient(from 210deg, transparent 0 65%, rgba(243, 179, 61, 0.22) 82%, transparent 89%);
   animation: orbit 14s linear infinite;
   mask-image: radial-gradient(circle, transparent 68%, black 69% 70%, transparent 71%);
 }
-
 @keyframes orbit { to { transform: rotate(1turn); } }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
 }
