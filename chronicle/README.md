@@ -28,88 +28,92 @@ paths this repository used to serve a viewer on now 404 — see
    complete snapshots from `/state` and `/state/stream` and render them; they never fold raw
    events. burrow ships none of them.
 
-The notice board in the village square opens a fleet-wide review of the 30 most
-recent `artifact_produced` events. It shows each artifact path, its maker and
-project, and how recently it was produced; an empty board says plainly that the
-recent event log contains no artifacts.
+## What one snapshot carries
 
-Beside it, the job board shows Steward's bounded current queue from `task_posted`,
-`task_claimed`, `task_done`, and `task_failed` events. Terminal work expires after a
-short visible window. A `task_failed` event whose reason is `lease_expired` instead
-reopens the job, matching Steward's queue, and identifies the expired attempt without
-leaving a ghost claim. Its
-post form writes directly to Steward with changeable browser-memory credentials; a job
-appears only after its exact, contract-valid event reaches Burrow.
-Blank skill names in valid Steward evidence are shown as explicit unnamed-skill markers,
-distinct from an empty requirement list and from unavailable post evidence.
-The form prevents overlapping or ambiguity-driven duplicate submissions. Only Steward's
-pre-mutation `401` and `422` refusals are retryable; server/proxy failures remain ambiguous
-unless their task identity is later proved by the exact event. Lease-expiry retry context
-links a present former claimant and marks an absent one explicitly.
-Rotation retains task lifecycle by task ID across the central poster and claimant
-sessions; an orphan transition says required skills are unavailable instead of claiming
-there were none. Post acknowledgement times out 15 seconds from request start even when
-Steward's HTTP response is still in flight. A late valid response retains its safe identities
-but remains visibly timed out until an exact post-boundary event proves the job; a malformed
-acceptance with a valid task identity follows the same evidence-only reconciliation rule.
+Everything a client shows is already reduced here. A `VillageState` is complete on its
+own: no client folds the raw log to get a field, and none of these arrays is a view a
+client assembles for itself. Alongside `villagers` — identity, residency, home or lodge,
+current state, place, the retained `history` tail, `mood`, `pending_approval_ids` — a
+snapshot carries:
 
-A structured `needs_human` opens an approval queue on that villager with the action,
-detail, and Steward-defined approve/deny/edit options. The browser POSTs directly to
-Steward with memory-only credentials, but the villager leaves the door only after the
-exact `needs_human_resolved` event reaches Burrow. Refusals, timeouts, ambiguous
-delivery, credential correction, and duplicate prevention stay explicit. Plain and
-malformed structured knocks retain the legacy text-only behavior. Structured phone
-notifications use the action as title and detail as body while preserving the same
-durable one-event/one-notification claim. The immutable question (including semantic
-detail/options, message, and expiry) is quarantined if one request ID is reused
-incompatibly; equal-time decisions use append order. Recent confirmed cards remain
-beside a newer pending queue, while a parked session stays ended after its approval
-closes. Only Steward's exact parsed `approval_expired` 409 envelope permits safe retry.
+- **`artifacts`** — the newest 30 `artifact_produced` records, each with its path, maker,
+  project and time. Empty means the *retained log* holds no artifacts, which is not the
+  same claim as the fleet having produced none.
+- **`tasks`** — Steward's current job queue, folded from `task_posted`, `task_claimed`,
+  `task_done` and `task_failed` by task ID, so a job's lifecycle survives being posted in
+  one session and claimed in another. A `task_failed` whose reason is `lease_expired`
+  reopens the job rather than failing it — matching Steward's own queue — and keeps naming
+  the attempt that expired. A blank skill name in an otherwise valid event stays a blank
+  name; that is not the same fact as an empty requirement list.
+- **`approvals`** — one record per `needs_human` carrying a `request_id`: the action, the
+  semantic detail, Steward's approve/deny/edit options, the declared expiry, and the
+  decision once a matching `needs_human_resolved` arrives. The question is immutable — a
+  request ID reused with a different question is quarantined as a `collision` instead of
+  overwritten, and a resolution that does not match on agent, project and action is a
+  diagnostic rather than a decision. Nothing here evaluates the expiry: `expires_at` is
+  carried through as declared, and deciding what an elapsed one means is the client's.
+- **`journals`** — journal *metadata* observed from Steward's `journal_written`: day,
+  agent, project, routine, path, observed time. Never the entry text. First valid append
+  owns each `(agent_id, day)`, and the highest 40 keys survive log rotation with one
+  representative collision diagnosed per retained key.
+- **`routines`** — scheduled runs and their outcome, duration and artifacts.
+- **`residents`** and **`diagnostic_residents`** — the manifest fleet that validated, and
+  actionable diagnostics for the declarations that did not. Both publish only the
+  allow-listed display and capability metadata from the
+  [resident-manifest guide](docs/resident-manifest.md): never raw manifest objects, never
+  app credentials.
+- **`diagnostics`**, **`capacity`** and **`capabilities`** — malformed records, the bounds
+  this server actually applied, and which event families this build projects (`ingest`,
+  `approvals`, `jobs`, `routines`), so a client can tell an older backend from a feature
+  the fleet is simply not using.
 
-Every projected Resident and Visitor also carries one inspectable operational
-mood glyph beside its name. It is a deterministic summary of retained failures,
-work density, exact human interactions, and unresolved needs—not personality or
-sentiment. Its native details disclosure says exactly which evidence was
-observed and anchors ages to the log, so a quiet browser clock never changes the
-claim. Inactive declarations receive no glyph; stale presence only fades the
-same unmodified reading. The exact reducer and thresholds are documented in
+Every villager also carries a **`mood`**: one deterministic operational reading built from
+retained failures, work density, exact human interactions and unresolved needs — not
+personality, not sentiment. It is computed here, by the single reducer in
+`village_state.py`, from validated events in append order, and every duration in it is
+anchored to the newest retained log timestamp rather than to a clock. A client that sits
+idle overnight therefore renders the same reading it was given, and events for one agent
+can never age another's. The exact signals, thresholds and precedence are in
 [the protocol](docs/protocol.md#operational-mood-glyph).
 
-The **fleet ledger** beside the census is the compact operational view. It keeps
-the newest 200 validated events from the shared parsed stream and filters them by
-search text, project, runner/source, event-derived state, and villager. Its
-needs-you leaf contains only villagers whose latest retained event remains
-`needs_human`. Resident leaves show stable homes and all five manifest dimensions;
-Visitors remain grouped under the lodge. “Configured” means a complete safe
-declaration exists—not that Burrow tested credentials or an external service. A
-`status_ref` is only an opaque locator for where status is established; its text
-is never interpreted as live health. “Missing” means no declaration, “invalid”
-comes from public diagnostics or an incomplete public record, and “externally
-unavailable” means the resident feed itself cannot currently be read.
-Missing declarations, invalid/incomplete manifests, an unavailable resident feed,
-malformed event records, stale telemetry, disconnection, and empty results are each
-named explicitly. No credentials or raw manifest objects are rendered.
+Be careful what you read into the resident arrays, because they assert less than a control
+panel usually wants. A valid manifest means a complete, safe *declaration* exists — not
+that this service tested a credential or reached anything. A `status_ref` is validated as a
+reference and echoed; nothing here ever fetches it, so its text is never evidence of live
+health. An incomplete declaration is published as a diagnostic rather than as an absence,
+and a missing manifest directory reads as an empty fleet — there is no "the feed is
+unavailable" signal to give, so a client showing one is reporting its own read, not the
+projection's. Matching is deliberate too: exact agent identity wins before a project
+fallback, the project fallback applies only when exactly one manifest claims that project,
+and a Claude or Codex child carrying `parent_agent_id` never inherits its parent's home.
 
-Resident detail panels also read identity directly from Steward. The charter is the
-manifest-declared mission, duties, hard rules, and escalation policy, visually separated
-from log-observed work. The latest seven journal entries come from Steward's read-only
-`GET /residents/{id}/journal?limit=7` endpoint, newest first. Those reads use the same
-browser-memory-only URL and bearer token as the other Steward controls; Burrow's server
-never proxies or caches them. Unreachable and malformed reads remain explicit, with the
-last successful in-memory entries labeled stale rather than mistaken for an empty journal.
-If Burrow's own resident-manifest feed is unavailable, cached Steward associations are also
-marked externally unavailable and stale until the exact local declaration can be read again.
-Fleet resident rows show charter state and journal recency. Visitors instead explain that
-temporary lodge occupants have no resident soul, manifest, charter, or journal.
-A strict Steward `journal_written` observation adds a
-separate “observed written” recency without inventing text or refreshing that direct read.
-For its first 60 seconds a matched Resident writes at a small illuminated home desk. Matching
-requires an exact declared agent or one unambiguous project-root declaration: a Claude or
-Codex child with `parent_agent_id` never borrows its parent's project home. Child, ambiguous,
-invalid, and unmatched observations stay only in Fleet history with an explicit diagnostic.
-First append owns each resident/day,
-and the highest 40 canonical `(day, agent_id)` keys survive log rotation with one
-representative collision diagnosed per retained key.
+Bounds are published rather than implied: `capacity` reports the retention this server
+applied to villagers, per-villager history, tasks, approvals, journals, routines and
+diagnostics. Full arrays keep the newest records, so a finished job leaves `tasks` because
+newer ones pushed it out, not because a timer retired it.
+
+## It observes writes; it never performs them
+
+Every write in the fleet — posting a job, deciding an approval, declaring a resident,
+running a routine — is a client talking to Steward with a credential a human typed at
+runtime. Chronicle has no outbound Steward client, proxies nothing to it, and holds no
+credentials of its own. A write reaches this service only later, as the event that write
+produced.
+
+That is what keeps the one rule enforceable across a write, and it is why both clients are
+built to distrust their own receipts. A job enters `tasks` when its `task_posted` event
+arrives, not when the POST was accepted — a claim or a completion for a job this log never
+saw posted is dropped rather than invented. A villager stops `knocking` on
+`needs_human_resolved`, not on a `200`, and one whose session already ended stays at your
+door for exactly as long as its approval is still open.
+
+Which refusals are safe to retry, how an ambiguous delivery is reconciled later, and where
+the operator credential lives are each that client's business, and documented with it:
+[arcadia](../arcadia/README.md) is the pixel village — the notice board, the job board, the
+knock at the door — and [townhall](../townhall/README.md) is the governance console and the
+full write surface. Resident journal text, inboxes and spend come from Steward directly,
+read by the client that needs them: the projection carries journal *metadata* and nothing
+of the other two.
 
 ## Running
 
