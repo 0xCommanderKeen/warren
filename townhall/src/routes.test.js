@@ -1,0 +1,76 @@
+import { describe, expect, it } from "vitest";
+import { NAV, matchRoute, navFor, normalizeBase, routeTo, stripBase, withBase } from "./routes.js";
+
+describe("base-prefix routing", () => {
+  it("reduces every spelling of a Vite base to one form", () => {
+    expect(normalizeBase("/")).toBe("");
+    expect(normalizeBase("")).toBe("");
+    expect(normalizeBase(undefined)).toBe("");
+    expect(normalizeBase("/observatory/")).toBe("/observatory");
+    expect(normalizeBase("observatory")).toBe("/observatory");
+    expect(normalizeBase("/townhall")).toBe("/townhall");
+  });
+
+  it("writes address-bar paths under the mount the build was made for", () => {
+    expect(withBase("/", "/")).toBe("/");
+    expect(withBase("/skills", "/")).toBe("/skills");
+    // The mount root keeps its slash: nginx 301s /observatory to /observatory/, and a
+    // link that takes the redirect is a link that reloads the bundle.
+    expect(withBase("/", "/observatory/")).toBe("/observatory/");
+    expect(withBase("/skills/triage", "/observatory/")).toBe("/observatory/skills/triage");
+  });
+
+  it("reads the app route back out of a prefixed path", () => {
+    expect(stripBase("/observatory", "/observatory/")).toBe("/");
+    expect(stripBase("/observatory/", "/observatory/")).toBe("/");
+    expect(stripBase("/observatory/skills/triage", "/observatory/")).toBe("/skills/triage");
+    expect(stripBase("/skills", "/")).toBe("/skills");
+  });
+
+  it("refuses a path outside the mount rather than guessing at a route", () => {
+    // /observatoryfoo is a different mount, not this app's /foo.
+    expect(stripBase("/observatoryfoo", "/observatory/")).toBeNull();
+    expect(stripBase("/burrow/state", "/observatory/")).toBeNull();
+  });
+
+  it("round-trips every built route through the deployed prefix", () => {
+    const base = "/observatory/";
+    const routes = [
+      routeTo.fleet(), routeTo.agent("d29c-…"), routeTo.residents(),
+      routeTo.resident("life-agent"), routeTo.skills(), routeTo.skill("read-inbox"),
+      routeTo.skillNew(), routeTo.budgets(), routeTo.budgets("life-agent"),
+    ];
+    for (const route of routes) expect(stripBase(withBase(route, base), base)).toBe(route);
+  });
+});
+
+describe("route matching", () => {
+  it("names a page and its parameters", () => {
+    expect(matchRoute("/")).toEqual({ page: "fleet", params: {} });
+    expect(matchRoute("/agents/abc")).toEqual({ page: "agent", params: { uuid: "abc" } });
+    expect(matchRoute("/residents")).toEqual({ page: "residents", params: {} });
+    expect(matchRoute("/residents/life-agent")).toEqual({ page: "resident", params: { id: "life-agent" } });
+    expect(matchRoute("/skills")).toEqual({ page: "skills", params: {} });
+    expect(matchRoute("/skills/new")).toEqual({ page: "skillNew", params: {} });
+    expect(matchRoute("/skills/read-inbox")).toEqual({ page: "skill", params: { name: "read-inbox" } });
+    expect(matchRoute("/budgets")).toEqual({ page: "budgets", params: {} });
+    expect(matchRoute("/budgets/life-agent")).toEqual({ page: "budgets", params: { id: "life-agent" } });
+  });
+
+  it("decodes a percent-encoded name back to the name steward knows", () => {
+    expect(matchRoute(routeTo.skill("a b/c"))).toEqual({ page: "skill", params: { name: "a b/c" } });
+  });
+
+  it("says a stale deep link is unknown rather than quietly showing the fleet", () => {
+    expect(matchRoute("/nope").page).toBe("unknown");
+    expect(matchRoute("/skills/a/b").page).toBe("unknown");
+    expect(navFor("unknown")).toBeNull();
+  });
+
+  it("lights exactly one sidebar entry for every page it owns", () => {
+    for (const entry of NAV) {
+      for (const page of entry.pages) expect(navFor(page)).toBe(entry.nav);
+    }
+    expect(NAV.map((entry) => entry.label)).toEqual(["Fleet", "Residents", "Skills", "Budgets"]);
+  });
+});
