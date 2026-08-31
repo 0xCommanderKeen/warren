@@ -150,7 +150,7 @@ class SpoolOrderingTests(unittest.TestCase):
     def test_publish_quarantines_evidence_before_erasing_its_source(self):
         """G3: torn bytes outlive the file they came from."""
         with tempfile.TemporaryDirectory() as directory:
-            spool = self.spool(directory)
+            spool = self.spool(directory, torn_at_source=True)
             source = spool.generation_path("crashed")
             with open(source, "wb") as stream:
                 stream.write(b'{"id":"kept"}\n{"id":"unfinis')
@@ -172,6 +172,41 @@ class SpoolOrderingTests(unittest.TestCase):
             with open(quarantined[0], "rb") as stream:
                 self.assertEqual(stream.read(), torn, "byte-exact evidence")
             self.assertFalse(os.path.exists(source), "source retired after evidence")
+
+    def test_quarantine_root_is_configuration_visible_on_disk(self):
+        """Both roots are real: one spool names evidence after the generation
+        it came from, the other keeps every sample beside the spool itself."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = "gen"
+            beside_spool = self.spool(directory, "a")
+            at_source = self.spool(directory, "b", torn_at_source=True)
+            for spool in (beside_spool, at_source):
+                generation = spool.generation_path(source)
+                with open(generation, "wb") as stream:
+                    stream.write(b'{"id":"ok"}\n{"tor')
+                spool.publish(
+                    [{"id": "ok"}],
+                    quarantine=((generation, spool.read(generation).torn),),
+                )
+            self.assertEqual(
+                len(glob.glob(beside_spool.path + durable.TORN_PREFIX + "*")),
+                1,
+                "evidence sits beside the spool, matching a spool-rooted glob",
+            )
+            self.assertEqual(
+                len(glob.glob(at_source.path + durable.TORN_PREFIX + "*")),
+                0,
+                "the other spool puts nothing there",
+            )
+            self.assertEqual(
+                len(
+                    glob.glob(
+                        at_source.generation_path(source) + durable.TORN_PREFIX + "*"
+                    )
+                ),
+                1,
+                "it names the sample after the generation instead",
+            )
 
     def test_publish_commits_every_extra_target_before_any_retirement(self):
         """A multi-file publish is one transaction: all replaces, then sources go."""

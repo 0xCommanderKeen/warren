@@ -31,7 +31,6 @@ Must never break the hosting agent: swallow everything, always exit 0."""
 import collections
 import datetime
 import fcntl
-import glob
 import hashlib
 import json
 import os
@@ -474,21 +473,35 @@ def _target_groups(pending=()):
     )
 
 
-def _read_outbox():
-    try:
-        with open(OUTBOX, encoding="utf-8") as stream:
-            stream.seek(0)
-            records = []
-            for line in stream:
-                try:
-                    record = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(record, dict):
-                    records.append(record)
-            return records
-    except OSError:
-        return []
+def _outbox_spool():
+    """The primary outbox, built per call so patched settings apply.
+
+    Its auxiliary generations are ``.journal.*`` rather than replays, because
+    they flow the other way: a writer that could not take the main lock leaves
+    one behind, and the next writer that can take it folds them in. Nothing
+    ever hands the active outbox off to a reader.
+    """
+    return durable.Spool(
+        OUTBOX,
+        lambda: (OUTBOX_RECORDS, OUTBOX_BYTES),
+        key=_record_key,
+        order=_enqueue_sort_key,
+        generation_prefix=".journal.",
+        torn_files=OUTBOX_TORN_FILES,
+        torn_bytes=OUTBOX_TORN_BYTES,
+    )
+
+
+def _read_active_outbox(spool):
+    """The live outbox, whose own writer already proved it whole.
+
+    A damaged line here is skipped rather than treated as a torn tail: unlike
+    a journal inherited from a crashed writer, this file was published by an
+    atomic replacement, so a bad line is corruption beneath us, not a
+    truncated write we should quarantine and replay.
+    """
+    active = spool.read(damage=durable.SKIP_DAMAGE)
+    return list(active.records) if active is not None else []
 
 
 def _schedule_path():
@@ -513,31 +526,23 @@ def _read_schedule():
         return {}
 
 
-def _outbox_journals():
-    return sorted(glob.glob(OUTBOX + ".journal.*"))
-
-
 def _new_enqueue_order():
     """Globally comparable order allocated before any outbox lock is taken."""
     return "%020d:%010d:%s" % (time.time_ns(), os.getpid(), uuid.uuid4().hex)
 
 
-def _ordered_outbox(records):
+def _enqueue_sort_key(record):
     """Stable total enqueue order, including records written by older emitters."""
-
-    def key(record):
-        order = record.get("enqueue_order")
-        if isinstance(order, str) and order:
-            return (1, order)
-        event = record.get("event") if isinstance(record.get("event"), dict) else {}
-        return (
-            0,
-            str(event.get("ts") or ""),
-            str(record.get("delivery_id") or ""),
-            str(record.get("target") or ""),
-        )
-
-    return sorted(records, key=key)
+    order = record.get("enqueue_order")
+    if isinstance(order, str) and order:
+        return (1, order)
+    event = record.get("event") if isinstance(record.get("event"), dict) else {}
+    return (
+        0,
+        str(event.get("ts") or ""),
+        str(record.get("delivery_id") or ""),
+        str(record.get("target") or ""),
+    )
 
 
 def _stamp_enqueue_order(records):
@@ -583,134 +588,69 @@ def _journal_outbox(records):
     event always has at least one durable home.
     """
     records = _stamp_enqueue_order(records)  # allocation precedes lock contention
-    directory = os.path.dirname(os.path.abspath(OUTBOX))
+    spool = _outbox_spool()
     try:
-        os.makedirs(directory, exist_ok=True)
-        with open(OUTBOX + ".transaction.lock", "a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            main = _read_outbox()
-            journals = _outbox_journals()
+        with spool.lock(".transaction", create=True):
+            main = _read_active_outbox(spool)
+            journals = spool.generation_paths()
             auxiliary = []
             for journal in journals:
-                valid, _ = _read_outbox_journal(journal)
-                if valid is not None:
-                    auxiliary.extend(valid)
+                generation = spool.read(journal)
+                # Unlike the main path this deliberately drops a torn suffix
+                # instead of quarantining it: see docs/spool.md, G3.
+                if generation is not None:
+                    auxiliary.extend(generation.records)
             auxiliary.extend(records)
-            auxiliary = _ordered_outbox(_dedupe_outbox_records(auxiliary))
-            main_lines = [json.dumps(item, ensure_ascii=False) + "\n" for item in main]
-            record_cap = max(0, OUTBOX_RECORDS - len(main_lines))
-            byte_cap = max(
-                0, OUTBOX_BYTES - sum(len(line.encode("utf-8")) for line in main_lines)
+            auxiliary = spool.arrange(auxiliary)
+            # Journals share the main authority's capacity, so a contended
+            # writer can never push the pair past the documented ceiling.
+            used = sum(len(spool.encode(item).encode("utf-8")) for item in main)
+            kept, victims = spool.bound(
+                auxiliary,
+                max_records=max(0, OUTBOX_RECORDS - len(main)),
+                max_bytes=max(0, OUTBOX_BYTES - used),
             )
-            encoded, dropped = _bounded_records(auxiliary, record_cap, byte_cap)
-            replacement = OUTBOX + ".journal.%020d.%s" % (
-                time.time_ns(),
-                uuid.uuid4().hex,
+            replacement = spool.generation_path(
+                "%020d.%s" % (time.time_ns(), uuid.uuid4().hex)
             )
-            pending = durable.stage_lines(OUTBOX + ".aux", encoded)
-            durable.publish_staged(((pending, replacement),))
-            durable.retire_files(journals)
-            if not encoded:
-                durable.retire_files((replacement,))
-            return dropped
+            spool.publish(
+                kept,
+                target=replacement,
+                staging=OUTBOX + ".aux",
+                retire=journals,
+            )
+            if not kept:
+                spool.retire((replacement,))
+            return len(victims)
     except OSError:
         return None
 
 
 def _read_outbox_journal(path):
-    try:
-        with open(path, "rb") as stream:
-            data = stream.read()
-        records = []
-        offset = 0
-        for line in data.splitlines(keepends=True):
-            try:
-                record = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                return records, data[offset:]
-            if not isinstance(record, dict):
-                return records, data[offset:]
-            records.append(record)
-            offset += len(line)
-        return records, b""
-    except OSError:
+    generation = _outbox_spool().read(path)
+    if generation is None:
         return None, b""
+    return generation.records, generation.torn
 
 
 def _quarantine_outbox_tail(torn):
-    path = OUTBOX + ".torn.%020d.%s" % (time.time_ns(), uuid.uuid4().hex)
-    with open(path, "xb") as stream:
-        stream.write(torn)
-        stream.flush()
-        os.fsync(stream.fileno())
-    quarantines = sorted(glob.glob(OUTBOX + ".torn.*"), reverse=True)
-    retained_bytes = 0
-    for index, candidate in enumerate(quarantines):
-        try:
-            size = os.path.getsize(candidate)
-        except OSError:
-            continue
-        if index >= OUTBOX_TORN_FILES or retained_bytes + size > OUTBOX_TORN_BYTES:
-            try:
-                os.unlink(candidate)
-            except OSError:
-                pass
-        else:
-            retained_bytes += size
-    _fsync_directory(os.path.dirname(os.path.abspath(OUTBOX)))
-    return path
-
-
-def _bounded_records(records, record_cap, byte_cap):
-    dropped = 0
-    encoded = [json.dumps(record, ensure_ascii=False) + "\n" for record in records]
-    sizes = [len(line.encode("utf-8")) for line in encoded]
-    total = sum(sizes)
-    while encoded and (len(encoded) > record_cap or total > byte_cap):
-        encoded.pop(0)
-        total -= sizes.pop(0)
-        dropped += 1
-    return encoded, dropped
-
-
-def _bounded_outbox(records):
-    return _bounded_records(records, OUTBOX_RECORDS, OUTBOX_BYTES)
-
-
-def _dedupe_outbox_records(records):
-    """Collapse crash-window copies while keeping their original queue slot."""
-    positions = {}
-    unique = []
-    for record in records:
-        key = _record_key(record)
-        if key in positions:
-            unique[positions[key]] = record
-        else:
-            positions[key] = len(unique)
-            unique.append(record)
-    return _ordered_outbox(unique)
+    return _outbox_spool().quarantine_tail(torn)
 
 
 def _read_durable_outbox_snapshot():
     """Best-effort oldest-first view of main and immutable journals."""
-    directory = os.path.dirname(os.path.abspath(OUTBOX))
-    os.makedirs(directory, exist_ok=True)
-    with open(OUTBOX + ".transaction.lock", "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        records = _read_outbox()
-        for journal in _outbox_journals():
-            valid, _ = _read_outbox_journal(journal)
-            if valid:
-                records.extend(valid)
-        return _dedupe_outbox_records(records)
+    spool = _outbox_spool()
+    with spool.lock(".transaction", create=True):
+        records = _read_active_outbox(spool)
+        for journal in spool.generation_paths():
+            generation = spool.read(journal)
+            if generation is not None and generation.records:
+                records.extend(generation.records)
+        return spool.arrange(records)
 
 
 def _record_key(record):
     return OutboxRecordKey(record.get("target"), record.get("delivery_id"))
-
-
-def _fsync_directory(path):
-    durable.fsync_parent(os.path.join(path, "."))
 
 
 def _attempt_generation(record):
@@ -725,14 +665,7 @@ def _recover_outbox():
     whether the writer completed its intended generation. Atomic replacement
     commits a generation; surviving staging bytes are therefore never promoted.
     """
-    pending = durable.pending_path(OUTBOX)
-    if not os.path.exists(pending):
-        return
-    try:
-        os.unlink(pending)
-        _fsync_directory(os.path.dirname(os.path.abspath(OUTBOX)))
-    except OSError:
-        return
+    _outbox_spool().discard_staging()
 
 
 def _update_outbox(delivered_keys, additions, attempted_targets=()):
@@ -742,28 +675,21 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
     lock. Auxiliary writers never take the main lock, so this order cannot cycle.
     """
     additions = _stamp_enqueue_order(additions)  # older contenders retain priority
-    with _OUTBOX_LOCK:
-        directory = os.path.dirname(os.path.abspath(OUTBOX))
-        os.makedirs(directory, exist_ok=True)
-        with open(OUTBOX + ".transaction.lock", "a+") as transaction:
-            fcntl.flock(transaction, fcntl.LOCK_EX)
-            lock_path = durable.lock_path(OUTBOX)
-            lock = open(lock_path, "a+")
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock.close()
+    spool = _outbox_spool()
+    with _OUTBOX_LOCK, spool.lock(".transaction", create=True):
+        with spool.lock(blocking=False) as main:
+            if main is None:
                 return 0, False
             _recover_outbox()
-            records = _read_outbox()
+            records = _read_active_outbox(spool)
             journals = []
-            for journal in _outbox_journals():
-                journal_records, torn = _read_outbox_journal(journal)
-                if journal_records is None:
+            for journal in spool.generation_paths():
+                generation = spool.read(journal)
+                if generation is None:
                     continue
-                journals.append((journal, torn))
-                records.extend(journal_records)
-            records = _dedupe_outbox_records(records)
+                journals.append((journal, generation.torn))
+                records.extend(generation.records)
+            records = spool.arrange(records)
             records = [
                 record
                 for record in records
@@ -809,10 +735,9 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                 for record in records:
                     if record.get("target") in attempted_targets:
                         record["attempt_generation"] = generation
-            records = _ordered_outbox(records)
-            encoded, dropped = _bounded_outbox(records)
+            records = spool.arrange(records)
+            kept, victims = spool.bound(records)
             try:
-                pending = durable.stage_lines(OUTBOX, encoded)
                 schedule = _read_schedule()
                 if attempted_targets:
                     generation = max(schedule.values(), default=0) + 1
@@ -821,18 +746,21 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                 schedule = _bounded_schedule(
                     schedule, (record.get("target") for record in records)
                 )
-                schedule_pending = durable.stage_json(_schedule_path(), schedule)
-                durable.publish_staged(
-                    ((pending, OUTBOX), (schedule_pending, _schedule_path()))
+                # The outbox and its fairness schedule are replaced in one
+                # publish, outbox first. A crash between them leaves a stale
+                # schedule, which is safe only because _read_schedule treats
+                # anything it cannot trust as empty.
+                spool.publish(
+                    kept,
+                    extra=(
+                        (durable.stage_json(_schedule_path(), schedule),
+                         _schedule_path()),
+                    ),
+                    quarantine=journals,
+                    retire=[journal for journal, _ in journals],
                 )
-                for journal, torn in journals:
-                    if torn:
-                        _quarantine_outbox_tail(torn)
-                durable.retire_files(journal for journal, _ in journals)
-                lock.close()
-                return dropped, True
+                return len(victims), True
             except OSError:
-                lock.close()
                 return 0, False
 
 
@@ -908,6 +836,7 @@ def _deferred_spool(path):
         key=lambda record: record[_DEFERRED_ID_FIELD],
         torn_files=DEFERRED_TORN_FILES,
         torn_bytes=DEFERRED_TORN_BYTES,
+        torn_at_source=True,
     )
 
 

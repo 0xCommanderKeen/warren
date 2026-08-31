@@ -204,6 +204,7 @@ class Spool:
         generation_prefix=REPLAY_PREFIX,
         torn_files=8,
         torn_bytes=256 * 1024,
+        torn_at_source=False,
     ):
         self.path = path
         # A spool used only to name, read, publish or retire needs no capacity.
@@ -215,6 +216,10 @@ class Spool:
         self.generation_prefix = generation_prefix
         self.torn_files = torn_files
         self.torn_bytes = torn_bytes
+        # Where a quarantine file is named: beside the spool, or beside the
+        # generation the bytes came from. Both roots share one budget, but the
+        # choice is visible on disk, so it is configuration rather than taste.
+        self.torn_at_source = torn_at_source
 
     # -- names ---------------------------------------------------------
 
@@ -413,7 +418,7 @@ class Spool:
         publish_staged([(pending, target)] + list(extra))
         for source, torn in quarantine:
             if torn:
-                self.quarantine_tail(torn, source)
+                self.quarantine_tail(torn, source if self.torn_at_source else None)
         retire_files(retire)
 
     def handoff(self, generation=None):
