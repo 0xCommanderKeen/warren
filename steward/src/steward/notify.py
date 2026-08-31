@@ -19,15 +19,26 @@ What this module owns is everything after a manifest has said *yes, tap me*:
 
 Two rules run through all of it, and both are about not making things worse:
 
-**A tap can never break the thing it is reporting.** Every send is fire-and-forget behind a
-short timeout and a circuit breaker, and every failure is swallowed into a log line. An
-unreachable ntfy must not turn a completed transition into a failed one, exactly as an
-unreachable village does not (:func:`steward.transitions.outcome.applied`). A failed tap is
-still *said* — ``log.warning`` naming the resident, the transport and the reason — because
-a notification that silently stops arriving is indistinguishable from a fleet with nothing
-to say. It is deliberately not an *event*: a chronicle event about steward's own plumbing
-would render in the village as though a villager did something, and an event about a failed
-notification is a fact that could itself be notified about.
+**A tap can never break the thing it is reporting.** Every result is discarded and every
+failure is swallowed into a log line: an unreachable ntfy must not turn a completed
+transition into a failed one, exactly as an unreachable village does not
+(:func:`steward.transitions.outcome.applied`).
+
+Forgotten, then — but not *fired and* forgotten. The POST is **synchronous**, bounded by a
+two second timeout and a sixty second circuit breaker, and it is deliberately not moved onto
+a thread. A background thread would make a tap cost the caller nothing and would also make it
+unreliable in the two places steward most often runs: a one-shot CLI (``steward approval
+raise``) exits the moment its work is done, and a daemon thread killed at interpreter exit
+drops the knock *silently* — trading two seconds for exactly the failure mode this module
+exists to avoid. The same call sites already accept a two second event POST, so the honest
+cost of a tap is a second one.
+
+A failed tap is still *said* — ``log.warning`` naming the resident, the kind and the reason,
+including every tap the breaker swallows while the window is open — because a notification
+that silently stops arriving is indistinguishable from a fleet with nothing to say. It is
+deliberately not an *event*: a chronicle event about steward's own plumbing would render in
+the village as though a villager did something, and an event about a failed notification is a
+fact that could itself be notified about.
 
 **Nothing leaves without redaction.** Human-facing text is scrubbed with
 :func:`steward.manifest.redact_secrets` and only then bounded — redact-then-bound, never the
@@ -46,7 +57,7 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from email.header import Header
 from typing import Any, Protocol
 
@@ -67,11 +78,13 @@ __all__ = [
     "NTFY_URL_ENV",
     "TITLE_MAX_CHARS",
     "TOPIC_PREFIX",
+    "NotificationReport",
     "Notifier",
     "NtfyTransport",
     "Tap",
     "Transport",
     "ntfy_topic",
+    "probe_tap",
     "tap_for",
 ]
 
@@ -102,8 +115,9 @@ NAMESPACE_ENV = "STEWARD_NOTIFY_NAMESPACE"
 NTFY_TIMEOUT_S = 2.0
 
 #: How long a failing transport is left alone after it fails, so a dead ntfy costs one
-#: timeout a minute rather than one per knock. The emitter's own idiom, one module over.
-BREAKER_S = 60.0
+#: timeout a minute rather than one per knock. The emitter's own idiom, and its own spelling
+#: (:data:`steward.events.BREAKER_SECONDS`), one module over.
+BREAKER_SECONDS = 60.0
 
 #: What every derived topic starts with, so an operator scanning their ntfy subscriptions can
 #: tell which ones came from here. It adds no guessability: the 160 bits after it do the work.
@@ -228,6 +242,62 @@ def _detail_lines(detail: object) -> list[str]:
     return [_human(rendered, DETAIL_MAX_CHARS)]
 
 
+def _lead(manifest: ResidentManifest) -> str:
+    """Build the first line of every body: who this is about, and where it lives."""
+    return f"{manifest.soul.name} · {manifest.chronicle_project}"
+
+
+def _knock_tap(manifest: ResidentManifest, event: ev.Event) -> Tap:
+    """Render a ``needs_human`` — the one a person has to get out of bed for."""
+    payload = event.payload
+    body = [_lead(manifest), f"action: {payload.get('action', '')}"]
+    body.extend(_detail_lines(payload.get("detail")))
+    if payload.get("options"):
+        body.append(f"options: {', '.join(str(option) for option in payload['options'])}")
+    if payload.get("expires_at"):
+        body.append(f"expires: {payload['expires_at']}")
+    body.append(f"request: {payload.get('request_id', '')}")
+    return Tap(
+        kind=ev.NEEDS_HUMAN,
+        title=payload.get("message") or f"{manifest.soul.name} needs a human",
+        body="\n".join(body),
+        priority=PRIORITY_HIGH,
+        tags=("door",),
+    )
+
+
+def _task_done_tap(manifest: ResidentManifest, event: ev.Event) -> Tap:
+    """Render a finished board task or delegated letter."""
+    payload = event.payload
+    body = [_lead(manifest), f"task: {payload.get('task_id', '')}"]
+    artifacts = payload.get("artifacts")
+    if isinstance(artifacts, Sequence) and not isinstance(artifacts, str) and artifacts:
+        body.append(f"artifacts: {', '.join(str(item) for item in artifacts)}")
+    return Tap(
+        kind=ev.TASK_DONE,
+        title=f"{manifest.soul.name} finished: {payload.get('title', '')}",
+        body="\n".join(body),
+        tags=("white_check_mark",),
+    )
+
+
+#: One renderer per declarable kind, keyed by the chronicle event type it reads. A map
+#: rather than an ``if`` cascade because the manifest already has a closed vocabulary for
+#: these and the two have to agree: the guard below fails the import when a kind a manifest
+#: may declare has no renderer here, which would otherwise be a declaration that validates,
+#: reads as configured, and silently sends nothing.
+_RENDERERS: Mapping[str, Callable[[ResidentManifest, ev.Event], Tap]] = {
+    ev.NEEDS_HUMAN: _knock_tap,
+    ev.TASK_DONE: _task_done_tap,
+}
+
+if set(_RENDERERS) != set(NOTIFICATION_KINDS):  # pragma: no cover — a guard against drift
+    raise RuntimeError(
+        f"manifest kinds {NOTIFICATION_KINDS} and steward.notify's renderers "
+        f"{sorted(_RENDERERS)} disagree; a manifest may declare a kind nothing here renders"
+    )
+
+
 def tap_for(manifest: ResidentManifest, event: ev.Event) -> Tap | None:
     """Turn one chronicle event into the notice a person actually reads, or ``None``.
 
@@ -238,44 +308,28 @@ def tap_for(manifest: ResidentManifest, event: ev.Event) -> Tap | None:
 
     The resident's own name leads, not its id: the tap arrives on a phone, where "Hob wants to
     send email" is a sentence and ``life-agent/needs_human`` is a log line.
+
+    Redaction and bounding happen **here**, once, rather than in each renderer — so a renderer
+    added tomorrow cannot forget the repo rule, and cannot get redact-then-bound backwards.
     """
-    payload = event.payload
-    name = manifest.soul.name
-    if event.type == ev.NEEDS_HUMAN:
-        body = [f"{name} · {manifest.chronicle_project}", f"action: {payload.get('action', '')}"]
-        body.extend(_detail_lines(payload.get("detail")))
-        if payload.get("options"):
-            body.append(f"options: {', '.join(str(o) for o in payload['options'])}")
-        if payload.get("expires_at"):
-            body.append(f"expires: {payload['expires_at']}")
-        body.append(f"request: {payload.get('request_id', '')}")
-        return Tap(
-            kind=ev.NEEDS_HUMAN,
-            title=_human(payload.get("message") or f"{name} needs a human", TITLE_MAX_CHARS),
-            body=_human("\n".join(body), BODY_MAX_CHARS),
-            priority=PRIORITY_HIGH,
-            tags=("door",),
-        )
-    if event.type == ev.TASK_DONE:
-        title = _human(payload.get("title", ""), TITLE_MAX_CHARS)
-        body = [f"{name} · {manifest.chronicle_project}", f"task: {payload.get('task_id', '')}"]
-        artifacts = payload.get("artifacts")
-        if isinstance(artifacts, Sequence) and not isinstance(artifacts, str) and artifacts:
-            body.append(f"artifacts: {', '.join(_human(a, DETAIL_MAX_CHARS) for a in artifacts)}")
-        return Tap(
-            kind=ev.TASK_DONE,
-            title=_human(f"{name} finished: {title}", TITLE_MAX_CHARS),
-            body=_human("\n".join(body), BODY_MAX_CHARS),
-            tags=("white_check_mark",),
-        )
-    return None
+    render = _RENDERERS.get(event.type)
+    if render is None:
+        return None
+    drafted = render(manifest, event)
+    return replace(
+        drafted,
+        title=_human(drafted.title, TITLE_MAX_CHARS),
+        body=_human(drafted.body, BODY_MAX_CHARS),
+    )
 
 
-def test_tap(manifest: ResidentManifest) -> Tap:
+def probe_tap(manifest: ResidentManifest) -> Tap:
     """Build the tap ``steward notify test`` sends: proof the wiring works, and nothing else.
 
     Named as its own thing rather than faked out of an event, because a rehearsal must not be
-    able to look like a real knock on a phone at 2am.
+    able to look like a real knock on a phone at 2am. And named ``probe_`` rather than
+    ``test_`` because a module-level ``test_`` function taking one argument is something
+    pytest would try to collect and hand a fixture, the moment anybody star-imports this.
     """
     return Tap(
         kind="test",
@@ -345,7 +399,7 @@ class NtfyTransport:
     an optional bearer token for a protected topic, and every error swallowed.
 
     The circuit breaker is :class:`steward.events.EventEmitter`'s, one module over: after a
-    failure the transport stops trying for :data:`BREAKER_S`, so an ntfy that is down costs
+    failure the transport stops trying for :data:`BREAKER_SECONDS`, so an ntfy that is down costs
     one timeout a minute instead of one per knock during a storm of them.
     """
 
@@ -406,7 +460,21 @@ class NtfyTransport:
         if not url.startswith(("http://", "https://")):
             log.warning("ntfy target %r is not an http(s) URL; %s taps nowhere", url, manifest.id)
             return False
-        if self.clock() < self._breaker_until:
+        now = self.clock()
+        if now < self._breaker_until:
+            # Said out loud, every time, and not only on the failure that opened the window.
+            # The breaker is there so a dead ntfy costs one timeout a minute rather than one
+            # per knock — but each knock it swallows is still a knock that did not reach a
+            # phone, and a notification that silently stops arriving is exactly what this
+            # module claims not to allow. One line per dropped tap is what makes "what did I
+            # miss while ntfy was down" answerable from the log.
+            log.warning(
+                "%s: dropped a %s tap — ntfy failed recently and is not being retried for "
+                "another %.0fs",
+                manifest.id,
+                tap.kind,
+                self._breaker_until - now,
+            )
             return False
         headers = {
             "Content-Type": "text/plain; charset=utf-8",
@@ -425,14 +493,14 @@ class NtfyTransport:
             with urllib.request.urlopen(request, timeout=self.timeout_s):  # noqa: S310
                 return True
         except (OSError, urllib.error.URLError, ValueError) as exc:
-            self._breaker_until = self.clock() + BREAKER_S
+            self._breaker_until = self.clock() + BREAKER_SECONDS
             log.warning(
                 "%s: could not tap %s over ntfy — %s: %s; not retrying for %.0fs",
                 manifest.id,
                 tap.kind,
                 type(exc).__name__,
                 exc,
-                BREAKER_S,
+                BREAKER_SECONDS,
             )
             return False
 
@@ -440,6 +508,40 @@ class NtfyTransport:
 # --------------------------------------------------------------------------------------
 # whether to send at all
 # --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class NotificationReport:
+    """What one resident declared, and where its taps would land. The operator's answer.
+
+    A record rather than a dictionary, like :class:`steward.board.BoardReport` and
+    :class:`steward.manifest.Diagnostic`, because the CLI renders it in two formats and a
+    field renamed in one place should not be a ``KeyError`` discovered in the other.
+
+    ``address`` is the derived ntfy topic URL, and it is the one place in steward that prints
+    one. On ntfy the topic *is* the capability — to read and to write — so this record is
+    written to a terminal and deliberately reaches no HTTP response.
+    """
+
+    resident: str
+    transport: str | None
+    status: str
+    on: tuple[str, ...]
+    enabled: bool
+    address: str | None
+    note: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Render as the JSON object ``steward notify list --format json`` prints."""
+        return {
+            "resident": self.resident,
+            "transport": self.transport,
+            "status": self.status,
+            "on": list(self.on),
+            "enabled": self.enabled,
+            "address": self.address,
+            "note": self.note,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,21 +632,25 @@ class Notifier:
             )
             return False
 
-    def describe(self, manifest: ResidentManifest) -> dict[str, Any]:
-        """One resident's notification wiring, as an operator report reads it."""
+    def describe(self, manifest: ResidentManifest) -> NotificationReport:
+        """Report one resident's notification wiring, address included.
+
+        Deliberately **not** :meth:`transport_for`: that method answers "should I send", and
+        this one answers "what did this resident declare, and where would it go". The
+        difference is `status` — a `pending` block resolves no transport for sending and still
+        has to show its address here, because that address is precisely what the operator has
+        to go and subscribe to before flipping it to `active`. Reporting nothing for the block
+        somebody is in the middle of wiring up would make this command useless at the one
+        moment it is needed.
+        """
         declared = manifest.notifications
         transport = self.transports.get(declared.transport or "")
-        return {
-            "resident": manifest.id,
-            "transport": declared.transport,
-            "status": declared.status,
-            "on": list(declared.on),
-            "enabled": declared.enabled,
-            "address": transport.address(manifest) if transport is not None else None,
-            "note": declared.note,
-        }
-
-
-#: Re-exported for the CLI and the docs, so "which kinds exist" is imported from one place
-#: whether the reader started at the manifest or at the transport.
-KINDS = NOTIFICATION_KINDS
+        return NotificationReport(
+            resident=manifest.id,
+            transport=declared.transport,
+            status=declared.status,
+            on=tuple(declared.on),
+            enabled=declared.enabled,
+            address=transport.address(manifest) if transport is not None else None,
+            note=declared.note,
+        )

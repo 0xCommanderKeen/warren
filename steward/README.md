@@ -197,9 +197,16 @@ ntfy's public namespace and cannot drift from the resident it belongs to — and
 *showing* a uid, which happens in git, in the API and in townhall, never incidentally
 discloses the topic. The server and its optional token are environment, never declaration.
 
-Sends are fire-and-forget behind a two-second timeout and a circuit breaker: an unreachable
-ntfy is a log line, and never a failed transition. A knock the repeat-deny guard answered
-taps nobody, exactly as it emits nothing.
+A tap's result is discarded and its errors are swallowed: an unreachable ntfy is a log line,
+never a failed transition. The POST is synchronous, bounded by a two-second timeout and a
+sixty-second circuit breaker — a background thread would make it free and unreliable, and a
+one-shot CLI would drop the knock on the way out. A knock the repeat-deny guard answered taps
+nobody, exactly as it emits nothing.
+
+Chronicle's own `CHRONICLE_NOTIFY_URL` forwarder still exists and is *not* coordinated with
+this: configure both and one knock buzzes twice. Chronicle's is one fleet-wide webhook over
+what it ingested; this is one topic per resident over what steward raised, and it also covers
+`task_done`. Pick one.
 
 ```console
 $ steward notify list                 # transport, kinds, and the URL to subscribe to

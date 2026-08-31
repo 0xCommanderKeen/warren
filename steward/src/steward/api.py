@@ -720,6 +720,11 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "board": manifest.board.model_dump(mode="json"),
         # And whether it may hand work to anybody else, and to whom.
         "delegation": manifest.delegation.model_dump(mode="json"),
+        # Whether steward taps a human about this resident, and about what (warren#114).
+        # The *declaration* only: the derived ntfy topic is deliberately not here and not
+        # anywhere else a browser can reach, because on ntfy the topic is the capability —
+        # `steward notify list`, at a terminal, is the one place it is printed.
+        "notifications": manifest.notifications.model_dump(mode="json"),
         "routines": [
             {
                 "id": routine.id,

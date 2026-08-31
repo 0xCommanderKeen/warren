@@ -792,7 +792,19 @@ class Dispatcher:
         watched: bool,
         handed: Sequence[dg.Delivery] = (),
     ) -> BoardReport:
-        """Atomically commit a board outcome with its replayable terminal fact."""
+        """Atomically commit a board outcome with its replayable terminal fact.
+
+        Also the board's half of warren#114, and it belongs *here* rather than at
+        :meth:`steward.transitions.task.TaskTransitions.finish` because this is where a close
+        is actually announced. The transition writes the row and builds the fact; which of the
+        two publication paths carries it — the durable terminal a watched run claims, or a
+        plain emit for an unwatched one — is decided in this method, and the tap follows each
+        of them. Tapping at the transition seam would have missed the watched path, which is
+        every real board session. A lease lost mid-session reaches neither branch: that task is
+        somebody else's now, the village hears nothing about it, and so does a phone. Which
+        facts are worth a tap is the notifier's question, not this method's — only
+        ``task_done`` is a declarable kind, so a ``task_failed`` taps nobody.
+        """
         terminal = (
             ev.task_done_event(
                 task_id=job.task_id,

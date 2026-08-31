@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import cache
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, get_args
 
 import yaml
 from croniter import CroniterBadDateError, croniter
@@ -242,20 +242,31 @@ JOB_BOARD_ROUTE_KIND = "job-board"
 #: it. The route's ``id`` is what a delegating session names in its block.
 DELEGATION_ROUTE_KIND = "delegation"
 
-#: The transports a ``notifications`` block may name. One today — ntfy, which chronicle has
-#: been pushing knocks through since before steward could — and it is a closed set rather
-#: than a free string for the reason :data:`PermissionMode` is: a typo in a transport name
-#: would otherwise be a manifest that reads as wired up and taps nobody, discovered on the
-#: night an approval knock does not arrive. Telegram belongs here when it exists, as a
-#: second transport of this same declaration, not as an outbound growth of the chat bridge.
-NOTIFICATION_TRANSPORTS = ("ntfy",)
+#: One transport name, as a manifest spells it. A closed set for the reason
+#: :data:`PermissionMode` is one: a typo in a transport name would otherwise be a manifest
+#: that reads as wired up and taps nobody, discovered on the night an approval knock does
+#: not arrive. Telegram belongs here when it exists — as a second transport of *this*
+#: declaration, not as an outbound growth of the chat bridge (warren#108).
+NotificationTransport = Literal["ntfy"]
 
-#: The facts a resident may ask steward to tap a human about, spelled as the chronicle event
-#: types they follow rather than as a second vocabulary — so an ``on:`` list reads against
-#: ``docs/transitions.md`` directly. This module cannot import :mod:`steward.events` (that
-#: module imports *this* one, for redaction), so the strings are repeated here and
-#: ``tests/test_notify.py`` fails if the two ever disagree.
-NOTIFICATION_KINDS = ("needs_human", "task_done")
+#: One fact a tap may be sent about, spelled as the chronicle event type it follows rather
+#: than as a second vocabulary — so an ``on:`` list reads against ``docs/transitions.md``
+#: directly. This module cannot import :mod:`steward.events` (that module imports *this*
+#: one, for redaction), so the strings are repeated here and :mod:`steward.notify` refuses
+#: to import if the two ever disagree.
+NotificationKind = Literal["needs_human", "task_done"]
+
+#: The same two vocabularies as tuples, for the diagnostics and the checks that have to
+#: *name* the members. Derived rather than written twice: a hand-kept copy of a ``Literal``
+#: is a copy that goes stale the first time somebody adds a transport.
+NOTIFICATION_TRANSPORTS: tuple[NotificationTransport, ...] = get_args(NotificationTransport)
+NOTIFICATION_KINDS: tuple[NotificationKind, ...] = get_args(NotificationKind)
+
+#: The one kind whose enforceability depends on the rest of the manifest — a resident that
+#: claims no board work and takes no letters closes no tasks. Named rather than spelled as a
+#: string literal inside :func:`_check_notifications_are_deliverable`, so the check cannot
+#: quietly stop matching a kind somebody renamed.
+NOTIFY_TASK_DONE: NotificationKind = "task_done"
 
 #: How long a claim is good for before the task returns to the board (30 minutes).
 DEFAULT_BOARD_LEASE_S = 30 * 60
@@ -891,13 +902,6 @@ class Route(_Model):
         still wiring up takes no letters.
         """
         return self.kind == DELEGATION_ROUTE_KIND and self.status == "active"
-
-
-#: One transport name, as a manifest spells it.
-NotificationTransport = Literal["ntfy"]
-
-#: One fact a tap may be sent about.
-NotificationKind = Literal["needs_human", "task_done"]
 
 
 class Notifications(_Model):
@@ -2068,7 +2072,7 @@ def _check_notifications_are_deliverable(
     warning is for.
     """
     notifications = manifest.notifications
-    if notifications.transport is None or "task_done" not in notifications.on:
+    if notifications.transport is None or NOTIFY_TASK_DONE not in notifications.on:
         return []
     if manifest.board.claim or any(route.accepts_delegation for route in manifest.routes):
         return []

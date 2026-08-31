@@ -1574,29 +1574,31 @@ def notify_list(residents: Path, output_format: str) -> None:
     """
     result = validate_paths([residents])
     notifier = nf.Notifier.from_env()
-    rows = [notifier.describe(resident.manifest) for resident in result.residents]
+    reports = [notifier.describe(resident.manifest) for resident in result.residents]
     if output_format == "json":
-        click.echo(json.dumps(rows, indent=2))
+        click.echo(json.dumps([report.to_dict() for report in reports], indent=2))
         return
-    if not rows:
+    if not reports:
         click.secho(f"no valid residents in {residents}", fg="yellow")
         return
-    for row in rows:
-        _report_notifications(row)
+    for report in reports:
+        _report_notifications(report)
 
 
-def _report_notifications(row: dict[str, Any]) -> None:
+def _report_notifications(report: nf.NotificationReport) -> None:
     """Print one resident's notification wiring, or say plainly that it has none."""
-    name = str(row["resident"])
-    if row["transport"] is None:
-        click.echo(f"{name}: taps nobody (no notifications block)")
+    if report.transport is None:
+        click.echo(f"{report.resident}: taps nobody (no notifications block)")
         return
-    state = "active" if row["enabled"] else f"{row['status']} — declared, and silent"
-    click.secho(f"{name}: {row['transport']} — {state}", fg="cyan" if row["enabled"] else "yellow")
-    click.echo(f"  on:      {', '.join(row['on'])}")
-    click.echo(f"  address: {row['address']}")
-    if row["note"]:
-        click.echo(f"  note:    {row['note']}")
+    state = "active" if report.enabled else f"{report.status} — declared, and silent"
+    click.secho(
+        f"{report.resident}: {report.transport} — {state}",
+        fg="cyan" if report.enabled else "yellow",
+    )
+    click.echo(f"  on:      {', '.join(report.on)}")
+    click.echo(f"  address: {report.address}")
+    if report.note:
+        click.echo(f"  note:    {report.note}")
 
 
 @notify_group.command("test")
@@ -1624,7 +1626,7 @@ def notify_test(resident_id: str, residents: Path) -> None:
         )
         click.secho(f"{resident.id} taps nobody: it {why}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
-    if notifier.send(resident.manifest, nf.test_tap(resident.manifest), transport=transport):
+    if notifier.send(resident.manifest, nf.probe_tap(resident.manifest), transport=transport):
         click.secho(f"sent — {resident.id} taps {transport.address(resident.manifest)}", fg="green")
         return
     click.secho(

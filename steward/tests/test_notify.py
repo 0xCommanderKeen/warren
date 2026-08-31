@@ -342,7 +342,7 @@ def test_an_untokened_transport_sends_no_authorization(
 ) -> None:
     url, seen = ntfy_server
     resident = tapping()
-    nf.NtfyTransport(base_url=url).send(resident, nf.test_tap(resident))
+    nf.NtfyTransport(base_url=url).send(resident, nf.probe_tap(resident))
     assert "Authorization" not in seen[0]["headers"]
     assert "test" in seen[0]["body"]
 
@@ -353,7 +353,7 @@ def test_an_unreachable_ntfy_is_a_false_and_a_log_line_and_nothing_else(
     resident = tapping()
     transport = nf.NtfyTransport(base_url="http://127.0.0.1:1")
     with caplog.at_level(logging.WARNING, logger="steward.notify"):
-        assert transport.send(resident, nf.test_tap(resident)) is False
+        assert transport.send(resident, nf.probe_tap(resident)) is False
     assert "could not tap" in caplog.text
     assert resident.id in caplog.text
 
@@ -366,23 +366,40 @@ def test_a_failed_send_stops_trying_for_a_while(
     now = 0.0
     resident = tapping()
     transport = nf.NtfyTransport(base_url="http://127.0.0.1:1", clock=lambda: now)
-    tap = nf.test_tap(resident)
+    tap = nf.probe_tap(resident)
 
     assert transport.send(resident, tap) is False  # tries, fails, trips the breaker
     transport.base_url = url
-    now = nf.BREAKER_S - 1.0
+    now = nf.BREAKER_SECONDS - 1.0
     assert transport.send(resident, tap) is False  # inside the window: does not even try
     assert seen == []
-    now = nf.BREAKER_S + 1.0
+    now = nf.BREAKER_SECONDS + 1.0
     assert transport.send(resident, tap) is True  # the window passed
     assert len(seen) == 1
+
+
+def test_every_tap_the_breaker_swallows_is_still_said(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A knock nobody was told about must not also be a knock nobody can find out about."""
+    now = 0.0
+    resident = tapping()
+    transport = nf.NtfyTransport(base_url="http://127.0.0.1:1", clock=lambda: now)
+
+    assert transport.send(resident, nf.probe_tap(resident)) is False
+    now = 1.0
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="steward.notify"):
+        assert transport.send(resident, nf.probe_tap(resident)) is False
+    assert "dropped a test tap" in caplog.text
+    assert resident.id in caplog.text
 
 
 def test_a_target_that_is_not_an_http_url_taps_nowhere(caplog: pytest.LogCaptureFixture) -> None:
     resident = tapping()
     transport = nf.NtfyTransport(base_url="file:///etc")
     with caplog.at_level(logging.WARNING, logger="steward.notify"):
-        assert transport.send(resident, nf.test_tap(resident)) is False
+        assert transport.send(resident, nf.probe_tap(resident)) is False
     assert "not an http(s) URL" in caplog.text
 
 
@@ -497,14 +514,14 @@ def test_send_resolves_the_transport_itself_when_nobody_names_one(
     notifier: nf.Notifier, transport: FakeTransport
 ) -> None:
     resident = tapping()
-    assert notifier.send(resident, nf.test_tap(resident)) is True
+    assert notifier.send(resident, nf.probe_tap(resident)) is True
     assert transport.sent[0].kind == "test"
-    assert notifier.send(manifest(), nf.test_tap(manifest())) is False
+    assert notifier.send(manifest(), nf.probe_tap(manifest())) is False
 
 
 def test_describe_is_what_an_operator_reads(notifier: nf.Notifier) -> None:
     described = notifier.describe(tapping(note="Miha's phone"))
-    assert described == {
+    assert described.to_dict() == {
         "resident": "test-agent",
         "transport": "ntfy",
         "status": "active",
@@ -513,7 +530,17 @@ def test_describe_is_what_an_operator_reads(notifier: nf.Notifier) -> None:
         "address": "fake://test-agent",
         "note": "Miha's phone",
     }
-    assert notifier.describe(manifest())["address"] is None
+    assert notifier.describe(manifest()).address is None
+
+
+def test_describe_still_shows_the_address_of_a_block_being_wired_up(
+    notifier: nf.Notifier,
+) -> None:
+    """`pending` sends nothing and still has to say where to subscribe — that is the point."""
+    pending = notifier.describe(tapping(status="pending"))
+    assert pending.enabled is False
+    assert pending.address == "fake://test-agent"
+    assert notifier.transport_for(tapping(status="pending")) is None
 
 
 # ------------------------------------------------------------------ the two vocabularies
@@ -523,7 +550,7 @@ def test_the_manifest_kinds_are_the_event_types_they_claim_to_be() -> None:
     """``manifest`` cannot import ``events`` (events imports it), so the strings are checked."""
     assert NOTIFICATION_KINDS == (ev.NEEDS_HUMAN, ev.TASK_DONE)
     assert set(NOTIFICATION_TRANSPORTS) == {nf.NTFY}
-    assert nf.KINDS == NOTIFICATION_KINDS
+    assert set(nf._RENDERERS) == set(NOTIFICATION_KINDS)
 
 
 def test_every_declarable_kind_actually_renders_a_tap() -> None:

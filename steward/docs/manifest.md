@@ -824,11 +824,22 @@ the guard, and it holds for the phone as well as for the village. A `task_failed
 lease, and every routine bracket are deliberately not tappable: a notification is for the
 thing you would want to be woken for.
 
-**Failure is a courtesy failing, never work failing.** A tap is fire-and-forget behind a two
-second timeout and a sixty second circuit breaker; an unreachable ntfy is a `WARNING` in
-steward's log and nothing else. It is deliberately not an *event*: an event about steward's
-own plumbing would render in the village as though a villager did something, and an event
-about a failed notification is a fact that could itself be notified about.
+**Failure is a courtesy failing, never work failing.** The result of a tap is discarded and
+every error is swallowed: an unreachable ntfy is a `WARNING` in steward's log and nothing
+else. The POST itself is *synchronous*, bounded by a two second timeout and a sixty second
+circuit breaker — not moved onto a thread, because a one-shot CLI exits the moment its work
+is done and a daemon thread killed at exit would drop the knock silently, which is the exact
+failure this exists to prevent. Every tap the breaker swallows is logged too, so "what did I
+miss while ntfy was down" is answerable. It is deliberately not an *event*: an event about
+steward's own plumbing would render in the village as though a villager did something, and an
+event about a failed notification is a fact that could itself be notified about.
+
+**Chronicle also forwards knocks, and the two do not know about each other.** Chronicle's
+`CHRONICLE_NOTIFY_URL` pushes every `needs_human` it *ingests* to one fleet-wide webhook;
+this pushes the ones steward *raises* to one topic per resident. Configure both and one knock
+buzzes twice. Pick one: the chronicle forwarder if you want a single stream and no manifest
+changes, this if you want per-resident topics you can mute individually and taps for
+`task_done` as well.
 
 **What validation refuses**, in the [`_check_budget_is_enforceable`](#budgets--what-a-day-may-cost)
 spirit — a declaration steward cannot honour is worse than none, because somebody read it:
