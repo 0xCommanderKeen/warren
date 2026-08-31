@@ -628,11 +628,14 @@ down:
 ```console
 $ steward scheduler run                    # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick                   # fire anything due now, then exit (external cron)
-$ steward scheduler tick --dry-run         # print what would fire, and the whole prompt
+$ steward scheduler tick --dry-run         # print what is due right now, and the whole prompt
 ```
 
 `--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
-manifest says. A rehearsal is not work.
+manifest says. A rehearsal is not work. It rehearses *this* tick, so it reports the
+routines that are due at this moment and `nothing due` when none is — a routine that is
+not due is not part of the tick being rehearsed. `steward show <resident>` prints the
+preamble any session opens with; `steward doctor` says when each routine next fires.
 
 Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
