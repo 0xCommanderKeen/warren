@@ -1153,3 +1153,296 @@ def test_a_timed_out_command_does_not_leave_children_running(
     assert "did not answer" in outcome.summary()
     time.sleep(1.1)
     assert not marker.exists(), "a timed-out command must not leave its remote child running"
+
+
+# ------------------------------------------------- container placement (steward #58)
+
+
+CONTAINER = "steward-testy"
+
+
+def docker_stub(  # noqa: PLR0913 — one keyword per behaviour a test wants to pick
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    session: str = "json",
+    running: str = "true",
+    brain_probe: int = 0,
+    help_flags: str = "",
+) -> Path:
+    """Stub the ``docker`` CLI and return the log every invocation appends its argv to.
+
+    The stub answers ``inspect`` with ``running``, an exec carrying ``command -v`` with
+    ``brain_probe``, an exec carrying ``--help`` with ``help_flags``, an exec carrying the
+    kill script by exiting zero, and the session exec itself per ``session``: ``json``
+    prints the claude result document, ``hang`` prints a line and sleeps far past any
+    test timeout.
+    """
+    log = tmp_path / "docker-calls.log"
+    monkeypatch.setenv("DOCKER_LOG", str(log))
+    if session == "json":
+        act = (
+            "cat <<'JSON'\n"
+            '{"type":"result","is_error":false,"result":"the summary",\n'
+            ' "usage":{"input_tokens":120,"output_tokens":34},"total_cost_usd":0.0125}\n'
+            "JSON"
+        )
+    else:
+        act = 'printf "partial thought\\n"; sleep 30'
+    stub_bin(
+        "docker",
+        f"""
+{{ printf '%s\\n' "===CALL"; for a in "$@"; do printf '%s\\n' "$a"; done; }} >> "$DOCKER_LOG"
+case "$1" in
+  inspect) printf '{running}\\n'; exit 0 ;;
+esac
+for a in "$@"; do
+  case "$a" in
+    *"command -v"*) exit {brain_probe} ;;
+    *"kill -9"*) exit 0 ;;
+    --help) printf '%s\\n' "{help_flags}"; exit 0 ;;
+  esac
+done
+{act}
+""",
+    )
+    return log
+
+
+def docker_calls(log: Path) -> list[list[str]]:
+    """Parse the stub's log into one argv list per docker invocation."""
+    calls: list[list[str]] = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if line == "===CALL":
+            calls.append([])
+        else:
+            calls[-1].append(line)
+    return calls
+
+
+PLACED = r.Placement(container=CONTAINER, workdir="/data/memory")
+
+
+def test_a_container_placed_session_execs_into_the_container(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The whole shape at once: workdir, named env, shim, untouched brain argv.
+
+    The brain argv after the shim is byte for byte what a local placement builds —
+    including ``--output-format json`` — which is what keeps ``parse`` feeding tokens and
+    cost into the budget ledger for a container-placed resident.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+    runner = r.build_runner(RunnerSpec(kind="claude", model="claude-opus-5"), PLACED)
+
+    result = runner.run(
+        request_for(tmp_path, env={"STEWARD_RUN_ID": "run-42", "BURROW_AGENT_ID": "cc:testy"})
+    )
+
+    assert result.outcome is r.Outcome.OK
+    assert result.output == "the summary"
+    assert (result.input_tokens, result.output_tokens) == (120, 34)
+    assert result.cost_usd == pytest.approx(0.0125)
+
+    (call,) = docker_calls(log)
+    assert call[:3] == ["exec", "-w", "/data/memory"]
+    assert call[3:7] == ["-e", "BURROW_AGENT_ID=cc:testy", "-e", "STEWARD_RUN_ID=run-42"]
+    assert call[7:9] == [CONTAINER, "sh"]
+    assert call[9] == "-c"
+    shim = call[10]
+    assert 'printf %s "$$" > /run/steward/run-42.pid' in shim
+    assert "rm -f /run/steward/run-42.pid" in shim
+    assert call[11:] == [
+        "claude",
+        "-p",
+        "say hello",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-opus-5",
+    ]
+
+
+def test_a_container_session_carries_only_the_named_variables(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No allowlist, no passthrough, no control-plane secrets — only ``request.env``.
+
+    The container has its own environment from compose and its ``.env``, and the brain's
+    credentials live on its ``/root/.claude`` volume. A ``STEWARD_TOKEN`` in the control
+    plane's environment must not be visible inside the session (steward #58's acceptance
+    line), and neither must the base names local placement forwards.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+    monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-not-for-the-wire")
+    monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, "ANTHROPIC_API_KEY")
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+
+    runner.run(request_for(tmp_path, env={"STEWARD_RUN_ID": "run-9"}))
+
+    (call,) = docker_calls(log)
+    named = [call[index + 1] for index, part in enumerate(call) if part == "-e"]
+    assert named == ["STEWARD_RUN_ID=run-9"]
+    joined = "\n".join(call)
+    assert "STEWARD_TOKEN" not in joined
+    assert "ANTHROPIC_API_KEY" not in joined
+    assert "HOME=" not in joined
+
+
+def test_a_container_timeout_is_a_kill_inside_the_container(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The kill must go inside the container, first — a dead client is not a dead run.
+
+    Killing the local ``docker exec`` client alone would leave the session burning
+    tokens behind a ledger row that says timeout, and the partial output the session
+    already streamed must survive (the ``_drain`` guarantee).
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path, session="hang")
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+
+    result = runner.run(request_for(tmp_path, timeout_s=1, env={"STEWARD_RUN_ID": "run-7"}))
+
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert "partial thought" in result.output
+    _session, kill = docker_calls(log)
+    assert "sleep 30" not in "\n".join(kill), "the kill call must not be the session call"
+    assert kill[0] == "exec"
+    assert kill[1] == CONTAINER
+    script = kill[-1]
+    assert 'kill -9 -"$pid"' in script
+    assert "/run/steward/run-7.pid" in script
+    assert "rm -f /run/steward/run-7.pid" in script
+
+
+def test_a_run_id_that_is_not_a_name_never_reaches_the_shim(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The run id is minted by steward, and the pid file still refuses to trust it."""
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+    hostile = 'x"; rm -rf /; echo "'
+
+    runner.run(request_for(tmp_path, env={"STEWARD_RUN_ID": hostile}))
+
+    (call,) = docker_calls(log)
+    shim = call[call.index("-c") + 1]
+    assert hostile not in shim
+    assert re.search(r"/run/steward/[0-9a-f]{24}\.pid", shim)
+
+
+def test_a_container_placement_ignores_the_workdir_descriptor(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch must not wrap itself in the local cwd helper over the descriptor.
+
+    The descriptor pins a control-plane directory; across `docker exec` it means nothing.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        request = replace(request_for(tmp_path, env={"STEWARD_RUN_ID": "run-3"}), workdir_fd=fd)
+        result = runner.run(request)
+    finally:
+        os.close(fd)
+
+    assert result.outcome is r.Outcome.OK
+    (call,) = docker_calls(log)
+    assert call[0] == "exec"
+
+
+def test_container_check_probes_the_container_not_the_local_path(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The control plane's own PATH has no claude here, and it must not matter.
+
+    A container-placed resident is ready when *its container* is running and carries
+    the brain.
+    """
+    docker_stub(stub_bin, monkeypatch, tmp_path)
+
+    assert r.check_runner(RunnerSpec(kind="claude"), PLACED) is None
+
+
+def test_a_stopped_container_is_a_loud_complaint(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_stub(stub_bin, monkeypatch, tmp_path, running="false")
+
+    complaint = r.check_runner(RunnerSpec(kind="claude"), PLACED)
+
+    assert complaint is not None
+    assert CONTAINER in complaint
+    assert "not running" in complaint
+
+
+@pytest.mark.usefixtures("empty_path")
+def test_an_unanswerable_docker_is_a_loud_complaint() -> None:
+    complaint = r.check_runner(RunnerSpec(kind="claude"), PLACED)
+
+    assert complaint is not None
+    assert "docker could not answer" in complaint
+
+
+def test_a_brainless_container_names_the_missing_binary(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_stub(stub_bin, monkeypatch, tmp_path, brain_probe=1)
+
+    complaint = r.check_runner(RunnerSpec(kind="claude"), PLACED)
+
+    assert complaint is not None
+    assert "'claude'" in complaint
+    assert CONTAINER in complaint
+
+
+def test_an_unplaceable_kind_is_refused_at_the_factory() -> None:
+    """The seam mirrors validation, for specs that never crossed a validator.
+
+    A container-placed mock or command runner may not be built at all.
+    """
+    for spec in (
+        RunnerSpec(kind="mock"),
+        RunnerSpec(kind="command", command=["tool", "{prompt}"]),
+    ):
+        with pytest.raises(r.RunnerError, match="cannot be placed in a container"):
+            r.build_runner(spec, PLACED)
+        complaint = r.check_runner(spec, PLACED)
+        assert complaint is not None
+        assert "cannot be placed" in complaint
+
+
+def test_describe_names_both_axes() -> None:
+    runner = r.build_runner(RunnerSpec(kind="claude", model="claude-opus-5"), PLACED)
+    assert runner.describe() == f"claude (claude-opus-5) in container {CONTAINER}"
+
+
+def test_the_flag_probe_asks_the_container_cli(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe must ask the CLI that will actually run the sessions.
+
+    The CLI a provisioned container carries is pinned by its image, not by the laptop
+    that validated the manifest.
+    """
+    log = docker_stub(
+        stub_bin, monkeypatch, tmp_path, help_flags="--tools --strict-mcp-config --add-dir"
+    )
+
+    assert r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), (), PLACED) is None
+    (call,) = docker_calls(log)
+    assert call == ["exec", CONTAINER, "claude", "--help"]
+
+
+def test_the_flag_probe_reports_a_container_cli_too_old_to_bound(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    docker_stub(stub_bin, monkeypatch, tmp_path, help_flags="--model only")
+
+    complaint = r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), (), PLACED)
+
+    assert complaint is not None
+    assert "--tools" in complaint
