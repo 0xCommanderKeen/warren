@@ -23,6 +23,12 @@ Writes are deliberately non-optimistic. A valid Steward receipt leaves the clien
 
 Only Steward's pre-mutation `401` and `422` refusals release the lock for retry. Network failures, other statuses, malformed receipts, and server/proxy failures are ambiguous and keep writes blocked, because sending again could duplicate work. If the request or receipt retains an exact usable identity, a later matching Burrow snapshot can reconcile it without another write. Ambiguous routine runs remain blocked because Steward's receipt does not expose the projected run ID.
 
+## Time of day
+
+**Not rebuilt yet.** The retired in-tree viewer tinted the village and Arcadia has not reimplemented it. The rule is kept here because Arcadia is where the village is drawn: Burrow has no part in it, and no phase, tint or clock reaches a client through the state contract.
+
+The village is tinted by the **real local time of the machine viewing it** — dawn, day, dusk and night, interpolated so there is never a jump. It is a projection of the clock and nothing else: no weather, no seasons, no simulated sky. After dark, a house's windows and doorway light up only while its villager is genuinely home, your porch lights only while somebody is actually knocking, and the working glow, the knock orange and the stale fade all stay legible. Any development override says so on screen, so a pinned tint never passes as the real thing.
+
 ## Development
 
 Requires Node.js 24 and pnpm 11.

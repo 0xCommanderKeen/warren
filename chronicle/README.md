@@ -266,79 +266,76 @@ test suite with `sh tests/run.sh`.
 
 Anything on the tailnet could otherwise POST fake events, and the village never lies.
 When the server has `BURROW_TOKEN` set, `POST /events` must carry it as
-`Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. GET endpoints —
-`/state`, `/events`, `/villagers` — are not gated. With the var unset, ingest is open,
-which is what local dev uses.
+`Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. That single POST is
+the only gated request there is: every GET — `/state`, `/state/stream`, `/events`,
+`/villagers`, `/residents`, `/transport/status` — is open, deliberately, so a client needs
+no credential to watch the fleet. With the var unset, ingest is open too, which is what
+local dev uses. Request framing is checked before the token, so an oversized or
+badly-framed POST is refused with a `400` or `413` whether or not it carried one.
 
 Emitters send the token from their own `BURROW_TOKEN`. A rejected POST is just a failed
 POST: the event falls back to the local JSONL file, so a missing token costs visibility,
 never events. **Roll it out server-first:** deploy the token-aware server with the var
 unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
-  API over the local log.
-- **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
-  `needs_human` event is also pushed there with a stable receiver dedupe ID. Plain knocks carry the
-  villager's name, project, and message; structured approvals carry action and detail
-  (`https://ntfy.sh/<your-topic>` works out of the box;
-  `BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a
-  dead notification service can never block or lose an event. Forwarding uses two
-  workers and a 64-knock memory queue backed by a pre-acknowledgement fsynced journal. Restart and
-  startup/saturation recovery use stable-lock atomic journal handoff. A fixed
-  shard lock spans durable terminal recheck, external notification, and outcome.
-  The knock journal and each delivered/drop ledger are independently capped at
-  1,024 records/5 MiB. Disjoint active/replay journal authority plus a pending
-  publication can occupy 15 MiB; live plus pending copies of both fixed-size
-  hashed-ASCII terminal ledgers add 20 MiB (35 MiB total at defaults). Recovery converges before another handoff, with capacity victims
-  durably terminal-dropped first. `GET /transport/status` reports `delivered` and
-  `dropped` as the current bounded counts in their authoritative durable ledgers;
-  these survive restart but can decrease when older keys leave the retention window.
-  Retry, failure, and saturation counters describe only the current server process.
-  Live clients consume this report.
-- **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
-  `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
-  `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the
-  village still needs, so nothing on screen changes. Archives are plain JSONL and
-  keep the full history; set `BURROW_ARCHIVE` to put them elsewhere (on the NAS,
-  they land next to the log in the mounted volume). `BURROW_MAX_LOG=0` turns
-  rotation off. One reserved non-event capsule (at most 32 KiB) carries bounded Mood approval
-  identity, stable append order, and an explicit conservative overflow state
-  across rotations; it is ignored by every ordinary projection and cannot
-  create presence. Exact future invalidation over unrestricted request IDs is
-  impossible in fixed space, so overflow displays an uncertain mood instead of
-  guessing. The delivery-ID acceleration ledger is separately bounded to
-  1,024 records/5 MiB plus one atomic-copy allowance (10 MiB physical at
-  defaults); retained live/archive events remain the dedupe authority after
-  ledger eviction. This is exactly-once replay within retained event authority,
-  not a global-forever guarantee.
+
+### Knocks on your phone
+
+A village you have to be looking at is no good for a knock. Set `BURROW_NOTIFY_URL` on the
+server and every `needs_human` event is also pushed there with a stable receiver dedupe ID.
+Plain knocks carry the villager's name, project and message; structured approvals carry the
+action as title and the detail as body (`https://ntfy.sh/<your-topic>` works out of the box;
+`BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a dead
+notification service can never block or lose an event.
+
+Forwarding uses two workers and a 64-knock memory queue backed by a pre-acknowledgement
+fsynced journal. Restart and startup/saturation recovery use stable-lock atomic journal
+handoff, and a fixed shard lock spans durable terminal recheck, external notification and
+outcome. The knock journal and each delivered/drop ledger are independently capped at 1,024
+records/5 MiB. Disjoint active/replay journal authority plus a pending publication can
+occupy 15 MiB; live plus pending copies of both fixed-size hashed-ASCII terminal ledgers add
+20 MiB (35 MiB total at defaults). Recovery converges before another handoff, with capacity
+victims durably terminal-dropped first. `GET /transport/status` reports `delivered` and
+`dropped` as the current bounded counts in their authoritative durable ledgers; these
+survive restart but can decrease when older keys leave the retention window. Retry, failure
+and saturation counters describe only the current server process. That report is published
+for clients, but it is delivery telemetry and not part of the state contract.
+
+### Log rotation
+
+The server keeps `events.jsonl` bounded on its own. Past `BURROW_MAX_LOG` bytes (default
+5 MiB) it rolls the log into `archive/events-<UTC timestamp>.jsonl` and restarts it from the
+tail the projection still needs, so the next snapshot is unchanged and no client sees the
+village move. Archives are plain JSONL and keep the full history; set `BURROW_ARCHIVE` to
+put them elsewhere (on the NAS, they land next to the log in the mounted volume).
+`BURROW_MAX_LOG=0` turns rotation off.
+
+Rotation carries a little state across the cut so the projection does not lose meaning at
+the seam. One reserved non-event capsule (at most 32 KiB) carries bounded mood approval
+identity, stable append order and an explicit conservative overflow state; it is ignored by
+every ordinary projection and cannot create presence. Exact future invalidation over
+unrestricted request IDs is impossible in fixed space, so overflow resolves to an uncertain
+mood instead of a guess. The delivery-ID acceleration ledger is separately bounded to 1,024
+records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults); retained
+live/archive events remain the dedupe authority after ledger eviction. This is exactly-once
+replay within retained event authority, not a global-forever guarantee.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
-## Time of day
-
-The village is tinted by the **real local time of the machine viewing it** —
-dawn, day, dusk and night, interpolated so there is never a jump. It is a
-projection of the clock and nothing else: no weather, no seasons, no simulated
-sky. After dark, a house's windows and doorway light up only while its villager
-is genuinely home, your porch lights only while somebody is actually knocking,
-and the working glow, the knock orange and the stale fade all stay legible.
-
-The tint is a client concern and burrow ships no client: the rule it must obey is that
-the phase comes from the real clock, and any development override says so on screen so a
-pinned tint never passes as the real thing.
-
 ## Driving a client without a fleet
 
-The village has no fleet of its own to test against, so there is a fixture that
-writes a synthetic event log for a client to render:
+This service has no fleet of its own to test against, so there is a fixture that writes a
+synthetic event log for a client to render:
 
 ```sh
 python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
 BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
 ```
 
-It forces the longest walks on the map — corner plots to your door and back — so
-pathfinding, fence gates and the knock queue all get exercised in whichever client is
-pointed at that server.
+Nine agents cycle between working, knocking and resting — eight of them on the far corner
+plots — so the snapshots it produces force the longest routes across the map. Whichever
+client is pointed at that server gets its pathfinding, its fence gates and its knock queue
+exercised without a real agent running anywhere.
 
 ## Residents and visitors
 

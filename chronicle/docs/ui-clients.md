@@ -32,7 +32,9 @@ implementation of the read loop and the shape to copy:
 - Refuse an unsupported `snapshot.schema_version` before applying any state, rather than
   rendering a version the client does not understand.
 
-`/state` answers `204` when nothing changed, and carries the cursor in `X-Burrow-Cursor`.
+`/state` answers `204` when nothing changed, and carries the current position in
+`X-Burrow-State-Generation` and `X-Burrow-State-Cursor`. (`X-Burrow-Cursor` is the internal
+`GET /events` header, not part of this contract.)
 A stale cursor receives one atomic reset snapshot; see
 [state-contract.md](state-contract.md) for the full contract and versioning policy.
 
