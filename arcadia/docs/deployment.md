@@ -97,10 +97,11 @@ no restart. That is the everyday rollback now that the origin is established.
 To undo the whole 2026-08-27 cutover: stop Arcadia, restore Burrow's port mapping to
 `8737:8737`, and recreate Burrow. The Arcadia build and configuration remain in
 `~/docker/arcadia/` for diagnosis. No data migration was part of that cutover, so rollback
-does not touch Burrow's event log or Steward's database. This used to also restore
-Burrow's built-in viewer at `/` — warren#219 removes that viewer from chronicle, so after
-it lands a cutover rollback returns an API with no UI in front of it, and arcadia is the
-only village view there is.
+does not touch Burrow's event log or Steward's database.
+
+That rollback no longer restores a UI. It used to bring back Burrow's built-in viewer at
+`/`; warren#219 removed that viewer from chronicle, which is now backend-only, so undoing
+the cutover today leaves an API with nothing in front of it. Arcadia is the village.
 
 ## Cutover record
 
