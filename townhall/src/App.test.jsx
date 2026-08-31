@@ -99,7 +99,7 @@ describe("the write path's front door", () => {
       { fetch, token: null },
     );
 
-    fireEvent.change(screen.getAllByPlaceholderText(/value of STEWARD_TOKEN/i)[0], {
+    fireEvent.change(screen.getAllByPlaceholderText(/steward-operator-/i)[0], {
       target: { value: "typed-at-runtime" },
     });
     fireEvent.click(screen.getAllByRole("button", { name: /^unlock$/i })[0]);
@@ -276,7 +276,7 @@ describe("the resident editor", () => {
         ? Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }))
         : Promise.resolve(json(200, DECLARATION)),
     );
-    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
 
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
     fireEvent.change(screen.getByDisplayValue(/version: 0/), { target: { value: "version: 0\n# kept\n" } });
@@ -312,7 +312,7 @@ describe("the shell itself", () => {
 
     const nav = screen.getByRole("navigation", { name: /sections/i });
     expect(within(nav).getAllByRole("link").map((link) => link.textContent)).toEqual([
-      "01Fleet", "02Residents", "03Skills", "04Budgets",
+      "01Fleet", "02Residents", "03Routines", "04Approvals", "05Board", "06Skills", "07Budgets",
     ]);
     expect(within(nav).getByRole("link", { name: /fleet/i }).getAttribute("aria-current")).toBe("page");
     // The read path needs no token: the fleet renders without one being asked for.
@@ -337,7 +337,7 @@ describe("reloading steward's own copy", () => {
       if (init?.method === "POST") return Promise.resolve(json(200, { status: "reloaded", residents: 3, routines: 7, skills: ["research"] }));
       return Promise.resolve(json(200, DECLARATION));
     });
-    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
 
     fireEvent.click(await screen.findByRole("button", { name: /write declaration/i }));
     fireEvent.click(await screen.findByRole("button", { name: /reload steward's own copy/i }));

@@ -7,7 +7,45 @@
  * the contrast correction documented at the top of `styles.css` (#152).
  */
 
+import { useEffect, useState } from "react";
+import { isTime, stamp, words } from "./time.js";
+
 const cx = (...parts) => parts.filter(Boolean).join(" ");
+
+/* -- time ---------------------------------------------------------------------------- */
+
+/**
+ * One second, shared.
+ *
+ * The console rewrote every `<time>` on the page from a single `setInterval`, and this is
+ * the same trick: one timer for the whole app, however many clocks are mounted. A clock
+ * per interval would be N timers whose only job is to disagree about what "now" is.
+ */
+export function useNow(everyMs = 1000) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
+
+/**
+ * A relative time that keeps itself honest — rewritten every second, forever.
+ *
+ * `mode="until"` counts down to a deadline and then says it has passed, rather than
+ * turning into a count-up that reads as though the thing is still coming.
+ */
+export function Clock({ at, mode = "ago", className }) {
+  const now = useNow();
+  if (!at) return <span className={cx("text-faint", className)}>—</span>;
+  const gone = mode === "until" && isTime(at) && Date.parse(at) <= now;
+  return (
+    <time dateTime={at} title={stamp(at) || undefined} className={cx(gone && "text-faint", className)}>
+      {words(at, { mode, now })}
+    </time>
+  );
+}
 
 /* -- headings ------------------------------------------------------------------------ */
 
@@ -18,6 +56,34 @@ export function PageHead({ title, children, aside }) {
         <h1 className="m-0 font-serif text-[34px] font-normal leading-[1.1] tracking-[.005em]">{title}</h1>
         {children ? (
           <p className="mt-3 max-w-[74ch] text-[12.5px] leading-[1.7] text-dim">{children}</p>
+        ) : null}
+      </div>
+      {aside ? <div className="flex shrink-0 flex-wrap items-center gap-2">{aside}</div> : null}
+    </div>
+  );
+}
+
+/**
+ * The head of a detail page: a way back, a name in this resident's own colour, a subtitle.
+ *
+ * The accent is a CSS custom property on the element that consumes it, which is the whole
+ * of the #151 fix — the console meant to do exactly this and its DOM helper silently
+ * dropped it. A resident with no accent falls back to ember *by declaration*, not by
+ * accident.
+ */
+export function DetailHead({ accent, title, back, children, aside }) {
+  return (
+    <div
+      className="rise mb-[26px] flex flex-wrap items-start justify-between gap-6"
+      style={accent ? { "--accent": accent } : undefined}
+    >
+      <div className="min-w-0">
+        {back}
+        <h1 className="m-0 mt-2 border-l-[3px] border-l-[color:var(--accent,var(--color-ember))] pl-3.5 font-serif text-[34px] font-normal leading-[1.1]">
+          {title}
+        </h1>
+        {children ? (
+          <p className="mt-3 max-w-[74ch] pl-3.5 text-[12.5px] leading-[1.7] text-dim">{children}</p>
         ) : null}
       </div>
       {aside ? <div className="flex shrink-0 flex-wrap items-center gap-2">{aside}</div> : null}
@@ -309,7 +375,7 @@ export function Row({ columns, children, head, href, onClick, accent, className 
 export function Who({ accent, name, id, role, retired }) {
   return (
     <span className="flex min-w-0 items-baseline gap-2.5">
-      <span className="size-2 flex-none -translate-y-px" style={{ background: accent || "var(--color-ember)" }} />
+      <Swatch accent={accent} className="-translate-y-px" />
       <span className="min-w-0">
         <span className="font-serif text-[17px] leading-[1.2]">{name}</span>{" "}
         <span className="text-[11px] text-faint">{id}</span>
@@ -317,6 +383,45 @@ export function Who({ accent, name, id, role, retired }) {
         {role ? <span className="mt-[3px] block text-[11px] text-dim">{role}</span> : null}
       </span>
     </span>
+  );
+}
+
+/**
+ * A resident's declared colour, as a colour (#151).
+ *
+ * The console passed its accent through `Object.assign(node.style, …)`, which cannot set a
+ * CSS custom property — so `--accent` never applied, every hover border and detail header
+ * fell back to the generic ember, and because the fallback looked fine nobody noticed. A
+ * React style object *does* support `"--accent"` keys, and `Row` and `Detail` below feed
+ * theirs through one, so the declared colour is the colour on the screen.
+ */
+export const Swatch = ({ accent, className }) => (
+  <span
+    className={cx("size-2 flex-none", className)}
+    style={{ background: accent || "var(--color-ember)" }}
+  />
+);
+
+/** A checkbox with a name and a description, the shape the console's grant lists used. */
+export function Check({ name, description, note, disabled, ...props }) {
+  return (
+    <label
+      className={cx(
+        "mb-2 flex cursor-pointer items-baseline gap-2.5 border border-rule-2 bg-deeper px-3 py-2.5",
+        disabled && "cursor-not-allowed opacity-70",
+      )}
+    >
+      <input type="checkbox" disabled={disabled} {...props} className="mt-0.5 accent-ember" />
+      <span className="min-w-0">
+        <span className="block text-ink">
+          {name}
+          {note ? <> {note}</> : null}
+        </span>
+        {description ? (
+          <span className="mt-0.5 block text-[11px] leading-[1.55] text-dim">{description}</span>
+        ) : null}
+      </span>
+    </label>
   );
 }
 

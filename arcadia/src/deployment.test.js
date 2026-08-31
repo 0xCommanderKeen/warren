@@ -23,7 +23,7 @@ describe("production deployment contract", () => {
 
   it("keeps Burrow ingest and Steward writes behind the deployed origin", () => {
     expect(nginx).toContain("location = /events");
-    expect(nginx).toContain("location ~ ^/(jobs|approvals|residents|skills|reload)(/|$)");
+    expect(nginx).toContain("location ~ ^/(jobs|approvals|residents|skills|reload|routines|requests)(/|$)");
     expect(nginx).toContain("host.docker.internal:8738");
     expect(nginx).toContain("host.docker.internal:8802");
     expect(readFileSync("deploy/smoke.sh", "utf8")).toContain("steward-preflight=401");

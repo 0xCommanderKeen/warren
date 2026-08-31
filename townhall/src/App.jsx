@@ -17,9 +17,13 @@ import { StewardProvider, useSteward } from "./steward/context.jsx";
 import { Button, Label, PageHead } from "./console/ui.jsx";
 import { viewModel } from "./model.js";
 import { createStateTransport } from "./transport.js";
+import { LedgerProvider } from "./console/ledger.jsx";
 import FleetPage from "./pages/FleetPage.jsx";
 import SkillsPage from "./pages/SkillsPage.jsx";
 import ResidentsPage from "./pages/ResidentsPage.jsx";
+import RoutinesPage from "./pages/RoutinesPage.jsx";
+import ApprovalsPage from "./pages/ApprovalsPage.jsx";
+import BoardPage from "./pages/BoardPage.jsx";
 import BudgetsPage from "./pages/BudgetsPage.jsx";
 
 /** Chronicle's snapshot feed. Unchanged: poll once, then stream, and never write. */
@@ -62,9 +66,18 @@ function LinkState({ tone, children, title }) {
 
 const CHRONICLE_TONE = { live: "ok", polling: "busy", reconnecting: "busy", disconnected: "bad" };
 const STEWARD_WORDS = {
-  held: ["ok", "token held"],
+  held: ["ok", "credential held"],
   open: ["ok", "steward runs open"],
-  unknown: ["idle", "no token yet"],
+  unknown: ["idle", "no credential yet"],
+};
+
+/* What this tab is actually carrying. A minted operator credential is the intended answer;
+ * anything else held is almost certainly the master token, and saying so out loud is the
+ * whole point of warren#225 — the master token in a browser is the thing being retired, so
+ * a control panel that could not tell you it was there would be hiding it. */
+const CREDENTIAL_NOTE = {
+  operator: ["named operator — revocable, and your name is on every write it makes"],
+  other: ["not an operator credential: likely the master token, which names nobody and cannot be revoked without a restart"],
 };
 
 function Rail({ snapshot, chronicle }) {
@@ -72,6 +85,7 @@ function Rail({ snapshot, chronicle }) {
   const { credential, status } = useSteward();
   const current = navFor(page);
   const [stewardTone, stewardWords] = STEWARD_WORDS[status] || STEWARD_WORDS.unknown;
+  const [credentialNote] = CREDENTIAL_NOTE[credential.kind?.()] || [null];
 
   return (
     <aside className="rail-gradient z-30 flex flex-col border-b border-rule px-5 py-4 rail:fixed rail:inset-y-0 rail:left-0 rail:w-[232px] rail:border-b-0 rail:border-r rail:px-0 rail:pb-[22px] rail:pt-[30px]">
@@ -120,8 +134,11 @@ function Rail({ snapshot, chronicle }) {
 
         <Label>steward</Label>
         <LinkState tone={stewardTone}>{stewardWords}</LinkState>
+        {credentialNote ? (
+          <div className="mb-3 text-[10px] leading-[1.55] text-faint">{credentialNote}</div>
+        ) : null}
         <Button tiny disabled={status === "unknown"} onClick={() => credential.forget()}>
-          forget token
+          forget credential
         </Button>
 
         <p className="mt-4 border-t border-rule-2 pt-[14px] text-[10.5px] leading-[1.6] text-faint">
@@ -142,8 +159,10 @@ function Rail({ snapshot, chronicle }) {
 /* -- the page ------------------------------------------------------------------------ */
 
 const TITLES = {
-  fleet: "Fleet", agent: "Record", residents: "Residents",
-  resident: "Resident", skills: "Skills", skill: "Skill", skillNew: "New skill", budgets: "Budgets",
+  fleet: "Fleet", agent: "Record", residents: "Residents", resident: "Resident",
+  residentNew: "New resident", residentDeclaration: "Declaration", routines: "Routines",
+  approvals: "Approvals", board: "Job board", skills: "Skills", skill: "Skill",
+  skillNew: "New skill", budgets: "Budgets",
 };
 
 function NotFound() {
@@ -171,7 +190,15 @@ function Page({ model, page, params }) {
       return <SkillsPage page={page} params={params} />;
     case "residents":
     case "resident":
+    case "residentNew":
+    case "residentDeclaration":
       return <ResidentsPage page={page} params={params} />;
+    case "routines":
+      return <RoutinesPage />;
+    case "approvals":
+      return <ApprovalsPage />;
+    case "board":
+      return <BoardPage />;
     case "budgets":
       return <BudgetsPage params={params} />;
     default:
@@ -213,7 +240,12 @@ export default function App() {
   return (
     <NavigationProvider base={import.meta.env.BASE_URL}>
       <StewardProvider>
-        <Shell />
+        {/* The pending ledger outlives any one page on purpose: an action asked for on the
+            Routines page is still unconfirmed while you read the Board, and a receipt that
+            disappeared on navigation would be a receipt that told nobody anything. */}
+        <LedgerProvider>
+          <Shell />
+        </LedgerProvider>
       </StewardProvider>
     </NavigationProvider>
   );

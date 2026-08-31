@@ -37,8 +37,10 @@ describe("base-prefix routing", () => {
     const base = "/observatory/";
     const routes = [
       routeTo.fleet(), routeTo.agent("d29c-…"), routeTo.residents(),
-      routeTo.resident("life-agent"), routeTo.skills(), routeTo.skill("read-inbox"),
-      routeTo.skillNew(), routeTo.budgets(), routeTo.budgets("life-agent"),
+      routeTo.resident("life-agent"), routeTo.residentNew(),
+      routeTo.residentDeclaration("life-agent"), routeTo.skills(),
+      routeTo.skill("read-inbox"), routeTo.skillNew(), routeTo.routines(),
+      routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("life-agent"),
     ];
     for (const route of routes) expect(stripBase(withBase(route, base), base)).toBe(route);
   });
@@ -50,6 +52,14 @@ describe("route matching", () => {
     expect(matchRoute("/agents/abc")).toEqual({ page: "agent", params: { uuid: "abc" } });
     expect(matchRoute("/residents")).toEqual({ page: "residents", params: {} });
     expect(matchRoute("/residents/life-agent")).toEqual({ page: "resident", params: { id: "life-agent" } });
+    expect(matchRoute("/residents/new")).toEqual({ page: "residentNew", params: {} });
+    expect(matchRoute("/residents/life-agent/declaration")).toEqual({
+      page: "residentDeclaration",
+      params: { id: "life-agent" },
+    });
+    expect(matchRoute("/routines")).toEqual({ page: "routines", params: {} });
+    expect(matchRoute("/approvals")).toEqual({ page: "approvals", params: {} });
+    expect(matchRoute("/board")).toEqual({ page: "board", params: {} });
     expect(matchRoute("/skills")).toEqual({ page: "skills", params: {} });
     expect(matchRoute("/skills/new")).toEqual({ page: "skillNew", params: {} });
     expect(matchRoute("/skills/read-inbox")).toEqual({ page: "skill", params: { name: "read-inbox" } });
@@ -71,6 +81,18 @@ describe("route matching", () => {
     for (const entry of NAV) {
       for (const page of entry.pages) expect(navFor(page)).toBe(entry.nav);
     }
-    expect(NAV.map((entry) => entry.label)).toEqual(["Fleet", "Residents", "Skills", "Budgets"]);
+    expect(NAV.map((entry) => entry.label)).toEqual([
+      "Fleet", "Residents", "Routines", "Approvals", "Board", "Skills", "Budgets",
+    ]);
+  });
+
+  it("keeps the form that declares a resident out of the id branch", () => {
+    // A resident may legitimately be called "new"; the form's address is claimed first, so
+    // declaring one could never take this page away from itself.
+    expect(matchRoute("/residents/new").page).toBe("residentNew");
+    expect(matchRoute("/residents/new/declaration")).toEqual({
+      page: "residentDeclaration",
+      params: { id: "new" },
+    });
   });
 });

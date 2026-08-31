@@ -14,26 +14,60 @@ shell.
 | | reads | writes |
 |---|---|---|
 | Chronicle `/state`, `/state/stream` | the fleet page | never |
-| steward | residents, skills, budgets | residents, skills, budgets |
+| steward | residents, routines, approvals, the board, skills, budgets | declare and edit residents, run a routine, decide an approval, post a job, write skills and caps |
 
 They are kept apart on purpose. The fleet page is unauthenticated and works for anybody who
-can load the page; steward gates every route on an operator token a human types at runtime,
-which lives in the tab's `sessionStorage` and is never built into the bundle. A resident's
-session credential will not do — steward answers `403 session_credential_forbidden` to every
-write here, by design.
+can load the page; steward gates every route on a credential a human types at runtime, which
+lives in the tab's `sessionStorage` and is never built into the bundle. A resident's session
+credential will not do — steward answers `403 session_credential_forbidden` to every write
+here, by design.
+
+**What to paste is an operator credential**, not the master `STEWARD_TOKEN` (warren#225):
+
+```console
+$ steward operator mint <your name>
+```
+
+steward prints it once and stores only its digest. It reaches everything the master token
+reaches, and the difference is that it names you — every write it makes is committed under
+your name, and `steward operator revoke <your name>` stops it on the next request. The
+master token still works and is still the wrong thing to put in a browser: it names nobody,
+it is the same secret that boots the server, and rotating it means a restart. The rail says
+which of the two this tab is carrying.
 
 ## Pages
 
 - **Fleet** — read-only telemetry over Chronicle's snapshot, plus the uid-addressed agent
-  record at `/agents/:uuid`.
-- **Residents** — the fleet steward could validate, and each resident's declaration:
-  manifest fields or the YAML byte for byte, with the soul document beside it.
+  record at `/agents/:uuid`. The one page that needs no credential.
+- **Residents** — the fleet steward could validate; one resident's whole record (soul,
+  charter, effective skills, routines, budget, journal, inbox); the nursery form that
+  declares a new one; and the declaration editor, which writes manifest fields or the YAML
+  byte for byte with the soul document beside it.
+- **Routines** — every routine every valid resident declares, with steward's own scheduler
+  heartbeat and a run-now button.
+- **Approvals** — pending and decided, with approve / deny / edit.
+- **Board** — the job board, and the form that posts to it.
 - **Skills** — the library, and the editor for adding and replacing one.
 - **Budgets** — daily caps per resident, with the spend steward has actually recorded
   against them.
 
-Every write renders steward's own answer: the commit it made, or the refusal and its
-per-field diagnostics. Nothing here synthesises a success.
+A resident's journal text, its inbox and its spend come from steward rather than from
+Chronicle, because the projection carries none of the three: it has journal *metadata* — a
+day, a routine, a path — and no delegation or budget at all.
+
+### Nothing here claims an effect steward has not confirmed
+
+steward's action endpoints answer `202 accepted` with a request id, and they mean it. So
+every write raises a ticket in the pending ledger — the corner of the screen — which moves
+**asked → accepted → confirmed** and reaches the last state only by reading steward's own
+records back: `GET /requests/{id}` for a run or a decision, the board for a posted job,
+`GET /residents` for a new resident. A fire-and-forget control panel is a lying control
+panel. Three minutes of silence is reported as three minutes of silence.
+
+The editing endpoints are different and say so: `PUT /residents/{id}/declaration` validates,
+writes and commits *before* it answers, so its answer already is the outcome and there is
+nothing honest left to poll for. Those render the commit steward reported making, or the
+refusal and its per-field diagnostics.
 
 ## Develop
 
