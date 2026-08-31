@@ -423,14 +423,16 @@ Where a resident lands is a manifest question with documented defaults (`dxp2800
 
 **What a resident's container actually is.** `steward-resident` is built from
 [`docker/resident/Dockerfile`](docker/resident/Dockerfile): `node:22-slim` **pinned by
-digest**, the `claude` CLI pinned by build arg, python3, and a vendored copy of
-`chronicle/hooks/emit.py` wired into the same six claude hooks the Mac uses. Every input is
+digest**, the `claude` CLI pinned by build arg, python3, and a vendored copy of chronicle's
+emitter — built from `chronicle/hooks/` into one stdlib-only file — wired into the same six
+claude hooks the Mac uses. Every input is
 pinned so that two builds of one commit are one image, and the image says which commit that
 was — `org.opencontainers.image.revision`, stamped by `make image` from `git rev-parse
 HEAD`. Moving the base digest is its own deliberate commit; the Dockerfile carries the
 `docker buildx imagetools inspect` line that produces the new one. `make vendor-emitter`
-refreshes the emitter copy from `../chronicle` — in-tree since the consolidation, so it
-needs no second checkout and no `CHRONICLE=` argument. CI builds this image on every PR that
+rebuilds the emitter copy from `../chronicle` — in-tree since the consolidation, so it
+needs no second checkout and no `CHRONICLE=` argument — and the suite rebuilds it again and
+compares byte for byte, so the copy cannot quietly fall behind its source. CI builds this image on every PR that
 touches steward, runs the entrypoint and runs `steward-smoke` against a stub village that
 only knows how to answer 204. There is no registry here, so the image travels like
 everything else does — a pipe over ssh:

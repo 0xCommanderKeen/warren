@@ -37,11 +37,17 @@ REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)$(shell test 
 
 #: Where the emitter's source lives, for `make vendor-emitter`. Since the warren monorepo
 #: (2026-08-31) that is the sibling directory `../chronicle`, not a separate checkout.
-#: hooks/emit.py is still *vendored* into docker/resident/burrow-emit.py — a copy, not a
+#: The emitter is still *vendored* into docker/resident/burrow-emit.py — a copy, not a
 #: symlink into ../chronicle — because the image is built from this directory alone and
-#: docker cannot COPY from outside its build context. tests/test_resident_image.py fails
-#: when the copy drifts from the recorded checksum, and CI runs that test in its `check`
-#: job — long before the `image` job builds anything.
+#: docker cannot COPY from outside its build context. What is copied is chronicle's
+#: **built bundle** (hooks/emit.py + hooks/durable.py flattened into one stdlib-only file
+#: by hooks/build.py), not a source file: the emitter grew a sibling module in warren#221
+#: and a directory is not something the image can carry.
+#: tests/test_resident_image.py rebuilds that bundle from ../chronicle at HEAD and compares
+#: it to the copy byte for byte, and CI runs that test in its `check` job — long before the
+#: `image` job builds anything. A recorded checksum is what used to be compared, and it
+#: could only ever catch tampering with the copy: it stayed green for a week while the
+#: source moved 1,200 lines away from it (warren#234).
 #: Override for a checkout elsewhere: `make vendor-emitter CHRONICLE=/path/to/chronicle`.
 #:
 #: `BURROW=` is still honoured as a deprecated alias (warren#216) so an operator's muscle
@@ -117,44 +123,34 @@ image:
 image-ship:
 	docker save $(IMAGE):$(IMAGE_VERSION) $(IMAGE):latest | gzip -1 | ssh $(NAS) 'gunzip -c | docker load'
 
-# Refresh the vendored copy of the hook emitter, and record where it came from.
-# Refuses when the source copy is uncommitted: a provenance line naming a commit that
-# does not contain these bytes would be worse than no provenance line at all.
+# Refresh the vendored copy of the hook emitter: chronicle's bundle build, run against
+# ../chronicle, written where the Dockerfile COPYs from.
 #
-# Every revspec below is written `HEAD:./hooks/emit.py`, cwd-relative. Plain
+# Refuses when any input is uncommitted. The artifact is a pure function of three files —
+# emit.py, durable.py and build.py itself — and a copy built from bytes that are in no
+# commit is a copy nobody can trace back to anything. build.py is in that list because it
+# decides the artifact's shape as much as the two sources do.
+#
+# The revspecs below are written `HEAD:./hooks/emit.py`, cwd-relative. Plain
 # `HEAD:hooks/emit.py` is resolved from the *repository root*, which was the same thing
 # when burrow was its own repo and is `warren/hooks/emit.py` — a path that does not
 # exist — now that the source sits at `chronicle/hooks/emit.py` in this one.
+#
+# No provenance file is written any more. The bundle's own header records the sha256 of
+# each source it was built from, which is what a byte comparison can check; a commit sha
+# recorded beside it would go stale on the next rebase while the bytes stayed identical.
+# The commit is echoed below for the human running this, and `git log -1 -- hooks/` in
+# chronicle answers the same question at any later date.
+BUNDLE_SOURCES = hooks/emit.py hooks/durable.py hooks/build.py
+
 vendor-emitter:
 	@git -C "$(CHRONICLE)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no checkout at $(CHRONICLE); pass CHRONICLE=/path/to/chronicle"; exit 1; }
-	@git -C "$(CHRONICLE)" cat-file -e HEAD:./hooks/emit.py 2>/dev/null || { echo "$(CHRONICLE)/hooks/emit.py is not committed at HEAD; commit it first"; exit 1; }
-	@git -C "$(CHRONICLE)" diff --quiet HEAD -- hooks/emit.py || { echo "$(CHRONICLE)/hooks/emit.py has uncommitted changes; commit them first"; exit 1; }
 	@set -eu; \
-	 commit=$$(git -C "$(CHRONICLE)" log -1 --format=%H -- hooks/emit.py); \
-	 when=$$(git -C "$(CHRONICLE)" log -1 --format=%cs -- hooks/emit.py); \
-	 test -n "$$commit"; \
-	 test -n "$$when"; \
-	 sum=$$($(PYTHON) -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$(CHRONICLE)/hooks/emit.py"); \
-	 test -n "$$sum"; \
-	 { \
-	   echo "# Vendored from chronicle. DO NOT EDIT HERE — edit chronicle/hooks/emit.py and"; \
-	   echo "# re-run \`make vendor-emitter\` in warren/steward/."; \
-	   echo "#"; \
-	   echo "# origin: https://github.com/0xCommanderKeen/warren  chronicle/hooks/emit.py"; \
-	   echo "# commit: $$commit ($$when)"; \
-	   echo "# sha256: $$sum (of every byte below the marker line)"; \
-	   echo "#"; \
-	   echo "# A copy rather than a submodule so this image builds with one repo checked"; \
-	   echo "# out. tests/test_resident_image.py re-hashes the copy against"; \
-	   echo "# docker/resident/burrow-emit.sha256 on every CI run, so drift is a failed"; \
-	   echo "# test rather than a resident that emits a protocol nobody supports."; \
-	   echo "# --- upstream copy begins below; every byte after this line is burrow's, verbatim ---"; \
-	   cat "$(CHRONICLE)/hooks/emit.py"; \
-	 } > docker/resident/burrow-emit.py; \
-	 { \
-	   echo "# Where docker/resident/burrow-emit.py came from, and what it hashed to."; \
-	   echo "# Written by \`make vendor-emitter\`; read by tests/test_resident_image.py."; \
-	   echo "commit: $$commit"; \
-	   echo "sha256: $$sum"; \
-	 } > docker/resident/burrow-emit.sha256; \
-	 echo "vendored chronicle/hooks/emit.py @ $$commit ($$sum)"
+	 for source in $(BUNDLE_SOURCES); do \
+	   git -C "$(CHRONICLE)" cat-file -e "HEAD:./$$source" 2>/dev/null || { echo "$(CHRONICLE)/$$source is not committed at HEAD; commit it first"; exit 1; }; \
+	   git -C "$(CHRONICLE)" diff --quiet HEAD -- "$$source" || { echo "$(CHRONICLE)/$$source has uncommitted changes; commit them first"; exit 1; }; \
+	 done
+	@set -eu; \
+	 provenance=$$(git -C "$(CHRONICLE)" log -1 --format='%H (%cs)' -- $(BUNDLE_SOURCES) || true); \
+	 $(PYTHON) "$(CHRONICLE)/hooks/build.py" --output docker/resident/burrow-emit.py; \
+	 echo "vendored chronicle's emitter bundle @ $${provenance:-a commit this shallow clone cannot name}"

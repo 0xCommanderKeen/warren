@@ -891,13 +891,20 @@ resident cannot work without:
   arg so a rebuild never silently changes which brain a resident has;
 - **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
   the whole install;
-- a **vendored copy of chronicle's `hooks/emit.py`**, with the commit it came from written in
-  its header and its checksum recorded in `docker/resident/burrow-emit.sha256`. Refresh it
-  with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle` by default,
-  and `CHRONICLE=/path/to/chronicle` overrides that for a checkout elsewhere);
-  `tests/test_resident_image.py` fails
-  when the copy drifts, and CI runs that test in the same job that lints and types the
-  package — one job earlier than the `image` job that actually builds this;
+- a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
+  (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
+  vendored is the single self-contained file `chronicle/hooks/build.py` flattens them into,
+  because a docker build context is one directory and there is no pip in this image.
+  Refresh it with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle`
+  by default, and `CHRONICLE=/path/to/chronicle` overrides that for a checkout elsewhere).
+  `tests/test_resident_image.py` **rebuilds that bundle from `../chronicle` at HEAD and
+  compares it byte for byte**, so drift is a failed test rather than a discovery; CI runs
+  it in the same job that lints and types the package — one job earlier than the `image`
+  job that actually builds this — and `.github/workflows/steward.yml` is path-filtered on
+  `chronicle/hooks/**` as well as `steward/**`, so an emitter change turns *this* service
+  red in the PR that made it. (It used to be a checksum recorded beside the copy. A pinned
+  hash catches somebody editing the copy and can never catch the copy going stale: it
+  stayed green while the source moved 1,200 lines away — warren#234.);
 - a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd` — the same six hooks the Mac
   config uses, reading `CHRONICLE_URL` / `CHRONICLE_TOKEN` from the container's environment
@@ -954,6 +961,84 @@ keeps them in the process running `steward scheduler run`, via `subprocess.Popen
 `docker exec` — see [`placement` under `runner`](#runner--which-brain). The rendered
 compose file runs the container under docker's own init (`init: true`), so the processes
 a killed session leaves behind are reaped rather than accumulating as zombies.
+
+### The durable outbox
+
+The emitter vendored since warren#234 is chronicle's current client, and it does not lose
+events when the village is away: an undelivered event is journaled, replayed oldest-first
+by a later hook once the village answers again, and a torn tail is quarantined rather than
+replayed. That is what an unattended container needs — the emitter it replaced appended to
+a local file that nothing ever read again.
+
+**Where that queue lives, and what happens to it.** Everything the emitter persists is
+under `$HOME` in the container — `/root`, since the image runs as root:
+
+| path | what it is |
+| --- | --- |
+| `/root/.chronicle/events.jsonl` | the offline fallback log |
+| `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`, `.lock`) | deferred events waiting to be replayed |
+| `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`, `.lock`) | the durable outbox and its delivery schedule |
+| `/root/.chronicle/transport-diagnostics.json`, `.post-failed-<target>` | the last failures, and the per-target circuit breaker |
+
+`/root/.chronicle` on a container that has never had a `/root/.burrow`; on one that has,
+the emitter keeps using the old directory rather than stranding events nobody would replay.
+
+**It is not on a volume.** The compose fragment steward renders mounts exactly two paths —
+`./memory:<memory.path>` and `./claude:/root/.claude` — and neither is this one. So the
+queue is in the container's writable layer:
+
+- `docker compose restart`, or a container that crashes and is restarted — **kept**;
+- `docker compose down && up`, `docker compose up` after an image change, `docker rm` —
+  **gone**, along with anything the village had not taken yet.
+
+Whether that matters is an operator call, and there are three answers, none of which
+steward picks for you:
+
+1. **Accept it.** The window is only "events produced while the village was unreachable,
+   lost if the container is recreated before it returns". Chronicle is on the same NAS as
+   the residents; that window is usually empty.
+2. **Mount it** — add `./chronicle:/root/.chronicle` to the volumes in `render_compose`.
+   One line, applies to every resident, and takes a re-provision (a new compose file means
+   recreated containers) to take effect.
+3. **Reuse the claude volume** — nothing today lets the state directory move without moving
+   `$HOME`, which would move claude's own config with it. Teaching the emitter a
+   `CHRONICLE_STATE_DIR` setting is chronicle's change to make, not steward's.
+
+`steward-smoke` prints the path when it sees a fallback, and the entrypoint prints it at
+every start, so the queue is never something you have to go looking for.
+
+### Rolling out a re-vendored emitter
+
+**Order: chronicle first, then images.** A resident's emitter is chronicle's own client,
+so the deployed server should be at least as new as the client that will be talking to it.
+What is actually on the wire, read off `chronicle/hooks/emit.py`:
+
+- the request **body** is a plain protocol-v0 event — no new fields, and chronicle's own
+  contract says "unknown extension fields remain allowed" ([protocol](../../chronicle/docs/protocol.md#strict-v0-validation-contract));
+- the delivery identity travels as the **header** `X-Burrow-Delivery-ID`. A server that
+  predates it ignores it, which costs only server-side dedupe: a replayed event it already
+  has is accepted twice rather than recognised;
+- one **event type** is new relative to the emitter that was frozen in the image:
+  `tool_failed`. A chronicle old enough not to know it answers 400, and the emitter keeps
+  the event in its local log — nothing is lost, but those events stay invisible until the
+  server is updated.
+
+So: confirm the deployed chronicle's version, deploy chronicle if it is behind, then
+`make image`, `make image-ship`, and re-provision. Re-verify at rollout time rather than
+trusting this paragraph — it describes the code, not the box.
+
+**A `docker compose down && up` discards the durable outbox** (see above), and rolling out
+a new image is exactly that. Roll out while the village is up, when the queue is empty.
+
+**Who is actually running which emitter.** `steward-resident` containers get the vendored
+copy from the image, replaced by the entrypoint at every start — so they converge on the
+next `make image-ship` + re-provision, with no per-container step. **life-agent does not**:
+it predates steward provisioning, runs `node:22` rather than this image (its manifest says
+so, and a test holds it to saying so), and carries its own emitter installed into its
+claude-config volume at `/root/.claude/burrow/`. It converges when somebody re-runs
+chronicle's `scripts/install-emitter.sh` against that volume, or when it is migrated onto
+`steward-resident` — a cutover, not a rebuild. Nothing in this repository will do either on
+its own.
 
 **Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
 up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A

@@ -13,8 +13,10 @@
 #   4. the emitter itself, fed a real hook payload on stdin, delivers the same way
 #
 # Exit 0 only when the village answered 204. When it did not, check 4's fallback line is
-# printed instead — a resident off the tailnet still logs to ~/.burrow/events.jsonl, and
-# seeing that line is the difference between "the emitter is broken" and "the NAS is away".
+# printed instead — a resident off the tailnet still logs to ~/.chronicle/events.jsonl (and
+# keeps the event in its durable outbox beside it, to replay when the village comes back),
+# and seeing that line is the difference between "the emitter is broken" and "the NAS is
+# away".
 #
 # On honesty: both events this posts are `heartbeat`, under a `steward-smoke:<host>` agent
 # id rather than the resident's own. A heartbeat is liveness-only in chronicle's projection —
@@ -36,7 +38,16 @@ EMITTER="$CONFIG_DIR/burrow-emit.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 AGENT_ID="${SMOKE_AGENT_ID:-steward-smoke:$(hostname)}"
 PROJECT="${CHRONICLE_PROJECT:-${BURROW_PROJECT:-steward}}"
-FALLBACK="$HOME/.burrow/events.jsonl"
+# Where the emitter keeps its own state: ~/.chronicle, or ~/.burrow on a machine that
+# already has one, which is exactly what chronicle/hooks/emit.py's `_state_dir` decides. A
+# smoke test that watched the wrong file would report "the emitter delivered" for an
+# emitter that quietly fell back — the one lie this check exists to prevent.
+if [ ! -d "$HOME/.chronicle" ] && [ -d "$HOME/.burrow" ]; then
+    STATE_DIR="$HOME/.burrow"
+else
+    STATE_DIR="$HOME/.chronicle"
+fi
+FALLBACK="$STATE_DIR/events.jsonl"
 failed=0
 
 say() { echo "smoke: $*"; }
@@ -120,6 +131,8 @@ if [ -f "$EMITTER" ]; then
     elif [ "$after" -gt "$before" ]; then
         say "note the emitter fell back to $FALLBACK — nothing is lost, but the village did not take it:"
         echo "      $(tail -n 1 "$FALLBACK")"
+        echo "      also queued in $STATE_DIR/primary-outbox.jsonl, to replay when the village returns;"
+        echo "      that directory is container-local unless the compose file mounts it"
         [ "${posted:-}" = "204" ] && fail "the direct POST worked but the emitter did not; check the village URL inside the container"
     else
         say "ok   the emitter delivered without falling back"

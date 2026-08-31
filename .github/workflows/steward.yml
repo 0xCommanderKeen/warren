@@ -1,14 +1,23 @@
 name: steward
 
+# chronicle/hooks/** is in the filter on purpose (warren#234). The emitter every resident
+# runs is built from those files and vendored into docker/resident/burrow-emit.py, and
+# tests/test_resident_image.py rebuilds the bundle and compares it byte for byte. Without
+# this line a chronicle-only PR would never run that comparison, and the drift would first
+# be noticed by whoever next ran `make vendor-emitter` — which is precisely how the copy
+# went stale in the first place. An emitter change now turns steward red until it is
+# re-vendored, in the same PR that made it.
 on:
   push:
     branches: [main]
     paths:
       - "steward/**"
+      - "chronicle/hooks/**"
       - ".github/workflows/steward.yml"
   pull_request:
     paths:
       - "steward/**"
+      - "chronicle/hooks/**"
       - ".github/workflows/steward.yml"
 
 permissions:
@@ -46,10 +55,11 @@ jobs:
         run: uv run ty check src/ tests/
 
       # This job reads docker/resident/ without building it — the `image` job below does
-      # the building. What it reads is drift: tests/test_resident_image.py re-hashes the
-      # vendored copy of chronicle's hooks/emit.py against docker/resident/burrow-emit.sha256
-      # (refresh it with `make vendor-emitter`), and holds the two copies of the
-      # CLAUDE_VERSION pin to each other. Neither is a thing a build would notice.
+      # the building. What it reads is drift: tests/test_resident_image.py rebuilds
+      # chronicle's emitter bundle from ../chronicle at HEAD and compares it to the
+      # vendored docker/resident/burrow-emit.py byte for byte (refresh it with
+      # `make vendor-emitter`), and holds the two copies of the CLAUDE_VERSION pin to each
+      # other. Neither is a thing a build would notice.
       - name: Tests
         run: uv run pytest
 
