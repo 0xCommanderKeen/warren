@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import fixture from "./fixtures/complete-v1.json";
+import fixture from "./fixtures/complete-v1.js";
 import { createStateTransport, validateSnapshot } from "./transport.js";
 
 describe("read-only Burrow transport", () => {

@@ -14,9 +14,19 @@ versioned snapshots; they do not read or reduce the event log.
 
 The checked-in [OpenAPI document](openapi.json) is the machine-readable contract. The
 complete examples in `tests/fixtures/state-contract/` are portable contract fixtures.
-Clients vendor those fixtures and check their copies for drift on a schedule. Burrow's CI
-does not install, run, or otherwise verify any client; each client is responsible for
-testing its parser against its vendored fixture.
+
+The in-repo clients — arcadia and townhall — **read those fixtures in place**, through a
+one-line re-export module that imports the path relatively
+(`arcadia/src/contract/fixtures/complete-v1.js`,
+`townhall/src/fixtures/complete-v1.js`). They used to vendor copies and check them for
+drift on a schedule, which is what a client in its own repo has to do; in the monorepo the
+fixture is a few relative directories away, so drift is impossible by construction and
+re-vendoring one would only reintroduce it. Each client's CI job path-filters on
+`chronicle/tests/fixtures/state-contract/**`, so a change here runs every client's parser
+tests. A client living outside this repo still has to vendor and check for drift.
+
+Burrow's own CI does not install, run, or otherwise verify any client; each client remains
+responsible for testing its parser against these fixtures.
 
 `GET /events` is an internal diagnostic and audit interface. It is deliberately absent
 from OpenAPI and is not a UI contract. `POST /events` is the authenticated emitter ingest

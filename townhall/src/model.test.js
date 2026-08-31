@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import fixture from "./fixtures/complete-v1.json";
+import fixture from "./fixtures/complete-v1.js";
 import { agentUrl, eventFeed, routeAgent, viewModel } from "./model.js";
 
 const snapshot = fixture.snapshot;

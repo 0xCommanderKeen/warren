@@ -5,10 +5,14 @@ on:
     branches: [main]
     paths:
       - "townhall/**"
+      # Townhall's transport tests read Chronicle's fixture in-tree rather than
+      # vendoring it, so a change to that fixture must run this suite.
+      - "chronicle/tests/fixtures/state-contract/**"
       - ".github/workflows/townhall.yml"
   pull_request:
     paths:
       - "townhall/**"
+      - "chronicle/tests/fixtures/state-contract/**"
       - ".github/workflows/townhall.yml"
 
 concurrency:
