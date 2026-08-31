@@ -442,8 +442,10 @@ def test_every_claude_session_names_its_setting_sources_and_names_none(
     """
     for tools in (UNRESTRICTED, ToolGrant(["Read"]), ToolGrant([])):
         argv = claude_argv(stub_bin, tmp_path, tools)
-        index = argv.index(r.SETTING_SOURCES_FLAG)
-        assert argv[index + 1] == r.SETTING_SOURCES
+        index = argv.index("--setting-sources")
+        # the literal, not the constant: sourcing both sides from `SETTING_SOURCES` would
+        # pass just as happily over `--setting-sources user`
+        assert argv[index + 1] == ""
 
 
 def test_a_bounded_resident_is_launched_with_the_names_and_strict_mcp(
@@ -583,6 +585,11 @@ def test_an_unrestricted_resident_is_still_probed_for_the_settings_flag(
 def test_an_unrestricted_resident_on_a_current_cli_has_no_complaint(
     stub_bin: StubWriter,
 ) -> None:
+    """The other half of the probe: a CLI that has the flag must not be complained about.
+
+    Without this, the assertion above would pass on a probe that complained about every
+    claude resident unconditionally.
+    """
     stub_bin("claude", HELP_STUB)
     assert r.check_cli_support(RunnerSpec(kind="claude"), UNRESTRICTED, ()) is None
 

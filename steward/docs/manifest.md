@@ -319,10 +319,11 @@ which for the 07:00 routine means a failed session in a ledger nobody is reading
 manifest that validated clean. Validation cannot reach it either, because the binary is not
 in the manifest.
 
-So `steward doctor` probes the flags a manifest's declarations compile into, rather than
-merely finding the binary on PATH, and fails for any resident whose declaration the
-installed CLI could not carry out. That moves the failure from 7am to daylight, which is
-the whole of what the probe buys.
+So `steward doctor` probes the flags a session for that manifest is actually launched with
+— what its declarations compile into, plus the one flag every claude session carries
+whatever it declares (`--setting-sources`, below) — rather than merely finding the binary
+on PATH, and fails for any resident the installed CLI could not run. That moves the
+failure from 7am to daylight, which is the whole of what the probe buys.
 
 It matters most where it is least visible: a provisioned resident installs its own CLI from
 the image's bootstrap, pinned by `CLAUDE_VERSION` in the Makefile, so the version running a
@@ -364,25 +365,46 @@ results decide it:
 
 So the sentence this document used to carry — *"the CLI refuses to apply a
 `.claude/settings.json` from an untrusted workspace"* — was true only of permission rules,
-and the dangerous half was never covered. `--setting-sources ""` was measured to stop all
-three effects, from all three sources, in trusted and untrusted workspaces alike; naming a
-subset is honoured as that subset, and an unknown name is refused loudly rather than
-ignored.
+and the dangerous half was never covered. `--setting-sources ""` stopped the hook,
+`defaultMode` and a workspace `.mcp.json` in both trust states and from every source, and
+the `model` key in the trusted state it was swept in. Naming a subset is honoured as that
+subset, and an unknown name is refused loudly rather than ignored.
 
 `steward doctor` probes for the flag on **every** claude resident, not only ones with a
 declaration, because every claude argv carries it: a `claude` too old to know it exits 1
 on the unknown option, which would otherwise be a failed session at 07:00 rather than a
-red line in daylight.
+red line in daylight. Nothing probes a `runner.kind: command` template that invokes
+`claude` itself — the same edge `tools` has, and for the same reason: steward writes that
+argv from the manifest and cannot bound what somebody else's command line does.
 
-**What it costs.** The flag means *load nothing from the filesystem*, so a `CLAUDE.md` in
-the working directory is no longer read (steward writes none, and a resident writing its
-own is the instruction-shaped version of the hole being closed — the journal is the
-supported channel for that), and `.claude/skills` is no longer discovered. Steward still
-materializes the effective skill set there, and skills still reach the session, because
-the **prompt** was always the delivery path: name, description and body are injected into
-every session. What a resident loses is the CLI's own route to them — the `Skill` tool
-answers `Unknown skill`. `steward skills` says exactly that rather than printing two
-channels where one works.
+**What it does not cost: permissions.** Measured 2026-09-01 against the real API, one run
+each way: read-ish Bash (`echo`) ran with zero denials with and without the flag, write-ish
+Bash (`touch`) was denied with and without it. What a live resident session may *do* is
+unchanged.
+
+**What it costs.** The flag means *load nothing from the filesystem*, and four things stop
+arriving:
+
+- **Hooks — including burrow's event emitter.** The per-session events
+  (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SessionEnd`)
+  were emitted by hooks in a settings file on whatever machine steward ran on: the
+  operator's `~/.claude/settings.json` locally, `/root/.claude/settings.json` inside the
+  resident image. Neither is loaded any more, so those events stop. Steward's own
+  run-level bracket (`routine_started`/`routine_finished`, task and delegation events) is
+  posted by `steward.events` and is untouched. Re-establishing the finer telemetry through
+  something steward *declares* — `--settings <file>`, measured to survive the flag — is
+  separate work.
+- **`CLAUDE.md`** in the working directory is no longer read. Steward writes none, and a
+  resident writing its own is the instruction-shaped version of the hole being closed —
+  the journal is the supported channel for that.
+- **`.mcp.json`** in the working directory is no longer loaded. Before this, only
+  `--strict-mcp-config` closed it, and that only reaches a resident that declared a
+  `tools` bound.
+- **`.claude/skills` is no longer discovered.** Steward still materializes the effective
+  skill set there, and skills still reach the session, because the **prompt** was always
+  the delivery path: name, description and body are injected into every session. What a
+  resident loses is the CLI's own route to them — the `Skill` tool answers `Unknown skill`.
+  `steward skills` says exactly that rather than printing two channels where one works.
 
 ## `workspace` — where a session may act
 
@@ -678,9 +700,8 @@ $ steward board dispatch --sweep-only      # reopen dead leases only; claim noth
 ```
 
 The claimed task is worked as an ordinary headless session — same identity, same voice,
-same journal, same skills (injected, and materialized on disk for the runners that read
-them from there), same charter with the last word — with one extra section naming the
-task.
+same journal, same skills (injected, and materialized on disk for the runners that take a
+copy there), same charter with the last word — with one extra section naming the task.
 See [docs/api.md](api.md) for posting to the board and the lifecycle events.
 
 ## `delegation` — handing work to another resident

@@ -21,6 +21,14 @@
 # it never claims a task, an artifact, or a knock — and a probe identity means running the
 # smoke test cannot conjure a villager for a resident that has not done any work yet. The
 # village never lies, including when steward is the one testing it.
+#
+# And on the same honesty: check 2 says this container *could* emit, not that a
+# steward-launched session *will*. Since steward #206 every claude session is launched with
+# `--setting-sources ""`, and settings.json here is the `user` source — so its hooks are
+# not loaded by a session steward starts. They are loaded by a person running `claude`
+# in here by hand. Closing that channel is what #206 is for; re-establishing the telemetry
+# through something steward declares (`--settings <file>`, measured to survive the flag —
+# see docs/settings-sources.md) is separate work and has not been done.
 set -u
 
 CONFIG_DIR=/root/.claude
@@ -61,7 +69,7 @@ if [ -f "$SETTINGS" ]; then
         fail "$SETTINGS is not valid JSON, so claude will start with no hooks at all"
     fi
 else
-    fail "no $SETTINGS — this session would run with no hooks and emit nothing"
+    fail "no $SETTINGS — a hand-run claude in here would have no hooks and emit nothing"
 fi
 
 # ------------------------------------------------------------------- 3. the village answers

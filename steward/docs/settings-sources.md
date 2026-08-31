@@ -152,13 +152,39 @@ That is the opposite of `--tools`, where an unknown *tool* name is silently drop
 
 ## What it costs
 
-`--setting-sources ""` is *load nothing from the filesystem*, not *load no permissions*.
-Two things a session used to pick up out of its working directory stop arriving:
+`--setting-sources ""` is *load nothing from the filesystem*, not *load no permissions*
+(see the permission rows above: what a real session may do is unchanged). Four things a
+session used to pick up off the disk stop arriving.
 
-- **`CLAUDE.md`** in the working directory is no longer read. Steward never writes one,
-  and a resident writing its own would be the instruction-shaped version of the hole this
-  flag closes, so this is a feature. The journal is the supported channel for a resident
-  leaving itself something (`docs/manifest.md`, "The journal").
+**The one that matters operationally: hooks, and with them the burrow event emitter.**
+Steward's own `EventEmitter` posts the run-level bracket (`routine_started`,
+`routine_finished`, task and delegation events) directly and is untouched. The finer
+per-session events — `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`,
+`Stop`, `SessionEnd` — were emitted by hooks registered in a settings file on whatever
+machine steward ran on: the operator's `~/.claude/settings.json` for a local placement, and
+`/root/.claude/settings.json` inside the resident image for a container one, which
+`docker/resident/entrypoint.sh` seeds for exactly this purpose. **Neither is loaded any
+more, so those events stop.** That is not a side effect to be sorry about — it *is* the
+inheritance #206 named ("steward inherits the operator's `~/.claude/settings.json` today.
+Nothing declares that a resident should") — but the telemetry that was riding on it needs
+re-establishing through something steward declares, and that has not been done here.
+
+The measured groundwork for the follow-up: **`--settings <file>` survives
+`--setting-sources ""`.** A settings file named explicitly on argv had its `SessionStart`
+hook fire with the sources switched off, so steward can own a settings file and pass it,
+rather than reading whatever the host happens to have. Where that file should live for a
+local placement — steward writes none today — is the open question, and is its own issue.
+
+Three smaller ones, all from the working directory — which is to say, all from the one
+directory the resident itself can write:
+
+- **`CLAUDE.md`** is no longer read. Steward never writes one, and a resident writing its
+  own would be the instruction-shaped version of the hole this flag closes, so this is a
+  feature. The journal is the supported channel for a resident leaving itself something
+  (`docs/manifest.md`, "The journal").
+- **`.mcp.json`** is no longer loaded. Also a feature, and the only thing that was closing
+  it before was `--strict-mcp-config`, which a session only gets when its manifest declares
+  a `tools` bound — and every live resident is `unrestricted`.
 - **`.claude/skills` is no longer discovered.** Steward materializes the effective skill
   set there before every claude run, and the CLI no longer sees it: the `Skill` tool
   answers `Unknown skill: <name>` and the skill's name is absent from the request body.
@@ -179,20 +205,28 @@ Restoring discovery without re-opening the settings channel is a separate design
 - *"The CLI refuses to apply a `.claude/settings.json` from an untrusted workspace"* —
   the sentence `docs/manifest.md` carried out of #204. True only of `permissions.allow`.
   Hooks, permission modes and models from that same untrusted file all applied.
-- *"Headless is permissive by default"* — recorded in `docs/manifest.md` from #204, where
-  a no-flags session ran `echo` with `permission_denials: []`. In an isolated config dir
-  with no settings at all, a headless `echo hi` was **denied** ("This command requires
-  approval"). The permissiveness measured in #204 most likely came from the operator's own
-  `~/.claude/settings.json`, which sets `permissions.defaultMode: auto` — that is, from
-  exactly the inheritance this issue closes. Stated as the likeliest reading rather than a
-  measured one: it was not re-run against the operator's real settings file, because doing
-  so would have meant running sessions under their config.
-- **Permission *rules* were not measured under the stub.** `--allowed-tools "Bash(mv:*)"`
-  on argv also failed to approve `mv a b` there, which is a stub artifact: matching a
-  `Bash(...)` rule needs a real model to extract the command prefix. The rule rows above
-  therefore rest on the trust gate's own message plus #204's real-API result, and are
-  marked as such. The `defaultMode` rows do not depend on a classifier and were measured
-  directly.
+- *"Headless is permissive by default"* — this one **held**, and the first draft of this
+  record wrongly retracted it. Under the stub, a headless `echo hi` with no settings at
+  all came back *"This command requires approval"*, which read as though #204's
+  permissiveness had come from the operator's own `permissions.defaultMode: auto` leaking
+  in. It had not. Re-measured **2026-09-01** against the real API on the operator's own
+  machine, one run each way:
+
+  | run | `echo hello-from-bash` | `touch probe-file` |
+  |---|---|---|
+  | `--setting-sources ""` | ran, 0 denials | denied, 1 denial |
+  | no flag (today) | ran, 0 denials | denied, 1 denial |
+
+  Identical. **The flag changes nothing about what a real session is permitted to do**:
+  read-ish Bash runs either way, write-ish Bash is denied either way, exactly as #204
+  recorded. What the stub showed was a stub artifact (below), not the operator's settings.
+- **Permission *rules* and modes cannot be measured under the stub.** `--allowed-tools
+  "Bash(mv:*)"` on argv failed to approve `mv a b` there too: matching a `Bash(...)` rule
+  needs a real model to extract the command prefix, and there was none. Everything the
+  stub was used for — hook sentinels, MCP spawn, the model on the wire, and
+  `defaultMode: bypassPermissions`, which short-circuits the check rather than consulting
+  it — is independent of that. The `allow`-rule rows above rest on the trust gate's own
+  message plus #204's real-API result, and are marked as such.
 - **A session's self-report** was not used anywhere, for anything.
 
 ## Reproducing it

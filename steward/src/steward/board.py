@@ -29,7 +29,7 @@ plus this manifest's own grants (:mod:`steward.skills`) — so a task tagged ``r
 claimable by a resident with no ``skills:`` block at all, because research is something
 every resident holds. The claimant is then provisioned exactly as a routine session is:
 same library, same prompt injection, same on-disk materialization for the runners that
-read skills off disk, same refusal when a grant names nothing.
+take a copy there, same refusal when a grant names nothing.
 
 **A delegated item is a task addressed to one resident.** Steward #7 writes handoffs into
 the same table with an ``assignee`` (:mod:`steward.delegation`), and this module works them

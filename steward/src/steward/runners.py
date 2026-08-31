@@ -303,13 +303,16 @@ TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
 #: (:attr:`RunRequest.workspace`), read by the same two places for the same reason.
 WORKSPACE_FLAG = "--add-dir"
 
-#: The flag naming which settings files a session loads, and the value steward gives it:
-#: the CLI's spelling for *none of them* (steward #206). Unlike the two above, this one is
-#: not compiled from anything a manifest says — it is a property of how steward launches
-#: every ``claude`` session, so :func:`required_flags` reports it for every claude resident
-#: and :func:`check_cli_support` probes for it whether or not a bound was declared.
-SETTING_SOURCES_FLAG = "--setting-sources"
-SETTING_SOURCES = ""
+#: The flag naming which settings files a session loads, and the value steward gives it —
+#: the CLI's spelling for *none of them* (steward #206). One tuple for the same reason
+#: :data:`TOOL_BOUND_FLAGS` is one: :meth:`ClaudeRunner.argv` spends it and
+#: :func:`required_flags` hands the spelling to the doctor probe, and a second copy is a
+#: probe that can go on passing over an argv it no longer describes.
+#:
+#: Unlike the two above, this is not compiled from anything a manifest says — it is a
+#: property of how steward launches every ``claude`` session, so every claude resident is
+#: probed for it whether or not it declared a thing.
+SETTING_SOURCES = ("--setting-sources", "")
 
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
@@ -963,8 +966,12 @@ class ClaudeRunner(_ProcessRunner):
     kind: ClassVar[str] = "claude"
     binary: str = "claude"
     env_names: ClassVar[tuple[str, ...]] = CLAUDE_ENV_NAMES
-    #: ``claude`` discovers skills under the working directory, so a granted skill is
-    #: both injected into the prompt and written here before the run.
+    #: Where a granted skill is written before the run. Not where the session finds it:
+    #: since steward #206 every claude session is launched with ``--setting-sources ""``
+    #: and ``.claude/skills`` is discovered through the *project* setting source, so the
+    #: CLI no longer sees this directory. The prompt carries each skill's body and is the
+    #: delivery path; this copy is a file a session with ``Read`` can open, and the thing
+    #: a future design that restores discovery would build on.
     skills_dir: ClassVar[str | None] = ".claude/skills"
 
     def argv(self, request: RunRequest) -> list[str]:
@@ -1003,15 +1010,7 @@ class ClaudeRunner(_ProcessRunner):
         whatever the launching machine happens to hold. None of the three is a source a
         resident should read, so none of them is named.
         """
-        argv = [
-            self.binary,
-            "-p",
-            request.prompt,
-            "--output-format",
-            "json",
-            SETTING_SOURCES_FLAG,
-            SETTING_SOURCES,
-        ]
+        argv = [self.binary, "-p", request.prompt, "--output-format", "json", *SETTING_SOURCES]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
@@ -1299,10 +1298,13 @@ def build_runner(
 
 
 def skills_home(spec: RunnerSpec) -> str | None:
-    """Return where this runner kind loads on-disk skills from, or ``None``.
+    """Return where this runner kind wants on-disk skills written, or ``None``.
 
-    Answered from the class rather than an instance, so asking "does this brain read
-    skills off disk" never builds a runner, let alone launches one.
+    Answered from the class rather than an instance, so asking "does this brain take a
+    copy on disk" never builds a runner, let alone launches one.
+
+    *Wants written*, not *reads*: since steward #206 a claude session loads no setting
+    sources and does not discover ``.claude/skills`` (see :attr:`ClaudeRunner.skills_dir`).
     """
     runner = RUNNER_KINDS.get(spec.kind)
     return getattr(runner, "skills_dir", None) if runner is not None else None
@@ -1352,13 +1354,14 @@ def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str])
     validation refuses to pair with the declaration in the first place.
 
     Never empty for ``claude``, though nothing may be declared at all:
-    :data:`SETTING_SOURCES_FLAG` is on every claude argv rather than compiled from a
+    :data:`SETTING_SOURCES` is on every claude argv rather than compiled from a
     declaration, so every claude resident has something the installed binary has to
     support.
     """
     if spec.kind != ClaudeRunner.kind:
         return ()
-    flags: list[str] = [SETTING_SOURCES_FLAG]
+    setting_sources_flag, _value = SETTING_SOURCES
+    flags: list[str] = [setting_sources_flag]
     if not tools.unrestricted:
         flags.extend(TOOL_BOUND_FLAGS)
     if workspace:
