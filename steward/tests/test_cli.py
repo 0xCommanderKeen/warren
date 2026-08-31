@@ -41,10 +41,43 @@ from steward.store import Store
 #: that answers `--help` with nothing is now a red doctor rather than a quiet one.
 CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"'
 
+#: A `docker` that answers the way the NAS's does: Hob's container up, a current `claude`
+#: inside it, and a daemon that names itself **DXP2800-2B60** — the appliance's own name,
+#: not the tailnet name manifests use, which is measured and is why steward's daemons there
+#: need `STEWARD_BURROW`. Every `docker exec` doctor makes is one of two probes,
+#: `command -v claude` and `claude --help`, and the help line satisfies both.
+NAS_DOCKER = (
+    'case "$1" in '
+    "info) printf 'DXP2800-2B60\\t27.3.1\\n' ;; "
+    "inspect) printf 'true\\n' ;; "
+    f"exec) {CURRENT_CLAUDE} ;; "
+    "*) exit 1 ;; esac"
+)
+
 
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def on_the_burrow(monkeypatch: pytest.MonkeyPatch, stub_bin: StubWriter, tmp_path: Path) -> Path:
+    """Stand in for dxp2800 with Hob provisioned on it, for doctor against the real tree.
+
+    Since Hob became container-placed (steward #40) a doctor run over `residents/` asks
+    three questions that are facts about the NAS and about no other machine: whether
+    `steward-life-agent` is up, whether a current `claude` is on *that container's* PATH,
+    and whether the host side of his memory mount exists. A test that wants the healthy
+    answer has to be the burrow — a docker that answers, the burrow's name, and a home
+    directory the resident has actually been provisioned into. Returns that host-side
+    memory directory.
+    """
+    stub_bin("docker", NAS_DOCKER)
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    memory = tmp_path / "docker" / "steward-life-agent" / "memory"
+    memory.mkdir(parents=True)
+    return memory
 
 
 def test_events_flush_reports_delivery_and_exits_cleanly(
@@ -360,6 +393,7 @@ def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
     assert "no resident manifests found" in result.output
 
 
+@pytest.mark.usefixtures("on_the_burrow")
 def test_doctor_names_the_brain_and_the_next_fire(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -368,8 +402,19 @@ def test_doctor_names_the_brain_and_the_next_fire(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: runner claude (claude-opus-5) — ready" in result.output
+    # Where, not only which: Hob's sessions happen inside his container (steward #40), and
+    # the line that names his brain is the one place doctor says so.
+    assert (
+        "life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready"
+        in result.output
+    )
     assert "life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana" in result.output
+    # The daemon does not name itself dxp2800 and never will; STEWARD_BURROW is what makes
+    # the fall-through land on "here" rather than on a container this process cannot see.
+    assert "docker at dxp2800's own docker answers as DXP2800-2B60 27.3.1" in result.output
+    assert "life-agent: container steward-life-agent on dxp2800 — supervised from here" in (
+        result.output
+    )
 
 
 @pytest.mark.usefixtures("empty_path")
@@ -491,14 +536,21 @@ def test_doctor_says_so_when_nothing_is_scheduled(
 
 
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
-    runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_the_burrow: Path,
 ) -> None:
     stub_bin("claude", CURRENT_CLAUDE)
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: journal /data/residents/life-agent/memory/journal" in result.output
+    # The *host* side of Hob's memory mount, not the /data path his manifest names: that
+    # one is where the container sees the same files, and steward journals from this side
+    # (steward #58). Doctor prints the side it would actually write to.
+    assert f"life-agent: journal {on_the_burrow}/journal" in result.output
     assert "closed by close-of-day" in result.output
     assert "burrow-builder: journal" in result.output
     assert "no routine closes the day" in result.output

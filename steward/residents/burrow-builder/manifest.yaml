@@ -82,6 +82,10 @@ tools: unrestricted
 runner:
   kind: claude
   model: claude-opus-5
+  # Written out although it is the default, because #40 asked for the decision and a
+  # decision that is only a comment is not one a reader can query. It is the same decision
+  # as the missing `deploy` block: see the note where that block would go.
+  placement: local
 
 # Maren declares no routines and claims nothing from the board, so steward launches almost
 # nothing for her today, and the interactive sessions she mostly wakes up for are a human's
@@ -90,6 +94,31 @@ runner:
 # rather than a night. Half of Hob's, because half of Hob's work is the most she has.
 budgets:
   daily_cost_usd: 5.0
+
+# No `deploy` block, and `runner.placement` left local. Decided, not forgotten (steward
+# #40) — Hob is the one being cut over to a container, and Maren is the reason that
+# decision is per-resident. Three facts from this file, in the order they settle it:
+#
+# 1. `placement` would move an empty set. Steward launches nothing for her — the budgets
+#    note above says why, and adds the third silence: no route accepts delegated work
+#    either. What relocating a session would have to relocate is a human's own CLI in a
+#    warren checkout, which never reaches this control plane at all.
+#
+# 2. It would be a containment that could not hold her work anyway.
+#    steward-resident:latest carries a claude CLI, git, python3 and the emitter — not a
+#    warren checkout, not `gh`, and not the GitHub credential her app_grants say she works
+#    through. A container-placed Maren could open neither a branch nor a pull request,
+#    which is her whole charter.
+#
+# 3. The block would say nothing a reader does not already get free — the defaults are
+#    `steward-burrow-builder` at `~/docker/steward-burrow-builder` on dxp2800 — and would
+#    change exactly one thing, for the worse: a *declared* `deploy.container` is what the
+#    watchdog and the topology report take as a promise that a container exists, so a
+#    resident nobody provisions would collect a permanent "unsupervised" line about a
+#    container that was never meant to be there.
+#
+# Revisit the day she is given a routine. That is the change that makes all three false,
+# and it arrives with the workspace question attached.
 
 # Maren may hand work to Hob, and to nobody else. Village work is hers; the reading and
 # the errand-shaped legwork around it is not, and Hob does that for a living. The switch

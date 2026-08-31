@@ -316,7 +316,7 @@ reach containers by shelling out to a **local** `docker` client — `docker insp
 of those calls has ever looked at `deploy.host`.
 
 The failure this prevents is a quiet one, and it is the **watchdog's** half that is quiet.
-A watchdog on the wrong machine asks a docker that has never heard of `life-agent`, gets
+A watchdog on the wrong machine asks a docker that has never heard of `steward-life-agent`, gets
 nothing, and reports the resident as *unsupervised* — honest about what it could see, and
 indistinguishable from a resident that has no container at all. It keeps burying stale runs
 and tripping budgets the whole time, so nothing looks wrong. (The scheduler's half already
@@ -331,16 +331,23 @@ other fleet-wide lines, below the per-resident block:
 $ steward doctor
 …
 life-agent: inbox 0 open via handoff
-topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
-life-agent: container life-agent on dxp2800 — supervised from here
+topology: docker at dxp2800's own docker answers as DXP2800-2B60 27.3.1
+life-agent: container steward-life-agent on dxp2800 — supervised from here
 watchdog: last pass …
 ```
 
-Doctor warns and still exits 0 (it is routinely run from a laptop while the daemons are on
-the NAS); the watchdog says it in red, because that process *is* the supervisor.
-`STEWARD_BURROW` names this burrow when the machine's hostname is not what manifests call
-it — though what `docker info` says about itself is consulted first, and settles it alone
-when it matches.
+Doctor warns and still exits 0 about *that* line (it is routinely run from a laptop while
+the daemons are on the NAS); the watchdog says it in red, because that process *is* the
+supervisor. A container-placed resident is the stricter case: `check_runner` probes its
+container, so `steward doctor` exits 1 anywhere the container is not — a laptop included.
+
+**On the NAS, export `STEWARD_BURROW=dxp2800`.** Measured: that machine's docker daemon
+names itself `DXP2800-2B60`, the appliance's own name and not the tailnet name manifests
+use — so `docker info`'s answer, which is consulted first and settles it alone when it
+matches, does not match here. What is left is the hostname, and nobody has checked that it
+answers to `dxp2800` either. Declare it rather than bet on it: losing that bet is a watchdog
+on the right machine reporting every container it is supervising as somewhere it cannot see.
+See [docs/topology.md](docs/topology.md).
 
 `DOCKER_HOST` is inherited by every docker call steward makes (measured, unlike a
 session's environment), so docker's own remote-endpoint support applies to supervision. It
@@ -388,6 +395,15 @@ back through the ordinary validator, and committed — before anything else happ
 the repo is the source of truth and a failed deploy should leave one commit to revert and
 one command to re-run. A dirty worktree is refused unless `--allow-dirty` says out loud
 that you want it anyway.
+
+A re-run against a resident that is already declared **converges** only while the flags
+still describe it. The moment a person has edited the manifest into something no command
+line can spell — routes, app grants, a skill's note, `runner.placement` — the stage refuses
+by name (*its skills, routes, app_grants, runner do not match what you asked for*) rather
+than overwriting a soul somebody wrote. That refusal is right, and it has a consequence
+worth knowing before you need it: a hand-written resident has **no** supported provision
+path, because this command is the only one there is. Provisioning from the declared
+manifest instead of from a spec is unbuilt work — steward #270.
 
 **Provision.** The compose fragment is rendered from `steward/templates/`, the runtime
 bundle is packed into a tar **in memory**, and the whole thing is piped over

@@ -531,8 +531,8 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
 ```console
 $ steward doctor
-life-agent: runner claude (claude-opus-5) — ready
-life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready
+life-agent: journal /home/Miha/docker/steward-life-agent/memory/journal — writable, closed by close-of-day
 life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana

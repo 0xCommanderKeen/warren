@@ -24,7 +24,7 @@ import pytest
 import yaml
 
 from conftest import REPO_ROOT, ResidentWriter, valid_manifest
-from steward.deploy import DEFAULT_IMAGE, render_compose, target_for
+from steward.deploy import DEFAULT_IMAGE, memory_mount, render_compose, target_for
 from steward.manifest import load_manifest
 
 IMAGE_DIR = REPO_ROOT / "docker" / "resident"
@@ -347,28 +347,49 @@ def test_the_local_dev_mirror_is_off_inside_a_container() -> None:
     assert 'CHRONICLE_MIRROR=""' in text
 
 
-# ------------------------------------------------------------------- life-agent, as it is
+# --------------------------------------------------------------- life-agent, as it deploys
 
 
-def test_life_agent_declares_where_it_actually_runs() -> None:
-    """Steward #52: Hob's container is hand-deployed and named life-agent. Say so.
+def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
+    """Steward #40: Hob's deploy block is the nursery layout, not the hand-built container.
 
-    Without `deploy.container` the watchdog calls Hob *unsupervised*, which was a fact
-    about steward rather than about the world. These values were read off the running
-    container, not chosen.
+    Until this cut over it said `life-agent` / `~/docker/life-agent` / `node:22`, read off
+    the container Hob had been running in since before steward existed (#52). These values
+    are the other kind of true: they are what the nursery resolves for this resident, and
+    the only address a container-placed resident can have. Merging the manifest is the
+    operator's half of the cutover; putting the bundle on the NAS is the rest, and steward
+    has no command for that half yet (`new-resident` refuses to converge onto a manifest a
+    person wrote — steward #270).
     """
     hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
     deploy = hob.manifest.deploy
 
-    assert deploy.container == "life-agent", "not steward-life-agent: nobody renamed it"
+    assert deploy.container == "steward-life-agent"
     assert deploy.host == "dxp2800"
     assert deploy.user == "Miha"
-    assert deploy.path == "~/docker/life-agent"
-    assert deploy.image == "node:22", (
-        "Hob still runs the hand-rolled node:22 container that installs claude at every "
-        "cold start; moving him onto steward-resident is a migration with a cutover"
+    assert deploy.path == "~/docker/steward-life-agent"
+    assert deploy.image == DEFAULT_IMAGE, (
+        "Hob runs the image this repo builds and ships, so his container has a brain "
+        "before a session opens instead of installing one on every cold start"
     )
     assert not deploy.command, (
-        "Hob's real command is a 40-line bash bootstrap in a compose file steward does "
-        "not own, so the manifest declares nothing about it rather than something tidier"
+        "the default is the truth now: a resident's container is a place for sessions to "
+        "happen, and `sleep infinity` under docker's init is exactly that"
     )
+
+
+def test_life_agent_runs_its_sessions_inside_that_container() -> None:
+    """The deploy block is an address; `placement` is what makes steward use it (#58, #40).
+
+    Explicit, never inferred: a resident may declare a container for the watchdog to
+    supervise while its sessions still run on the control plane, which is what every
+    resident deployed before #58 does. Hob no longer does — which is also what puts the
+    two sides of his memory mount on different machines.
+    """
+    hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+
+    assert hob.manifest.runner.placement == "container"
+    assert hob.manifest.runner.container_placed is True
+    host_side, container_side = memory_mount(hob.manifest)
+    assert host_side == "~/docker/steward-life-agent/memory"
+    assert container_side == "/data/residents/life-agent/memory"

@@ -3,6 +3,7 @@
 from conftest import REPO_ROOT, RESIDENTS_DIR
 from steward import journal
 from steward import manifest as m
+from steward.deploy import target_for
 from steward.skills import default_skills, effective_names, load_library, missing_skills
 
 
@@ -83,6 +84,27 @@ def test_every_shipped_resident_declares_a_daily_cost_cap() -> None:
         assert resident.manifest.budgets.daily_cost_usd is not None, (
             f"{resident.id} runs uncapped: nothing bounds what a day may cost"
         )
+
+
+def test_maren_stays_on_the_control_plane_and_declares_no_container() -> None:
+    """The other half of steward #40's deploy decision, and it is a decision (not a gap).
+
+    Hob was cut over to a container; Maren deliberately was not. Steward launches nothing
+    for her — no routines, no board claim, no route that accepts delegated work — so a
+    placement would relocate an empty set, and a *declared* `deploy.container` is exactly
+    what `topology.supervises` and `DockerSupervisor.owns` read as a promise that a
+    container exists. Her manifest carries the reasoning; this pins the shape of it.
+    """
+    maren = m.load_manifest(RESIDENTS_DIR / "burrow-builder" / "manifest.yaml")
+
+    assert maren.manifest.runner.placement == "local"
+    assert maren.manifest.deploy.container is None
+    assert maren.manifest.routines == []
+    assert maren.manifest.board.claim is False
+    assert maren.delegation_routes == ()
+    # The address the nursery would use if she were ever provisioned, which is precisely
+    # why writing it into the manifest would have added nothing.
+    assert target_for(maren.manifest).container == "steward-burrow-builder"
 
 
 def test_shipped_souls_have_voices_within_the_cap() -> None:
