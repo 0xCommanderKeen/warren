@@ -123,8 +123,10 @@ $ steward show life-agent            # the exact preamble Hob's next session ope
 `--dry-run` rehearses **this** tick: it prints the routines that are due at this moment
 with their assembled prompts, and `nothing due` when none is — which is what a rehearsal
 against a state file whose anchors are all fresh should say. It is not a way to dump every
-routine's prompt; `steward show <resident>` prints the preamble any session opens with,
-and `steward doctor` says when each routine next fires.
+routine's prompt. For a routine that is not due, `steward show <resident>` prints
+everything above the task — identity, voice, journal, skills, pending decisions, charter,
+assembled by the same module in the same order — and the task section under it is the
+routine's own `prompt` from the manifest. `steward doctor` says when each one fires next.
 
 **The HTTP API** (#3). The token-gated write path chronicle's viewer calls directly, so
 chronicle's server never gets write access to agents: run a routine now, post a job to the
@@ -280,7 +282,7 @@ stay in git; retirement is a lifecycle state, not a deletion.
 ```console
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run
-$ steward new-resident … --skills research     # declare, commit, build, check
+$ steward new-resident … --skills write-blog-post   # declare, commit, build, check
 $ steward retire note-keeper                    # stop it, and say so in git
 ```
 
@@ -362,7 +364,7 @@ $ export CHRONICLE_TOKEN=…                    # the village's shared ingest se
 
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run   # read the plan first
-$ steward new-resident … --skills research     # declare, commit, build, check
+$ steward new-resident … --skills write-blog-post   # declare, commit, build, check
 ```
 
 `--charter` points at a YAML file — a charter is prose somebody thought about, and prose
@@ -386,8 +388,10 @@ parent of that tree); `--dry-run`, `--allow-dirty`, and `--no-commit` behave as 
 `retire`; and **`--no-deploy`** is the only host-less path — it declares and checks but
 builds no container, for developing a resident before it has a machine. `--skills` is a
 grant *on top of* the default set every resident already gets, so naming a default skill
-(`write-journal`, `escalate`) is redundant rather than additive — grant only what a
-resident holds beyond the defaults.
+(`write-journal`, `daily-summary`, `research`, `escalate`) is redundant rather than
+additive — grant only what a resident holds beyond the defaults. It is not an error, and
+steward does not silently drop it: the effective set is the same either way, and the
+nursery warns by name so the line can be deleted from a manifest that means nothing by it.
 
 The three stages, and what each one really does:
 
@@ -599,7 +603,8 @@ echo '{"result": "Done.", "is_error": false, "total_cost_usd": 0.42, "usage": {"
 The `--help` arm is what keeps `steward doctor` green: doctor asks the installed binary
 what flags it supports, because every claude session carries `--setting-sources` whether a
 manifest asked for it or not. (The scheduler's own startup check is cheaper — it only asks
-whether the binary is on `PATH`.) With `budgets: {daily_cost_usd: 0.25}` on the resident,
+whether the binary answers where sessions run, which for a container-placed resident is
+docker rather than this `PATH`.) With `budgets: {daily_cost_usd: 0.25}` on the resident,
 one tick ledgers $0.42, trips the cap, pauses the resident and knocks — the whole budget
 path, without a model call. The `result` string is the session's output, so a stub that
 puts the control region in there exercises both halves at once.

@@ -104,7 +104,7 @@ from steward.scheduler import (
     default_state_path,
     next_fire_after,
 )
-from steward.skills import library_for
+from steward.skills import library_for, redundant_grants
 
 __all__ = [
     "CommitIdentity",
@@ -1006,6 +1006,18 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
             raise NurseryError(complaint)
         elif complaint:
             warnings.append(complaint)
+
+    granted_names = [grant.id for grant in spec.skills]
+    already_held = redundant_grants(granted_names, library_for(root, skills_dir))
+    if already_held:
+        # Not a refusal: the effective set is the same either way, and the resident is
+        # perfectly valid. But a grant that adds nothing is a line somebody wrote
+        # believing it did something, and the only moment it can be said usefully is the
+        # one where they are writing it (warren#90).
+        warnings.append(
+            f"already in the default set every resident holds, so granting them adds "
+            f"nothing: {', '.join(already_held)}"
+        )
 
     village_url = (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip()
     if provision and dry_run and not village_url:

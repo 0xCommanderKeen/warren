@@ -634,8 +634,9 @@ $ steward scheduler tick --dry-run         # print what is due right now, and th
 `--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
 manifest says. A rehearsal is not work. It rehearses *this* tick, so it reports the
 routines that are due at this moment and `nothing due` when none is — a routine that is
-not due is not part of the tick being rehearsed. `steward show <resident>` prints the
-preamble any session opens with; `steward doctor` says when each routine next fires.
+not due is not part of the tick being rehearsed. To read one that is not, `steward show
+<resident>` prints everything above the task section, and the task section is this
+routine's own `prompt`; `steward doctor` says when each routine next fires.
 
 Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default

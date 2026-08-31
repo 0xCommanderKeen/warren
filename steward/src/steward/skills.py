@@ -70,6 +70,7 @@ __all__ = [
     "materialize",
     "missing_skills",
     "parse_skill",
+    "redundant_grants",
 ]
 
 SKILL_FILENAME = "SKILL.md"
@@ -452,6 +453,19 @@ def default_skills_dir(residents_dir: Path | str) -> Path | None:
 def default_skills(library: SkillLibrary) -> tuple[Skill, ...]:
     """Return the skills every resident holds without granting them."""
     return tuple(skill for skill in library if skill.default)
+
+
+def redundant_grants(granted: Iterable[str], library: SkillLibrary) -> tuple[str, ...]:
+    """Return the granted names the default set already holds, in the order granted.
+
+    Not an error, and deliberately not a refusal: the effective set is identical either
+    way, so a manifest that grants a default skill is correct — it is just a line
+    somebody wrote believing it did something. Steward's answer to that everywhere else
+    is to say so rather than to fail or to quietly drop it, and this is what lets the
+    nursery say it at the moment the grant is written.
+    """
+    defaults = {skill.name for skill in default_skills(library)}
+    return tuple(name for name in granted if name in defaults)
 
 
 def effective_skills(manifest: ResidentManifest, library: SkillLibrary) -> tuple[Skill, ...]:

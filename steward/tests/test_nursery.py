@@ -10,7 +10,7 @@ from uuid import UUID
 import pytest
 import yaml
 
-from conftest import ScratchRepo
+from conftest import ScratchRepo, SkillWriter
 from steward.board import (
     delegation_residents,
     load_board_residents,
@@ -357,6 +357,41 @@ def test_a_runner_the_machine_cannot_launch_is_a_problem_on_the_deploy(
     assert report.register is not None
     assert not report.register.ok
     assert "not on PATH" in report.register.problems[0]
+
+
+def test_granting_a_default_skill_is_a_warning_not_a_silent_no_op(
+    scratch_repo: ScratchRepo, host: LocalTransport, write_skill: SkillWriter
+) -> None:
+    """A grant of a default skill changes nothing, and steward says so (warren#90).
+
+    Every resident already holds the defaults, so naming one under `--skills` (or in
+    `POST /residents`) is a line somebody wrote believing it did something. It is not an
+    error — the effective set is the same either way — so it is not refused; it is said
+    out loud, through the same warnings channel both front doors already print.
+    """
+    write_skill("research", defaults=True, root=scratch_repo.skills)
+    write_skill("errands", root=scratch_repo.skills)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat(skills): a default one and an ordinary one")
+
+    report = raise_into(scratch_repo, host, spec=spec(skills=["research", "errands"]))
+
+    warning = next(line for line in report.warnings if "default set" in line)
+    assert "research" in warning
+    assert "errands" not in warning
+
+
+def test_granting_only_what_the_defaults_do_not_hold_warns_about_nothing(
+    scratch_repo: ScratchRepo, host: LocalTransport, write_skill: SkillWriter
+) -> None:
+    write_skill("research", defaults=True, root=scratch_repo.skills)
+    write_skill("errands", root=scratch_repo.skills)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat(skills): a default one and an ordinary one")
+
+    report = raise_into(scratch_repo, host, spec=spec(skills=["errands"]))
+
+    assert not [line for line in report.warnings if "default set" in line]
 
 
 # ---------------------------------------------------------------------- converging

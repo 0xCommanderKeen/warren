@@ -1144,9 +1144,9 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     `--dry-run` rehearses *this* tick and no other: it reports the routines that are due
     at this moment, which is the question a rehearsal is asked. It used to print every
     routine in the tree as "would fire", which was untrue of all but the due ones and
-    unreadable on a fleet with more than a handful (warren#90). To read the preamble of a
-    routine that is not due, ask `steward show <resident>`; to see when one fires next,
-    `steward doctor`.
+    unreadable on a fleet with more than a handful (warren#90). For a routine that is not
+    due, `steward show <resident>` prints everything above the task and the manifest holds
+    the task; `steward doctor` says when each one fires next.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _build_scheduler(
