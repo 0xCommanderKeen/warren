@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""burrow v0 server: the event log, the village projection and the HTTP API.
+"""chronicle v0 server: the event log, the village projection and the HTTP API.
 
 Accepts protocol events (POST /events, one JSON event per request) and publishes
 the projection over /state and /state/stream. It serves no browser client of its
@@ -8,15 +8,16 @@ docs/ui-clients.md).
 
     python3 serve.py [port]     # default 8737
 
-Env:
-    BURROW_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container)
-    BURROW_EVENTS        event log path (default ~/.burrow/events.jsonl)
-    BURROW_VILLAGERS     resident-manifest directory (default: villagers/ next to this file)
-    BURROW_ARCHIVE       rotated log directory (default <events dir>/archive)
-    BURROW_MAX_LOG       rotate once the live log passes this many bytes
-    BURROW_NOTIFY_URL    POST target for needs_human knocks (unset = no notifications)
-    BURROW_NOTIFY_TOKEN  optional bearer token for that target (e.g. a private ntfy topic)
-    BURROW_NOTIFY_TIMEOUT  seconds to wait on the webhook (default 5)
+Env (each also accepted under its pre-rename BURROW_* spelling for one release;
+the CHRONICLE_* spelling wins wherever both are set):
+    CHRONICLE_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container)
+    CHRONICLE_EVENTS        event log path (default ~/.chronicle/events.jsonl)
+    CHRONICLE_VILLAGERS     resident-manifest directory (default: villagers/ next to this file)
+    CHRONICLE_ARCHIVE       rotated log directory (default <events dir>/archive)
+    CHRONICLE_MAX_LOG       rotate once the live log passes this many bytes
+    CHRONICLE_NOTIFY_URL    POST target for needs_human knocks (unset = no notifications)
+    CHRONICLE_NOTIFY_TOKEN  optional bearer token for that target (e.g. a private ntfy topic)
+    CHRONICLE_NOTIFY_TIMEOUT  seconds to wait on the webhook (default 5)
 
 GET /transport/status exposes bounded ingest-deduplication and knock-forwarding
 pressure for the browser's live transport status.
@@ -92,7 +93,7 @@ LEDGER_NOTIFIED = notification_persistence.NOTIFIED
 LEDGER_NOTIFY_DROPPED = notification_persistence.DROPPED
 LEDGER_KINDS = notification_persistence.KINDS
 DROP_SECONDS = 12 * 60 * 60
-_active_runtime = contextvars.ContextVar("burrow_runtime", default=None)
+_active_runtime = contextvars.ContextVar("chronicle_runtime", default=None)
 
 
 def _setting(name, fallback):
@@ -185,7 +186,7 @@ def read_residents():
 # ————— knocks: push a needs_human event to a webhook —————
 #
 # The village can't knock on a door you're not looking at, so a `needs_human`
-# ingest also fires one POST at BURROW_NOTIFY_URL. Body is plain text and the
+# ingest also fires one POST at CHRONICLE_NOTIFY_URL. Body is plain text and the
 # title rides in headers, which is exactly what ntfy wants; anything that
 # accepts a POST works. It happens on a daemon thread and swallows every
 # error: a knock we fail to forward must never slow down or fail the ingest.
@@ -605,7 +606,7 @@ def ensure_knock_workers():
         _knock_worker_stop.clear()
         for index in range(_setting("notify_workers", NOTIFY_WORKERS)):
             worker = threading.Thread(
-                target=_knock_worker, name=f"burrow-knock-{index}", daemon=True
+                target=_knock_worker, name=f"chronicle-knock-{index}", daemon=True
             )
             worker.start()
             _knock_worker_threads.append(worker)
@@ -958,7 +959,7 @@ with open(os.path.join(ROOT, "pyproject.toml"), "rb") as _project_file:
 
 
 app = FastAPI(
-    title="Burrow Village API",
+    title="Chronicle Village API",
     version=PROJECT_VERSION,
     lifespan=lifespan(_legacy_config),
 )
@@ -1233,7 +1234,7 @@ def serve_forever(config: Config) -> None:
 if __name__ == "__main__":
     config = Config.from_env(os.environ, sys.argv[1:])
     print(
-        f"burrow village at http://{config.host}:{config.port}, log at {config.events}"
+        f"chronicle village at http://{config.host}:{config.port}, log at {config.events}"
     )
     if config.notify_url:
         print(f"knocks will be pushed to {config.notify_url}")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write Burrow's deterministic, checked-in OpenAPI contract."""
+"""Write Chronicle's deterministic, checked-in OpenAPI contract."""
 
 import json
 import pathlib

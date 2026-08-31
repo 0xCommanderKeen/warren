@@ -16,7 +16,7 @@ class InstalledEmitterTest(unittest.TestCase):
             ["sh", str(ROOT / "scripts" / "install-emitter.sh")],
             check=True,
             cwd=ROOT,
-            env={**os.environ, "BURROW_INSTALL_ROOT": str(install_root), **extra_env},
+            env={**os.environ, "CHRONICLE_INSTALL_ROOT": str(install_root), **extra_env},
             capture_output=True,
             text=True,
         )
@@ -27,11 +27,16 @@ class InstalledEmitterTest(unittest.TestCase):
             self.run_installer(install_root)
             self.assertEqual(
                 {path.name for path in install_root.iterdir()},
-                {"burrow-emit", "emit.py", "durable.py"},
+                {"chronicle-emit", "burrow-emit", "emit.py", "durable.py"},
             )
-            self.assertTrue(os.access(install_root / "burrow-emit", os.X_OK))
+            for entry_point in ("chronicle-emit", "burrow-emit"):
+                self.assertTrue(os.access(install_root / entry_point, os.X_OK))
+                self.assertEqual(
+                    (install_root / entry_point).stat().st_mode & 0o777, 0o700
+                )
             self.assertEqual(
-                (install_root / "burrow-emit").stat().st_mode & 0o777, 0o700
+                (install_root / "chronicle-emit").read_bytes(),
+                (install_root / "burrow-emit").read_bytes(),
             )
             self.assertEqual((install_root / "emit.py").stat().st_mode & 0o777, 0o600)
 
@@ -61,7 +66,7 @@ class InstalledEmitterTest(unittest.TestCase):
             self.run_installer(target)
             before = {p.name: p.read_bytes() for p in target.iterdir()}
             with self.assertRaises(subprocess.CalledProcessError):
-                self.run_installer(target, BURROW_INSTALL_FAIL_BEFORE_PUBLISH="1")
+                self.run_installer(target, CHRONICLE_INSTALL_FAIL_BEFORE_PUBLISH="1")
             self.assertEqual(before, {p.name: p.read_bytes() for p in target.iterdir()})
             self.assertEqual([], list(parent.glob(".bundle.*")))
 
@@ -71,7 +76,7 @@ class InstalledEmitterTest(unittest.TestCase):
                 result = subprocess.run(
                     ["sh", str(ROOT / "scripts" / "install-emitter.sh")],
                     cwd=ROOT,
-                    env={**os.environ, "BURROW_INSTALL_ROOT": target},
+                    env={**os.environ, "CHRONICLE_INSTALL_ROOT": target},
                     capture_output=True,
                     text=True,
                 )
@@ -85,7 +90,7 @@ class InstalledEmitterTest(unittest.TestCase):
             result = subprocess.run(
                 ["sh", str(ROOT / "scripts" / "install-emitter.sh")],
                 cwd=ROOT,
-                env={**os.environ, "BURROW_INSTALL_ROOT": str(target)},
+                env={**os.environ, "CHRONICLE_INSTALL_ROOT": str(target)},
                 capture_output=True,
                 text=True,
             )
@@ -93,11 +98,12 @@ class InstalledEmitterTest(unittest.TestCase):
             self.assertEqual([], list(outside.iterdir()))
 
     def install(self, root):
-        bundle = pathlib.Path(root) / ".local" / "lib" / "burrow-emitter"
+        bundle = pathlib.Path(root) / ".local" / "lib" / "chronicle-emitter"
         bundle.mkdir(parents=True, mode=0o700)
-        for name in ("emit.py", "durable.py", "burrow-emit"):
+        for name in ("emit.py", "durable.py", "chronicle-emit"):
             shutil.copy2(ROOT / "hooks" / name, bundle / name)
-        (bundle / "burrow-emit").chmod(0o700)
+        (bundle / "chronicle-emit").chmod(0o700)
+        shutil.copy2(bundle / "chronicle-emit", bundle / "burrow-emit")
         return bundle
 
     def test_documented_bundle_runs_outside_repo_and_failed_transport_is_fail_open(
@@ -115,10 +121,13 @@ class InstalledEmitterTest(unittest.TestCase):
                 "prompt": "work",
             }
             env = dict(
-                os.environ, HOME=home, BURROW_MIRROR="", BURROW_URL="http://127.0.0.1:1"
+                os.environ,
+                HOME=home,
+                CHRONICLE_MIRROR="",
+                CHRONICLE_URL="http://127.0.0.1:1",
             )
             result = subprocess.run(
-                [str(bundle / "burrow-emit"), "--runner", "codex"],
+                [str(bundle / "chronicle-emit"), "--runner", "codex"],
                 input=json.dumps(event),
                 text=True,
                 cwd=cwd,
@@ -127,9 +136,71 @@ class InstalledEmitterTest(unittest.TestCase):
                 timeout=5,
             )
             self.assertEqual(result.returncode, 0)
-            log = pathlib.Path(home) / ".burrow" / "events.jsonl"
+            log = pathlib.Path(home) / ".chronicle" / "events.jsonl"
             records = [json.loads(line) for line in log.read_text().splitlines()]
             self.assertEqual(records[-1]["agent_id"], "codex:installed-layout")
+
+    def default_root(self, existing=()):
+        """Where the installer puts a bundle when no root is given."""
+        with tempfile.TemporaryDirectory() as home:
+            lib = pathlib.Path(home) / ".local" / "lib"
+            for name in existing:
+                (lib / name).mkdir(parents=True)
+            environment = {
+                k: v
+                for k, v in os.environ.items()
+                if k not in ("CHRONICLE_INSTALL_ROOT", "BURROW_INSTALL_ROOT")
+            }
+            subprocess.run(
+                ["sh", str(ROOT / "scripts" / "install-emitter.sh")],
+                check=True,
+                cwd=ROOT,
+                env={**environment, "HOME": home},
+                capture_output=True,
+                text=True,
+            )
+            return sorted(p.name for p in lib.iterdir())
+
+    def test_a_first_install_uses_the_new_bundle_name(self):
+        self.assertEqual(self.default_root(), ["chronicle-emitter"])
+
+    def test_an_existing_bundle_is_upgraded_where_it_already_lives(self):
+        """Hook configs name this directory absolutely; moving it breaks them."""
+        self.assertEqual(self.default_root(["burrow-emitter"]), ["burrow-emitter"])
+
+    def test_the_new_bundle_wins_once_the_operator_has_migrated(self):
+        self.assertEqual(
+            self.default_root(["burrow-emitter", "chronicle-emitter"]),
+            ["burrow-emitter", "chronicle-emitter"],
+        )
+
+    def test_the_pre_rename_entry_point_still_runs_the_emitter(self):
+        """A hook wired to burrow-emit must keep working across the upgrade."""
+        with (
+            tempfile.TemporaryDirectory() as home,
+            tempfile.TemporaryDirectory() as cwd,
+        ):
+            bundle = self.install(home)
+            result = subprocess.run(
+                [str(bundle / "burrow-emit")],
+                input=json.dumps(
+                    {
+                        "session_id": "old-entry-point",
+                        "cwd": cwd,
+                        "hook_event_name": "UserPromptSubmit",
+                        "prompt": "work",
+                    }
+                ),
+                text=True,
+                cwd=cwd,
+                env=dict(os.environ, HOME=home, CHRONICLE_MIRROR="", CHRONICLE_URL=""),
+                capture_output=True,
+                timeout=5,
+            )
+            self.assertEqual(result.returncode, 0)
+            log = pathlib.Path(home) / ".chronicle" / "events.jsonl"
+            records = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(records[-1]["agent_id"], "claude-code:old-entry-point")
 
     def test_launcher_is_exit_zero_when_bundle_dependency_is_missing(self):
         with (
@@ -139,7 +210,7 @@ class InstalledEmitterTest(unittest.TestCase):
             bundle = self.install(home)
             (bundle / "durable.py").unlink()
             result = subprocess.run(
-                [str(bundle / "burrow-emit")],
+                [str(bundle / "chronicle-emit")],
                 input="{}",
                 text=True,
                 cwd=cwd,

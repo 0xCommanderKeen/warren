@@ -1,11 +1,11 @@
 # UI client routing
 
-Burrow has no user interface. It is the event log, the projection and the HTTP API; every
+Chronicle has no user interface. It is the event log, the projection and the HTTP API; every
 UI is a separate client consuming the versioned state contract over one authoritative
 backend. Clients read `/state` and `/state/stream`; none consume `/events` or reconstruct
 projected state for themselves.
 
-Nothing is served to a browser from this repository. Burrow answers its documented API
+Nothing is served to a browser from this repository. Chronicle answers its documented API
 paths and 404s everything else, so a client pointed at a path that used to return the
 retired in-tree viewer fails loudly instead of rendering a stale page.
 
@@ -16,7 +16,7 @@ retired in-tree viewer fails loudly instead of rendering a stale page.
 - **Townhall** — the control panel.
 
 Both are maintained outside this service and follow their own development and deployment
-instructions. Burrow supplies only the authoritative `/state` and `/state/stream` read
+instructions. Chronicle supplies only the authoritative `/state` and `/state/stream` read
 interfaces, and knows nothing about either client's routes.
 
 ## Client transport
@@ -40,7 +40,7 @@ A stale cursor receives one atomic reset snapshot; see
 
 ## Development
 
-Run Burrow on its standard local port:
+Run Chronicle on its standard local port:
 
 ```sh
 uv run uvicorn serve:app --host 127.0.0.1 --port 8737
@@ -70,7 +70,7 @@ without a live backend. Run `sh tests/ui-contract.sh` before using a fixture in 
 
 ## Production
 
-When hosting a client under the same origin, proxy Burrow's state endpoints under
+When hosting a client under the same origin, proxy Chronicle's state endpoints under
 `/burrow/`. The client itself is served by its own deployment; this shape exposes only the
 shared state transport:
 

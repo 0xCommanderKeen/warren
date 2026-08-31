@@ -553,7 +553,7 @@ class ResidentManifestTest(unittest.TestCase):
         self.assertEqual(report["diagnostics"], [])
         self.assertEqual(
             {resident["file"] for resident in report["residents"]},
-            {"burrow.resident.json", "life.resident.json"},
+            {"chronicle.resident.json", "life.resident.json"},
         )
 
 

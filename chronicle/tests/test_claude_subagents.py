@@ -26,8 +26,11 @@ FIXTURE = ROOT / "tests" / "fixtures" / "claude-subagents.jsonl"
 class ClaudeSubagentAdapterTest(unittest.TestCase):
     def deliver(self, hooks):
         with tempfile.TemporaryDirectory() as home:
-            env = dict(os.environ, HOME=home, BURROW_MIRROR="")
-            env.pop("BURROW_URL", None)
+            env = dict(os.environ, HOME=home, CHRONICLE_MIRROR="")
+            # Both spellings are live during the rename, so clearing only the new
+            # one would let an exported BURROW_URL reach the emitter anyway.
+            for stale in ("CHRONICLE_URL", "BURROW_URL", "BURROW_MIRROR"):
+                env.pop(stale, None)
             for hook in hooks:
                 subprocess.run(
                     [sys.executable, str(ROOT / "hooks" / "emit.py")],
@@ -36,7 +39,7 @@ class ClaudeSubagentAdapterTest(unittest.TestCase):
                     check=True,
                     env=env,
                 )
-            log = pathlib.Path(home) / ".burrow" / "events.jsonl"
+            log = pathlib.Path(home) / ".chronicle" / "events.jsonl"
             return [json.loads(line) for line in log.read_text().splitlines()]
 
     def project(self, events):
@@ -133,7 +136,7 @@ class ClaudeSubagentAdapterTest(unittest.TestCase):
         }
         delivered = []
         with (
-            mock.patch.dict(os.environ, {"BURROW_AGENT_ID": "life-agent"}),
+            mock.patch.dict(os.environ, {"CHRONICLE_AGENT_ID": "life-agent"}),
             mock.patch.object(sys, "stdin", io.StringIO(json.dumps(hook))),
             mock.patch.object(emit, "deliver", side_effect=delivered.append),
         ):

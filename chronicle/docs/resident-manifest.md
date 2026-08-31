@@ -2,7 +2,7 @@
 
 Resident manifests are checked-in `villagers/*.resident.json` declarations. A valid manifest promotes one matching event identity from Visitor to Resident during projection; the event log is never rewritten. Invalid manifests are omitted from residency and reported by `GET /residents` as diagnostics with `file`, JSON `path`, and `message`. `GET /villagers` remains the v0-compatible array of valid resident records plus any legacy display-only soul files.
 
-The normative machine-readable shape is [resident-manifest.schema.json](resident-manifest.schema.json). Burrow's dependency-free runtime validator applies the same shape plus cross-file uniqueness for `home` and `match`.
+The normative machine-readable shape is [resident-manifest.schema.json](resident-manifest.schema.json). Chronicle's dependency-free runtime validator applies the same shape plus cross-file uniqueness for `home` and `match`.
 
 ```json
 {
@@ -42,9 +42,9 @@ The unauthenticated `GET /residents` and `GET /villagers` responses are an expli
 The optional `routines` array mirrors Steward's public schedule fields: `id`, five-field
 `schedule`, `schedule_tz`, and `enabled`. `steward_resident` names the URL path segment
 used by Steward's run-now endpoint. Prompts, skill grants, internals, and credentials are
-not copied into Burrow. Schedules are rendered as “declared, not observed”; observed
+not copied into Chronicle. Schedules are rendered as “declared, not observed”; observed
 outcomes come only from `routine_*` events. The Steward token is entered into the client
-and retained in memory only, then sent directly to Steward—never to Burrow's server.
+and retained in memory only, then sent directly to Steward—never to Chronicle's server.
 The manifest validator accepts a safe five-field declaration envelope, including
 croniter names and operators such as `MON`, `JAN`, `L`, `?`, ranges, lists, and steps.
 It deliberately does not reimplement croniter: authenticated `GET /routines` is the
@@ -55,7 +55,7 @@ and requires an installed `ZoneInfo` name such as `UTC` or `Europe/Ljubljana`. T
 also includes the installed single-segment aliases Steward accepts (`GMT`, `CET`,
 `Zulu`, `Factory`, and their peers); a slash is not required for a real zone name.
 
-Burrow also reads Steward's authenticated `GET /routines` directly from the browser to
+Chronicle also reads Steward's authenticated `GET /routines` directly from the browser to
 show its computed `next_fire`; it never computes that promise from the local cron text.
 Configure Steward with the client's exact origin, for example
 `STEWARD_CORS_ORIGINS=http://village.local:8080`. When it is unset or does not match,

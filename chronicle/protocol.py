@@ -1,4 +1,4 @@
-"""Strict Burrow protocol-v0 validation.
+"""Strict Chronicle protocol-v0 validation.
 
 This module is the server-side adapter for the contract documented in
 ``docs/protocol.md``.  The browser implements the same small interface as

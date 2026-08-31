@@ -13,7 +13,7 @@ trees, through the fence gates.
 
 Point the server at it and open the viewer:
 
-    BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
+    CHRONICLE_EVENTS=/tmp/chronicle-fixture.jsonl python3 serve.py 8899
 """
 
 import argparse
@@ -59,7 +59,7 @@ def event(agent_id, project, kind, payload):
         "source": "fixture",
         "agent_id": agent_id,
         "project": project,
-        "cwd": "/tmp/burrow-fixture/" + project,
+        "cwd": "/tmp/chronicle-fixture/" + project,
         "type": kind,
         "payload": payload,
     }
@@ -74,7 +74,7 @@ def write(path, events):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="/tmp/burrow-fixture.jsonl")
+    ap.add_argument("--out", default="/tmp/chronicle-fixture.jsonl")
     ap.add_argument(
         "--every", type=float, default=3.0, help="seconds between transitions"
     )

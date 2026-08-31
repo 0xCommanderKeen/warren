@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stable fail-open entry point for installed Burrow emitter bundles.
+# Stable fail-open entry point for installed Chronicle emitter bundles.
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || exit 0
 python3 "$script_dir/emit.py" "$@" || true
 exit 0

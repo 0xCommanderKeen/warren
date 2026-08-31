@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive a burrow log from a scripted scenario, to exercise the viewer without a
+"""Drive a chronicle log from a scripted scenario, to exercise the viewer without a
 live fleet.
 
     python3 fixtures/demo.py                       # the "village" scenario, looping
@@ -9,7 +9,7 @@ live fleet.
 
 Then serve the village against the same log:
 
-    BURROW_EVENTS=/tmp/burrow-demo.jsonl python3 serve.py
+    CHRONICLE_EVENTS=/tmp/chronicle-demo.jsonl python3 serve.py
 
 This is a driver, not a simulator. It writes real protocol events (v0, see
 docs/protocol.md) into a real log and lets the real projection decide what the
@@ -37,7 +37,7 @@ MINUTE = 60
 AGENTS = {
     "scholar": {"id": "demo:scholar", "project": "atlas", "cwd": "/tmp/atlas"},
     "scribe": {"id": "demo:scribe", "project": "almanac", "cwd": "/tmp/almanac"},
-    "mason": {"id": "demo:mason", "project": "burrow", "cwd": "/tmp/burrow"},
+    "mason": {"id": "demo:mason", "project": "chronicle", "cwd": "/tmp/chronicle"},
     "courier": {"id": "demo:courier", "project": "mail", "cwd": "/tmp/mail"},
     "forester": {"id": "demo:forester", "project": "life", "cwd": "/tmp/life"},
     "hermit": {"id": "demo:hermit", "project": "attic", "cwd": "/tmp/attic"},
@@ -240,8 +240,8 @@ def main():
     ap.add_argument("--list", action="store_true", help="list the scenarios and exit")
     ap.add_argument(
         "--out",
-        default="/tmp/burrow-demo.jsonl",
-        help="event log to write (default: /tmp/burrow-demo.jsonl)",
+        default="/tmp/chronicle-demo.jsonl",
+        help="event log to write (default: /tmp/chronicle-demo.jsonl)",
     )
     ap.add_argument(
         "--speed",
@@ -278,7 +278,7 @@ def main():
 
     print(f"{args.scenario}: {scenario['blurb']}")
     print(f"writing {args.out} at {args.speed:g}× — serve it with:")
-    print(f"  BURROW_EVENTS={args.out} python3 serve.py")
+    print(f"  CHRONICLE_EVENTS={args.out} python3 serve.py")
     print(
         "one pass, then stop" if args.once else "looping (ctrl-c to stop)", flush=True
     )

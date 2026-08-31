@@ -129,6 +129,10 @@ def journal_event(entry):
 
 
 def terminal_key(event):
+    # The "burrow-" prefix is stored data and deliberately keeps its pre-rename
+    # spelling: these keys are what the durable terminal ledger already holds, so
+    # changing the prefix would make every past knock stop looking terminal and
+    # re-notify the operator for the entire retained history at once.
     return (
         "burrow-sha256-"
         + hashlib.sha256(knock_key(event).encode("utf-8", "surrogatepass")).hexdigest()

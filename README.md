@@ -25,8 +25,10 @@ arcadia). They were folded into this monorepo via `git subtree`, so each
 directory carries its full history. The event service was renamed burrow →
 chronicle when "burrow" was promoted to mean a machine in the warren; the
 control panel was renamed observatory → townhall when it gained its write
-mission. Code-level identifiers (the `burrow` Python package, `BURROW_*` env
-vars) keep their old names until the tracked rename lands.
+mission. Code-level identifiers followed in warren#216: the package is
+`chronicle` and the settings are `CHRONICLE_*`, each still accepted under its old
+`BURROW_*` spelling for one release so deployed environments can be re-spelled
+whenever it suits rather than during a deploy.
 
 ## Development
 
@@ -58,8 +60,8 @@ There is no registry either: images travel as `docker save | ssh … docker load
 One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
 `/observatory/`, and proxies `/burrow/state`, `/state`, `/events` to chronicle and the
 write routes to steward. So a townhall release is published into *arcadia's* deploy
-directory, and `BURROW_URL=http://dxp2800:8737` is correct even though chronicle listens on
-8738 — the origin proxies `/events` through.
+directory, and `CHRONICLE_URL=http://dxp2800:8737` (still accepted as `BURROW_URL`)
+is correct even though chronicle listens on 8738 — the origin proxies `/events` through.
 
 **Steward's daemons run on the burrow whose containers they supervise** — today, the NAS.
 `steward scheduler run` and `steward watchdog run` reach containers by shelling out to a
@@ -75,5 +77,5 @@ The tar recipes pack paths relative to the working directory, so the directory y
 is part of the command.
 
 The directory names on the NAS still say `burrow` and the mount still says `/observatory/`;
-they are paths, not identifiers, and renaming them is deliberately deferred (warren#216,
-warren#218).
+they are paths, not identifiers. warren#216 renamed the identifiers and deliberately left
+these alone; renaming the paths stays deferred (warren#218).

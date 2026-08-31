@@ -45,7 +45,7 @@ class ASGITransportContractTests(unittest.TestCase):
 
     def test_fastapi_openapi_names_public_wire_contracts(self):
         schema = serve.app.openapi()
-        self.assertEqual(schema["info"]["title"], "Burrow Village API")
+        self.assertEqual(schema["info"]["title"], "Chronicle Village API")
         self.assertIn("ProtocolEvent", schema["components"]["schemas"])
         self.assertIn("StateEnvelope", schema["components"]["schemas"])
         self.assertIn("TransportStatus", schema["components"]["schemas"])

@@ -6,8 +6,8 @@ the current time and appends it to a log, one every couple of seconds, so a
 projection rule can be watched end to end.
 
 ```sh
-python3 fixtures/play.py &                                  # writes /tmp/burrow-play.jsonl
-BURROW_EVENTS=/tmp/burrow-play.jsonl python3 serve.py     # open http://127.0.0.1:8737
+python3 fixtures/play.py &                                  # writes /tmp/chronicle-play.jsonl
+CHRONICLE_EVENTS=/tmp/chronicle-play.jsonl python3 serve.py     # open http://127.0.0.1:8737
 ```
 
 The village still never lies: every sprite you see is driven by an event in the
@@ -25,7 +25,7 @@ python3 fixtures/demo.py --list
 python3 fixtures/demo.py                     # "village", looping
 python3 fixtures/demo.py library --once      # one library round trip
 python3 fixtures/demo.py states --speed 2    # twice as fast
-BURROW_EVENTS=/tmp/burrow-demo.jsonl python3 serve.py
+CHRONICLE_EVENTS=/tmp/chronicle-demo.jsonl python3 serve.py
 ```
 
 | scenario  | what it shows |

@@ -32,8 +32,11 @@ class CodexEndToEndTest(unittest.TestCase):
 
     def deliver(self, hooks):
         with tempfile.TemporaryDirectory() as home:
-            env = dict(os.environ, HOME=home, BURROW_MIRROR="")
-            env.pop("BURROW_URL", None)
+            env = dict(os.environ, HOME=home, CHRONICLE_MIRROR="")
+            # Both spellings are live during the rename, so clearing only the new
+            # one would let an exported BURROW_URL reach the emitter anyway.
+            for stale in ("CHRONICLE_URL", "BURROW_URL", "BURROW_MIRROR"):
+                env.pop(stale, None)
             for hook in hooks:
                 proc = subprocess.run(
                     [sys.executable, str(EMIT), "--runner", "codex"],
@@ -44,7 +47,7 @@ class CodexEndToEndTest(unittest.TestCase):
                 )
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(proc.stdout.strip(), "{}")
-            path = pathlib.Path(home) / ".burrow" / "events.jsonl"
+            path = pathlib.Path(home) / ".chronicle" / "events.jsonl"
             return [json.loads(line) for line in path.read_text().splitlines()]
 
     def test_redacted_fixture_matches_the_documented_hook_shape(self):
@@ -185,8 +188,11 @@ class CodexEndToEndTest(unittest.TestCase):
 class RunnerSelectionEndToEndTest(unittest.TestCase):
     def run_hook(self, args):
         with tempfile.TemporaryDirectory() as home:
-            env = dict(os.environ, HOME=home, BURROW_MIRROR="")
-            env.pop("BURROW_URL", None)
+            env = dict(os.environ, HOME=home, CHRONICLE_MIRROR="")
+            # Both spellings are live during the rename, so clearing only the new
+            # one would let an exported BURROW_URL reach the emitter anyway.
+            for stale in ("CHRONICLE_URL", "BURROW_URL", "BURROW_MIRROR"):
+                env.pop(stale, None)
             proc = subprocess.run(
                 [sys.executable, str(EMIT), *args],
                 input=json.dumps(
@@ -201,7 +207,7 @@ class RunnerSelectionEndToEndTest(unittest.TestCase):
                 capture_output=True,
                 env=env,
             )
-            log = pathlib.Path(home) / ".burrow" / "events.jsonl"
+            log = pathlib.Path(home) / ".chronicle" / "events.jsonl"
             return proc, log.exists()
 
     def test_malformed_runner_options_emit_nothing(self):
