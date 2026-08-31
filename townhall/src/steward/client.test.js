@@ -186,9 +186,10 @@ describe("the steward client", () => {
 });
 
 describe("reading steward's commit back", () => {
-  it("reports the sha steward committed under", () => {
-    expect(describeCommit({ committed: true, sha: "0123456789abcdef", identity: "steward (api) <x@y>" }))
-      .toMatchObject({ state: "committed", short: "0123456789", identity: "steward (api) <x@y>" });
+  it("reports the sha steward committed under, and the message it wrote", () => {
+    const message = "chore(residents): update hob via the API";
+    expect(describeCommit({ committed: true, sha: "0123456789abcdef", message }))
+      .toMatchObject({ state: "committed", short: "0123456789", message });
   });
 
   it("calls an uncommitted write converged, not failed", () => {

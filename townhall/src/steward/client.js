@@ -176,14 +176,16 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
  */
 export function describeCommit(commit) {
   if (!commit || typeof commit !== "object") {
-    return { state: "none", sha: null, short: null, note: null, identity: null };
+    return { state: "none", sha: null, short: null, note: null, message: null };
   }
   const sha = typeof commit.sha === "string" && commit.sha ? commit.sha : null;
   return {
     state: commit.committed && sha ? "committed" : "converged",
     sha,
     short: sha ? sha.slice(0, 10) : null,
-    identity: typeof commit.identity === "string" ? commit.identity : null,
+    // The subject line steward wrote, whose trailer carries the request id — the honest
+    // link back to `GET /requests/{id}` for who asked and when.
+    message: typeof commit.message === "string" && commit.message ? commit.message : null,
     note: typeof commit.note === "string" && commit.note ? commit.note : null,
   };
 }
