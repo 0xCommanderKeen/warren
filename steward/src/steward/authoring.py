@@ -52,7 +52,7 @@ from steward.manifest import (
     ValidationResult,
     validate_tree,
 )
-from steward.nursery import CommitIdentity, NurseryError, commit_paths
+from steward.nursery import DECLARE_SUBJECT, CommitIdentity, NurseryError, commit_paths
 from steward.runners import PipedRun, run_argv
 from steward.skills import (
     SKILL_FILENAME,
@@ -62,6 +62,7 @@ from steward.skills import (
 )
 
 __all__ = [
+    "DECLARE_SUBJECT",
     "DEFAULT_IDENTITY",
     "AuthoringError",
     "CommitReport",
@@ -296,7 +297,15 @@ def candidate_tree(source: Path) -> Iterator[Path]:
     """
     with tempfile.TemporaryDirectory(prefix="steward-authoring-") as scratch:
         target = Path(scratch) / source.name
-        shutil.copytree(source, target, symlinks=True)
+        if source.is_dir():
+            shutil.copytree(source, target, symlinks=True)
+        else:
+            # The first skill in a fleet that has no library yet. The candidate is an empty
+            # library rather than no library, which is the whole question being asked: a
+            # configured-but-empty library turns every existing grant into an error, so this
+            # is exactly where a first skill that would break the fleet gets refused —
+            # before the directory exists, rather than after creating one nobody can undo.
+            target.mkdir(parents=True)
         yield target
 
 
@@ -449,7 +458,10 @@ def repo_toplevel(path: Path, *, git: PipedRun = run_argv) -> Path | None:
 
 def commit_message(subject: str, request_id: str, principal: str) -> str:
     """Compose the commit body: what happened, who asked, and which request it was."""
-    return f"{subject}\n\nWritten over the steward API by {principal}.\n{REQUEST_TRAILER}: {request_id}\n"
+    return (
+        f"{subject}\n\nWritten over the steward API by {principal}.\n"
+        f"{REQUEST_TRAILER}: {request_id}\n"
+    )
 
 
 def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records

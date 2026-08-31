@@ -42,15 +42,18 @@ from hmac import compare_digest
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 
+import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from steward import authoring as au
 from steward import delegation as dg
 from steward import events as ev
+from steward import manifest as m
 from steward.approvals import WithheldValueError, redact_decision, restore_withheld
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
@@ -68,6 +71,7 @@ from steward.input_bounds import (
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
 from steward.nursery import (
+    CommitIdentity,
     NewResident,
     NurseryError,
     NurseryReport,
@@ -135,6 +139,25 @@ TOKEN_ENV = "STEWARD_TOKEN"  # noqa: S105 — an env var name, not a credential
 CORS_ENV = "STEWARD_CORS_ORIGINS"
 RESIDENTS_ENV = "STEWARD_RESIDENTS"
 UI_ENV = "STEWARD_UI"
+COMMIT_IDENTITY_ENV = "STEWARD_COMMIT_IDENTITY"
+ALLOW_UNCOMMITTED_ENV = "STEWARD_ALLOW_UNCOMMITTED_WRITES"
+
+#: How the write API describes the caller in a commit. Not a name, because there is not one
+#: to know: the human token is a shared secret, so what steward can say truthfully is which
+#: door the change came through. The request id in the same commit is what makes it
+#: traceable to a moment and a path in the request log.
+API_PRINCIPAL = "a holder of STEWARD_TOKEN, over the steward API"
+
+#: How a refused write is answered. A manifest that does not validate is the caller's
+#: mistake and unprocessable; a residents tree with no git behind it is the *server's*
+#: configuration and not something the caller can fix by sending different bytes.
+WRITE_STATUS: Mapping[str, int] = {
+    "manifest_invalid": 422,
+    "skill_invalid": 422,
+    "unknown_skill": 404,
+    "not_a_git_checkout": 409,
+    "commit_failed": 409,
+}
 
 #: The management console's mount point, and the file that must exist for a directory to
 #: count as one. Serving a directory without it would hand the browser a 404 shaped like
@@ -184,6 +207,15 @@ class ApiConfig:
     workdir: Path | None = None
     #: The skills library. ``None`` finds the one beside the residents tree.
     skills_dir: Path | None = None
+    #: Who commits appear to be by. ``None`` uses steward's own generic API identity,
+    #: because ``STEWARD_TOKEN`` is a shared secret with no person behind it. An operator
+    #: running a single-person steward can name themselves here, which is exactly as
+    #: trustworthy as the token — and is configuration rather than a claim in a request.
+    commit_identity: CommitIdentity | None = None
+    #: Accept writes into a residents tree that is not in a git checkout. Off, because a
+    #: fleet whose declarations have no history is a thing to choose out loud rather than
+    #: to discover on the day somebody needs to undo something.
+    allow_uncommitted_writes: bool = False
     #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
     #: a directory with no ``index.html`` in it is not served at all.
     ui_dir: Path | None = None
@@ -215,12 +247,37 @@ class ApiConfig:
             workdir=Path(workdir) if workdir is not None else None,
             skills_dir=Path(skills_dir) if skills_dir is not None else None,
             ui_dir=Path(configured_ui) if configured_ui else None,
+            commit_identity=parse_identity(source.get(COMMIT_IDENTITY_ENV)),
+            allow_uncommitted_writes=_flag(source.get(ALLOW_UNCOMMITTED_ENV)),
         )
 
 
 def parse_origins(raw: str | None) -> tuple[str, ...]:
     """Split ``STEWARD_CORS_ORIGINS`` into origins. Unset means no origin is allowed."""
     return tuple(part.strip() for part in (raw or "").split(",") if part.strip())
+
+
+def parse_identity(raw: str | None) -> CommitIdentity | None:
+    """Read ``Name <email>`` from the environment, or ``None`` for steward's own identity.
+
+    Deliberately forgiving in only one direction: anything that is not the standard git
+    author spelling is ignored rather than half-parsed into a name that is really an
+    address. A misconfigured identity should leave commits reading ``steward (api)``, which
+    is true, rather than something that looks like a person and is not.
+    """
+    text = (raw or "").strip()
+    if not text.endswith(">") or "<" not in text:
+        return None
+    name, _, address = text[:-1].partition("<")
+    name, address = name.strip(), address.strip()
+    if not name or not address:
+        return None
+    return CommitIdentity(name=name, email=address)
+
+
+def _flag(raw: str | None) -> bool:
+    """Read an environment switch. Only an explicit yes counts as one."""
+    return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def default_ui_dir() -> Path | None:
@@ -310,6 +367,86 @@ class ResidentPost(NewResident):
     deploy: bool = Field(
         default=False,
         description="Provision the container and check the schedule, not just declare.",
+    )
+
+
+#: How much manifest, soul, or skill text one request may carry. Generous next to the
+#: caps validation applies to individual fields, because it is not trying to be those caps
+#: — it is the bound that stops a write path from having to materialise something
+#: unreasonable before the real limits get a chance to speak.
+DOCUMENT_MAX_CHARS = 200_000
+
+
+class DeclarationPut(_Body):
+    """A resident's declaration, as a form edits it.
+
+    ``manifest`` and ``text`` are two spellings of one thing and exactly one may be given.
+    ``manifest`` is the mapping a form builds from its fields, which steward serialises —
+    convenient, and it rewrites the file, so comments in it do not survive. ``text`` is the
+    YAML itself, written byte for byte, which is how a caller keeps the comments a person
+    wrote. Neither is more validated than the other.
+    """
+
+    manifest: dict[str, Any] | None = Field(
+        default=None, description="The manifest as data. Steward serialises it to YAML."
+    )
+    text: str | None = Field(
+        default=None,
+        max_length=DOCUMENT_MAX_CHARS,
+        description="The manifest as YAML, written exactly as given. Preserves comments.",
+    )
+    soul: str | None = Field(
+        default=None,
+        max_length=DOCUMENT_MAX_CHARS,
+        description="The soul document. Omit it to leave the soul untouched.",
+    )
+    revision: str | None = Field(
+        default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The revision this edit was made against. Omit it to overwrite blindly.",
+    )
+
+    @model_validator(mode="after")
+    def _one_spelling(self) -> DeclarationPut:
+        """Insist on exactly one manifest spelling, so neither can silently win."""
+        if (self.manifest is None) == (self.text is None):
+            raise ValueError("give exactly one of `manifest` (a mapping) or `text` (YAML)")
+        return self
+
+
+class SkillBody(_Body):
+    """One skill, as the library stores it and a form edits it.
+
+    ``defaults`` is the field to look at twice: it is not a property of this skill so much
+    as a grant to the entire fleet, since a default skill is held by every resident without
+    any manifest saying so.
+    """
+
+    description: str = Field(
+        min_length=1,
+        max_length=DOCUMENT_MAX_CHARS,
+        description="One line saying what this skill is for.",
+    )
+    body: str = Field(
+        min_length=1, max_length=DOCUMENT_MAX_CHARS, description="The instructions themselves."
+    )
+    defaults: bool = Field(
+        default=False, description="Give this skill to every resident, granted or not."
+    )
+    revision: str | None = Field(
+        default=None,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The revision this edit was made against. Omit it to overwrite blindly.",
+    )
+
+
+class SkillPost(SkillBody):
+    """A skill to add to the library, which names itself."""
+
+    name: str = Field(
+        min_length=1,
+        max_length=IDENTIFIER_MAX_CHARS,
+        description="The skill's slug; it becomes the directory name.",
     )
 
 
@@ -553,6 +690,22 @@ def _refuse(status: int, error: str, message: str) -> NoReturn:
     raise HTTPException(status_code=status, detail={"error": error, "message": message})
 
 
+def _refuse_reload(errors: Sequence[str]) -> NoReturn:
+    """Refuse to swap in a tree that does not validate, and say which part does not."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "error": "tree_invalid",
+            "message": (
+                "the residents tree does not validate, so nothing was reloaded and this "
+                "process is still running the last declarations that did; run "
+                "`steward validate` for the field-by-field diagnostics"
+            ),
+            "errors": list(errors),
+        },
+    )
+
+
 def _refuse_if_retired(resident: Resident) -> None:
     """Refuse to give work to a retired resident, with the reason every path shares."""
     complaint = retired_complaint(resident)
@@ -615,6 +768,28 @@ SESSION_WRITE_PATHS = frozenset({"/delegate"})
 #: ``/residents/{id}/routines/{id}/run``, so a ``/residents`` fragment ahead of
 #: ``/routines/`` would tell a session it had tried to declare a resident.
 _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
+    (
+        "/declaration",
+        (
+            "a resident's charter, skills and routines are written about it rather than by "
+            "it; a session that could edit its own declaration would be choosing its own "
+            "rules, which is the one thing the declaration exists to stop"
+        ),
+    ),
+    (
+        "/skills",
+        (
+            "a skill is a capability somebody granted; a session that could write one would "
+            "be handing itself instructions nobody approved"
+        ),
+    ),
+    (
+        "/reload",
+        (
+            "when the fleet re-reads its declarations is an operator's decision, not "
+            "something a running session arranges for itself"
+        ),
+    ),
     (
         "/approvals/",
         (
@@ -1024,10 +1199,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     def list_residents() -> dict[str, Any]:
         """List the validated residents, and name the manifests that did not validate."""
         result = validate_path(residents_dir, settings.skills_dir)
+        current = library_for(residents_dir, settings.skills_dir)
         return {
             "residents": [
                 {
-                    **resident_view(resident, library),
+                    **resident_view(resident, current),
                     # The fuel gauge burrow's fleet-ops view draws, on the one call that
                     # already lists everybody. A stopped resident should not need a
                     # second round trip to look stopped.
@@ -1042,7 +1218,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     def get_resident(resident_id: str) -> dict[str, Any]:
         """Return one validated manifest, runner included, so "which brain" is answerable."""
         result = validate_path(residents_dir, settings.skills_dir)
-        return resident_view(_find_resident(result, resident_id, residents_dir), library)
+        current = library_for(residents_dir, settings.skills_dir)
+        return resident_view(_find_resident(result, resident_id, residents_dir), current)
 
     @app.get("/residents/{resident_id}/budget")
     def get_resident_budget(resident_id: str) -> dict[str, Any]:
@@ -1076,10 +1253,17 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         runs, with two settings the API always makes for itself:
 
         ``commit=False``
-            **Never.** The server is not guaranteed to own the checkout it is reading —
-            it may be a tailnet process on a machine where nobody is watching git — and a
-            commit appearing there is a commit that surprises somebody. The response says
-            so, so a panel can tell the human what is still theirs to do.
+            The *nursery* does not commit here, because its commit is bound up with its own
+            dirty-worktree refusal, which is right for a terminal and wrong for a server.
+            The declaration is committed all the same — by :mod:`steward.authoring`, after
+            the pipeline returns, staging only the two files that were written.
+
+            This reverses the endpoint's original stance, deliberately (steward #214). It
+            used to commit nothing on the grounds that the server may not own its checkout,
+            which left the fleet's newest declarations as the only ones with no history and
+            no author. The honest version of that worry is a *configured* one:
+            ``STEWARD_ALLOW_UNCOMMITTED_WRITES`` accepts a tree with no git behind it, and
+            a tree that has git gets the audit trail everything else gets.
         ``provision=body.deploy``
             Default false, so the endpoint's old behaviour is its default behaviour: files
             for review and nothing else.
@@ -1099,11 +1283,24 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id = accept(
             request, "deployed" if body.deploy else "declared", {"resident": body.id}
         )
-        uncommitted = (
-            "the declaration is written but NOT committed — steward does not commit from "
-            "the server, because it may not own this checkout; commit "
-            f"residents/{body.id}/ yourself"
-        )
+        written = [
+            path
+            for path in (report.declare.manifest_path, report.declare.soul_path)
+            if path.is_file()
+        ]
+        try:
+            commit = au.commit_write(
+                residents_dir,
+                written,
+                au.DECLARE_SUBJECT.format(id=body.id),
+                request_id=request_id,
+                principal=API_PRINCIPAL,
+                **write_settings(),
+            )
+        except au.AuthoringError as exc:
+            db.set_request_outcome(request_id, f"refused: {exc.reason}")
+            refuse_write(exc)
+        uncommitted = commit.note
         if not body.deploy:
             deployed = "nothing is deployed and no routine is scheduled: this is a file for review"
         elif report.register is not None and not report.register.ok:
@@ -1130,26 +1327,321 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "manifest_path": str(report.declare.manifest_path),
             "soul_path": str(report.declare.soul_path),
             **report.to_dict(),
+            # Last, and deliberately after the report: `declare.commit` is the *nursery's*
+            # commit, which is always null here because the API asks it not to commit.
+            # This is the one that happened.
+            "commit": commit.to_dict(),
+        }
+
+    # -- writing declarations and skills (steward #214) -------------------------------
+
+    def refuse_write(exc: au.AuthoringError) -> NoReturn:
+        """Turn an authoring refusal into its HTTP answer, diagnostics and all.
+
+        Structured rather than rendered, unlike the read views: the caller is a form with
+        fields to highlight, and three lines of terminal prose cannot tell it which one.
+        """
+        raise HTTPException(
+            status_code=WRITE_STATUS.get(exc.reason, 409),
+            detail={
+                "error": exc.reason,
+                "message": str(exc),
+                "diagnostics": [au.diagnostic_as_dict(d) for d in exc.diagnostics],
+            },
+        )
+
+    def check_revision(offered: str | None, actual: str) -> None:
+        """Refuse an edit made against a version that is no longer what is on disk.
+
+        Optional, and deliberately so: a caller that omits ``revision`` is saying it means
+        to overwrite whatever is there, which is what a script wants. A UI sends the
+        revision it loaded, and gets told rather than silently winning.
+        """
+        if offered is not None and offered != actual:
+            _refuse(
+                409,
+                "stale_revision",
+                f"this edit was made against {offered}, and what is on disk is now {actual}; "
+                f"somebody else changed it first — re-read it and reapply your change",
+            )
+
+    def write_settings() -> dict[str, Any]:
+        """Return the two knobs every write shares, resolved from configuration."""
+        return {
+            "identity": settings.commit_identity or au.DEFAULT_IDENTITY,
+            "allow_uncommitted": settings.allow_uncommitted_writes,
+        }
+
+    @app.get("/residents/{resident_id}/declaration")
+    def get_declaration(resident_id: str) -> dict[str, Any]:
+        """Return the two files that declare this resident, as text and as data.
+
+        The editable source, not the projection :func:`resident_view` serves. Both are
+        useful and they are not the same thing: the view is assembled from a validated
+        model and is what a fleet list draws, while this is what is actually in git —
+        comments, field order, and all — which is the only thing you can sensibly write
+        back. ``PUT`` takes exactly this shape.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        soul_file = resident.manifest.soul.file
+        declaration = au.read_declaration(residents_dir, resident.id, soul_file)
+        return {
+            "id": resident.id,
+            "uid": str(resident.manifest.uid),
+            "manifest": yaml.safe_load(declaration.manifest_text),
+            "text": declaration.manifest_text,
+            "soul": declaration.soul_text,
+            "soul_file": soul_file,
+            "revision": au.revision_of(
+                *au.declaration_paths(residents_dir, resident.id, soul_file)
+            ),
+            "paths": [str(p) for p in au.declaration_paths(residents_dir, resident.id, soul_file)],
+        }
+
+    @app.put("/residents/{resident_id}/declaration")
+    def put_declaration(resident_id: str, body: DeclarationPut, request: Request) -> dict[str, Any]:
+        """Replace a resident's declaration, if it validates, and commit it.
+
+        **Human callers only**, and this is the sharpest instance of that rule in the whole
+        API: a resident that could rewrite its own charter would be choosing the rules it is
+        held to.
+
+        A full replacement rather than a patch. Merging a partial edit into a manifest means
+        steward deciding what a missing key meant — cleared, or untouched? — and the
+        declaration is the wrong file to be clever with. Read it, change it, write it back.
+        The ``revision`` from the ``GET`` is how two editors find out about each other.
+
+        Nothing is written unless the whole tree still validates with this change applied,
+        including the checks that only exist across residents. A refusal has written
+        nothing, committed nothing, and left the resident exactly as it was.
+        """
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        soul_file = resident.manifest.soul.file
+        current = au.declaration_paths(residents_dir, resident.id, soul_file)
+        check_revision(body.revision, au.revision_of(*current))
+        manifest_text = (
+            body.text
+            if body.text is not None
+            else yaml.safe_dump(body.manifest, sort_keys=False, allow_unicode=True)
+        )
+        declaration = au.Declaration(manifest_text=manifest_text, soul_text=body.soul)
+        if declaration.soul_filename != soul_file:
+            _refuse(
+                409,
+                "soul_file_changed",
+                f"this declaration renames the soul from {soul_file!r} to "
+                f"{declaration.soul_filename!r}; steward will not leave the old file orphaned "
+                f"in the tree, so rename it in the checkout and commit that yourself",
+            )
+        request_id = accept(request, "written", {"resident": resident.id})
+        try:
+            written = au.write_declaration(
+                residents_dir,
+                resident.id,
+                declaration,
+                request_id=request_id,
+                principal=API_PRINCIPAL,
+                skills_dir=settings.skills_dir,
+                **write_settings(),
+            )
+        except au.AuthoringError as exc:
+            db.set_request_outcome(request_id, f"refused: {exc.reason}")
+            refuse_write(exc)
+        return {
+            "request_id": request_id,
+            "status": "accepted",
+            "id": resident.id,
+            "revision": written.revision,
+            "paths": [str(p) for p in written.paths],
+            "commit": written.commit.to_dict(),
+            "warnings": [au.diagnostic_as_dict(d) for d in written.validation.warnings],
+            "message": (
+                f"written and validated; {written.commit.note}. The scheduler picks this up "
+                f"on its next wake-up, or immediately via POST /reload"
+            ),
         }
 
     # -- skills ----------------------------------------------------------------------
+
+    def skills_view(current: SkillLibrary) -> dict[str, Any]:
+        """Render the library and who holds each skill."""
+        result = validate_path(residents_dir, settings.skills_dir)
+        holders: dict[str, list[str]] = {skill.name: [] for skill in current}
+        for resident in result.residents:
+            for skill in effective_skills(resident.manifest, current):
+                holders[skill.name].append(resident.id)
+        return {
+            "library": str(current.path) if current.path is not None else None,
+            "skills": [{**skill.as_dict(), "holders": holders[skill.name]} for skill in current],
+            "errors": [diagnostic.render() for diagnostic in current.diagnostics],
+        }
 
     @app.get("/skills")
     def list_skills() -> dict[str, Any]:
         """List the skills library, and who holds each skill.
 
-        Read-only, like the rest of the views: a skill is added by committing a
-        ``SKILL.md`` and granted by committing a manifest, never over HTTP.
+        Read from disk per request rather than from the copy this app started with. That
+        was always the honest thing to serve and is now the necessary one: since a skill
+        can be written over HTTP (steward #214), a listing built from a startup snapshot
+        would not contain the skill the caller just created. It costs nothing extra —
+        ``validate_path`` on the line below already re-reads the same library.
         """
-        result = validate_path(residents_dir, settings.skills_dir)
-        holders: dict[str, list[str]] = {skill.name: [] for skill in library}
-        for resident in result.residents:
-            for skill in effective_skills(resident.manifest, library):
-                holders[skill.name].append(resident.id)
+        return skills_view(library_for(residents_dir, settings.skills_dir))
+
+    @app.get("/skills/{name}")
+    def get_skill(name: str) -> dict[str, Any]:
+        """Return one skill's frontmatter and body, with the revision to edit against."""
+        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
+        if root is None:
+            _refuse(404, "unknown_skill", f"there is no skills library beside {residents_dir}")
+        try:
+            document, revision = au.read_skill_document(root, name)
+        except au.AuthoringError as exc:
+            refuse_write(exc)
         return {
-            "library": str(library.path) if library.path is not None else None,
-            "skills": [{**skill.as_dict(), "holders": holders[skill.name]} for skill in library],
-            "errors": [diagnostic.render() for diagnostic in library.diagnostics],
+            "name": document.name,
+            "description": document.description,
+            "body": document.body,
+            "defaults": document.default,
+            "revision": revision,
+            "path": str(root / name / "SKILL.md"),
+        }
+
+    def write_one_skill(
+        document: au.SkillDocument, request: Request, *, created: bool
+    ) -> dict[str, Any]:
+        """Validate, write and commit one skill — the shared half of POST and PUT."""
+        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
+        if root is None:
+            # No library yet. The default location beside the tree is where one belongs,
+            # and it is created only once the write has actually been accepted.
+            root = Path(residents_dir).resolve().parent / "skills"
+        request_id = accept(request, "written", {"skill": document.name})
+        try:
+            written = au.write_skill(
+                residents_dir,
+                root,
+                document,
+                request_id=request_id,
+                principal=API_PRINCIPAL,
+                created=created,
+                **write_settings(),
+            )
+        except au.AuthoringError as exc:
+            db.set_request_outcome(request_id, f"refused: {exc.reason}")
+            refuse_write(exc)
+        return {
+            "request_id": request_id,
+            "status": "accepted",
+            "name": document.name,
+            "revision": written.revision,
+            "paths": [str(p) for p in written.paths],
+            "commit": written.commit.to_dict(),
+            "warnings": [au.diagnostic_as_dict(d) for d in written.validation.warnings],
+            "message": (
+                f"written and validated against the fleet; {written.commit.note}. Sessions "
+                f"opened from now on are provisioned with it"
+            ),
+        }
+
+    @app.post("/skills", status_code=201)
+    def create_skill(body: SkillPost, request: Request) -> dict[str, Any]:
+        """Add a skill to the library.
+
+        **Human callers only.** Refuses an existing name rather than overwriting it: a
+        ``POST`` that quietly replaced somebody's skill would make "add" and "rewrite" the
+        same button.
+
+        ``defaults: true`` deserves a second look before sending. A default skill is held
+        by every resident in the fleet without any manifest granting it, so this one flag
+        changes what every session is given.
+        """
+        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
+        if root is not None and (root / body.name / "SKILL.md").is_file():
+            _refuse(
+                409,
+                "skill_exists",
+                f"skill {body.name!r} already exists; PUT /skills/{body.name} replaces it",
+            )
+        return write_one_skill(
+            au.SkillDocument(
+                name=body.name,
+                description=body.description,
+                body=body.body,
+                default=body.defaults,
+            ),
+            request,
+            created=True,
+        )
+
+    @app.put("/skills/{name}")
+    def update_skill(name: str, body: SkillBody, request: Request) -> dict[str, Any]:
+        """Replace one skill in the library, if it still validates for the whole fleet.
+
+        **Human callers only**, like every write here.
+        """
+        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
+        if root is None or not (root / name / "SKILL.md").is_file():
+            _refuse(404, "unknown_skill", f"no skill {name!r}; POST /skills adds one")
+        check_revision(body.revision, au.revision_of(root / name / "SKILL.md"))
+        return write_one_skill(
+            au.SkillDocument(
+                name=name, description=body.description, body=body.body, default=body.defaults
+            ),
+            request,
+            created=False,
+        )
+
+    # -- reload ------------------------------------------------------------------------
+
+    @app.post("/reload")
+    def reload_fleet(request: Request) -> dict[str, Any]:
+        """Re-read the residents tree and the skills library into this process.
+
+        **This process**, and the distinction is the whole of the endpoint's honesty. The
+        scheduler daemon is a *different process* — usually on the same burrow, started by
+        ``steward serve`` — and no HTTP call can reach into it. It does not need one: it
+        watches the trees itself and reloads on its next wake-up (:class:`TreeSource`),
+        which is within a minute. What this endpoint fixes is the API's own long-lived
+        collaborators, the run-now scheduler and the board dispatcher, which were assembled
+        at startup and would otherwise fire a routine against the manifest that was on disk
+        when the server booted.
+
+        Read views need no reload at all — they re-read the tree on every request.
+        """
+        current = library_for(residents_dir, settings.skills_dir)
+        result = validate_path(residents_dir, settings.skills_dir)
+        errors = [diagnostic.render() for diagnostic in result.errors]
+        if errors:
+            # The same judgement the daemon makes (:meth:`Scheduler.reload_if_changed`): a
+            # tree that stopped validating does not stop the fleet. Swapping in what did
+            # parse would quietly retire every resident whose manifest is mid-edit, so the
+            # previous snapshot stands and the reason is returned rather than swallowed.
+            _refuse_reload(errors)
+        active = tuple(m.active_residents(result.residents))
+        runs.scheduler.set_library(current)
+        runs.scheduler.scheduled = [
+            ScheduledRoutine(resident=resident, routine=routine)
+            for resident in active
+            for routine in resident.manifest.routines
+            if routine.enabled
+        ]
+        hooks.refresh(active, current)
+        app.state.library = current
+        request_id = accept(request, "reloaded", {"residents": len(active)})
+        return {
+            "request_id": request_id,
+            "status": "reloaded",
+            "residents": len(active),
+            "routines": len(runs.scheduler.scheduled),
+            "skills": [skill.name for skill in current],
+            "errors": errors,
+            "message": (
+                "this API process re-read the tree; the scheduler daemon is a separate "
+                "process and picks the same change up on its own next wake-up"
+            ),
         }
 
     # -- routines --------------------------------------------------------------------

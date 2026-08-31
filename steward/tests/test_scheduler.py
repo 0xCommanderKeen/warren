@@ -21,6 +21,7 @@ from steward import runners as r
 from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
+from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
 from steward.session_auth import (
     SESSION_CREDENTIAL_PREFIX,
@@ -2110,9 +2111,7 @@ def test_a_routine_added_on_disk_is_picked_up_without_a_restart(
     assert sorted(item.routine.id for item in engine.scheduled) == ["daily-summary", "inbox-read"]
 
 
-def test_an_unchanged_tree_is_not_reloaded(
-    write_resident: ResidentWriter, tmp_path: Path
-) -> None:
+def test_an_unchanged_tree_is_not_reloaded(write_resident: ResidentWriter, tmp_path: Path) -> None:
     """The check runs on every wake-up, so it has to be cheap and has to stay quiet."""
     path = write_resident(manifest_with(DAILY))
     engine = reloading(path.parent.parent, tmp_path)
@@ -2199,8 +2198,6 @@ def test_the_board_dispatcher_is_refreshed_with_the_fleet(
     write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     """A resident declared at noon must not be invisible to the board until a restart."""
-    from steward.board import Dispatcher
-
     path = write_resident(manifest_with(DAILY))
     store = Store(":memory:")
     try:

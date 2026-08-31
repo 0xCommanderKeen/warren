@@ -36,7 +36,7 @@ GRANTED = ("daily-summary", "write-journal")
 def fleet(
     scratch_repo: ScratchRepo, write_resident: ResidentWriter, write_skill: SkillWriter
 ) -> ScratchRepo:
-    """A committed checkout holding one valid resident and the skills it is granted."""
+    """Build a committed checkout with one valid resident and the skills it is granted."""
     for name in GRANTED:
         write_skill(name, root=scratch_repo.skills)
     write_resident(valid_manifest(), root=scratch_repo.residents)
@@ -50,7 +50,7 @@ def declaration_of(repo: ScratchRepo, resident_id: str = "test-agent") -> au.Dec
     return au.read_declaration(repo.residents, resident_id, "soul.md")
 
 
-def edited(declaration: au.Declaration, **changes: Any) -> au.Declaration:
+def edited(declaration: au.Declaration, **changes: object) -> au.Declaration:
     """Return the declaration with those top-level manifest keys changed."""
     data = yaml.safe_load(declaration.manifest_text)
     data.update(changes)
@@ -85,7 +85,9 @@ def test_an_edit_that_does_not_validate_is_refused_and_changes_nothing(fleet: Sc
         write(fleet, "test-agent", edited(declaration_of(fleet), summary="x" * 5_000))
 
     assert refused.value.reason == "manifest_invalid"
-    assert (fleet.residents / "test-agent" / MANIFEST_FILENAME).read_text(encoding="utf-8") == before
+    assert (fleet.residents / "test-agent" / MANIFEST_FILENAME).read_text(
+        encoding="utf-8"
+    ) == before
     assert fleet.head() == head
     assert fleet.git("status", "--porcelain").stdout.strip() == ""
 
