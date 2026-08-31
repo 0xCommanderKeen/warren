@@ -303,6 +303,14 @@ TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
 #: (:attr:`RunRequest.workspace`), read by the same two places for the same reason.
 WORKSPACE_FLAG = "--add-dir"
 
+#: The flag naming which settings files a session loads, and the value steward gives it:
+#: the CLI's spelling for *none of them* (steward #206). Unlike the two above, this one is
+#: not compiled from anything a manifest says — it is a property of how steward launches
+#: every ``claude`` session, so :func:`required_flags` reports it for every claude resident
+#: and :func:`check_cli_support` probes for it whether or not a bound was declared.
+SETTING_SOURCES_FLAG = "--setting-sources"
+SETTING_SOURCES = ""
+
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
 log = logging.getLogger("steward.runners")
@@ -981,11 +989,29 @@ class ClaudeRunner(_ProcessRunner):
         acceptEdits`` still had no Bash. A permissive mode cannot hand back a tool this
         argv took away.
 
-        ``unrestricted`` emits neither flag, so an unbounded resident's argv is byte for
-        byte what it was before this field existed. An empty list emits ``--tools ""``,
+        ``unrestricted`` emits neither flag, so an unbounded resident's tool argv is byte
+        for byte what it was before that field existed. An empty list emits ``--tools ""``,
         which the CLI documents — and which measured out — as *no tools at all*.
+
+        ``--setting-sources ""`` goes on every claude session, bounded or not, and is the
+        one flag here that no manifest asks for (steward #206). Measured 2026-08-31, in
+        ``docs/settings-sources.md``: a settings file at any of the three sources registers
+        a ``SessionStart`` hook that runs, and sets ``permissions.defaultMode``, and neither
+        is gated by the workspace trust flag that was the only thing standing in the way.
+        A session's working directory *is* the resident's memory directory, so ``project``
+        and ``local`` are files under the constrained session's own hand; ``user`` is
+        whatever the launching machine happens to hold. None of the three is a source a
+        resident should read, so none of them is named.
         """
-        argv = [self.binary, "-p", request.prompt, "--output-format", "json"]
+        argv = [
+            self.binary,
+            "-p",
+            request.prompt,
+            "--output-format",
+            "json",
+            SETTING_SOURCES_FLAG,
+            SETTING_SOURCES,
+        ]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
@@ -1320,14 +1346,19 @@ def _cli_help(binary: str, placement: Placement) -> str | None:
 
 
 def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> tuple[str, ...]:
-    """Return the CLI flags this manifest's declarations compile into, in argv order.
+    """Return the CLI flags a session for this manifest is launched with, in argv order.
 
     Empty for a kind that compiles none — which, for both declarations, is a kind
     validation refuses to pair with the declaration in the first place.
+
+    Never empty for ``claude``, though nothing may be declared at all:
+    :data:`SETTING_SOURCES_FLAG` is on every claude argv rather than compiled from a
+    declaration, so every claude resident has something the installed binary has to
+    support.
     """
     if spec.kind != ClaudeRunner.kind:
         return ()
-    flags: list[str] = []
+    flags: list[str] = [SETTING_SOURCES_FLAG]
     if not tools.unrestricted:
         flags.extend(TOOL_BOUND_FLAGS)
     if workspace:

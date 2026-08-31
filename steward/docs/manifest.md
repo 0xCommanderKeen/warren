@@ -328,15 +328,61 @@ It matters most where it is least visible: a provisioned resident installs its o
 the image's bootstrap, pinned by `CLAUDE_VERSION` in the Makefile, so the version running a
 manifest on the NAS is not the one on the laptop that validated it.
 
-Two edges this does **not** close, both worth knowing:
+One edge this does **not** close: a granted skill can need a tool the list denies. Nothing
+cross-checks skill frontmatter against `tools`, so that mismatch surfaces at run time
+rather than at validation.
 
-- A granted skill can need a tool the list denies. Nothing cross-checks skill frontmatter
-  against `tools`, so that mismatch surfaces at run time rather than at validation.
-- `--setting-sources` is not passed, so in principle a resident session could load settings
-  from the host or from its own working directory. In practice the CLI refuses to apply a
-  `.claude/settings.json` from an untrusted workspace — it says so on stderr — and a
-  resident's memory directory is not trusted. That is a mitigation resting on host state
-  rather than on anything steward declares, and closing it properly is separate work.
+The other one — settings — is closed, and is not a manifest dimension. See below.
+
+## What a session loads from disk: nothing
+
+`ClaudeRunner.argv` writes `--setting-sources ""` on **every** claude session, bounded or
+unrestricted. No manifest asks for it and none can turn it off: which settings files a
+session reads is a property of how steward launches sessions, not something a resident
+declares about itself. There are three sources and steward names none of them:
+
+| source | file | why not |
+|---|---|---|
+| `user` | `~/.claude/settings.json` | whatever the launching machine happens to hold — the operator's own hooks, permission mode and model, which nothing declared a resident should inherit |
+| `project` | `<workdir>/.claude/settings.json` | the working directory **is** the resident's memory directory: a permission file under the constrained session's own hand |
+| `local` | `<workdir>/.claude/settings.local.json` | same directory, same hand |
+
+The measurement is in [`settings-sources.md`](settings-sources.md), dated 2026-08-31,
+taken against a deliberately trusted throwaway workspace on CLI 2.1.243 and 2.1.252. Three
+results decide it:
+
+- A settings file at **any** of the three sources registers a `SessionStart` hook that
+  runs. A hook is arbitrary code at the next fire, and `--tools` does not touch it — a
+  hook is not a tool.
+- A settings file at any source sets `permissions.defaultMode`. `bypassPermissions` from a
+  file measured out as the whole permission system switched off: `permission_denials: []`
+  where a session with no settings file was refused.
+- **Neither is gated by workspace trust.** The trust flag `#204` recorded as the mitigation
+  covers `permissions.allow` entries and nothing else — the CLI's own message says so, and
+  a hook in that same untrusted file ran anyway. Trust is not inherited by subdirectories
+  either, so the gate was never going to cover a resident's memory directory by accident.
+
+So the sentence this document used to carry — *"the CLI refuses to apply a
+`.claude/settings.json` from an untrusted workspace"* — was true only of permission rules,
+and the dangerous half was never covered. `--setting-sources ""` was measured to stop all
+three effects, from all three sources, in trusted and untrusted workspaces alike; naming a
+subset is honoured as that subset, and an unknown name is refused loudly rather than
+ignored.
+
+`steward doctor` probes for the flag on **every** claude resident, not only ones with a
+declaration, because every claude argv carries it: a `claude` too old to know it exits 1
+on the unknown option, which would otherwise be a failed session at 07:00 rather than a
+red line in daylight.
+
+**What it costs.** The flag means *load nothing from the filesystem*, so a `CLAUDE.md` in
+the working directory is no longer read (steward writes none, and a resident writing its
+own is the instruction-shaped version of the hole being closed — the journal is the
+supported channel for that), and `.claude/skills` is no longer discovered. Steward still
+materializes the effective skill set there, and skills still reach the session, because
+the **prompt** was always the delivery path: name, description and body are injected into
+every session. What a resident loses is the CLI's own route to them — the `Skill` tool
+answers `Unknown skill`. `steward skills` says exactly that rather than printing two
+channels where one works.
 
 ## `workspace` — where a session may act
 
@@ -397,7 +443,7 @@ reading.
 
 | kind | what it runs |
 |---|---|
-| `claude` | `claude -p <prompt> --model <model> --output-format json`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free. |
+| `claude` | `claude -p <prompt> --output-format json --setting-sources "" --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and comes from no declaration. |
 | `codex` | `codex exec [--model <model>] <prompt>`. Plain text out; usage is unavailable, and steward reports it as unknown rather than guessing. |
 | `command` | The argv template below, for anything else. |
 | `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
@@ -1146,16 +1192,21 @@ library either way. What that means depends on the runner:
 
 | runner kind | prompt injection | on-disk skills |
 |---|---|---|
-| `claude` | yes | yes — `<workdir>/.claude/skills/<name>/SKILL.md` |
+| `claude` | yes | written to `<workdir>/.claude/skills/<name>/SKILL.md`, not discovered |
 | `codex` | yes | no — nothing is written |
 | `command` | yes | no |
 | `mock` | yes | no |
 
-The prompt copy is what steward can honestly say the session was *told*; the on-disk copy
-is what a brain with its own skill loader can pick up as it works. **Steward owns the
-materialized directory**: files are written only when their content changed, and anything
-in there that is not in the effective set is removed — so a skill taken out of a manifest
-is genuinely absent from the next session rather than surviving on disk.
+The prompt copy is what steward can honestly say the session was *told*, and since
+[`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) it is the only copy the
+session acts on: a claude session loads no setting sources, and `.claude/skills` is
+discovered through the project source. The directory is still written — a file a session
+with `Read` can open, and the thing a future design that restores discovery without
+re-opening the settings channel would build on — but the CLI's `Skill` tool does not see
+it. **Steward owns the materialized directory**: files are written only when their content
+changed, and anything in there that is not in the effective set is removed — so a skill
+taken out of a manifest is genuinely absent from the next session rather than surviving on
+disk.
 
 A granted skill the library does not have is a **loud pre-run failure**: a routine is
 bracketed `routine_started` → `routine_failed` with the missing name in the error, a
@@ -1171,7 +1222,7 @@ library /srv/steward/skills
   read-inbox     [granted]  Read and triage mail on a schedule…
 
 life-agent: daily-summary, escalate, research, write-journal, read-inbox, read-calendar, errands
-  runner claude — prompt + .claude/skills/ in the session's working directory
+  runner claude — prompt — plus a copy in .claude/skills/ the session's CLI does not discover
 ```
 
 `steward validate` checks grants against `skills/` beside the residents tree; `--skills`
