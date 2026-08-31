@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import fixture from "../contract/fixtures/complete-v1.json";
+import fixture from "../contract/fixtures/complete-v1.js";
 import { createStateTransport } from "./createStateTransport.js";
 
 function envelope(generation, cursor, extra = {}) {

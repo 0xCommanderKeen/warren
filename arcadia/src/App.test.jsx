@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
-import fixture from "./contract/fixtures/complete-v1.json";
+import fixture from "./contract/fixtures/complete-v1.js";
 import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
@@ -125,6 +125,13 @@ describe("Arcadia", () => {
     expect(screen.getByRole("region", { name: "Journal observations" })).toHaveTextContent(
       "No journal observations have been recorded.",
     );
+  });
+
+  it("waits for a snapshot rather than falling back to contract test data", () => {
+    render(<App />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Village snapshot has not loaded yet.");
+    expect(screen.queryByText("Keeper")).toBeNull();
   });
 
   it("distinguishes a snapshot that has not loaded from an unavailable contract", () => {

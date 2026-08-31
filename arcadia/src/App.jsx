@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { pendingApprovals } from "./contract/approvals.js";
-import fixture from "./contract/fixtures/complete-v1.json";
 import { parseSnapshot, UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { PhaserGame } from "./game/PhaserGame.jsx";
 import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
@@ -175,8 +174,8 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
   );
 }
 
-export function App({ envelope = fixture, stewardClient = null }) {
-  if (envelope === null) {
+export function App({ envelope, stewardClient = null }) {
+  if (envelope == null) {
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
         <p className="border border-[#785a25] bg-[#faf6eb] px-5 py-4 font-mono text-sm" role="status">Village snapshot has not loaded yet.</p>

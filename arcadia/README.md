@@ -2,7 +2,7 @@
 
 Arcadia is the village client for [Burrow](https://github.com/0xCommanderKeen/burrow). React owns the interface and Phaser owns the canvas, connected through the EventBus bridge supplied by `phaserjs/template-react`.
 
-This repository consumes Burrow's complete, versioned `StateEnvelope` contract. The vendored [`complete-v1.json`](src/contract/fixtures/complete-v1.json) is the current compatibility fixture. Arcadia accepts `snapshot` and `reset` envelopes whose `snapshot.schema_version` is `1`, then renders `snapshot.villagers` directly. It rejects unsupported schema versions before applying any state.
+Arcadia consumes Burrow's complete, versioned `StateEnvelope` contract. The compatibility fixture is Burrow's own [`complete-v1.json`](../chronicle/tests/fixtures/state-contract/complete-v1.json), read in-tree through [`src/contract/fixtures/complete-v1.js`](src/contract/fixtures/complete-v1.js) — Arcadia keeps no copy of it, so it cannot drift. Arcadia accepts `snapshot` and `reset` envelopes whose `snapshot.schema_version` is `1`, then renders `snapshot.villagers` directly. It rejects unsupported schema versions before applying any state.
 
 Arcadia is allowed to read only these Burrow endpoints:
 
@@ -32,7 +32,7 @@ pnpm install
 pnpm dev
 ```
 
-The running app always loads live Burrow state; the vendored fixture is compatibility test data only. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. Placeholder SVG tiles keep the asset pipeline replaceable while the scene architecture settles.
+The running app always loads live Burrow state; the contract fixture is compatibility test data only and is never bundled into the app. The village map is authored as a Tiled JSON export in `public/assets/village.tmj`; tile properties define collision, and the `Places` object layer defines homes, the shared visitor Lodge, street, and work anchors. Placeholder SVG tiles keep the asset pipeline replaceable while the scene architecture settles.
 
 ## Verification
 
