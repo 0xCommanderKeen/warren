@@ -178,6 +178,38 @@ def test_a_container_session_runs_in_the_mount_with_only_named_env_and_reports_c
     )
 
 
+# ------------------------------------------------- where the docker client points (#59)
+
+#: A TCP endpoint no docker daemon is ever listening on. Port 1 is privileged and
+#: reserved, so this fails at connect rather than reaching somebody's real daemon.
+NOWHERE = "tcp://127.0.0.1:1"
+
+
+def test_a_bogus_docker_host_reaches_the_real_docker_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The measurement steward #59's documentation rests on, against a real client.
+
+    ``test_runners.py`` proves ``run_argv`` passes the parent environment through by
+    reading it back out of a stub. This proves the consequence that matters: the *real*
+    docker client honours the ``DOCKER_HOST`` steward's daemon was started with, so
+    pointing it at another machine genuinely moves supervision there. The failure is the
+    proof — a client that had ignored the variable would have answered from this host.
+
+    What it deliberately does not prove is that a remote ``DOCKER_HOST`` is enough for
+    *container-placed execution*: that half also needs the host side of the resident's
+    memory mount on the control plane's own filesystem, which
+    :func:`steward.sessions.workdir_refusal` requires and no endpoint can supply. See
+    ``docs/topology.md``.
+    """
+    monkeypatch.setenv("DOCKER_HOST", NOWHERE)
+
+    outcome = r.run_argv([DOCKER, "ps"])
+
+    assert not outcome.ok
+    assert NOWHERE in outcome.stderr, outcome.stderr
+
+
 def test_a_granted_skill_crosses_the_mount_and_pruning_removes_it(tmp_path: Path) -> None:
     """Criterion 5 across the real boundary: materialize host-side, read it from inside.
 

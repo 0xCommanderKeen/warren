@@ -304,6 +304,40 @@ ssh access to the NAS. Nothing pulls on the NAS — it has no git and no clone; 
 pushes the runtime bundle over ssh, and the deploy directories there are unpacked
 artifacts.
 
+### Where the daemons run
+
+**`steward scheduler run` and `steward watchdog run` run on the burrow whose containers
+they supervise** — today, the NAS. The commands above are the exception, not the rule:
+declaring and provisioning a resident is multi-host by design (`deploy.host` per manifest,
+tar over ssh), and is meant to be run from a laptop. *Supervising* one is not. Both daemons
+reach containers by shelling out to a **local** `docker` client — `docker inspect` and
+`docker restart` for the watchdog, `docker exec` for a container-placed session — and none
+of those calls has ever looked at `deploy.host`.
+
+The failure this prevents is a quiet one. A watchdog on the wrong machine asks a docker
+that has never heard of `life-agent`, gets nothing, and reports the resident as
+*unsupervised* — which is honest about what it could see and indistinguishable from a
+resident that has no container at all. It keeps burying stale runs and tripping budgets the
+whole time, so nothing looks wrong. `steward doctor` and `steward watchdog` therefore open
+with a topology report naming any container this process cannot reach:
+
+```console
+$ steward doctor
+topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
+life-agent: container life-agent on dxp2800 — supervised from here
+```
+
+Doctor warns and still exits 0 (it is routinely run from a laptop while the daemons are on
+the NAS); the watchdog says it in red at startup, because that process *is* the supervisor.
+`STEWARD_BURROW` names this burrow when the machine's hostname is not what manifests call
+it — though what `docker info` says about itself is checked first, and outranks it.
+
+`DOCKER_HOST` does relocate supervision (measured: steward's docker invocations inherit the
+daemon's environment, unlike a session's). It does **not** relocate execution — a
+container-placed session also needs the host side of its memory mount on the control
+plane's own filesystem, which `workdir_refusal` requires. The rule, the measurements, and
+the case for teaching supervision ssh later are in [docs/topology.md](docs/topology.md).
+
 ```console
 $ export BURROW_URL=http://dxp2800:8737    # arcadia's origin, which proxies /events to
                                            # chronicle on 8738 — not a stale port
@@ -389,10 +423,12 @@ smoke: PASS this container can reach the village
 
 `steward-smoke` runs inside the container and is [issue
 #51](https://github.com/0xCommanderKeen/warren/issues/51)'s acceptance criterion made
-executable. The container still runs `sleep infinity`: **the scheduler runs sessions
-locally**, in the process running `steward scheduler run`, and nothing in steward execs
-into a resident's container yet. The image is what makes that step possible, not the step
-itself.
+executable. The container runs `sleep infinity` because it is a *place for sessions to
+happen* rather than a process doing work: steward drives the brain from outside. **Whether
+a session happens in there is `runner.placement`** (steward #58) — `local`, the default,
+runs it in the process running `steward scheduler run`; `container` runs it as a
+`docker exec` into this container. Either way the docker client is the *local* one, which
+is why [the daemons run on the burrow](#where-the-daemons-run).
 
 **Secrets never enter this repo.** `BURROW_URL` and `BURROW_TOKEN` are read from steward's
 own environment at provision time and written into a `.env` on the host at mode `0600`.
@@ -506,6 +542,8 @@ the scheduler and the API name the ones they need on startup.
 | `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
 | `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
+| `STEWARD_BURROW` | doctor, watchdog | What this machine is called when its hostname is not the name manifests use for it (`deploy.host`). Read only to *report* whether supervision reaches a container; never to decide where anything runs. A declaration replaces the hostname rather than joining it, and `docker info`'s own answer outranks both. See [docs/topology.md](docs/topology.md). |
+| `DOCKER_HOST` | docker, so: watchdog + container placement | Docker's own pointer. Steward never sets it and never reads it to decide anything — but every docker call steward makes inherits it, so it does relocate *supervision* to another machine's daemon. It does not relocate *execution*: a container-placed session also needs the host side of its memory mount on this filesystem. Reported as **unverified**, because nothing here can prove the endpoint is the declared host's docker. |
 
 Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
 `--allow-open`, `--residents` — and the flag wins over the variable.

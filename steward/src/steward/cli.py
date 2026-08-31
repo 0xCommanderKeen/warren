@@ -92,6 +92,7 @@ from steward.store import (
     Store,
     default_db_path,
 )
+from steward.topology import Survey, survey
 from steward.transitions.approval import ApprovalTransitions
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
@@ -536,6 +537,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
+        problems += _report_topology(result.residents)
         problems += _report_health_failures(store.health.latest())
         problems += _report_watchdog(store.last_watchdog_pass())
     problems += _report_scheduler(SchedulerState.load(default_state_path()))
@@ -708,6 +710,29 @@ def _report_inbox(resident: Resident, store: Store) -> int:
         )
         return 1
     click.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
+    return 0
+
+
+def _report_topology(residents: Sequence[Resident]) -> int:
+    """Say whether the docker this host reaches holds the containers manifests name (#59).
+
+    Never a problem worth exiting on, and for exactly the reason
+    :func:`_report_scheduler` is not: doctor is routinely run on a laptop while the
+    daemons live on the NAS, and a container this host cannot see is not a broken fleet —
+    it is a report being run from somewhere other than the burrow. What *is* worth saying
+    out loud is which of those two it is, because the failure this catches is
+    indistinguishable from health at run time: a watchdog pointed at the wrong docker gets
+    "no such container", reports the resident as unsupervised, and never restarts
+    anything.
+
+    The same survey is red in ``steward watchdog``, where the process reading it *is* the
+    supervisor and the gap is its own defect rather than a diagnostic run from elsewhere.
+    """
+    for note in survey(residents).notes():
+        if note.ok:
+            click.secho(note.text, fg="green")
+        else:
+            click.secho(note.text, fg="yellow", err=True)
     return 0
 
 
@@ -1779,6 +1804,23 @@ def _watchdog_failed(report: WatchdogPass) -> bool:
     return bool(report.gave_up or report.paused)
 
 
+def _report_topology_to_the_supervisor(report: Survey) -> None:
+    """Say, before the first pass, which containers this watchdog can actually reach (#59).
+
+    Red here, where the same survey is only yellow in ``steward doctor``: doctor is a
+    diagnostic somebody may well be running from a laptop, but this process *is* the
+    supervisor, and a watchdog that cannot see a container it is responsible for is not
+    reporting on a gap — it is the gap. Said once at startup rather than on every pass,
+    and printed rather than only logged, because the operator who typed the command is
+    the person who can move it to the right burrow.
+    """
+    for note in report.notes():
+        if note.ok:
+            click.secho(note.text, fg="bright_black")
+        else:
+            click.secho(note.text, fg="red", err=True)
+
+
 @watchdog.command("tick")
 @_RESIDENTS_OPTION
 @_DB_OPTION
@@ -1787,7 +1829,12 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
     """Make one pass: probe, sweep deadlines, bury stale runs, check budgets. Then exit."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
-        report = Watchdog.from_path(residents, store).tick()
+        dog = Watchdog.from_path(residents, store)
+        # Before the pass, not after: a reader who sees "unsupervised" for every resident
+        # deserves to have already been told the docker being asked is the wrong one.
+        if output_format != "json":
+            _report_topology_to_the_supervisor(dog.topology())
+        report = dog.tick()
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
     else:
@@ -1816,6 +1863,7 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
         dog = Watchdog.from_path(residents, store)
+        _report_topology_to_the_supervisor(dog.topology())
         try:
             passes = dog.run(interval_s=interval, max_passes=max_passes)
         except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon

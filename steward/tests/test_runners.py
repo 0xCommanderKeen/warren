@@ -1155,6 +1155,44 @@ def test_a_timed_out_command_does_not_leave_children_running(
     assert not marker.exists(), "a timed-out command must not leave its remote child running"
 
 
+# ----------------------------------------------- where the control plane's docker points
+
+
+def test_a_control_plane_command_inherits_the_daemons_docker_host(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_argv` passes this process's whole environment through — including DOCKER_HOST.
+
+    Unlike a session (steward #41), a control-plane command is *not* environment-scrubbed:
+    ``docker inspect`` and ``docker restart`` are steward's own tools and need this host's
+    docker configuration to work at all. Which is what makes ``DOCKER_HOST`` a real pointer
+    rather than a hopeful one, and therefore what steward #59 is allowed to document.
+    """
+    monkeypatch.setenv("DOCKER_HOST", "ssh://Miha@dxp2800")
+    stub_bin("say-docker-host", 'printf %s "$DOCKER_HOST"')
+
+    assert r.run_argv(["say-docker-host"]).stdout == "ssh://Miha@dxp2800"
+
+
+def test_a_container_launch_hands_docker_the_daemons_docker_host(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The exec launcher passes it too, so both halves of #58 point at the same daemon.
+
+    ``_run_in_container`` builds its child environment as ``{**os.environ, **request.env}``
+    — the docker *client* is a control-plane tool like the nursery's ssh, and only the
+    named ``-e`` variables cross into the container.
+    """
+    seen = tmp_path / "docker-host-seen"
+    monkeypatch.setenv("DOCKER_HOST", "ssh://Miha@dxp2800")
+    stub_bin("docker", f'printf %s "$DOCKER_HOST" > {seen}; printf "{{}}"')
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+
+    runner.run(request_for(tmp_path, env={"STEWARD_RUN_ID": "run-dh"}))
+
+    assert seen.read_text(encoding="utf-8") == "ssh://Miha@dxp2800"
+
+
 # ------------------------------------------------- container placement (steward #58)
 
 

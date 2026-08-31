@@ -787,6 +787,12 @@ different compose root, a container somebody named by hand before steward existe
 `deploy` block still means unsupervised: the default name is what the nursery *would*
 create, and a resident nobody has provisioned has no container under it.
 
+`host` is read by the nursery, which reaches it over ssh — and **not** by the watchdog,
+which probes and restarts through whatever `docker` the daemon's own machine has. So
+declaring a `host` relocates *provisioning* and not *supervision*: steward's daemons have
+to run on the burrow whose containers they supervise, and `steward doctor` says so out
+loud when they do not. See [topology.md](topology.md).
+
 The default `command` is honest about what a resident's container is: a place for sessions
 to happen, not a process that does work on its own. Steward drives the brain from outside,
 so the container's job is to be there.
