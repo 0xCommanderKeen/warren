@@ -127,6 +127,13 @@ describe("Arcadia", () => {
     );
   });
 
+  it("waits for a snapshot rather than falling back to contract test data", () => {
+    render(<App />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("Village snapshot has not loaded yet.");
+    expect(screen.queryByText("Keeper")).toBeNull();
+  });
+
   it("distinguishes a snapshot that has not loaded from an unavailable contract", () => {
     const { rerender } = render(<App envelope={null} />);
 
