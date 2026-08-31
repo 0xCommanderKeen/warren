@@ -1,0 +1,14 @@
+{
+  "now": "2026-08-25T18:39:00.000Z",
+  "plain": {
+    "agent_id": "codex:mood-plain-boundary",
+    "knock": "2026-08-25T18:39:00.000Z",
+    "failure": "2026-08-25T07:21:00.000Z",
+    "boundary": "2026-08-25T17:00:00.000Z"
+  },
+  "capacity": {
+    "agent_id": "codex:mood-capacity",
+    "oldest": "2026-08-25T10:39:00.000Z",
+    "recent_count": 40
+  }
+}

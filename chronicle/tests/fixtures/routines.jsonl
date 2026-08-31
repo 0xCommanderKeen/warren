@@ -1,0 +1,8 @@
+{"v":0,"ts":"2026-08-25T11:55:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_started","payload":{"routine":"summary","run_id":"ok-1","trigger":"schedule"}}
+{"v":0,"ts":"2026-08-25T11:56:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_finished","payload":{"routine":"summary","run_id":"ok-1","outcome":"ok","artifacts":["summary.md"],"duration_s":60}}
+{"v":0,"ts":"2026-08-25T11:57:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_started","payload":{"routine":"inbox","run_id":"fail-1","trigger":"manual"}}
+{"v":0,"ts":"2026-08-25T11:57:10.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_failed","payload":{"routine":"inbox","run_id":"fail-1","error":"mail service unavailable","duration_s":10}}
+{"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_started","payload":{"routine":"stuck","run_id":"stale-1","trigger":"schedule"}}
+{"v":0,"ts":"2026-08-25T11:59:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_started","payload":{"routine":"broken"}}
+{"v":0,"ts":"2026-08-25T11:50:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_finished","payload":{"routine":"out-of-order","run_id":"order-1","outcome":"ok","artifacts":[],"duration_s":1}}
+{"v":0,"ts":"2026-08-25T11:51:00.000Z","source":"steward","agent_id":"steward:life-agent","project":"life","type":"routine_started","payload":{"routine":"out-of-order","run_id":"order-1","trigger":"schedule"}}

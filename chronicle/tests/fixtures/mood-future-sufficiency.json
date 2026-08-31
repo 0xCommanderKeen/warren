@@ -1,0 +1,14 @@
+{
+  "agent_id": "codex:future-safe",
+  "initial": [
+    {"v":0,"ts":"2026-08-25T12:31:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T12:32:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T14:00:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"task_started","payload":{"prompt":"root"}},
+    {"v":0,"ts":"2026-08-25T12:45:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T13:00:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T12:50:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"needs_human","payload":{"message":"legacy knock"}}
+  ],
+  "append": {"v":0,"ts":"2026-08-25T12:20:00.000Z","source":"codex","agent_id":"codex:future-safe","project":"burrow","type":"idle","payload":{}},
+  "now": "2026-08-25T14:00:00.000Z"
+}

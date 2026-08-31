@@ -1,0 +1,2840 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>burrow</title>
+<style>
+  :root {
+    --ink:     #e8dfc8;
+    --ink-dim: #8b8474;
+    --alert:   #ff8f5e;
+    --busy:    #ffc86b;
+    --panel:   #100d18;
+    --focus:   #fff2a8;
+    font-size: 16px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Courier New", monospace;
+    background: #142317;
+    color: var(--ink);
+    overflow: hidden;
+  }
+  button, input, select { touch-action: manipulation; }
+  :where(button, input, select):focus-visible {
+    outline: 3px solid var(--focus); outline-offset: 3px;
+    box-shadow: 0 0 0 2px #271b12;
+  }
+  #game { position: absolute; inset: 0; }
+  #game canvas { image-rendering: pixelated; }
+
+  /* name chips over villagers — DOM so they stay crisp at any scale */
+  #labels { position: absolute; inset: 0; z-index: 15; pointer-events: none; overflow: hidden; }
+  .chip {
+    position: absolute; transform: translate(-50%, -100%);
+    pointer-events: auto; cursor: pointer;
+    background: rgba(13, 11, 20, .84); color: var(--ink);
+    border: 1px solid rgba(232, 223, 200, .22); border-radius: 4px;
+    padding: 1px 7px 2px; font-size: 15px; line-height: 1.05;
+    text-align: center; white-space: nowrap;
+    font-family: inherit;
+  }
+  .chip .dot { display: inline-block; width: 7px; height: 7px; margin-right: 5px; }
+  .chip .sub { display: block; font-size: 12px; color: var(--ink-dim); }
+  .chip.working .sub { color: var(--busy); }
+  .chip.knocking { border-color: var(--alert); color: #fff; }
+  .chip.knocking .sub { color: var(--alert); }
+  .chip.failed { border-color: #c96b54; }
+  .chip.failed .sub { color: #e18a70; }
+  .chip.stale { opacity: .55; }
+  .chip.you, .chip.place {
+    background: rgba(13, 11, 20, .6); border-color: rgba(232,223,200,.12);
+  }
+
+  header {
+    position: absolute; top: 18px; left: 24px; z-index: 20; line-height: 1.1;
+    pointer-events: none; text-shadow: 0 2px 0 rgba(0,0,0,.75);
+  }
+  header h1 { font-size: 42px; font-weight: 400; letter-spacing: 2px; }
+  header .tagline { font-size: 18px; color: var(--ink-dim); }
+  #census { font-size: 20px; margin-top: 8px; }
+  #census .dot { color: var(--ink-dim); }
+  #census .attn { color: var(--alert); }
+  #census .census-action {
+    pointer-events: auto; cursor: pointer; font: inherit; color: inherit;
+    background: none; border: 0; text-shadow: inherit;
+  }
+  #census .census-action:hover, #census .census-action:focus-visible { text-decoration: underline; }
+  #lastbeat { font-size: 16px; color: var(--ink-dim); }
+  #transport { font-size: 16px; color: #9bb7a0; }
+  #transport[data-state="recovering"], #transport[data-state="reconnecting"], #transport[data-state="polling"] { color: var(--busy); }
+  #transport[data-state="disconnected"] { color: var(--alert); }
+  #fleet-open {
+    pointer-events: auto; margin-top: 10px; padding: 4px 10px 5px;
+    font: inherit; font-size: 18px; color: #ead8aa; cursor: pointer;
+    background: rgba(39,31,24,.82); border: 2px solid #8e7045;
+    box-shadow: 3px 3px 0 rgba(9,7,12,.55);
+  }
+  #fleet-open:hover, #fleet-open:focus-visible { color: #fff4d2; border-color: #d2a15c; }
+
+  #empty {
+    position: absolute; left: 0; right: 0; top: 42vh; text-align: center;
+    font-size: 26px; color: var(--ink); z-index: 10; pointer-events: none;
+    text-shadow: 0 2px 0 rgba(0,0,0,.8);
+  }
+  #empty .sub { font-size: 18px; margin-top: 6px; color: var(--ink-dim); }
+
+  #panel {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 380px; z-index: 30;
+    background: var(--panel); border-left: 4px solid #2a2438;
+    padding: 26px 22px; overflow-y: auto; overscroll-behavior: contain;
+    transform: translateX(100%); transition: transform .18s steps(4);
+  }
+  #panel.open { transform: translateX(0); }
+  #panel[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  #panel.ledger { width: min(760px, 58vw); background: #17130f; border-color: #6f5533; }
+  #panel.ledger[data-narrow="true"] { width: 100vw; }
+  #panel .close {
+    position: absolute; top: 14px; right: 16px; font-size: 26px; color: var(--ink-dim);
+    cursor: pointer; background: none; border: none; font-family: inherit;
+  }
+  #panel .close:hover, #panel .close:focus-visible { color: var(--ink); }
+  #panel h2 { font-size: 30px; font-weight: 400; }
+  #panel .meta { font-size: 17px; color: var(--ink-dim); margin-bottom: 4px; word-break: break-all; }
+  #panel .state-line { font-size: 20px; margin: 10px 0 16px; }
+  #panel .state-line.attn { color: var(--alert); }
+  #panel .state-line.busy { color: var(--busy); }
+  /* a knock is the one thing you must not have to squint at */
+  #panel .knock {
+    border: 2px solid var(--alert); border-left-width: 6px;
+    background: rgba(255, 143, 94, .09);
+    padding: 10px 12px 12px; margin: 0 0 16px;
+  }
+  #panel .knock .knock-h {
+    font-size: 16px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--alert); margin-bottom: 6px;
+  }
+  #panel .knock .knock-msg {
+    font-size: 22px; line-height: 1.2; color: #fff;
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  #panel .knock .knock-when { font-size: 15px; color: var(--ink-dim); margin-top: 8px; }
+  .approval-card { border: 2px solid #a65b4a; background: rgba(166,91,74,.12); padding: 12px; margin: 0 0 14px; }
+  .approval-card.resolved { border-color: #6e9b63; background: rgba(79,125,91,.13); }
+  .approval-card h3 { font-size: 23px; font-weight: 400; color: #ffd0b8; overflow-wrap: anywhere; }
+  .approval-detail { margin: 9px 0; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; background: #0d0b14; border-left: 4px solid #6f5533; color: #fff; font: inherit; }
+  .approval-options { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+  .approval-options button { min-height: 40px; padding: 6px 10px; font: inherit; cursor: pointer; color: var(--ink); background: #351f1c; border: 1px solid var(--alert); }
+  .approval-edit { display: grid; gap: 4px; margin-top: 9px; color: #ffd0b8; }
+  .approval-edit textarea { min-height: 74px; resize: vertical; padding: 7px; font: inherit; color: var(--ink); background: #0d0b14; border: 1px solid #a65b4a; }
+  .approval-feedback { margin-top: 9px; color: var(--busy); }
+  .approval-feedback.failed, .approval-feedback.ambiguous, .approval-feedback.timeout,
+  .approval-feedback.indeterminate { color: var(--alert); }
+  .approval-diagnostic { color: #f2a17d; border-left: 4px solid #a65b4a; padding: 5px 8px; margin: 8px 0; }
+  .evt { border-top: 2px solid #221d30; padding: 8px 0; font-size: 17px; }
+  #panel .meta.role { color: var(--busy); }
+  #panel .soul {
+    white-space: pre-wrap; font-size: 16px; line-height: 1.25;
+    border: 2px solid #221d30; padding: 10px 12px; margin-bottom: 14px;
+    color: var(--ink);
+  }
+  .evt .when { color: var(--ink-dim); font-size: 15px; }
+  .evt .what { word-break: break-word; }
+  .evt.t-needs_human .what { color: var(--alert); }
+  .artifact-empty { color: var(--ink-dim); font-size: 19px; margin-top: 18px; }
+  .artifact-path { color: var(--ink); overflow-wrap: anywhere; }
+  .artifact-by { color: var(--ink-dim); font-size: 15px; }
+  .job-form { border: 2px solid #6b4930; background: rgba(94,56,29,.18); padding: 10px; margin: 14px 0; }
+  .job-form label { display: grid; gap: 3px; margin-bottom: 8px; color: #d2a15c; }
+  .job-form input, .job-form textarea { width: 100%; min-width: 0; font: inherit; color: var(--ink); background: #100d0a; border: 1px solid #6f5533; padding: 7px; }
+  .job-form textarea { min-height: 72px; resize: vertical; }
+  .job-form button { font: inherit; color: var(--ink); background: #2b2115; border: 1px solid #d2a15c; padding: 6px 10px; cursor: pointer; }
+  .job-state { border-left: 4px solid #786344; padding-left: 9px; margin: 10px 0; }
+  .job-state.claimed { border-color: var(--busy); }
+  .job-state.done { opacity: .72; }
+  .job-state.failed { border-color: var(--alert); opacity: .82; }
+  .job-skills { color: #b8aa8d; font-size: 15px; }
+  .job-ack { color: #d8ad68; margin: 8px 0; }
+  .job-ack.failed, .job-ack.ambiguous, .job-ack.indeterminate, .job-ack.timeout { color: var(--alert); }
+  .job-diagnostic { color: #f2a17d; border: 1px solid #a65b4a; padding: 7px; margin-top: 10px; }
+  .ledger-kicker { color: #d2a15c; letter-spacing: 2px; text-transform: uppercase; }
+  .ledger-truth { color: #aa9d81; font-size: 16px; max-width: 58ch; margin: 4px 0 14px; }
+  .ledger-tabs { display: flex; gap: 5px; border-bottom: 2px solid #6f5533; margin-bottom: 14px; }
+  .ledger-tabs button, .entry-link {
+    font: inherit; color: var(--ink); background: transparent; cursor: pointer;
+  }
+  .ledger-tabs button { border: 0; padding: 6px 10px; font-size: 19px; }
+  .ledger-tabs button[aria-selected="true"] { color: #17130f; background: #d2a15c; }
+  .ledger-filters { display: grid; grid-template-columns: 2fr repeat(4, 1fr); gap: 7px; margin-bottom: 12px; }
+  .ledger-filters input, .ledger-filters select {
+    width: 100%; min-width: 0; font: inherit; font-size: 16px; color: var(--ink);
+    background: #100d0a; border: 1px solid #6f5533; padding: 6px 7px;
+  }
+  .ledger-state { border: 1px solid #4f422f; padding: 7px 9px; color: #b7aa8f; margin-bottom: 9px; }
+  .ledger-state.bad { border-color: #a65b4a; color: #f2a17d; }
+  .ledger-list { list-style: none; }
+  .ledger-entry { display: grid; grid-template-columns: 104px 1fr auto; gap: 10px; border-top: 1px solid #403522; padding: 9px 2px; }
+  .ledger-entry > * { min-width: 0; overflow-wrap: anywhere; }
+  .entry-link { border: 0; text-align: left; font-size: 18px; text-decoration: underline; text-decoration-color: #6f5533; }
+  .entry-link:hover, .entry-link:focus-visible { color: #ffd486; }
+  .ledger-small { color: #a79b82; font-size: 15px; overflow-wrap: anywhere; }
+  .status-mark { display: inline-block; border: 1px solid #706149; padding: 0 5px; color: #d3c6aa; }
+  .status-mark.missing { color: #d8ad68; }
+  .status-mark.invalid, .status-mark.externally-unavailable { color: #f08a69; border-color: #a65b4a; }
+  .routine-card { border: 2px solid #55452e; padding: 10px; margin: 12px 0; }
+  .routine-card.failed, .routine-card.stale { border-color: var(--alert); }
+  .routine-card .declared { color: #d2a15c; border-left: 3px solid #d2a15c; padding-left: 8px; }
+  .routine-run { font: inherit; margin-top: 8px; padding: 5px 9px; color: var(--ink); background: #2b2115; border: 1px solid #d2a15c; cursor: pointer; }
+  .routine-error { white-space: pre-wrap; overflow-wrap: anywhere; color: #f2a17d; }
+  #steward-auth { max-width: min(430px, calc(100vw - 24px)); color: var(--ink); background: #17130f; border: 2px solid #d2a15c; }
+  #steward-auth::backdrop { background: rgba(7, 9, 6, .82); }
+  #steward-auth label { display: grid; gap: 4px; margin: 12px 0; }
+  #steward-auth input { min-width: 0; font: inherit; color: var(--ink); background: #2b2115; border: 1px solid #706149; padding: 7px; }
+  #steward-auth menu { display: flex; justify-content: flex-end; gap: 8px; padding: 0; }
+  .nursery-form { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 12px; }
+  .nursery-form label { display:grid; gap:4px; color:var(--ink-dim); }
+  .nursery-form input, .nursery-form textarea, .nursery-form select { min-width:0; box-sizing:border-box; width:100%; font:inherit; color:var(--ink); background:#17130f; border:1px solid #706149; padding:7px; }
+  .nursery-form textarea { min-height:72px; resize:vertical; }
+  .nursery-form .wide, .nursery-form button, .nursery-feedback { grid-column:1 / -1; }
+  .nursery-error { color:#ffb09a; font-size:13px; }
+  .resident-card { border: 2px solid #55452e; padding: 12px; margin-bottom: 12px; background: rgba(79,61,34,.16); }
+  .resident-card h3 { font-weight: 400; font-size: 24px; }
+  .name-with-mood { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  .mood { position: relative; display: inline-block; font-size: 15px; color: var(--ink-dim); opacity: 1; }
+  .mood.mood-stale { opacity: .45; }
+  .mood summary { display: inline-flex; align-items: baseline; gap: 5px; cursor: pointer;
+    list-style: none; border: 1px solid #625238; padding: 2px 7px; background: #1a1710; }
+  .mood summary::-webkit-details-marker { display: none; }
+  .mood summary:focus-visible { outline: 2px solid var(--busy); outline-offset: 2px; }
+  .mood-glyph { color: var(--busy); font-size: 18px; line-height: 1; }
+  .mood-status { white-space: nowrap; }
+  .mood-breakdown { position: relative; z-index: 3; width: min(430px, calc(100vw - 72px));
+    margin-top: 5px; border: 2px solid #625238; padding: 10px; background: #15130e;
+    color: var(--ink); box-shadow: 5px 5px 0 rgba(0,0,0,.5); }
+  .mood-breakdown dl { display: grid; grid-template-columns: minmax(120px, 1fr) 2fr;
+    gap: 5px 10px; margin: 8px 0; }
+  .mood-breakdown dt { color: var(--ink-dim); }
+  .mood-breakdown dd { margin: 0; overflow-wrap: anywhere; }
+  .mood-asof { color: var(--ink-dim); }
+  .mood, .mood * { animation: none !important; transition: none !important; }
+  .cap-row { width: 100%; display: grid; grid-template-columns: 92px 1fr; gap: 8px; border: 0; border-top: 1px dotted #55452e; padding: 5px 0; color: var(--ink); background: transparent; font: inherit; text-align: left; cursor: pointer; }
+  .cap-row:hover, .cap-row:focus-visible { color: #ffd486; background: rgba(210,161,92,.08); }
+  .cap-values { overflow-wrap: anywhere; }
+  .lodge-group { border-left: 5px solid #7b6f57; padding-left: 10px; }
+  .declared-identity { border: 2px solid #6f5533; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; background: rgba(210,161,92,.08); }
+  .declared-identity h3, .journal-section h3 { font-size: 20px; font-weight: 400; color: #ffd486; }
+  .declared-identity h4 { margin-top: 9px; color: #d2a15c; font-weight: 400; }
+  .declared-identity ul { padding-left: 22px; }
+  .journal-section { border: 2px solid #344d3b; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; background: rgba(79,125,91,.08); }
+  .journal-entry { border-top: 1px dotted #4f6d56; padding: 8px 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .journal-entry time { display: block; color: #9fbd9f; font-size: 15px; }
+  .journal-observed { color: #ffd486; border-left: 4px solid #d2a15c; padding: 7px 9px;
+    margin: 8px 0; background: rgba(210,161,92,.08); }
+  .identity-warning { color: #f2a17d; margin: 7px 0; }
+  .visitor-truth { border: 2px solid #7b6f57; border-left-width: 6px; padding: 11px;
+    margin: 14px 0; color: #d4cbb8; }
+
+  @media (max-width: 680px) {
+    header { top: max(10px, env(safe-area-inset-top)); left: max(12px, env(safe-area-inset-left));
+      right: max(12px, env(safe-area-inset-right)); }
+    header h1 { font-size: 34px; }
+    footer { display: none; }
+    #panel, #panel.ledger { left: 0; right: auto; width: 100vw; border-left: 0;
+      padding: max(20px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+        max(20px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left)); }
+    #panel .close { top: max(10px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right));
+      min-width: 44px; min-height: 44px; }
+    #panel h2 { padding-right: 42px; line-height: 1; }
+    #fleet-open, .ledger-tabs button, .entry-link, .cap-row, .census-action,
+    .approval-options button { min-height: 44px; }
+    .ledger-filters input, .ledger-filters select { min-height: 44px; font-size: 18px; }
+    .ledger-filters { grid-template-columns: 1fr 1fr; }
+    .ledger-filters input { grid-column: 1 / -1; }
+    .ledger-entry { grid-template-columns: 72px 1fr; }
+    .ledger-entry > :last-child { grid-column: 2; }
+    .ledger-tabs { overflow-x: auto; }
+    .nursery-form { grid-template-columns:1fr; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    #panel { transition: none; }
+    *, *::before, *::after { scroll-behavior: auto !important; }
+  }
+  @media (prefers-contrast: more) {
+    :root { --ink: #fff8df; --ink-dim: #d7cfbb; --alert: #ffad86; --busy: #ffdc91; }
+    .chip, #fleet-open, #panel, .resident-card { border-color: currentColor; }
+  }
+
+  footer {
+    position: absolute; bottom: 8px; left: 24px; z-index: 20; pointer-events: none;
+    font-size: 15px; color: #cfc7ae; text-shadow: 0 2px 0 rgba(0,0,0,.7);
+  }
+  #preview {
+    position: absolute; bottom: 8px; right: 24px; z-index: 40; pointer-events: none;
+    font-size: 16px; color: var(--alert); border: 1px solid var(--alert);
+    background: rgba(13,11,20,.8); padding: 3px 9px 4px;
+  }
+  #preview .note { display:block; font-size:13px; color:var(--ink-dim); }
+</style>
+<script src="/vendor/phaser.min.js"></script>
+<script src="/presence.js"></script>
+<script src="/sprites.js"></script>
+<script src="/retention-policy.js"></script>
+<script src="/journal-observations.js"></script>
+<script src="/typed-json.js"></script>
+<script src="/presentation.js"></script>
+</head>
+<body>
+<div id="game"></div>
+<div id="labels"></div>
+
+<header>
+  <h1>burrow</h1>
+  <div class="tagline">the village never lies</div>
+  <div id="census"></div>
+  <div id="lastbeat"></div>
+  <div id="transport" data-state="disconnected" role="status" aria-live="polite" aria-atomic="true">telemetry disconnected</div>
+  <button id="fleet-open" type="button" aria-haspopup="dialog">open fleet ledger</button>
+</header>
+
+<div id="empty" style="display:none">
+  the village is asleep — nothing is running
+  <div class="sub">events will appear from ~/.burrow/events.jsonl</div>
+</div>
+
+<aside id="panel" role="dialog" aria-modal="true" aria-labelledby="panel-title" hidden>
+  <button class="close" title="close" aria-label="Close panel">✕</button>
+  <div id="panel-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div id="panel-body"></div>
+</aside>
+<dialog id="steward-auth" aria-labelledby="steward-auth-title">
+  <form method="dialog" id="steward-auth-form">
+    <h2 id="steward-auth-title">Connect to Steward</h2>
+    <p>Used only by this browser tab. The token is never saved, logged, shown, or sent to Burrow.</p>
+    <label>Tailnet URL <input id="steward-url" name="url" type="url" required value="http://127.0.0.1:8801" autocomplete="off" spellcheck="false"></label>
+    <label>Bearer token <input id="steward-token" name="token" type="password" required autocomplete="off" spellcheck="false"></label>
+    <div id="steward-auth-error" class="routine-error" role="alert"></div>
+    <menu><button value="cancel" type="submit" formnovalidate>cancel</button><button value="connect" type="submit">connect</button></menu>
+  </form>
+</dialog>
+
+<footer>burrow v0.5 · a projection, never a simulation · art: Ninja Adventure (CC0)</footer>
+<div id="preview" hidden></div>
+
+<script src="/routes.js"></script>
+<script src="/destinations.js"></script>
+<script src="/routine-lifecycle.js"></script>
+<script src="/fleet-operations.js"></script>
+<script src="/fleet-controller.js"></script>
+<script src="/routine-ledger.js"></script>
+<script src="/job-board.js"></script>
+<script src="/approval-knocks.js"></script>
+<script src="/mood-glyph.js"></script>
+<script src="/nursery.js"></script>
+<script src="/charter-journal.js"></script>
+<script src="/state-transport.js"></script>
+<script src="/village-adapter.js"></script>
+<script src="/browser-runtime.js"></script>
+<script>
+"use strict";
+
+/* Village domain state arrives as authoritative snapshots. This page owns only
+   rendering, map routing, focus, dialogs, and transient interaction state. */
+
+/* ————— the village scene ————— */
+
+const SKY = [[0,0x47539c,1],[4.5,0x47539c,1],[6,0x8f7fb8,.6],[6.75,0xf5b9a2,.26],
+  [8,0xffffff,0],[17,0xffffff,0],[18.75,0xf5a460,.26],[19.75,0x9070ac,.6],
+  [21,0x47539c,1],[24,0x47539c,1]];
+const PHASES = { dawn:6.75, day:12.5, dusk:18.75, night:23 };
+function phaseOf(h) { return h < 5.25 || h >= 20.5 ? "night" : h < 7.75 ? "dawn" : h < 17.5 ? "day" : "dusk"; }
+function mixRGB(a,b,t) { const ch=s=>Math.round(((a>>s)&255)+(((b>>s)&255)-((a>>s)&255))*t)<<s; return ch(16)|ch(8)|ch(0); }
+function skyAt(hour) {
+  const h=((hour%24)+24)%24; let i=1; while(i<SKY.length-1&&SKY[i][0]<h)i++;
+  const [h0,c0,d0]=SKY[i-1],[h1,c1,d1]=SKY[i],t=(h-h0)/(h1-h0),s=t*t*(3-2*t);
+  return {hour:h,phase:phaseOf(h),color:mixRGB(c0,c1,s),dark:d0+(d1-d0)*s};
+}
+const PREVIEW=(()=>{const q=new URLSearchParams(location.search),cycle=q.get("cycle");
+  if(cycle!==null)return {cycle:Math.max(4,Number(cycle)||60)}; const time=q.get("time");
+  if(time&&/^\d{1,2}(:\d{2})?$/.test(time)){const [h,m]=time.split(":");return {hour:(Number(h)+(Number(m)||0)/60)%24};}
+  const phase=(q.get("phase")||"").toLowerCase(); return phase in PHASES?{hour:PHASES[phase]}:null;})();
+const BOOT=Date.now();
+function clockHour(){if(PREVIEW&&PREVIEW.cycle)return ((Date.now()-BOOT)/1000/PREVIEW.cycle%1)*24;
+  if(PREVIEW)return PREVIEW.hour; const d=new Date(); return d.getHours()+d.getMinutes()/60+d.getSeconds()/3600;}
+function hhmm(h){const m=Math.floor((h-Math.floor(h))*60);return String(Math.floor(h)).padStart(2,"0")+":"+String(m).padStart(2,"0");}
+
+const PLACES = {
+  library: {
+    label: "the library",
+    tx: 11, ty: 19, w: 3, h: 3,
+    frame: { x: 352, y: 0, w: 48, h: 48 },
+    accent: "#7fb0c8",
+  },
+  workshop: {
+    label: "the workshop",
+    tx: 15, ty: 19, w: 3, h: 3,
+    frame: { x: 256, y: 0, w: 48, h: 48 },
+    accent: "#d99a5e",
+  },
+  "post-office": {
+    label: "the post office",
+    tx: 19, ty: 19, w: 3, h: 3,
+    frame: { x: 304, y: 0, w: 48, h: 48 },
+    accent: "#d97979",
+  },
+  "visitor-lodge": {
+    label: "the visitor lodge",
+    tx: 23, ty: 19, w: 3, h: 3,
+    frame: { x: 208, y: 0, w: 48, h: 48 },
+    accent: "#c4a56a",
+  },
+};
+
+const T = 16, MAPW = 32, MAPH = 27, ZOOM = 3;
+const REDUCED_MOTION = typeof window !== "undefined" &&
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const FLOOR_COLS = 22;
+const GRASS = 11 * FLOOR_COLS + 3, GRASS2 = 11 * FLOOR_COLS + 2;
+// dirt autotile block: cols 0-2 × rows 7-9 of the floor tileset (edges + center)
+const DIRT_AT = (col, row) => row * FLOOR_COLS + col;
+// flat ground clutter from TilesetNature — villagers walk over it
+const DECOR = [[0,176],[16,176],[32,176],[48,176],[96,176],
+               [112,176],[128,176],[144,176],[176,192]];
+// solid props — each one blocks its tile, so paths route around it
+const PROPS = [[0,160],[16,160],[32,160],[48,160],[64,160],[80,160],[96,160],
+               [64,128],[80,128],[64,224],[80,224]];
+const CROPS = [[144,144],[160,144],[128,160],[144,160]];   // garden vegetables
+// villager house plots: [tileX, tileY]. Houses are 4×3 tiles, but the door in the
+// prefab is not centred: its opening sits at x 17..30 of the 64 px frame.
+const PLOTS = [[3,8],[8,8],[20,8],[25,8],[3,16],[8,16],[20,16],[25,16]];
+const YOUR_HOUSE = { tx: 14, ty: 3 };   // 3×3 tiles, A-frame
+// fenced kitchen gardens: [tileX, tileY, w, h]. The whole rect is solid ground;
+// the inside is soil with crops, the border carries the picket fence.
+const GARDENS = [[2,5,4,3],[8,5,4,3],[20,5,4,3],[26,5,4,3],[13,16,4,3]];
+// picket runs along the street edge of each house row: [x0, x1, row].
+// Door stubs punch gates through them, so every doorstep stays reachable.
+const FENCE_RUNS = [[3,13,11],[18,28,11],[2,5,15],[9,12,15],[19,22,15],[26,29,15]];
+const WALK_SPEED = 55;                  // px/s, native scale
+const SKY_DEPTH=4000, LIGHT_DEPTH=4001;
+// path costs: a road tile is cheaper than grass, so walks visibly prefer the
+// street; turning costs a hair so paths come out straight instead of stair-stepped
+const ROAD_COST = 10, GRASS_COST = 16, TURN_COST = 2;
+// direction indices in the character sheets: columns = down, up, left, right
+const D_DOWN = 0, D_UP = 1, D_LEFT = 2, D_RIGHT = 3;
+const NOTICE_BOARD_ID = "notice-board";
+const JOB_BOARD_ID = "job-board";
+const FLEET_LEDGER_ID = "fleet-ledger";
+const NURSERY_ID = "nursery";
+
+const PLOT_DOOR_X = 24;   // centre of the door opening inside the house frame
+function plotDoor(i) {
+  const [px, py] = PLOTS[i];
+  return { x: px * T + PLOT_DOOR_X, y: (py + 3) * T };
+}
+function placeDoor(name) {
+  const p = PLACES[name];
+  return { x: p.tx * T + p.w * T / 2, y: (p.ty + p.h) * T };
+}
+const yourDoor = { x: YOUR_HOUSE.tx * T + 24, y: (YOUR_HOUSE.ty + 3) * T };
+const grid = fill => Array.from({ length: MAPH }, () => Array(MAPW).fill(fill));
+
+/* Where each villager belongs, as { kind, ... } rather than a string — see
+   viewer/destinations.js. The viewer supplies what the projection cannot know:
+   the PLACES it can actually draw, which plots are occupied right now, and
+   which door a delegating villager is already standing at. */
+const { destinationFor, destinationKey, DELEGATION } = BurrowDestinations;
+
+/* Two halves of one identity: the snapshot's `place` decides which place a
+ * villager belongs at, while `PLACES` above decides where that place stands.
+ * Nothing but the string joins them, so a typo or a one-sided rename would send
+ * every researcher home and say nothing about it. `destinationFor` degrades
+ * that way on purpose — better a villager at home than an exception — so the
+ * join is checked out loud at startup (`reportPlaces`) and in
+ * `delegation` is exempt: it is the one projected place
+ * that is deliberately not a building. */
+function unmappedPlaces() {
+  return [...new Set(Object.values(PLACE_OF_VERB))]
+    .filter(id => id !== DELEGATION && !PLACES[id]);
+}
+
+class Village extends Phaser.Scene {
+  constructor() {
+    super("village");
+    this.viz = new Map();
+    this.plotOf = new Map();
+    this.routing = null;
+    this.slotAllocator = null;
+  }
+
+  preload() {
+    this.load.image("floor",  "/assets/tilesets/TilesetFloor.png");
+    this.load.image("houses", "/assets/tilesets/TilesetHouse.png");
+    this.load.image("nature", "/assets/tilesets/TilesetNature.png");
+    this.load.image("shadow", "/assets/shadow.png");
+    for (const c of CHARS) {
+      this.load.spritesheet(c + "-walk", "/assets/characters/" + c + "-walk.png",
+                            { frameWidth: 16, frameHeight: 16 });
+      this.load.spritesheet(c + "-idle", "/assets/characters/" + c + "-idle.png",
+                            { frameWidth: 16, frameHeight: 16 });
+    }
+  }
+
+  create() {
+    this.cameras.main.setZoom(ZOOM);
+    this.cameras.main.centerOn(MAPW * T / 2, MAPH * T / 2);
+    // named frames for prefab buildings and trees
+    const houses = this.textures.get("houses");
+    for (let i = 0; i < 4; i++) houses.add("h" + i, 0, i * 64, 0, 64, 48);
+    houses.add("yours", 0, 416, 0, 48, 48);
+    for (const [name, p] of Object.entries(PLACES))
+      houses.add("place-" + name, 0, p.frame.x, p.frame.y, p.frame.w, p.frame.h);
+    // picket fence cut out of the enclosure prefab: the horizontal run repeats
+    // every 16 px and the vertical rail every 16 px, plus a post cap at each end
+    houses.add("fenceH", 0, 161, 162, 16, 14);
+    houses.add("fenceL", 0, 150, 162, 11, 14);
+    houses.add("fenceR", 0, 207, 162, 12, 14);
+    houses.add("fenceV", 0, 150, 178,  4, 16);
+    const nature = this.textures.get("nature");
+    nature.add("tree0", 0, 0, 0, 32, 32);
+    nature.add("tree1", 0, 32, 0, 32, 32);
+    DECOR.forEach(([x, y], i) => nature.add("d" + i, 0, x, y, 16, 16));
+    PROPS.forEach(([x, y], i) => nature.add("p" + i, 0, x, y, 16, 16));
+    CROPS.forEach(([x, y], i) => nature.add("c" + i, 0, x, y, 16, 16));
+
+    // walkability is derived from the terrain: every builder marks what it covers
+    this.blocked = grid(false);
+    this.buildGround();
+    this.buildBuildings();
+    this.buildTrees();
+    this.buildFences();
+    this.buildDecor();
+    this.routing = BurrowRoutes.createRoutingMap({
+      width: MAPW, height: MAPH, tileSize: T, places: PLACES, plots: PLOTS,
+      ownDoor: yourDoor, roadCost: ROAD_COST, grassCost: GRASS_COST,
+      turnCost: TURN_COST, blocked: (x, y) => this.blocked[y][x],
+      costAt: (x, y) => this.dirt[y][x] ? ROAD_COST : GRASS_COST,
+    });
+    this.slotAllocator = BurrowRoutes.createSlotAllocator(where => {
+      const [kind, value] = where.split(":");
+      if (kind === "building") return this.routing.capacity({ kind, id: value });
+      if (kind === "plot") return this.routing.capacity({ kind, plot: Number(value) });
+      return this.routing.capacity({ kind: where });
+    });
+    this.buildSky();
+    this.reportMap();
+    this.reportPlaces();
+
+    for (const c of CHARS) {
+      for (const d of [D_DOWN, D_UP, D_LEFT, D_RIGHT]) {
+        this.anims.create({
+          key: c + "-walk-" + d,
+          frames: this.anims.generateFrameNumbers(c + "-walk",
+                    { frames: [d, d + 4, d + 8, d + 12] }),
+          frameRate: 8, repeat: -1,
+        });
+      }
+    }
+
+    this.input.on("gameobjectdown", (_p, obj) => {
+      if (obj.getData("agent")) openPanel(obj.getData("agent"));
+      if (obj.getData("noticeBoard")) openPanel(NOTICE_BOARD_ID);
+      if (obj.getData("jobBoard")) openPanel(JOB_BOARD_ID);
+      if (obj.getData("nursery")) openPanel(NURSERY_ID);
+    });
+    this.events.on("update", () => {
+      for (const v of this.viz.values()) {
+        v.cont.setDepth(v.cont.y);
+        v.chip.wx = v.cont.x;
+        v.chip.wy = v.cont.y - 11;
+        // self-check: a villager standing on solid ground would be a lie
+        const t = this.tileAt(v.cont.x, v.cont.y);
+        if (!this.walkable(t.x, t.y)) this.offRoute++;
+      }
+      this.layoutChips();
+      this.applySky();
+    });
+  }
+
+  buildSky() {
+    this.sky=this.add.rectangle(0,0,MAPW*T,MAPH*T,0xffffff).setOrigin(0,0)
+      .setDepth(SKY_DEPTH).setBlendMode(Phaser.BlendModes.MULTIPLY);
+    this.skyState=null; this.applySky();
+  }
+
+  applySky() {
+    const sky=skyAt(clockHour()); this.sky.setFillStyle(sky.color,1);
+    for (const prop of this.journalProps || []) prop.setVisible(false);
+    for(const viz of this.viz.values()) {
+      if(viz.state==="stale") viz.cont.setAlpha(.45+.15*sky.dark);
+      if(viz.plot>=0) {
+        const light=BurrowPresence.houseLight(viz);
+        this.glows[viz.plot].setVisible(light.home).setAlpha(light.working?.55+.4*sky.dark:.3*sky.dark);
+        if (viz.journal && this.journalProps[viz.plot]) this.journalProps[viz.plot].setVisible(true);
+      }
+    }
+    if(this.knockGlow) this.knockGlow.setVisible(this.knockers>0).setAlpha(.2+.5*sky.dark);
+    if(!this.skyState||this.skyState.color!==sky.color||Math.abs(this.skyState.hour-sky.hour)>.02) renderSky(sky);
+    this.skyState=sky;
+  }
+
+  /* ————— terrain ————— */
+
+  block(x, y) {
+    if (x >= 0 && y >= 0 && x < MAPW && y < MAPH) this.blocked[y][x] = true;
+  }
+
+  buildGround() {
+    const dirt = grid(false), soil = grid(false);
+    const mark = (x0, x1, y0, y1) => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) dirt[y][x] = true;
+    };
+    mark(2, 29, 12, 14);                       // main street
+    mark(14, 17, 6, 11);                       // lane from your door to the street
+    mark(12, 19, 6, 8);                        // plaza at your door
+    for (const [px, py] of PLOTS) mark(px + 1, px + 2, py + 3, py + 3); // door stubs
+    for (const p of Object.values(PLACES)) {          // lane off the street, then
+      const doorRow = p.ty + p.h, lane = p.tx - 2;    // an apron at the door
+      mark(lane, lane, 15, doorRow);
+      mark(lane, p.tx + p.w + 1, doorRow, doorRow + 1);
+    }
+    for (const [gx, gy, gw, gh] of GARDENS) {
+      for (let y = gy; y < gy + gh; y++)
+        for (let x = gx; x < gx + gw; x++) this.block(x, y);
+      for (let y = gy + 1; y < gy + gh; y++)
+        for (let x = gx + 1; x < gx + gw - 1; x++) soil[y][x] = true;
+    }
+    this.dirt = dirt;
+    this.soil = soil;
+    const earth = (x, y) => dirt[y][x] || soil[y][x];
+    const rows = [];
+    for (let y = 0; y < MAPH; y++) {
+      const row = [];
+      for (let x = 0; x < MAPW; x++) {
+        if (soil[y][x]) { row.push(DIRT_AT(1, 8)); continue; }  // tilled bed, fenced in
+        if (!earth(x, y)) {
+          row.push(hashCode(x + "," + y) % 11 === 0 ? GRASS2 : GRASS);
+          continue;
+        }
+        const gN = y > 0 && !earth(x, y - 1), gS = y < MAPH - 1 && !earth(x, y + 1);
+        const gW = x > 0 && !earth(x - 1, y), gE = x < MAPW - 1 && !earth(x + 1, y);
+        const col = gW && !gE ? 0 : gE && !gW ? 2 : 1;
+        const r   = gN && !gS ? 7 : gS && !gN ? 9 : 8;
+        row.push(DIRT_AT(col, r));
+      }
+      rows.push(row);
+    }
+    const map = this.make.tilemap({ data: rows, tileWidth: T, tileHeight: T });
+    map.createLayer(0, map.addTilesetImage("floor"), 0, 0).setDepth(-10);
+  }
+
+  buildDecor() {
+    // doorsteps, the knock queue and the tiles around them stay clear of props
+    const clear = new Set();
+    const reserve = (x, y) => {
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++) clear.add((x + dx) + "," + (y + dy));
+    };
+    for (const p of Object.values(PLACES))
+      for (let y = p.ty - 1; y <= p.ty + p.h; y++)
+        for (let x = p.tx - 1; x <= p.tx + p.w; x++) clear.add(x + "," + y);
+    // the slots in front of a shared place reach further out than its footprint
+    // Routing endpoints are deterministic, so reserve their complete promised
+    // capacity before procedural decor gets a chance to block one.
+    const clearRouting = BurrowRoutes.createRoutingMap({
+      width: MAPW, height: MAPH, tileSize: T, places: PLACES, plots: PLOTS,
+      ownDoor: yourDoor, blocked: () => false,
+    });
+    for (const { point } of clearRouting.allocatableEndpoints()) {
+      const t = { x: Math.floor(point.x / T), y: Math.floor(point.y / T) };
+      reserve(t.x, t.y);
+    }
+    for (const [px, py] of PLOTS) { reserve(px + 1, py + 3); reserve(px + 2, py + 3); }
+    for (let y = 6; y <= 8; y++) for (let x = 12; x <= 19; x++) reserve(x, y);
+    // the lane behind the lower houses is the only way to their doors: keep it clear
+    for (let y = 15; y <= 19; y++) for (let x = 0; x < MAPW; x++) clear.add(x + "," + y);
+    for (let y = 1; y < MAPH - 1; y++) {
+      for (let x = 1; x < MAPW - 1; x++) {
+        if (this.blocked[y][x] || this.dirt[y][x]) continue;
+        const h = hashCode(y + ":" + x);
+        if (h % 5 === 0) {
+          this.add.image(x * T + 8, y * T + 16, "nature", "d" + ((h >> 4) % DECOR.length))
+            .setOrigin(.5, 1).setDepth(0);
+        } else if (h % 11 === 0 && !clear.has(x + "," + y) && this.tryBlock(x, y)) {
+          this.add.image(x * T + 8, y * T + 16, "nature", "p" + ((h >> 4) % PROPS.length))
+            .setOrigin(.5, 1).setDepth(y * T + 16);
+        }
+      }
+    }
+  }
+
+  // Block a tile only if it costs the village exactly that one tile — a bush is
+  // never allowed to wall a villager off from its door.
+  tryBlock(x, y) {
+    const before = this.reachable();
+    this.blocked[y][x] = true;
+    if (this.reachable() === before - 1) return true;
+    this.blocked[y][x] = false;
+    return false;
+  }
+
+  // how many tiles you can walk to from the main street
+  reachable() {
+    if (this.blocked[13][15]) return 0;
+    const seen = new Uint8Array(MAPW * MAPH);
+    const seed = 13 * MAPW + 15;   // middle of the main street
+    const stack = [seed];
+    seen[seed] = 1;
+    let n = 0;
+    while (stack.length) {
+      const i = stack.pop(), cx = i % MAPW, cy = (i / MAPW) | 0;
+      n++;
+      for (const [dx, dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nx = cx + dx, ny = cy + dy;
+        if (nx < 0 || ny < 0 || nx >= MAPW || ny >= MAPH) continue;
+        const ni = ny * MAPW + nx;
+        if (seen[ni] || this.blocked[ny][nx]) continue;
+        seen[ni] = 1; stack.push(ni);
+      }
+    }
+    return n;
+  }
+
+  // no walkable tile is walled off from the street
+  connected() {
+    let open = 0;
+    for (let y = 0; y < MAPH; y++)
+      for (let x = 0; x < MAPW; x++) if (!this.blocked[y][x]) open++;
+    return this.reachable() === open;
+  }
+
+  buildFences() {
+    const gates = new Set();
+    for (const [px, py] of PLOTS) {
+      gates.add((px + 1) + "," + (py + 3));
+      gates.add((px + 2) + "," + (py + 3));
+    }
+    for (const [x0, x1, row] of FENCE_RUNS) {
+      let run = [];
+      const flush = () => {
+        if (run.length) this.fenceRun(run[0], run[run.length - 1], row);
+        run = [];
+      };
+      for (let x = x0; x <= x1; x++) {
+        if (gates.has(x + "," + row)) { flush(); continue; }
+        this.block(x, row);
+        run.push(x);
+      }
+      flush();
+    }
+    for (const [gx, gy, gw, gh] of GARDENS) {
+      this.fenceRun(gx, gx + gw - 1, gy);
+      this.fenceRun(gx, gx + gw - 1, gy + gh - 1);
+      for (let r = gy; r < gy + gh; r++) {
+        this.add.image(gx * T + 5, r * T, "houses", "fenceV")
+          .setOrigin(0, 0).setDepth((r + 1) * T + 2);
+        this.add.image((gx + gw - 1) * T + 7, r * T, "houses", "fenceV")
+          .setOrigin(0, 0).setDepth((r + 1) * T + 2);
+      }
+      // one row of vegetables, so the soil and the front fence both stay visible
+      for (let x = gx + 1; x < gx + gw - 1; x++) {
+        const h = hashCode("crop" + x + ":" + gy);
+        this.add.image(x * T + 8, (gy + 2) * T, "nature", "c" + (h % CROPS.length))
+          .setOrigin(.5, 1).setDepth((gy + 1) * T + 8);
+      }
+    }
+  }
+
+  fenceRun(x0, x1, row) {
+    const y = (row + 1) * T;
+    for (let x = x0; x <= x1; x++)
+      this.add.image(x * T, y, "houses", "fenceH").setOrigin(0, 1).setDepth(y);
+    this.add.image(x0 * T, y, "houses", "fenceL").setOrigin(1, 1).setDepth(y + 1);
+    this.add.image((x1 + 1) * T, y, "houses", "fenceR").setOrigin(0, 1).setDepth(y + 1);
+  }
+
+  buildBuildings() {
+    this.glows = [];
+    this.journalProps = [];
+    PLOTS.forEach(([px, py], i) => {
+      this.add.image(px * T, py * T, "houses", "h" + (i % 4))
+        .setOrigin(0, 0).setDepth((py + 3) * T);
+      for (let y = py; y < py + 3; y++)
+        for (let x = px; x < px + 4; x++) this.block(x, y);
+      // warm light in the doorway while its agent works — off otherwise
+      const g = this.add.rectangle(px * T + PLOT_DOOR_X, (py + 3) * T - 9, 12, 11, 0xffc86b, .55)
+        .setDepth(LIGHT_DEPTH).setVisible(false);
+      this.glows.push(g);
+      // A code-drawn desk, paper and lamp: visible evidence of the observation,
+      // never fabricated journal contents and never a link to the supplied path.
+      const desk = this.add.container(px * T + 53, (py + 3) * T + 2)
+        .setDepth((py + 3) * T + 10).setVisible(false);
+      desk.add([
+        this.add.rectangle(0, 0, 20, 5, 0x5e3923).setStrokeStyle(1, 0x9c6941),
+        this.add.rectangle(-7, 5, 3, 9, 0x442818),
+        this.add.rectangle(7, 5, 3, 9, 0x442818),
+        this.add.rectangle(1, -3, 10, 7, 0xf0e2b8).setAngle(-5),
+        this.add.rectangle(-7, -8, 3, 9, 0xd2a15c),
+        this.add.circle(-7, -13, 4, 0xffd486, .85),
+      ]);
+      this.journalProps.push(desk);
+    });
+    this.add.image(YOUR_HOUSE.tx * T, YOUR_HOUSE.ty * T, "houses", "yours")
+      .setOrigin(0, 0).setDepth((YOUR_HOUSE.ty + 3) * T)
+      .setInteractive({ useHandCursor: true }).setData("nursery", true);
+    for (let y = YOUR_HOUSE.ty; y < YOUR_HOUSE.ty + 3; y++)
+      for (let x = YOUR_HOUSE.tx; x < YOUR_HOUSE.tx + 3; x++) this.block(x, y);
+    this.knockers=0;
+    this.knockGlow=this.add.rectangle(yourDoor.x,yourDoor.y-8,32,24,0xff8f5e,.4)
+      .setDepth(LIGHT_DEPTH).setVisible(false);
+    this.chips = [];
+    this.makeChip(NURSERY_ID, "#ffc86b", yourDoor.x, YOUR_HOUSE.ty * T - 2, "town hall")
+      .el.classList.add("you");
+    this.buildNoticeBoard();
+    this.buildJobBoard();
+    // shared locations: building, name label, and a doorway lit only while
+    // somebody is genuinely there
+    this.placeGlow = {};
+    for (const [name, p] of Object.entries(PLACES)) {
+      const d = placeDoor(name);
+      this.add.image(p.tx * T, p.ty * T, "houses", "place-" + name)
+        .setOrigin(0, 0).setDepth(d.y);
+      this.placeGlow[name] = this.add.rectangle(d.x, d.y - 9, 12, 14, 0xffc86b, .5)
+        .setDepth(LIGHT_DEPTH).setVisible(false);
+      this.makeChip(null, p.accent, d.x, p.ty * T - 2, p.label)
+        .el.classList.add("place");
+    }
+  }
+
+  buildNoticeBoard() {
+    // A code-drawn prop keeps the board distinct from houses while using the
+    // same crisp map label and pointer interaction as villagers.
+    const x = 18 * T, y = 10 * T;
+    this.block(18, 9); this.block(19, 9);
+    const board = this.add.container(x, y).setDepth(y + T);
+    const sign = this.add.rectangle(T, -T / 2, 30, 20, 0x7a4e2e)
+      .setStrokeStyle(2, 0xd2a15c);
+    const paper = this.add.rectangle(T, -T / 2, 19, 12, 0xe8dfc8);
+    const lines = [0, 4, 8].map(dx => this.add.rectangle(6 + dx, -T / 2, 2, 7, 0x6f6758));
+    const posts = [this.add.rectangle(4, 7, 4, 18, 0x56351f),
+                   this.add.rectangle(28, 7, 4, 18, 0x56351f)];
+    board.add([sign, paper, ...lines, ...posts]);
+    board.setSize(32, 34).setInteractive({ useHandCursor: true });
+    board.setData("noticeBoard", true);
+    this.makeChip(NOTICE_BOARD_ID, "#d2a15c", x + T, y - 22, "notice board")
+      .el.classList.add("place");
+  }
+
+  buildJobBoard() {
+    const x = 12 * T, y = 10 * T;
+    this.block(12, 9); this.block(13, 9);
+    const board = this.add.container(x, y).setDepth(y + T);
+    const sign = this.add.rectangle(T, -T / 2, 30, 20, 0x59402c)
+      .setStrokeStyle(2, 0xffc86b);
+    const cards = [-7, 0, 7].map(dx => this.add.rectangle(T + dx, -T / 2, 5, 11, 0xe8dfc8));
+    const posts = [this.add.rectangle(4, 7, 4, 18, 0x47311f),
+                   this.add.rectangle(28, 7, 4, 18, 0x47311f)];
+    board.add([sign, ...cards, ...posts]);
+    board.setSize(32, 34).setInteractive({ useHandCursor: true });
+    board.setData("jobBoard", true);
+    const chip = this.makeChip(JOB_BOARD_ID, "#ffc86b", x + T, y - 54, "job board");
+    chip.el.classList.add("place");
+    chip.el.setAttribute("aria-label", "Job board. Open details");
+  }
+
+  makeChip(id, accent, wx, wy, name, sub) {
+    const el = document.createElement(id ? "button" : "div");
+    el.className = "chip";
+    if (id) {
+      el.type = "button";
+      el.dataset.panelTarget = id;
+      el.setAttribute("aria-label", `${name}${sub ? `, ${sub}` : ""}. Open details`);
+    }
+    el.innerHTML = `<span class="dot" style="background:${accent}"></span><span class="nm"></span><span class="sub"></span>`;
+    el.querySelector(".nm").textContent = name;
+    el.querySelector(".sub").textContent = sub || "";
+    if (!sub) el.querySelector(".sub").style.display = "none";
+    if (id) el.addEventListener("click", () => openPanel(id, el));
+    document.getElementById("labels").appendChild(el);
+    const chip = { el, wx, wy };
+    this.chips.push(chip);
+    return chip;
+  }
+
+  layoutChips() {
+    const rect = this.game.canvas.getBoundingClientRect();
+    const s = rect.width / (MAPW * T * ZOOM);
+    for (const c of this.chips) {
+      c.el.style.left = (rect.left + c.wx * ZOOM * s) + "px";
+      c.el.style.top  = (rect.top  + c.wy * ZOOM * s) + "px";
+    }
+  }
+
+  buildTrees() {
+    // a tree is 32×32 with its base at (x, y): the ground it stands on is solid,
+    // which is what makes the border trees a wall villagers have to route around
+    const tree = (x, y, i) => {
+      this.add.image(x, y, "nature", "tree" + (i % 2)).setOrigin(.5, 1).setDepth(y);
+      for (let ty = Math.floor((y - 32) / T); ty <= Math.ceil(y / T) - 1; ty++)
+        for (let tx = Math.floor((x - 16) / T); tx <= Math.ceil((x + 16) / T) - 1; tx++)
+          this.block(tx, ty);
+    };
+    for (let i = 0; i < MAPW / 2; i++) {
+      tree(i * 32 + 16, 34, i);
+      tree(i * 32 + 16, MAPH * T, i + 1);
+    }
+    for (let i = 2; i < 10; i++) {
+      tree(16, i * 32 + 2, i);
+      tree(MAPW * T - 16, i * 32 + 2, i + 1);
+    }
+    tree(13 * T, 4 * T, 0); tree(19 * T, 4 * T, 1);   // accents flanking your house
+  }
+
+  /* ————— pathfinding ————— */
+
+  walkable(x, y) {
+    return x >= 0 && y >= 0 && x < MAPW && y < MAPH && !this.blocked[y][x];
+  }
+  tileAt(x, y) {
+    return { x: Phaser.Math.Clamp(Math.floor(x / T), 0, MAPW - 1),
+             y: Phaser.Math.Clamp(Math.floor(y / T), 0, MAPH - 1) };
+  }
+  tileCost(x, y) { return this.dirt[y][x] ? ROAD_COST : GRASS_COST; }
+
+  findPath(sx, sy, gx, gy) {
+    return this.routing.findPath(sx, sy, gx, gy);
+  }
+
+  // pixel waypoints for a walk: tile centres along the path, collinear runs
+  // collapsed into one leg, ending exactly on the spot the villager is headed for
+  route(fromX, fromY, toX, toY) {
+    return this.routing.route({ x: fromX, y: fromY }, { x: toX, y: toY });
+  }
+
+  // every doorstep, work spot and knock slot the projection can ask for
+  spots() {
+    const out = this.routing.allocatableEndpoints().map(({ dest, slot, point }) => ({
+      name: destinationKey(dest) + " " + slot, ...point,
+    }));
+    for (let i = 0; i < 14; i++)
+      out.push({ name: "street " + i, x: 48 + i * 28, y: 13 * T + 8 });
+    return out;
+  }
+
+  // One component traversal proves that every allocatable endpoint and street
+  // spot is open and mutually reachable; `village.checkMap()` re-runs it.
+  checkMap() {
+    const spots = this.spots();
+    const streets = spots.filter(spot => spot.name.startsWith("street "));
+    const validation = this.routing.validate(streets), bad = [...validation.problems];
+    let open = 0, road = 0;
+    for (let y = 0; y < MAPH; y++)
+      for (let x = 0; x < MAPW; x++)
+        if (!this.blocked[y][x]) { open++; if (this.dirt[y][x]) road++; }
+    return { tiles: MAPW * MAPH, walkable: open, road, spots: spots.length,
+             connected: validation.connected, offRoute: this.offRoute, problems: bad };
+  }
+
+  /* A place the projection can name but the map cannot draw is the bug this
+     whole change exists to fix, and its symptom — a villager quietly standing
+     at home — looks like nothing at all. Say it loudly instead. */
+  reportPlaces() {
+    const missing = unmappedPlaces();
+    if (!missing.length) return;
+    const msg = "burrow places: the projection sends villagers to " +
+                missing.join(", ") + ", which the map has no building for";
+    console.error(msg);
+    const foot = document.querySelector("footer");
+    if (foot) foot.textContent += " · ⚠ " + msg;
+  }
+
+  reportMap() {
+    this.offRoute = 0;
+    const r = this.checkMap();
+    const line = `burrow map: ${r.walkable}/${r.tiles} tiles walkable ` +
+                 `(${r.road} road), ${r.spots} spots all reachable`;
+    if (r.problems.length) console.error("burrow map problems:", r.problems);
+    else console.log(line);
+  }
+
+  text(x, y, str, color, size) {
+    // rendered at 3× and drawn at ⅓: crisp at ZOOM, and unlike setResolution()
+    // it survives the WebGL renderer, where the "!" was coming out as a smudge
+    return this.add.text(x, y, str, {
+      fontFamily: "VT323", fontSize: (size || 8) * 3 + "px", color,
+    }).setOrigin(.5, 1).setScale(1 / 3).setDepth(9000)
+      .setShadow(0, 3, "#000000", 0, true, true);
+  }
+
+  /* ————— villagers ————— */
+
+  assignPlot(v) {
+    const id = typeof v === "string" ? v : v.id;
+    const plot = typeof v === "string" ? (this.plotOf.get(id) ?? -1) :
+      (v.residency === "resident" && Number.isInteger(v.home) ? v.home : -1);
+    this.plotOf.set(id, plot);
+    return plot;
+  }
+
+  /* A shared location hands out stable slots: a villager keeps the spot it took
+     for as long as it stays, so nobody shuffles sideways because a neighbour
+     arrived or left — that would be movement no event asked for. */
+  slotAt(where, id) {
+    return this.slotAllocator.allocate(where, id);
+  }
+
+  leaveSlots(id, except) {
+    this.slotAllocator.release(id, except);
+  }
+
+  spotFor(v, viz, dest, slot) {
+    if (dest.kind === "plot" || dest.kind === "building" || dest.kind === "door")
+      return this.routing.endpoint(dest, slot, v.state);
+    if (viz.plot < 0) {   // traveler rests/works on the street
+      const rx = 48 + (hashCode(viz.id) % 14) * 28;
+      return { x: rx, y: 13 * T + 8, kind: v.state };
+    }
+    return this.routing.endpoint({ kind: "home", plot: viz.plot }, 0, v.state);
+  }
+
+  spawn(v, dest) {
+    const plot = this.assignPlot(v);
+    const door = plot >= 0 ? plotDoor(plot) : { x: 48 + (hashCode(v.id) % 14) * 28, y: 13 * T + 8 };
+    const cont = this.add.container(door.x, door.y + 2);
+    const shadow = this.add.image(0, 7, "shadow").setAlpha(.35);
+    const spr = this.add.sprite(0, 0, v.char + "-idle", D_DOWN);
+    // knock "!" and sleep "z" live above the day/night overlay and follow the
+    // container from the update loop: state must not dim just because it's night
+    const bang = this.text(cont.x + 9, cont.y - 5, "!", "#ff8f5e", 10)
+      .setDepth(LIGHT_DEPTH).setVisible(false);
+    const zzz  = this.text(cont.x + 6, cont.y - 6, "z", "#cfc7ae", 8)
+      .setDepth(LIGHT_DEPTH).setVisible(false);
+    cont.add([shadow, spr]);
+    cont.setSize(14, 16).setInteractive({ useHandCursor: true });
+    cont.setData("agent", v.id);
+    spr.setData("agent", v.id);
+    const chip = this.makeChip(v.id, v.accent, cont.x, cont.y - 11, v.name, v.project);
+    const viz = { id: v.id, cont, spr, bang, zzz, chip, plot, char: v.char,
+                  state: v.state, lastTs: 0, target: null, walk: null,
+                  home: BurrowPresence.atHome(v.state, dest) };
+    this.viz.set(v.id, viz);
+    return viz;
+  }
+
+  despawn(id) {
+    const viz = this.viz.get(id);
+    if (!viz) return;
+    if (viz.walk) viz.walk.destroy();
+    viz.chip.el.remove();
+    this.chips = this.chips.filter(c => c !== viz.chip);
+    viz.cont.destroy();
+    this.leaveSlots(id, null);
+    this.viz.delete(id);
+    this.plotOf.delete(id);
+  }
+
+  walkTo(viz, target, targetY, arrivesHome, preparedPath) {
+    const c = viz.cont, char = viz.spr.texture.key.replace("-idle", "").replace("-walk", "");
+    const tx = typeof target === "object" ? target.x : target;
+    const ty = typeof target === "object" ? target.y : targetY;
+    if (typeof target === "object") arrivesHome = targetY;
+    const path = preparedPath || this.route(c.x, c.y, tx, ty);
+    if (!path) {
+      // Staying put is truthful. A straight fallback could cross solid terrain
+      // and show the villager somewhere it could never have walked.
+      console.error("burrow invariant: no walkable path to", tx, ty);
+      return false;
+    }
+    if (REDUCED_MOTION) {
+      if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+      c.setPosition(tx, ty);
+      viz.spr.stop().setTexture(char + "-idle", D_DOWN);
+      BurrowPresence.finishJourney(viz, Boolean(arrivesHome));
+      return true;
+    }
+    if (viz.walk) { viz.walk.destroy(); viz.walk = null; }
+    BurrowPresence.startJourney(viz, Boolean(arrivesHome));
+    const legs = [];
+    let px = c.x, py = c.y;
+    for (const p of path) {
+      const dx = p.x - px, dy = p.y - py;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 1) continue;
+      const d = Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? D_RIGHT : D_LEFT)
+                                             : (dy > 0 ? D_DOWN : D_UP);
+      legs.push({
+        x: p.x, y: p.y, duration: dist / WALK_SPEED * 1000,
+        onStart: () => viz.spr.play(char + "-walk-" + d, true),
+      });
+      px = p.x; py = p.y;
+    }
+    const settle = () => {
+      viz.spr.stop();
+      viz.spr.setTexture(char + "-idle", D_DOWN);
+      viz.walk = null;
+      BurrowPresence.finishJourney(viz, Boolean(arrivesHome));
+    };
+    if (!legs.length) { settle(); return true; }
+    viz.walk = this.tweens.chain({ targets: c, tweens: legs, onComplete: settle });
+    return true;
+  }
+
+  hop(viz) {   // one real event just arrived → one small hop; never loops
+    if (REDUCED_MOTION) return;
+    this.tweens.add({ targets: viz.spr, y: -3, duration: 110, yoyo: true });
+  }
+
+  updateVillage(list) {
+    /* Plan the whole snapshot before touching the scene. This is deliberately
+       one transaction: capacity overflow or one impossible route means the
+       previous truthful frame remains completely intact. */
+    const ids = new Set();
+    for (const v of list) {
+      if (ids.has(v.id)) {
+        console.error("burrow snapshot rejected: duplicate villager id", v.id);
+        return false;
+      }
+      ids.add(v.id);
+    }
+    const plannedPlots = new Map(list.map(v => [v.id,
+      v.residency === "resident" && Number.isInteger(v.home) ? v.home : -1]));
+    const occupied = [...plannedPlots.values()].filter(plot => plot >= 0);
+    const plans = [], claims = [];
+    for (const v of list) {
+      const viz = this.viz.get(v.id), isNew = !viz;
+      const dest = destinationFor(v, {
+        held: viz && viz.delegateTo, ownPlot: plannedPlots.get(v.id),
+        occupied, hash: hashCode(v.id), places: PLACES,
+      });
+      const key = dest.kind === "home" ? null : destinationKey(dest);
+      const targetClaim = { where: key, id: v.id };
+      claims.push(targetClaim);
+      let sourceClaim = null;
+      if (isNew && v.residency === "visitor" && key !== "building:visitor-lodge") {
+        sourceClaim = { where: "building:visitor-lodge", id: v.id };
+        claims.push(sourceClaim);
+      }
+      plans.push({ v, viz, isNew, dest, key, targetClaim, sourceClaim,
+        plot: plannedPlots.get(v.id) });
+    }
+    const preview = this.slotAllocator.reconcile(claims, false);
+    if (!preview) {
+      console.error("burrow snapshot rejected: destination capacity exhausted");
+      return false;
+    }
+    const slotOf = new Map(claims.map((claim, index) => [claim, preview[index]]));
+    for (const plan of plans) {
+      const { v, viz, isNew, dest, targetClaim, sourceClaim, plot } = plan;
+      const target = this.spotFor(v, viz || { id: v.id, plot }, dest, slotOf.get(targetClaim));
+      if (!target) {
+        console.error("burrow snapshot rejected: invalid destination endpoint");
+        return false;
+      }
+      const source = sourceClaim ? this.routing.endpoint(
+        { kind: "building", id: "visitor-lodge" }, slotOf.get(sourceClaim), v.state) : null;
+      const from = source || (viz && { x: viz.cont.x, y: viz.cont.y });
+      const moved = !viz || !viz.target || viz.target.x !== target.x || viz.target.y !== target.y;
+      const needsRoute = Boolean(from) && (moved || v.state !== viz?.state);
+      const path = needsRoute ? this.routing.route(from, target) : [];
+      if (needsRoute && !path) {
+        console.error("burrow snapshot rejected: no walkable path to", target.x, target.y);
+        return false;
+      }
+      Object.assign(plan, { target, source, moved, needsRoute, path });
+    }
+    const committed = this.slotAllocator.reconcile(claims);
+    if (!committed) throw new Error("burrow invariant: validated allocation did not commit");
+
+    const seen = new Set(list.map(v => v.id));
+    const busyPlaces = new Set();
+    let knockers = 0;
+    for (const plan of plans) {
+      const { v, isNew, dest, key, plot, target: spot, source, moved, needsRoute, path } = plan;
+      let viz = plan.viz;
+      this.plotOf.set(v.id, plot);
+      if (viz) viz.plot = plot;
+      if (isNew) {
+        viz = this.spawn(v, source ? { kind: "building", id: "visitor-lodge" } : dest);
+        if (source) viz.cont.setPosition(source.x, source.y);
+      }
+      viz.chip.el.className = "chip " + v.state;
+      viz.chip.el.querySelector(".nm").textContent = v.name;
+      viz.chip.el.querySelector(".dot").style.background = v.accent;
+      if (!isNew && v.char !== viz.char) {   // soul file edited → new sprite
+        viz.spr.stop();
+        viz.spr.setTexture(v.char + "-idle", D_DOWN);
+      }
+      viz.char = v.char;
+      const sub = viz.chip.el.querySelector(".sub");
+      const subText =
+        v.state === "knocking" ? "needs you!" :
+        v.state === "failed"   ? v.project + " · tool failed" :
+        v.state === "stale"    ? v.project + " · no signal" :
+        v.state === "working" && v.doing ? v.project + " · " + v.doing :
+        v.residency === "visitor" ? v.project + " · visitor" : v.project;
+      sub.textContent = subText;
+      sub.style.display = "";
+      viz.chip.el.setAttribute("aria-label", `${v.name}, ${subText}. Open details`);
+      if (v.journal) viz.chip.el.setAttribute("aria-label",
+        `${v.name}, writing the journal at home beside an illuminated desk, paper, and lamp. Open details`);
+
+      if (!isNew && v.lastTs > viz.lastTs && v.state === "working") this.hop(viz);
+      viz.lastTs = v.lastTs;
+      viz.journal = Boolean(v.journal);
+
+      if (dest.kind === "building" && v.state === "working") busyPlaces.add(dest.id);
+      if (v.state === "knocking") knockers++;
+      if (isNew && !source) {
+        viz.cont.setPosition(spot.x, spot.y);
+        viz.target = spot;
+        viz.dest = dest;
+        viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
+        viz.slotKey = key;
+        viz.spr.setTexture(v.char + "-idle", D_DOWN);
+      } else if (needsRoute) {
+        if (!this.walkTo(viz, spot, BurrowPresence.atHome(v.state, dest), undefined, path))
+          throw new Error("burrow invariant: validated route did not start");
+        viz.target = spot;
+        viz.state = v.state;
+        viz.dest = dest;
+        viz.delegateTo = dest.kind === "plot" ? dest.plot : null;
+        viz.slotKey = key;
+      }
+      if (isNew || (!moved && v.state === viz.state)) viz.state = v.state;
+
+      const stale = v.state === "stale";
+      viz.cont.setAlpha(stale ? .45 : 1);
+      viz.bang.setVisible(v.state === "knocking");
+      viz.zzz.setVisible(v.state === "resting");
+    }
+    for (const name of Object.keys(PLACES))
+      this.placeGlow[name].setVisible(busyPlaces.has(name));
+    for (const id of [...this.viz.keys()])
+      if (!seen.has(id)) this.despawn(id);
+    this.knockers=knockers;
+    this.applySky();
+    return true;
+  }
+}
+
+/* ————— DOM chrome: census, panel, live event transport ————— */
+
+const censusEl  = document.getElementById("census");
+const beatEl    = document.getElementById("lastbeat");
+const transportEl = document.getElementById("transport");
+const emptyEl   = document.getElementById("empty");
+const panelEl   = document.getElementById("panel");
+const panelBody = document.getElementById("panel-body");
+BurrowMoodGlyph.bind(panelEl);
+const stewardDialog = document.getElementById("steward-auth");
+const stewardForm = document.getElementById("steward-auth-form");
+const stewardTokenInput = document.getElementById("steward-token");
+let stewardDialogResolve = null;
+let stewardDialogPromise = null;
+
+function finishStewardDialog(value) {
+  stewardTokenInput.value = "";
+  if (stewardDialog.open) stewardDialog.close();
+  const resolve = stewardDialogResolve; stewardDialogResolve = null;
+  stewardDialogPromise = null;
+  if (resolve) resolve(value);
+}
+stewardForm.addEventListener("submit", event => {
+  event.preventDefault();
+  if (event.submitter && event.submitter.value === "cancel") { finishStewardDialog(null); return; }
+  if (!stewardForm.reportValidity()) return;
+  const config = { url: document.getElementById("steward-url").value,
+    token: stewardTokenInput.value };
+  finishStewardDialog(config);
+});
+stewardDialog.addEventListener("cancel", event => { event.preventDefault(); finishStewardDialog(null); });
+function requestStewardConfig() {
+  if (stewardConfig) return Promise.resolve(stewardConfig);
+  if (stewardDialogPromise) return stewardDialogPromise;
+  document.getElementById("steward-auth-error").textContent = "";
+  stewardDialogPromise = new Promise(resolve => { stewardDialogResolve = resolve; });
+  stewardDialog.showModal(); stewardTokenInput.focus();
+  return stewardDialogPromise;
+}
+async function refreshStewardDeclarations() {
+  const generation = ++stewardDeclarationGeneration;
+  const config = stewardConfig;
+  stewardDeclarations = { state: "loading", byRoutine: new Map(), error: null };
+  renderPanel(Date.now());
+  try {
+    const byRoutine = await BurrowRoutines.fetchDeclarations(config);
+    if (generation !== stewardDeclarationGeneration) return;
+    stewardDeclarations = { state: "loaded", byRoutine, error: null };
+  } catch (error) {
+    if (generation !== stewardDeclarationGeneration) return;
+    stewardDeclarations = { state: "error", byRoutine: new Map(),
+      error: error && error.message || "connection failed" };
+  }
+  renderPanel(Date.now());
+}
+async function refreshIdentity() {
+  if (!stewardConfig) { if (selectedId) renderPanel(Date.now()); return; }
+  if (!fleetView.directoryAvailable) {
+    if (identityAbortController) identityAbortController.abort();
+    identityAbortController = null;
+    identityGeneration += 1;
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, fleetView.residents);
+    if (selectedId) renderPanel(Date.now());
+    return;
+  }
+  if (identityAbortController) identityAbortController.abort();
+  const controller = new AbortController();
+  identityAbortController = controller;
+  const generation = ++identityGeneration;
+  identityState = { ...identityState, status: "loading" };
+  if (selectedId) renderPanel(Date.now());
+  const next = await BurrowIdentity.refresh(identityState, stewardConfig,
+    fleetView.residents, (...args) => fetch(...args), Date.now(), { signal: controller.signal,
+      isCurrent(_local, key, fingerprint) {
+        const current = fleetView.residents.find(item => item && item.file === key);
+        return generation === identityGeneration && fleetView.directoryAvailable && current &&
+          BurrowIdentity.localFingerprint(current) === fingerprint;
+      }, localAvailable() { return fleetView.directoryAvailable; } });
+  if (generation !== identityGeneration) return;
+  identityAbortController = null;
+  identityState = next;
+  if (selectedId) renderPanel(Date.now());
+}
+
+let villagers = [];
+let selectedId = null;
+let scene = null;
+
+function renderChrome(now) {
+  emptyEl.style.display = villagers.length ? "none" : "block";
+  const knockers = villagers.filter(v => v.state === "knocking").length;
+  const working  = villagers.filter(v => v.state === "working").length;
+  const resting  = villagers.filter(v => v.state === "resting").length;
+  const failed   = villagers.filter(v => v.state === "failed").length;
+  const stale    = villagers.filter(v => v.state === "stale").length;
+  const parts = [`${villagers.length} villager${villagers.length === 1 ? "" : "s"}`];
+  if (working) parts.push(`${working} working`);
+  if (resting) parts.push(`${resting} resting`);
+  if (failed) parts.push(`${failed} failed`);
+  if (stale) parts.push(`<button type="button" class="attn census-action" data-action="inspect-stale">${stale} stale — inspect no-signal agents</button>`);
+  censusEl.innerHTML = parts.join('<span class="dot"> · </span>') +
+    (knockers ? `<span class="dot"> · </span><span class="attn">${knockers} at your door</span>` : "");
+  const newest = Math.max(0, ...villagers.map(v => v.lastTs));
+  beatEl.textContent = newest ? "last signal " + ago(newest, now) : "";
+  if (selectedId && ![JOB_BOARD_ID, NURSERY_ID].includes(selectedId)) renderPanel(now);
+}
+
+const previewEl = document.getElementById("preview");
+const PAGE_BG = [0x14, 0x23, 0x17];   // the letterboxed area around the village
+
+/* the DOM half of the daylight projection: page background, a `data-phase` hook,
+   and — only when the clock is overridden — a badge that says so out loud */
+function renderSky(sky) {
+  const bg = PAGE_BG.map((c, i) => Math.round(c * ((sky.color >> (16 - i * 8)) & 255) / 255));
+  document.body.style.background = `rgb(${bg[0]},${bg[1]},${bg[2]})`;
+  document.body.dataset.phase = sky.phase;
+  document.body.dataset.clock = hhmm(sky.hour);
+  if (!PREVIEW) { previewEl.hidden = true; return; }
+  previewEl.hidden = false;
+  previewEl.innerHTML = `preview: ${esc(sky.phase)} · ${hhmm(sky.hour)}` +
+    `<span class="note">dev override — not the real clock</span>`;
+}
+
+/* What the panel may claim about where a villager is: whatever the map did
+   with it, and no more. A delegating villager is at a neighbour's door — the
+   protocol never says whose, so neither does this. */
+function placeLabel(v) {
+  const viz = scene && scene.viz.get(v.id);
+  const dest = viz && viz.dest;
+  if (!dest) return "";
+  if (dest.kind === "building") return " · at " + PLACES[dest.id].label;
+  if (dest.kind === "plot") return " · at a neighbour's door";
+  return "";
+}
+
+let fleetView = { state: BurrowFleet.createFleetState(), residents: [], diagnosticResidents: [], diagnostics: [],
+  directoryAvailable: false, villagers: [], transport: "disconnected", now: Date.now(),
+  jobState: BurrowJobs.createState(), approvalState: BurrowApprovals.createState(),
+  journalState: BurrowJournals.createState(),
+  taskEvidence: [], approvalEvidence: [] };
+let fleetTab = "activity";
+const routineAcks = BurrowRoutines.createAcknowledgements();
+const routineRunNotices = new Map();
+const jobAcks = BurrowJobs.createAcknowledgements({ onChange() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  refreshJobFeedback();
+  refreshJobListing(Date.now());
+  refreshJobFormState();
+} });
+const approvalDrafts = new Map();
+const approvalNotices = new Map();
+function pruneApprovalUi(state) {
+  const retained = new Set(state && state.requests instanceof Map ? state.requests.keys() : []);
+  for (const target of [approvalDrafts, approvalNotices]) {
+    for (const key of target.keys()) if (!retained.has(key)) target.delete(key);
+  }
+}
+function selectedPendingApprovalQueue() {
+  const selected = villagers.find(v => v.id === selectedId);
+  const projected = selected && selected.knock && selected.knock.queue;
+  const state = fleetView.approvalState;
+  if (!selected || !Array.isArray(projected) || !(state && state.requests instanceof Map)) return [];
+  return projected.filter(candidate => {
+    if (!candidate || typeof candidate.id !== "string") return false;
+    const record = BurrowApprovals.recordFor(state, candidate.id);
+    return record === candidate && !record.resolution && !record.collided && record.knock &&
+      record.knock.agent_id === selected.id &&
+      BurrowApprovals.sameLifecycle(record, record.knock, record.shape);
+  });
+}
+const approvalAcks = BurrowApprovals.createAcknowledgements({ onChange(item) {
+  if (!selectedId) return;
+  const selected = villagers.find(v => v.id === selectedId);
+  if (selected && selected.knock && selected.knock.queue &&
+      selected.knock.queue.some(record => record.id === item.request_id)) renderPanel(Date.now());
+} });
+const jobDraft = { title: "", detail: "", required_skills: "" };
+let jobPostNotice = "";
+const nurseryDraft = { name: "", char: "Villager", accent: "#4f7ea6", role: "",
+  mission: "", duties: "", rules: "", escalation: "", skills: "", runner: "codex" };
+let nurseryErrors = {};
+// A preflight failure is current interaction truth, independently of the
+// bounded tracker history below it. Keeping the two models separate prevents
+// an older receipt from swallowing a newer "nothing was sent" result.
+let nurseryNotice = null;
+function setNurseryNotice(message, action, itemKey = null, kind = "preflight") {
+  nurseryNotice = { message, action, itemKey, kind };
+}
+function clearNurseryNotice(action = null) {
+  if (!action || nurseryNotice && nurseryNotice.action === action) nurseryNotice = null;
+}
+function nurseryTelemetryAvailability(snapshot, retry = false) {
+  const result = BurrowRoutines.telemetryAvailability(snapshot.transport, snapshot.cursor);
+  if (result.ok) return result;
+  const subject = retry ? "Nursery retry" : "Nursery";
+  return { ...result, message: result.reason === "transport" ?
+    `${subject} unavailable: telemetry is ${snapshot.transport || "disconnected"}; no request was sent` :
+    `${subject} unavailable: exact telemetry cursor is not available; no request was sent` };
+}
+let nurseryAbortController = null;
+const nurseryTracker = BurrowNursery.createTracker({ onChange(item) {
+  if (nurseryNotice && nurseryNotice.action === "retry" &&
+      nurseryNotice.itemKey === item.key &&
+      !["ambiguous", "timeout", "unreachable", "cancelled"].includes(item.state)) {
+    nurseryNotice = null;
+  }
+  if (selectedId === NURSERY_ID) renderPanel(Date.now());
+} });
+let stewardConfig = null; // deliberately memory-only: never localStorage, URL, server, or manifest
+let stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
+let stewardDeclarationGeneration = 0;
+let identityState = BurrowIdentity.createState();
+let identityGeneration = 0;
+let identityAbortController = null;
+let identityLocalSignature = "";
+const fleetFilters = { query: "", project: "", source: "", state: "", villager: "" };
+function villagerFor(agentId) { return villagers.find(v => v.id === agentId); }
+function forgetStewardConfig() {
+  if (nurseryAbortController) nurseryAbortController.abort();
+  nurseryAbortController = null;
+  if (identityAbortController) identityAbortController.abort();
+  identityAbortController = null;
+  stewardConfig = null;
+  stewardDeclarations = { state: "unconfigured", byRoutine: new Map(), error: null };
+  stewardDeclarationGeneration += 1;
+  identityGeneration += 1;
+  if (!fleetView.directoryAvailable) {
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, fleetView.residents);
+    return;
+  }
+  identityState = { ...identityState, status: "unavailable",
+    residents: new Map([...identityState.residents].map(([key, value]) => [key, { ...value,
+      status: "unavailable", stale: Boolean(value.lastSuccessAt),
+      journal: value.journal ? { ...value.journal, status: "unavailable",
+        stale: Boolean(value.journal.lastSuccessAt) } : null }])) };
+}
+function currentIdentitySignature(residents = fleetView.residents,
+    available = fleetView.directoryAvailable) {
+  return `${available ? "available" : "unavailable"}\n` +
+    (residents || []).filter(item => item && item.valid === true)
+    .map(item => `${item.file}\0${BurrowIdentity.localFingerprint(item)}`).sort().join("\n");
+}
+function reconcileIdentityLocals(residents, available = fleetView.directoryAvailable) {
+  const signature = currentIdentitySignature(residents, available);
+  if (signature === identityLocalSignature) return;
+  identityLocalSignature = signature;
+  if (identityAbortController) identityAbortController.abort();
+  identityAbortController = null;
+  identityGeneration += 1;
+  if (!available) {
+    identityState = BurrowIdentity.localFeedUnavailable(identityState, residents);
+    if (selectedId) renderPanel(Date.now());
+    return;
+  }
+  const current = new Map((residents || []).filter(item => item && item.valid === true)
+    .map(item => [item.file, item]));
+  identityState = { ...identityState, status: stewardConfig ? "unavailable" : identityState.status,
+    residents: new Map([...identityState.residents].filter(([key, record]) => {
+      const local = current.get(key);
+      return local && record.localFingerprint === BurrowIdentity.localFingerprint(local);
+    })) };
+  if (stewardConfig && selectedId && ![JOB_BOARD_ID, FLEET_LEDGER_ID].includes(selectedId)) {
+    queueMicrotask(refreshIdentity);
+  }
+}
+function routineNoticeKey(correlation, routine) {
+  return `${correlation.agent_id ? `agent:${correlation.agent_id}` : `project:${correlation.project}`}\0${routine}`;
+}
+function villagerName(agentId) {
+  const current = villagerFor(agentId);
+  return current ? current.name : NAMES[hashCode(agentId) % NAMES.length];
+}
+function selectOptions(values, selected, label) {
+  return `<option value="">${esc(label)}</option>` + values.map(value =>
+    `<option value="${esc(value)}"${value === selected ? " selected" : ""}>${esc(value)}</option>`).join("");
+}
+function entryLink(detailId, label) {
+  return `<button type="button" class="entry-link" data-agent="${esc(detailId)}" data-fleet-focus="agent:${esc(detailId)}">${esc(label)}</button>`;
+}
+function residentDetailId(resident) { return `@resident/${resident.file}`; }
+function journalResident(record) {
+  return BurrowJournals.ownerFor(fleetView.journalState, record);
+}
+function journalForResident(resident) {
+  if (!resident || resident.valid !== true) return null;
+  return BurrowJournals.records(fleetView.journalState).slice().reverse().find(record => {
+    const owner = journalResident(record);
+    return owner && (owner === resident || owner.file === resident.file);
+  }) || null;
+}
+function journalObservationMarkup(resident) {
+  const record = journalForResident(resident);
+  if (!record) return `<div class="ledger-small">No journal write has been observed in retained telemetry.</div>`;
+  const event = record.event, payload = event.payload;
+  return `<div class="journal-observed" data-journal-observed>
+    observed written ${esc(payload.day)} · ${ago(Date.parse(event.ts) || 0, fleetView.now || Date.now())}<br>
+    <span class="ledger-small">${esc(BurrowJournals.sentence(event))} · evidence path
+    <code>${esc(payload.path)}</code> (text only; never opened or fetched)</span></div>`;
+}
+function statusMark(status) {
+  return `<span class="status-mark ${esc(status.replaceAll(" ", "-"))}">${esc(status)}</span>`;
+}
+function capabilityLine(label, declarations, active, resident) {
+  const items = Array.isArray(declarations) ? declarations : declarations ? [declarations] : [];
+  const statuses = label === "soul" ? [!fleetView.directoryAvailable ? "externally unavailable" :
+    declarations && declarations.invalid ? "invalid" : items.length ? "configured" : "missing"] : items.length ? items.map(item =>
+    BurrowFleet.capabilityStatus(item, fleetView.directoryAvailable, item.invalid === true)) :
+    [BurrowFleet.capabilityStatus(null, fleetView.directoryAvailable)];
+  const status = statuses.includes("invalid") ? "invalid" :
+    statuses.includes("externally unavailable") ? "externally unavailable" : statuses[0];
+  const values = items.map(item => `${esc(item.id || item.ref || item.name || "declared")}` +
+    (item.status_ref ? ` <span class="ledger-small">(${esc(item.status_ref)})</span>` : "")).join(" · ");
+  const focusKey = `cap:${resident.file}:${label}`;
+  const detailId = active ? active.id : residentDetailId(resident);
+  const detailName = active ? active.name : resident.meta.name || resident.file;
+  const attrs = ` data-agent="${esc(detailId)}" data-fleet-focus="${esc(focusKey)}" aria-label="Open ${esc(detailName)} detail: ${esc(label)}"`;
+  return `<button type="button" class="cap-row"${attrs}><span>${esc(label)}</span><span class="cap-values">${statusMark(status)}${values ? ` ${values}` : ""}</span></button>`;
+}
+function identityStatus(record, kind) {
+  if (!record) return identityState.status === "unconfigured" ? "externally unavailable" :
+    identityState.status === "loaded" ? "missing" : "externally unavailable";
+  if (kind === "charter") return record.status === "configured" ? "configured" :
+    ["invalid", "malformed"].includes(record.status) ? "invalid" : record.status === "missing" ? "missing" :
+      "externally unavailable";
+  const journal = record.journal;
+  return journal && journal.status === "loaded" ? "configured" :
+    journal && journal.status === "malformed" ? "invalid" : "externally unavailable";
+}
+function journalRecency(record) {
+  const journal = record && record.journal;
+  if (!journal || !journal.lastSuccessAt) return "never fetched";
+  if (!journal.entries.length) return `empty · checked ${new Date(journal.lastSuccessAt).toLocaleString()}`;
+  return `latest ${journal.entries[0].date}${journal.stale ? ` · stale as of ${new Date(journal.lastSuccessAt).toLocaleString()}` : ""}`;
+}
+function identityDirectoryLine(resident, active, kind) {
+  const record = BurrowIdentity.recordFor(identityState, resident), status = identityStatus(record, kind);
+  const detailId = active ? active.id : residentDetailId(resident), name = resident.meta.name || resident.file;
+  const observed = kind === "journal" ? journalForResident(resident) : null;
+  const value = kind === "journal" ? `${observed ? `observed written ${esc(observed.event.payload.day)} · ` : ""}${journalRecency(record)}` : record && record.charter ?
+    esc(record.charter.mission) : status;
+  return `<button type="button" class="cap-row" data-agent="${esc(detailId)}" data-fleet-focus="identity:${esc(resident.file)}:${kind}" aria-label="Open ${esc(name)} detail: ${kind}"><span>${kind}</span><span class="cap-values">${statusMark(status)} ${value}</span></button>`;
+}
+function fleetActivityEntries() {
+  return BurrowFleet.recentActivity(fleetView.state,
+    BurrowJournals.activityEntries(fleetView.journalState));
+}
+function journalActivityOwner(entry) {
+  if (!entry || !entry.event || entry.event.type !== "journal_written") return null;
+  return journalResident(fleetView.journalState.records.get(BurrowJournals.keyFor(entry.event)));
+}
+function renderActivity(now) {
+  const state = fleetView.state;
+  const all = fleetActivityEntries();
+  const recent = BurrowFleet.filterEntries(all, fleetFilters);
+  const opts = key => BurrowFleet.optionsForEntries(all, key);
+  const journalDiagnostics = fleetView.journalState ? [
+    ...(fleetView.journalState.diagnostics || []),
+    ...(fleetView.journalState.ownershipDiagnostics || []),
+  ] : [];
+  const collisionDiagnosticCount = fleetView.journalState ?
+    (fleetView.journalState.collisionDiagnostics || []).length : 0;
+  const malformedDiagnosticCount = fleetView.journalState ?
+    (fleetView.journalState.malformedDiagnostics || []).length : 0;
+  const journalDiagnosticSummary = [
+    collisionDiagnosticCount ? `${collisionDiagnosticCount} retained collision${collisionDiagnosticCount === 1 ? "" : "s"}` : "",
+    malformedDiagnosticCount ? `${malformedDiagnosticCount} most recent malformed detail${malformedDiagnosticCount === 1 ? "" : "s"} of ${fleetView.journalState.malformed}` : "",
+  ].filter(Boolean).join("; ");
+  return `<div class="ledger-filters">
+    <input name="query" data-fleet-focus="filter:query" type="search" aria-label="Search recent activity" placeholder="search the ledger…" value="${esc(fleetFilters.query)}">
+    <select name="project" data-fleet-focus="filter:project" aria-label="Filter by project">${selectOptions(opts("project"), fleetFilters.project, "all projects")}</select>
+    <select name="source" data-fleet-focus="filter:source" aria-label="Filter by source">${selectOptions(opts("source"), fleetFilters.source, "all runners")}</select>
+    <select name="state" data-fleet-focus="filter:state" aria-label="Filter by state">${selectOptions(opts("state"), fleetFilters.state, "all states")}</select>
+    <select name="villager" data-fleet-focus="filter:villager" aria-label="Filter by villager">${selectOptions(opts("agent_id"), fleetFilters.villager, "all villagers")}</select>
+  </div>
+  ${state.malformed ? `<div class="ledger-state bad">${state.malformed} malformed record${state.malformed === 1 ? " was" : "s were"} ignored; invalid data never enters the village.</div>` : ""}
+  ${fleetView.journalState && fleetView.journalState.malformed ? `<div class="ledger-state bad">${fleetView.journalState.malformed} malformed journal observation${fleetView.journalState.malformed === 1 ? " was" : "s were"} ignored; it entered no journal history or recency state.</div>` : ""}
+  ${journalDiagnostics.length ? `<div class="ledger-state bad">Journal diagnostics${journalDiagnosticSummary ? ` (${journalDiagnosticSummary})` : ""}:<ul>${journalDiagnostics.map(item => `<li>${esc(item.reason)}${item.day ? ` · ${esc(item.day)}` : ""}</li>`).join("")}</ul></div>` : ""}
+  ${fleetView.journalState && fleetView.journalState.capacityDropped ? `<div class="ledger-state bad">${fleetView.journalState.capacityDropped} older canonical journal day${fleetView.journalState.capacityDropped === 1 ? " was" : "s were"} omitted by the 40-day global bound.</div>` : ""}
+  ${!new Set(["live", "polling"]).has(fleetView.transport) ? `<div class="ledger-state bad">Telemetry ${esc(fleetView.transport || "disconnected")}. This ledger may be stale.</div>` : ""}
+  ${villagers.some(v => v.state === "stale") ? `<div class="ledger-state bad">Some activity is stale: its villager has had no signal for over 30 minutes.</div>` : ""}
+  ${recent.length ? `<ol class="ledger-list">${recent.map(entry => `<li class="ledger-entry">
+    <div>${ago(entry.ts, now)}<div class="ledger-small">${esc(entry.state)}</div></div>
+    <div>${entry.event.type === "journal_written" && !journalActivityOwner(entry) ?
+      `<span>${esc(entry.agent_id)}</span><div class="identity-warning">${esc((fleetView.journalState.ownershipDiagnostics || []).find(item => item.key === BurrowJournals.keyFor(entry.event))?.reason || "unmatched resident; journal observation remains Fleet-only")} · no house animation was created</div>` :
+      entryLink(entry.agent_id, journalActivityOwner(entry)?.meta?.name || villagerName(entry.agent_id))}<div class="ledger-small">${esc(entry.project)} · ${esc(entry.source)}</div><div>${esc(describe(entry.event))}</div></div>
+    <div class="ledger-small">${esc(entry.event.type)}</div>
+  </li>`).join("")}</ol>` : `<div class="ledger-state">No valid recent events match these filters.</div>`}`;
+}
+function attentionEntries() {
+  const needs = BurrowFleet.outstandingNeeds(fleetView.state)
+    .filter(entry => BurrowApprovals.classify(entry.event).kind !== "structured");
+  const structured = fleetView.approvalState ? [...fleetView.approvalState.requests.values()]
+    .filter(record => !record.resolution && !record.collided)
+    .sort((a,b)=>BurrowApprovals.compareOrdinal(b.knockOrdinal,a.knockOrdinal)) : [];
+  const confirmations = BurrowApprovals.recentConfirmations(fleetView.approvalState);
+  return { needs, structured, confirmations };
+}
+function renderAttention(now) {
+  const { needs, structured, confirmations } = attentionEntries();
+  const diagnostics = fleetView.approvalState && fleetView.approvalState.diagnostics || [];
+  const rows = `${needs.map(entry => `<li class="ledger-entry">
+    <div>${ago(entry.ts, now)}</div><div>${entryLink(entry.agent_id, villagerName(entry.agent_id))}<div class="ledger-small">owner · ${esc(entry.agent_id)} · project · ${esc(entry.project)}</div><div>${esc(entry.event.payload.message)}</div></div><div>${statusMark("needs human")}</div>
+  </li>`).join("")}${structured.map(record => `<li class="ledger-entry" data-approval-request="${esc(record.id)}">
+    <div>${ago(Date.parse(record.knock.ts),now)}</div><div>${entryLink(record.knock.agent_id,villagerName(record.knock.agent_id))}<div class="ledger-small">owner · ${esc(record.knock.agent_id)} · project · ${esc(record.knock.project)} · request · ${esc(record.id)}</div><div>${esc(record.shape.action)}</div></div><div>${statusMark("approval")}</div>
+  </li>`).join("")}`;
+  return `${rows ? `<ol class="ledger-list">${rows}</ol>` : `<div class="ledger-state">No outstanding needs-human requests in the bounded recent window.</div>`}
+    ${confirmations.length ? `<section aria-label="Recent confirmed approval decisions">
+      <div class="meta">recent confirmed decisions · newest first · at most ${BurrowApprovals.MAX_CONFIRMATIONS}</div>
+      ${confirmations.map(item => approvalConfirmationMarkup(item, now, true)).join("")}</section>` : ""}
+    ${fleetView.approvalState && fleetView.approvalState.capacityDropped ? `<div class="ledger-state bad">${fleetView.approvalState.capacityDropped} approval record${fleetView.approvalState.capacityDropped === 1 ? " was" : "s were"} omitted by bounded retention.</div>` : ""}
+    ${diagnostics.length ? `<div class="ledger-state bad">Approval diagnostics:<ul>${diagnostics.map(item=>`<li>${esc(item.reason)}${item.request_id?` · ${esc(item.request_id)}`:""}</li>`).join("")}</ul></div>` : ""}`;
+}
+function activeForResident(resident) {
+  const match = resident.match || {};
+  return villagers.find(v => match.agent_id ? v.id === match.agent_id :
+    v.project === match.project && v.residency === "resident");
+}
+function renderDirectory() {
+  const directory = BurrowFleet.residentDirectory(fleetView.residents, fleetView.diagnostics,
+    fleetView.directoryAvailable, fleetView.diagnosticResidents);
+  const availability = directory.available ? "" : `<div class="ledger-state bad">Resident declarations are externally unavailable. Cached declarations are shown for orientation only; no capability is assumed configured.</div>`;
+  const cards = directory.residents.map(resident => {
+    const caps = resident.capabilities || {}, active = activeForResident(resident);
+    return `<article class="resident-card"><div class="name-with-mood"><h3>${entryLink(active ? active.id : residentDetailId(resident), resident.meta.name)}</h3>${active ? BurrowMoodGlyph.render(active.name, active.mood, { stale: active.state === "stale" }) : ""}</div>
+      <div class="ledger-small">resident · stable home ${resident.home + 1} · ${esc(resident.meta.role || "role not declared")}</div>
+      ${caps.soul && caps.soul.description ? `<div class="soul">${esc(caps.soul.description)}<div class="ledger-small">sprite ${esc(caps.soul.char)} · accent ${esc(caps.soul.accent)}</div></div>` : ""}
+      ${capabilityLine("soul", caps.soul, active, resident)}${capabilityLine("skills", caps.skills, active, resident)}
+      ${capabilityLine("memory", caps.memory, active, resident)}${capabilityLine("routes", caps.routes, active, resident)}
+      ${capabilityLine("app grants", caps.app_grants, active, resident)}
+      ${identityDirectoryLine(resident, active, "charter")}${identityDirectoryLine(resident, active, "journal")}</article>`;
+  }).join("");
+  const diagnosticCards = directory.diagnosticResidents.map(resident => {
+    const caps = resident.capabilities || {};
+    const name = resident.meta && resident.meta.name || resident.file;
+    const home = Number.isInteger(resident.declared_home) ?
+      ` · declared home ${resident.declared_home + 1} (not reserved)` : "";
+    return `<article class="resident-card invalid-resident"><h3>${entryLink(residentDetailId(resident), name)}</h3>
+      <div class="ledger-small">invalid resident declaration${home} · no residency or home granted</div>
+      ${capabilityLine("soul", caps.soul, null, resident)}${capabilityLine("skills", caps.skills, null, resident)}
+      ${capabilityLine("memory", caps.memory, null, resident)}${capabilityLine("routes", caps.routes, null, resident)}
+      ${capabilityLine("app grants", caps.app_grants, null, resident)}
+      <div class="cap-row"><span>charter</span><span>${statusMark("invalid")} invalid resident manifest</span></div>
+      <div class="cap-row"><span>journal</span><span>${statusMark("invalid")} no valid resident identity</span></div></article>`;
+  }).join("");
+  const invalid = directory.invalid.length ? `<div class="ledger-state bad">Incomplete or invalid manifests:<ul>${directory.invalid.map(d => `<li>${esc(d.file)}${esc(d.path)} — ${esc(d.message)}</li>`).join("")}</ul>${statusMark("invalid")}</div>` : "";
+  const visitors = villagers.filter(v => v.residency === "visitor");
+  const lodge = `<section class="resident-card lodge-group"><h3>Visitor lodge</h3><div class="ledger-small">Visitors share the lodge and are never presented as configured residents.</div>${visitors.length ? visitors.map(v => `<div class="name-with-mood">${entryLink(v.id, v.name)} · ${esc(v.project)} ${BurrowMoodGlyph.render(v.name, v.mood, { stale: v.state === "stale" })}</div>`).join("") : `<div class="ledger-small">The lodge is empty.</div>`}</section>`;
+  const identityControls = `<div class="ledger-truth"><button type="button" class="routine-run" data-open-nursery>found a resident at the town hall</button><br>Charters and journals are read directly from Steward into this browser tab. ${stewardConfig ?
+    `<button type="button" class="routine-run" data-identity-refresh>refresh identity</button>` :
+    `<button type="button" class="routine-run" data-identity-refresh>connect to load identity</button>`}</div>`;
+  return availability + identityControls + (cards || `<div class="ledger-state">No cached valid resident manifests are available.</div>`) + diagnosticCards + invalid + lodge;
+}
+function routineRows(now) {
+  const events = fleetView.state.routineRecent.slice().reverse().map(entry => entry.event);
+  return BurrowRoutines.declared(fleetView.residents,
+    BurrowRoutines.project(events, now, { validateEvent }));
+}
+function stewardDeclaration(routine) {
+  return stewardDeclarations.byRoutine.get(JSON.stringify(
+    [routine.steward_resident, routine.id])) || null;
+}
+function nextFireText(routine) {
+  const declaration = stewardDeclaration(routine);
+  if (declaration) return declaration.next_fire ?
+    `next run ${new Date(declaration.next_fire).toLocaleString()} · declared by Steward, not observed` :
+    "no next run declared by Steward (disabled or retired) · not observed";
+  if (stewardDeclarations.state === "loading") return "loading next run from Steward…";
+  if (stewardDeclarations.state === "error") return `next run unavailable: ${stewardDeclarations.error}`;
+  return "next run not loaded from Steward";
+}
+function renderRoutines(now) {
+  const rows = routineRows(now);
+  const diagnostics = fleetView.state.routineMalformed || 0;
+  return `${diagnostics ? `<div class="ledger-state bad">${diagnostics} malformed routine event${diagnostics === 1 ? " was" : "s were"} skipped; no partial run was rendered.</div>` : ""}
+    ${fleetView.state.routineCapacityDropped ? `<div class="ledger-state bad">${fleetView.state.routineCapacityDropped} valid routine lifecycle${fleetView.state.routineCapacityDropped === 1 ? " was" : "s were"} dropped from the bounded ledger by capacity; this is retention pressure, not malformed telemetry.</div>` : ""}
+    <div class="ledger-truth">Actual next runs come directly from Steward's authenticated declaration. ${stewardConfig ?
+      `<button class="routine-run" type="button" data-steward-connect>refresh Steward schedules</button>` :
+      `<button class="routine-run" type="button" data-steward-connect>connect to load next runs</button>`}</div>
+    ${rows.length ? `<ol class="ledger-list">${rows.map(row => {
+      const active = activeForResident(row.resident);
+      return `<li class="ledger-entry">
+      <div>${row.latest ? ago(row.latest.started_at, now) : "never"}</div>
+      <div>${entryLink(active ? active.id : row.agent_id || (row.resident.match || {}).agent_id || residentDetailId(row.resident), row.resident.meta.name)}
+        <div>${esc(row.routine.id)}</div><div class="ledger-small">${esc(row.routine.schedule)} · ${esc(row.routine.schedule_tz)} · local declaration</div>
+        <div class="ledger-small">${esc(nextFireText(row.routine))}</div></div>
+      <div>${statusMark(row.state)}${row.latest && row.latest.outcome ? `<div class="ledger-small">outcome: ${esc(row.latest.outcome)}</div>` : ""}</div></li>`;
+    }).join("")}</ol>` : `<div class="ledger-state">No residents declare routines. Visitors have no routine ledger; routines belong to residents.</div>`}`;
+}
+function renderResidentRoutines(resident, now) {
+  if (!resident || resident.valid !== true) return `<div class="ledger-state">Routines belong to residents; visitors have no ledger.</div>`;
+  const rows = BurrowRoutines.declared([resident], BurrowRoutines.project(
+    fleetView.state.routineRecent.slice().reverse().map(entry => entry.event), now, { validateEvent }));
+  if (!rows.length) return `<div class="ledger-state">This resident declares no routines (empty history).</div>`;
+  return `<section aria-label="Routine ledger"><h3>Routine ledger</h3>${rows.map(row => {
+    // Navigation follows the currently active owner, but Run Now belongs to
+    // the declaration. A project declaration may be executed by a distinct
+    // Steward runner, so narrowing it to the open villager would make its real
+    // lifecycle acknowledgement impossible to observe.
+    const correlation = resident.match || {};
+    const latest = row.latest, ack = routineAcks.get(correlation, row.routine.id);
+    const notice = routineRunNotices.get(routineNoticeKey(correlation, row.routine.id));
+    const duration = latest && latest.duration_s !== null ? ` · ${latest.duration_s}s` :
+      latest && latest.state === "failed" ? " · duration unknown" : "";
+    const observed = !latest ? "never observed running" : `${latest.state} · started ${ago(latest.started_at, now)}` +
+      (latest.outcome ? ` · outcome: ${esc(latest.outcome)}` : "") +
+      duration +
+      (latest.artifacts.length ? ` · artifacts: ${latest.artifacts.map(esc).join(", ")}` : "");
+    const declaration = stewardDeclaration(row.routine);
+    const telemetry = BurrowRoutines.telemetryAvailability(fleetView.transport, fleetView.cursor);
+    const runDisabled = BurrowRoutines.runDisabled(
+      row.routine, declaration, stewardDeclarations.state, ack, row.history, telemetry);
+    return `<article class="routine-card ${esc(row.state)}"><h4>${esc(row.routine.id)} ${statusMark(row.state)}</h4>
+      <div class="declared">schedule: ${esc(row.routine.schedule)} (${esc(row.routine.schedule_tz)}) · local declaration<br>${esc(nextFireText(row.routine))}</div>
+      <div>${observed}</div>
+      ${latest && row.history.length ? `<details><summary>Recent history (${row.history.length})</summary>${row.history.map(run => `<div class="evt">${ago(run.started_at, now)} · ${esc(run.state)}${run.outcome ? ` · outcome: ${esc(run.outcome)}` : ""} · ${esc(run.run_id)}${run.error ? `<details><summary>Inspect failure for ${esc(run.run_id)}</summary><div class="routine-error">${esc(run.error)}</div></details>` : ""}</div>`).join("")}</details>` : ""}
+      <button class="routine-run" type="button" data-run-resident="${esc(row.routine.steward_resident)}" data-run-agent="${esc(correlation.agent_id || "")}" data-run-project="${esc(correlation.project || "")}" data-run-routine="${esc(row.routine.id)}" data-run-enabled="${row.routine.enabled !== false}"${runDisabled ? " disabled" : ""}>run now</button>
+      ${notice ? `<div role="alert">${esc(notice)}</div>` : ""}
+      ${!telemetry.ok && !notice ? `<div role="status">${esc(telemetry.message)}</div>` : ""}
+      ${ack ? `<div role="status">${ack.state === "requesting" ? "asking steward…" : ack.state === "pending" ? "asked steward — pending acknowledgement" : ack.state === "unacknowledged" ? "steward acknowledged nothing — outcome remains uncertain; retry unavailable until exact lifecycle evidence arrives" : ack.state === "uncertain" ? `Steward may have accepted the request — ${esc(ack.error)}; retry unavailable until exact lifecycle evidence arrives` : ack.state === "indeterminate" ? "run observed, but bounded terminal evidence was lost — outcome is indeterminate and retry remains unavailable" : ack.state === "running" ? "running — confirmed by matching real event" : ack.state === "completed" ? "completed — confirmed by matching real event" : ack.state === "failed" ? "failed — confirmed by matching real event" : `request failed — ${esc(ack.error)} — retry available`}</div>` : ""}
+    </article>`;
+  }).join("")}</section>`;
+}
+function replaceFleet(now) {
+  panelEl.classList.add("ledger");
+  panelEl.setAttribute("aria-label", "Fleet operations ledger");
+  const body = fleetTab === "activity" ? renderActivity(now) : fleetTab === "attention" ? renderAttention(now) : fleetTab === "routines" ? renderRoutines(now) : renderDirectory();
+  panelBody.innerHTML = `<div class="ledger-kicker">the steward's field ledger</div><h2 id="panel-title" tabindex="-1">Fleet operations</h2>
+    <div class="ledger-truth">Configured means a complete, safe public declaration exists. Missing means none is declared. Invalid comes only from public diagnostics or an incomplete public record. Externally unavailable means the resident feed is unavailable. A status reference is only an opaque locator; Burrow never interprets it as live health or tests secret-backed access.</div>
+    <div class="ledger-tabs" role="tablist" aria-label="Fleet ledger sections">${[["activity","Activity"],["attention","Needs you"],["residents","Residents & lodge"],["routines","Routines"]].map(([id,label]) => `<button role="tab" data-fleet-tab="${id}" data-fleet-focus="tab:${id}" aria-selected="${fleetTab === id}" tabindex="${fleetTab === id ? 0 : -1}">${label}</button>`).join("")}</div>
+    <section>${body}</section>`;
+  const counts = fleetTab === "activity" ? BurrowFleet.filterEntries(fleetActivityEntries(), fleetFilters).length :
+    fleetTab === "attention" ? Object.values(attentionEntries()).reduce((sum, items) => sum + items.length, 0) : fleetTab === "routines" ? routineRows(now).length :
+    fleetView.residents.length + (fleetView.diagnosticResidents || []).length;
+  const status = `${fleetTab === "activity" ? "Activity" : fleetTab === "attention" ? "Needs you" : fleetTab === "routines" ? "Routines" : "Residents and lodge"}: ${counts} ${counts === 1 ? "item" : "items"}.`;
+  const live = document.getElementById("panel-status");
+  if (live.textContent !== status) live.textContent = status;
+}
+function renderFleet(now) { return fleetController.preserveFocus(() => replaceFleet(now)); }
+
+const pageRegions = ["game", "labels", "empty", "preview"].map(id => document.getElementById(id))
+  .concat([document.querySelector("header"), document.querySelector("footer")]);
+let returnFocus = null;
+let returnFleet = null;
+let dialogGeneration = 0;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+function focusIdentity(element) {
+  if (!element) return null;
+  return element.dataset.fleetFocus ? { fleetFocus: element.dataset.fleetFocus } :
+    element.dataset.panelTarget ? { panelTarget: element.dataset.panelTarget } : null;
+}
+function showDialog(initialFocus = true) {
+  if (!panelEl.hidden && panelEl.classList.contains("open")) {
+    pageRegions.forEach(region => { if (region) region.inert = true; });
+    if (initialFocus) panelEl.querySelector(".close").focus({ preventScroll: true });
+    return;
+  }
+  const generation = ++dialogGeneration;
+  panelEl.hidden = false;
+  pageRegions.forEach(region => { if (region) region.inert = true; });
+  panelEl.classList.remove("open");
+  const reveal = () => {
+    if (generation !== dialogGeneration || panelEl.hidden) return;
+    panelEl.classList.add("open");
+    if (initialFocus) panelEl.querySelector(".close").focus({ preventScroll: true });
+  };
+  if (reducedMotion.matches) reveal(); else requestAnimationFrame(reveal);
+}
+function openPanel(id, opener = document.activeElement) {
+  if (selectedId !== id) approvalFocusMemory = null;
+  const wasFleet = selectedId === FLEET_LEDGER_ID;
+  if (id !== FLEET_LEDGER_ID && wasFleet) {
+    returnFleet = { tab: fleetTab, focus: focusIdentity(opener) };
+  } else if (!selectedId) {
+    returnFocus = { element: opener, identity: focusIdentity(opener) };
+    returnFleet = null;
+  }
+  selectedId = id;
+  renderPanel(Date.now());
+  showDialog(true);
+  const resident = villagers.find(item => item.id === id);
+  const declaration = resident && resident.residency === "resident" ? resident.soul :
+    fleetView.residents.find(item => residentDetailId(item) === id);
+  if (stewardConfig && identityState.status !== "loading" && declaration &&
+      !BurrowIdentity.recordFor(identityState, declaration)) {
+    queueMicrotask(refreshIdentity);
+  }
+}
+function renderJobListing(now) {
+  const boardRows = BurrowJobs.rows(fleetView.jobState, now);
+  const active = boardRows.filter(job => !["done", "failed"].includes(job.state));
+  return `${active.length ? "" : `<div class="artifact-empty">No tasks are open.</div>`}
+      ${boardRows.map(job => {
+        const claimantTruth = agentId => {
+          if (!agentId) return `unknown <span class="status-mark missing">unknown</span>`;
+          const claimant = villagerFor(agentId);
+          return claimant ? `<button type="button" class="entry-link" data-agent="${esc(agentId)}" data-job-focus="claimant:${esc(job.id)}:${esc(agentId)}">${esc(claimant.name)}</button>` :
+            `${esc(agentId)} <span class="status-mark missing">absent</span>`;
+        };
+        const claim = job.state === "open" ? "open" :
+          `${job.state} by ${claimantTruth(job.claimant)}`;
+        const retry = job.reason === "lease_expired" ?
+          `<div class="job-diagnostic">retry after expired lease · former claimant ${claimantTruth(job.previous_claimant)}</div>` : "";
+        return `<article class="job-state ${esc(job.state)}" data-task-id="${esc(job.id)}">
+          <div><strong>${esc(job.title)}</strong> <span class="status-mark">${esc(job.state)}</span></div>
+          <div class="job-skills">${!Array.isArray(job.required_skills) ? "required skills unavailable" :
+            job.required_skills.length ? `skills: ${job.required_skills.map(skill => skill.trim() ?
+              esc(skill) : '<span class="job-skill-empty" aria-label="blank required skill">(unnamed skill)</span>').join(", ")}` : "no required skills"} · ${job.posted_at === null ?
+                `posted age unavailable · updated ${ago(job.updated_at, now)}` :
+                `posted ${ago(job.posted_at, now)}`}</div>
+          <div>${claim}</div>
+          ${job.reason ? `<div class="job-diagnostic">reason: ${esc(job.reason)}</div>` : ""}
+          ${retry}
+        </article>`;
+      }).join("")}
+      ${fleetView.jobState.malformed ? `<div class="job-diagnostic" role="status">Skipped ${fleetView.jobState.malformed} malformed task event${fleetView.jobState.malformed === 1 ? "" : "s"}; missing IDs or titles never become jobs.</div>` : ""}
+      ${fleetView.jobState.capacityDropped ? `<div class="job-diagnostic" role="status">${fleetView.jobState.capacityDropped} task record${fleetView.jobState.capacityDropped === 1 ? " was" : "s were"} omitted by the bounded board.</div>` : ""}`;
+}
+function refreshJobListing(now) {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const list = panelBody.querySelector("[data-job-list]");
+  if (!list) return;
+  const active = document.activeElement;
+  const focusKey = list.contains(active) && active.dataset ? active.dataset.jobFocus : null;
+  const selection = focusKey && typeof active.selectionStart === "number" ? {
+    start: active.selectionStart, end: active.selectionEnd,
+    direction: active.selectionDirection || "none",
+  } : null;
+  list.innerHTML = renderJobListing(now);
+  if (!focusKey) return;
+  const replacement = [...list.querySelectorAll("[data-job-focus]")]
+    .find(element => element.dataset.jobFocus === focusKey);
+  if (replacement && !replacement.disabled) {
+    replacement.focus({ preventScroll: true });
+    if (selection && typeof replacement.setSelectionRange === "function") {
+      const length = String(replacement.value || "").length;
+      replacement.setSelectionRange(Math.min(selection.start, length),
+        Math.min(selection.end, length), selection.direction);
+    }
+  } else {
+    // If the focused row expires, keep keyboard focus inside the open dialog
+    // while truthfully removing the record.
+    const heading = panelBody.querySelector("#panel-title");
+    if (heading) heading.focus({ preventScroll: true });
+  }
+}
+function jobFeedbackMarkup() {
+  const latestAck = jobAcks.latest();
+  const ackLabel = latestAck ?
+    latestAck.state === "requesting" ? "Sending directly to Steward…" :
+    latestAck.state === "pending" ? `Steward accepted ${latestAck.task_id}; waiting for its exact task_posted event.` :
+    latestAck.message : "";
+  return `${latestAck ? `<div class="job-ack ${esc(latestAck.state)}" role="${["failed","ambiguous","indeterminate","timeout"].includes(latestAck.state) ? "alert" : "status"}">${esc(ackLabel)}</div>` : ""}
+    ${jobPostNotice ? `<div class="job-diagnostic" role="alert">${esc(jobPostNotice)}</div>` : ""}`;
+}
+function refreshJobFeedback() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const feedback = panelBody.querySelector("[data-job-feedback]");
+  if (feedback) feedback.innerHTML = jobFeedbackMarkup();
+}
+function refreshJobFormState() {
+  if (selectedId !== JOB_BOARD_ID) return;
+  const form = panelBody.querySelector("[data-post-job]");
+  if (!form) return;
+  const blocked = jobAcks.blocksSubmission();
+  for (const control of form.elements) control.disabled = blocked;
+  form.setAttribute("aria-busy", jobAcks.hasActive() ? "true" : "false");
+}
+function approvalDetail(detail) {
+  if (!detail || !Object.keys(detail).length) return "No additional detail was supplied.";
+  try { return JSON.stringify(detail, null, 2); }
+  catch { return "Detail could not be displayed."; }
+}
+function approvalConfirmationMarkup(item, now, global = false) {
+  const owner = global ? `owner · ${esc(item.record.knock.agent_id)} · project · ${esc(item.record.knock.project)} · ` : "";
+  const attribute = global ? "data-global-approval-confirmation" : "data-approval-confirmation";
+  return `<article class="approval-card resolved" ${attribute}="${esc(item.request_id)}">
+    <h3>${esc(item.record.shape.action)}</h3>
+    <pre class="approval-detail">${esc(approvalDetail(item.record.shape.detail))}</pre>
+    <div class="ledger-small">${owner}request · ${esc(item.request_id)} · closed ${ago(Date.parse(item.resolution.ts) || 0, now)}</div>
+    <div class="approval-feedback acknowledged" role="status">Decision ${esc(item.resolution.payload.decision)} — confirmed by the exact closing event.</div>
+  </article>`;
+}
+function approvalFeedback(record) {
+  const ack = approvalAcks.get(record.id);
+  const notice = approvalNotices.get(record.id);
+  const text = ack ? ack.state === "requesting" ? "Sending directly to Steward…" :
+    ack.state === "pending" ? "Steward recorded the decision; waiting for the exact closing event…" :
+    ack.message : notice;
+  if (!text) return "";
+  const state = ack ? ack.state : "failed";
+  const role = ["failed","ambiguous","timeout","indeterminate"].includes(state) ? "alert" : "status";
+  return `<div class="approval-feedback ${esc(state)}" role="${role}">${esc(text)}</div>`;
+}
+function renderApprovals(v, now) {
+  const records = v.knock && Array.isArray(v.knock.queue) ? v.knock.queue : [];
+  const confirmations = Array.isArray(v.approvals) ? v.approvals : [];
+  if (!records.length && !confirmations.length) return "";
+  return `<section aria-label="Approval requests">
+    ${v.knock && !v.knock.structured ? `<div class="knock">
+      <div class="knock-h">needs you</div>
+      <div class="knock-msg">${esc(v.knock.message)}</div>
+      <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
+    </div>` : ""}
+    ${records.length ? `<div class="ledger-truth">Decisions go directly to Steward; only the closing event releases the villager. ${stewardConfig ?
+      `<button type="button" class="routine-run" data-steward-change>change credentials</button>
+       <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+      `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+    <div class="meta">${records.length} decision${records.length === 1 ? "" : "s"} waiting · newest first</div>` : ""}
+    ${records.map(record => {
+      const shape = record.shape, blocked = approvalAcks.blocks(record.id);
+      const draft = approvalDrafts.get(record.id) || "";
+      return `<article class="approval-card" data-approval-request="${esc(record.id)}" aria-busy="${blocked ? "true" : "false"}">
+        <h3>${esc(shape.action)}</h3>
+        <pre class="approval-detail">${esc(approvalDetail(shape.detail))}</pre>
+        <div class="ledger-small">request · ${esc(record.id)} · knocked ${ago(Date.parse(record.knock.ts) || 0, now)}</div>
+        ${shape.options.includes("edit") ? `<label class="approval-edit">Edited detail
+          <textarea data-approval-edit="${esc(record.id)}"${blocked ? " disabled" : ""}>${esc(draft)}</textarea></label>` : ""}
+        <div class="approval-options" aria-label="Choose a decision">${shape.options.map((option, index) =>
+          `<button type="button" data-approval-option="${esc(option)}" data-approval-index="${index}" data-approval-id="${esc(record.id)}"${blocked ? " disabled" : ""}>${esc(option)}</button>`).join("")}</div>
+        ${approvalFeedback(record)}
+      </article>`;
+    }).join("")}
+    ${confirmations.length ? `<div class="meta">recent confirmed decisions · newest first · at most ${BurrowApprovals.MAX_CONFIRMATIONS}</div>
+      ${confirmations.map(item => approvalConfirmationMarkup(item, now)).join("")}` : ""}</section>`;
+}
+function escalationMarkup(escalation) {
+  if (!escalation) return "";
+  if (escalation.kind === "text") return `<div>${esc(escalation.text)}</div>`;
+  return `<ul>${escalation.when.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <div class="ledger-small">how · ${esc(escalation.how)}${escalation.note ? ` · ${esc(escalation.note)}` : ""}</div>`;
+}
+function journalEntriesMarkup(entries) {
+  return (entries || []).map(entry => `<article class="journal-entry"><time datetime="${entry.date}">${entry.date}${entry.routine ?
+    ` · ${esc(entry.routine)}` : ""}</time>${esc(entry.text)}</article>`).join("");
+}
+function identityMarkup(resident) {
+  if (!resident || resident.valid !== true) return "";
+  const record = BurrowIdentity.recordFor(identityState, resident);
+  const controls = stewardConfig ? `<button type="button" class="routine-run" data-identity-refresh>refresh from Steward</button>
+    <button type="button" class="routine-run" data-steward-change>change credentials</button>
+    <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+    `<button type="button" class="routine-run" data-identity-refresh>connect to Steward</button>`;
+  let charter = `<div class="identity-warning">Charter externally unavailable. Connect to Steward to read the declared manifest identity.</div>`;
+  if (record && record.charter) charter = `<div class="${record.stale ? "identity-warning" : "ledger-small"}">${record.stale ?
+      `${record.status === "authentication" ? "Steward rejected these credentials. " :
+        record.status === "malformed" ? "Could not read the latest charter. " :
+        record.status === "error" || record.status === "missing" ? "Steward definitively refused the latest charter read. " :
+        record.status === "local-unavailable" ? "Burrow's resident manifest feed is unavailable. " :
+        record.status === "unavailable" ? "Steward credentials are not configured. " :
+        "Steward unreachable. "}Cached declaration as of ${new Date(record.lastSuccessAt).toLocaleString()}.` :
+      "Declared by the Steward manifest · authoritative identity, not observed activity."}</div>
+    <h4>Mission</h4><div>${esc(record.charter.mission)}</div>
+    <h4>Duties</h4><ul>${record.charter.duties.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <h4>Hard rules</h4><ul>${record.charter.rules.map(item => `<li>${esc(item)}</li>`).join("")}</ul>
+    <h4>Escalation policy</h4>${escalationMarkup(record.charter.escalation)}`;
+  else if (record && record.status === "missing") charter = `<div class="identity-warning">Missing charter: ${esc(record.diagnostic || "no Steward resident matches this resident declaration")}.</div>`;
+  else if (record && ["invalid", "malformed"].includes(record.status)) charter = `<div class="identity-warning">Could not read charter. ${esc(record.diagnostic || "The declaration is malformed.")}</div>`;
+  else if (record && record.diagnostic) charter = `<div class="identity-warning">Charter externally unavailable. ${esc(record.diagnostic)}</div>`;
+
+  const journal = record && record.journal;
+  const observation = journalForResident(resident);
+  let journalBody = `<div class="identity-warning">Journal externally unavailable. No empty-journal claim can be made.</div>`;
+  if (journal && journal.status === "loaded") journalBody = journal.entries.length ?
+    journalEntriesMarkup(journal.entries) :
+    `<div>This resident has written nothing yet.</div>`;
+  else if (journal && journal.status === "malformed") journalBody = `<div class="identity-warning">Could not read journal. ${esc(journal.diagnostic || "The response was malformed.")}</div>` +
+    (journal.stale ? `<div class="ledger-small">Cached entries below are stale as of ${new Date(journal.lastSuccessAt).toLocaleString()}.</div>${journalEntriesMarkup(journal.entries)}` : "");
+  else if (journal && ["unreachable", "unavailable", "local-unavailable", "authentication", "missing", "error"].includes(journal.status)) journalBody =
+    `<div class="identity-warning">${journal.status === "authentication" ? "Steward rejected these credentials." :
+      journal.status === "missing" ? "Steward reports this resident is missing." :
+      journal.status === "error" ? "Steward definitively refused the journal read." :
+      journal.status === "local-unavailable" ? "Burrow's resident manifest feed is unavailable." :
+      journal.status === "unavailable" ? "Steward credentials are not configured." :
+      "Steward unreachable."} ${journal.lastSuccessAt ? `Last successful fetch ${new Date(journal.lastSuccessAt).toLocaleString()}.` : "No successful fetch yet."}</div>` +
+    (journal.stale ? `<div class="ledger-small">Cached entries are stale as of that time.</div>${journalEntriesMarkup(journal.entries)}` : "");
+  const observedMismatch = observation && (!journal || journal.status !== "loaded" ||
+    !(journal.entries || []).some(entry => entry.date === observation.event.payload.day)) ?
+    `<div class="identity-warning" data-journal-mismatch>The write was observed for ${esc(observation.event.payload.day)}, but contents are not yet refreshed. Burrow does not fabricate text or automatically refetch Steward.</div>` : "";
+  return `<section class="declared-identity" aria-label="Declared charter"><h3>Charter ${statusMark(identityStatus(record, "charter"))}</h3>${charter}</section>
+    <section class="journal-section" aria-label="Resident journal"><h3>Journal ${statusMark(identityStatus(record, "journal"))}</h3>
+      ${journalObservationMarkup(resident)}${observedMismatch}
+      <div class="ledger-small">Read-only Steward journal · newest first · latest ${BurrowIdentity.JOURNAL_LIMIT}</div>${journalBody}${controls}</section>`;
+}
+function visitorIdentityMarkup(declaration = null) {
+  const reason = declaration && declaration.diagnostic ?
+    "Its resident declaration is invalid, so it has no valid resident soul or manifest and no charter or journal can be trusted." :
+    "This visitor has no resident soul or manifest, so it has no charter or journal to show.";
+  return `<section class="visitor-truth" aria-label="Temporary visitor lodging"><strong>Temporary lodging.</strong>
+    ${reason} It stays in the shared lodge only while its session exists; this is not an unconfigured resident.</section>`;
+}
+function nurseryFieldError(name) {
+  return nurseryErrors[name] ? `<span class="nursery-error" id="nursery-${name}-error">${esc(nurseryErrors[name])}</span>` : "";
+}
+function focusFirstNurseryError(errors) {
+  const name = Object.keys(errors || {})[0];
+  if (!name) return;
+  const focus = () => panelBody
+    .querySelector(`[data-create-resident] [name="${CSS.escape(name)}"]`)
+    ?.focus({ preventScroll: true });
+  focus();
+  // Native button activation may restore focus to the submitter after the
+  // synchronous submit event. Reassert the invalid-field target after that
+  // activation completes, but only while this same error is still current.
+  requestAnimationFrame(() => {
+    if (selectedId === NURSERY_ID && nurseryErrors[name]) focus();
+  });
+}
+function nurseryFeedback() {
+  const item = nurseryTracker.latest();
+  const notice = nurseryNotice ? `<div${item ? ` id="nursery-current-notice"` : ""} role="alert" class="nursery-error" data-nursery-notice>${esc(nurseryNotice.message)}</div>` : "";
+  if (!item) return notice;
+  const bad = ["rejected", "validation", "authentication", "ambiguous", "timeout",
+    "unreachable", "cancelled", "silent", "deployment-failed"].includes(item.state);
+  const suffix = item.truncated ? " [Steward's validation message was truncated at the viewer's 4096-character safety limit.]" : "";
+  const stewardLink = item.state === "silent" && stewardConfig ?
+    ` Check Steward at ${esc(stewardConfig.url.replace(/\/+$/, ""))}.` : "";
+  const retryNotice = nurseryNotice && nurseryNotice.action === "retry" &&
+    nurseryNotice.itemKey === item.key;
+  const retry = !item.httpPending && ["ambiguous", "timeout", "unreachable", "cancelled"].includes(item.state) ?
+    ` <button type="button" class="routine-run" data-nursery-retry="${esc(item.key)}"${retryNotice ? " aria-describedby=\"nursery-current-notice\"" : ""}>${retryNotice ? "check current telemetry and retry exact original declaration" : "retry exact original declaration"}</button>` : "";
+  return `${notice}<div class="nursery-feedback ${esc(item.state)}" role="${bad ? "alert" : "status"}"><strong>${esc(item.state)}</strong> · ${esc(item.message)}${esc(suffix)}${stewardLink}${item.code ? ` · ${esc(item.code)}` : ""}${retry}</div>`;
+}
+function renderNursery() {
+  panelEl.classList.add("ledger");
+  panelEl.setAttribute("aria-label", "Town hall resident nursery");
+  const blocked = nurseryTracker.blocks();
+  const busy = nurseryTracker.busy();
+  const charOptions = BurrowNursery.CHARS.map(char => `<option${char === nurseryDraft.char ? " selected" : ""}>${esc(char)}</option>`).join("");
+  const validity = (name, describedBy = "") => {
+    const errorId = nurseryErrors[name] ? `nursery-${name}-error` : "";
+    const ids = [describedBy, errorId].filter(Boolean).join(" ");
+    return `${nurseryErrors[name] ? ` aria-invalid="true"` : ""}${ids ? ` aria-describedby="${ids}"` : ""}`;
+  };
+  const field = (name, label, input, wide = false) => `<label class="${wide ? "wide" : ""}">${label}${input}${nurseryFieldError(name)}</label>`;
+  panelBody.innerHTML = `<h2 id="panel-title" tabindex="-1"><span style="color:#ffc86b">▪</span> Town hall nursery</h2>
+    <div class="meta">Ask Steward to declare and deploy one resident. Burrow writes nothing and never invents their house.</div>
+    <div class="ledger-truth">The request goes directly from this tab to Steward. Credentials remain in memory only. ${stewardConfig ?
+      `<button type="button" class="routine-run" data-steward-change>change credentials</button> <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+      `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+    <form class="nursery-form" data-create-resident aria-busy="${busy}" novalidate>
+      ${field("name", "Name", `<input name="name" required maxlength="120" autocomplete="off" value="${esc(nurseryDraft.name)}"${validity("name", "nursery-id-preview")}${blocked ? " disabled" : ""}><span class="ledger-small" id="nursery-id-preview">resident ID: ${esc(BurrowNursery.slug(nurseryDraft.name) || "will be derived from name")}</span>`)}
+      ${field("char", "Sprite", `<select name="char"${validity("char")}${blocked ? " disabled" : ""}>${charOptions}</select>`)}
+      ${field("accent", "Accent", `<input name="accent" type="color" value="${esc(nurseryDraft.accent)}"${validity("accent")}${blocked ? " disabled" : ""}>`)}
+      ${field("runner", "Runner", `<select name="runner"${validity("runner")}${blocked ? " disabled" : ""}><option value="codex"${nurseryDraft.runner === "codex" ? " selected" : ""}>Codex</option><option value="claude"${nurseryDraft.runner === "claude" ? " selected" : ""}>Claude</option></select>`)}
+      ${field("role", "Role", `<input name="role" required maxlength="240" value="${esc(nurseryDraft.role)}"${validity("role")}${blocked ? " disabled" : ""}>`, true)}
+      ${field("mission", "Charter mission", `<textarea name="mission" required maxlength="4000"${validity("mission")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.mission)}</textarea>`, true)}
+      ${field("duties", "Duties — one per line", `<textarea name="duties" required maxlength="4000"${validity("duties")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.duties)}</textarea>`, true)}
+      ${field("rules", "Rules — one per line", `<textarea name="rules" required maxlength="4000"${validity("rules")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.rules)}</textarea>`, true)}
+      ${field("escalation", "Escalation", `<textarea name="escalation" required maxlength="4000"${validity("escalation")}${blocked ? " disabled" : ""}>${esc(nurseryDraft.escalation)}</textarea>`, true)}
+      ${field("skills", "Skills — comma or newline separated slugs", `<input name="skills" autocomplete="off" value="${esc(nurseryDraft.skills)}"${validity("skills")}${blocked ? " disabled" : ""}>`, true)}
+      <button type="submit" class="routine-run" data-nursery-submit${blocked ? " disabled" : ""}>ask Steward to found resident</button>
+    </form>${nurseryFeedback()}
+    <div class="ledger-small">After Steward accepts, this waits ${Math.round(BurrowNursery.DEFAULT_WAIT_MS / 60000)} minutes for the resident's own first protocol event. It performs no nursery polling. Until that event, no house, manifest, or villager is added by this form.</div>`;
+}
+async function sendNurseryRequest(item) {
+  nurseryAbortController = new AbortController();
+  try {
+    const receipt = await BurrowNursery.createResident(stewardConfig, item.body,
+      (...args) => fetch(...args), { signal: nurseryAbortController.signal });
+    nurseryTracker.accepted(item.key, receipt);
+  } catch (error) {
+    nurseryTracker.failed(item.key, error);
+    if (error && error.authRejected) {
+      nurseryAbortController = null;
+      forgetStewardConfig();
+    }
+  } finally { nurseryAbortController = null; }
+  renderPanel(Date.now());
+}
+function renderPanelContent(now) {
+  if (selectedId === FLEET_LEDGER_ID) { renderFleet(now); return; }
+  if (selectedId === NURSERY_ID) { renderNursery(); return; }
+  panelEl.classList.remove("ledger");
+  panelEl.setAttribute("aria-label", "Villager details");
+  if (selectedId === NOTICE_BOARD_ID) {
+    const named = nameArtifacts(artifacts, villagers, souls);
+    panelBody.innerHTML = `
+      <h2 id="panel-title" tabindex="-1"><span style="color:#d2a15c">▪</span> What the fleet made</h2>
+      <div class="meta">recent artifacts across the village</div>
+      ${named.length ? named.map(a => `
+        <div class="evt artifact">
+          <div class="artifact-path">${esc(a.artifact)}</div>
+          <div class="artifact-by">${esc(a.name)} · ${esc(a.project)} · ${ago(a.ts, now)}</div>
+        </div>`).join("") :
+        `<div class="artifact-empty">Nothing has been produced in the recent event log.</div>`}`;
+    return;
+  }
+  if (selectedId === JOB_BOARD_ID) {
+    panelEl.setAttribute("aria-label", "Job board");
+    const jobSubmissionBlocked = jobAcks.blocksSubmission();
+    panelBody.innerHTML = `
+      <h2 id="panel-title" tabindex="-1"><span style="color:#ffc86b">▪</span> Job board</h2>
+      <div class="meta">current work reconstructed only from Steward's task events · newest first · at most ${BurrowJobs.MAX_TASKS}</div>
+      <div class="ledger-truth">Steward credentials stay only in browser memory. ${stewardConfig ?
+        `<button type="button" class="routine-run" data-steward-change>change credentials</button>
+         <button type="button" class="routine-run" data-steward-clear>clear credentials</button>` :
+        `<button type="button" class="routine-run" data-steward-change>connect to Steward</button>`}</div>
+      <form class="job-form" data-post-job aria-busy="${jobAcks.hasActive() ? "true" : "false"}">
+        <label>Title <input name="title" required maxlength="240" autocomplete="off" value="${esc(jobDraft.title)}"${jobSubmissionBlocked ? " disabled" : ""}></label>
+        <label>Detail <textarea name="detail" maxlength="8000"${jobSubmissionBlocked ? " disabled" : ""}>${esc(jobDraft.detail)}</textarea></label>
+        <label>Required skills <input name="required_skills" autocomplete="off" placeholder="research, write-journal" value="${esc(jobDraft.required_skills)}"${jobSubmissionBlocked ? " disabled" : ""}></label>
+        <button type="submit"${jobSubmissionBlocked ? " disabled" : ""}>post job</button>
+      </form>
+      <div data-job-feedback>${jobFeedbackMarkup()}</div>
+      <div data-job-list>${renderJobListing(now)}</div>`;
+    return;
+  }
+  const v = villagers.find(x => x.id === selectedId);
+  if (!v) {
+    const residentFile = selectedId.startsWith("@resident/") ? selectedId.slice(10) : null;
+    const candidates = [...fleetView.residents, ...(fleetView.diagnosticResidents || [])];
+    let resident = residentFile ? candidates.find(item => item.file === residentFile) : null;
+    const journalOwner = resident ? journalForResident(resident) :
+      BurrowJournals.records(fleetView.journalState).slice().reverse()
+        .find(record => record.event.agent_id === selectedId && journalResident(record)) || null;
+    let latest = resident ? fleetView.state.recent.find(entry => {
+      const match = resident.match || {};
+      return match.agent_id ? entry.agent_id === match.agent_id :
+        match.project ? entry.project === match.project : false;
+    }) : fleetView.state.recent.find(entry => entry.agent_id === selectedId);
+    const routineOwner = residentFile ? null :
+      fleetView.state.routineRecent.find(entry => entry.agent_id === selectedId);
+    const journalEvidence = journalOwner ? { event: journalOwner.event,
+      ts: Date.parse(journalOwner.event.ts) || 0, agent_id: journalOwner.event.agent_id,
+      project: journalOwner.event.project } : null;
+    const ownerEvidence = latest || routineOwner || journalEvidence;
+    if (!resident) resident = candidates.find(item =>
+      (item.match || {}).agent_id === selectedId ||
+      (ownerEvidence && (item.match || {}).project === ownerEvidence.project));
+    if (!resident && !ownerEvidence) { closePanel(); return; }
+    const meta = resident && resident.meta || {};
+    const name = meta.name || (ownerEvidence ? villagerName(ownerEvidence.agent_id) : resident.file);
+    const identity = ownerEvidence ? ownerEvidence.agent_id : (resident.match || {}).agent_id ||
+      (resident.match || {}).project || resident.file;
+    const residency = resident && resident.valid === true ?
+      `resident · home ${resident.home + 1}` : resident && resident.diagnostic ?
+      "invalid declaration · no residency or home granted" : "visitor · no current village projection";
+    panelBody.innerHTML = `
+      <h2 id="panel-title" tabindex="-1"><span style="color:${esc(meta.accent || "#8aa65b")}">▪</span> ${esc(name)}</h2>
+      <div class="meta role">${esc(residency)}</div>
+      ${meta.role ? `<div class="meta role">${esc(meta.role)}</div>` : ""}
+      <div class="meta">${esc(identity)}</div>
+      <div class="state-line">inactive · no current signal</div>
+      ${routineOwner && !latest ? `<div class="meta">Routine ownership observed from Steward; its current villager signal has expired.</div>` : ""}
+      ${resident && resident.body ? `<div class="soul">${esc(resident.body)}</div>` : ""}
+      ${resident && resident.valid === true ? identityMarkup(resident) : visitorIdentityMarkup(resident)}
+      ${renderResidentRoutines(resident, now)}
+      ${latest ? `<div class="evt t-${esc(latest.event.type)}">
+        <div class="when">latest retained event · ${ago(latest.ts, now)} · ${esc(latest.event.type)}</div>
+        <div class="what">${esc(describe(latest.event))}</div>
+      </div>` : `<div class="meta">No retained event is available.</div>`}`;
+    return;
+  }
+  const at = placeLabel(v);
+  const stateText =
+    v.state === "knocking" ? "at your door — needs you" :
+    v.state === "failed"   ? (v.stateEvent && v.stateEvent.type === "routine_failed" ?
+      "routine failed" : "a tool failed") :
+    v.state === "working"  ? (v.doing || "working") + at :
+    v.state === "stale"    ? "no signal for a while" + at : "resting";
+  const cls = v.state === "knocking" ? "attn" : v.state === "working" ? "busy" : "";
+  const approvalDiagnostics = fleetView.approvalState && fleetView.approvalState.diagnostics ?
+    fleetView.approvalState.diagnostics.filter(item => item.agent_id === v.id) : [];
+  panelBody.innerHTML = `
+    <div class="name-with-mood"><h2 id="panel-title" tabindex="-1"><span style="color:${v.accent}">▪</span> ${esc(v.name)}</h2>${BurrowMoodGlyph.render(v.name, v.mood, { stale: v.state === "stale" })}</div>
+    <div class="meta role">${v.residency === "resident" ? `resident · home ${v.home + 1}` : "visitor · based at the lodge"}</div>
+    ${v.soul && v.soul.meta.role ? `<div class="meta role">${esc(v.soul.meta.role)}</div>` : ""}
+    <div class="meta">${esc(v.project)} · ${esc(v.cwd)}</div>
+    <div class="meta">${esc(v.id)}</div>
+      <div class="state-line ${cls}">${esc(stateText)}</div>
+    ${v.journal ? `<div class="journal-observed" role="status">Writing at the resident's own illuminated desk with paper and lamp. ${esc(BurrowJournals.sentence(v.journal.event))}.</div>` : ""}
+    ${(v.knock && v.knock.queue && v.knock.queue.length) || (v.approvals && v.approvals.length) ? renderApprovals(v, now) : v.knock ? `
+      <div class="knock">
+        <div class="knock-h">needs you</div>
+        <div class="knock-msg">${esc(v.knock.message)}</div>
+        <div class="knock-when">knocked ${ago(v.knock.ts, now)}</div>
+      </div>` : ""}
+    ${approvalDiagnostics.map(item => `<div class="approval-diagnostic" role="status">${esc(item.reason)}</div>`).join("")}
+    ${v.soul && v.soul.body ? `<div class="soul">${esc(v.soul.body)}</div>` : ""}
+    ${v.residency === "resident" ? identityMarkup(v.soul) : visitorIdentityMarkup()}
+    ${renderResidentRoutines(v.soul, now)}
+    ${v.events.slice().reverse().map(ev => `
+      <div class="evt t-${esc(ev.type)}">
+        <div class="when">${ago(Date.parse(ev.ts) || 0, now)} · ${esc(ev.type)}</div>
+        <div class="what">${esc(describe(ev))}</div>
+      </div>`).join("")}`;
+}
+let approvalFocusMemory = null;
+function captureApprovalFocus() {
+  const active = document.activeElement;
+  if (!active || !panelBody.contains(active)) {
+    // Replacing the focused keyed node transiently moves focus to body before
+    // another projection callback can run. Retain the key across that gap, but
+    // forget it when the user explicitly focuses another real control.
+    return approvalFocusMemory;
+  }
+  let selector = null;
+  if (active.matches("[data-approval-edit]")) {
+    selector = `[data-approval-edit="${CSS.escape(active.dataset.approvalEdit)}"]`;
+  } else if (active.matches("[data-approval-option]")) {
+    selector = `[data-approval-id="${CSS.escape(active.dataset.approvalId)}"][data-approval-index="${CSS.escape(active.dataset.approvalIndex)}"]`;
+  } else if (active.matches("[data-create-resident] [name]")) {
+    selector = `[data-create-resident] [name="${CSS.escape(active.name)}"]`;
+  } else if (active.matches("[data-nursery-submit]")) {
+    selector = "[data-nursery-submit]";
+  } else if (active.matches("[data-nursery-retry]")) {
+    selector = "[data-nursery-retry]";
+  } else if (active.matches("[data-steward-change]")) {
+    selector = "[data-steward-change]";
+  } else if (active.matches("[data-steward-clear]")) {
+    selector = "[data-steward-clear]";
+  } else if (active.matches("[data-identity-refresh]")) {
+    selector = "[data-identity-refresh]";
+  }
+  if (!selector) return approvalFocusMemory;
+  approvalFocusMemory = { selector,
+    selectionCapable: Number.isInteger(active.selectionStart) && Number.isInteger(active.selectionEnd),
+    start: active.selectionStart, end: active.selectionEnd,
+    direction: active.selectionDirection };
+  return approvalFocusMemory;
+}
+panelEl.addEventListener("pointerdown", event => {
+  if (!event.target.closest(
+      "[data-approval-edit], [data-approval-option], [data-create-resident] [name], [data-nursery-submit], [data-nursery-retry], [data-steward-change], [data-steward-clear], [data-identity-refresh]")) {
+    approvalFocusMemory = null;
+  }
+});
+function restoreApprovalFocus(saved) {
+  if (!saved || !selectedId) return;
+  let target = panelBody.querySelector(saved.selector);
+  // Queue advancement, bounded expiry, or a reset may remove the keyed
+  // request. A submit can also leave the keyed node present but disabled. In
+  // either case focus the next enabled approval control, then the heading.
+  const usedFallback = !target || target.matches(":disabled") ||
+    target.getAttribute("aria-disabled") === "true";
+  if (usedFallback) target = panelBody.querySelector(
+    "[data-approval-edit]:not(:disabled), [data-approval-option]:not(:disabled), [data-nursery-retry]:not(:disabled), [data-nursery-submit]:not(:disabled), [data-create-resident] [name]:not(:disabled)") ||
+    panelBody.querySelector("#panel-title");
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  if (saved.selectionCapable && typeof target.setSelectionRange === "function" &&
+      Number.isInteger(saved.start) && Number.isInteger(saved.end)) {
+    const limit = target.value.length;
+    target.setSelectionRange(Math.min(saved.start, limit), Math.min(saved.end, limit),
+      saved.direction || "none");
+  }
+  approvalFocusMemory = captureApprovalFocus();
+  if (usedFallback) {
+    const selector = target.matches("[data-approval-edit]") ?
+      `[data-approval-edit="${CSS.escape(target.dataset.approvalEdit)}"]` :
+      target.matches("[data-approval-option]") ?
+        `[data-approval-id="${CSS.escape(target.dataset.approvalId)}"][data-approval-index="${CSS.escape(target.dataset.approvalIndex)}"]` :
+        target.matches("[data-steward-change]") ? "[data-steward-change]" :
+          target.matches("[data-nursery-retry]") ? "[data-nursery-retry]" :
+          target.matches("[data-nursery-submit]") ? "[data-nursery-submit]" :
+          target.matches("[data-create-resident] [name]") ?
+            `[data-create-resident] [name="${CSS.escape(target.name)}"]` :
+          target.matches("[data-identity-refresh]") ? "[data-identity-refresh]" : "#panel-title";
+    requestAnimationFrame(() => {
+      const settled = selectedId && panelBody.querySelector(selector);
+      if (settled && document.activeElement === document.body) settled.focus({ preventScroll: true });
+    });
+  }
+}
+function renderPanel(now) {
+  const approvalFocus = captureApprovalFocus();
+  renderPanelContent(now);
+  restoreApprovalFocus(approvalFocus);
+}
+function restoreIdentity(target) {
+  if (!target) return false;
+  const selector = target.fleetFocus ? `[data-fleet-focus="${CSS.escape(target.fleetFocus)}"]` :
+    target.panelTarget ? `[data-panel-target="${CSS.escape(target.panelTarget)}"]` : null;
+  const replacement = selector && document.querySelector(selector);
+  if (!replacement) return false;
+  replacement.focus({ preventScroll: true });
+  return true;
+}
+function closePanel() {
+  approvalFocusMemory = null;
+  if (returnFleet && selectedId !== FLEET_LEDGER_ID) {
+    const target = returnFleet;
+    returnFleet = null;
+    selectedId = FLEET_LEDGER_ID;
+    fleetTab = target.tab;
+    renderPanel(Date.now());
+    showDialog(false);
+    requestAnimationFrame(() => { if (!restoreIdentity(target.focus)) panelEl.querySelector('[role="tab"][aria-selected="true"]').focus(); });
+    return;
+  }
+  selectedId = null;
+  const generation = ++dialogGeneration;
+  panelEl.classList.remove("open");
+  const target = returnFocus;
+  returnFocus = null;
+  const finish = () => {
+    if (generation !== dialogGeneration || panelEl.classList.contains("open")) return;
+    panelEl.hidden = true;
+    panelEl.classList.remove("ledger");
+    pageRegions.forEach(region => { if (region) region.inert = false; });
+    if (target && target.element && target.element.isConnected &&
+        target.element !== document.body && target.element !== document.documentElement) {
+      target.element.focus({ preventScroll: true });
+    }
+    else if (!restoreIdentity(target && target.identity)) document.getElementById("fleet-open").focus();
+  };
+  if (reducedMotion.matches) { finish(); return; }
+  const ended = event => {
+    if (event.target !== panelEl || event.propertyName !== "transform") return;
+    panelEl.removeEventListener("transitionend", ended);
+    clearTimeout(fallback);
+    finish();
+  };
+  panelEl.addEventListener("transitionend", ended);
+  const timing = getComputedStyle(panelEl);
+  const seconds = value => value.split(",").reduce((maximum, item) =>
+    Math.max(maximum, parseFloat(item) * (item.trim().endsWith("ms") ? .001 : 1)), 0);
+  const fallback = setTimeout(() => {
+    panelEl.removeEventListener("transitionend", ended);
+    finish();
+  }, (seconds(timing.transitionDuration) + seconds(timing.transitionDelay)) * 1000 + 50);
+}
+panelEl.querySelector(".close").addEventListener("click", closePanel);
+function dialogFocusable() {
+  const selector = 'a[href], area[href], textarea, select, button, input, iframe, object, embed, audio[controls], video[controls], [contenteditable]:not([contenteditable="false"]), [tabindex]';
+  return [...panelEl.querySelectorAll(selector)].filter(element => {
+    if (element.matches(":disabled") || element.closest('[hidden], [inert]')) return false;
+    if (element.tabIndex < 0) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  });
+}
+panelEl.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); event.stopImmediatePropagation(); closePanel(); return; }
+  if (event.key !== "Tab") return;
+  approvalFocusMemory = null;
+  const focusable = dialogFocusable();
+  if (!focusable.length) return;
+  const first = focusable[0], last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+censusEl.addEventListener("click", event => {
+  if (!event.target.closest('[data-action="inspect-stale"]')) return;
+  const staleVillager = villagers.find(v => v.state === "stale");
+  if (staleVillager) openPanel(staleVillager.id);
+});
+document.getElementById("fleet-open").addEventListener("click", event => openPanel(FLEET_LEDGER_ID, event.currentTarget));
+const fleetController = BurrowFleetController.createFleetController({
+  panel: panelEl, body: panelBody, document,
+  moveFocus: BurrowFleet.moveFocus,
+  launcher: document.getElementById("fleet-open"),
+  renderTab(id) { fleetTab = id; renderFleet(Date.now()); },
+  openAgent: openPanel, close: closePanel,
+});
+fleetController.fitViewport(window.innerWidth);
+window.addEventListener("resize", () => fleetController.fitViewport(window.innerWidth));
+panelBody.addEventListener("input", event => {
+  if (event.target.matches("[data-approval-edit]")) {
+    approvalDrafts.set(event.target.dataset.approvalEdit, event.target.value);
+    return;
+  }
+  if (selectedId === JOB_BOARD_ID && event.target.name in jobDraft) {
+    jobDraft[event.target.name] = event.target.value;
+    return;
+  }
+  if (selectedId === NURSERY_ID && event.target.name in nurseryDraft) {
+    nurseryDraft[event.target.name] = event.target.value;
+    const errorId = `nursery-${event.target.name}-error`;
+    delete nurseryErrors[event.target.name];
+    event.target.removeAttribute("aria-invalid");
+    const describedBy = (event.target.getAttribute("aria-describedby") || "")
+      .split(/\s+/).filter(id => id && id !== errorId);
+    if (describedBy.length) event.target.setAttribute("aria-describedby", describedBy.join(" "));
+    else event.target.removeAttribute("aria-describedby");
+    panelBody.querySelector(`#${CSS.escape(errorId)}`)?.remove();
+    if (nurseryNotice && nurseryNotice.kind === "validation" &&
+        BurrowNursery.validate(nurseryDraft).ok) {
+      nurseryNotice = null;
+      panelBody.querySelector("[data-nursery-notice]")?.remove();
+    }
+    if (event.target.name === "name") {
+      const preview = panelBody.querySelector("#nursery-id-preview");
+      if (preview) preview.textContent = `resident ID: ${BurrowNursery.slug(event.target.value) || "will be derived from name"}`;
+    }
+    return;
+  }
+  if (!event.target.name || !(event.target.name in fleetFilters)) return;
+  fleetFilters[event.target.name] = event.target.value;
+  renderFleet(Date.now());
+});
+panelBody.addEventListener("click", async event => {
+  const nurseryLink = event.target.closest("[data-open-nursery]");
+  if (nurseryLink) { openPanel(NURSERY_ID, nurseryLink); return; }
+  const nurseryRetry = event.target.closest("[data-nursery-retry]");
+  if (nurseryRetry) {
+    const item = nurseryTracker.latest();
+    if (!item || item.key !== nurseryRetry.dataset.nurseryRetry) return;
+    const initial = runtime.snapshot();
+    const telemetry = nurseryTelemetryAvailability(initial, true);
+    if (!telemetry.ok) {
+      setNurseryNotice(telemetry.message, "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) {
+        setNurseryNotice("Steward credentials were not provided; the original declaration was not retried.",
+          "retry", item.key);
+        renderPanel(Date.now()); return;
+      }
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      setNurseryNotice("Telemetry changed while authorizing; the original declaration was not retried.",
+        "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    let retry;
+    try { retry = nurseryTracker.retry(item.key, current.cursor); }
+    catch (error) {
+      setNurseryNotice(`Nursery retry could not be prepared: ${error && error.message || "unknown error"}; no request was sent.`,
+        "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    if (!retry.ok) {
+      setNurseryNotice(retry.message, "retry", item.key);
+      renderPanel(Date.now()); return;
+    }
+    clearNurseryNotice("retry"); renderPanel(Date.now());
+    await sendNurseryRequest(retry.item); return;
+  }
+  const approvalOption = event.target.closest("[data-approval-option]");
+  if (approvalOption) {
+    const requestId = approvalOption.dataset.approvalId;
+    const decision = approvalOption.dataset.approvalOption;
+    const record = fleetView.approvalState &&
+      BurrowApprovals.recordFor(fleetView.approvalState, requestId);
+    if (!record || record.resolution || record.collided) {
+      approvalNotices.set(requestId, "This request is no longer pending; no decision was sent.");
+      renderPanel(Date.now()); return;
+    }
+    const edit = approvalDrafts.get(requestId) || "";
+    if (decision === "edit" && !edit.trim()) {
+      approvalNotices.set(requestId, "Write the edited detail before choosing edit; no decision was sent.");
+      renderPanel(Date.now()); return;
+    }
+    const initial = runtime.snapshot();
+    const observable = BurrowRoutines.telemetryAvailability(initial.transport, initial.cursor);
+    if (!observable.ok) {
+      approvalNotices.set(requestId,
+        `Approval unavailable: telemetry is ${initial.transport || "disconnected"}; no decision was sent.`);
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) return;
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      approvalNotices.set(requestId,
+        "Telemetry changed while authorizing; no decision was sent. Review the still-current request and retry.");
+      renderPanel(Date.now()); return;
+    }
+    const tracking = approvalAcks.request(requestId, decision,
+      decision === "edit" ? { note: edit.trim() } : null, current.cursor,
+      { agent_id: record.knock.agent_id, project: record.knock.project,
+        action: record.shape.action, lifecycle: record.lifecycle });
+    if (!tracking.ok) {
+      approvalNotices.set(requestId, tracking.message); renderPanel(Date.now()); return;
+    }
+    approvalNotices.delete(requestId); renderPanel(Date.now());
+    try {
+      const receipt = await BurrowApprovals.decide(stewardConfig, requestId, decision, edit);
+      approvalAcks.accepted(requestId, receipt);
+    } catch (error) {
+      approvalAcks.failed(requestId, error && error.message || "Decision request failed.",
+        Boolean(error && error.definitive));
+      if (error && error.authRejected) {
+        forgetStewardConfig();
+        approvalNotices.set(requestId,
+          "Steward rejected those credentials. Correct them and retry; no decision was recorded.");
+      }
+    }
+    renderPanel(Date.now()); return;
+  }
+  const claimant = event.target.closest("[data-agent]");
+  if (claimant && selectedId === JOB_BOARD_ID) {
+    openPanel(claimant.dataset.agent, claimant);
+    return;
+  }
+  const changeCredentials = event.target.closest("[data-steward-change]");
+  const identityResident = selectedId && villagers.find(item => item.id === selectedId);
+  const inactiveIdentity = selectedId && fleetView.residents.find(item =>
+    residentDetailId(item) === selectedId);
+  const inIdentityFlow = Boolean(inactiveIdentity ||
+    (identityResident && identityResident.residency === "resident"));
+  if (changeCredentials && (selectedId === JOB_BOARD_ID || selectedId === NURSERY_ID ||
+      selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
+    forgetStewardConfig();
+    renderPanel(Date.now());
+    const config = await requestStewardConfig();
+    if (config) {
+      stewardConfig = config;
+      if (inIdentityFlow) await refreshIdentity();
+    }
+    renderPanel(Date.now());
+    return;
+  }
+  const clearCredentials = event.target.closest("[data-steward-clear]");
+  if (clearCredentials && (selectedId === JOB_BOARD_ID || selectedId === NURSERY_ID ||
+      selectedPendingApprovalQueue().length > 0 || inIdentityFlow)) {
+    forgetStewardConfig();
+    if (selectedId === JOB_BOARD_ID) jobPostNotice = "Steward credentials cleared from browser memory.";
+    renderPanel(Date.now());
+    return;
+  }
+  const connect = event.target.closest("[data-steward-connect]");
+  if (connect) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+    await refreshStewardDeclarations();
+    return;
+  }
+  const identityRefresh = event.target.closest("[data-identity-refresh]");
+  if (identityRefresh) {
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) return;
+      stewardConfig = config;
+      await refreshIdentity();
+    } else await refreshIdentity();
+    return;
+  }
+  const button = event.target.closest("[data-run-routine]");
+  if (!button) return;
+  const request = { resident: button.dataset.runResident, routine: button.dataset.runRoutine,
+    local: { enabled: button.dataset.runEnabled === "true" },
+    correlation: button.dataset.runAgent ? { agent_id: button.dataset.runAgent } :
+      { project: button.dataset.runProject } };
+  const noticeKey = routineNoticeKey(request.correlation, request.routine);
+  const preflight = routineAcks.availability(request.correlation, request.routine);
+  if (!preflight.ok) {
+    routineRunNotices.set(noticeKey, preflight.message);
+    renderPanel(Date.now());
+    return;
+  }
+  const initialTelemetry = runtime.snapshot();
+  const telemetryPreflight = BurrowRoutines.telemetryAvailability(
+    initialTelemetry.transport, initialTelemetry.cursor);
+  if (!telemetryPreflight.ok) {
+    routineRunNotices.set(noticeKey, telemetryPreflight.message);
+    renderPanel(Date.now());
+    return;
+  }
+  if (!stewardConfig) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+    await refreshStewardDeclarations();
+  }
+  const declaration = stewardDeclarations.byRoutine.get(JSON.stringify(
+    [request.resident, request.routine]));
+  if (!BurrowRoutines.canRunAuthoritatively(
+      request.local, declaration, stewardDeclarations.state)) return;
+  // Credentials and declaration reads may leave a cached cursor behind after
+  // disconnect or reset. Only the exact still-current observable boundary may
+  // precede a run request; otherwise the eventual lifecycle cannot be
+  // correlated truthfully.
+  const currentTelemetry = runtime.snapshot();
+  const currentAvailability = BurrowRoutines.telemetryAvailability(
+    currentTelemetry.transport, currentTelemetry.cursor);
+  if (!currentAvailability.ok || currentTelemetry.transport !== initialTelemetry.transport ||
+      currentTelemetry.cursor !== initialTelemetry.cursor) {
+    const message = currentAvailability.ok ?
+      "Run Now unavailable: telemetry changed while authorizing; no request was sent" :
+      currentAvailability.message;
+    routineRunNotices.set(noticeKey, message);
+    renderPanel(Date.now());
+    return;
+  }
+  const correlation = request.correlation;
+  const requestedAt = Date.now();
+  const boundary = { events: fleetView.state.routineRecent.map(entry => entry.event),
+    cursor: currentTelemetry.cursor };
+  const tracking = routineAcks.request(
+    correlation, request.routine, requestedAt, boundary, validateEvent);
+  if (!tracking.ok) {
+    routineRunNotices.set(noticeKey, tracking.message);
+    renderPanel(requestedAt);
+    return;
+  }
+  routineRunNotices.delete(noticeKey);
+  renderPanel(requestedAt);
+  try {
+    const accepted = await BurrowRoutines.runNow(stewardConfig, request.resident, request.routine);
+    routineAcks.accepted(correlation, request.routine, accepted.request_id);
+  } catch (error) {
+    const message = error && error.message || "run request failed";
+    if (error && error.definitive === true) {
+      routineAcks.failed(correlation, request.routine, message);
+    } else {
+      routineAcks.uncertain(correlation, request.routine, message);
+    }
+  }
+  renderPanel(Date.now());
+});
+panelBody.addEventListener("submit", async event => {
+  const nurseryForm = event.target.closest("[data-create-resident]");
+  if (nurseryForm) {
+    event.preventDefault();
+    if (nurseryTracker.blocks()) {
+      setNurseryNotice("A previous nursery request is unresolved; no duplicate was sent.", "submit",
+        nurseryTracker.latest() && nurseryTracker.latest().key);
+      renderPanel(Date.now()); return;
+    }
+    const validation = BurrowNursery.validate(nurseryDraft);
+    nurseryErrors = validation.errors;
+    if (!validation.ok) {
+      setNurseryNotice("Fix the highlighted fields; nothing was sent.", "submit", null, "validation");
+      renderPanel(Date.now());
+      focusFirstNurseryError(validation.errors);
+      return;
+    }
+    const initial = runtime.snapshot();
+    const telemetry = nurseryTelemetryAvailability(initial);
+    if (!telemetry.ok) {
+      setNurseryNotice(telemetry.message, "submit");
+      renderPanel(Date.now()); return;
+    }
+    if (!stewardConfig) {
+      const config = await requestStewardConfig();
+      if (!config) {
+        setNurseryNotice("Steward credentials were not provided; no resident request was sent.", "submit");
+        renderPanel(Date.now()); return;
+      }
+      stewardConfig = config;
+    }
+    const current = runtime.snapshot();
+    if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+      setNurseryNotice("Telemetry changed while authorizing; no resident request was sent.", "submit");
+      renderPanel(Date.now()); return;
+    }
+    let tracking;
+    try { tracking = nurseryTracker.begin(current.cursor, nurseryDraft); }
+    catch (error) {
+      setNurseryNotice(`Nursery request could not be prepared: ${error && error.message || "unknown error"}; no request was sent.`,
+        "submit");
+      renderPanel(Date.now()); return;
+    }
+    if (!tracking.ok) { nurseryErrors = tracking.validation && tracking.validation.errors || {};
+      setNurseryNotice(tracking.message || "Fix the highlighted fields; nothing was sent.", "submit",
+        null, tracking.validation ? "validation" : "preflight");
+      renderPanel(Date.now()); return; }
+    clearNurseryNotice(); renderPanel(Date.now());
+    await sendNurseryRequest(tracking.item); return;
+  }
+  const form = event.target.closest("[data-post-job]");
+  if (!form) return;
+  event.preventDefault();
+  if (jobAcks.blocksSubmission()) {
+    jobPostNotice = "A previous post is still unresolved; no duplicate request was sent.";
+    refreshJobFeedback();
+    refreshJobFormState();
+    return;
+  }
+  if (!form.reportValidity()) return;
+  const initial = runtime.snapshot();
+  const telemetry = BurrowRoutines.telemetryAvailability(initial.transport, initial.cursor);
+  if (!telemetry.ok) {
+    jobPostNotice = telemetry.message;
+    renderPanel(Date.now());
+    return;
+  }
+  if (!stewardConfig) {
+    const config = await requestStewardConfig();
+    if (!config) return;
+    stewardConfig = config;
+  }
+  const current = runtime.snapshot();
+  if (current.transport !== initial.transport || current.cursor !== initial.cursor) {
+    jobPostNotice = "Telemetry changed while authorizing; no job was sent.";
+    renderPanel(Date.now());
+    return;
+  }
+  const tracking = jobAcks.request(current.cursor);
+  if (!tracking.ok) {
+    jobPostNotice = tracking.message;
+    renderPanel(Date.now());
+    return;
+  }
+  jobPostNotice = "";
+  refreshJobFeedback();
+  refreshJobFormState();
+  try {
+    const accepted = await BurrowJobs.postJob(stewardConfig, jobDraft);
+    const acknowledgement = jobAcks.accepted(tracking.id, accepted.task_id, accepted.request_id);
+    if (acknowledgement && ["pending", "acknowledged"].includes(acknowledgement.state)) {
+      jobDraft.title = ""; jobDraft.detail = ""; jobDraft.required_skills = "";
+      for (const name of Object.keys(jobDraft)) form.elements[name].value = "";
+    }
+  } catch (error) {
+    jobAcks.failed(tracking.id, error && error.message || "Job request failed.",
+      Boolean(error && error.definitive), error && error.taskId);
+    if (error && error.authRejected) {
+      forgetStewardConfig();
+      jobPostNotice = "Steward rejected those credentials. Connect again to retry without reloading.";
+    }
+  }
+  if (stewardConfig) {
+    refreshJobFeedback();
+    refreshJobFormState();
+  } else {
+    renderPanel(Date.now());
+  }
+});
+
+let souls = [];
+let artifacts = [];
+let deliverySuffix = "";
+const runtime = BurrowBrowser.createBrowserRuntime({
+  now: () => Date.now(), fetch: (...args) => fetch(...args),
+  adaptSnapshot: BurrowVillageAdapter.adapt,
+  EventSource: typeof EventSource === "undefined" ? null : EventSource,
+  setTimeout: (...args) => setTimeout(...args),
+  clearTimeout: timer => clearTimeout(timer),
+  warn: message => console.warn(message),
+  onProjection(view) {
+    villagers = view.villagers;
+    artifacts = view.artifacts;
+    souls = view.souls;
+    fleetView = { ...fleetView, journalState: view.journalState, now: view.now };
+    if (scene && scene.scene.isActive()) scene.updateVillage(villagers);
+    renderChrome(view.now);
+  },
+  onFleet(view) {
+    fleetView = view;
+    reconcileIdentityLocals(view.residents, view.directoryAvailable);
+    pruneApprovalUi(view.approvalState);
+    routineAcks.observe({ events: view.routineBatch, cursor: view.cursor, reset: view.reset },
+      view.now, validateEvent);
+    jobAcks.observe({ events: view.taskEvidence, cursor: view.cursor, reset: view.reset },
+      validateEvent);
+    approvalAcks.observe({ events: view.approvalEvidence, cursor: view.cursor,
+      reset: view.reset, approvalState: view.approvalState });
+    nurseryTracker.observe({ events: view.eventEvidence, cursor: view.cursor, reset: view.reset },
+      validateEvent);
+    if (selectedId === FLEET_LEDGER_ID) renderFleet(view.now);
+    if (selectedId === JOB_BOARD_ID) {
+      refreshJobListing(view.now);
+      if (view.taskEvidence.length || view.reset) {
+        refreshJobFeedback();
+        refreshJobFormState();
+      }
+    }
+    if (selectedId === NURSERY_ID && (view.eventEvidence.length || view.reset)) renderPanel(view.now);
+    if (selectedId && selectedId !== JOB_BOARD_ID && selectedId !== FLEET_LEDGER_ID &&
+        (view.approvalEvidence.length || view.eventEvidence.some(event =>
+          event.type === "journal_written") || view.reset)) renderPanel(view.now);
+  },
+  onTransport(state) {
+    transportEl.dataset.state = state;
+    transportEl.textContent = "telemetry " + state + deliverySuffix;
+  },
+  onTransportStatus(status) {
+    const notifications = status.notifications || {};
+    const pressure = Number(notifications.queued || 0);
+    const dropped = Number(notifications.dropped || 0);
+    transportEl.dataset.deliveryPressure = pressure || dropped ? "1" : "0";
+    if (dropped) deliverySuffix = ` · ${dropped} knock${dropped === 1 ? "" : "s"} dropped`;
+    else if (pressure) deliverySuffix = ` · ${pressure} knock${pressure === 1 ? "" : "s"} queued`;
+    else deliverySuffix = "";
+    transportEl.textContent = "telemetry " + runtime.snapshot().transport + deliverySuffix;
+  },
+});
+
+/* ————— boot ————— */
+
+(async () => {
+  const game = new Phaser.Game({
+    type: Phaser.AUTO,
+    parent: "game",
+    width: MAPW * T * ZOOM, height: MAPH * T * ZOOM,
+    pixelArt: true, roundPixels: true,
+    backgroundColor: "#142317",
+    scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+    scene: Village,
+  });
+  window.__burrow = game;
+  game.events.on("ready", () => {
+    scene = game.scene.getScene("village");
+    window.__burrow.village = scene;   // map self-check hook, see checkMap()
+    scene.events.once("create", async () => {
+      await runtime.poll();
+      runtime.refreshResidents();
+      runtime.connectStream();
+      // Idle while SSE is healthy; this is the fallback when it is not.
+      setInterval(runtime.poll, 2000);
+      // Manifests are a separate projection input: refresh even while SSE keeps
+      // event polling idle, so adding one promotes a visitor on the next fold.
+      setInterval(runtime.refreshResidents, 2000);
+      runtime.refreshTransportStatus();
+      setInterval(runtime.refreshTransportStatus, 2000);
+      // Wall-clock projection is independent of both transports: a quiet live
+      // stream still ages activity, relative times, and the 12-hour census.
+      setInterval(runtime.tick, 1000);
+    });
+  });
+})();
+</script>
+</body>
+</html>

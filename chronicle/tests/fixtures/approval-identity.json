@@ -1,0 +1,38 @@
+[
+  {
+    "name": "JSON key order and integral number spelling are semantically equal",
+    "compatible": true,
+    "left": {"message":"May I?","request_id":"semantic","action":"send_email","detail":{"count":1,"nested":{"b":[true,null,1.0],"a":"x"}},"options":["approve","deny"],"expires_at":"2026-08-26T10:00:00.000Z"},
+    "right": {"expires_at":"2026-08-26T10:00:00.000Z","options":["approve","deny"],"detail":{"nested":{"a":"x","b":[true,null,1]},"count":1.0},"action":"send_email","request_id":"semantic","message":"May I?"}
+  },
+  {
+    "name": "nested array order is immutable",
+    "compatible": false,
+    "left": {"message":"May I?","request_id":"array-order","action":"send_email","detail":{"steps":[1,2]},"options":["approve","deny"],"expires_at":null},
+    "right": {"message":"May I?","request_id":"array-order","action":"send_email","detail":{"steps":[2,1]},"options":["approve","deny"],"expires_at":null}
+  },
+  {
+    "name": "numbers compare in the shared browser JSON domain",
+    "compatible": true,
+    "left": {"message":"May I?","request_id":"wide-number","action":"send_email","detail":{"value":9007199254740992},"options":["approve"],"expires_at":null},
+    "right": {"message":"May I?","request_id":"wide-number","action":"send_email","detail":{"value":9007199254740993},"options":["approve"],"expires_at":null}
+  },
+  {
+    "name": "offered option order is immutable",
+    "compatible": false,
+    "left": {"message":"May I?","request_id":"option-order","action":"send_email","detail":{},"options":["approve","deny"],"expires_at":null},
+    "right": {"message":"May I?","request_id":"option-order","action":"send_email","detail":{},"options":["deny","approve"],"expires_at":null}
+  },
+  {
+    "name": "derived message is immutable",
+    "compatible": false,
+    "left": {"message":"Hob wants to send email","request_id":"message","action":"send_email","detail":{},"options":["approve"],"expires_at":null},
+    "right": {"message":"Hob wants to publish note","request_id":"message","action":"send_email","detail":{},"options":["approve"],"expires_at":null}
+  },
+  {
+    "name": "expiry is immutable",
+    "compatible": false,
+    "left": {"message":"May I?","request_id":"expiry","action":"send_email","detail":{},"options":["approve"],"expires_at":"2026-08-26T10:00:00.000Z"},
+    "right": {"message":"May I?","request_id":"expiry","action":"send_email","detail":{},"options":["approve"],"expires_at":"2026-08-27T10:00:00.000Z"}
+  }
+]

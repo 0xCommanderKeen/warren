@@ -1,0 +1,29 @@
+{
+  "now": "2026-08-25T20:00:00.000Z",
+  "scenarios": {
+    "ambiguous_close": [
+      {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"First deploy question","request_id":"ambiguous-q","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T12:01:00.000Z","source":"codex","agent_id":"codex:other","project":"burrow","type":"needs_human","payload":{"message":"Erase question","request_id":"ambiguous-q","action":"erase","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T12:02:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Second deploy question","request_id":"ambiguous-q","action":"deploy","detail":{"attempt":2},"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T18:30:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 0","request_id":"recent-0","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T18:40:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 1","request_id":"recent-1","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T18:50:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 2","request_id":"recent-2","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T19:00:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 3","request_id":"recent-3","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T19:10:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 4","request_id":"recent-4","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T19:20:00.000Z","source":"codex","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human","payload":{"message":"Recent 5","request_id":"recent-5","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T20:00:00.000Z","source":"steward","agent_id":"codex:ambiguous","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"ambiguous-q","decision":"approve","decided_by":"human","action":"deploy"}}
+    ],
+    "post_close_collision": {
+      "events": [
+      {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:post-collision","project":"burrow","type":"needs_human","payload":{"message":"Question one","request_id":"closed-q1","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T12:10:00.000Z","source":"steward","agent_id":"codex:post-collision","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"closed-q1","decision":"approve","decided_by":"human","action":"deploy"}},
+      {"v":0,"ts":"2026-08-25T12:20:00.000Z","source":"codex","agent_id":"codex:post-collision","project":"burrow","type":"needs_human","payload":{"message":"Question two","request_id":"collided-q2","action":"deploy","detail":null,"options":["approve","deny"]}},
+      {"v":0,"ts":"2026-08-25T12:30:00.000Z","source":"steward","agent_id":"codex:post-collision","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"collided-q2","decision":"approve","decided_by":"human","action":"deploy"}},
+      {"v":0,"ts":"2026-08-25T12:40:00.000Z","source":"codex","agent_id":"codex:post-collision","project":"burrow","type":"needs_human","payload":{"message":"Incompatible question two","request_id":"collided-q2","action":"erase","detail":null,"options":["approve","deny"]}}
+      ],
+      "pending_count": 40,
+      "pending_start": "2026-08-25T18:00:00.000Z",
+      "anchor": {"v":0,"ts":"2026-08-25T20:00:00.000Z","source":"codex","agent_id":"codex:post-collision","project":"burrow","type":"idle","payload":{}}
+    }
+  }
+}

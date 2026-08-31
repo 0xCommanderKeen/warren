@@ -1,0 +1,13 @@
+{
+  "now": "2026-08-25T12:00:00.000Z",
+  "events": [
+    {"v":0,"ts":"2026-08-25T04:00:00.000Z","source":"codex","agent_id":"codex:mood","project":"burrow","type":"needs_human","payload":{"message":"Deploy?","request_id":"mood-r","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T10:30:00.000Z","source":"claude-code","agent_id":"codex:mood","project":"burrow","type":"task_started","payload":{"prompt":"Inspect release"}},
+    {"v":0,"ts":"2026-08-25T10:45:00.000Z","source":"codex","agent_id":"codex:mood","project":"burrow","type":"tool_called","payload":{"tool":"Read"}},
+    {"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"steward","agent_id":"codex:mood","project":"burrow","type":"routine_started","payload":{"routine":"release","run_id":"run-1","trigger":"manual"}},
+    {"v":0,"ts":"2026-08-25T11:15:00.000Z","source":"codex","agent_id":"codex:mood","project":"burrow","type":"artifact_produced","payload":{"artifact":"dist/release"}},
+    {"v":0,"ts":"2026-08-25T11:30:00.000Z","source":"codex","agent_id":"codex:mood","project":"burrow","type":"tool_failed","payload":{"tool":"Bash","error":"exit 1"}},
+    {"v":0,"ts":"2026-08-25T11:45:00.000Z","source":"steward","agent_id":"codex:mood","project":"burrow","type":"task_failed","payload":{"task_id":"mood-task","title":"Release","claimant":"codex:mood","reason":"lease_expired"}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:mood","project":"burrow","type":"heartbeat","payload":{}}
+  ]
+}

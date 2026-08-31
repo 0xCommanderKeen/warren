@@ -1,0 +1,26 @@
+{
+  "now": "2026-08-25T12:00:00.000Z",
+  "events": [
+    {"v":0,"ts":"2026-08-25T10:30:00.000Z","source":"codex","agent_id":"codex:mood-adversarial","project":"burrow","type":"task_started","payload":{"prompt":"Inspect retained evidence"}},
+    {"v":0,"ts":"2026-08-25T10:40:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-0","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T10:50:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-1","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-2","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T11:10:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-3","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T11:20:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-4","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T11:30:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"routine_finished","payload":{"routine":"check","run_id":"run-5","outcome":"ok","artifacts":[],"duration_s":1}},
+    {"v":0,"ts":"2026-08-25T11:40:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"orphan-0","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T11:45:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"orphan-1","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T11:50:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"orphan-2","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T11:55:00.000Z","source":"steward","agent_id":"codex:mood-adversarial","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"orphan-3","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:mood-adversarial","project":"burrow","type":"idle","payload":{}},
+    {"v":0,"ts":"2026-08-25T09:50:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"task_started","payload":{"prompt":"Recover interrupted failures"}},
+    {"v":0,"ts":"2026-08-25T10:00:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"tool_failed","payload":{"tool":"A"}},
+    {"v":0,"ts":"2026-08-25T10:10:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T10:20:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"tool_failed","payload":{"tool":"B"}},
+    {"v":0,"ts":"2026-08-25T10:30:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T10:40:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"tool_failed","payload":{"tool":"C"}},
+    {"v":0,"ts":"2026-08-25T10:50:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T11:00:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"heartbeat","payload":{}},
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:mood-interrupted","project":"burrow","type":"heartbeat","payload":{}}
+  ]
+}
