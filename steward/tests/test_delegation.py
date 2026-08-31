@@ -863,7 +863,7 @@ def make_dispatcher(store: Store, sink: ev.NullEmitter, tmp_path: Path) -> MakeD
             store=store,
             emitter=sink,
             workdir=tmp_path,
-            runner_factory=lambda _spec: runner or ScriptedRunner(),
+            runner_factory=lambda _spec, _placement: runner or ScriptedRunner(),
         )
 
     return _make
@@ -1107,7 +1107,7 @@ def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
         emitter=sink,
         workdir=tmp_path,
         library=library_for(REPO_ROOT / "residents"),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
     )
     maren = next(r for r in residents if r.id == "burrow-builder")
     # The human's task, and Maren already holds it: this is the session she is finishing.
@@ -1235,7 +1235,7 @@ def guarded_dispatcher(  # noqa: PLR0913, PLR0917 — the collaborators an entry
         store=store,
         emitter=sink,
         workdir=workdir,
-        runner_factory=lambda _spec: runner or ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: runner or ScriptedRunner(),
         guard=guard,
         clock=lambda: NOW,
     )

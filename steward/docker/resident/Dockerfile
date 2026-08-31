@@ -31,12 +31,13 @@
 # honest default and it is *not* a placeholder for a missing feature: a resident's
 # container is a place for sessions to happen, and steward drives the brain from outside.
 #
-# Be precise about where that stands today: **steward's scheduler runs sessions locally**,
-# in the process running `steward scheduler run` (see steward/runners.py — subprocess.Popen
-# with cwd set to the resident's workdir). Nothing in steward execs into this container
-# yet. This image is what makes that possible — `docker exec steward-<id> claude -p …`
-# works the moment somebody wires it — but wiring it is the pilot's step, not something
-# this image can claim on its own.
+# Where sessions actually run is the manifest's choice (steward #58): the default
+# `runner.placement: local` keeps them in the process running `steward scheduler run`,
+# and `placement: container` runs them in here — `docker exec steward-<id> claude -p …`,
+# built and killed by steward/runners.py, with the memory volume as the working
+# directory and only the named session variables in the environment. The compose file
+# steward renders runs this image under docker's own init (`init: true`), so what a
+# killed session leaves behind is reaped rather than accumulating as zombies.
 #
 # ## Arch
 #

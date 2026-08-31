@@ -254,9 +254,9 @@ def test_the_image_carries_everything_a_session_needs() -> None:
 def test_the_container_still_just_stays_up() -> None:
     """A resident's container is a place for sessions to happen, not a process doing work.
 
-    Steward's scheduler runs sessions *locally* today (steward/runners.py starts them with
-    subprocess.Popen); nothing execs into this container yet. `sleep infinity` is the
-    honest default until something does.
+    That is true under either placement (steward #58): steward drives the brain from
+    outside — locally by default, or `docker exec`-ed in for `placement: container` — so
+    `sleep infinity` stays the honest default command either way.
     """
     text = DOCKERFILE.read_text(encoding="utf-8")
 

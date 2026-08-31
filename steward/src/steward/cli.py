@@ -37,7 +37,7 @@ from steward.approvals import (
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
-from steward.deploy import TransportError
+from steward.deploy import TransportError, placement_for
 from steward.health import HealthFailure
 from steward.journal import (
     JournalEntry,
@@ -69,7 +69,7 @@ from steward.nursery import (
     retire_resident,
 )
 from steward.prompt import assemble_preamble
-from steward.runners import check_cli_support, check_runner, skills_home
+from steward.runners import Placement, check_cli_support, check_runner, skills_home
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -459,7 +459,9 @@ def _report_reach(resident: Resident) -> int:
     """
     manifest = resident.manifest
     tools = manifest.tools
-    complaint = check_cli_support(manifest.runner, tools, manifest.workspace)
+    complaint = check_cli_support(
+        manifest.runner, tools, manifest.workspace, placement_for(manifest)
+    )
     if complaint:
         click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
         return 1
@@ -516,11 +518,9 @@ def doctor(residents: Path | None, db: Path | None) -> None:
                 # "ready" about it would be the one line of this report that is untrue.
                 click.secho(f"{resident.id}: retired — fires nothing", fg="bright_black")
                 continue
-            runner = resident.manifest.runner
-            complaint = check_runner(runner)
-            label = f"{resident.id}: runner {runner.kind}"
-            if runner.model:
-                label += f" ({runner.model})"
+            placement = placement_for(resident.manifest)
+            complaint = check_runner(resident.manifest.runner, placement)
+            label = _runner_label(resident, placement)
             if complaint:
                 problems += 1
                 click.secho(f"{label} — {complaint}", fg="red", err=True)
@@ -575,6 +575,17 @@ def _probe_writable(directory: Path) -> str | None:
     except OSError as exc:
         return f"not writable: {exc}"
     return None
+
+
+def _runner_label(resident: Resident, placement: Placement) -> str:
+    """Name a resident's brain and where it runs, for one doctor line."""
+    runner = resident.manifest.runner
+    label = f"{resident.id}: runner {runner.kind}"
+    if runner.model:
+        label += f" ({runner.model})"
+    if placement.is_container:
+        label += f" in {placement.describe()}"
+    return label
 
 
 def _report_journal(resident: Resident) -> int:

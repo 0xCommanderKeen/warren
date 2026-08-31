@@ -384,6 +384,7 @@ manifest declares which brain it opens onto.
 ```yaml
 runner:
   kind: claude               # claude | codex | command | mock
+  placement: local           # local | container
   model: claude-opus-5
   command: [my-agent, --prompt, "{prompt}", --cwd, "{workdir}"]   # kind: command only
   permission_mode: null      # acceptEdits | auto | bypassPermissions | manual | dontAsk | plan
@@ -407,6 +408,56 @@ reading.
 nothing, so a `command` runner without it fails validation. `{workdir}` is optional.
 Substitution is a single pass, so a prompt containing the literal text `{workdir}` is
 inserted as data and never re-scanned.
+
+### `placement` — where a session runs
+
+`kind` answers *which brain*; `placement` answers *on which machine, in which
+filesystem*, and the two are independent axes — folding the container into a fifth
+`kind` would have duplicated the claude argv and lost the JSON cost parse that feeds the
+budget ledger.
+
+- **`local`** (the default): the session runs in the process running the scheduler,
+  exactly as every session always has. A manifest that says nothing changes nothing.
+- **`container`**: the session runs inside the resident's own container —
+  `docker exec <deploy.container> claude -p …` — on the host the scheduler runs on.
+  Explicit, never inferred from a `deploy` block being present: a resident can have a
+  container for supervision while its sessions run on the control plane, which is
+  exactly the state of every resident deployed before this field existed.
+
+`placement: container` requires an explicit `deploy.container` (validation refuses a
+defaulted name), a `kind` that runs a real brain argv (`claude` or `codex` — `mock`
+spawns nothing and a `command` template would substitute `{workdir}` with a
+control-plane path), and the container to be visible to this host's docker at run time —
+`steward doctor` and the scheduler's startup check both probe `docker inspect` and the
+brain's presence on the *container's* PATH.
+
+**The two sides of the memory mount.** For a container-placed resident, `memory.path`
+names the mount point *inside* the container; the same files live on the host at
+`<deploy.path>/memory` (what the rendered compose file mounts as `./memory`). Steward
+touches each side deliberately: the journal is read and written and skills are
+materialized on the **host side**, and the session's working directory is the
+**container side** (`docker exec -w`). A container-placed resident whose host-side
+`memory/` directory is missing is refused loudly — it has not been provisioned — rather
+than relocated to the process working directory.
+
+**The environment is the named variables and nothing else.** A local session inherits
+the allowlist (`SESSION_ENV_BASE`, the runner's own names, the
+`STEWARD_SESSION_ENV_PASSTHROUGH` hatch) plus the per-wake facts; a container session
+gets **only the per-wake facts**, one `-e` at a time — `BURROW_AGENT_ID`,
+`STEWARD_RUN_ID`, the session credential, and their siblings. Everything else the
+session needs is already in the container: its compose `environment`, its `.env` (the
+operator's hatch here), and the brain's credentials on the `./claude:/root/.claude`
+volume. A `STEWARD_TOKEN` in the control plane's environment is not visible inside the
+session — measured, and asserted by `tests/test_container_integration.py` against a
+real container.
+
+**A timeout is a kill inside the container.** Killing the local `docker exec` client
+alone would leave the session running invisibly while the ledger said `timeout`, so the
+launch shim records the session's in-container pid under `/run/steward/<run id>.pid`
+and the timeout path kills that whole process group inside the container first, then
+reaps the client — partial output the session already streamed still reaches the run's
+`output`. The rendered compose file runs the container under `init: true` so what a
+kill leaves behind is reaped instead of accumulating as zombies.
 
 A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
@@ -784,10 +835,12 @@ mount hides whatever the image baked at that path, so the canonical copies live 
 keeping). The credentials a `docker exec <container> claude` login writes stay in the
 volume across restarts and rebuilds.
 
-**What is not true yet.** Steward's scheduler runs sessions **locally** — in the process
-running `steward scheduler run`, via `subprocess.Popen` in `steward/runners.py`. Nothing in
-steward execs into a resident's container. This image is what makes that possible; wiring
-`docker exec` into the runner seam is a separate, deliberate step.
+**Where sessions run is the manifest's choice.** The default `runner.placement: local`
+keeps them in the process running `steward scheduler run`, via `subprocess.Popen` in
+`steward/runners.py`; `placement: container` runs them inside this container over
+`docker exec` — see [`placement` under `runner`](#runner--which-brain). The rendered
+compose file runs the container under docker's own init (`init: true`), so the processes
+a killed session leaves behind are reaped rather than accumulating as zombies.
 
 **Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
 up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A

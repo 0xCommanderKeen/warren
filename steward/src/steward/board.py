@@ -58,6 +58,7 @@ from typing import cast
 from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
+from steward.deploy import placement_for
 from steward.manifest import (
     DEFAULT_BOARD_LEASE_S,
     DEFAULT_BOARD_TIMEOUT_S,
@@ -236,7 +237,7 @@ def board_preflight(
     for resident in board_residents(residents):
         missing = missing_skills(resident.manifest, library)
         complaints = (
-            check_runner(resident.manifest.runner),
+            check_runner(resident.manifest.runner, placement_for(resident.manifest)),
             describe_missing(resident.id, missing, library) if missing else None,
             workdir_refusal(resident, fallback, library),
         )
