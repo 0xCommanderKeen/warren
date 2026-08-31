@@ -1425,6 +1425,11 @@ class Resident:
         return self.manifest.id
 
     @property
+    def uid(self) -> str:
+        """The resident's durable identity, as the string every wire format carries it as."""
+        return str(self.manifest.uid)
+
+    @property
     def agent_id(self) -> str:
         """The burrow identity this resident's events are emitted under."""
         return self.manifest.burrow_agent_id

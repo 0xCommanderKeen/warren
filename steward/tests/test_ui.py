@@ -684,6 +684,28 @@ def test_the_console_fetches_through_exactly_one_door() -> None:
     assert source.count("fetch(") == 1, "every request must go through the single call() helper"
 
 
+def test_the_residents_list_links_by_uid_not_by_id() -> None:
+    """A resident's own page is addressed by the name that cannot be reused.
+
+    An id is a directory name: retire ``pip``, raise a new ``pip``, and a bookmarked
+    ``#/residents/pip`` quietly means someone else. The uid never moves, so the row links
+    with it. The API resolves either, so this is a sharpening rather than a break.
+    """
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    listing = source.split("function viewResidents(")[1].split("\nfunction ")[0]
+
+    assert "`#/residents/${encodeURIComponent(resident.uid)}`" in listing
+    assert "`#/residents/${encodeURIComponent(resident.id)}`" not in listing
+
+
+def test_the_resident_page_shows_the_uid_its_url_is_keyed_on() -> None:
+    # A URL made of an opaque uuid is only usable if the page says which uuid it is.
+    source = (UI_DIR / "app.js").read_text(encoding="utf-8")
+    panel = source.split("function soulPanel(")[1].split("\nfunction ")[0]
+
+    assert '["uid", mono(it.uid)]' in panel
+
+
 def test_the_approvals_panel_uses_the_servers_definition_of_pending() -> None:
     """Expired unswept rows stay auditable, but must never get decision controls (#154)."""
     source = (UI_DIR / "app.js").read_text(encoding="utf-8")
