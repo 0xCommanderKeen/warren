@@ -596,12 +596,13 @@ case "$1" in --help) echo "--setting-sources --tools --strict-mcp-config --add-d
 echo '{"result": "Done.", "is_error": false, "total_cost_usd": 0.42, "usage": {"input_tokens": 1200, "output_tokens": 300}}'
 ```
 
-The `--help` arm matters: `steward doctor` and the scheduler's startup check ask the
-installed binary what flags it supports before trusting it with a manifest. With
-`budgets: {daily_cost_usd: 0.25}` on the resident, one tick ledgers $0.42, trips the cap,
-pauses the resident and knocks — the whole budget path, without a model call. The `result`
-string is the session's output, so a stub that puts the control region in there exercises
-both halves at once.
+The `--help` arm is what keeps `steward doctor` green: doctor asks the installed binary
+what flags it supports, because every claude session carries `--setting-sources` whether a
+manifest asked for it or not. (The scheduler's own startup check is cheaper — it only asks
+whether the binary is on `PATH`.) With `budgets: {daily_cost_usd: 0.25}` on the resident,
+one tick ledgers $0.42, trips the cap, pauses the resident and knocks — the whole budget
+path, without a model call. The `result` string is the session's output, so a stub that
+puts the control region in there exercises both halves at once.
 
 ## Environment
 
