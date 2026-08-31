@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
-import { createStewardClient } from "./StewardClient.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createStewardClient, isSameOrigin, stewardBaseFromLocation } from "./StewardClient.js";
 
 function response(status, body) {
   return {
@@ -148,5 +148,118 @@ describe("Steward client", () => {
       "/residents/keeper/routines/daily/run",
       "/approvals/a-1",
     ]);
+  });
+});
+
+/* -- the origin guard (warren#256) ----------------------------------------------------- */
+
+describe("where Steward lives", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("is this origin when nobody says otherwise", () => {
+    expect(stewardBaseFromLocation("?unrelated=true")).toBe("");
+  });
+
+  it("is still this origin under ?steward= in anything that ships", () => {
+    // The exfiltration link, defused: `import.meta.env.DEV` is false in a built bundle and
+    // Vite eliminates the branch, so the parameter is inert text in a URL.
+    vi.stubEnv("DEV", false);
+    expect(stewardBaseFromLocation("?steward=https://evil.tld")).toBe("");
+  });
+
+  it("ignores VITE_STEWARD_URL in anything that ships, for the same reason", () => {
+    // A build-time variable is not attacker-controlled, but a shipped Arcadia has no use
+    // for one: deploy/nginx.conf proxies Steward's write routes behind the same origin.
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_STEWARD_URL", "https://steward.elsewhere");
+    expect(stewardBaseFromLocation("?unrelated=true")).toBe("");
+  });
+
+  it("is whatever a developer running vite points it at", () => {
+    // Arcadia's dev server proxies Burrow but not Steward, so this override is the only way
+    // to reach a Steward at all in development.
+    vi.stubEnv("DEV", true);
+    expect(stewardBaseFromLocation("?steward=http://127.0.0.1:8802")).toBe("http://127.0.0.1:8802");
+    vi.stubEnv("VITE_STEWARD_URL", "http://127.0.0.1:8802");
+    expect(stewardBaseFromLocation("?unrelated=true")).toBe("http://127.0.0.1:8802");
+  });
+});
+
+describe("the credential never leaves this origin", () => {
+  // warren#256, sibling of #241: the approval prompt hands a bearer token to this client,
+  // so a base chosen by a link would carry that token to whoever wrote the link. In a built
+  // bundle `import.meta.env.DEV` is false and this refusal is unconditional.
+  afterEach(() => vi.unstubAllEnvs());
+
+  const shipped = () => vi.stubEnv("DEV", false);
+
+  it("refuses a cross-origin base outright, so no request is made at all", async () => {
+    shipped();
+    const fetch = vi.fn();
+    const client = createStewardClient({ baseUrl: "https://evil.tld", fetch });
+    client.setCredentials({ token: "secret" });
+
+    await expect(client.postJob({ title: "Map the woods" })).rejects.toMatchObject({
+      code: "cross_origin_base", ambiguous: false, retryable: false,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("sends no Authorization header off-origin, on any write", async () => {
+    shipped();
+    const fetch = vi.fn();
+    for (const baseUrl of ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8802"]) {
+      const client = createStewardClient({ baseUrl, fetch });
+      client.setCredentials({ token: "secret" });
+      await client.postJob({ title: "x" }).catch(() => {});
+      await client.runRoutine("keeper", "daily").catch(() => {});
+      await client.decideApproval("a-1", { decision: "approve" }).catch(() => {});
+      await client.createResident({ id: "keeper" }).catch(() => {});
+    }
+
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not wedge the client: a refusal leaves no write unresolved", async () => {
+    // The refusal has to happen before any write is registered. A cross-origin base that
+    // parked `writeState` would answer every later write with "already unresolved" — the
+    // client would be dead until reload, which is a worse bug than the one being fixed.
+    shipped();
+    const fetch = vi.fn();
+    const client = createStewardClient({ baseUrl: "https://evil.tld", fetch });
+    client.setCredentials({ token: "secret" });
+
+    await expect(client.postJob({ title: "one" })).rejects.toMatchObject({ code: "cross_origin_base" });
+    await expect(client.postJob({ title: "two" })).rejects.toMatchObject({ code: "cross_origin_base" });
+  });
+
+  it("still writes to this origin, by empty base or bare path", async () => {
+    shipped();
+    const fetch = vi.fn().mockResolvedValue(response(202, {
+      status: "accepted", request_id: "request-1", task_id: "task-1",
+    }));
+
+    const here = createStewardClient({ fetch });
+    here.setCredentials({ token: "secret" });
+    await here.postJob({ title: "Map the woods" });
+
+    const prefixed = createStewardClient({ baseUrl: `${window.location.origin}/arcadia`, fetch });
+    prefixed.setCredentials({ token: "secret" });
+    await prefixed.postJob({ title: "Map the woods" });
+
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "/jobs", `${window.location.origin}/arcadia/jobs`,
+    ]);
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer secret");
+  });
+
+  it("answers the same question directly, for a base that came from anywhere", () => {
+    expect(isSameOrigin("")).toBe(true);
+    expect(isSameOrigin("/burrow")).toBe(true);
+    expect(isSameOrigin(window.location.origin)).toBe(true);
+    expect(isSameOrigin("https://evil.tld")).toBe(false);
+    expect(isSameOrigin("//evil.tld")).toBe(false);
+    expect(isSameOrigin("javascript:alert(1)")).toBe(false);
+    expect(isSameOrigin("https://steward.test")).toBe(false);
   });
 });
