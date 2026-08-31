@@ -611,7 +611,7 @@ the scheduler and the API name the ones they need on startup.
 
 | variable | who reads it | meaning |
 |---|---|---|
-| `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
+| `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. Unset, the file is `.steward/state/scheduler.json` under the current directory — which moves with the current directory, so a daemon wants this set. |
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
 | `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` on a machine that still has that directory. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
