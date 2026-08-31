@@ -36,15 +36,28 @@ DOCKER = shutil.which("docker") or "docker"
 
 
 def _docker_answers() -> bool:
+    """Report whether a docker *daemon* answers here, not merely whether a client exists.
+
+    ``docker version --format '{{.Server.Version}}'`` rather than ``docker info``: measured
+    against docker 27.3.1, ``info`` prints the client's half of the report and **exits 0**
+    when nothing is listening at ``DOCKER_HOST`` (see
+    ``test_docker_info_exits_zero_at_an_endpoint_with_no_daemon``). This gate is what makes
+    the module's "skipped wholesale when no docker daemon answers" promise true, so it has
+    to be the probe that can actually tell — otherwise a host with the CLI and no daemon
+    skips nothing and fails everything.
+    """
     if shutil.which("docker") is None:
         return False
     try:
         probe = subprocess.run(  # noqa: S603 — fixed argv, a capability probe
-            [DOCKER, "info"], capture_output=True, timeout=15, check=False
+            [DOCKER, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
     except OSError, subprocess.TimeoutExpired:
         return False
-    return probe.returncode == 0
+    return probe.returncode == 0 and bool(probe.stdout.strip())
 
 
 pytestmark = pytest.mark.skipif(not _docker_answers(), reason="no docker daemon on this host")

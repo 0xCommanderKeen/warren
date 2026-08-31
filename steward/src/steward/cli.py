@@ -713,26 +713,38 @@ def _report_inbox(resident: Resident, store: Store) -> int:
     return 0
 
 
+def _print_topology(report: Survey, *, alarm: str, ok_lines: bool = True) -> None:
+    """Print one topology survey (#59), each line green or in the caller's alarm colour.
+
+    Two callers and two alarm colours, and the difference between them is a judgement
+    about who is reading. ``steward doctor`` says it in **yellow** and does not fail: it
+    is routinely run on a laptop while the daemons live on the NAS, and a container this
+    host cannot see is not a broken fleet — the same judgement :func:`_report_scheduler`
+    makes about a state file this host cannot see. ``steward watchdog`` says it in
+    **red**: that process *is* the supervisor, so a container it cannot reach is not a
+    report about a gap, it is the gap.
+
+    Every complaint goes to **stderr**, which is what lets ``ok_lines=False`` exist: a
+    caller writing a JSON document to stdout drops the green lines that would corrupt it
+    and keeps the ones somebody needs to see. A machine-readable pass and a silent one are
+    not the same thing.
+    """
+    for note in report.notes():
+        if note.ok and not ok_lines:
+            continue
+        click.secho(note.text, fg="green" if note.ok else alarm, err=not note.ok)
+
+
 def _report_topology(residents: Sequence[Resident]) -> int:
     """Say whether the docker this host reaches holds the containers manifests name (#59).
 
-    Never a problem worth exiting on, and for exactly the reason
-    :func:`_report_scheduler` is not: doctor is routinely run on a laptop while the
-    daemons live on the NAS, and a container this host cannot see is not a broken fleet —
-    it is a report being run from somewhere other than the burrow. What *is* worth saying
-    out loud is which of those two it is, because the failure this catches is
-    indistinguishable from health at run time: a watchdog pointed at the wrong docker gets
-    "no such container", reports the resident as unsupervised, and never restarts
-    anything.
-
-    The same survey is red in ``steward watchdog``, where the process reading it *is* the
-    supervisor and the gap is its own defect rather than a diagnostic run from elsewhere.
+    Never a problem worth exiting on — :func:`_print_topology` has the reason. What *is*
+    worth saying out loud is which of the two situations this is, because the failure it
+    catches is indistinguishable from health at run time: a watchdog pointed at the wrong
+    docker gets "no such container", reports the resident as unsupervised, and never
+    restarts anything.
     """
-    for note in survey(residents).notes():
-        if note.ok:
-            click.secho(note.text, fg="green")
-        else:
-            click.secho(note.text, fg="yellow", err=True)
+    _print_topology(survey(residents), alarm="yellow")
     return 0
 
 
@@ -1804,23 +1816,6 @@ def _watchdog_failed(report: WatchdogPass) -> bool:
     return bool(report.gave_up or report.paused)
 
 
-def _report_topology_to_the_supervisor(report: Survey) -> None:
-    """Say, before the first pass, which containers this watchdog can actually reach (#59).
-
-    Red here, where the same survey is only yellow in ``steward doctor``: doctor is a
-    diagnostic somebody may well be running from a laptop, but this process *is* the
-    supervisor, and a watchdog that cannot see a container it is responsible for is not
-    reporting on a gap — it is the gap. Said once at startup rather than on every pass,
-    and printed rather than only logged, because the operator who typed the command is
-    the person who can move it to the right burrow.
-    """
-    for note in report.notes():
-        if note.ok:
-            click.secho(note.text, fg="bright_black")
-        else:
-            click.secho(note.text, fg="red", err=True)
-
-
 @watchdog.command("tick")
 @_RESIDENTS_OPTION
 @_DB_OPTION
@@ -1831,9 +1826,11 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
     with _open_store(db) as store:
         dog = Watchdog.from_path(residents, store)
         # Before the pass, not after: a reader who sees "unsupervised" for every resident
-        # deserves to have already been told the docker being asked is the wrong one.
-        if output_format != "json":
-            _report_topology_to_the_supervisor(dog.topology())
+        # deserves to have already been told the docker being asked is the wrong one. The
+        # JSON caller still gets the complaints — on stderr, where they cannot corrupt the
+        # document — because an unattended consumer is the last one who should be told
+        # nothing.
+        _print_topology(dog.topology(), alarm="red", ok_lines=output_format != "json")
         report = dog.tick()
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
@@ -1863,7 +1860,9 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
         dog = Watchdog.from_path(residents, store)
-        _report_topology_to_the_supervisor(dog.topology())
+        # Once, at startup, before the daemon settles into its loop: which containers this
+        # process can actually reach is a property of where it is running, not of a pass.
+        _print_topology(dog.topology(), alarm="red")
         try:
             passes = dog.run(interval_s=interval, max_passes=max_passes)
         except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon

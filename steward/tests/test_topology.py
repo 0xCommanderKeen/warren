@@ -89,7 +89,7 @@ def test_a_resident_that_declares_no_container_is_nothing_to_supervise(
 
     assert report.supervised == ()
     assert docker.calls == []
-    assert report.ok
+    assert report.unreachable == ()
     (note,) = report.notes()
     assert note.ok
     assert "nothing here needs docker" in note.text
@@ -144,8 +144,7 @@ def test_a_container_on_this_burrow_is_supervised_from_here(
 
     (item,) = report.supervised
     assert item.reach is t.Reach.HERE
-    assert item.reachable
-    assert report.ok
+    assert report.unreachable == ()
     assert any("supervised from here" in note.text and note.ok for note in report.notes())
 
 
@@ -162,7 +161,6 @@ def test_a_container_on_another_burrow_is_called_out_by_name(
 
     (item,) = report.supervised
     assert item.reach is t.Reach.ELSEWHERE
-    assert not report.ok
     assert report.unreachable == (item,)
     (complaint,) = [note for note in report.notes() if not note.ok]
     assert "runs on dxp2800" in complaint.text
@@ -200,10 +198,31 @@ def test_a_docker_host_pointer_is_unverified_rather_than_fine(
 
     (item,) = report.supervised
     assert item.reach is t.Reach.UNVERIFIED
-    assert not report.ok
+    assert report.unreachable == report.supervised
     (complaint,) = [note for note in report.notes() if not note.ok]
     assert "DOCKER_HOST=ssh://Miha@dxp2800" in complaint.text
     assert "cannot verify" in complaint.text
+
+
+def test_being_on_the_right_burrow_proves_nothing_once_docker_host_is_set(
+    write_resident: ResidentWriter,
+) -> None:
+    """The module's own false-fine, and the reason the three signals are ranked.
+
+    A watchdog running *on the NAS* with `DOCKER_HOST` pointed at some other daemon
+    supervises nothing on the NAS — so answering from what this machine is called would
+    print "supervised from here" over exactly the gap #59 is about. The local name is only
+    consulted once the calls are known to be local.
+    """
+    report = t.survey(
+        [supervised_resident(write_resident, host="dxp2800")],
+        env={t.BURROW_ENV: "dxp2800", t.DOCKER_HOST_ENV: "tcp://elsewhere:2375"},
+        command=FakeDocker("something-else\t27.3.1\n"),
+    )
+
+    (item,) = report.supervised
+    assert item.reach is t.Reach.UNVERIFIED
+    assert report.unreachable == report.supervised
 
 
 def test_a_docker_host_that_answers_for_the_declared_host_is_reached_after_all(
@@ -218,7 +237,7 @@ def test_a_docker_host_that_answers_for_the_declared_host_is_reached_after_all(
 
     (item,) = report.supervised
     assert item.reach is t.Reach.HERE
-    assert report.ok
+    assert report.unreachable == ()
 
 
 # ---------------------------------------------------------------- when docker says nothing
@@ -234,11 +253,18 @@ def test_a_docker_that_does_not_answer_names_what_is_left_unsupervised(
     )
 
     assert not report.daemon.answered
-    assert not report.ok
+    assert report.unreachable == report.supervised
     complaint = report.notes()[0]
     assert not complaint.ok
     assert "docker did not answer" in complaint.text
     assert "nothing is supervising test-agent" in complaint.text
+    # And the resident's own line must not then say the opposite two lines later. The
+    # container is on this burrow — which is not supervision, because no docker on this
+    # burrow answered for it.
+    resident_line = report.notes()[1]
+    assert not resident_line.ok
+    assert "the right burrow, but no docker here answered for it" in resident_line.text
+    assert "supervised from here" not in resident_line.text
 
 
 def test_a_docker_that_exits_zero_with_no_server_did_not_answer(
@@ -260,7 +286,7 @@ def test_a_docker_that_exits_zero_with_no_server_did_not_answer(
 
     assert not report.daemon.answered
     assert report.daemon.complaint == t.NO_SERVER
-    assert not report.ok
+    assert report.unreachable == report.supervised
     assert "no server version" in report.notes()[0].text
 
 
@@ -331,11 +357,28 @@ def test_container_placement_needs_a_reachable_docker_too(
 ) -> None:
     """Placement is the other half of #58; both halves shell out to the same docker."""
     data = valid_manifest()
-    data["deploy"] = {"container": "steward-test-agent"}
+    data["deploy"] = {"container": "named-by-hand"}
     data["runner"] = {"kind": "claude", "placement": placement}
     docker = FakeDocker()
 
     report = t.survey([load_manifest(write_resident(data))], env={}, command=docker)
 
-    assert len(report.supervised) == 1
+    (item,) = report.supervised
+    assert item.container == "named-by-hand"
     assert docker.calls
+
+
+def test_a_resident_with_no_declared_container_is_never_given_the_default_name(
+    write_resident: ResidentWriter,
+) -> None:
+    """`target_for` would invent `steward-<id>`, and the watchdog disowns that name.
+
+    `DockerSupervisor.owns` reads `deploy.container` and nothing else, so a report that
+    named the default would be promising supervision of a container the supervisor will
+    never try. An absent `deploy` block means unsupervised, exactly as `docs/manifest.md`
+    says.
+    """
+    resident = local_resident(write_resident)
+
+    assert not t.supervises(resident.manifest)
+    assert t.survey([resident], env={}, command=FakeDocker()).supervised == ()

@@ -54,10 +54,14 @@ stale runs, still sweeps expired leases and approvals, still trips budgets — a
 work perfectly, because none of them needs docker. So the daemon looks healthy, its output
 looks normal, and the one job that needed a container is the one job nobody is doing.
 
-Container placement (`runner.placement: container`) fails more loudly, because it fails
-at a moment somebody is watching: `steward doctor` and the scheduler's startup check both
-run `_check_container`, and a container the local docker cannot see is a refusal before
-anything fires. Supervision had no equivalent, which is what steward#59 was filed about.
+The scheduler's half of the rule was already loud, which is worth being precise about,
+because it is why only one daemon needed a new report. Container placement
+(`runner.placement: container`) fails at a moment somebody is watching: `steward doctor`
+and the scheduler's own startup check both run `check_runner`, which for a container
+placement probes the container instead of the local `PATH` (`_check_container`), and a
+container the local docker cannot see is a **refusal before anything fires**. Supervision
+had no equivalent — no refusal, no complaint, just a calm `unsupervised` forever — which is
+what steward#59 was filed about.
 
 ## "On the burrow" is about docker, not about the machine
 
@@ -80,35 +84,56 @@ daemon — because from steward's side they are the same failure.
 
 ## What steward now says
 
-`steward doctor` and `steward watchdog` both open with a topology report
-(`steward/src/steward/topology.py`). It asks `docker info` **once**, and only when some
-resident actually declares a `deploy.container` — a fleet of locally-placed residents
-never waits on a daemon it does not need:
+`steward doctor` and `steward watchdog` both print a topology report
+(`steward/src/steward/topology.py`) — the watchdog at startup, *before* its first pass, so
+the "unsupervised" lines that follow are already explained; doctor down with its other
+fleet-wide lines (`watchdog:`, `scheduler:`), because it is a fleet-wide fact and not a
+per-resident one. It asks `docker info` **once**, and only when some resident actually
+declares a `deploy.container` — a fleet of locally-placed residents never waits on a daemon
+it does not need:
 
 ```console
-$ steward doctor                     # on the NAS
+$ steward watchdog tick              # on the NAS
 topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
 life-agent: container life-agent on dxp2800 — supervised from here
 
-$ steward doctor                     # on a laptop
-topology: docker at Mihas-MacBook-Pro's own docker answers as docker-desktop 27.3.1
+$ steward watchdog tick              # on a laptop (real output)
+topology: docker at Mihas-MacBook-Pro.local's own docker answers as docker-desktop 27.3.1
 life-agent: container life-agent runs on dxp2800, but this process supervises through
-  Mihas-MacBook-Pro's own docker — the watchdog cannot see it. Run steward's daemons on
-  dxp2800 (the intended topology, docs/topology.md), or point DOCKER_HOST at that
+  Mihas-MacBook-Pro.local's own docker — the watchdog cannot see it. Run steward's daemons
+  on dxp2800 (the intended topology, docs/topology.md), or point DOCKER_HOST at that
   machine's docker
+life-agent: unsupervised — steward's own state shows nothing stuck, which is not the same
+  as up; docker could not answer for 'life-agent': exit status 1
+nothing to intervene in
 ```
 
-Three things decide "is this container's host the machine I am on", and they are asked in
-descending order of how much they are worth:
+The third line is what the watchdog said before this change, on its own. The two above it
+are why.
+
+Three things decide "is this container's host the machine I am on", and each is consulted
+only because the one above it could not answer:
 
 1. **What docker says about itself.** `docker info --format {{.Name}}` names the daemon on
    the other end. That is a measurement rather than a guess, and it settles the case a
    hostname cannot: a NAS whose `hostname` is not its tailnet name would otherwise report
    its own containers as unreachable, which is the more damaging direction to be wrong in.
-2. **`STEWARD_BURROW`.** Name this burrow when the machine's own hostname is not what
-   manifests call it. A declaration *replaces* the hostname rather than joining it —
-   an operator who has to name their burrow is saying the hostname is the wrong answer.
-3. **The hostname**, and its first label, as the fallback nobody has to configure.
+   It is also the only one of the three that survives a `DOCKER_HOST`.
+2. **Whether `DOCKER_HOST` is set at all.** If it is, and the daemon did not name itself as
+   this container's host, the calls are leaving this machine for somewhere steward cannot
+   identify — and what *this* machine is called says nothing about where they land. Falling
+   through to the local name here would be this report's own false "fine": a watchdog **on
+   the NAS** with `DOCKER_HOST` pointed elsewhere would read as "supervised from here"
+   while supervising nothing on it.
+3. **What this burrow is called** — `STEWARD_BURROW`, else the hostname and its first
+   label. Only now, with the calls known to be local, does the operator's name for the
+   machine decide. A `STEWARD_BURROW` *replaces* the hostname rather than joining it: an
+   operator who has to name their burrow is saying the hostname is the wrong answer.
+
+The report also refuses to contradict itself. Reach answers *which machine's docker holds
+this container*; whether any docker answered is a separate fact, and a container on the
+right burrow with no daemon behind it is reported as exactly that — "the right burrow, but
+no docker here answered for it" — never as supervised.
 
 One measured detail about that probe, because it caught this implementation out: **`docker
 info` exits 0 even when no daemon answers.** Against a `DOCKER_HOST` pointing at nothing,
@@ -154,10 +179,21 @@ eats it:
   with `DOCKER_HOST=tcp://127.0.0.1:1`, `docker ps` fails with *Cannot connect to the
   Docker daemon at tcp://127.0.0.1:1* rather than answering from this host.
 
-So **`DOCKER_HOST` genuinely relocates supervision.** `docker inspect` and `docker restart`
-against `ssh://Miha@dxp2800` would restart the right container from anywhere.
+So **steward does not eat `DOCKER_HOST`**, and docker's own remote-endpoint support
+therefore applies to supervision: `docker inspect` and `docker restart` are ordinary docker
+calls, and a client pointed at another machine runs them there.
 
-It does **not** relocate execution, and the reason is not docker's:
+Be exact about the edge of that. What is measured is the *passthrough* — steward hands the
+variable to the real client, and the real client honours it. What is **not** measured here
+is an end-to-end restart of a real container over a real remote endpoint: that needs a
+second machine running docker, and neither the test suite nor this repo's CI has one.
+Proving it would mean an integration test against a reachable remote daemon
+(`ssh://…` or a TCP endpoint) asserting that `DockerSupervisor.restart` actually bounces
+the container there — worth writing the day a second burrow exists, and dishonest to claim
+before it. Until then this document claims the passthrough, which is measured, and not the
+round trip, which is inferred from docker's own documented behaviour.
+
+`DOCKER_HOST` does **not** relocate execution, and that reason is not docker's:
 
 - A container-placed session's *own* half runs fine remotely — `docker exec` is just
   another docker call, and `-e NAME` reads its value from the client's environment.
@@ -171,9 +207,11 @@ It does **not** relocate execution, and the reason is not docker's:
   the wrong filesystem, and `materialize` prunes whatever it does not own.
 
 That asymmetry is why steward reports a set `DOCKER_HOST` as **unverified** rather than
-fine: nothing here can prove the endpoint is the declared host's docker, and even if it is,
-only half the fleet's work would follow it there. Use it as a break-glass for supervision.
-Do not use it to run residents on a machine the control plane cannot see the disk of.
+fine: even where the endpoint does reach the declared host's docker, only half the fleet's
+work would follow it there. The one exception is not a guess — when the daemon at the far
+end *names itself* as the declared host, that is measured, and the report says reached.
+Everywhere else the honest word is unverified. Use it as a break-glass for supervision; do
+not use it to run residents on a machine the control plane cannot see the disk of.
 
 ## What we did not do, and when to revisit
 

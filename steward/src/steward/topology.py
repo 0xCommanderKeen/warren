@@ -54,7 +54,11 @@ from steward.runners import CommandRun, run_argv
 
 __all__ = [
     "BURROW_ENV",
+    "DAEMON_FORMAT",
     "DOCKER_HOST_ENV",
+    "LOOPBACK_NAMES",
+    "NOT_ASKED",
+    "NO_SERVER",
     "Daemon",
     "Note",
     "Reach",
@@ -106,6 +110,16 @@ NOT_ASKED = "docker was not asked: no resident here declares a container"
 NO_SERVER = "docker exited 0 but reported no server version, so no daemon answered there"
 
 
+def _source(env: Mapping[str, str] | None) -> Mapping[str, str]:
+    """Return the environment to read: the caller's, or this process's own."""
+    return os.environ if env is None else env
+
+
+def _declared(env: Mapping[str, str] | None = None) -> str:
+    """Return the burrow name the operator wrote down, or ``""`` when they did not."""
+    return (_source(env).get(BURROW_ENV) or "").strip()
+
+
 def this_burrow(env: Mapping[str, str] | None = None) -> str:
     """Return what this machine is called, for a line a human reads.
 
@@ -113,9 +127,7 @@ def this_burrow(env: Mapping[str, str] | None = None) -> str:
     calls itself and ``deploy.host`` is what the fleet calls it, and only one of those is
     in a manifest.
     """
-    source = os.environ if env is None else env
-    declared = (source.get(BURROW_ENV) or "").strip()
-    return declared or socket.gethostname()
+    return _declared(env) or socket.gethostname()
 
 
 def burrow_names(env: Mapping[str, str] | None = None) -> frozenset[str]:
@@ -125,8 +137,7 @@ def burrow_names(env: Mapping[str, str] | None = None) -> frozenset[str]:
     operator who has to name their burrow is telling steward the hostname is the wrong
     answer, and keeping it would leave no way to say so.
     """
-    source = os.environ if env is None else env
-    declared = (source.get(BURROW_ENV) or "").strip()
+    declared = _declared(env)
     if declared:
         candidates = {declared}
     else:
@@ -144,32 +155,42 @@ def docker_endpoint(env: Mapping[str, str] | None = None) -> str | None:
     from the empty string on purpose — ``DOCKER_HOST=`` set to nothing is the default too,
     and reporting it as a remote pointer would be a fiction.
     """
-    source = os.environ if env is None else env
-    return (source.get(DOCKER_HOST_ENV) or "").strip() or None
+    return (_source(env).get(DOCKER_HOST_ENV) or "").strip() or None
 
 
 def supervises(manifest: ResidentManifest) -> bool:
     """Report whether this manifest names a container for steward to reach.
 
-    The same question :meth:`steward.watchdog.DockerSupervisor.owns` asks — a *declared*
-    ``deploy.container``, never the name the nursery would invent — plus container
-    placement, which validation already refuses without one. Both, so the answer does not
-    depend on which of two equivalent declarations a manifest happens to lean on.
+    Exactly the question :meth:`steward.watchdog.DockerSupervisor.owns` asks, and
+    deliberately no wider: a **declared** ``deploy.container``, never the name the nursery
+    would invent. ``runner.placement: container`` is not a second way in, because
+    validation already refuses it without a declared container
+    (:func:`steward.manifest._check_placement`) — and a manifest that somehow reached here
+    without one would be reported against the *defaulted* ``steward-<id>``, a container
+    the supervisor itself disowns. This report must never name something the watchdog
+    would not even try.
     """
-    return manifest.deploy.container is not None or manifest.runner.container_placed
+    return manifest.deploy.container is not None
 
 
 class Reach(StrEnum):
-    """Whether the docker this process reaches holds a resident's container."""
+    """Which machine's docker holds a resident's container, as far as steward can tell.
 
-    #: The container's declared host is the burrow this process is on, or is the daemon
-    #: docker itself named. Supervision reaches it.
+    Note what this is *not*: whether anything is actually running. :attr:`HERE` says the
+    docker these calls go to is the one holding this container, which is the prior
+    question — :meth:`steward.watchdog.DockerSupervisor.health` still has to ask whether
+    the container is up.
+    """
+
+    #: The daemon named itself as this container's declared host, or — with no
+    #: ``DOCKER_HOST`` in play — this burrow answers to that name. Supervision reaches it.
     HERE = "here"
     #: The container is declared on another host and docker calls stay on this machine.
     #: Supervision does not reach it, and nothing at run time will say so.
     ELSEWHERE = "elsewhere"
-    #: ``DOCKER_HOST`` sends docker calls off this machine. They may well arrive at the
-    #: declared host's docker; steward cannot prove it either way and will not guess.
+    #: ``DOCKER_HOST`` sends docker calls off this machine and the daemon did not name
+    #: itself as the declared host. They may still arrive at that host's docker; steward
+    #: cannot prove it either way and will not guess.
     UNVERIFIED = "unverified"
 
 
@@ -199,17 +220,19 @@ class Daemon:
 
 @dataclass(frozen=True, slots=True)
 class Supervision:
-    """One resident's container, where it is declared, and whether steward can reach it."""
+    """One resident's container, where it is declared, and which docker holds it.
+
+    Deliberately without a ``reachable`` shorthand. Whether supervision reaches this
+    container is *two* facts — the right machine (:attr:`reach`) and a docker that
+    answered (:attr:`Survey.daemon`) — and only :class:`Survey` holds both. A property
+    here could read only the first and would have called a container on the right burrow
+    "reachable" while no daemon answered for it at all.
+    """
 
     resident_id: str
     container: str
     host: str
     reach: Reach
-
-    @property
-    def reachable(self) -> bool:
-        """True only when steward can say supervision reaches this container."""
-        return self.reach is Reach.HERE
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,13 +263,16 @@ class Survey:
 
     @property
     def unreachable(self) -> tuple[Supervision, ...]:
-        """Every container this process is supposed to supervise and cannot."""
-        return tuple(item for item in self.supervised if not item.reachable)
+        """Every container this process is supposed to supervise and cannot.
 
-    @property
-    def ok(self) -> bool:
-        """True when every declared container is one this process can actually reach."""
-        return not self.unreachable and (self.daemon.answered or not self.supervised)
+        A daemon that did not answer puts *all* of them here, whatever machine they are
+        declared on: reach is about which docker holds a container, and no docker holding
+        it means no supervision anywhere. Being on the right burrow is not supervision on
+        its own.
+        """
+        if not self.daemon.answered:
+            return self.supervised
+        return tuple(item for item in self.supervised if item.reach is not Reach.HERE)
 
     def notes(self) -> tuple[Note, ...]:
         """Return the report, one line at a time, worst kind of line first.
@@ -271,7 +297,7 @@ class Survey:
                 f"topology: docker at {self.where} answers as {self.daemon.describe()}",
                 ok=True,
             )
-        orphaned = ", ".join(item.resident_id for item in self.supervised)
+        orphaned = ", ".join(item.resident_id for item in self.unreachable)
         return Note(
             f"topology: docker did not answer at {self.where} ({self.daemon.complaint}); "
             f"the watchdog restarts containers by shelling out to it, so nothing is "
@@ -281,6 +307,14 @@ class Survey:
     def _reach_note(self, item: Supervision) -> Note:
         """Say whether one declared container is one this process can reach."""
         if item.reach is Reach.HERE:
+            if not self.daemon.answered:
+                # The right machine and no docker on it is still nothing supervising this
+                # container, and a green "supervised from here" under a red "docker did
+                # not answer" would be the report contradicting itself in two lines.
+                return Note(
+                    f"{item.resident_id}: container {item.container} on {item.host} — "
+                    f"this is the right burrow, but no docker here answered for it"
+                )
             return Note(
                 f"{item.resident_id}: container {item.container} on {item.host} — "
                 f"supervised from here",
@@ -314,11 +348,28 @@ def _ask_docker(command: CommandRun, binary: str = "docker") -> Daemon:
 
 
 def _reach(host: str, *, names: frozenset[str], endpoint: str | None, daemon: Daemon) -> Reach:
-    """Decide whether the docker this process reaches is the one holding ``host``."""
+    """Decide whether the docker this process reaches is the one holding ``host``.
+
+    Three signals, and the order is the whole point — each one is only consulted because
+    the one above it could not answer:
+
+    1. **What the daemon called itself.** A measurement of which machine is on the other
+       end of these calls, and the only signal that survives a ``DOCKER_HOST``.
+    2. **Whether ``DOCKER_HOST`` is set at all.** If it is and the daemon did not name
+       itself as this host, the calls are leaving this machine for somewhere steward
+       cannot identify — and what *this* machine is called says nothing about where they
+       land. Answering from the local name here would be the module's own false "fine":
+       a watchdog on the NAS with ``DOCKER_HOST`` pointed elsewhere would read as
+       "supervised from here" while supervising nothing on it.
+    3. **What this burrow is called.** Only now, with the calls known to be local, does
+       the operator's name for the machine decide.
+    """
     folded = host.casefold()
-    if folded in names or (daemon.name and folded == daemon.name.casefold()):
+    if daemon.name and folded == daemon.name.casefold():
         return Reach.HERE
-    return Reach.UNVERIFIED if endpoint is not None else Reach.ELSEWHERE
+    if endpoint is not None:
+        return Reach.UNVERIFIED
+    return Reach.HERE if folded in names else Reach.ELSEWHERE
 
 
 def survey(

@@ -66,7 +66,7 @@ directory, and `BURROW_URL=http://dxp2800:8737` is correct even though chronicle
 *local* `docker` client, so a watchdog anywhere else gets "no such container", reports
 every resident as unsupervised, and restarts nothing — silently, since that is
 indistinguishable from having nothing to supervise. `steward doctor` and `steward watchdog`
-now open with a topology report that names any container the process cannot reach.
+now both print a topology report naming any container the process cannot reach.
 [`steward/docs/topology.md`](steward/docs/topology.md) has the rule, what it costs to break
 it, and how far `DOCKER_HOST` actually goes.
 

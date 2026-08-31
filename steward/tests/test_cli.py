@@ -2379,14 +2379,18 @@ def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
     assert "Run steward's daemons on dxp2800" in result.output
 
 
-def test_the_watchdog_json_report_is_still_only_the_pass(
+def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
     runner: CliRunner,
     write_resident: ResidentWriter,
     stub_bin: StubWriter,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """`--format json` is a document somebody parses; a topology line would corrupt it."""
+    """`--format json` keeps stdout parseable, and still says the gap out loud on stderr.
+
+    An unattended consumer is the last caller who should be told nothing (#59), so the
+    complaint goes where it cannot corrupt the document rather than nowhere.
+    """
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2400,7 +2404,10 @@ def test_the_watchdog_json_report_is_still_only_the_pass(
     )  # fmt: skip
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["interventions"] == 0
+    assert "the watchdog cannot see it" in result.output
+    document = result.output[result.output.index("{") :]
+    assert json.loads(document)["interventions"] == 0
+    assert "topology: docker at" not in result.output, "a green line would corrupt the JSON"
 
 
 def test_doctor_fails_loudly_when_completed_spend_was_dropped(
