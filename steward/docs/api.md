@@ -613,6 +613,13 @@ answer: sessions for it get none. `board` and `delegation` are the two blocks th
 what work a resident takes on beyond its own routines — whether it claims from the board,
 and whether it may hand work to a neighbour and to whom.
 
+`notifications` is the resident's *declaration* of where steward's outbound taps go —
+`{transport, on, status, note}`, exactly as the manifest carries it. The derived ntfy topic
+is deliberately **not** in this payload, or in any other a browser can reach: on ntfy the
+topic is the capability, to read and to write. `steward notify list`, at a terminal, is the
+one place it is printed. See
+[docs/manifest.md](manifest.md#notifications--where-this-residents-outbound-taps-go).
+
 ### `GET /residents/{id}/budget`
 
 Spent against limit for each budget, the window those numbers are counted in, and the

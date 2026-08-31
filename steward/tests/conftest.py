@@ -97,6 +97,29 @@ def isolated_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolated_notifications(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point every derived ntfy topic at a server that is not there.
+
+    Autouse and unconditional, for the reason :func:`isolated_events` is. The ntfy default
+    is the *public* ``https://ntfy.sh``, and a manifest fixture that declares
+    ``notifications: {transport: ntfy}`` would otherwise push a real message into a real
+    public topic every time the suite ran — reachable by anyone who computed the same topic
+    from a uid this repo commits in plain text. Loopback port 1 is refused instantly and
+    reaches no network at all.
+
+    A test that wants a *working* transport injects a fake one; a test that wants to check
+    the default target passes an explicit env mapping to ``from_env`` rather than the
+    process environment. The namespace is set for the same reason: a suite must not derive
+    the topics a real installation derives.
+    """
+    monkeypatch.setenv("STEWARD_NTFY_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("STEWARD_NOTIFY_NAMESPACE", "pytest")
+    monkeypatch.delenv("STEWARD_NTFY_TOKEN", raising=False)
+    monkeypatch.delenv("STEWARD_NTFY_TIMEOUT_S", raising=False)
+    return "http://127.0.0.1:1"
+
+
 type ResidentWriter = Callable[..., Path]
 
 

@@ -36,6 +36,7 @@ from conftest import (
 from steward import events as ev
 from steward import journal
 from steward import manifest as m
+from steward import notify as nf
 from steward.api import (
     AlreadyRunningError as ApiAlreadyRunningError,
 )
@@ -2143,6 +2144,25 @@ def test_a_resident_reports_which_tools_it_may_reach(api: ApiFactory) -> None:
     body = api(manifest=bounded).client.get("/residents/test-agent").json()
     assert body["tools"] == ["Read", "Glob"]
     assert body["workspace"] == ["/data/library/books"]
+
+
+def test_a_resident_reports_its_notification_declaration_but_never_its_topic(
+    api: ApiFactory,
+) -> None:
+    """The declaration is a capability dimension; the derived topic is a capability."""
+    silent = api().client.get("/residents/test-agent").json()
+    assert silent["notifications"] == {
+        "transport": None,
+        "on": ["needs_human"],
+        "status": "active",
+        "note": None,
+    }
+
+    declared = valid_manifest()
+    declared["notifications"] = {"transport": "ntfy", "on": ["needs_human"]}
+    body = api(manifest=declared).client.get("/residents/test-agent").json()
+    assert body["notifications"]["transport"] == "ntfy"
+    assert nf.ntfy_topic(body["uid"], "pytest") not in json.dumps(body)
 
 
 def test_the_skills_listing_needs_the_token_like_everything_else(api: ApiFactory) -> None:

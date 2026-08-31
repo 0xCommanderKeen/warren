@@ -406,6 +406,67 @@
       "title": "Memory",
       "type": "object"
     },
+    "Notifications": {
+      "additionalProperties": false,
+      "description": "Where this resident's outbound taps go \u2014 the one-way twin of :class:`Route`.\n\n``routes`` answers *how work reaches this resident*: every kind in it is a doorway\nsomething arrives through, and two of them are doorways steward itself delivers into.\nThis block answers the opposite question, and the opposite direction is exactly why it\nis a dimension of its own rather than a ninth route kind. A **notification** is steward\ntapping a *person* on the shoulder about a resident \u2014 a ``needs_human`` at 2am, a task\nthat finished \u2014 and nothing listens for a reply: no session fires, no answer comes back,\nand the tap is not a channel anything can arrive through. Chat (warren#108) stays what\nit is, a two-way conversation where an operator speaks and a session answers; the two\nwould be one type only if \"a message went somewhere\" were the whole of what a channel\nmeans, and it is not.\n\nSilence is not consent, exactly as it is for :class:`Board` and :class:`Delegation`: a\nmanifest with no ``notifications`` block taps nobody, however loudly its resident knocks.\n\nDeclaring a ``transport`` is the whole opt-in, and there is deliberately **no address\nfield**. An ntfy topic is derived from the resident's ``uid``\n(:func:`steward.notify.ntfy_topic`), so it is unguessable in ntfy's public namespace, it\ncannot be typed wrong, and it cannot drift from the resident it belongs to. Nothing\nsecret is declared here either, for the reason nothing secret is declared anywhere in a\nmanifest: the ntfy server and its optional token are read from steward's own environment,\nand what a manifest says is *that* this resident taps \u2014 never how to authenticate as one.",
+      "properties": {
+        "transport": {
+          "anyOf": [
+            {
+              "const": "ntfy",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which transport carries the taps. Absent means this resident taps nobody.",
+          "title": "Transport"
+        },
+        "on": {
+          "default": [
+            "needs_human"
+          ],
+          "description": "Which facts are tapped. Defaults to the knock a human has to answer.",
+          "items": {
+            "enum": [
+              "needs_human",
+              "task_done"
+            ],
+            "type": "string"
+          },
+          "title": "On",
+          "type": "array"
+        },
+        "status": {
+          "default": "active",
+          "description": "Only 'active' sends; 'pending' and 'disabled' are declared and silent.",
+          "enum": [
+            "active",
+            "pending",
+            "disabled"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Who this taps, in words \u2014 'Miha's phone'. A label, never an address.",
+          "title": "Note"
+        }
+      },
+      "title": "Notifications",
+      "type": "object"
+    },
     "Route": {
       "additionalProperties": false,
       "description": "A declared inbound channel through which work can reach a resident.\n\nA route of kind ``delegation`` is the receiving half of steward #7: it declares that\nthis resident accepts work handed to it by another resident, and steward will deliver\ninto it. Every other kind is a channel steward only describes.",
@@ -866,6 +927,10 @@
     "delegation": {
       "$ref": "#/$defs/Delegation",
       "description": "Handing work to other residents. Absent means this one never does."
+    },
+    "notifications": {
+      "$ref": "#/$defs/Notifications",
+      "description": "Outbound taps to a human. Absent means steward taps nobody about this one."
     },
     "deploy": {
       "$ref": "#/$defs/Deploy",
