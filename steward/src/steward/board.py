@@ -58,6 +58,7 @@ from typing import cast
 from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
+from steward import notify as nf
 from steward.claims import ClaimHeld, ClaimRefused, ResidentClaims, stale_before
 from steward.deploy import placement_for
 from steward.manifest import (
@@ -375,6 +376,10 @@ class Dispatcher:
     #: for the same resident used to be able to open two sessions at once. A rehearsal is
     #: given none — it claims nothing, in the database or anywhere else.
     claims: ResidentClaims | None = None
+    #: Where a finished task also goes when nobody is looking at the village (warren#114).
+    #: One per dispatcher, shared with :attr:`approvals`, so a test that hands a dispatcher a
+    #: fake transport catches both the knocks a session raised and the tasks it closed.
+    notifier: nf.Notifier = field(default_factory=nf.Notifier.from_env, repr=False)
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
 
@@ -472,7 +477,7 @@ class Dispatcher:
     @cached_property
     def approvals(self) -> ApprovalTransitions:
         """The seam a session's escalations and the deadline sweep both cross."""
-        return ApprovalTransitions(store=self.store, emitter=self.emitter)
+        return ApprovalTransitions(store=self.store, emitter=self.emitter, notifier=self.notifier)
 
     @property
     def delegator(self) -> dg.Delegator:
@@ -820,6 +825,7 @@ class Dispatcher:
             )
             if recorded is not None:
                 self.run_transitions.publish_pending(self.emitter, now=moment)
+                self._tap(resident, terminal)
                 return BoardReport(
                     resident_id=resident.id,
                     claimant=resident.agent_id,
@@ -844,7 +850,27 @@ class Dispatcher:
         report = self._record(resident, job, result, moment, raised, run_id=run_id, handed=handed)
         if report.reason != "lease lost while the session was running":
             self.emitter.emit(terminal)
+            self._tap(resident, terminal)
         return report
+
+    def _tap(self, resident: Resident, terminal: ev.Event) -> None:
+        """Tap a human about a task this resident just closed, if its manifest asked to be.
+
+        The board's half of warren#114, and it lives here rather than in
+        :meth:`steward.transitions.task.TaskTransitions.finish` because *here* is where a
+        close is actually announced. The transition writes the row and builds the fact; which
+        of the two publication paths carries it — the durable terminal a watched run claims,
+        or a plain emit for an unwatched one — is this method's caller's decision, and both
+        converge on these two lines. Putting the tap at the transition would have missed the
+        watched path entirely, which is every real board session.
+
+        A lease lost mid-session reaches neither branch: that task is somebody else's now and
+        the village hears nothing about it, so a phone should not either. Only ``task_done``
+        is tapped in practice — ``task_failed`` is not one of
+        :data:`steward.manifest.NOTIFICATION_KINDS` — and the filtering is the notifier's, so
+        this call site holds no opinion about which facts a resident asked for.
+        """
+        self.notifier.tap(resident.manifest, terminal)
 
     # -- the run registry ---------------------------------------------------------------
 

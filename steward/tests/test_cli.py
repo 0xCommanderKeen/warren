@@ -24,6 +24,7 @@ from conftest import (
 )
 from steward import cli
 from steward import events as ev
+from steward import notify as nf
 from steward.budgets import BudgetGuard
 from steward.claims import CLAIM_GRACE_S
 from steward.cli import main
@@ -3675,3 +3676,122 @@ def test_an_operator_needs_a_name_to_be_committed_as(runner: CliRunner, tmp_path
 
     assert result.exit_code == 1
     assert "an operator needs a name" in result.output
+
+
+# ------------------------------------------------------------- notifications (warren#114)
+
+
+def tapping_manifest() -> dict[str, Any]:
+    data = valid_manifest()
+    data["notifications"] = {"transport": "ntfy", "on": ["needs_human"], "note": "Miha's phone"}
+    return data
+
+
+def test_notify_list_prints_the_address_an_operator_has_to_subscribe_to(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    """The derived topic is written down nowhere else, so this command is the setup path."""
+    tree = write_resident(tapping_manifest()).parent.parent
+
+    result = runner.invoke(main, ["notify", "list", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    assert "test-agent: ntfy — active" in result.output
+    assert "on:      needs_human" in result.output
+    assert nf.ntfy_topic(VALID_RESIDENT_UID, "pytest") in result.output
+    assert "Miha's phone" in result.output
+
+
+def test_notify_list_says_plainly_when_a_resident_taps_nobody(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    tree = write_resident().parent.parent
+    result = runner.invoke(main, ["notify", "list", "--residents", str(tree)])
+    assert result.exit_code == 0
+    assert "taps nobody" in result.output
+
+
+def test_notify_list_marks_a_declaration_that_is_not_live_yet(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    data = tapping_manifest()
+    data["notifications"]["status"] = "pending"
+    tree = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["notify", "list", "--residents", str(tree)])
+
+    assert "pending — declared, and silent" in result.output
+
+
+def test_notify_list_json_is_the_machine_view(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    tree = write_resident(tapping_manifest()).parent.parent
+
+    result = runner.invoke(main, ["notify", "list", "--residents", str(tree), "--format", "json"])
+
+    (row,) = json.loads(result.output)
+    assert row["transport"] == "ntfy"
+    assert row["enabled"] is True
+    assert row["address"].endswith(nf.ntfy_topic(VALID_RESIDENT_UID, "pytest"))
+
+
+def test_notify_list_over_an_empty_tree_says_so(runner: CliRunner, tmp_path: Path) -> None:
+    empty = tmp_path / "residents"
+    empty.mkdir()
+    result = runner.invoke(main, ["notify", "list", "--residents", str(empty)])
+    assert result.exit_code == 0
+    assert "no valid residents" in result.output
+
+
+def test_notify_test_refuses_a_resident_that_never_opted_in(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    """This command proves a declaration; it does not stand in for one."""
+    tree = write_resident().parent.parent
+
+    result = runner.invoke(main, ["notify", "test", "test-agent", "--residents", str(tree)])
+
+    assert result.exit_code == 1
+    assert "declares no notifications block" in result.output
+
+
+def test_notify_test_refuses_a_declaration_that_is_not_active(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    data = tapping_manifest()
+    data["notifications"]["status"] = "disabled"
+    tree = write_resident(data).parent.parent
+
+    result = runner.invoke(main, ["notify", "test", "test-agent", "--residents", str(tree)])
+
+    assert result.exit_code == 1
+    assert "status is 'disabled'" in result.output
+
+
+def test_notify_test_reports_a_transport_it_could_not_reach(
+    runner: CliRunner, write_resident: ResidentWriter
+) -> None:
+    """The suite points ntfy at a closed loopback port, which is exactly this case."""
+    tree = write_resident(tapping_manifest()).parent.parent
+
+    result = runner.invoke(main, ["notify", "test", "test-agent", "--residents", str(tree)])
+
+    assert result.exit_code == 1
+    assert "not sent" in result.output
+
+
+def test_notify_test_says_where_it_landed(
+    runner: CliRunner, write_resident: ResidentWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sent: list[nf.Tap] = []
+    monkeypatch.setattr(
+        nf.NtfyTransport, "send", lambda _self, _manifest, tap: bool(sent.append(tap)) or True
+    )
+    tree = write_resident(tapping_manifest()).parent.parent
+
+    result = runner.invoke(main, ["notify", "test", "test-agent", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    assert "sent —" in result.output
+    assert [tap.kind for tap in sent] == ["test"]

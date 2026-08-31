@@ -56,6 +56,8 @@ __all__ = [
     "DELEGATION_ROUTE_KIND",
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
+    "NOTIFICATION_KINDS",
+    "NOTIFICATION_TRANSPORTS",
     "SCHEMA_VERSION",
     "SECRET_REDACTION",
     "UNRESTRICTED_TOOLS",
@@ -70,6 +72,7 @@ __all__ = [
     "Escalation",
     "ManifestError",
     "Memory",
+    "Notifications",
     "PermissionMode",
     "Resident",
     "ResidentManifest",
@@ -238,6 +241,21 @@ JOB_BOARD_ROUTE_KIND = "job-board"
 #: to "how does work reach this resident", and a letter from a neighbour is work reaching
 #: it. The route's ``id`` is what a delegating session names in its block.
 DELEGATION_ROUTE_KIND = "delegation"
+
+#: The transports a ``notifications`` block may name. One today — ntfy, which chronicle has
+#: been pushing knocks through since before steward could — and it is a closed set rather
+#: than a free string for the reason :data:`PermissionMode` is: a typo in a transport name
+#: would otherwise be a manifest that reads as wired up and taps nobody, discovered on the
+#: night an approval knock does not arrive. Telegram belongs here when it exists, as a
+#: second transport of this same declaration, not as an outbound growth of the chat bridge.
+NOTIFICATION_TRANSPORTS = ("ntfy",)
+
+#: The facts a resident may ask steward to tap a human about, spelled as the chronicle event
+#: types they follow rather than as a second vocabulary — so an ``on:`` list reads against
+#: ``docs/transitions.md`` directly. This module cannot import :mod:`steward.events` (that
+#: module imports *this* one, for redaction), so the strings are repeated here and
+#: ``tests/test_notify.py`` fails if the two ever disagree.
+NOTIFICATION_KINDS = ("needs_human", "task_done")
 
 #: How long a claim is good for before the task returns to the board (30 minutes).
 DEFAULT_BOARD_LEASE_S = 30 * 60
@@ -875,6 +893,106 @@ class Route(_Model):
         return self.kind == DELEGATION_ROUTE_KIND and self.status == "active"
 
 
+#: One transport name, as a manifest spells it.
+NotificationTransport = Literal["ntfy"]
+
+#: One fact a tap may be sent about.
+NotificationKind = Literal["needs_human", "task_done"]
+
+
+class Notifications(_Model):
+    """Where this resident's outbound taps go — the one-way twin of :class:`Route`.
+
+    ``routes`` answers *how work reaches this resident*: every kind in it is a doorway
+    something arrives through, and two of them are doorways steward itself delivers into.
+    This block answers the opposite question, and the opposite direction is exactly why it
+    is a dimension of its own rather than a ninth route kind. A **notification** is steward
+    tapping a *person* on the shoulder about a resident — a ``needs_human`` at 2am, a task
+    that finished — and nothing listens for a reply: no session fires, no answer comes back,
+    and the tap is not a channel anything can arrive through. Chat (warren#108) stays what
+    it is, a two-way conversation where an operator speaks and a session answers; the two
+    would be one type only if "a message went somewhere" were the whole of what a channel
+    means, and it is not.
+
+    Silence is not consent, exactly as it is for :class:`Board` and :class:`Delegation`: a
+    manifest with no ``notifications`` block taps nobody, however loudly its resident knocks.
+
+    Declaring a ``transport`` is the whole opt-in, and there is deliberately **no address
+    field**. An ntfy topic is derived from the resident's ``uid``
+    (:func:`steward.notify.ntfy_topic`), so it is unguessable in ntfy's public namespace, it
+    cannot be typed wrong, and it cannot drift from the resident it belongs to. Nothing
+    secret is declared here either, for the reason nothing secret is declared anywhere in a
+    manifest: the ntfy server and its optional token are read from steward's own environment,
+    and what a manifest says is *that* this resident taps — never how to authenticate as one.
+    """
+
+    transport: NotificationTransport | None = Field(
+        default=None,
+        description="Which transport carries the taps. Absent means this resident taps nobody.",
+    )
+    on: tuple[NotificationKind, ...] = Field(
+        default=("needs_human",),
+        description="Which facts are tapped. Defaults to the knock a human has to answer.",
+    )
+    status: Literal["active", "pending", "disabled"] = Field(
+        default="active",
+        description="Only 'active' sends; 'pending' and 'disabled' are declared and silent.",
+    )
+    note: str | None = Field(
+        default=None,
+        description="Who this taps, in words — 'Miha's phone'. A label, never an address.",
+    )
+
+    @property
+    def enabled(self) -> bool:
+        """True when steward should actually send this resident's taps.
+
+        Both halves are required and neither is inferred, like
+        :attr:`Route.accepts_delegation`: a transport says taps have somewhere to go, and
+        ``active`` says the operator has actually subscribed. A topic nobody is listening to
+        is a knock into an empty room, and a manifest that is still being wired up should be
+        able to say so.
+        """
+        return self.transport is not None and self.status == "active"
+
+    @field_validator("transport", mode="before")
+    @classmethod
+    def _transport_is_one_steward_has(cls, value: object) -> object:
+        """Refuse a transport name steward has no way to deliver through.
+
+        The ``Literal`` alone would refuse it too, with ``input should be 'ntfy'``. This
+        exists for the message: it names the whole known set and offers the closest match,
+        which is the diagnostic style every other named-vocabulary field in this file gets.
+        """
+        if not isinstance(value, str):
+            return value
+        name = value.strip()
+        if name in NOTIFICATION_TRANSPORTS:
+            return name
+        known = ", ".join(NOTIFICATION_TRANSPORTS)
+        suggestion = closest_match(name, NOTIFICATION_TRANSPORTS)
+        hint = f"; did you mean {suggestion!r}?" if suggestion else ""
+        raise ValueError(
+            f"{name!r} is not a transport steward can deliver a notification through "
+            f"(known: {known}){hint}"
+        )
+
+    @model_validator(mode="after")
+    def _a_declared_transport_taps_something(self) -> Self:
+        """Refuse a declaration that cannot ever send: a transport with nothing to send."""
+        if self.transport is None:
+            return self
+        if not self.on:
+            raise ValueError(
+                "a declared transport with an empty 'on' taps nobody about anything; "
+                f"name the facts to tap ({', '.join(NOTIFICATION_KINDS)}) or drop the block"
+            )
+        repeated = sorted({kind for kind in self.on if self.on.count(kind) > 1})
+        if repeated:
+            raise ValueError(f"duplicate notification kind(s) {repeated}; name each one once")
+        return self
+
+
 class AppGrant(_Model):
     """A declared grant to use an external application. Identifier and status only."""
 
@@ -1296,6 +1414,10 @@ class ResidentManifest(_Model):
         default_factory=Delegation,
         description="Handing work to other residents. Absent means this one never does.",
     )
+    notifications: Notifications = Field(
+        default_factory=Notifications,
+        description="Outbound taps to a human. Absent means steward taps nobody about this one.",
+    )
     deploy: Deploy = Field(
         default_factory=Deploy,
         description="Where this resident runs, for the watchdog. Absent means unsupervised.",
@@ -1574,6 +1696,11 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.kind": "kind: email  (delegation makes the route deliverable)",
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
+    "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
+    "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
+    "notifications.on": "on: [needs_human, task_done]",
+    "notifications.status": "status: active  (active | pending | disabled)",
+    "notifications.note": "note: Miha's phone  (a label, never an address)",
     "app_grants": "app_grants: [{id: gmail, name: Gmail, status: granted}]",
     "app_grants.id": "id: gmail",
     "app_grants.name": "name: Gmail",
@@ -1916,6 +2043,49 @@ def _check_board_route(manifest: ResidentManifest, source: Path) -> list[Diagnos
                 f"village would render"
             ),
             example=example,
+        )
+    ]
+
+
+def _check_notifications_are_deliverable(
+    manifest: ResidentManifest, source: Path
+) -> list[Diagnostic]:
+    """Warn about a declared tap for a fact this resident has no way to produce.
+
+    :func:`_check_budget_is_enforceable`'s question, asked of the other capability that
+    fires on its own: a manifest that declares one thing and can only do another is a
+    document disagreeing with itself, and validation is the one moment somebody is reading
+    both halves. Here it is ``on: [task_done]`` on a resident that neither claims from the
+    board nor keeps an open ``delegation`` route — there is no path by which a task of its
+    ever closes, so that tap can never fire.
+
+    A **warning**, and the difference from the budget case is the whole argument. An
+    unenforceable daily cap reads green while real money leaves, so it is refused. A tap
+    that never fires spends nothing and loses nothing: the declaration is not wrong, only
+    aspirational, and granting the resident ``board: {claim: true}`` tomorrow makes it true
+    without touching this line. What it does risk is an operator reading the silence as a
+    broken transport and going looking for a bug in ntfy — which is exactly the sentence a
+    warning is for.
+    """
+    notifications = manifest.notifications
+    if notifications.transport is None or "task_done" not in notifications.on:
+        return []
+    if manifest.board.claim or any(route.accepts_delegation for route in manifest.routes):
+        return []
+    return [
+        Diagnostic(
+            file=source,
+            field_path="notifications.on",
+            problem=(
+                "'task_done' is declared but this resident closes no tasks: board.claim is "
+                "false and no active 'delegation' route is declared, so nothing will ever "
+                "tap under this kind"
+            ),
+            example=(
+                "on: [needs_human]  (the knock this resident can actually raise), or "
+                "board: {claim: true}  (give it work it can finish)"
+            ),
+            severity=Severity.WARNING,
         )
     ]
 
@@ -2522,6 +2692,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     )
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
+    diagnostics.extend(_check_notifications_are_deliverable(manifest, source))
     diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))

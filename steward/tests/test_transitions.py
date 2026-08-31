@@ -18,8 +18,9 @@ from typing import Any
 
 import pytest
 
-from conftest import ResidentWriter
+from conftest import ResidentWriter, valid_manifest
 from steward import events as ev
+from steward import notify as nf
 from steward import prompt as p
 from steward import transitions as tr
 from steward.approvals import NeedsHuman
@@ -1406,3 +1407,153 @@ def test_the_transitions_package_has_exactly_one_place_that_emits() -> None:
     assert emitting[0].startswith("outcome.py:"), (
         f"the one line that emits must be the one in outcome.applied; found {emitting[0]}"
     )
+
+
+# ------------------------------------------------------------- notifications (warren#114)
+
+
+class RecordingTransport:
+    """A transport that keeps every tap instead of sending it."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        """Start empty, optionally rigged to explode on the next send."""
+        self.sent: list[nf.Tap] = []
+        self.raises = raises
+
+    @property
+    def name(self) -> str:
+        """Answer to the manifest word that selects it."""
+        return nf.NTFY
+
+    def address(self, manifest: ResidentManifest) -> str:
+        """Say where it would have sent."""
+        return f"fake://{manifest.id}"
+
+    def send(self, manifest: ResidentManifest, tap: nf.Tap) -> bool:  # noqa: ARG002
+        """Record the tap, or blow up if the test asked it to."""
+        if self.raises:
+            raise RuntimeError("no phone here")
+        self.sent.append(tap)
+        return True
+
+
+@pytest.fixture
+def taps() -> RecordingTransport:
+    return RecordingTransport()
+
+
+@pytest.fixture
+def tapping_manifest(write_resident: ResidentWriter) -> ResidentManifest:
+    data = {**valid_manifest(), "notifications": {"transport": "ntfy", "on": ["needs_human"]}}
+    return load_manifest(write_resident(data)).manifest
+
+
+def knocking(
+    store: Store, sink: ev.NullEmitter, taps: RecordingTransport
+) -> tr.ApprovalTransitions:
+    """Build the approval seam over a transport that records rather than sends."""
+    return tr.ApprovalTransitions(store=store, emitter=sink, notifier=nf.Notifier({nf.NTFY: taps}))
+
+
+def test_a_raised_request_also_taps_the_declared_transport(
+    store: Store,
+    sink: ev.NullEmitter,
+    taps: RecordingTransport,
+    tapping_manifest: ResidentManifest,
+) -> None:
+    knocking(store, sink, taps).raise_request(
+        manifest=tapping_manifest,
+        request=NeedsHuman(raw="", action="send_email", detail={"to": "a@example.com"}),
+        now=NOW,
+    )
+    (tap,) = taps.sent
+    assert tap.kind == "needs_human"
+    assert tap.title == "Testy wants to send email"
+    assert "a@example.com" in tap.body
+
+
+def test_a_knock_steward_raised_itself_taps_too(
+    store: Store,
+    sink: ev.NullEmitter,
+    taps: RecordingTransport,
+    tapping_manifest: ResidentManifest,
+) -> None:
+    """A budget pause, a watchdog give-up and a refused handoff all come through here."""
+    knocking(store, sink, taps).knock(
+        manifest=tapping_manifest,
+        request=NeedsHuman(raw="", action="budget_exceeded"),
+        message="Testy has spent $5.00 of $5.00 today",
+        now=NOW,
+    )
+    (tap,) = taps.sent
+    assert tap.title == "Testy has spent $5.00 of $5.00 today"
+
+
+def test_an_undeclared_resident_writes_the_row_and_taps_nobody(
+    store: Store, sink: ev.NullEmitter, taps: RecordingTransport, manifest: ResidentManifest
+) -> None:
+    outcome = knocking(store, sink, taps).raise_request(
+        manifest=manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert outcome.applied
+    assert len(sink.events) == 1
+    assert taps.sent == []
+
+
+def test_the_repeat_guard_silences_the_phone_as_well_as_the_village(
+    store: Store,
+    sink: ev.NullEmitter,
+    taps: RecordingTransport,
+    tapping_manifest: ResidentManifest,
+) -> None:
+    """The whole point of the guard: a looping resident must not buzz on every wake-up."""
+    seam = knocking(store, sink, taps)
+    first = seam.raise_request(
+        manifest=tapping_manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert first.record is not None
+    seam.decide(first.record.request_id, "deny", now=NOW)
+    taps.sent.clear()
+
+    outcome = seam.raise_request(
+        manifest=tapping_manifest,
+        request=NeedsHuman(raw="", action="send_email"),
+        now=NOW + timedelta(hours=1),
+    )
+    assert outcome.answered
+    assert taps.sent == []
+
+
+def test_an_exploding_transport_cannot_fail_the_knock_it_reports(
+    store: Store, sink: ev.NullEmitter, tapping_manifest: ResidentManifest
+) -> None:
+    """The load-bearing promise: a courtesy must never take the durable change with it."""
+    seam = tr.ApprovalTransitions(
+        store=store,
+        emitter=sink,
+        notifier=nf.Notifier({nf.NTFY: RecordingTransport(raises=True)}),
+    )
+    outcome = seam.raise_request(
+        manifest=tapping_manifest, request=NeedsHuman(raw="", action="send_email"), now=NOW
+    )
+    assert outcome.applied
+    assert store.approval(outcome.require().request_id) is not None
+    assert [event.type for event in sink.events] == ["needs_human"]
+
+
+def test_a_secret_is_scrubbed_on_the_way_to_the_phone_too(
+    store: Store,
+    sink: ev.NullEmitter,
+    taps: RecordingTransport,
+    tapping_manifest: ResidentManifest,
+) -> None:
+    knocking(store, sink, taps).raise_request(
+        manifest=tapping_manifest,
+        request=NeedsHuman(
+            raw="", action="rotate_token", detail={"key": "sk-ant-api03-DEADBEEFDEADBEEFDEADBEEF"}
+        ),
+        now=NOW,
+    )
+    (tap,) = taps.sent
+    assert "sk-ant-api03" not in tap.body
+    assert SECRET_REDACTION in tap.body

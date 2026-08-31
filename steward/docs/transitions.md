@@ -106,6 +106,7 @@ the way it learns of any other.
 | **status/reason derivation** | `done` iff `RunResult.ok`; otherwise `failed` with `reason = f"{outcome}: {summary()}"` — one rule, written in `TaskTransitions.finish` and nowhere else, so a caller cannot decide two of {status, reason, event type} and disagree with the third |
 | **run_id** | this attempt's registry row, never the task id: a task claimed, dropped and re-claimed is two sessions (#39) |
 | **callers** | `Dispatcher.work` (both the admitted path and the admission-refused path) |
+| **notification** | not here. The board publishes a close through two paths — the durable terminal a watched run claims, and a plain emit for an unwatched one — and both converge in `Dispatcher._finish`, which is where `Notifier.tap` is called (warren#114). Tapping at this seam would miss the watched path, which is every real board session. Only `task_done` is a declarable kind; a superseded close and a `task_failed` tap nobody |
 
 #### T6 — lease expiry
 
@@ -149,6 +150,7 @@ the way it learns of any other.
 | **repeat guard** | a property of *which act was called*, not a flag: `raise_request` is a session's own ask and the guard is always on; `knock` is steward's own news about a resident (budget pause, watchdog give-up, delegation refusals) and the guard is always off. Never applied to `unreadable_escalation` either way |
 | **callers of `raise_request`** | `ApprovalTransitions.harvest` (session output), `steward approval raise` |
 | **callers of `knock`** | `BudgetTransitions.pause`, `Delegator._knock`, `Watchdog._give_up` |
+| **notification** | on the **applied** branch only, and after the emit: `Notifier.tap` sends the same fact to the resident's declared [`notifications`](manifest.md#notifications--where-this-residents-outbound-taps-go) transport (warren#114). The answered branch returns before it, so the repeat guard silences the phone exactly as it silences the village. A tap is fire-and-forget and its result is discarded: a transition that failed because ntfy was down would be steward inventing a failure out of a courtesy |
 | **returns (`harvest`)** | `list[Transition[ApprovalRecord]]`, one per block a session wrote, for the same reason the sweeps return transitions — and here it is also the only way a caller can tell an ask somebody was knocked about from one the guard swallowed on arrival. `Dispatcher._harvest_approvals` reads the rows off with `require`, safe because both outcomes wrote one |
 
 #### A2 — decide

@@ -15,6 +15,7 @@ import yaml
 from pydantic import ValidationError
 
 from steward import events as ev
+from steward import notify as nf
 from steward.api import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -1544,6 +1545,94 @@ def _render_lineage_hop(item: JobRecord) -> None:
     )
     click.secho(f"{indent}{item.task_id}  {item.title}", bold=True)
     click.echo(f"{indent}  {who} — {item.status}{f' ({item.outcome})' if item.outcome else ''}")
+
+
+# --------------------------------------------------------------------------------------
+# notifications
+# --------------------------------------------------------------------------------------
+
+
+@main.group("notify")
+def notify_group() -> None:
+    """Where a resident's outbound taps go, and whether they arrive."""
+
+
+@notify_group.command("list")
+@_RESIDENTS_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def notify_list(residents: Path, output_format: str) -> None:
+    """Print every resident's notification wiring, including the address to subscribe to.
+
+    This is the operator's setup path, and it is the only one: an ntfy topic is derived from
+    a resident's ``uid`` rather than declared, so there is nowhere else to read it off. Doing
+    it here rather than in the manifest is what keeps the topic out of git, out of the API
+    and out of chronicle — and it is why this output deserves the same care a password does.
+
+    A topic on ntfy is the capability, to read *and* to write: whoever has the URL can watch
+    every knock this resident makes and can push a fake one at you. Subscribe on the phone,
+    then close the terminal.
+    """
+    result = validate_paths([residents])
+    notifier = nf.Notifier.from_env()
+    rows = [notifier.describe(resident.manifest) for resident in result.residents]
+    if output_format == "json":
+        click.echo(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        click.secho(f"no valid residents in {residents}", fg="yellow")
+        return
+    for row in rows:
+        _report_notifications(row)
+
+
+def _report_notifications(row: dict[str, Any]) -> None:
+    """Print one resident's notification wiring, or say plainly that it has none."""
+    name = str(row["resident"])
+    if row["transport"] is None:
+        click.echo(f"{name}: taps nobody (no notifications block)")
+        return
+    state = "active" if row["enabled"] else f"{row['status']} — declared, and silent"
+    click.secho(f"{name}: {row['transport']} — {state}", fg="cyan" if row["enabled"] else "yellow")
+    click.echo(f"  on:      {', '.join(row['on'])}")
+    click.echo(f"  address: {row['address']}")
+    if row["note"]:
+        click.echo(f"  note:    {row['note']}")
+
+
+@notify_group.command("test")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+def notify_test(resident_id: str, residents: Path) -> None:
+    """Send one harmless tap to a resident's transport, and say whether it landed.
+
+    The whole point of a notification is that it arrives when nobody is looking, which means
+    the only honest way to know the wiring works is to use it. The message says out loud that
+    it is a test, so a tap that arrives at 2am is never mistaken for a resident in trouble.
+
+    A resident that has not opted in is refused rather than tapped: this command proves a
+    declaration, it does not stand in for one.
+    """
+    resident = _resident_or_exit(residents, resident_id)
+    notifier = nf.Notifier.from_env()
+    transport = notifier.transport_for(resident.manifest)
+    if transport is None:
+        declared = resident.manifest.notifications
+        why = (
+            f"declared {declared.transport!r} but status is {declared.status!r}"
+            if declared.transport
+            else "declares no notifications block"
+        )
+        click.secho(f"{resident.id} taps nobody: it {why}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if notifier.send(resident.manifest, nf.test_tap(resident.manifest), transport=transport):
+        click.secho(f"sent — {resident.id} taps {transport.address(resident.manifest)}", fg="green")
+        return
+    click.secho(
+        f"not sent — {transport.name} refused or could not be reached; the log line above says why",
+        fg="red",
+        err=True,
+    )
+    sys.exit(EXIT_INVALID)
 
 
 # --------------------------------------------------------------------------------------

@@ -25,11 +25,12 @@ it wrote.
 import logging
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from steward import events as ev
+from steward import notify as nf
 from steward import prompt
 from steward.approvals import (
     DETAIL_MAX_CHARS,
@@ -172,6 +173,12 @@ class ApprovalTransitions:
 
     store: Store
     emitter: ev.Emitter
+    #: Where a knock also goes when nobody is looking at the village (warren#114). Defaulted
+    #: from the environment rather than threaded through six constructors, because every
+    #: owner that builds one of these seams would otherwise have to know about notifications
+    #: to *not* break them — and a resident with no ``notifications`` block taps nobody, so
+    #: the default is inert for every manifest that has not asked. A test hands its own.
+    notifier: nf.Notifier = field(default_factory=nf.Notifier.from_env, repr=False)
 
     # -- raising -------------------------------------------------------------------------
 
@@ -298,20 +305,25 @@ class ApprovalTransitions:
                 repeat_deny_window_s() // 3600,
             )
             return answered(record, "already denied inside the repeat window")
-        return applied(
-            self.emitter,
-            record,
-            ev.needs_human_event(
-                message=record.message,
-                request_id=record.request_id,
-                action=record.action,
-                agent_id=record.agent_id,
-                project=record.project,
-                detail=record.detail,
-                options=record.options,
-                expires_at=record.expires_at,
-            ),
+        fact = ev.needs_human_event(
+            message=record.message,
+            request_id=record.request_id,
+            action=record.action,
+            agent_id=record.agent_id,
+            project=record.project,
+            detail=record.detail,
+            options=record.options,
+            expires_at=record.expires_at,
         )
+        knock = applied(self.emitter, record, fact)
+        # One of the two places steward taps a human (warren#114), and it is *this* branch on
+        # purpose. A knock that was auto-denied by the repeat guard returns above without
+        # reaching here, which is the whole point of that guard: a looping resident writes a
+        # row and nobody's phone buzzes. The tap comes after the durable write and after the
+        # emit, and its answer is discarded, because a village that heard the knock heard it
+        # whether or not a phone did — see :meth:`steward.notify.Notifier.tap`.
+        self.notifier.tap(manifest, fact)
+        return knock
 
     def _denied_recently(self, resident: str, action: str, moment: datetime) -> bool:
         """Report whether this resident was already told no about this action, recently.

@@ -185,6 +185,27 @@ $ steward approval raise life-agent --action send_email --detail-json '{"to": "�
 $ steward approval show <request_id>  # request, decision, decider, timestamps
 ```
 
+**Notifications** (warren#114). A village you have to be looking at is no good for a knock,
+and neither is a log. A manifest may declare `notifications: {transport: ntfy, on:
+[needs_human, task_done]}` — a **one-way** tap, and its own capability dimension rather than
+a route kind or a chat channel, because nothing listens for a reply: no session fires and no
+answer comes back. Chat (#108) stays conversation-only.
+
+There is no address in the manifest, because there is no address a human should be typing:
+an ntfy topic is derived from the resident's `uid` through SHA-256, so it is unguessable in
+ntfy's public namespace and cannot drift from the resident it belongs to — and so that
+*showing* a uid, which happens in git, in the API and in townhall, never incidentally
+discloses the topic. The server and its optional token are environment, never declaration.
+
+Sends are fire-and-forget behind a two-second timeout and a circuit breaker: an unreachable
+ntfy is a log line, and never a failed transition. A knock the repeat-deny guard answered
+taps nobody, exactly as it emits nothing.
+
+```console
+$ steward notify list                 # transport, kinds, and the URL to subscribe to
+$ steward notify test life-agent      # one harmless tap, and whether it landed
+```
+
 **Delegation** (#7). A resident can hand work to a neighbour, and steward is the only
 arbiter: both manifests have to agree — `delegation: {send: true}` on the sender, an active
 route of kind `delegation` on the receiver — and steward enforces what no manifest can see,
@@ -625,6 +646,10 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_ALLOW_UNCOMMITTED_WRITES` | API | `1`/`true`/`yes`/`on` accepts a residents tree with no git behind it. Off, a write into a tree outside a checkout is refused `409 not_a_git_checkout` rather than leaving declarations with no history and no author. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `STEWARD_REPEAT_DENY_WINDOW_H` | approvals | Whole hours a `deny` goes on answering the same `(resident, action)` a session raises, so a looping resident cannot knock on every wake-up (default 12). `0` is the kill switch: every repeat knocks again. Anything that is not a whole number ≥ 0 is logged as a misconfiguration and the default is used. Steward's own knocks are never guarded — see [docs/approvals.md](docs/approvals.md). |
+| `STEWARD_NTFY_URL` | notifications | The ntfy server outbound taps are POSTed to. Defaults to `https://ntfy.sh`, which is safe because the topic is derived and unguessable — point it at a self-hosted instance to keep even that off the public internet. |
+| `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
+| `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |
+| `STEWARD_NOTIFY_NAMESPACE` | notifications | Folded into every derived topic. Empty by default; set it on a second installation reading the same `residents/` tree, so a developer's test knock does not buzz the operator's real phone. |
 | `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. Read as `BURROW_URL` too, so an environment written before warren#216 still configures steward; the new spelling wins. |
 | `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. `BURROW_TOKEN` is read the same way, and loses the same way. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |

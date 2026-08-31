@@ -1584,3 +1584,167 @@ def test_an_unknown_placement_is_refused(write_resident: ResidentWriter) -> None
 def test_the_schema_carries_placement() -> None:
     schema = m.manifest_json_schema()
     assert "placement" in schema["$defs"]["Runner"]["properties"]
+
+
+# --------------------------------------------- notifications — outbound taps (warren#114)
+
+
+def notifying(notifications: dict[str, object] | None = None, **overrides: object) -> dict:
+    """Build a manifest carrying a notifications block."""
+    data = valid_manifest()
+    if notifications is not None:
+        data["notifications"] = notifications
+    data.update(overrides)
+    return data
+
+
+def test_a_manifest_with_no_notifications_block_taps_nobody(
+    write_resident: ResidentWriter,
+) -> None:
+    """Silence is not consent here either: an undeclared resident knocks into the log only."""
+    resident = m.load_manifest(write_resident())
+    assert resident.manifest.notifications.transport is None
+    assert resident.manifest.notifications.enabled is False
+
+
+def test_declaring_a_transport_is_the_whole_opt_in(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(write_resident(notifying({"transport": "ntfy"})))
+    declared = resident.manifest.notifications
+    assert declared.enabled is True
+    assert declared.on == ("needs_human",)
+    assert declared.status == "active"
+
+
+@pytest.mark.parametrize("status", ["pending", "disabled"])
+def test_a_transport_that_is_not_active_is_declared_and_silent(
+    status: str, write_resident: ResidentWriter
+) -> None:
+    data = notifying({"transport": "ntfy", "status": status})
+    resident = m.load_manifest(write_resident(data))
+    assert resident.manifest.notifications.transport == "ntfy"
+    assert resident.manifest.notifications.enabled is False
+
+
+def test_an_unknown_transport_is_refused_by_name(write_resident: ResidentWriter) -> None:
+    """A shape that cannot work: steward would read this and deliver through nothing."""
+    result = m.validate_manifest(write_resident(notifying({"transport": "telegram"})))
+    assert not result.ok
+    problem = problem_for(result, "notifications.transport")
+    assert "telegram" in problem
+    assert "ntfy" in problem
+
+
+def test_a_near_miss_transport_is_told_what_it_nearly_said(
+    write_resident: ResidentWriter,
+) -> None:
+    result = m.validate_manifest(write_resident(notifying({"transport": "ntfyy"})))
+    assert "did you mean 'ntfy'" in problem_for(result, "notifications.transport")
+
+
+def test_an_explicit_null_transport_is_the_same_as_no_block(
+    write_resident: ResidentWriter,
+) -> None:
+    """Saying 'nobody' out loud is legal; the name check has nothing to check."""
+    resident = m.load_manifest(write_resident(notifying({"transport": None})))
+    assert resident.manifest.notifications.enabled is False
+
+
+def test_a_transport_that_is_not_even_a_name_is_refused(write_resident: ResidentWriter) -> None:
+    result = m.validate_manifest(write_resident(notifying({"transport": 3})))
+    assert not result.ok
+    assert any(d.field_path.startswith("notifications.transport") for d in result.diagnostics)
+
+
+def test_an_unknown_notification_kind_is_refused(write_resident: ResidentWriter) -> None:
+    data = notifying({"transport": "ntfy", "on": ["routine_finished"]})
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert any(d.field_path.startswith("notifications.on") for d in result.diagnostics)
+
+
+def test_a_transport_that_taps_about_nothing_is_refused(write_resident: ResidentWriter) -> None:
+    """A declaration that can never send is the shape validation exists to catch."""
+    result = m.validate_manifest(write_resident(notifying({"transport": "ntfy", "on": []})))
+    assert not result.ok
+    assert "taps nobody about anything" in problem_for(result, "notifications")
+
+
+def test_a_repeated_notification_kind_is_refused(write_resident: ResidentWriter) -> None:
+    data = notifying({"transport": "ntfy", "on": ["needs_human", "needs_human"]})
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "duplicate notification kind" in problem_for(result, "notifications")
+
+
+def test_an_empty_on_without_a_transport_is_simply_nothing(
+    write_resident: ResidentWriter,
+) -> None:
+    """No transport means no taps, so there is nothing for the emptiness to contradict."""
+    assert m.validate_manifest(write_resident(notifying({"on": []}))).ok
+
+
+def test_tapping_on_a_task_this_resident_can_never_close_is_a_warning(
+    write_resident: ResidentWriter,
+) -> None:
+    data = notifying({"transport": "ntfy", "on": ["task_done"]})
+    result = m.validate_manifest(write_resident(data))
+    assert result.ok  # a warning: nothing is spent and nothing is unsafe
+    assert "closes no tasks" in problem_for(result, "notifications.on")
+    assert all(d.severity is m.Severity.WARNING for d in result.diagnostics)
+
+
+def test_a_board_claimant_may_tap_on_task_done(write_resident: ResidentWriter) -> None:
+    data = notifying({"transport": "ntfy", "on": ["task_done"]})
+    data["routes"] = [
+        *data["routes"],
+        {"id": "job-board", "kind": "job-board", "address": "steward:job-board"},
+    ]
+    data["board"] = {"claim": True}
+    result = m.validate_manifest(write_resident(data))
+    assert result.ok
+    assert result.diagnostics == ()
+
+
+def test_a_resident_with_an_open_delegation_route_may_tap_on_task_done(
+    write_resident: ResidentWriter,
+) -> None:
+    """A letter from a neighbour closes as a task too, so that tap can fire."""
+    data = notifying({"transport": "ntfy", "on": ["task_done"]})
+    data["routes"] = [
+        *data["routes"],
+        {"id": "handoff", "kind": "delegation", "address": "steward:delegation"},
+    ]
+    assert m.validate_manifest(write_resident(data)).diagnostics == ()
+
+
+def test_a_pending_delegation_route_does_not_excuse_the_warning(
+    write_resident: ResidentWriter,
+) -> None:
+    data = notifying({"transport": "ntfy", "on": ["task_done"]})
+    data["routes"] = [
+        *data["routes"],
+        {
+            "id": "handoff",
+            "kind": "delegation",
+            "address": "steward:delegation",
+            "status": "pending",
+        },
+    ]
+    result = m.validate_manifest(write_resident(data))
+    assert "closes no tasks" in problem_for(result, "notifications.on")
+
+
+def test_a_notifications_block_may_not_carry_an_address_or_a_token(
+    write_resident: ResidentWriter,
+) -> None:
+    """There is nowhere in this block to put a secret, and that is the point."""
+    data = notifying({"transport": "ntfy", "topic": "steward-mine"})
+    assert not m.validate_manifest(write_resident(data)).ok
+
+
+def test_the_schema_carries_notifications() -> None:
+    schema = m.manifest_json_schema()
+    assert "notifications" in schema["properties"]
+    properties = schema["$defs"]["Notifications"]["properties"]
+    assert set(properties) == {"transport", "on", "status", "note"}
+    assert properties["on"]["items"]["enum"] == list(m.NOTIFICATION_KINDS)

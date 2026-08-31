@@ -38,6 +38,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
 | `delegation` | no | Handing work to other residents. Absent means this one never does. |
+| `notifications` | no | Outbound taps to a human. Absent means steward taps nobody about this one. |
 | `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
 | `deploy` | no | Where this resident runs: the nursery deploys there, the watchdog probes it. |
 | `retired` | no | Lifecycle state. `true` stops the resident; the files stay in git. |
@@ -209,6 +210,13 @@ Two kinds are more than description, because steward itself delivers through the
   no other, and the delegating session names the route by its `id`. A resident may declare
   several — `inbox` and `research` are different doors. See
   [`delegation`](#delegation--handing-work-to-another-resident).
+
+Every kind here is **inbound**: a way work reaches this resident. The other direction —
+steward tapping a person about this resident, one-way, with nothing listening for a reply —
+is [`notifications`](#notifications--where-this-residents-outbound-taps-go), a dimension of
+its own. Chat is a *route*, because a conversation is two-way and fires a session; a
+notification is not, and putting them in one vocabulary would make `kind` mean two opposite
+things.
 
 ## `app_grants` — declared app access
 
@@ -743,6 +751,101 @@ $ steward task lineage <task_id>           # the whole chain, root first
 
 The grammar a session writes, the guardrails, and the lineage model are in
 [docs/delegation.md](delegation.md).
+
+## `notifications` — where this resident's outbound taps go
+
+```yaml
+notifications:
+  transport: ntfy            # the only transport today; absent means this resident taps nobody
+  on: [needs_human]          # needs_human | task_done
+  status: active             # active | pending | disabled
+  note: Miha's phone         # a label, never an address
+```
+
+**A notification is not a route, and not a chat.** `routes` answers *how work reaches this
+resident*: every kind in it is a doorway something arrives through, and two of them
+(`job-board`, `delegation`) are doorways steward itself delivers into. This block answers
+the opposite question, in the opposite direction. Steward taps a **person** on the shoulder
+*about* a resident — a `needs_human` at 2am, a board task that finished — and nothing
+listens for a reply: no session fires, no answer comes back, and nothing can arrive through
+it. Chat (warren#108) stays what it is, a two-way conversation where an operator speaks and
+a session answers. The two would be one type only if "a message went somewhere" were the
+whole of what a channel means, and it is not — which is why this is its own top-level
+dimension beside `board`, `delegation` and `budgets` rather than a ninth route kind.
+
+**Silence is not consent**, exactly as it is for `board.claim` and `delegation.send`: a
+manifest with no `notifications` block taps nobody, however loudly its resident knocks.
+Declaring a `transport` is the whole opt-in.
+
+**There is no address field, and that is deliberate.** An ntfy topic is *derived* from the
+resident's [`uid`](#top-level):
+
+```
+topic = "steward-" + base32(sha256("steward/notify/ntfy/v1|<namespace>|<uid>"))[:32]
+```
+
+A topic on ntfy **is** the capability — anyone who knows the string can subscribe to it and
+publish into it — so it has to be a value that can live in a public namespace. The `uid` is
+already unguessable, so `steward-<uid>` would be just as hard to *guess*; the reason for the
+hash is the other direction. The uid was minted to be an **identifier**, and identifiers get
+shown: it is in git, in the JSON schema, in `GET /residents`, in townhall's markup, in a
+screenshot, in a paste. None of those places was designed while asking "and does this also
+grant read and write on the operator's phone?", and if the topic were the uid, every one of
+them would silently be doing that. Hashing lets the uid keep being the printable identifier
+it was minted as, and it runs the other way too: a topic that leaks says nothing about which
+resident it belongs to. It is **not** a boundary against somebody holding this repo — they
+have the uid and this formula — and it is not meant to be; the property bought is narrower
+and cheap: *disclosing the uid never incidentally discloses the topic.*
+
+Because the topic is derived, it is written down nowhere. Read it off the one command that
+knows how, and treat the output like a password:
+
+```console
+$ steward notify list                 # every resident: transport, kinds, and the URL to subscribe to
+$ steward notify test life-agent      # send one harmless tap and say whether it landed
+```
+
+**No secrets, here or anywhere.** The ntfy server and its optional token are steward's own
+environment — `STEWARD_NTFY_URL` (default `https://ntfy.sh`), `STEWARD_NTFY_TOKEN`,
+`STEWARD_NTFY_TIMEOUT_S`, and `STEWARD_NOTIFY_NAMESPACE`, which keeps two installations
+reading the same `residents/` tree (a laptop checkout and the NAS) off each other's phones.
+A manifest declares *that* a resident taps, never how to authenticate as one.
+
+**What is tapped.** `on` names chronicle event types, so it reads against
+[docs/transitions.md](transitions.md) directly:
+
+| kind | when | where it is sent from |
+|---|---|---|
+| `needs_human` | a session raised an escalation, **or** steward knocked about the resident — a budget pause, a watchdog give-up, a refused handoff | `ApprovalTransitions._raise` |
+| `task_done` | a claimed board task or a delegated letter closed successfully | `Dispatcher._finish` |
+
+A knock the repeat-deny guard answered on arrival taps nobody — that is the whole point of
+the guard, and it holds for the phone as well as for the village. A `task_failed`, a lost
+lease, and every routine bracket are deliberately not tappable: a notification is for the
+thing you would want to be woken for.
+
+**Failure is a courtesy failing, never work failing.** A tap is fire-and-forget behind a two
+second timeout and a sixty second circuit breaker; an unreachable ntfy is a `WARNING` in
+steward's log and nothing else. It is deliberately not an *event*: an event about steward's
+own plumbing would render in the village as though a villager did something, and an event
+about a failed notification is a fact that could itself be notified about.
+
+**What validation refuses**, in the [`_check_budget_is_enforceable`](#budgets--what-a-day-may-cost)
+spirit — a declaration steward cannot honour is worse than none, because somebody read it:
+
+- **an unknown transport** — an error, naming the transports that exist and the closest
+  match. A manifest that reads as wired up and delivers through nothing would be discovered
+  on the night an approval knock does not arrive.
+- **a transport with an empty `on`** — an error. A tap for nothing is a declaration that can
+  never send.
+- **a repeated kind** — an error; name each one once.
+- **`task_done` on a resident that closes no tasks** (`board.claim` false and no *active*
+  `delegation` route) — a **warning**, not an error. Nothing is spent and nothing is unsafe;
+  the declaration is merely aspirational, and granting the resident board work tomorrow makes
+  it true. What it risks is an operator reading the silence as a broken transport.
+
+`steward validate` refuses to store a credential-shaped value anywhere in a manifest, and
+this block has no field one would fit in.
 
 ## `budgets` — what a day may cost
 

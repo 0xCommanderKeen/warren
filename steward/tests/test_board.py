@@ -14,6 +14,7 @@ from steward import approvals, prompt
 from steward import board as b
 from steward import budgets as bg
 from steward import events as ev
+from steward import notify as nf
 from steward import sessions as ss
 from steward import watchdog as w
 from steward.claims import ResidentClaims
@@ -77,18 +78,21 @@ type Dispatch = Callable[..., b.Dispatcher]
 def make_dispatcher(
     write_resident: ResidentWriter, store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> Dispatch:
-    def _make(
+    def _make(  # noqa: PLR0913 — one keyword per thing a board test varies
         manifest: dict[str, Any] | None = None,
         *,
         runner: Runner | None = None,
         residents: list[Resident] | None = None,
         clock: Callable[[], datetime] | None = None,
         guard: ss.RunGuard | None = None,
+        notifier: nf.Notifier | None = None,
     ) -> b.Dispatcher:
         if residents is None:
             path = write_resident(manifest if manifest is not None else board_manifest())
             residents = [load_manifest(path)]
         kwargs: dict[str, Any] = {"clock": clock} if clock is not None else {}
+        if notifier is not None:
+            kwargs["notifier"] = notifier
         return b.Dispatcher(
             residents=residents,
             store=store,
@@ -1721,3 +1725,106 @@ def test_a_dispatcher_with_no_claims_works_exactly_as_before(
     run = dispatcher.dispatch(NOW)
     assert [report.status for report in run.reports] == ["done"]
     assert store.resident_claim("test-agent") is None
+
+
+# ------------------------------------------------------------- notifications (warren#114)
+
+
+class RecordingTransport:
+    """A transport that keeps every tap instead of sending it."""
+
+    def __init__(self) -> None:
+        """Start with nothing sent."""
+        self.sent: list[nf.Tap] = []
+
+    @property
+    def name(self) -> str:
+        """Answer to the manifest word that selects it."""
+        return nf.NTFY
+
+    def address(self, manifest: ResidentManifest) -> str:
+        """Say where it would have sent."""
+        return f"fake://{manifest.id}"
+
+    def send(self, manifest: ResidentManifest, tap: nf.Tap) -> bool:  # noqa: ARG002
+        """Record the tap and report success."""
+        self.sent.append(tap)
+        return True
+
+
+def tapping_board(*on: str) -> dict[str, Any]:
+    """Build a board-enabled manifest that has also opted into ntfy taps."""
+    return board_manifest(notifications={"transport": "ntfy", "on": list(on)})
+
+
+def test_a_finished_task_taps_the_resident_that_asked_to_be_told(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    taps = RecordingTransport()
+    store.post_job(title="Research X")
+    dispatcher = make_dispatcher(tapping_board("task_done"), notifier=nf.Notifier({nf.NTFY: taps}))
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.done
+    assert [tap.kind for tap in taps.sent] == ["task_done"]
+    assert taps.sent[0].title == "Testy finished: Research X"
+
+
+def test_a_finished_task_taps_nobody_when_the_manifest_did_not_ask(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    taps = RecordingTransport()
+    store.post_job(title="Research X")
+    dispatcher = make_dispatcher(
+        tapping_board("needs_human"), notifier=nf.Notifier({nf.NTFY: taps})
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert report.done
+    assert taps.sent == []
+
+
+def test_a_failed_task_is_not_a_tap(make_dispatcher: Dispatch, store: Store) -> None:
+    """Only ``task_done`` is declarable, so a failure stays in the village and the log."""
+    taps = RecordingTransport()
+    store.post_job(title="Research X")
+    dispatcher = make_dispatcher(
+        tapping_board("task_done"),
+        runner=ScriptedRunner(RunResult(outcome=Outcome.FAILED, error="no")),
+        notifier=nf.Notifier({nf.NTFY: taps}),
+    )
+
+    (report,) = dispatcher.dispatch(NOW).reports
+
+    assert not report.done
+    assert taps.sent == []
+
+
+def test_an_escalation_a_board_session_raised_taps_through_the_same_notifier(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """One notifier per dispatcher: the knock and the close reach the same phone."""
+    taps = RecordingTransport()
+    store.post_job(title="Research X")
+    asked = ScriptedRunner(
+        RunResult(
+            outcome=Outcome.OK,
+            exit_status=0,
+            output=(
+                f"drafted it\n{prompt.ACTIONS_OPEN}\n"
+                '<needs-human action="send_email">\n{"to": "a"}\n</needs-human>\n'
+                f"{prompt.ACTIONS_CLOSE}"
+            ),
+        )
+    )
+    dispatcher = make_dispatcher(
+        tapping_board("needs_human", "task_done"),
+        runner=asked,
+        notifier=nf.Notifier({nf.NTFY: taps}),
+    )
+
+    dispatcher.dispatch(NOW)
+
+    assert [tap.kind for tap in taps.sent] == ["needs_human", "task_done"]
