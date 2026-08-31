@@ -1,7 +1,8 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { App } from "./App.jsx";
+import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
+import { App, LiveApp, backendFromLocation } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.json";
 import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 
@@ -12,6 +13,70 @@ vi.mock("./game/PhaserGame.jsx", () => ({
 afterEach(cleanup);
 
 describe("Arcadia", () => {
+  it("starts the live Burrow transport and renders its snapshots", async () => {
+    let options;
+    const close = vi.fn();
+    const transportFactory = vi.fn((nextOptions) => {
+      options = nextOptions;
+      return { start: vi.fn().mockResolvedValue(), close };
+    });
+    const stewardClient = { confirm: vi.fn() };
+    const { unmount } = render(
+      <LiveApp
+        baseUrl="/burrow"
+        stewardClient={stewardClient}
+        transportFactory={transportFactory}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Village snapshot has not loaded yet.");
+    await waitFor(() => expect(transportFactory).toHaveBeenCalledWith(
+      expect.objectContaining({ baseUrl: "/burrow" }),
+    ));
+    options.onEnvelope(fixture);
+    await waitFor(() => expect(screen.getAllByText("Keeper").length).toBeGreaterThan(0));
+    await waitFor(() => expect(stewardClient.confirm).toHaveBeenCalledWith(fixture.snapshot));
+
+    unmount();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("uses the backend query parameter as the live transport prefix", () => {
+    expect(backendFromLocation("?backend=%2Fburrow")).toBe("/burrow");
+    expect(backendFromLocation("?unrelated=true")).toBe("/burrow");
+  });
+
+  it("keeps valid state visible through a transient transport failure", async () => {
+    let options;
+    const transportFactory = (nextOptions) => {
+      options = nextOptions;
+      return { start: vi.fn().mockResolvedValue(), close: vi.fn() };
+    };
+    render(<LiveApp transportFactory={transportFactory} />);
+    options.onEnvelope(fixture);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Arcadia" })).toBeVisible());
+
+    options.onError(new Error("State request failed: HTTP 502"));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Arcadia" })).toBeVisible());
+    expect(screen.queryByText("Contract mismatch")).not.toBeInTheDocument();
+  });
+
+  it("turns an unsupported live schema into the safe mismatch screen", async () => {
+    let options;
+    const transportFactory = (nextOptions) => {
+      options = nextOptions;
+      return { start: vi.fn().mockResolvedValue(), close: vi.fn() };
+    };
+    render(<LiveApp transportFactory={transportFactory} />);
+
+    options.onError(new UnsupportedSchemaVersionError(2));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Unsupported village schema version: 2",
+    );
+  });
+
   it("renders every read-only panel directly from the contract fixture", () => {
     render(<App envelope={fixture} />);
 
@@ -130,6 +195,25 @@ describe("Arcadia", () => {
     rerender(<App envelope={confirmed} stewardClient={stewardClient} />);
 
     expect(screen.queryByRole("region", { name: "Approval knocks" })).not.toBeInTheDocument();
+  });
+
+  it("hands Steward credentials over without storing them in the page", () => {
+    const stewardClient = {
+      confirm: vi.fn(),
+      setCredentials: vi.fn(),
+      decideApproval: vi.fn(),
+    };
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+
+    expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Steward token"), {
+      target: { value: "tab-only-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock answers" }));
+
+    expect(stewardClient.setCredentials).toHaveBeenCalledWith({ token: "tab-only-secret" });
+    expect(screen.queryByDisplayValue("tab-only-secret")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeEnabled();
   });
 
   it("orders multiple fixture approvals deterministically and answers each by request id", () => {
