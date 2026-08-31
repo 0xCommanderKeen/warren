@@ -223,52 +223,89 @@ code and all of the subtle ordering.
    a stable per-target name (`path + ".prune-" + sha256(abspath(generation))`)
    chosen to sit outside the `.replay.*` glob. `Spool.publish_onto` supports it;
    the policy stays in `notification_persistence.py`.
-6. **Damage tolerance.** Three genuinely different policies, so `Spool.read` takes
-   one explicitly rather than guessing:
+6. **Damage tolerance.** Two policies survive as `Spool.read(damage=…)`, taken
+   explicitly rather than guessed:
    - `STOP_AT_DAMAGE` — the first bad line ends the generation and everything from
-     it onward is a torn tail (outbox, deferred).
+     it onward is a torn tail (outbox journals, deferred).
    - `SKIP_DAMAGE` — bad lines are skipped and the generation is marked
-     incomplete, which is what blocks its retirement (knock journal `recover`).
-   - `KEEP_DAMAGE` — bad lines are preserved verbatim as opaque records
-     (`prune_terminal_generations`).
+     incomplete, which is what blocks its retirement (knock journal `recover`,
+     and the live outbox, whose own writer already proved it whole).
 
-   The *shape* check is a codec concern and also differs: a decoded non-dict is
-   damage to the outbox and a skipped line to the deferred spool. The codec
-   raises `ValueError` for the former and returns `None` for the latter.
+   A third policy — preserving bad lines verbatim as opaque records — was
+   designed and then dropped: only `prune_terminal_generations` needs it, it is
+   a raw-text operation rather than a record operation, and its crash behaviour
+   is pinned by a test that patches the publish seam. It stays hand-rolled.
+
+   The *shape* check is a codec concern and also differs: a decoded non-object is
+   damage to the outbox and an absent line to the deferred spool. `json_record`
+   raises `ValueError` for the former, `json_mapping` returns `None` for the
+   latter, and `json_entry` additionally treats a blank line as absent so the
+   knock journal's blank-line tolerance survives.
 7. **`_journal_outbox`'s silent torn discard** (G3 deviation above), preserved
    verbatim.
+8. **Where a quarantine file is named.** The outbox names every sample after the
+   spool (`primary-outbox.jsonl.torn.*`) even when the bytes came from a journal;
+   the deferred spool names it after the generation the bytes came from
+   (`events.jsonl.deferred.replay.<id>.torn.*`). Both roots are globbed by
+   existing tests, so this is a `torn_at_source` flag with its own test rather
+   than something to quietly unify. The retention budget is shared across both
+   roots either way.
 
-## The interface
+## The interface, as shipped
 
 ```python
 class Spool:
     """One bounded, ordered, crash-safe log: an active authority plus immutable
     auxiliary generations, behind a stable sidecar lock."""
 
-    def __init__(self, path, records, max_bytes, codec=JSON_LINES, key=None,
-                 order=None, generation_suffix=REPLAY_PREFIX,
-                 torn_files=8, torn_bytes=256 * 1024)
+    def __init__(self, path, limits=None, decode=json_record, encode=encode_json,
+                 key=None, order=None, generation_prefix=REPLAY_PREFIX,
+                 torn_files=8, torn_bytes=256 * 1024, torn_at_source=False)
 ```
 
-Names (`pending_path`, `lock_path`, `generations`, `replay_generations`) —
-including the rule that a quarantine file never counts as a generation even when
-its name matches the glob.
+`limits` is a callable returning `(records, bytes)`, so live settings are re-read
+per operation instead of frozen at construction. Construction performs no I/O —
+which is what lets `emit.py` build a spool per call and pick up patched module
+globals, and lets the notification store build one per ledger kind.
 
-Locking — `lock(suffix="", exclusive=True, blocking=True)`, a context manager that
-yields `False` rather than raising when a non-blocking acquisition fails.
+**Names** — `pending_path`, `lock_path(suffix="")`, `generation_path(name)`,
+`generation_paths()`, `generations()` (active first). A quarantine file never
+counts as a generation even when its name matches the glob.
 
-Reading — `read(path, damage=STOP_AT_DAMAGE)` → `Generation(path, records, torn,
-complete)`; `snapshot(...)` → the same for every generation, active first;
-`collect(...)` → the deduped, ordered record list across all generations.
+**Locking** — `lock(suffix="", exclusive=True, blocking=True, create=False)`, a
+context manager yielding the lock file, or `None` when a non-blocking
+acquisition found it held. Contention is a result, never an exception.
 
-Policy helpers — `dedupe(records)` (G9), `bound(records)` → `(kept, victims)` (G8).
+**Reading** — `read(path=None, damage=STOP_AT_DAMAGE)` → `Generation(path,
+records, torn, complete)`, or `None` when the file cannot be read at all —
+deliberately distinguishable from an empty generation, because one is retirable
+and the other is not. `snapshot(damage, active_damage)` returns the same for
+every generation; `collect(...)` returns the deduped, ordered records.
 
-Writing, the ordering core — `publish(records, retire=(), quarantine=(),
-extra=())` performs G1 → G3 → G2 in that order; `publish_onto(target, records,
-staging=…)` for in-place generation rewrites; `handoff()` (G6) → the new
-generation path or `None`; `retire(paths)`; `quarantine_tail(source, torn)`;
-`discard_staging()` (G5).
+**Policy** — `dedupe(records)` (G9), `arrange(records)` (dedupe then `order`),
+`bound(records, max_records=None, max_bytes=None)` → `(kept, victims)` (G8).
 
-`Spool` owns no locks it is not asked for, no process state, and no policy. It
-owns exactly the crash ordering — which is the level the issue said `durable.py`
-was one step below.
+**Writing** — `publish(records, target=None, staging=None, retire=(),
+quarantine=(), extra=(), encode=None)` performs G1 → G3 → G2 in that order;
+`handoff(generation=None)` (G6) → the new generation path or `None`;
+`retire(paths)`; `quarantine_tail(torn, source=None)`; `discard_staging()` (G5).
+
+`target`/`staging` cover the in-place generation rewrite; `extra` takes
+already-staged `(pending, target)` pairs for a multi-file publish; `encode`
+overrides the codec for a caller holding pre-encoded lines. Staging order among
+pending files is immaterial — staging is never authority.
+
+`Spool` owns no locks it is not asked for, no process state, and no delivery
+policy. It owns exactly the crash ordering — the level the issue said
+`durable.py` sat one step below.
+
+## What this did not change
+
+`docs/protocol.md`'s transport section is unchanged, and that is the right
+outcome rather than a missed win. It documents the *observable* durability
+contract — capacity ceilings, physical crash-copy bounds, what survives a
+restart — and none of that moved. The prose there looks duplicated because two
+transports really do make the same promises, not because one implementation was
+described twice; deleting either copy would remove a guarantee a reader needs,
+to save lines in a document nobody was struggling with. The mechanism behind
+both now has one home, and this file is it.
