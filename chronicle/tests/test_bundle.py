@@ -116,13 +116,19 @@ class BundleBehaviourTest(unittest.TestCase):
             timeout=15,
         )
 
-    def test_the_bundle_emits_through_the_module_it_embedded(self):
-        """The offline path runs entirely through durable.Spool, so this proves the embed."""
+    def test_an_unreachable_village_leaves_the_event_in_the_durable_outbox(self):
+        """The outbox is written by durable.Spool before any network work: the embed, proved.
+
+        Asserted on the outbox rather than on the local fallback log, because the fallback
+        append is gated on the emitter's one-second hook budget — a loaded machine can
+        legitimately spend the whole budget and leave the event queued for replay and
+        nowhere else, which is not a failure and must not read as one.
+        """
         with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as home:
             artifact = pathlib.Path(temporary) / "emit-bundle.py"
             build_to(artifact)
             event = {
-                "session_id": "bundled",
+                "session_id": "queued",
                 "cwd": home,
                 "hook_event_name": "UserPromptSubmit",
                 "prompt": "work",
@@ -131,9 +137,31 @@ class BundleBehaviourTest(unittest.TestCase):
             result = self.run_bundle(artifact, json.dumps(event), home)
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            outbox = pathlib.Path(home) / ".chronicle" / "primary-outbox.jsonl"
+            queued = [json.loads(line) for line in outbox.read_text().splitlines()]
+            self.assertEqual(
+                [record["event"]["agent_id"] for record in queued],
+                ["claude-code:queued"],
+            )
+
+    def test_a_village_that_was_never_configured_falls_back_to_the_local_log(self):
+        """No target at all is the one path that appends locally under no deadline."""
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as home:
+            artifact = pathlib.Path(temporary) / "emit-bundle.py"
+            build_to(artifact)
+            event = {
+                "session_id": "offline",
+                "cwd": home,
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "work",
+            }
+
+            result = self.run_bundle(artifact, json.dumps(event), home, CHRONICLE_URL="")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
             log = pathlib.Path(home) / ".chronicle" / "events.jsonl"
             records = [json.loads(line) for line in log.read_text().splitlines()]
-            self.assertEqual(records[-1]["agent_id"], "claude-code:bundled")
+            self.assertEqual(records[-1]["agent_id"], "claude-code:offline")
 
     def test_the_bundle_delivers_to_a_village_that_answers(self):
         """The delivered path takes the durable outbox, not just the local log."""
