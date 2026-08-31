@@ -358,7 +358,7 @@ this village is drawn with now lives with Arcadia's assets, attribution included
 
 ## Working on burrow
 
-Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/burrow/issues)
+Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/warren/issues)
 with status labels. The convention, for humans and agents alike:
 
 - `status:ready` — free to pick up. **When you start, swap it to `status:in-progress`**
@@ -398,4 +398,4 @@ captured fixtures clients render against still match the snapshot models.
 
 ## Not this project
 
-Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate project ([arcadia](https://github.com/0xCommanderKeen/arcadia)).
+Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate concern, and lives in this monorepo's [arcadia/](../arcadia/).
