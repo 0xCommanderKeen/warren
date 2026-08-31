@@ -96,7 +96,7 @@ newer ones pushed it out, not because a timer retired it.
 
 Every write in the fleet — posting a job, deciding an approval, declaring a resident,
 running a routine — is a client talking to Steward with a credential a human typed at
-runtime. Chronicle has no outbound Steward client, proxies nothing to it, and holds no
+runtime. burrow has no outbound Steward client, proxies nothing to it, and holds no
 credentials of its own. A write reaches this service only later, as the event that write
 produced.
 
