@@ -1,0 +1,177 @@
+"""Container placement against a real docker daemon (steward #58's acceptance tests).
+
+The unit tests in ``test_runners.py`` pin the argv shapes against a stubbed ``docker``;
+these prove the two claims a stub cannot: that a timed-out session is *verifiably dead
+inside the container* — ``ps`` shows no survivor, not merely a dead local client — and
+that the environment boundary and the mount-side working directory hold against a real
+``docker exec``.
+
+Skipped wholesale when no docker daemon answers, so the suite stays runnable on a
+machine with no docker at all. The container is throwaway ``alpine:3`` with a shell
+script standing in for the brain: what is under test is the launcher, the shim, and the
+kill — none of which care which brain they carry.
+"""
+
+import secrets
+import shutil
+import subprocess
+import time
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+
+from steward import runners as r
+from steward.manifest import Runner as RunnerSpec
+from steward.manifest import ToolGrant
+
+UNRESTRICTED = ToolGrant("unrestricted")
+
+
+#: The docker CLI by absolute path, resolved once — and the module-wide skip when the
+#: daemon does not answer, so the suite stays runnable on a machine with no docker.
+DOCKER = shutil.which("docker") or "docker"
+
+
+def _docker_answers() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        probe = subprocess.run(  # noqa: S603 — fixed argv, a capability probe
+            [DOCKER, "info"], capture_output=True, timeout=15, check=False
+        )
+    except OSError, subprocess.TimeoutExpired:
+        return False
+    return probe.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(not _docker_answers(), reason="no docker daemon on this host")
+
+
+def _docker(*argv: str, stdin: bytes | None = None, timeout: float = 60) -> str:
+    completed = subprocess.run(  # noqa: S603 — fixed test argv against a throwaway container
+        [DOCKER, *argv], input=stdin, capture_output=True, timeout=timeout, check=True
+    )
+    return completed.stdout.decode()
+
+
+@pytest.fixture
+def container() -> Iterator[str]:
+    """Provide a throwaway running container, removed however the test ends.
+
+    ``--init`` because the rendered compose files run residents the same way
+    (:func:`steward.deploy.render_compose`): PID 1 must reap what a killed session
+    leaves behind, or every timeout strands zombies for the container's lifetime.
+    """
+    name = f"steward-test-{secrets.token_hex(4)}"
+    _docker("run", "-d", "--init", "--name", name, "alpine:3", "sleep", "300", timeout=120)
+    try:
+        yield name
+    finally:
+        subprocess.run(  # noqa: S603 — cleanup must run even after a failure
+            [DOCKER, "rm", "-f", name], capture_output=True, check=False, timeout=60
+        )
+
+
+def _pid_file_exists(container: str, run_id: str) -> bool:
+    probe = subprocess.run(  # noqa: S603 — fixed probe argv
+        [DOCKER, "exec", container, "test", "-e", f"/run/steward/{run_id}.pid"],
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    return probe.returncode == 0
+
+
+def _install_brain(container: str, script: str) -> None:
+    """Put a shell script named ``claude`` on the container's PATH."""
+    _docker(
+        "exec",
+        "-i",
+        container,
+        "sh",
+        "-c",
+        "cat > /usr/local/bin/claude && chmod +x /usr/local/bin/claude",
+        stdin=("#!/bin/sh\n" + script + "\n").encode(),
+    )
+
+
+def test_a_timed_out_session_is_verifiably_dead_inside_the_container(
+    container: str, tmp_path: Path
+) -> None:
+    """The acceptance crux: after `_terminate`, `docker exec ps` shows no survivor.
+
+    The fake brain prints an escalation and hangs with a child process, exactly the
+    shape of a stuck session. The timeout must keep the partial output (the ``_drain``
+    guarantee), and the group kill inside the container must take both the brain and
+    its child — a ledger row saying timeout over a session still burning tokens is the
+    lie this launcher exists to refuse.
+    """
+    _install_brain(container, 'echo "partial escalation"; sleep 120')
+    runner = r.build_runner(
+        RunnerSpec(kind="claude"),
+        r.Placement(container=container, workdir="/tmp"),  # noqa: S108 — a container path
+    )
+
+    result = runner.run(
+        r.RunRequest(
+            prompt="hang",
+            workdir=tmp_path,
+            timeout_s=2,
+            tools=UNRESTRICTED,
+            env={"STEWARD_RUN_ID": "run-int-timeout"},
+        )
+    )
+
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert "partial escalation" in result.output
+    time.sleep(0.5)
+    survivors = _docker("exec", container, "ps")
+    assert "claude" not in survivors
+    assert "sleep 120" not in survivors
+    assert not _pid_file_exists(container, "run-int-timeout"), (
+        "the kill path must remove the dead run's pid file"
+    )
+
+
+def test_a_container_session_runs_in_the_mount_with_only_named_env_and_reports_cost(
+    container: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One real run: the exec workdir, the env boundary, and the ledger numbers.
+
+    The brain reports back its working directory, its run id, and whether it can see a
+    ``STEWARD_TOKEN`` that is present in the control plane's environment — through the
+    same ``--output-format json`` document the real CLI emits, so the cost lands the way
+    the budget ledger will read it.
+    """
+    _install_brain(
+        container,
+        "cat <<JSON\n"
+        '{"type":"result","is_error":false,'
+        '"result":"$(pwd)|$STEWARD_RUN_ID|${STEWARD_TOKEN:-unseen}",'
+        '"usage":{"input_tokens":11,"output_tokens":7},"total_cost_usd":0.0042}\n'
+        "JSON",
+    )
+    monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
+    runner = r.build_runner(
+        RunnerSpec(kind="claude"),
+        r.Placement(container=container, workdir="/tmp"),  # noqa: S108 — a container path
+    )
+
+    result = runner.run(
+        r.RunRequest(
+            prompt="report",
+            workdir=tmp_path,
+            timeout_s=30,
+            tools=UNRESTRICTED,
+            env={"STEWARD_RUN_ID": "run-int-ok"},
+        )
+    )
+
+    assert result.ok, (result.error, result.output)
+    assert result.output == "/tmp|run-int-ok|unseen"  # noqa: S108 — a container path
+    assert (result.input_tokens, result.output_tokens) == (11, 7)
+    assert result.cost_usd == pytest.approx(0.0042)
+    assert not _pid_file_exists(container, "run-int-ok"), (
+        "an ordinary exit must remove its own pid file"
+    )
