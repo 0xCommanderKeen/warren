@@ -25,11 +25,8 @@ class RunnerDiscoveryTest(unittest.TestCase):
         expected = sorted(
             path
             for path in tracked
-            if (
-                pathlib.PurePosixPath(path).name.startswith("test_")
-                and pathlib.PurePosixPath(path).suffix in {".py", ".js"}
-            )
-            or pathlib.PurePosixPath(path).name.endswith(".test.js")
+            if pathlib.PurePosixPath(path).name.startswith("test_")
+            and pathlib.PurePosixPath(path).suffix == ".py"
         )
 
         result = subprocess.run(
@@ -46,6 +43,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
         ]
 
         self.assertEqual(listed, expected)
+        self.assertEqual([path for path in listed if path.endswith(".js")], [])
 
     def test_normal_run_executes_each_tracked_test_once(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -65,10 +63,11 @@ class RunnerDiscoveryTest(unittest.TestCase):
                     "with open(os.environ['BURROW_RUNNER_LOG'], 'a') as log:\n"
                     "    log.write(os.path.basename(__file__).replace('\\n', '<NL>') + '\\n')\n"
                 )
+            # Burrow runs no JavaScript. A tracked .js test is discovered by
+            # nothing and executed by nothing, rather than quietly requiring a
+            # Node toolchain the suite no longer installs.
             javascript_tests = [
                 repo / "test_root.js",
-                repo / "nested" / "test_nested.js",
-                repo / "viewer.test.js",
                 repo / "nested" / "model.test.js",
             ]
             for test in javascript_tests:
@@ -90,8 +89,6 @@ class RunnerDiscoveryTest(unittest.TestCase):
                     "test_alpha.py",
                     "nested/test_odd\nname.py",
                     "test_root.js",
-                    "nested/test_nested.js",
-                    "viewer.test.js",
                     "nested/model.test.js",
                 ],
                 cwd=repo,
@@ -110,14 +107,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
 
             self.assertEqual(
                 sorted(log.read_text().splitlines()),
-                [
-                    "model.test.js",
-                    "test_alpha.py",
-                    "test_nested.js",
-                    "test_odd<NL>name.py",
-                    "test_root.js",
-                    "viewer.test.js",
-                ],
+                ["test_alpha.py", "test_odd<NL>name.py"],
             )
             self.assertEqual(result.stdout.splitlines()[-1], "all green")
 
