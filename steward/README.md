@@ -456,6 +456,14 @@ Six views behind hash routing: **Residents** (list, then soul, charter, voice, e
 skills, routines, budget, journal, inbox), **New resident**, **Routines** (fleet-wide,
 with run-now), **Approvals**, **Job board**, and **Skills**.
 
+A resident's own page is addressed by its **uid**, not its id — `#/residents/<uid>`. An id
+is a directory name and can be retired and raised again, so a bookmarked `#/residents/pip`
+could quietly come to mean a different resident a year from now; the uid never moves. Every
+`/residents/{resident_id}` route resolves either spelling, matching ids first and
+exhaustively, so links and scripts written against ids keep working. The page prints its own
+uid in the soul panel, because a URL made of an opaque uuid is only usable if you can read
+which uuid it is.
+
 Four things are worth knowing about it.
 
 **One token, once.** The first load asks for `STEWARD_TOKEN`, keeps it in this tab's

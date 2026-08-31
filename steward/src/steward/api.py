@@ -564,9 +564,20 @@ def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Pa
     for resident in result.residents:
         if resident.id == resident_id:
             return resident
+    # A uid also names a resident here. An id is a directory name: retire `pip` and raise a
+    # new `pip` next month and the name has moved, while the uid (#112) never does — so a
+    # link, a bookmark or a console route that must still mean *this* resident a year from
+    # now can carry the uid instead. Ids are matched first and exhaustively, so no caller
+    # that works today can change meaning: a uid only ever resolves what an id did not.
+    for resident in result.residents:
+        if resident.uid == resident_id:
+            return resident
     if (residents_dir / resident_id).is_dir():
         # The resident exists but did not validate. Saying "unknown" would send someone
-        # looking for a missing directory instead of a broken manifest.
+        # looking for a missing directory instead of a broken manifest. This branch can
+        # only ever fire for an id: a manifest that does not validate was never parsed,
+        # so its uid is not a fact steward holds, and a uid for a broken resident falls
+        # through to the 404 below. That is the honest answer available.
         _refuse(
             409,
             "resident_invalid",

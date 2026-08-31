@@ -644,7 +644,10 @@ async function viewResidents() {
       .sort((a, b) => Date.parse(a.next_fire) - Date.parse(b.next_fire))[0];
     const budget = resident.budget || {};
     add(rows, [el("a", {
-      class: "row", href: `#/residents/${encodeURIComponent(resident.id)}`,
+      // Addressed by uid, not id: an id is a directory name and can be retired and reused,
+      // so a bookmarked #/residents/pip could quietly come to mean a different resident.
+      // The uid cannot. The API resolves either, so older id links still work.
+      class: "row", href: `#/residents/${encodeURIComponent(resident.uid)}`,
       style: { gridTemplateColumns: RESIDENT_COLUMNS, "--accent": resident.soul.accent },
     },
       el("span", { class: "who" },
@@ -780,6 +783,10 @@ function soulPanel(it) {
       ["role", it.soul.role],
       ["accent", it.soul.accent],
       ["summary", it.summary],
+      // The durable name. `id` above the fold is what a person calls this resident; the
+      // uid is what outlives a retirement and a reuse of that name, and it is what this
+      // page's own URL is keyed on, so it belongs where it can be read and copied.
+      ["uid", mono(it.uid)],
       ["manifest", mono(it.path)],
       ["memory", mono(`${it.memory.kind}: ${it.memory.path}`)],
       ["runner", `${it.runner.kind}${it.runner.model ? ` · ${it.runner.model}` : ""}`],
