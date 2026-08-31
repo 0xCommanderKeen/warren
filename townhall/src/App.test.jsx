@@ -237,6 +237,9 @@ describe("budget controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /write caps/i }));
 
     await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
+    // The commit survives the re-read that follows the save; a receipt swept away by a
+    // refresh has told the operator nothing.
+    expect(await screen.findByText("9f1c0a77bb")).toBeTruthy();
     const [url, init] = fetch.mock.calls.find(([, call]) => call?.method === "PUT");
     expect(url).toBe("/residents/life-agent/declaration");
     const sent = JSON.parse(init.body);
@@ -324,5 +327,24 @@ describe("the shell itself", () => {
 
     render(<App />);
     expect(screen.getByText(/No such page/i)).toBeTruthy();
+  });
+});
+
+describe("reloading steward's own copy", () => {
+  it("is offered after a declaration write, and reports what steward answered", async () => {
+    const fetch = vi.fn().mockImplementation((url, init) => {
+      if (init?.method === "PUT") return Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }));
+      if (init?.method === "POST") return Promise.resolve(json(200, { status: "reloaded", residents: 3, routines: 7, skills: ["research"] }));
+      return Promise.resolve(json(200, DECLARATION));
+    });
+    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
+
+    fireEvent.click(await screen.findByRole("button", { name: /write declaration/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /reload steward's own copy/i }));
+
+    expect(await screen.findByText(/reloaded: 3 residents, 7 routines, 1 skills/)).toBeTruthy();
+    const [url, init] = fetch.mock.calls.find(([, call]) => call?.method === "POST");
+    expect(url).toBe("/reload");
+    expect(init.headers.Authorization).toBe("Bearer operator-token");
   });
 });

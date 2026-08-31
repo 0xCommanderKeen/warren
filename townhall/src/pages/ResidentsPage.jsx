@@ -232,6 +232,16 @@ function DeclarationEditor({ id }) {
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
+  const [reloaded, setReloaded] = useState(null);
+
+  // Re-reading after a save must not sweep away the answer the person is still reading —
+  // the commit sha is the receipt, and a form that clears it on refresh has told them
+  // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
+  useEffect(() => {
+    setReceipt(null);
+    setRefusal(null);
+    setReloaded(null);
+  }, [id]);
 
   useEffect(() => {
     if (!loaded.data) return;
@@ -241,8 +251,6 @@ function DeclarationEditor({ id }) {
       soul: loaded.data.soul,
       revision: loaded.data.revision,
     });
-    setReceipt(null);
-    setRefusal(null);
   }, [loaded.data]);
 
   const diagnostics = refusal?.diagnostics || [];
@@ -272,11 +280,32 @@ function DeclarationEditor({ id }) {
         revision: draft.revision,
       });
       setReceipt(answer);
+      setReloaded(null);
       loaded.refresh();
     } catch (caught) {
       setRefusal(caught);
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Ask the API process to re-read the tree.
+   *
+   * Not automatic, and not cosmetic. The scheduler *daemon* watches both trees itself and
+   * picks this up within a minute, so a saved declaration is live without any of this. What
+   * does not pick it up is the API's own long-lived run-now scheduler and board dispatcher,
+   * assembled at startup — so until this is called, firing a routine from a control panel
+   * would use the manifest that was on disk when the server booted. The button says which
+   * process it reaches, because the difference is the whole point of it.
+   */
+  async function reload() {
+    setReloaded({ state: "asking" });
+    try {
+      const answer = await client.reload();
+      setReloaded({ state: "done", answer });
+    } catch (caught) {
+      setReloaded({ state: "refused", error: caught });
     }
   }
 
@@ -309,8 +338,25 @@ function DeclarationEditor({ id }) {
               ))}
             </ul>
           ) : null}
+          <div className="mt-3">
+            <Button tiny onClick={reload} disabled={reloaded?.state === "asking"}>
+              {reloaded?.state === "asking" ? "asking…" : "reload steward's own copy"}
+            </Button>
+            <p className="mb-0 mt-2 text-[10.5px] leading-[1.6] text-faint">
+              The scheduler daemon watches the tree itself and picks this up within a minute,
+              so it is already live there. This reaches the API's own run-now scheduler and
+              board dispatcher, which were assembled when the server booted.
+            </p>
+            {reloaded?.state === "done" ? (
+              <p className="mb-0 mt-2 text-[11px] text-live">
+                {reloaded.answer.status}: {reloaded.answer.residents} residents,{" "}
+                {reloaded.answer.routines} routines, {(reloaded.answer.skills || []).length} skills.
+              </p>
+            ) : null}
+          </div>
         </Receipt>
       ) : null}
+      {reloaded?.state === "refused" ? <Problem error={reloaded.error} /> : null}
 
       {refusal ? (
         <Problem error={refusal} />

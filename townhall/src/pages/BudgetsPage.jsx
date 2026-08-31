@@ -165,11 +165,17 @@ function CapsForm({ id, declaration, onWritten }) {
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
 
+  // Sync the draft to whatever is now on disk, but keep the receipt: re-reading after a
+  // save must not sweep away the commit the person is still reading. It clears when a
+  // different resident is opened, or by its own ×.
   useEffect(() => {
     setDraft(declaration.manifest);
+  }, [declaration]);
+
+  useEffect(() => {
     setRefusal(null);
     setReceipt(null);
-  }, [declaration]);
+  }, [id]);
 
   const diagnostics = refusal?.diagnostics || [];
   const dirty = changed(draft, declaration.manifest);
