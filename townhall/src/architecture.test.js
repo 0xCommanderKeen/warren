@@ -109,6 +109,61 @@ describe("the console shell", () => {
   });
 });
 
+/* -- origin overrides (#241) ----------------------------------------------------------- */
+
+/** The body of a top-level `function name(…) {…}`, up to the closing brace in column 0. */
+const functionBody = (source, name) => {
+  const start = source.indexOf(`function ${name}(`);
+  expect(start, `no function ${name} to read`).toBeGreaterThan(-1);
+  return source.slice(start, source.indexOf("\n}", start));
+};
+
+describe("the origin overrides are a development convenience, enforced as one", () => {
+  // warren#241: `?steward=` and `?backend=` were honest-system dev conveniences that the
+  // deployed bundle also honoured, so `/observatory/?steward=https://evil.tld` opened in an
+  // unlocked tab sent the operator bearer token — the control plane's master key — to
+  // whoever wrote the link. The gate is `import.meta.env.DEV`, which Vite resolves to false
+  // at build time: the branch that reads the parameter is eliminated from what ships.
+
+  it.each([
+    ["./steward/context.jsx", "stewardBase", "steward"],
+    ["./App.jsx", "chronicleBase", "backend"],
+  ])("reads %s's override only behind import.meta.env.DEV", (file, name, param) => {
+    const source = read(file);
+    const body = functionBody(source, name);
+
+    expect(body).toContain("import.meta.env.DEV");
+    expect(body.indexOf("import.meta.env.DEV")).toBeLessThan(body.indexOf(`"${param}"`));
+    expect(body).toContain(`get("${param}")`);
+
+    // And nowhere else in that file: one read, inside the one guarded function.
+    expect([...source.matchAll(new RegExp(`get\\("${param}"\\)`, "g"))]).toHaveLength(1);
+  });
+
+  it("names the query parameters in no other module", () => {
+    const others = [
+      "./navigation.jsx", "./transport.js", "./main.jsx", "./routes.js", "./model.js",
+      "./console/Gate.jsx", "./console/ledger.jsx",
+      "./steward/client.js", "./steward/credential.js",
+      ...PAGES.map((page) => `./pages/${page}.jsx`),
+    ].map(read).join("\n");
+
+    expect(others).not.toContain('get("steward")');
+    expect(others).not.toContain('get("backend")');
+  });
+
+  it("refuses the credential to any base that is not this origin", () => {
+    // Defence in depth: even if a base reached the client from somewhere this file cannot
+    // see, the bearer header does not follow it off-origin.
+    const client = read("./steward/client.js");
+
+    expect(client).toContain("isSameOrigin");
+    expect(client).toContain("cross_origin_base");
+    // The refusal is what a shipped bundle does unconditionally; only a dev build relaxes it.
+    expect(functionBody(client, "createStewardClient")).toContain("import.meta.env.DEV");
+  });
+});
+
 /* -- contrast (#152) ------------------------------------------------------------------ */
 
 const channel = (value) => {

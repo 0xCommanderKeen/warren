@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOperatorCredential } from "./credential.js";
 import {
-  StewardError, createStewardClient, describeCommit, diagnosticsFor, normalizeDiagnostics,
+  StewardError, createStewardClient, describeCommit, diagnosticsFor, isSameOrigin,
+  normalizeDiagnostics,
 } from "./client.js";
 
 const answer = (status, body, { json = true } = {}) => ({
@@ -182,6 +183,69 @@ describe("the steward client", () => {
     const client = createStewardClient({ baseUrl: "http://127.0.0.1:8801/", credential: held(), fetch });
     await client.listResidents();
     expect(fetch.mock.calls[0][0]).toBe("http://127.0.0.1:8801/residents");
+  });
+});
+
+/* -- the origin guard (warren#241) ---------------------------------------------------- */
+
+describe("the credential never leaves this origin", () => {
+  // The attack this closes: a link like `/observatory/?steward=https://evil.tld` opened in
+  // a tab that already holds an unlocked operator token. The token is the whole control
+  // plane's master key, so the client refuses the base rather than trusting whoever set it.
+  // In development `import.meta.env.DEV` is true and a human pointing vite at their own
+  // steward is still honoured; the built bundle has no such branch in it.
+  afterEach(() => vi.unstubAllEnvs());
+
+  const shipped = () => vi.stubEnv("DEV", false);
+
+  it("refuses a cross-origin base outright, so no request is made at all", async () => {
+    shipped();
+    const fetch = vi.fn().mockResolvedValue(answer(200, {}));
+    const client = createStewardClient({ baseUrl: "https://evil.tld", credential: held(), fetch });
+
+    await expect(client.listResidents()).rejects.toMatchObject({ code: "cross_origin_base" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("sends no Authorization header anywhere but this origin, on any route", async () => {
+    shipped();
+    const fetch = vi.fn().mockResolvedValue(answer(200, {}));
+    const hostile = ["https://evil.tld", "//evil.tld", "http://127.0.0.1:8801", "https://evil.tld:443/x"];
+
+    for (const baseUrl of hostile) {
+      const client = createStewardClient({ baseUrl, credential: held(), fetch });
+      await client.listResidents().catch(() => {});
+      await client.createSkill({ name: "x" }).catch(() => {});
+      await client.reload().catch(() => {});
+    }
+
+    expect(fetch).not.toHaveBeenCalled();
+    const headersSent = fetch.mock.calls.map(([, init]) => init?.headers?.Authorization);
+    expect(headersSent).not.toContain("Bearer s3cret");
+  });
+
+  it("still calls this origin, by empty base or by bare path", async () => {
+    shipped();
+    const fetch = vi.fn().mockResolvedValue(answer(200, {}));
+
+    await createStewardClient({ credential: held(), fetch }).listResidents();
+    await createStewardClient({ baseUrl: "/api", credential: held(), fetch }).listResidents();
+    await createStewardClient({ baseUrl: window.location.origin, credential: held(), fetch }).listResidents();
+
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "/residents", "/api/residents", `${window.location.origin}/residents`,
+    ]);
+    expect(fetch.mock.calls[0][1].headers.Authorization).toBe("Bearer s3cret");
+  });
+
+  it("answers the same question directly, for a base that came from anywhere", () => {
+    expect(isSameOrigin("")).toBe(true);
+    expect(isSameOrigin("/api")).toBe(true);
+    expect(isSameOrigin(window.location.origin)).toBe(true);
+    expect(isSameOrigin("https://evil.tld")).toBe(false);
+    expect(isSameOrigin("//evil.tld")).toBe(false);
+    expect(isSameOrigin("javascript:alert(1)")).toBe(false);
+    expect(isSameOrigin("http://localhost:9999")).toBe(false);
   });
 });
 
