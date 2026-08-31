@@ -933,26 +933,42 @@ def test_show_names_the_residents_it_knows_about(
 
 # ---------------------------------------------------------------------------- scheduler
 
+#: The one routine :func:`mock_resident` declares, and the key the scheduler files it
+#: under — the resident id and the routine id, which is how an anchor is addressed.
+MOCK_ROUTINE_ID = "inbox-read"
+MOCK_ROUTINE_KEY = f"test-agent/{MOCK_ROUTINE_ID}"
+
+
+def scheduler_state_file(tmp_path: Path) -> Path:
+    """Return the state file every scheduler test in this file schedules against.
+
+    One spelling, because ``--state`` and anything that seeds an anchor into it have to
+    name the same file: two literals that drifted apart would leave the seed writing
+    somewhere the CLI never reads, and the test would pass by asserting the fresh-state
+    behaviour it was written to distinguish from.
+    """
+    return tmp_path / "state.json"
+
 
 def scheduler_args(path: Path, tmp_path: Path) -> list[str]:
     return [
         "--residents",
         str(path.parent),
         "--state",
-        str(tmp_path / "state.json"),
+        str(scheduler_state_file(tmp_path)),
         "--workdir",
         str(tmp_path),
     ]
 
 
-def seed_anchor(tmp_path: Path, key: str, ago: timedelta) -> Path:
+def seed_anchor(tmp_path: Path, ago: timedelta, key: str = MOCK_ROUTINE_KEY) -> Path:
     """Write a state file whose anchor for ``key`` is already that far in the past.
 
     First sight anchors a routine at *now*, so nothing is ever due against a state file
     that has never been written — which is the right answer and a useless fixture. Every
     test that needs a routine to actually be due says so here.
     """
-    state = SchedulerState(path=tmp_path / "state.json")
+    state = SchedulerState(path=scheduler_state_file(tmp_path))
     state.set_anchor(key, datetime.now(UTC) - ago)
     state.save()
     return state.path
@@ -963,7 +979,7 @@ def mock_resident() -> dict:
     data["runner"] = {"kind": "mock", "model": "pretend"}
     data["routines"] = [
         {
-            "id": "inbox-read",
+            "id": MOCK_ROUTINE_ID,
             "schedule": "* * * * *",
             "prompt": "Read the mail.",
             "timeout_s": 60,
@@ -1018,24 +1034,24 @@ def test_scheduler_dry_run_prints_the_prompt_and_emits_nothing(
     fallback = tmp_path / "events.jsonl"
     monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(fallback))
     path = write_resident(mock_resident())
-    state = seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
-    before = state.read_text(encoding="utf-8")
+    state_file = seed_anchor(tmp_path, timedelta(minutes=5))
+    before = state_file.read_text(encoding="utf-8")
     result = runner.invoke(
         main, ["scheduler", "tick", *scheduler_args(path, tmp_path), "--dry-run"]
     )
     assert result.exit_code == 0, result.output
-    assert "would fire test-agent/inbox-read" in result.output
+    assert f"would fire {MOCK_ROUTINE_KEY}" in result.output
     assert "YOUR CHARTER (AUTHORITATIVE, LAST WORD)" in result.output
     assert not fallback.exists()
-    assert state.read_text(encoding="utf-8") == before  # a rehearsal anchors nothing
+    assert state_file.read_text(encoding="utf-8") == before  # a rehearsal anchors nothing
 
 
-@pytest.mark.parametrize("command", [("tick",), ("run",)])
+@pytest.mark.parametrize("command", ["tick", "run"])
 def test_scheduler_dry_run_rehearses_only_what_is_due(
     runner: CliRunner,
     write_resident: ResidentWriter,
     tmp_path: Path,
-    command: tuple[str, ...],
+    command: str,
 ) -> None:
     """A rehearsal is a rehearsal of the *next tick*, so it answers the tick's question.
 
@@ -1055,38 +1071,38 @@ def test_scheduler_dry_run_rehearses_only_what_is_due(
         }
     )
     path = write_resident(data)
-    seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
+    seed_anchor(tmp_path, timedelta(minutes=5))
     result = runner.invoke(
-        main, ["scheduler", *command, *scheduler_args(path, tmp_path), "--dry-run"]
+        main, ["scheduler", command, *scheduler_args(path, tmp_path), "--dry-run"]
     )
     assert result.exit_code == 0, result.output
-    assert "would fire test-agent/inbox-read" in result.output
+    assert f"would fire {MOCK_ROUTINE_KEY}" in result.output
     assert "test-agent/nightly" not in result.output
 
 
-@pytest.mark.parametrize("command", [("tick",), ("run",)])
+@pytest.mark.parametrize("command", ["tick", "run"])
 def test_scheduler_dry_run_on_a_fresh_state_has_nothing_to_rehearse(
     runner: CliRunner,
     write_resident: ResidentWriter,
     tmp_path: Path,
-    command: tuple[str, ...],
+    command: str,
 ) -> None:
     """First sight anchors at now, so nothing is due yet — and the rehearsal says so."""
     path = write_resident(mock_resident())
     result = runner.invoke(
-        main, ["scheduler", *command, *scheduler_args(path, tmp_path), "--dry-run"]
+        main, ["scheduler", command, *scheduler_args(path, tmp_path), "--dry-run"]
     )
     assert result.exit_code == 0, result.output
     assert "nothing due" in result.output
     assert "would fire" not in result.output
-    assert not (tmp_path / "state.json").exists()
+    assert not scheduler_state_file(tmp_path).exists()
 
 
 def test_scheduler_run_dry_run_does_not_loop(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     path = write_resident(mock_resident())
-    seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
+    seed_anchor(tmp_path, timedelta(minutes=5))
     result = runner.invoke(main, ["scheduler", "run", *scheduler_args(path, tmp_path), "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "would fire" in result.output
@@ -3111,9 +3127,9 @@ def test_the_charter_example_is_a_charter_steward_accepts(
 ) -> None:
     """The example a refusal prints is the only spec `--charter` has (warren#90).
 
-    It is printed at every refusal and reproduced verbatim in the README, so an operator
-    who copies it has to end up with a charter the validator takes. A drifting example
-    would be a file format documented wrongly, which is worse than one documented nowhere.
+    An operator meets it at the moment they got the format wrong, so copying it has to
+    produce a charter the validator takes. An example that drifted would document the
+    file format wrongly, which is worse than not documenting it at all.
     """
     charter = tmp_path / "from-the-example.yaml"
     charter.write_text(cli.CHARTER_EXAMPLE, encoding="utf-8")
@@ -3122,6 +3138,14 @@ def test_the_charter_example_is_a_charter_steward_accepts(
 
     assert result.exit_code == 0, result.output
     assert not nas.touched
+
+
+def test_the_readme_carries_the_cli_s_charter_example_verbatim() -> None:
+    """The README's charter block is a copy, and a copy is a thing that drifts.
+
+    Both are the documentation of `--charter`, so they have to be the same bytes: the
+    test above proves one of them works, and this is what makes that cover the other.
+    """
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert cli.CHARTER_EXAMPLE in readme, "README's charter block has drifted from the CLI's"
 
