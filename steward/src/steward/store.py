@@ -410,6 +410,28 @@ def _dumps(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _resident_claim(row: sqlite3.Row) -> ResidentClaim:
+    """Read one claim row back. Column by column, like every other record here.
+
+    :class:`~steward.claims.ResidentClaim` lives in :mod:`steward.claims` rather than beside
+    the other records in this module, because the scheduler needs it and this module imports
+    the scheduler. So it gets a function rather than a ``from_row`` classmethod — the reading
+    is still explicit, which is what matters: a column added to the table later is a column
+    this function does not pass, not a ``TypeError`` on the next read.
+    """
+    return ResidentClaim(
+        resident_id=row["resident_id"],
+        token=row["token"],
+        holder=row["holder"],
+        claimed_at=row["claimed_at"],
+        heartbeat_at=row["heartbeat_at"],
+        kind=row["kind"],
+        ref=row["ref"],
+        run_id=row["run_id"],
+        released_at=row["released_at"],
+    )
+
+
 def _loads(raw: str, fallback: object) -> Any:  # noqa: ANN401 — JSON is Any by nature
     try:
         return json.loads(raw)
@@ -2742,7 +2764,7 @@ class Store:
             row = self._conn.execute(
                 "SELECT * FROM resident_claims WHERE resident_id = ?", (resident_id,)
             ).fetchone()
-        return ResidentClaim(**dict(row))
+        return _resident_claim(row)
 
     def renew_resident_claim(self, resident_id: str, *, token: str, now: str | None = None) -> bool:
         """Stamp a claim's heartbeat. ``False`` means this token no longer holds it.
@@ -2782,7 +2804,7 @@ class Store:
             row = self._conn.execute(
                 "SELECT * FROM resident_claims WHERE resident_id = ?", (resident_id,)
             ).fetchone()
-        return ResidentClaim(**dict(row)) if row is not None else None
+        return _resident_claim(row) if row is not None else None
 
     def session_principal(self, credential: str, *, fresh_since: str) -> SessionPrincipal | None:
         """Return who a session credential is, or ``None`` if it is not a live one.

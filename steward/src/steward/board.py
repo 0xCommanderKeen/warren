@@ -48,7 +48,7 @@ reconstructible from those four events alone.
 
 import contextlib
 import logging
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cached_property
@@ -58,7 +58,7 @@ from typing import cast
 from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
-from steward.claims import ClaimHeld, ClaimRefused, ResidentClaims
+from steward.claims import ClaimHeld, ClaimRefused, ResidentClaims, stale_before
 from steward.deploy import placement_for
 from steward.manifest import (
     DEFAULT_BOARD_LEASE_S,
@@ -1056,7 +1056,7 @@ class Dispatcher:
         *,
         pick: Callable[[Resident, datetime], JobRecord | None],
         count_for: Callable[[Resident], int],
-        kind: str = "",
+        kind: str,
     ) -> list[BoardReport]:
         """Let each un-refused resident claim and work up to its cap. Never raises.
 
@@ -1068,32 +1068,44 @@ class Dispatcher:
         *per claim*, not once, so a slow drain's Nth lease is measured from when it was
         actually handed out rather than from the top of the dispatch (steward #73).
 
-        The resident's cross-process session claim is taken *before* ``pick``, and held for
-        the whole of its turn. Before, because a task claimed and then not worked would sit
-        leased to a resident that never started it; and for the whole turn, because the cap
-        lets one resident work several tasks in a row and each of them is a session. A
-        resident somebody else is already running is skipped with a line saying who has it,
-        which is what this loop already does for every other reason not to work.
+        The resident's cross-process session claim (warren#111) is taken *before* ``pick``,
+        and held for the whole of its turn — for the turn because the cap lets one resident
+        work several tasks in a row and each of them is a session, and before ``pick``
+        because the alternative is worse. Claiming after a task is picked means a task that
+        was leased to a resident this dispatch then discovers it may not run: the notice sits
+        `claimed` by somebody who never started it until its lease expires, which is minutes
+        of the board saying something untrue. That is the failure this whole seam exists to
+        prevent, so the order is not negotiable.
+
+        It is not free, and the cost is worth naming: a resident with nothing waiting is
+        claimed and released anyway, for as long as one indexed ``claim_next_job`` takes, and
+        another process attempting a fire inside that window is refused a run it could have
+        had. Sub-millisecond, once per resident per source per tick, against a lease measured
+        in minutes — and the refusal is reported with a reason naming this dispatch, so it is
+        a visible skip rather than a mystery. The trade is deliberate.
+
+        A resident somebody else is already running is skipped with a line saying who has it,
+        which is what this loop already does for every other reason not to work. ``INFO``
+        rather than the ``WARNING`` its neighbour uses, and for a reason: an admission refusal
+        is something wrong with the resident, while "the scheduler is running it right now" is
+        a healthy fleet doing its job, and ``steward board dispatch`` prints at ``INFO``
+        anyway so an operator still sees it.
         """
         reports: list[BoardReport] = []
         for resident in residents:
             if resident.id in refusals:
                 continue
-            with self._session_claim(resident, kind) as claim:
+            claimed = (
+                self.claims.hold(resident.id, kind=kind)
+                if self.claims is not None
+                else contextlib.nullcontext(ClaimHeld())
+            )
+            with claimed as claim:
                 if isinstance(claim, ClaimRefused):
                     log.info("%s: not working — %s", resident.id, claim.reason)
                     continue
                 reports.extend(self._drain_one(resident, moment, admissions, pick, count_for))
         return reports
-
-    @contextlib.contextmanager
-    def _session_claim(self, resident: Resident, kind: str) -> Iterator[ClaimHeld | ClaimRefused]:
-        """Hold this resident's cross-process claim, or nothing at all when none is configured."""
-        if self.claims is None:
-            yield ClaimHeld()
-            return
-        with self.claims.hold(resident.id, kind=kind) as claim:
-            yield claim
 
     def _drain_one(
         self,
@@ -1240,9 +1252,17 @@ class Dispatcher:
         """Return why a rehearsal shows this resident claiming nothing, writing nothing.
 
         Read-only on purpose: a real refusal *pauses* an exhausted resident and knocks at a
-        door, and a rehearsal must do neither. It reports an existing pause or a missing
-        workdir, and leaves the trip-check to the real dispatch.
+        door, and a rehearsal must do neither. It reports an existing pause, a live session
+        claim, or a missing workdir, and leaves the trip-check to the real dispatch.
+
+        The session claim is read here rather than taken, and it belongs here for the same
+        reason the pause does: a rehearsal that answered "would claim task 7" for a resident
+        another process is running would be rehearsing something that cannot happen. Reading
+        one costs a ``SELECT`` and writes nothing, which is the whole rule for this path.
         """
         if self.store.budget_pause(resident.id) is not None:
             return "paused"
+        claim = self.store.resident_claim(resident.id)
+        if claim is not None and claim.live_at(stale_before()):
+            return f"already running — {claim.describe()}"
         return workdir_refusal(resident, self.workdir, self.library)

@@ -257,6 +257,50 @@ def test_a_heartbeat_that_finds_the_claim_gone_stops_beating(store: Store, caplo
     assert "no longer holds the resident claim" in caplog.text
 
 
+def test_a_heartbeat_that_loses_to_its_own_shutdown_says_nothing(caplog):
+    """The hold ended and released the claim; a beat still in flight is not a reclaim.
+
+    Calling that "another process reclaimed it" would be steward reporting an incident that
+    did not happen, at the exact moment a perfectly ordinary session ended.
+    """
+    stop = threading.Event()
+
+    class ReleasingStore(BrokenStore):
+        """Ends the hold underneath the beat, exactly as ``_release`` would."""
+
+        def renew_resident_claim(self, *_args: object, **_kwargs: object) -> bool:
+            stop.set()
+            return False
+
+    claims = ResidentClaims(ReleasingStore(), heartbeat_every_s=0.01)
+    with caplog.at_level("WARNING"):
+        beating = threading.Thread(target=claims._beat, args=("hob", "token", stop))
+        beating.start()
+        beating.join(timeout=5.0)
+    assert not beating.is_alive()
+    assert "no longer holds the resident claim" not in caplog.text
+
+
+def test_a_hold_that_cannot_start_its_heartbeat_gives_the_claim_back(
+    store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    """The claim is written before the thread exists, so the thread's failure must free it.
+
+    A row nothing ever releases would refuse the resident for a full grace window over an
+    error the operator never saw.
+    """
+
+    def no_threads_left(_self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", no_threads_left)
+    claims = ResidentClaims(store, heartbeat_every_s=3600.0)
+    with pytest.raises(RuntimeError, match="can't start new thread"), claims.hold("hob"):
+        pytest.fail("the body must not run when the heartbeat could not be started")
+    assert claims.holder("hob") is None
+    assert claims_row(store, "hob").released_at is not None
+
+
 # --------------------------------------------------------------------------------------
 # two real processes
 # --------------------------------------------------------------------------------------

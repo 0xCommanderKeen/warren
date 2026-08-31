@@ -14,12 +14,14 @@ the morning summary.
 
 **One run per routine at a time, and one session per resident.** An overlapping fire is
 skipped and logged, never queued. A queue would turn "Hob is doing the hourly inbox read"
-into a backlog of sessions claiming to be hourly. Two routines of the same resident are
-serialised rather than skipped — they are different work, and the second one is not a
-duplicate of the first. Both guards used to be ``threading.Lock``s, which the API's manual
-runs, ``steward board dispatch`` and a chat daemon could not see; the resident half is now
-a durable claim in the shared database that every firing process honours
-(:mod:`steward.claims`, warren#111).
+into a backlog of sessions claiming to be hourly. Two routines of one resident that come due
+together are *serialised* here rather than skipped — they are different work, and the second
+is not a duplicate of the first. Both guards used to be ``threading.Lock``s, which the API's
+manual runs, ``steward board dispatch`` and a chat daemon could not see; the resident half is
+now a durable claim in the shared database that every firing process honours
+(:mod:`steward.claims`, warren#111). Serialising is *this* module's answer, not the rule
+everywhere: a run-now asks for a session at a moment, so the API refuses it instead
+(:class:`steward.api.ManualRuns`).
 
 **Restart changes nothing.** The last fire time of every routine is persisted (default
 ``.steward/state/scheduler.json``), so restarting neither re-fires what already ran nor

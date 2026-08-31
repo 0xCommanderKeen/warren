@@ -486,6 +486,34 @@ def test_a_run_now_is_refused_while_another_process_runs_the_resident(
     assert len(refused) == 1, "a run somebody asked for and did not get is still a fact"
 
 
+def test_a_run_now_for_a_second_routine_of_a_busy_resident_is_refused(
+    api: ApiFactory, tmp_path: Path, claim_holder: ClaimHolderSpawner
+) -> None:
+    """The deliberate difference from the scheduler, tested so it cannot drift silently.
+
+    The scheduler serialises two routines of one resident; a run-now is asking for a session
+    *now*, and the honest answer while the resident is busy is that it cannot have one.
+    """
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["routines"].append(
+        {
+            "id": "inbox-read",
+            "schedule": "15 * * * *",
+            "prompt": "Read the mail.",
+            "timeout_s": 60,
+        }
+    )
+    database = tmp_path / "steward.db"
+    harness = api(manifest=manifest, db_path=database)
+    claim_holder(database, "test-agent", ref="daily-summary", run_id="held-run")
+
+    response = harness.client.post("/residents/test-agent/routines/inbox-read/run")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "already_running"
+    assert "daily-summary" in response.json()["detail"]["message"]
+
+
 def test_a_run_now_goes_ahead_once_the_other_process_lets_go(
     api: ApiFactory, tmp_path: Path, claim_holder: ClaimHolderSpawner
 ) -> None:

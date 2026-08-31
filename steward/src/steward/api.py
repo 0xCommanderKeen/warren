@@ -58,7 +58,7 @@ from steward import manifest as m
 from steward.approvals import WithheldValueError, redact_decision, restore_withheld
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
-from steward.claims import ResidentClaims
+from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
 from steward.deploy import Transport
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
@@ -551,14 +551,26 @@ class ManualRuns:
     can tell work steward decided to do from work a human asked for (steward #23).
 
     The scheduler's other promise carries over too, now in both halves: one run per routine
-    at a time here, and one session per resident across every process, read from the
-    scheduler's own claim (:mod:`steward.claims`). A second run-now while the first is
-    still going is refused with a 409 rather than queued, because a queue would let the
-    village show an hourly routine as a backlog.
+    at a time here, and one session per resident across every process
+    (:mod:`steward.claims`). A second run-now while the first is still going is refused with
+    a 409 rather than queued, because a queue would let the village show an hourly routine as
+    a backlog.
+
+    Worth saying plainly, because it differs from the scheduler: a run-now for routine *B*
+    while routine *A* of the same resident is going is refused too, not serialised. The
+    scheduler serialises those, and should — it is executing a schedule, and both occurrences
+    are work it already decided to do. A human at the door is asking for a session *now*, and
+    "now" is the one thing steward cannot give while the resident is busy. Telling them so is
+    the honest answer; holding the request open until the resident frees up is the queue this
+    whole rule exists to refuse.
     """
 
     scheduler: Scheduler
     store: Store
+    #: The cross-process claim this surface reads before accepting. Defaults to the one the
+    #: scheduler it fires through will actually take, so the read and the take can never
+    #: disagree about which claim is being talked about.
+    claims: ResidentClaims | None = None
     max_workers: int = 4
     _pool: ThreadPoolExecutor = field(init=False)
     _inflight: set[str] = field(default_factory=set, init=False)
@@ -566,7 +578,9 @@ class ManualRuns:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
     def __post_init__(self) -> None:
-        """Open the small pool manual runs execute on."""
+        """Open the small pool manual runs execute on, and settle which claim to read."""
+        if self.claims is None:
+            self.claims = self.scheduler.claims
         self._pool = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="run-now")
 
     def submit(self, item: ScheduledRoutine, request_id: str) -> None:
@@ -578,12 +592,11 @@ class ManualRuns:
         settles a race two reads could both pass. So a refusal here is never wrong, and a
         pass here is not yet a promise.
         """
-        claims = self.scheduler.claims
-        holder = claims.holder(item.resident.id) if claims is not None else None
+        holder = self.claims.holder(item.resident.id) if self.claims is not None else None
         if holder is not None:
             raise AlreadyRunningError(
-                f"{item.resident.id} is already running — {holder.describe()}; steward runs "
-                "one session per resident at a time, so ask again when it has finished"
+                f"{item.resident.id} is already running — {holder.describe()}; "
+                f"{ONE_SESSION_PER_RESIDENT}, so ask again when it has finished"
             )
         with self._lock:
             if item.key in self._inflight:
@@ -1213,6 +1226,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     # harvested and its pending decisions are delivered into its preamble, exactly as they
     # are on a scheduled fire. Without these a run-now silently dropped both while still
     # reporting "ran" — and this is burrow's primary write path.
+    # The one-session-per-resident claim (:mod:`steward.claims`, warren#111). The API is the
+    # *other* process the scheduler daemon has never been able to see, so this is the surface
+    # the issue is named after. One object for this process, handed to everything here that
+    # could ever open a session, so the two can never hold different ideas of who is busy.
+    claims = ResidentClaims(db)
     hooks = Dispatcher.from_path(
         residents_dir,
         db,
@@ -1221,13 +1239,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         runner_factory=runner_factory,
         library=library,
         guard=guard,
+        claims=claims,
     )
-    # The one-session-per-resident claim, shared by the two things in this process that can
-    # start a session: a manual fire and the board dispatch the hooks above run
-    # (:mod:`steward.claims`, warren#111). The API is the *other* process the scheduler
-    # daemon has always been unable to see, so this is the surface the issue is about.
-    claims = ResidentClaims(db)
-    hooks.claims = claims
     runs = ManualRuns(
         scheduler=Scheduler(
             [],
@@ -1242,6 +1255,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             claims=claims,
         ),
         store=db,
+        claims=claims,
     )
 
     @asynccontextmanager

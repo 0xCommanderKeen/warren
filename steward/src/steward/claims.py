@@ -25,6 +25,12 @@ notion of "the holder is dead" rather than two.
 when the claim was taken, so a process that was declared dead and came back cannot renew or
 release the claim that replaced it — the same trick ``owner_token`` plays for run closes.
 
+**The lease is measured on wall clocks, and they have to agree.** Every process writes its
+own ``now`` and judges staleness against its own ``now``, so a clock more than
+:data:`CLAIM_GRACE_S` ahead of its neighbours could declare a live holder dead. That is the
+same assumption ``close_stale_run`` and the watchdog already make about the same file, and
+the same answer: the burrows steward runs on keep their clocks in step.
+
 **A claim steward cannot take is not a session steward refuses.** An unreachable database
 is a warning and the caller runs, exactly as an unwritable run registry is
 (:meth:`steward.scheduler.Scheduler._open_run`: "a lost row is not a lost run"). The claim
@@ -58,11 +64,13 @@ from steward.run_lifecycle import RUN_HEARTBEAT_EVERY_S, RUN_LEASE_GRACE_S
 __all__ = [
     "CLAIM_GRACE_S",
     "CLAIM_HEARTBEAT_EVERY_S",
+    "ONE_SESSION_PER_RESIDENT",
     "ClaimHeld",
     "ClaimRefused",
     "ClaimStore",
     "ResidentClaim",
     "ResidentClaims",
+    "stale_before",
     "this_process",
 ]
 
@@ -78,6 +86,19 @@ CLAIM_GRACE_S = RUN_LEASE_GRACE_S
 #: eight beats inside one grace window means a claim survives a slow database, a starved
 #: thread, or a long pause without its holder being declared dead.
 CLAIM_HEARTBEAT_EVERY_S = RUN_HEARTBEAT_EVERY_S
+
+#: The rule itself, in one clause, so the scheduler's log line, the API's 409 and anything
+#: chat writes are all quoting the same sentence rather than three paraphrases of it.
+ONE_SESSION_PER_RESIDENT = "steward runs one session per resident at a time"
+
+
+def stale_before(now: datetime | None = None, *, grace_s: float = CLAIM_GRACE_S) -> str:
+    """Return the cutoff a holder's heartbeat must be newer than to still hold the claim.
+
+    The one definition of "this holder is gone", so a reader — ``steward doctor``, say —
+    judges a claim by exactly the arithmetic the writer used to defend it.
+    """
+    return utc_now_iso((now or datetime.now(UTC)) - timedelta(seconds=grace_s))
 
 
 def this_process() -> str:
@@ -112,9 +133,14 @@ class ResidentClaim:
         return self.released_at is None and self.heartbeat_at > stale_before
 
     def describe(self) -> str:
-        """Name what is running, in the words a refusal is written in."""
-        named = f"{self.kind} {self.ref!r}".strip() if self.ref else ""
-        subject = named or f"a {self.kind} session".replace("  ", " ")
+        """Name what is running, in the words a refusal is written in.
+
+        Every part is optional except the holder and the moment, because a caller that knows
+        only "this resident is busy" must still produce a sentence — a refusal that named
+        nothing would send an operator to the logs to find out what it meant.
+        """
+        kind = self.kind or "steward"
+        subject = f"{kind} {self.ref!r}" if self.ref else f"a {kind} session"
         run = f" (run {self.run_id})" if self.run_id else ""
         return f"{subject}{run} held by {self.holder} since {self.claimed_at}"
 
@@ -124,7 +150,7 @@ class ClaimStore(Protocol):
 
     A structural protocol rather than an import of :class:`steward.store.Store`, for the
     usual reason in this codebase and one extra: ``Store`` imports the scheduler and the
-    scheduler needs this module. What satisfies it in production is that ``Store``.
+    scheduler needs this module. What satisfies it is that ``Store``.
     """
 
     def claim_resident(  # noqa: PLR0913 — one parameter per fact the claim records
@@ -239,10 +265,11 @@ class ResidentClaims:
         """
         token = str(uuid.uuid4())
         taken = self._take(resident_id, token=token, kind=kind, ref=ref, run_id=run_id)
-        if isinstance(taken, ClaimRefused) or taken.claim is None:
-            # Refused, or running unclaimed because the store could not be written. Neither
-            # has anything to beat for or give back.
-            yield taken
+        if isinstance(taken, ClaimRefused):
+            yield taken  # somebody else has this resident; nothing was written to give back
+            return
+        if taken.claim is None:
+            yield taken  # the store could not be written, so there is no claim to keep alive
             return
         stop = threading.Event()
         thread = threading.Thread(
@@ -251,12 +278,16 @@ class ResidentClaims:
             name=f"steward-claim-{resident_id}",
             daemon=True,
         )
-        thread.start()
+        # Inside the ``try`` from here on. A ``start()`` that raised — thread exhaustion is
+        # the realistic one — outside it would leave a row nothing ever releases, and the
+        # resident refused for a whole grace window over an error nobody could see.
         try:
+            thread.start()
             yield taken
         finally:
             stop.set()
-            thread.join(timeout=self.heartbeat_every_s)
+            if thread.ident is not None:  # a thread that never started cannot be joined
+                thread.join(timeout=self.heartbeat_every_s)
             self._release(resident_id, token)
 
     # -- the three writes ----------------------------------------------------------------
@@ -294,23 +325,32 @@ class ResidentClaims:
             resident_id=resident_id,
             holder=holder,
             reason=(
-                f"{resident_id} already has a live session{held}; steward runs one session "
-                "per resident at a time and skips the overlap rather than queueing it"
+                f"{resident_id} already has a live session{held}; {ONE_SESSION_PER_RESIDENT} "
+                "and skips the overlap rather than queueing it"
             ),
         )
 
     def _beat(self, resident_id: str, token: str, stop: threading.Event) -> None:
-        """Say this process is still here, until the block ends or the claim is lost."""
+        """Say this process is still here, until the block ends or the claim is lost.
+
+        A renew that comes back ``False`` means one of two very different things, and the
+        difference is exactly whether ``stop`` is set. Unset, the claim was reclaimed under a
+        running session and somebody should hear about it. Set, the block has already ended
+        and :meth:`_release` has run — a beat that lost a race with its own shutdown, which
+        is not news. Reporting that as a reclaim would be steward describing work that is not
+        happening, which is the one thing this codebase refuses to do.
+        """
         while not stop.wait(self.heartbeat_every_s):
             try:
                 if not self.store.renew_resident_claim(
                     resident_id, token=token, now=utc_now_iso(self.clock())
                 ):
-                    log.warning(
-                        "%s: this session no longer holds the resident claim; another "
-                        "process reclaimed it after the heartbeat went stale",
-                        resident_id,
-                    )
+                    if not stop.is_set():
+                        log.warning(
+                            "%s: this session no longer holds the resident claim; another "
+                            "process reclaimed it after the heartbeat went stale",
+                            resident_id,
+                        )
                     return
             except Exception as exc:  # noqa: BLE001 — a heartbeat must not kill the session
                 log.warning("%s: could not renew the session claim: %s", resident_id, exc)
@@ -335,5 +375,5 @@ class ResidentClaims:
     # -- helpers -------------------------------------------------------------------------
 
     def _stale_before(self) -> str:
-        """Return the cutoff a holder's heartbeat must be newer than to still hold."""
-        return utc_now_iso(self.clock() - timedelta(seconds=self.grace_s))
+        """Return this instance's staleness cutoff, on its own clock and its own grace."""
+        return stale_before(self.clock(), grace_s=self.grace_s)

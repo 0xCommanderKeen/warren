@@ -1680,6 +1680,31 @@ def test_a_rehearsing_dispatch_takes_no_claim(make_dispatcher: Dispatch, store: 
     assert store.resident_claim("test-agent") is None
 
 
+def test_a_rehearsal_reads_the_claim_and_plans_nothing_for_a_busy_resident(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A rehearsal says what *would* happen, so it must not promise a session that is refused.
+
+    Read, never taken — the same read-only shape ``budget_pause`` already gets on this path.
+    """
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+    store.post_job(title="Read the mail")
+    store.claim_resident(
+        "test-agent",
+        token="t",
+        holder="dxp2800:99",
+        kind="routine",
+        ref="daily-summary",
+        stale_before=ev.utc_now_iso(),
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert run.planned == ()
+    assert store.jobs("open")[0].title == "Read the mail", "and the notice is still there"
+
+
 def test_a_rehearsal_is_built_with_no_claims_at_all(store: Store, tmp_path: Path) -> None:
     """``dry_run`` is the one construction that gets none, so it cannot write by accident."""
     assert b.Dispatcher(residents=[], store=store, workdir=tmp_path, dry_run=True).claims is None

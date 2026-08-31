@@ -537,13 +537,19 @@ down:
   `--catchup-seconds`) is not run at all. A daemon that was down all morning does not
   run the 7am summary at noon and call it the morning summary.
 - **One run per routine at a time, and one session per resident.** An overlapping fire is
-  skipped and logged, never queued. Two routines of the same resident are serialised rather
-  than skipped — they are different work. The per-resident half is a durable claim in
-  `steward.db` (`resident_claims`), so the promise holds across processes: a manual run
-  from the API, a `steward board dispatch`, and the scheduler daemon all honour the same
-  claim, and whichever asks second is refused with a reason naming what is running. The
-  claim is a *lease* — it is kept alive by a heartbeat and becomes reclaimable two minutes
+  skipped and logged, never queued. Two routines of one resident that come due together are
+  *serialised* by the scheduler rather than skipped — they are different work, and the
+  second is not a duplicate of the first.
+  The per-resident half is a durable claim in `steward.db` (`resident_claims`), so the
+  promise holds across processes too: the scheduler daemon, a run-now over the API and a
+  `steward board dispatch` all honour the same claim, and whichever asks second is refused
+  with a reason naming what is running. Refused, not queued, and that is the difference
+  between the two halves — the scheduler can serialise occurrences it already decided to
+  run, while a run-now asks for a session *now* and is told when it cannot have one
+  ([`POST …/run`](api.md#post-residentsidroutinesidrun) answers `409 already_running`).
+  The claim is a *lease*: a heartbeat keeps it alive and it becomes reclaimable two minutes
   after its holder stops beating, so a crashed daemon cannot wedge a resident.
+  `steward doctor` prints who holds each resident, and says so when a claim is stale.
 - **Restart changes nothing.** Last-fire state lives in `.steward/state/scheduler.json`
   (`--state`, `$STEWARD_STATE`), so a restart neither re-fires nor duplicates. A routine
   seen for the first time is anchored at that moment and fires at its *next* occurrence.

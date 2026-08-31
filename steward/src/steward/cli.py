@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +36,7 @@ from steward.approvals import (
 )
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
-from steward.claims import CLAIM_GRACE_S, ResidentClaims
+from steward.claims import ResidentClaims, stale_before
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError, placement_for
 from steward.health import HealthFailure
@@ -763,11 +763,10 @@ def _report_session_claim(resident: Resident, store: Store) -> int:
     claim = store.resident_claim(resident.id)
     if claim is None:
         return 0
-    now = datetime.now(UTC)
     if claim.released_at is not None:
         click.secho(f"{resident.id}: no session running", fg="bright_black")
         return 0
-    if claim.live_at(ev.utc_now_iso(now - timedelta(seconds=CLAIM_GRACE_S))):
+    if claim.live_at(stale_before()):
         click.secho(f"{resident.id}: running — {claim.describe()}", fg="green")
         return 0
     click.secho(
