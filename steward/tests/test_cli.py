@@ -945,6 +945,19 @@ def scheduler_args(path: Path, tmp_path: Path) -> list[str]:
     ]
 
 
+def seed_anchor(tmp_path: Path, key: str, ago: timedelta) -> Path:
+    """Write a state file whose anchor for ``key`` is already that far in the past.
+
+    First sight anchors a routine at *now*, so nothing is ever due against a state file
+    that has never been written — which is the right answer and a useless fixture. Every
+    test that needs a routine to actually be due says so here.
+    """
+    state = SchedulerState(path=tmp_path / "state.json")
+    state.set_anchor(key, datetime.now(UTC) - ago)
+    state.save()
+    return state.path
+
+
 def mock_resident() -> dict:
     data = valid_manifest()
     data["runner"] = {"kind": "mock", "model": "pretend"}
@@ -1005,6 +1018,8 @@ def test_scheduler_dry_run_prints_the_prompt_and_emits_nothing(
     fallback = tmp_path / "events.jsonl"
     monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(fallback))
     path = write_resident(mock_resident())
+    state = seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
+    before = state.read_text(encoding="utf-8")
     result = runner.invoke(
         main, ["scheduler", "tick", *scheduler_args(path, tmp_path), "--dry-run"]
     )
@@ -1012,6 +1027,58 @@ def test_scheduler_dry_run_prints_the_prompt_and_emits_nothing(
     assert "would fire test-agent/inbox-read" in result.output
     assert "YOUR CHARTER (AUTHORITATIVE, LAST WORD)" in result.output
     assert not fallback.exists()
+    assert state.read_text(encoding="utf-8") == before  # a rehearsal anchors nothing
+
+
+@pytest.mark.parametrize("command", [("tick",), ("run",)])
+def test_scheduler_dry_run_rehearses_only_what_is_due(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    command: tuple[str, ...],
+) -> None:
+    """A rehearsal is a rehearsal of the *next tick*, so it answers the tick's question.
+
+    Printing every routine as "would fire" said something that was not true of any of
+    them, and it said it loudest on the fleet with the most routines — the operator
+    reading it cannot tell the 07:00 summary that is about to run from the one that runs
+    in nine hours (warren#90).
+    """
+    data = mock_resident()
+    data["routines"].append(
+        {
+            "id": "nightly",
+            "schedule": "0 4 * * *",
+            "prompt": "Sleep.",
+            "timeout_s": 60,
+            "enabled": True,
+        }
+    )
+    path = write_resident(data)
+    seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
+    result = runner.invoke(
+        main, ["scheduler", *command, *scheduler_args(path, tmp_path), "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "would fire test-agent/inbox-read" in result.output
+    assert "test-agent/nightly" not in result.output
+
+
+@pytest.mark.parametrize("command", [("tick",), ("run",)])
+def test_scheduler_dry_run_on_a_fresh_state_has_nothing_to_rehearse(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    command: tuple[str, ...],
+) -> None:
+    """First sight anchors at now, so nothing is due yet — and the rehearsal says so."""
+    path = write_resident(mock_resident())
+    result = runner.invoke(
+        main, ["scheduler", *command, *scheduler_args(path, tmp_path), "--dry-run"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing due" in result.output
+    assert "would fire" not in result.output
     assert not (tmp_path / "state.json").exists()
 
 
@@ -1019,6 +1086,7 @@ def test_scheduler_run_dry_run_does_not_loop(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:
     path = write_resident(mock_resident())
+    seed_anchor(tmp_path, "test-agent/inbox-read", timedelta(minutes=5))
     result = runner.invoke(main, ["scheduler", "run", *scheduler_args(path, tmp_path), "--dry-run"])
     assert result.exit_code == 0, result.output
     assert "would fire" in result.output
