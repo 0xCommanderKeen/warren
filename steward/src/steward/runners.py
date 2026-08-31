@@ -338,7 +338,7 @@ class Outcome(StrEnum):
 
 
 class RunnerError(Exception):
-    """Raised when a runner cannot be built from a manifest declaration."""
+    """Raised when a runner cannot be built, or placed, from a manifest declaration."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -370,6 +370,16 @@ class Placement:
     def is_container(self) -> bool:
         """True when sessions are placed inside the resident's own container."""
         return self.container is not None
+
+    @property
+    def container_name(self) -> str:
+        """Return the container's name, on the paths only reached when :attr:`is_container`.
+
+        The one place the ``str | None`` is narrowed: every caller is behind an
+        ``is_container`` guard, and spelling ``container or ""`` at each would restate
+        the invariant four times over.
+        """
+        return self.container or ""
 
     def describe(self) -> str:
         """One word or one name, for the line that answers 'where does Hob run'."""
@@ -684,7 +694,7 @@ class _ProcessRunner(Runner):
         fail ``steward doctor`` and the scheduler's startup check, not its next fire.
         """
         if self.placement.is_container:
-            return self._check_container(self.placement.container or "")
+            return self._check_container(self.placement.container_name)
         if not self.binary:
             return None
         if shutil.which(self.binary) is None:
@@ -836,22 +846,26 @@ class _ProcessRunner(Runner):
 
         Two deliberate differences from local placement:
 
-        - **The session sees only the named variables.** ``docker exec -e`` carries
-          ``request.env`` — the facts steward chose to tell this session — and nothing
-          else: no :data:`SESSION_ENV_BASE`, no passthrough, no control-plane
-          ``STEWARD_TOKEN``. The container already has its own environment from its
-          compose file and ``.env``, and the brain's credentials live on its
-          ``/root/.claude`` volume; the compose ``.env`` is the operator's hatch here,
-          where :data:`SESSION_ENV_PASSTHROUGH_ENV` is the local one.
+        - **The session sees only the named variables.** ``docker exec -e NAME`` — the
+          bare name, whose value docker reads from the *client's* environment (measured
+          against docker 27) — carries ``request.env``, the facts steward chose to tell
+          this session, and nothing else: no :data:`SESSION_ENV_BASE`, no passthrough,
+          no control-plane ``STEWARD_TOKEN``. By name and not ``NAME=value``, because
+          the values include the per-run session credential and an argv is readable in
+          any host ``ps`` for the life of the run. The container already has its own
+          environment from its compose file and ``.env``, and the brain's credentials
+          live on its ``/root/.claude`` volume; the compose ``.env`` is the operator's
+          hatch here, where :data:`SESSION_ENV_PASSTHROUGH_ENV` is the local one.
         - **``request.workdir_fd`` is ignored.** The descriptor pins a directory in the
           control plane's mount namespace, which means nothing across ``docker exec``;
           the working directory inside the container is the placement's own
           (``docker exec -w``), and the control plane keeps using the descriptor for
           what happens on its side of the mount (skills, journal).
 
-        The local ``docker`` client inherits the control plane's environment — it is a
-        control-plane tool, like the nursery's ``ssh``, and needs its own ``DOCKER_HOST``
-        and config; none of that environment crosses into the container.
+        The local ``docker`` client inherits the control plane's environment (plus the
+        named values above, for ``-e`` to read) — it is a control-plane tool, like the
+        nursery's ``ssh``, and needs its own ``DOCKER_HOST`` and config; none of that
+        environment crosses into the container beyond the named variables.
         """
         started = time.monotonic()
         argv = self.argv(request)
@@ -860,12 +874,13 @@ class _ProcessRunner(Runner):
         if self.placement.workdir:
             launch_argv += ["-w", self.placement.workdir]
         for name in sorted(request.env):
-            launch_argv += ["-e", f"{name}={request.env[name]}"]
-        launch_argv += [self.placement.container or "", "sh", "-c", _container_shim(pid_path)]
+            launch_argv += ["-e", name]
+        launch_argv += [self.placement.container_name, "sh", "-c", _container_shim(pid_path)]
         launch_argv += argv
         try:
             process = subprocess.Popen(  # noqa: S603 — argv list, shell=False
                 launch_argv,
+                env={**os.environ, **request.env},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 start_new_session=True,
@@ -884,19 +899,38 @@ class _ProcessRunner(Runner):
             # exact lie this launcher exists to refuse (steward #58). Once the group is
             # dead in there, the client exits by itself and the usual reap drains the
             # partial output it had already streamed.
-            self._kill_in_container(pid_path)
-            return _timeout_result(process, started=started, timeout_s=request.timeout_s)
+            undelivered = self._kill_in_container(pid_path)
+            result = _timeout_result(process, started=started, timeout_s=request.timeout_s)
+            if undelivered is not None:
+                # The ledger row still says timeout — steward did give up on the run —
+                # but the words must not claim a kill that may not have landed: a
+                # session possibly still burning tokens behind a clean "was killed" is
+                # the same lie in a different tense.
+                return replace(
+                    result,
+                    error=(
+                        f"{result.error}, but the kill inside container "
+                        f"{self.placement.container_name!r} could not be delivered "
+                        f"({undelivered}); the session may still be running there"
+                    ),
+                )
+            return result
         return self._conclude(process, raw_out, raw_err, started)
 
-    def _kill_in_container(self, pid_path: str) -> None:
+    def _kill_in_container(self, pid_path: str) -> str | None:
         """Kill the timed-out session's whole process group inside the container.
 
         The group kill is the real one — the recorded pid leads its own group, so
         ``kill -9 -<pid>`` takes the brain and every child it spawned. The direct kill is
         a fallback for a pid that somehow stopped leading a group, and the ``rm`` keeps a
-        dead run's pid file from shadowing a future one. Best effort by design: the
-        session may have exited in the race between the timeout and this call, and a
-        watchdog that crashes over a corpse is worse than the corpse.
+        dead run's pid file from shadowing a future one. A kill that finds no pid file or
+        no such process is success — the session is already gone.
+
+        Returns ``None`` when the kill command ran inside the container, and steward's
+        own one-line reason when it could not be delivered at all (no docker, a wedged
+        daemon, a container that stopped answering) — which the caller must surface,
+        because a timeout whose kill never arrived is a session that may still be
+        running.
         """
         script = (
             f'pid="$(cat {pid_path} 2>/dev/null)"; '
@@ -904,13 +938,15 @@ class _ProcessRunner(Runner):
             f'kill -9 -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null; fi; '
             f"rm -f {pid_path}"
         )
-        outcome = run_argv(["docker", "exec", self.placement.container or "", "sh", "-c", script])
-        if not outcome.ok:
-            log.warning(
-                "could not confirm the kill inside container %s: %s",
-                self.placement.container,
-                outcome.summary(),
-            )
+        outcome = run_argv(["docker", "exec", self.placement.container_name, "sh", "-c", script])
+        if outcome.ok:
+            return None
+        log.warning(
+            "could not deliver the kill inside container %s: %s",
+            self.placement.container,
+            outcome.summary(),
+        )
+        return outcome.summary()
 
 
 class ClaudeRunner(_ProcessRunner):
@@ -1273,7 +1309,7 @@ def _cli_help(binary: str, placement: Placement) -> str | None:
     PATH lookup is a stale answer waiting to be given to somebody who just upgraded.
     """
     argv = (
-        ["docker", "exec", placement.container or "", binary, "--help"]
+        ["docker", "exec", placement.container_name, binary, "--help"]
         if placement.is_container
         else [binary, "--help"]
     )

@@ -277,7 +277,7 @@ def memory_host_dir(manifest: ResidentManifest) -> Path:
     always had — and the host side of :func:`memory_mount` for a container-placed one,
     where ``memory.path`` names the mount point inside the container instead.
     """
-    if manifest.runner.placement == "container":
+    if manifest.runner.container_placed:
         host, _ = memory_mount(manifest)
         return Path(host).expanduser()
     return Path(manifest.memory.path).expanduser()
@@ -293,7 +293,7 @@ def placement_for(manifest: ResidentManifest) -> Placement:
     container placement with no declared ``deploy.container``, so the ``target_for``
     default here is only ever the declared name normalized through one spelling.
     """
-    if manifest.runner.placement != "container":
+    if not manifest.runner.container_placed:
         return LOCAL_PLACEMENT
     target = target_for(manifest)
     _, container_workdir = memory_mount(manifest)

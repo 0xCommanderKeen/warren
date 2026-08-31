@@ -1169,6 +1169,7 @@ def docker_stub(  # noqa: PLR0913 — one keyword per behaviour a test wants to 
     session: str = "json",
     running: str = "true",
     brain_probe: int = 0,
+    kill_status: int = 0,
     help_flags: str = "",
 ) -> Path:
     """Stub the ``docker`` CLI and return the log every invocation appends its argv to.
@@ -1200,7 +1201,7 @@ esac
 for a in "$@"; do
   case "$a" in
     *"command -v"*) exit {brain_probe} ;;
-    *"kill -9"*) exit 0 ;;
+    *"kill -9"*) exit {kill_status} ;;
     --help) printf '%s\\n' "{help_flags}"; exit 0 ;;
   esac
 done
@@ -1247,7 +1248,7 @@ def test_a_container_placed_session_execs_into_the_container(
 
     (call,) = docker_calls(log)
     assert call[:3] == ["exec", "-w", "/data/memory"]
-    assert call[3:7] == ["-e", "BURROW_AGENT_ID=cc:testy", "-e", "STEWARD_RUN_ID=run-42"]
+    assert call[3:7] == ["-e", "BURROW_AGENT_ID", "-e", "STEWARD_RUN_ID"]
     assert call[7:9] == [CONTAINER, "sh"]
     assert call[9] == "-c"
     shim = call[10]
@@ -1280,15 +1281,24 @@ def test_a_container_session_carries_only_the_named_variables(
     monkeypatch.setenv(r.SESSION_ENV_PASSTHROUGH_ENV, "ANTHROPIC_API_KEY")
     runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
 
-    runner.run(request_for(tmp_path, env={"STEWARD_RUN_ID": "run-9"}))
+    credential = "steward-session-not-for-any-ps"
+    runner.run(
+        request_for(
+            tmp_path,
+            env={"STEWARD_RUN_ID": "run-9", "STEWARD_SESSION_TOKEN": credential},
+        )
+    )
 
     (call,) = docker_calls(log)
     named = [call[index + 1] for index, part in enumerate(call) if part == "-e"]
-    assert named == ["STEWARD_RUN_ID=run-9"]
+    assert named == ["STEWARD_RUN_ID", "STEWARD_SESSION_TOKEN"]
     joined = "\n".join(call)
-    assert "STEWARD_TOKEN" not in joined
+    assert "STEWARD_TOKEN=" not in joined
     assert "ANTHROPIC_API_KEY" not in joined
-    assert "HOME=" not in joined
+    assert "HOME" not in joined
+    # By name, never NAME=value: the values include the per-run session credential, and
+    # an argv is readable in any host `ps` for the life of the run.
+    assert credential not in joined
 
 
 def test_a_container_timeout_is_a_kill_inside_the_container(
@@ -1315,6 +1325,28 @@ def test_a_container_timeout_is_a_kill_inside_the_container(
     assert 'kill -9 -"$pid"' in script
     assert "/run/steward/run-7.pid" in script
     assert "rm -f /run/steward/run-7.pid" in script
+    assert "could not be delivered" not in (result.error or "")
+
+
+def test_an_undeliverable_kill_is_said_out_loud(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A timeout whose kill never arrived is a session that may still be running.
+
+    The outcome stays timeout — steward did give up on the run — but the words must not
+    claim a kill that did not land; that would be the trap-(a) lie in a different tense.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path, session="hang", kill_status=1)
+    runner = r.build_runner(RunnerSpec(kind="claude"), PLACED)
+
+    result = runner.run(request_for(tmp_path, timeout_s=1, env={"STEWARD_RUN_ID": "run-8"}))
+
+    assert result.outcome is r.Outcome.TIMEOUT
+    assert result.error is not None
+    assert "could not be delivered" in result.error
+    assert "may still be running" in result.error
+    assert not result.error_is_child, "this is steward's own diagnostic, safe for an event"
+    assert len(docker_calls(log)) == 2
 
 
 def test_a_run_id_that_is_not_a_name_never_reaches_the_shim(

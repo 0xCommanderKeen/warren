@@ -82,7 +82,7 @@ def declared_directory(resident: Resident) -> Path | None:
     caller's fallback directory.
     """
     manifest = resident.manifest
-    if manifest.runner.placement == "container":
+    if manifest.runner.container_placed:
         return memory_host_dir(manifest)
     if manifest.memory.kind != "directory":
         return None
@@ -410,7 +410,7 @@ class SessionResult:
 
 def workdir_refusal(resident: Resident, fallback: Path, library: SkillLibrary) -> str | None:
     """Return why materializing skills in this resident's fallback would be unsafe."""
-    if resident.manifest.runner.placement == "container":
+    if resident.manifest.runner.container_placed:
         # A container-placed resident has no fallback to be unsafe *in*: its sessions
         # happen inside the container, and the host side of its memory mount is the only
         # place steward may journal and materialize. Missing means unprovisioned, and
@@ -534,7 +534,7 @@ class ResidentSessions:
                 try:
                     identity = self._observe_directory(declared)
                 except FileNotFoundError:
-                    if resident.manifest.runner.placement == "container":
+                    if resident.manifest.runner.container_placed:
                         return Refusal(unprovisioned_reason(resident))
                     identity = None
                 else:
@@ -717,7 +717,7 @@ class ResidentSessions:
     def _declared_reference(resident: Resident) -> str:
         """Name the directory a workdir refusal is about, on the side steward touches."""
         manifest = resident.manifest
-        if manifest.runner.placement == "container":
+        if manifest.runner.container_placed:
             return f"the memory mount's host side {str(memory_host_dir(manifest))!r}"
         return f"memory.path {manifest.memory.path!r}"
 

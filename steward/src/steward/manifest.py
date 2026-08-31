@@ -984,6 +984,16 @@ class Runner(_Model):
         description="Permission mode passed to the CLI; one of the modes it accepts.",
     )
 
+    @property
+    def container_placed(self) -> bool:
+        """True when this resident's sessions run inside its container.
+
+        The one spelling of the question: every branch that must pick a side of the
+        memory mount (steward #58) asks this rather than comparing the literal, so
+        "which placements exist" has a single home.
+        """
+        return self.placement == "container"
+
     @model_validator(mode="after")
     def _check_command_template(self) -> Self:
         placeholders = {
@@ -2155,7 +2165,7 @@ def _check_placement(manifest: ResidentManifest, source: Path) -> list[Diagnosti
       diagnostic in daylight rather than a 7am ``docker exec`` against a guess.
     """
     runner = manifest.runner
-    if runner.placement != "container":
+    if not runner.container_placed:
         return []
     if runner.kind in UNPLACEABLE_RUNNER_KINDS:
         reason = (

@@ -24,6 +24,7 @@ import pytest
 from steward import runners as r
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import ToolGrant
+from steward.skills import Skill, materialize
 
 UNRESTRICTED = ToolGrant("unrestricted")
 
@@ -175,3 +176,51 @@ def test_a_container_session_runs_in_the_mount_with_only_named_env_and_reports_c
     assert not _pid_file_exists(container, "run-int-ok"), (
         "an ordinary exit must remove its own pid file"
     )
+
+
+def test_a_granted_skill_crosses_the_mount_and_pruning_removes_it(tmp_path: Path) -> None:
+    """Criterion 5 across the real boundary: materialize host-side, read it from inside.
+
+    The control plane writes skills into the host side of the memory mount; the session
+    discovers them at the container's `.claude/skills` through the bind mount. And the
+    load-bearing half — a skill removed from the manifest is *gone* from the next
+    session — must hold across the same boundary, because pruning is how an ungranted
+    skill stops being a capability.
+    """
+    host_memory = tmp_path / "memory"
+    host_memory.mkdir()
+    name = f"steward-test-{secrets.token_hex(4)}"
+    try:
+        _docker(
+            "run",
+            "-d",
+            "--init",
+            "--name",
+            name,
+            "-v",
+            f"{host_memory}:/data/memory",
+            "alpine:3",
+            "sleep",
+            "300",
+            timeout=120,
+        )
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"docker cannot bind-mount {host_memory}: {exc.stderr.decode()[:200]}")
+    try:
+        granted = [
+            Skill(name="daily-summary", description="Summarise the day.", body="Do it."),
+            Skill(name="write-journal", description="Close the day.", body="Write it."),
+        ]
+        materialize(granted, host_memory, ".claude/skills")
+        inside = _docker("exec", name, "ls", "/data/memory/.claude/skills")
+        assert "daily-summary" in inside
+        assert "write-journal" in inside
+
+        materialize(granted[:1], host_memory, ".claude/skills")
+        inside = _docker("exec", name, "ls", "/data/memory/.claude/skills")
+        assert "daily-summary" in inside
+        assert "write-journal" not in inside
+    finally:
+        subprocess.run(  # noqa: S603 — cleanup must run even after a failure
+            [DOCKER, "rm", "-f", name], capture_output=True, check=False, timeout=60
+        )
