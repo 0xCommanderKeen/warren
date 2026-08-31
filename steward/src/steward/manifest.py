@@ -965,6 +965,15 @@ class Runner(_Model):
     """Which brain a resident runs on. Every session launch goes through this seam."""
 
     kind: Literal["claude", "codex", "command", "mock"] = "claude"
+    #: Where the session's process runs — an independent axis from ``kind``, which answers
+    #: *which brain*. Explicit, never inferred from ``deploy.container`` being present: a
+    #: resident can have a container for supervision while its sessions run on the control
+    #: plane, which is precisely the state of every resident deployed before steward #58,
+    #: and inferring would have silently relocated all of their execution.
+    placement: Literal["local", "container"] = Field(
+        default="local",
+        description="Where a session runs: on the control plane, or inside deploy.container.",
+    )
     model: str | None = Field(default=None, description="Model id passed to the CLI.")
     command: list[str] | None = Field(
         default=None,
@@ -1559,6 +1568,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "workspace": "workspace: [/data/library/books]  (absolute paths)",
     "runner": "runner: {kind: claude, model: claude-opus-5}",
     "runner.kind": "kind: claude  (claude | codex | command | mock)",
+    "runner.placement": "placement: local  (local | container)",
     "runner.model": "model: claude-opus-5",
     "runner.permission_mode": "permission_mode: acceptEdits  (a mode the CLI accepts)",
     "runner.command": "command: ['my-agent', '--prompt', '{prompt}', '--cwd', '{workdir}']",
@@ -2123,6 +2133,62 @@ def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> l
     ]
 
 
+#: Runner kinds a session cannot be placed in a container under. ``mock`` spawns nothing,
+#: so the declaration would read as containment while the "session" ran in-process; a
+#: ``command`` template substitutes ``{workdir}`` on the control plane, so its argv would
+#: run inside the container carrying a host path baked in. Both are the same failure the
+#: tools refusals exist for: a declaration somebody reads that holds nothing.
+UNPLACEABLE_RUNNER_KINDS = frozenset({"mock", "command"})
+
+
+def _check_placement(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse a container placement steward could not honestly hold (steward #58).
+
+    Two refusals, both at validation time because both fail silently at run time:
+
+    - ``placement: container`` under a kind in :data:`UNPLACEABLE_RUNNER_KINDS` — the
+      manifest would read as "sessions happen inside the container" while they did not,
+      or did with the wrong working directory substituted in.
+    - ``placement: container`` with no ``deploy.container``. The address must be written
+      down: the nursery's default name is what it *would* create, and relocating a
+      resident's execution should never hang off a name nobody wrote. Refusing here is a
+      diagnostic in daylight rather than a 7am ``docker exec`` against a guess.
+    """
+    runner = manifest.runner
+    if runner.placement != "container":
+        return []
+    if runner.kind in UNPLACEABLE_RUNNER_KINDS:
+        reason = (
+            "spawns no process for a container to hold"
+            if runner.kind == "mock"
+            else "substitutes {workdir} with a control-plane path the container does not have"
+        )
+        return [
+            Diagnostic(
+                file=source,
+                field_path="runner.placement",
+                problem=(
+                    f"placement 'container' under runner kind {runner.kind!r} declares a "
+                    f"containment that cannot hold: {runner.kind!r} {reason}"
+                ),
+                example="runner: {kind: claude, placement: container}",
+            )
+        ]
+    if not manifest.deploy.container:
+        return [
+            Diagnostic(
+                file=source,
+                field_path="runner.placement",
+                problem=(
+                    "placement 'container' needs deploy.container to name the container "
+                    "sessions run in; steward will not exec into a defaulted name"
+                ),
+                example="deploy: {container: steward-" + manifest.id + "}",
+            )
+        ]
+    return []
+
+
 def _check_delegation(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     """Check that the delegation block says something, and does not say it about itself.
 
@@ -2444,6 +2510,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))
     diagnostics.extend(_check_workspace_is_reachable(manifest, source))
+    diagnostics.extend(_check_placement(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
 
