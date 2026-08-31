@@ -1,12 +1,12 @@
-# burrow
+# chronicle
 
 The backend behind a living village that shows what your AI agents are actually doing.
 
 Each real agent — the one summarizing your day, reviewing your code, reading your email, researching, or supervising the others — is a villager with a house. When an agent works, its villager works. When it's idle, it rests. When it needs you, it walks to your door and knocks.
 
-**burrow is not a game and not a simulation.** It is an ambient interface to a real agent fleet. The village is a projection of live events; it never invents behavior.
+**chronicle is not a game and not a simulation.** It is an ambient interface to a real agent fleet. The village is a projection of live events; it never invents behavior.
 
-**burrow runs no browser code.** It is the event protocol, the log, the projection and the
+**chronicle runs no browser code.** It is the event protocol, the log, the projection and the
 HTTP API, in Python. Every UI is a separate client consuming the versioned state contract:
 **Arcadia** renders the pixel-art village, **Townhall** is the control panel. Requests for
 paths this repository used to serve a viewer on now 404 — see
@@ -21,12 +21,12 @@ paths this repository used to serve a viewer on now 404 — see
 
 ## Architecture (four layers)
 
-1. **The fleet** — real agents, running wherever they run. burrow does not own them.
+1. **The fleet** — real agents, running wherever they run. chronicle does not own them.
 2. **Event protocol** — agents emit structured events (`task_started`, `tool_called`, `artifact_produced`, `needs_human`, `idle`). This is the core of the project; everything else consumes it.
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
 4. **Clients** — pixel-art renderers and control panels, each its own project. They read
    complete snapshots from `/state` and `/state/stream` and render them; they never fold raw
-   events. burrow ships none of them.
+   events. chronicle ships none of them.
 
 ## What one snapshot carries
 
@@ -96,7 +96,7 @@ newer ones pushed it out, not because a timer retired it.
 
 Every write in the fleet — posting a job, deciding an approval, declaring a resident,
 running a routine — is a client talking to Steward with a credential a human typed at
-runtime. burrow has no outbound Steward client, proxies nothing to it, and holds no
+runtime. chronicle has no outbound Steward client, proxies nothing to it, and holds no
 credentials of its own. A write reaches this service only later, as the event that write
 produced.
 
@@ -127,7 +127,7 @@ There is one supported setup path for both Claude Code and Codex:
    installed bundle; Codex adds `--runner codex`.
 3. Add or edit `villagers/*.resident.json`, then validate every manifest with
    `python3 -m unittest tests.test_residents`. App-grant references and status
-   references describe public configuration/health locations only. Burrow never
+   references describe public configuration/health locations only. Chronicle never
    stores app credentials; those stay in the owning app or secret store.
 4. Run the authoritative test suite with `sh tests/run.sh`.
 5. Deploy the exact tested tree with the tar-over-SSH command below and restart
@@ -153,12 +153,20 @@ The NAS has no git installed and holds no clone: `~/docker/burrow/app` is an
 unpacked copy of the tree the tar below carried. Nothing there pulls — every
 deploy is pushed from a machine that has the repo checked out.
 
+> **The `BURROW_*` spellings below still work.** Every setting here is read under
+> both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name, with the new one
+> winning where both are set, so the compose file and `.env` already on the NAS
+> keep working across this deploy and can be re-spelled whenever it suits. The
+> deployed *paths* — `~/docker/burrow`, the `/burrow/` proxy prefix,
+> `~/.burrow/` — are deliberately not renamed here; they are directory names the
+> NAS already has, not identifiers, and moving them is a separate operator step.
+
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:
   `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
   `uv sync --frozen --no-dev` and runs `uv run uvicorn serve:app --host 0.0.0.0 --port 8737`
-  with `BURROW_HOST=0.0.0.0`,
-  `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
+  with `CHRONICLE_HOST=0.0.0.0`,
+  `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_TOKEN=<shared secret>`. Deploy code
   and all runtime support and resident manifests with the authoritative
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
   retention-policy.json
@@ -184,33 +192,36 @@ deploy is pushed from a machine that has the repo checked out.
   in [docs/state-contract.md](docs/state-contract.md).
   Development proxies and external-client production state routing are documented in
   [docs/ui-clients.md](docs/ui-clients.md).
-- **Mac emitter** — the installed `burrow-emit` bundle described in the
+- **Mac emitter** — the installed `chronicle-emit` bundle described in the
   [protocol guide](docs/protocol.md#installed-emitter-bundle), wired into
   `~/.claude/settings.json` hooks
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`,
   `SubagentStart`, `SubagentStop`, `SessionEnd`) with
-  `BURROW_URL=http://dxp2800:8737` and `BURROW_TOKEN=<same
+  `CHRONICLE_URL=http://dxp2800:8737` and `CHRONICLE_TOKEN=<same
   secret>`. Off the tailnet it records the privacy-filtered event in the bounded
-  durable primary outbox and `~/.burrow/events.jsonl`; later hooks replay
+  durable primary outbox and `~/.chronicle/events.jsonl`; later hooks replay
   oldest-first after connectivity returns.
   Sessions pick hooks up on start, so already-running sessions won't appear.
   Every event is also mirrored to a local dev server if one is running — see
-  [Working on burrow locally](#working-on-burrow-locally).
+  [Working on chronicle locally](#working-on-chronicle-locally).
 - **Codex emitter** — the same installed command invoked with `--runner codex` from
   user-level Codex hooks. It uses a distinct `codex:` identity without changing
   the default Claude adapter. Copyable configuration, trust review, and a smoke
   check are in [the protocol guide](docs/protocol.md#user-level-codex-setup).
 - **Life Agent emitter** — the same bundle installed at
   `/root/.claude/burrow/` inside the `life-agent` container (via the
-  `claude-config` volume), invoked as `/root/.claude/burrow/burrow-emit`, with
-  `BURROW_AGENT_ID=life-agent BURROW_PROJECT=life` and the same `BURROW_URL` /
-  `BURROW_TOKEN` pair, so it appears as one resident villager that rests between
+  `claude-config` volume), invoked as `/root/.claude/burrow/burrow-emit` — a
+  deployed path, unchanged by the identifier rename, and one the bundle still
+  answers to. It converges on the new name whenever that container is next
+  provisioned. It runs with
+  `CHRONICLE_AGENT_ID=life-agent CHRONICLE_PROJECT=life` and the same `CHRONICLE_URL` /
+  `CHRONICLE_TOKEN` pair, so it appears as one resident villager that rests between
   turns instead of leaving.
 - **Local-only mode** — `uv run uvicorn serve:app --host 127.0.0.1 --port 8737` and no
-  `BURROW_URL` still works: same
-  API over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
+  `CHRONICLE_URL` still works: same
+  API over the local log. Leave `CHRONICLE_TOKEN` unset and ingest stays open.
 
-### Working on burrow locally
+### Working on chronicle locally
 
 Nothing has to be deployed to the NAS to see a change work on real events. The
 emitter mirrors every event to `http://127.0.0.1:8737` as well as to the village,
@@ -226,12 +237,12 @@ is a live copy of your own fleet — the same sessions, the same villagers, the 
 knocks — while the shared village keeps receiving everything as usual. The mirror is
 best-effort and off the critical path: when nothing is listening on 8737 the refused
 connection costs nothing, and the event still reaches the NAS. Turn it off with
-`BURROW_MIRROR=` (empty), point it somewhere else with `BURROW_MIRROR=http://host:port`
-(comma-separated for several), and give it a token with `BURROW_MIRROR_TOKEN` — the
-village's `BURROW_TOKEN` is deliberately never sent to a mirror.
+`CHRONICLE_MIRROR=` (empty), point it somewhere else with `CHRONICLE_MIRROR=http://host:port`
+(comma-separated for several), and give it a token with `CHRONICLE_MIRROR_TOKEN` — the
+village's `CHRONICLE_TOKEN` is deliberately never sent to a mirror.
 
 A mirror success never acknowledges the shared village. Primary failures remain in
-`~/.burrow/primary-outbox.jsonl` until a later hook replays them. Delivery attempts
+`~/.chronicle/primary-outbox.jsonl` until a later hook replays them. Delivery attempts
 to independent targets run concurrently and rotate fairly through a durable queue.
 The complete transport path runs in a killable helper under a documented one-second
 host-hook budget; stalled persistence, diagnostics, or fallback cannot hold up the
@@ -241,7 +252,7 @@ One stable outbox transaction lock orders main and journal authorities by a
 pre-lock enqueue ID and enforces their aggregate caps. Lock contention and capped
 targets are durably deferred and diagnosed. Serialized bounded payload-free
 counters and recent failures are inspectable in
-`~/.burrow/transport-diagnostics.json`.
+`~/.chronicle/transport-diagnostics.json`.
 Local-log rotation contention uses the same crash-safe pattern: a stable-lock
 deferred journal, atomic handoff, and idempotent replay IDs. Active plus replay
 deferred authority retains the newest 1,024 records within 5 MiB; capacity drops
@@ -251,10 +262,10 @@ plus at most 8 non-authoritative torn-tail files within 256 KiB.
 
 Two caveats worth knowing:
 
-- The local server's log defaults to `~/.burrow/events.jsonl`, which is also the
-  emitter's offline fallback. Use `BURROW_EVENTS=/tmp/burrow-dev.jsonl uv run uvicorn serve:app`
+- The local server's log defaults to `~/.chronicle/events.jsonl`, which is also the
+  emitter's offline fallback. Use `CHRONICLE_EVENTS=/tmp/chronicle-dev.jsonl uv run uvicorn serve:app`
   to keep a dev run's history separate.
-- Hook *env* is read when a session starts, so changing `BURROW_MIRROR` only affects
+- Hook *env* is read when a session starts, so changing `CHRONICLE_MIRROR` only affects
   sessions started afterwards. Updating the installed emitter bundle applies
   immediately — its files are re-read on every hook.
 
@@ -265,7 +276,7 @@ test suite with `sh tests/run.sh`.
 ### Ingest auth
 
 Anything on the tailnet could otherwise POST fake events, and the village never lies.
-When the server has `BURROW_TOKEN` set, `POST /events` must carry it as
+When the server has `CHRONICLE_TOKEN` set, `POST /events` must carry it as
 `Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. That single POST is
 the only gated request there is: every GET — `/state`, `/state/stream`, `/events`,
 `/villagers`, `/residents`, `/transport/status` — is open, deliberately, so a client needs
@@ -273,19 +284,19 @@ no credential to watch the fleet. With the var unset, ingest is open too, which 
 local dev uses. Request framing is checked before the token, so an oversized or
 badly-framed POST is refused with a `400` or `413` whether or not it carried one.
 
-Emitters send the token from their own `BURROW_TOKEN`. A rejected POST is just a failed
+Emitters send the token from their own `CHRONICLE_TOKEN`. A rejected POST is just a failed
 POST: the event falls back to the local JSONL file, so a missing token costs visibility,
 never events. **Roll it out server-first:** deploy the token-aware server with the var
-unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
+unset, set `CHRONICLE_TOKEN` on every emitter, then set it on the server and restart. Full
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
 
 ### Knocks on your phone
 
-A village you have to be looking at is no good for a knock. Set `BURROW_NOTIFY_URL` on the
+A village you have to be looking at is no good for a knock. Set `CHRONICLE_NOTIFY_URL` on the
 server and every `needs_human` event is also pushed there with a stable receiver dedupe ID.
 Plain knocks carry the villager's name, project and message; structured approvals carry the
 action as title and the detail as body (`https://ntfy.sh/<your-topic>` works out of the box;
-`BURROW_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a dead
+`CHRONICLE_NOTIFY_TOKEN` for a private topic). Unset means no notifications, and a dead
 notification service can never block or lose an event.
 
 Forwarding uses two workers and a 64-knock memory queue backed by a pre-acknowledgement
@@ -303,12 +314,12 @@ for clients, but it is delivery telemetry and not part of the state contract.
 
 ### Log rotation
 
-The server keeps `events.jsonl` bounded on its own. Past `BURROW_MAX_LOG` bytes (default
+The server keeps `events.jsonl` bounded on its own. Past `CHRONICLE_MAX_LOG` bytes (default
 5 MiB) it rolls the log into `archive/events-<UTC timestamp>.jsonl` and restarts it from the
 tail the projection still needs, so the next snapshot is unchanged and no client sees the
-village move. Archives are plain JSONL and keep the full history; set `BURROW_ARCHIVE` to
+village move. Archives are plain JSONL and keep the full history; set `CHRONICLE_ARCHIVE` to
 put them elsewhere (on the NAS, they land next to the log in the mounted volume).
-`BURROW_MAX_LOG=0` turns rotation off.
+`CHRONICLE_MAX_LOG=0` turns rotation off.
 
 Rotation carries a little state across the cut so the projection does not lose meaning at
 the seam. One reserved non-event capsule (at most 32 KiB) carries bounded mood approval
@@ -329,7 +340,7 @@ synthetic event log for a client to render:
 
 ```sh
 python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
-BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
+CHRONICLE_EVENTS=/tmp/chronicle-fixture.jsonl python3 serve.py 8899
 ```
 
 Nine agents cycle between working, knocking and resting — eight of them on the far corner
@@ -342,7 +353,7 @@ exercised without a real agent running anywhere.
 Residents get persistent identity and a reserved home from versioned **resident
 manifests** under [`villagers/`](villagers). Every other projected identity is a
 Visitor based at the shared lodge. Editing a resident is: edit the JSON file → run
-the tests → commit → deploy. Point `BURROW_VILLAGERS` at another directory to
+the tests → commit → deploy. Point `CHRONICLE_VILLAGERS` at another directory to
 override it (handy for a local scratch village).
 
 The [resident-manifest v1 guide](docs/resident-manifest.md) documents the validated
@@ -357,7 +368,7 @@ Visitors get a stable hash-based name and sprite for their event identity. Sprit
 the client that draws them; the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
 this village is drawn with now lives with Arcadia's assets, attribution included.
 
-## Working on burrow
+## Working on chronicle
 
 Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/warren/issues)
 with status labels. The convention, for humans and agents alike:

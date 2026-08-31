@@ -18,7 +18,7 @@ Line numbers are from the tree this analysis was written against, not the issue'
 | **Knock journal** | `notification_persistence.py` `compact_locked` / `recover` / `journal` / `record_attempt` / `commit_terminal` | JSON records, active + `.replay.*` generations, dedupe by `knock_key(event)` |
 | **Terminal ledgers** | `notification_persistence.py` `remember_batch` / `load_ledger` / `contains` | One opaque string per line, single generation, dedupe by the string itself |
 | **Primary outbox** | `hooks/emit.py` `_update_outbox` / `_journal_outbox` / `_read_durable_outbox_snapshot` | JSON records, active + `.journal.*` generations, dedupe by `(target, delivery_id)` |
-| **Deferred local spool** | `hooks/emit.py` `_defer_local` / `_replay_deferred` / `_compact_deferred_locked` | JSON records, active + `.replay.*` generations, dedupe by `_burrow_deferred_id` |
+| **Deferred local spool** | `hooks/emit.py` `_defer_local` / `_replay_deferred` / `_compact_deferred_locked` | JSON records, active + `.replay.*` generations, dedupe by `_burrow_deferred_id` (a stored member name, kept at its pre-rename spelling — see below) |
 
 Four structures, not three: `notification_persistence.py` carries both a
 generational journal and a flat ledger, and they have opposite capacity policies.
@@ -184,7 +184,11 @@ without jumping the queue.
 
 - Outbox: `_dedupe_outbox_records`, key `OutboxRecordKey(target, delivery_id)`.
 - Deferred: the identical loop inlined in `_compact_deferred_locked`, key
-  `_burrow_deferred_id`.
+  `_burrow_deferred_id`. That key keeps its pre-rename spelling on purpose: it is
+  a member of records already on disk, and the crash-idempotence above depends on
+  a record written before an upgrade still being recognised after one. Renaming
+  it would not degrade — it would make a spool generation written by the previous
+  build replay as if it had never been seen.
 - Knock journal: `latest[knock_key(event)] = entry` on an `OrderedDict` — assigning
   to an existing key updates the value without moving it. Same rule.
 

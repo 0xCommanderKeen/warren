@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://burrow.local/schemas/resident-manifest-v1.json",
-  "title": "Burrow resident manifest v1",
+  "$id": "https://chronicle.local/schemas/resident-manifest-v1.json",
+  "title": "Chronicle resident manifest v1",
   "type": "object",
   "additionalProperties": false,
   "required": ["manifest_version", "match", "home", "soul", "skills", "memory", "routes", "app_grants"],

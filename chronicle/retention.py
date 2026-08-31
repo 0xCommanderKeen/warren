@@ -158,6 +158,14 @@ def _mood_authority_input_event(event):
     )
 
 
+# ``_burrow_internal`` is a stored member name, not a vocabulary word, and is
+# deliberately left at its pre-rename spelling. It identifies the reserved
+# capsule that rotation writes into the event log to carry mood authority across
+# the cut, so archives and any live log written before this rename still contain
+# it — and the readers below match the member set exactly, meaning a renamed key
+# would not degrade, it would make those capsules unparseable and silently drop
+# the mood identity they exist to preserve. Renaming it is a schema-version
+# change, in the same class as the X-Burrow-* wire headers.
 def _mood_authority_marker(record):
     return (
         isinstance(record, dict)

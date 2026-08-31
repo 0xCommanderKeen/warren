@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay a fixture event log into a live burrow log, one event at a time.
+"""Replay a fixture event log into a live chronicle log, one event at a time.
 
     python3 fixtures/play.py                                  # 2.5 s per event
     python3 fixtures/play.py fixtures/library-walk.jsonl --step 1
@@ -7,7 +7,7 @@
 
 Then serve the village against the same log:
 
-    BURROW_EVENTS=/tmp/burrow-play.jsonl python3 serve.py
+    CHRONICLE_EVENTS=/tmp/chronicle-play.jsonl python3 serve.py
 
 This is not a simulation of agents. A fixture is a recorded sequence of real
 protocol events; the player only re-stamps each one with the current time (the
@@ -38,8 +38,8 @@ def main():
     ap.add_argument("fixture", nargs="?", default=DEFAULT_FIXTURE)
     ap.add_argument(
         "--out",
-        default="/tmp/burrow-play.jsonl",
-        help="event log to write (default: /tmp/burrow-play.jsonl)",
+        default="/tmp/chronicle-play.jsonl",
+        help="event log to write (default: /tmp/chronicle-play.jsonl)",
     )
     ap.add_argument(
         "--step",

@@ -1,6 +1,6 @@
-# Burrow Village
+# Chronicle Village
 
-Burrow projects truthful agent activity into a village without turning the fiction into hidden system state.
+Chronicle projects truthful agent activity into a village without turning the fiction into hidden system state.
 
 ## Language
 

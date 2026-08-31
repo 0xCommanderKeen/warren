@@ -1,4 +1,4 @@
-"""Validated resident manifests for Burrow.
+"""Validated resident manifests for Chronicle.
 
 The loader is intentionally dependency-free and returns a report instead of
 raising: callers can serve every valid resident while reporting exactly why an
@@ -177,7 +177,7 @@ def _validate_reference_list(value, filename, path, diagnostics):
 def _valid_cron(schedule):
     """Validate a safe five-field declaration, not croniter semantics.
 
-    Steward's authenticated ``GET /routines`` response is authoritative.  Burrow
+    Steward's authenticated ``GET /routines`` response is authoritative.  Chronicle
     deliberately has no scheduler dependency, so this check only prevents
     control characters, macros, and ambiguous field counts while preserving
     croniter features such as names, ``L``, ``?``, lists, ranges, and steps.

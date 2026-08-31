@@ -1,6 +1,6 @@
 # UI state contract
 
-Burrow is the sole projection authority for user interfaces. Clients consume complete,
+Chronicle is the sole projection authority for user interfaces. Clients consume complete,
 versioned snapshots; they do not read or reduce the event log.
 
 ## Public read endpoints
@@ -25,7 +25,7 @@ re-vendoring one would only reintroduce it. Each client's CI job path-filters on
 `chronicle/tests/fixtures/state-contract/**`, so a change here runs every client's parser
 tests. A client living outside this repo still has to vendor and check for drift.
 
-Burrow's own CI does not install, run, or otherwise verify any client; each client remains
+Chronicle's own CI does not install, run, or otherwise verify any client; each client remains
 responsible for testing its parser against these fixtures.
 
 `GET /events` is an internal diagnostic and audit interface. It is deliberately absent
@@ -41,7 +41,7 @@ contract, not a UI read API.
   accepted values requires a new `schema_version`.
 - Clients must reject unsupported versions before applying a snapshot and must replace
   their current state atomically after accepting a `snapshot` or `reset` envelope.
-- During a version migration, Burrow must either serve a shape understood by all deployed
+- During a version migration, Chronicle must either serve a shape understood by all deployed
   clients or expose an explicitly versioned endpoint. A server must not silently emit a
   breaking shape under an existing version.
 - Changes to `docs/openapi.json` and the representative fixtures are reviewed like code.
@@ -62,7 +62,7 @@ Run the exporter after either choice so the artifact always binds the current sh
 current version.
 
 Contract fixtures must carry the current `SCHEMA_VERSION`; a version bump therefore fails
-until every checked-in fixture has been updated. This guard is Burrow's compatibility
+until every checked-in fixture has been updated. This guard is Chronicle's compatibility
 enforcement mechanism after clients leave this repository. The fixtures remain portable
 test data, not a substitute for the version-to-shape binding.
 
@@ -71,7 +71,7 @@ the durable log position and namespace. Neither is a schema-version substitute.
 
 ## Client adapter policy
 
-The snapshot itself is the shared client interface, and it is the whole interface. Burrow
+The snapshot itself is the shared client interface, and it is the whole interface. Chronicle
 publishes it unchanged and ships no client code that reshapes it first. Clients should
 render the documented arrays directly; there is no published hydration package, and clients
 must not recreate projection or domain decisions from `history` or `/events`.

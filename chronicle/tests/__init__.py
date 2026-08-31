@@ -1,1 +1,1 @@
-"""Burrow test suite support package."""
+"""Chronicle test suite support package."""

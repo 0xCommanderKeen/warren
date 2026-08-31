@@ -1,4 +1,4 @@
-# Burrow ingestion and Village State protocols
+# Chronicle ingestion and Village State protocols
 
 Agents (or adapters wrapping them) append one JSON object per line to the event
 log. This v0 event protocol is the ingestion and audit contract only. Python
@@ -28,10 +28,10 @@ only a later authoritative snapshot changes visible state.
 
 Two transports; the event shape is the contract, not the pipe:
 
-- **HTTP ingest** (preferred): `POST <BURROW_URL>/events` with one JSON event as the
-  body → 204. The server appends it to its own log. Emitters set `BURROW_URL`; a
+- **HTTP ingest** (preferred): `POST <CHRONICLE_URL>/events` with one JSON event as the
+  body → 204. The server appends it to its own log. Emitters set `CHRONICLE_URL`; a
   failed POST trips a per-target circuit breaker, appends the privacy-filtered
-  event to `~/.burrow/primary-outbox.jsonl`, and leaves it in the local log.
+  event to `~/.chronicle/primary-outbox.jsonl`, and leaves it in the local log.
   Later hooks replay at most 16 pending events per primary, oldest first, before
   their new event. The outbox is capped at 1,024 records and 5 MiB. Rewrites use
   a stable sidecar lock, an fsynced replacement, atomic rename, and directory
@@ -53,13 +53,13 @@ Two transports; the event shape is the contract, not the pipe:
   the retained live log and archives remain canonical and are scanned on a ledger
   miss. Exactly-once ingest therefore applies only while that event/archive
   authority is retained, not globally forever.
-- **Mirrors**: the same event is POSTed to every `BURROW_MIRROR` target as well
+- **Mirrors**: the same event is POSTed to every `CHRONICLE_MIRROR` target as well
   (default `http://127.0.0.1:8737`, i.e. a local dev server). A mirror never
   acknowledges or drains a primary's outbox. Mirrors carry
-  `BURROW_MIRROR_TOKEN`, never `BURROW_TOKEN`.
-- **Local JSONL file**: append one event per line to `~/.burrow/events.jsonl`
+  `CHRONICLE_MIRROR_TOKEN`, never `CHRONICLE_TOKEN`.
+- **Local JSONL file**: append one event per line to `~/.chronicle/events.jsonl`
   (a single `write()` of < 4 KB is atomic enough on macOS/Linux). Used when
-  `BURROW_URL` is unset, or as the fallback above. If rotation owns the live
+  `CHRONICLE_URL` is unset, or as the fallback above. If rotation owns the live
   log lock, the hook appends to a fsynced deferred journal behind a stable
   sidecar lock. Recovery atomically hands that journal to an immutable replay
   generation; per-record replay IDs in the live log make a crash after replay
@@ -92,7 +92,7 @@ are durably queued; excess best-effort mirrors are explicitly reported rather
 than silently omitted. Every error is swallowed and the hook exits zero. Bounded
 payload-free diagnostics serialize cross-process updates, keep exact counters,
 and retain only the 20 newest records in
-`~/.burrow/transport-diagnostics.json`.
+`~/.chronicle/transport-diagnostics.json`.
 
 Primary requests carry a random `X-Burrow-Delivery-ID`. A retry retains that ID;
 the server records accepted IDs in a fsynced sidecar ledger and returns 204
@@ -108,17 +108,17 @@ untrusted length are never reinterpreted as a keep-alive request.
 The village never lies, so nothing on the tailnet may write to it unasked — a forged
 event is a lie with extra steps. Ingest is protected by one shared secret:
 
-- The server reads `BURROW_TOKEN`. **When set**, `POST /events` must present it as
+- The server reads `CHRONICLE_TOKEN`. **When set**, `POST /events` must present it as
   `Authorization: Bearer <token>` (preferred) or `X-Burrow-Token: <token>`; anything
   else gets `401 unauthorized` and is not logged. Comparison is constant-time, and an
   empty/whitespace-only value counts as unset.
 - **When unset**, ingest is open — exactly today's behavior, which is what local-only
-  mode (`python3 serve.py` with no `BURROW_URL`) relies on.
+  mode (`python3 serve.py` with no `CHRONICLE_URL`) relies on.
 - **GET is never gated.** `/state`, `/events`, `/villagers` and `/transport/status` stay open;
   the token guards writes, not reads. The event log is still a map of everything the
   fleet does, so the server stays off the public internet either way.
 
-Emitters send `BURROW_TOKEN` from their own env. A 401 is treated as just another
+Emitters send `CHRONICLE_TOKEN` from their own env. A 401 is treated as just another
 failed POST: circuit breaker trips, the event is appended to the local JSONL file. **A
 wrong token loses no events** — only their remoteness — which is what makes the rollout
 below safe.
@@ -128,12 +128,12 @@ below safe.
 The token must never be required before it is sent, or in-flight agents silently fall
 back to local logs and the village looks emptier than the fleet is.
 
-1. **Server first, token unset.** Deploy the `BURROW_TOKEN`-aware `serve.py` with the
+1. **Server first, token unset.** Deploy the `CHRONICLE_TOKEN`-aware `serve.py` with the
    var *not* set. Behavior is unchanged; every existing emitter keeps working.
-2. **Emitters next.** Roll `BURROW_TOKEN=<secret>` out to every emitter (Mac hooks,
+2. **Emitters next.** Roll `CHRONICLE_TOKEN=<secret>` out to every emitter (Mac hooks,
    `life-agent` container, any other resident). A server with no token set ignores the
    header, so emitters can be updated one at a time with no coordination.
-3. **Server last, token set.** Once every emitter sends the secret, set `BURROW_TOKEN`
+3. **Server last, token set.** Once every emitter sends the secret, set `CHRONICLE_TOKEN`
    on the server and restart. Ingest is now closed; anything still unconfigured degrades
    to its local log rather than disappearing.
 
@@ -192,7 +192,7 @@ A durable delivered-key ledger prevents a duplicate delivery ID from knocking
 again while that key remains in the retained knock authority. Forwarding uses two
 workers, a 64-item memory queue, and at most three attempts. The journal,
 delivered ledger, and terminal-drop ledger each retain at most 1,024 keys/records
-and 5 MiB (configurable with `BURROW_KNOCK_RECORDS` and `BURROW_KNOCK_BYTES`).
+and 5 MiB (configurable with `CHRONICLE_KNOCK_RECORDS` and `CHRONICLE_KNOCK_BYTES`).
 Auxiliary knock state therefore has a 3,072-record/15 MiB logical ceiling. Each
 journal can have disjoint active and replay authority plus one pending
 publication (15 MiB); each terminal ledger can have its live file plus one
@@ -220,8 +220,8 @@ runtime polls this report through its live status interface.
   "ts": "2026-08-24T14:03:22.114Z",
   "source": "claude-code",
   "agent_id": "claude-code:9f2c81aa-…",
-  "project": "burrow",
-  "cwd": "/Users/miha/Work/hobbies/burrow",
+  "project": "chronicle",
+  "cwd": "/Users/miha/Life/NAS/warren/chronicle",
   "type": "tool_called",
   "payload": { "tool": "Read", "detail": "README.md" }
 }
@@ -254,7 +254,7 @@ The stricter journal observation fields are additionally shared through
   requires that value to be an object or null before it offers controls;
   `stop_hook_active`, when present, is boolean.
 - `task_posted.required_skills` follows Steward's exact `list[str]` contract. The
-  list may be empty and individual strings may be blank or whitespace-only; Burrow
+  list may be empty and individual strings may be blank or whitespace-only; Chronicle
   preserves those values instead of rejecting or normalizing valid evidence.
 
 Invalid HTTP records return 400 and are never appended or notified. Projection
@@ -401,7 +401,7 @@ never gain a house or writing animation. The event records observation only: it 
 not fabricate body text, refresh the direct Steward journal read, send a notification,
 or make a request.
 `duration_s` is deliberately optional on failures: Steward's watchdog closes vanished
-runs without inventing a duration it cannot know, and Burrow renders that absence as
+runs without inventing a duration it cannot know, and Chronicle renders that absence as
 `duration unknown`. When present, durations must be finite, non-negative numbers in
 both protocol adapters.
 
@@ -426,7 +426,7 @@ that agent, while project manifests accept the distinct Steward runner for that 
 Once that exact agent/routine/run identity is confirmed, its exact terminal event may close
 the acknowledgement after a cursor-generation reset; unrelated starts and terminals remain
 ineligible. For an unconfirmed request, the first reset/bootstrap publication is never
-acknowledgement evidence: Burrow advances the request boundary to that publication's ending
+acknowledgement evidence: Chronicle advances the request boundary to that publication's ending
 cursor, rejects all snapshot-contained lifecycle records, and considers only later records in
 the same new cursor generation. This makes a reset recoverable without attributing replay.
 The UI may navigate to the project's currently active owner without narrowing
@@ -464,13 +464,13 @@ conflicts within one kind. Exact duplicates compare equal. This preserves Stewar
 expiry-then-reclaim hand-off while even 10,000 distinct same-millisecond transitions retain
 only the latest post and transition. A later post supplies the canonical title,
 skills, and posted age even when its claim arrived first. Open and claimed jobs remain.
-When a claim or terminal event is retained without its post, Burrow renders required
+When a claim or terminal event is retained without its post, Chronicle renders required
 skills as unavailable rather than inventing an empty requirement set.
 An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
 entry in a non-empty list renders as an accessible “unnamed skill” marker, one marker per
 entry, so it cannot be confused with either an empty list or unavailable orphan metadata.
 Steward's `task_failed` with `reason: "lease_expired"` means its lease sweep has reopened
-that task: Burrow therefore renders it open again, clears the former claimant, and retains
+that task: Chronicle therefore renders it open again, clears the former claimant, and retains
 the reason/former claimant as truthful retry context. A present former claimant links to
 that villager, an absent one is marked absent, and missing claimant evidence is explicitly
 unknown rather than invented. Other failures and done jobs remain
@@ -486,9 +486,9 @@ discards the entire reduced
 board before folding the grouped baseline, so work absent from that authority cannot haunt
 the square.
 
-Posting is a direct browser-to-Steward `POST /jobs`; Burrow's server remains a reader.
+Posting is a direct browser-to-Steward `POST /jobs`; Chronicle's server remains a reader.
 The Tailnet URL and bearer token live only in JavaScript memory and the password field is
-cleared when its dialog closes. Burrow draws no optimistic task. It requires non-empty
+cleared when its dialog closes. Chronicle draws no optimistic task. It requires non-empty
 `task_id` and `request_id` values from Steward's `202` response, then acknowledges only an
 exact matching `task_posted` event beyond the validated pre-request cursor. Another task, an old replay,
 or reset baseline cannot acknowledge it. Only Steward's `401` authentication gate and
@@ -496,7 +496,7 @@ or reset baseline cannot acknowledge it. Only Steward's `401` authentication gat
 HTTP refusals are definitive and retryable. A `5xx`, other HTTP/proxy status, network failure,
 invalid acceptance, or telemetry reset is explicitly ambiguous and blocks duplicate retry.
 If an ambiguous response—including a malformed `202` envelope—supplies an independently
-valid non-empty task identity, Burrow retains only that safe identity and a later exact valid
+valid non-empty task identity, Chronicle retains only that safe identity and a later exact valid
 event reconciles it; the malformed envelope itself is never acknowledgement. An invalid task
 identity remains unidentified ambiguity. A valid `202` that arrives after the request-start
 deadline retains its validated `task_id` and `request_id` for exact reconciliation, while the
@@ -546,11 +546,11 @@ shape:
 `action` is Steward's lowercase action slug, `detail` is a required key whose value
 is an object or explicit null, and
 `options` is a non-empty ordered list of `approve`, `deny`, and `edit`. Steward
-preserves repeated entries, and Burrow renders one accessible button per entry in
+preserves repeated entries, and Chronicle renders one accessible button per entry in
 the same order with index-keyed focus identity.
 Detection is by payload shape, never by `source`, so Codex, Claude, or another
 emitter can raise the same real request. A partial or malformed structured attempt
-is still a valid legacy `needs_human`: Burrow shows its `message`, emits a bounded
+is still a valid legacy `needs_human`: Chronicle shows its `message`, emits a bounded
 diagnostic, and offers no buttons.
 
 Valid requests are bounded to 40 identities and queue per villager newest first.
@@ -561,7 +561,7 @@ browser-consumer number domain (`1` equals `1.0`), while array/option order rema
 meaningful. Wire identity strings are never trimmed during correlation.
 Steward owns `request_id` as a global primary key, any protocol producer may emit
 the request, and only `source: "steward"` may emit its close. If a corrupt or combined
-log reuses one request ID with any incompatible immutable field, Burrow keeps
+log reuses one request ID with any incompatible immutable field, Chronicle keeps
 bounded diagnostic evidence but quarantines the ID-only controls; neither identity
 can rewrite the question/options, inherit its close, or be submitted ambiguously.
 A pending request owns the doorstep even if later activity arrives and even after
@@ -589,7 +589,7 @@ to the next enabled approval control. A resident whose ordinary latest event is
 resurrect it as resting. Rotation retains that terminal evidence with the approval so
 live delivery and reset replay agree.
 
-An option calls Steward directly; Burrow's server remains read-only:
+An option calls Steward directly; Chronicle's server remains read-only:
 
 ```http
 POST <steward>/approvals/<url-encoded-request_id>
@@ -603,7 +603,7 @@ Content-Type: application/json
 `{"decision":"edit","edit":{"note":"…"}}`; building a field-aware editor is out
 of scope. Credentials live only in browser memory. Steward records the decision
 durably, emits `needs_human_resolved`, and only then returns the first-write `202`
-receipt with `status: "recorded"`. That receipt is not resolution evidence. Burrow
+receipt with `status: "recorded"`. That receipt is not resolution evidence. Chronicle
 starts a 15-second acknowledgement deadline at click time. Within one telemetry
 generation it stages bounded exact post-cursor close evidence, but acknowledges only
 the first close selected by the authoritative approval projection for the exact
@@ -616,7 +616,7 @@ error, or malformed receipt is ambiguous and blocks retry to prevent a duplicate
 `{"detail":{"error":"approval_expired","message":"…"}}` envelope; invalid JSON,
 proxy bodies, other codes, or extra envelope fields remain ambiguous and block unsafe
 retry. A `200` means a replay of an already-recorded answer; Steward
-emits no new event for it, so Burrow calls it indeterminate and waits for retained
+emits no new event for it, so Chronicle calls it indeterminate and waits for retained
 exact log evidence rather than resolving optimistically.
 
 Closing-event evidence uses the same SSE readiness staging as run and job
@@ -713,7 +713,7 @@ plain, fallback, and structured needs excluded, so a future superseder or exact
 close cannot consume the only evidence-threshold witness. Resolved structured
 approvals cannot be made exact forever in
 fixed space: unrestricted request IDs let a future incompatible append
-invalidate any chosen suffix and reveal an arbitrarily old decision. Burrow
+invalidate any chosen suffix and reveal an arbitrarily old decision. Chronicle
 therefore makes that information limit explicit. Full-log and retained-log
 reduction both admit at most 256 irreducible approval facts plus the latest
 root prompt per agent, and the encoded capsule is capped at 32 KiB. Replayed immutable knocks, orphan closes, and superseded
@@ -804,8 +804,8 @@ animates, and treats stale alpha as an unscored presence wrapper.
 ## Log rotation
 
 The live log is a window, not an archive. When `events.jsonl` grows past
-`BURROW_MAX_LOG` bytes (default 5 MiB, `0` disables), the server rolls it into
-`<BURROW_ARCHIVE or archive/>/events-20260824T170430Z.jsonl` and starts the live
+`CHRONICLE_MAX_LOG` bytes (default 5 MiB, `0` disables), the server rolls it into
+`<CHRONICLE_ARCHIVE or archive/>/events-20260824T170430Z.jsonl` and starts the live
 file again from the **carry-forward tail** derived from the same latest 4,000
 lines the viewer reads: the last 80 visible events of every villager the
 projection would still draw — plus its latest liveness-only heartbeat when
@@ -915,14 +915,14 @@ Rules that keep this honest:
 
 A villager at your door is useless if the village isn't on a screen you are looking
 at, so the server can forward it. When it ingests a `needs_human` event and
-`BURROW_NOTIFY_URL` is set, it asynchronously attempts a POST at that URL:
+`CHRONICLE_NOTIFY_URL` is set, it asynchronously attempts a POST at that URL:
 
 - body: `<villager name> · <project>` then the `message`, verbatim
 - headers: `Title: <name> is at your door (<project>)`, `Tags: door`,
   `Priority: high` — ntfy reads these, so `https://ntfy.sh/<topic>` works as-is;
   any endpoint that accepts a POST works too (Telegram via a small relay)
-- `BURROW_NOTIFY_TOKEN` (optional) adds `Authorization: Bearer …` for private topics
-- `BURROW_NOTIFY_TIMEOUT` (optional, default 5 s) bounds the request
+- `CHRONICLE_NOTIFY_TOKEN` (optional) adds `Authorization: Bearer …` for private topics
+- `CHRONICLE_NOTIFY_TIMEOUT` (optional, default 5 s) bounds the request
 
 Two properties matter more than the format:
 
@@ -940,12 +940,12 @@ Two properties matter more than the format:
   replay does not duplicate a successful delivery. A failed delivery remains eligible.
 - **Notifying never blocks ingest.** The POST runs on a daemon thread and swallows
   every error; a down notification service must not slow an agent down or lose an
-  event. Unset `BURROW_NOTIFY_URL` and nothing is sent at all.
+  event. Unset `CHRONICLE_NOTIFY_URL` and nothing is sent at all.
 
 This is a transport for something that already happened. It never invents a knock —
 one `needs_human` event, one notification.
 For a valid structured approval the push title is its `action` and the UTF-8 body is
-its JSON `detail`, so the decision is legible without opening Burrow. A malformed
+its JSON `detail`, so the decision is legible without opening Chronicle. A malformed
 structured attempt uses the unchanged legacy villager/project/message notification.
 The durable claim, delivery ID, retry, and one-event/one-notification semantics are
 identical for both shapes.
@@ -959,7 +959,7 @@ event supports. Filler is forbidden on both sides of the log.
 
 `hooks/emit.py` adapts Claude Code hook callbacks to this protocol:
 
-| Claude Code hook                          | burrow event        |
+| Claude Code hook                          | chronicle event        |
 |-------------------------------------------|---------------------|
 | `UserPromptSubmit`                        | `task_started`      |
 | `PreToolUse` (any tool)                   | `tool_called`       |
@@ -982,30 +982,39 @@ The emitter must never break the agent: it swallows all errors and always exits 
 ### Installed emitter bundle
 
 `emit.py` depends on its sibling `durable.py`; supported deployments install both
-with the fail-open `burrow-emit` launcher. From the repository root, use the
+with the fail-open `chronicle-emit` launcher. From the repository root, use the
 canonical installer:
 
 ```sh
 sh scripts/install-emitter.sh
 ```
 
-Use the stable command `$HOME/.local/lib/burrow-emitter/burrow-emit` in hooks.
+Use the stable command `$HOME/.local/lib/chronicle-emitter/chronicle-emit` in hooks.
 The launcher locates its sibling files independently of the caller's working
 directory and returns zero even if the bundle is incomplete or the emitter hits
 an unexpected runtime failure. Transport failures remain handled by `emit.py` and
 fall back to its bounded durable local storage.
 
-Env vars: `BURROW_URL` (POST target, see Transport), `BURROW_TOKEN` (ingest secret,
-see Ingest auth — sent as a bearer header, omitted when unset), `BURROW_MIRROR` /
-`BURROW_MIRROR_TOKEN` (extra POST targets, see Transport; empty disables). **Resident agents** — services
+> **Both spellings work during the rename.** Every `CHRONICLE_*` variable below
+> is also read under its pre-rename `BURROW_*` name, and the same is true of the
+> server's settings. The new spelling wins wherever both are set. A hook's
+> environment is fixed when its session starts, so sessions already running when
+> the emitter is updated keep sending the old names — dropping them would take
+> those sessions quiet without any error. The old names go away in a later
+> release; nothing has to be renamed in lockstep with a deploy. The installed
+> bundle likewise still answers to `burrow-emit` alongside `chronicle-emit`.
+
+Env vars: `CHRONICLE_URL` (POST target, see Transport), `CHRONICLE_TOKEN` (ingest secret,
+see Ingest auth — sent as a bearer header, omitted when unset), `CHRONICLE_MIRROR` /
+`CHRONICLE_MIRROR_TOKEN` (extra POST targets, see Transport; empty disables). **Resident agents** — services
 that outlive any one Claude session, like a bot running `claude -p` per message —
-set `BURROW_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
-`BURROW_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
+set `CHRONICLE_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
+`CHRONICLE_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
 `session_ended`: the session's process died, but the agent-as-service is still
 home, resting. Its children remain distinct; a child stop still ends that child,
 and its lineage points to the stable resident parent identity.
 
-`BURROW_DETAIL=full|safe|off` is enforced by the shared delivery interface before
+`CHRONICLE_DETAIL=full|safe|off` is enforced by the shared delivery interface before
 the first remote POST or local append. `full` (the default) preserves bounded
 detail. `safe` clears `cwd`, reduces artifact and detail sourced from an explicit
 file/notebook/path input field to a basename, and replaces free-form commands,
@@ -1024,7 +1033,7 @@ use `codex:<agent_id>` and retain the parent session identity, `turn_id`, and
 `agent_type` in their payload when supplied. Root and parent identities use the
 same unbounded canonical value so lineage remains exact even for long session IDs.
 
-| Codex hook | burrow event |
+| Codex hook | chronicle event |
 |------------|--------------|
 | `SessionStart` | none — a process starting does not say work began |
 | `UserPromptSubmit` | `task_started` |
@@ -1050,7 +1059,7 @@ child and removes only that child; root `SessionEnd` removes only the root. The 
 never approves, denies, rewrites, blocks, or continues anything.
 
 `PostToolUse` means a tool produced a response, not necessarily that it succeeded.
-For `apply_patch`, Burrow emits requested paths only when `tool_response` is the exact
+For `apply_patch`, Chronicle emits requested paths only when `tool_response` is the exact
 positive success JSON string, `"Done!"`, used by Codex's apply-patch tool output.
 Any mixed/partial failure emits `tool_failed` and claims no paths. Missing or
 ambiguous success evidence emits one heartbeat and claims no paths.
@@ -1083,8 +1092,8 @@ copies or configure duplicate user-level hook representations.
 
 The Claude Code hook names and their exact event mapping are listed in
 [v0 emitter: Claude Code hooks](#v0-emitter-claude-code-hooks). Point each configured
-command at `$HOME/.local/lib/burrow-emitter/burrow-emit` and provide `BURROW_URL`
-and `BURROW_TOKEN` through protected hook environment configuration.
+command at `$HOME/.local/lib/chronicle-emitter/chronicle-emit` and provide `CHRONICLE_URL`
+and `CHRONICLE_TOKEN` through protected hook environment configuration.
 
 Merge this hook object into `~/.claude/settings.json`, replacing `REPLACE_ME`.
 The repeated command is intentional: every lifecycle callback enters the same
@@ -1093,15 +1102,15 @@ fail-open adapter, which determines the event from the callback body.
 ```json
 {
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "Notification": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME \"$HOME/.local/lib/burrow-emitter/burrow-emit\""}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\""}]}]
   }
 }
 ```
@@ -1116,16 +1125,16 @@ inline hooks in `config.toml`), not both.
 
 ```json
 {
-  "description": "Send truthful Codex lifecycle events to Burrow.",
+  "description": "Send truthful Codex lifecycle events to Chronicle.",
   "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "PermissionRequest": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "BURROW_URL=http://dxp2800:8737 BURROW_TOKEN=REPLACE_ME BURROW_MIRROR= \"$HOME/.local/lib/burrow-emitter/burrow-emit\" --runner codex", "timeout": 3}]}]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "CHRONICLE_URL=http://dxp2800:8737 CHRONICLE_TOKEN=REPLACE_ME CHRONICLE_MIRROR= \"$HOME/.local/lib/chronicle-emitter/chronicle-emit\" --runner codex", "timeout": 3}]}]
   }
 }
 ```
@@ -1142,11 +1151,11 @@ identifiers. It inspects an `apply_patch` response only to require the exact suc
 marker; it does **not** transmit tool responses, read transcripts, or send model
 responses, file contents, or credentials
 unless those secrets were themselves included in a prompt/command/path. Keep the
-server private, use `BURROW_TOKEN`, protect both the token-bearing config and
+server private, use `CHRONICLE_TOKEN`, protect both the token-bearing config and
 emitter file, and review diffs before re-trusting an update. The example disables
 the default localhost mirror; enable it knowingly if a local dev server should
 receive the same event stream. The hook is observational only and fails open so a
-Burrow outage cannot block Codex.
+Chronicle outage cannot block Codex.
 
 ### Local smoke check
 
@@ -1154,9 +1163,9 @@ This exercises the real adapter and local fallback without contacting a server:
 
 ```sh
 smoke_home=$(mktemp -d)
-printf '%s\n' '{"session_id":"smoke-1","cwd":"/tmp/burrow-smoke","hook_event_name":"UserPromptSubmit","prompt":"smoke check"}' |
-  HOME="$smoke_home" BURROW_MIRROR= "$HOME/.local/lib/burrow-emitter/burrow-emit" --runner codex
-python3 -m json.tool "$smoke_home/.burrow/events.jsonl"
+printf '%s\n' '{"session_id":"smoke-1","cwd":"/tmp/chronicle-smoke","hook_event_name":"UserPromptSubmit","prompt":"smoke check"}' |
+  HOME="$smoke_home" CHRONICLE_MIRROR= "$HOME/.local/lib/chronicle-emitter/chronicle-emit" --runner codex
+python3 -m json.tool "$smoke_home/.chronicle/events.jsonl"
 ```
 
 The emitted record should have `source: "codex"`,
