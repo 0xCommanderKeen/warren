@@ -21,6 +21,7 @@ from steward import runners as r
 from steward import scheduler as s
 from steward import sessions as ss
 from steward import skills as sk
+from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
 from steward.session_auth import (
     SESSION_CREDENTIAL_PREFIX,
@@ -2077,3 +2078,159 @@ def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
 
     assert report.fired
     assert [event.type for event in sink.events] == [ev.ROUTINE_STARTED]
+
+
+# --------------------------------------------------------------------------------------
+# picking up an edited tree without a restart (steward #214)
+# --------------------------------------------------------------------------------------
+
+
+def reloading(residents_dir: Path, tmp_path: Path) -> s.Scheduler:
+    """Build a scheduler that knows where its routines came from."""
+    source = s.TreeSource(residents_dir=residents_dir)
+    return s.Scheduler(
+        source.load().scheduled,
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        source=source,
+    )
+
+
+def test_a_routine_added_on_disk_is_picked_up_without_a_restart(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The daemon holds a snapshot of parsed manifests, and this is what refreshes it."""
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+    assert [item.routine.id for item in engine.scheduled] == ["daily-summary"]
+
+    write_resident(manifest_with(DAILY, HOURLY))
+
+    assert engine.reload_if_changed()
+    assert sorted(item.routine.id for item in engine.scheduled) == ["daily-summary", "inbox-read"]
+
+
+def test_an_unchanged_tree_is_not_reloaded(write_resident: ResidentWriter, tmp_path: Path) -> None:
+    """The check runs on every wake-up, so it has to be cheap and has to stay quiet."""
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+    before = engine.scheduled
+
+    assert not engine.reload_if_changed()
+    assert engine.scheduled is before
+
+
+def test_a_tree_that_stops_validating_keeps_the_last_good_declarations(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A half-saved manifest must not silence the fleet — steward runs yesterday's truth."""
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+
+    path.write_text("this: is: not: a manifest\n", encoding="utf-8")
+
+    assert not engine.reload_if_changed()
+    assert [item.routine.id for item in engine.scheduled] == ["daily-summary"]
+
+
+def test_a_broken_tree_is_complained_about_once_and_then_left_alone(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Re-reading a broken tree every second would fill a log with one fact."""
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+    path.write_text("this: is: not: a manifest\n", encoding="utf-8")
+    engine.reload_if_changed()
+
+    assert not engine.reload_if_changed(), "nothing changed since the complaint"
+
+
+def test_a_reload_reaches_the_sessions_that_provision_skills(
+    write_resident: ResidentWriter, write_skill, tmp_path: Path
+) -> None:
+    """Rebinding only the scheduler's own attribute would look exactly like a working reload."""
+    for name in ("daily-summary", "write-journal"):
+        write_skill(name, root=tmp_path / "skills")
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+    assert "research" not in engine.library
+
+    write_skill("research", root=tmp_path / "skills")
+
+    assert engine.reload_if_changed()
+    assert "research" in engine.library
+    assert "research" in engine.sessions.library
+
+
+def test_a_scheduler_with_no_source_keeps_the_list_it_was_given(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The old contract, unchanged: a scheduler handed a list is a scheduler over that list."""
+    path = write_resident(manifest_with(DAILY))
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+    )
+
+    write_resident(manifest_with(DAILY, HOURLY))
+
+    assert not engine.reload_if_changed()
+    assert [item.routine.id for item in engine.scheduled] == ["daily-summary"]
+
+
+def test_the_daemon_loop_reloads_before_it_decides_what_is_due(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A routine added a minute ago should be due on this wake-up, not the next one."""
+    path = write_resident(manifest_with(DAILY))
+    engine = reloading(path.parent.parent, tmp_path)
+    write_resident(manifest_with(DAILY, HOURLY))
+
+    engine.run(max_ticks=1, sleep=lambda _seconds: None)
+
+    assert sorted(item.routine.id for item in engine.scheduled) == ["daily-summary", "inbox-read"]
+
+
+def test_the_board_dispatcher_is_refreshed_with_the_fleet(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A resident declared at noon must not be invisible to the board until a restart."""
+    path = write_resident(manifest_with(DAILY))
+    store = Store(":memory:")
+    try:
+        hooks = Dispatcher.from_path(path.parent.parent, store, workdir=tmp_path)
+        source = s.TreeSource(residents_dir=path.parent.parent)
+        engine = s.Scheduler(
+            source.load().scheduled,
+            emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+            hooks=hooks,
+            source=source,
+        )
+        assert [resident.id for resident in hooks.residents] == ["test-agent"]
+
+        second = manifest_with(DAILY)
+        second["id"] = "second-agent"
+        second["agent_id"] = "claude-code:second-agent"
+        second["uid"] = "3a78217a-df03-4f3b-a46a-4c75b4ad929f"
+        write_resident(
+            second,
+            directory="second-agent",
+            soul=VALID_SOUL.replace("claude-code:test-agent", "claude-code:second-agent"),
+        )
+
+        assert engine.reload_if_changed()
+        assert sorted(resident.id for resident in hooks.residents) == [
+            "second-agent",
+            "test-agent",
+        ]
+        assert sorted(resident.id for resident in hooks.sessions.residents) == [
+            "second-agent",
+            "test-agent",
+        ]
+    finally:
+        store.close()

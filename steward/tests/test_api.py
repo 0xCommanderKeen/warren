@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import re
+import subprocess
 import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -125,6 +126,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         db_path: Path | None = None,
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
+        git: bool = True,
         transport: LocalTransport | None = None,
         emitter: ev.Emitter | None = None,
         approval_expiry_interval_s: float = 30.0,
@@ -134,6 +136,12 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents_dir.mkdir(exist_ok=True)
         if residents:
             write_resident(manifest or valid_manifest(), root=residents_dir)
+        if git:
+            # A real checkout around the tree, because since steward #214 every accepted
+            # write is committed and a harness with no git would be testing the fallback
+            # rather than the behaviour. Nothing here configures a git identity: steward
+            # passes its own, which is what makes committing work on a server that has none.
+            init_repo(tmp_path)
         events_path = tmp_path / "events.jsonl"
         store = Store(db_path or ":memory:")
         app = create_app(
@@ -170,6 +178,11 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             release.set()
         harness.client.app.state.runs.shutdown()
         harness.store.close()
+
+
+def init_repo(root: Path) -> None:
+    """Make a directory a git checkout, the way a burrow holding the tree actually is."""
+    subprocess.run(["git", "-C", str(root), "init", "-b", "main"], check=True, capture_output=True)  # noqa: S603, S607
 
 
 def disabled_routine_manifest() -> dict[str, Any]:
@@ -2804,15 +2817,44 @@ def test_the_api_calls_the_same_pipeline_the_cli_does(
 
 
 @pytest.mark.usefixtures("village")
-def test_the_api_never_commits_and_says_so(api: ApiFactory, tmp_path: Path) -> None:
-    """The server may not own this checkout, so a commit here would surprise somebody."""
+def test_a_declaration_is_committed_by_steward_itself(api: ApiFactory, tmp_path: Path) -> None:
+    """The reversal in steward #214: the newest declarations used to be the only unrecorded ones.
+
+    This endpoint deliberately committed nothing, on the grounds that the server might not
+    own its checkout. The cost was that every resident raised from a control panel had no
+    history and no author, which is the one thing the repo-as-source-of-truth rule exists to
+    provide. `declare.commit` stays null — that is the *nursery's* commit, which the API
+    still asks it not to make — and the commit that did happen is its own key.
+    """
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
 
     response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
     assert response.json()["declare"]["commit"] is None
-    assert "NOT committed" in response.json()["message"]
+    commit = response.json()["commit"]
+    assert commit["committed"]
+    assert commit["sha"]
+    subjects = subprocess.run(  # noqa: S603
+        ["git", "-C", str(tmp_path), "log", "--format=%s"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "declare note-keeper" in subjects
+
+
+@pytest.mark.usefixtures("village")
+def test_a_tree_with_no_git_refuses_to_declare_rather_than_writing_quietly(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """A fleet whose declarations have no history is a thing to choose, not to discover."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"), git=False)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "not_a_git_checkout"
 
 
 def test_a_deploy_leaks_no_secret_into_the_response(
@@ -2858,3 +2900,391 @@ def test_a_retired_resident_takes_no_letters(api: ApiFactory) -> None:
     # reason code so a panel can tell a resident that left the village from a typo (#W21).
     assert response.json()["detail"]["error"] == "retired_recipient"
     assert "is retired" in response.json()["detail"]["message"]
+
+
+# --------------------------------------------------------------------------------------
+# the write API: declarations and skills (steward #214)
+# --------------------------------------------------------------------------------------
+
+GRANTED_SKILLS = ("daily-summary", "write-journal")
+
+
+@pytest.fixture
+def writable(api: ApiFactory, write_skill: SkillWriter, tmp_path: Path) -> Callable[..., Harness]:
+    """Build an API whose library holds the skills the test resident is granted.
+
+    Without it the tree has no library at all, every grant goes unchecked, and the first
+    skill written would configure a library that suddenly makes those grants errors — which
+    is correct behaviour and a terrible way to set up a test about something else.
+    """
+
+    def _make(**kwargs: object) -> Harness:
+        for name in GRANTED_SKILLS:
+            write_skill(name, root=tmp_path / "skills")
+        return api(**kwargs)
+
+    return _make
+
+
+def declaration(harness: Harness, resident_id: str = "test-agent") -> dict[str, Any]:
+    """Read a resident's declaration the way a form loads it."""
+    response = harness.client.get(f"/residents/{resident_id}/declaration")
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_a_declaration_is_readable_as_text_and_as_data(writable: Callable[..., Harness]) -> None:
+    """A form needs the fields; a diff needs the bytes. Both, from one call."""
+    body = declaration(writable())
+
+    assert body["manifest"]["id"] == "test-agent"
+    assert "id: test-agent" in body["text"]
+    assert body["soul"].startswith("---")
+    assert body["revision"].startswith("sha256:")
+
+
+def test_an_edited_declaration_is_written_validated_and_committed(
+    writable: Callable[..., Harness],
+) -> None:
+    """The endpoint the whole UI write track is built on."""
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"]["summary"] = "A resident with a tidier summary."
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration",
+        json={"manifest": body["manifest"], "revision": body["revision"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["commit"]["committed"]
+    assert declaration(harness)["manifest"]["summary"] == "A resident with a tidier summary."
+
+
+def test_a_declaration_can_be_written_as_text_so_comments_survive(
+    writable: Callable[..., Harness],
+) -> None:
+    """A manifest people edit carries comments; a round trip through a model destroys them."""
+    harness = writable()
+    body = declaration(harness)
+    commented = "# why this resident exists\n" + body["text"]
+
+    response = harness.client.put("/residents/test-agent/declaration", json={"text": commented})
+
+    assert response.status_code == 200
+    assert "# why this resident exists" in declaration(harness)["text"]
+
+
+def test_an_invalid_edit_is_refused_with_the_field_that_was_wrong(
+    writable: Callable[..., Harness],
+) -> None:
+    """A UI has to be able to put a red border round one input."""
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"]["charter"]["mission"] = "m" * 3_000
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["error"] == "manifest_invalid"
+    assert "charter.mission" in {d["field"] for d in detail["diagnostics"]}
+    assert declaration(harness)["manifest"]["charter"]["mission"] != "m" * 3_000
+
+
+def test_a_refused_edit_commits_nothing_and_logs_the_refusal(
+    writable: Callable[..., Harness],
+) -> None:
+    """Refusals are immediate and specific, and leave the resident exactly as it was."""
+    harness = writable()
+    body = declaration(harness)
+    before = body["text"]
+    body["manifest"]["summary"] = "s" * 5_000
+
+    harness.client.put("/residents/test-agent/declaration", json={"manifest": body["manifest"]})
+
+    assert declaration(harness)["text"] == before
+    assert [r.outcome for r in harness.store.requests()] == ["refused: manifest_invalid"]
+
+
+def test_two_editors_are_told_rather_than_one_silently_winning(
+    writable: Callable[..., Harness],
+) -> None:
+    """The revision a form loaded is what makes a lost update visible instead of invisible."""
+    harness = writable()
+    first = declaration(harness)
+    second = declaration(harness)
+    first["manifest"]["summary"] = "The first editor's summary."
+    harness.client.put(
+        "/residents/test-agent/declaration",
+        json={"manifest": first["manifest"], "revision": first["revision"]},
+    )
+
+    second["manifest"]["summary"] = "The second editor's summary."
+    response = harness.client.put(
+        "/residents/test-agent/declaration",
+        json={"manifest": second["manifest"], "revision": second["revision"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "stale_revision"
+    assert declaration(harness)["manifest"]["summary"] == "The first editor's summary."
+
+
+def test_a_declaration_needs_exactly_one_spelling(writable: Callable[..., Harness]) -> None:
+    """`manifest` and `text` are two ways to say one thing; neither may silently win."""
+    harness = writable()
+    body = declaration(harness)
+
+    both = harness.client.put(
+        "/residents/test-agent/declaration",
+        json={"manifest": body["manifest"], "text": body["text"]},
+    )
+    neither = harness.client.put("/residents/test-agent/declaration", json={})
+
+    assert both.status_code == 422
+    assert neither.status_code == 422
+
+
+def test_editing_an_unknown_resident_is_404(writable: Callable[..., Harness]) -> None:
+    """PUT updates; it does not create. POST /residents is how a resident is declared."""
+    response = writable().client.put(
+        "/residents/nobody/declaration", json={"manifest": {"id": "nobody"}}
+    )
+
+    assert response.status_code == 404
+
+
+def test_renaming_the_soul_file_is_refused_rather_than_orphaning_it(
+    writable: Callable[..., Harness],
+) -> None:
+    """Steward will not leave a file behind in the tree that nothing reads and nothing owns."""
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"]["soul"]["file"] = "identity.md"
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "soul_file_changed"
+
+
+# -- skills ----------------------------------------------------------------------------
+
+
+NEW_SKILL = {
+    "name": "triage",
+    "description": "Sort the inbox before anything else.",
+    "body": "Read every message. Answer what you can. Escalate what you cannot.",
+}
+
+
+def test_a_skill_written_over_http_is_visible_at_once(writable: Callable[..., Harness]) -> None:
+    """The library used to be read once at startup, so a fresh skill would have been invisible."""
+    harness = writable()
+
+    created = harness.client.post("/skills", json=NEW_SKILL)
+
+    assert created.status_code == 201
+    assert created.json()["commit"]["committed"]
+    assert "triage" in {skill["name"] for skill in harness.client.get("/skills").json()["skills"]}
+
+
+def test_one_skill_is_readable_with_the_revision_to_edit_against(
+    writable: Callable[..., Harness],
+) -> None:
+    """The GET a form loads before it lets anybody type."""
+    harness = writable()
+    harness.client.post("/skills", json=NEW_SKILL)
+
+    body = harness.client.get("/skills/triage").json()
+
+    assert body["description"] == NEW_SKILL["description"]
+    assert body["body"].strip() == NEW_SKILL["body"]
+    assert body["revision"].startswith("sha256:")
+
+
+def test_adding_a_skill_that_exists_is_refused_rather_than_overwriting(
+    writable: Callable[..., Harness],
+) -> None:
+    """Refuse rather than overwrite: add and rewrite must not be the same button."""
+    harness = writable()
+    harness.client.post("/skills", json=NEW_SKILL)
+
+    again = harness.client.post("/skills", json=NEW_SKILL | {"body": "Something else entirely."})
+
+    assert again.status_code == 409
+    assert again.json()["detail"]["error"] == "skill_exists"
+    assert harness.client.get("/skills/triage").json()["body"].startswith("Read every message")
+
+
+def test_a_skill_is_replaced_by_put(writable: Callable[..., Harness]) -> None:
+    """Full replacement, like the declaration: read it, change it, write it back."""
+    harness = writable()
+    harness.client.post("/skills", json=NEW_SKILL)
+
+    response = harness.client.put(
+        "/skills/triage",
+        json={"description": "Sort the inbox, gently.", "body": "Read. Answer. Escalate."},
+    )
+
+    assert response.status_code == 200
+    assert harness.client.get("/skills/triage").json()["description"] == "Sort the inbox, gently."
+
+
+def test_editing_an_unknown_skill_is_404(writable: Callable[..., Harness]) -> None:
+    """PUT updates a skill; POST /skills adds one."""
+    response = writable().client.put(
+        "/skills/nobody-wrote-this", json={"description": "d", "body": "b"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_an_invalid_skill_is_refused_with_diagnostics(writable: Callable[..., Harness]) -> None:
+    """The library's own caps, surfaced as fields rather than swallowed."""
+    harness = writable()
+
+    response = harness.client.post("/skills", json=NEW_SKILL | {"body": "x" * 9_000})
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["diagnostics"]
+    assert harness.client.get("/skills/triage").status_code == 404
+
+
+def test_a_default_skill_reaches_every_resident(writable: Callable[..., Harness]) -> None:
+    """`defaults: true` is a grant to the whole fleet, and the fleet view has to show it."""
+    harness = writable()
+
+    harness.client.post("/skills", json=NEW_SKILL | {"defaults": True})
+
+    resident = harness.client.get("/residents/test-agent").json()
+    assert "triage" in resident["effective_skills"]
+
+
+def test_a_skill_that_would_break_the_fleet_is_refused(api: ApiFactory, tmp_path: Path) -> None:
+    """A first skill that turns every existing grant into an error must not be written.
+
+    Creating the library is what makes grants checkable at all, so this is the one write
+    whose blast radius is the entire tree — and it is refused before the directory exists.
+    """
+    harness = api()
+
+    response = harness.client.post("/skills", json=NEW_SKILL)
+
+    assert response.status_code == 422
+    assert not (tmp_path / "skills").exists()
+
+
+# -- reload ----------------------------------------------------------------------------
+
+
+def test_reload_re_reads_the_tree_into_this_process(writable: Callable[..., Harness]) -> None:
+    """The API's own long-lived collaborators, refreshed without a restart."""
+    harness = writable()
+
+    response = harness.client.post("/reload")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "reloaded"
+    assert body["residents"] == 1
+    assert sorted(body["skills"]) == list(GRANTED_SKILLS)
+
+
+def test_reload_picks_up_a_routine_added_since_startup(
+    writable: Callable[..., Harness], write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The run-now scheduler was assembled at startup and would fire the old manifest."""
+    harness = writable()
+    data = copy.deepcopy(valid_manifest())
+    data["routines"].append(
+        {
+            "id": "second-routine",
+            "schedule": "0 9 * * *",
+            "prompt": "Do the other thing.",
+            "timeout_s": 600,
+        }
+    )
+    write_resident(data, root=tmp_path / "residents")
+
+    assert harness.client.post("/reload").status_code == 200
+    assert harness.client.app.state.runs.scheduler.scheduled
+    assert "second-routine" in {
+        item.routine.id for item in harness.client.app.state.runs.scheduler.scheduled
+    }
+
+
+# -- human-only ------------------------------------------------------------------------
+
+
+def test_a_session_may_not_write_anything_the_fleet_is_declared_by(
+    writable: Callable[..., Harness],
+) -> None:
+    """The allowlist holds by construction; this is the proof, route by route.
+
+    A resident editing its own charter would be choosing the rules it is held to, and a
+    resident writing a skill would be handing itself instructions nobody approved. Both are
+    refused for the same reason `POST /residents` always was.
+    """
+    harness = writable()
+    credential = open_session_run(harness)
+    before = declaration(harness)["text"]
+
+    refusals = {
+        "declaration": harness.client.put(
+            "/residents/test-agent/declaration",
+            json={"manifest": {"id": "test-agent"}},
+            headers=as_session(credential),
+        ),
+        "skill_create": harness.client.post(
+            "/skills", json=NEW_SKILL, headers=as_session(credential)
+        ),
+        "skill_update": harness.client.put(
+            "/skills/daily-summary",
+            json={"description": "d", "body": "b"},
+            headers=as_session(credential),
+        ),
+        "reload": harness.client.post("/reload", headers=as_session(credential)),
+    }
+
+    for route, response in refusals.items():
+        assert response.status_code == 403, route
+        assert response.json()["detail"]["error"] == "session_credential_forbidden", route
+    assert declaration(harness)["text"] == before
+    assert harness.store.requests() == [], "and nothing was logged as accepted"
+
+
+def test_a_session_may_still_read_the_declaration_it_is_bound_by(
+    writable: Callable[..., Harness],
+) -> None:
+    """Reads stay open: a resident that could not see its own charter could not follow it."""
+    harness = writable()
+    credential = open_session_run(harness)
+
+    response = harness.client.get(
+        "/residents/test-agent/declaration", headers=as_session(credential)
+    )
+
+    assert response.status_code == 200
+
+
+def test_reload_refuses_a_tree_that_does_not_validate(
+    writable: Callable[..., Harness], write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The daemon's rule, in this process too: a broken manifest must not retire the fleet."""
+    harness = writable()
+    before = list(harness.client.app.state.runs.scheduler.scheduled)
+    broken = copy.deepcopy(valid_manifest())
+    broken["charter"]["mission"] = "m" * 3_000
+    write_resident(broken, root=tmp_path / "residents")
+
+    response = harness.client.post("/reload")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "tree_invalid"
+    assert harness.client.app.state.runs.scheduler.scheduled == before

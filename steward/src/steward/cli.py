@@ -77,6 +77,7 @@ from steward.scheduler import (
     Scheduler,
     SchedulerError,
     SchedulerState,
+    TreeSource,
     default_state_path,
     load_scheduled,
     scheduler_liveness,
@@ -998,6 +999,10 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
             hooks=hooks,
             guard=guard,
             registry=registry,
+            # What makes `steward serve` notice a manifest that changed under it. A
+            # rehearsal is given no source: `--dry-run` reports on the tree as it was read,
+            # and a reload halfway through would make the report describe two of them.
+            source=None if dry_run else TreeSource(residents_dir=Path(residents)),
         )
     finally:
         # This store is owned by the CLI assembly above. Scheduler also accepts injected

@@ -106,6 +106,7 @@ from steward.scheduler import (
 from steward.skills import library_for
 
 __all__ = [
+    "CommitIdentity",
     "CreatedResident",
     "DeclareStage",
     "NewResident",
@@ -390,8 +391,38 @@ def worktree_complaint(repo: Path, *, git: PipedRun = run_argv) -> str | None:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class CommitIdentity:
+    """Who a commit steward makes is authored and committed by.
+
+    Both, not just the author. ``--author`` alone leaves the *committer* to whatever
+    ``git config`` the process happens to see, and a server is exactly the place where that
+    is unset — a steward on the NAS would stage a manifest perfectly and then fail at the
+    commit with "Please tell me who you are". Passing the identity as command-line config
+    makes the commit work on a machine with no git identity at all, which is the machine
+    this is for.
+    """
+
+    name: str
+    email: str
+
+    @property
+    def spec(self) -> str:
+        """Return the ``Name <email>`` form git prints in a log."""
+        return f"{self.name} <{self.email}>"
+
+    def config_args(self) -> tuple[str, ...]:
+        """Return the ``-c`` flags that make this identity both author and committer."""
+        return ("-c", f"user.name={self.name}", "-c", f"user.email={self.email}")
+
+
 def commit_paths(
-    repo: Path, paths: Sequence[Path], message: str, *, git: PipedRun = run_argv
+    repo: Path,
+    paths: Sequence[Path],
+    message: str,
+    *,
+    identity: CommitIdentity | None = None,
+    git: PipedRun = run_argv,
 ) -> str | None:
     """Stage and commit exactly these paths. Returns the new commit, or ``None``.
 
@@ -399,6 +430,15 @@ def commit_paths(
     re-run: the manifest on disk is already the manifest in git, so there is no second
     commit saying the same thing. That is what makes running ``steward new-resident``
     twice a no-op rather than a growing pile of empty commits.
+
+    ``identity`` names who the commit is by. ``None`` keeps the terminal's behaviour — the
+    person's own git config, because ``steward new-resident`` is something a person ran —
+    while the write API passes one, because there is nobody at the keyboard to inherit it
+    from.
+
+    Exactly these paths, always: a commit here can never pick up an unrelated file somebody
+    was in the middle of editing, which is what makes committing from a long-running server
+    safe at all.
     """
     relative = [str(path.resolve().relative_to(repo.resolve())) for path in paths]
     added = _git(repo, "add", "--", *relative, git=git)
@@ -407,7 +447,8 @@ def commit_paths(
     staged = _git(repo, "diff", "--cached", "--quiet", "--", *relative, git=git)
     if staged.exit_status == 0:
         return None  # Already committed, byte for byte. Converged.
-    committed = _git(repo, "commit", "-m", message, "--", *relative, git=git)
+    config = identity.config_args() if identity is not None else ()
+    committed = _git(repo, *config, "commit", "-m", message, "--", *relative, git=git)
     if not committed.ok:
         raise NurseryError(f"git could not commit the declaration: {committed.summary()}")
     head = _git(repo, "rev-parse", "HEAD", git=git)

@@ -103,6 +103,14 @@ def console(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ConsoleF
         if residents:
             write_resident(manifest or valid_manifest(), root=residents_dir)
         store = Store(":memory:")
+        # A real checkout around the tree: since steward #214 the API commits what it
+        # writes, and a console harness with no git behind it would be exercising the
+        # refusal rather than the panel.
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(tmp_path), "init", "-b", "main"],  # noqa: S607
+            check=True,
+            capture_output=True,
+        )
         app = create_app(
             ApiConfig(
                 residents_dir=residents_dir,

@@ -142,6 +142,14 @@ is `403 session_credential_forbidden`, and nothing is recorded — it is refused
 before a route runs. This is an allowlist, so a write path added later is refused until
 somebody decides otherwise.
 
+That allowlist is what makes the write API (steward #214) safe to have at all. A resident
+that could `PUT` its own declaration would be choosing the rules it is held to, and one
+that could write a skill would be handing itself instructions nobody approved — so
+`PUT /residents/{id}/declaration`, `POST /skills`, `PUT /skills/{name}` and `POST /reload`
+are all refused for a session, each naming the act rather than reciting a policy. Reading
+a declaration stays open: a resident that could not see its own charter could not follow
+it.
+
 Reads are *not* narrowed, and that is a decision rather than an omission. A locally placed
 session already has `steward.db` and the residents tree on the same disk — that is how
 `steward delegate` and `steward approval raise` work at all — so narrowing what it may read
@@ -429,12 +437,17 @@ that fails validation is removed rather than left to break the tree for everyone
 for that is asking steward to reach a machine over ssh and start something on it, which
 is not a thing a request should be able to do by leaving a field out.
 
-**This endpoint never commits.** Not with `deploy: false`, not with `deploy: true`. The
-server is not guaranteed to own the checkout it is reading — it may be a tailnet process
-on a machine where nobody is watching git — and a commit appearing there is a commit that
-surprises somebody. The response says so in `message`, and `declare.commit` is `null`, so
-a panel can tell the human what is still theirs to do. `steward new-resident` on a
-terminal is the path that commits.
+**This endpoint commits, since steward #214.** It used to commit nothing, on the grounds
+that the server may not own the checkout it is reading. The cost of that was that every
+resident raised from a control panel was left with no history and no author — the newest
+declarations in the fleet being the only unrecorded ones, which is exactly backwards.
+
+`declare.commit` is still `null`: that is the *nursery's* commit, and the API still asks
+the nursery not to make one, because the nursery's commit is bound up with its
+dirty-worktree refusal, which is right for a terminal and wrong for a long-running server.
+The commit that actually happened is the top-level `commit` key, and it stages only the two
+files that were written. See [Writing declarations and skills](#writing-declarations-and-skills)
+for the shared rules, including what happens when the tree is not in a checkout at all.
 
 `201` with the paths it wrote and the full report:
 
@@ -638,8 +651,12 @@ valid resident. A skill nobody holds reports `"holders": []` — that is a real 
 not an omission. A `SKILL.md` that does not parse is named in `errors` and left out of
 `skills`, the same way a broken manifest is handled above.
 
-Read-only, like the other views: a skill is added by committing a `SKILL.md` and granted
-by committing a manifest. There is no HTTP path that writes either.
+The library is read from disk on every request, so a skill written through the endpoints
+below is in the next listing rather than the next restart.
+
+Skills *are* writable over HTTP since steward #214 — see
+[Writing declarations and skills](#writing-declarations-and-skills). Granting one to a
+particular resident is still a manifest edit, which is `PUT /residents/{id}/declaration`.
 
 ### `GET /routines`
 
@@ -776,3 +793,160 @@ read-modify-write over a JSON file cannot promise.
 Schema changes are `ALTER TABLE`, applied at open time. A steward that has been running
 since the API landed already has a `steward.db` full of real jobs, and a migration that
 drops it is a migration that loses work.
+
+## Writing declarations and skills
+
+Added in steward #214. Every UI before it was read-only by construction: manifests and
+skills are files in the residents tree that only a commit could change. These endpoints
+move the *typing* into a control panel while keeping every guarantee that rule bought.
+
+Four rules hold for all of them.
+
+**Human callers only.** A session credential is `403` on every route in this section — see
+[Two kinds of caller](#two-kinds-of-caller).
+
+**An invalid write is never written.** The candidate is applied to a throwaway *copy* of
+the tree and validated there with the same gate `steward validate` runs, and only a copy
+that passes is applied for real. It is the whole tree rather than the one file, because a
+duplicate `uid` and two residents sharing a journal directory are only visible across
+residents — an API that checked one file would be weaker than CI, and "it passed the API
+and broke the build" is the failure these endpoints exist to prevent. A refusal has
+written nothing and committed nothing.
+
+**Refusals carry structured diagnostics**, so a form can highlight the field rather than
+print a paragraph. Every validation cap applies and is surfaced, never swallowed:
+
+```json
+{"detail": {"error": "manifest_invalid",
+            "message": "the declaration for 'hob' does not validate: charter.mission: …",
+            "diagnostics": [{"file": "residents/hob/manifest.yaml", "field": "charter.mission",
+                             "problem": "…exceeds the 2000 character limit",
+                             "example": "mission: Keep the village's notes in order.",
+                             "severity": "error"}]}}
+```
+
+**Every accepted write is committed by steward**, staging *only* the files it wrote —
+never `git add -A`, so a checkout with somebody's half-finished afternoon in it is neither
+swept into the commit nor a reason to refuse. The commit names the request:
+
+```
+chore(residents): update hob via the API
+
+Written over the steward API by a holder of STEWARD_TOKEN, over the steward API.
+Steward-Request-Id: 4d9e01be-c649-44bf-82f0-75ad5cac45d2
+```
+
+The author is `steward (api) <steward-api@localhost>` unless `STEWARD_COMMIT_IDENTITY` is
+set to a `Name <email>`. Deliberately not a person by default: `STEWARD_TOKEN` is a shared
+secret with no principal behind it, and an author line naming somebody would be a guess
+dressed up as an audit record. The request id in the trailer is the honest link —
+`GET /requests/{id}` turns it into a method, a path and a moment. Both author *and*
+committer are set, so the commit works on a server with no ambient `git config` identity.
+
+`committed: false` with `sha: null` is the converged answer, not a failure: what is on
+disk was already what is in git.
+
+**If the residents tree is not inside a git checkout**, the write is **refused** with
+`409 not_a_git_checkout`. A fleet whose declarations have no history and no way back is a
+thing to choose out loud rather than to discover on the day somebody needs to undo
+something. `STEWARD_ALLOW_UNCOMMITTED_WRITES=1` accepts it, and then every response says
+so in `commit.note`.
+
+### `GET /residents/{id}/declaration` · `PUT /residents/{id}/declaration`
+
+The editable source of one resident — both files, together. Not the same thing as
+[`GET /residents/{id}`](#get-residents--get-residentsid), which is a projection assembled
+from a validated model; this is what is actually in git, comments and field order and all.
+
+```json
+{"id": "hob", "uid": "…",
+ "manifest": {"version": 0, "id": "hob", "…": "…"},
+ "text": "# the manifest as YAML, byte for byte\nversion: 0\n…",
+ "soul": "---\nagent_id: claude-code:hob\n---\n…",
+ "soul_file": "soul.md",
+ "revision": "sha256:…",
+ "paths": ["residents/hob/manifest.yaml", "residents/hob/soul.md"]}
+```
+
+`PUT` takes that shape back. Exactly one of `manifest` (the mapping a form builds, which
+steward serialises — convenient, and it rewrites the file, so comments do not survive) or
+`text` (the YAML itself, written byte for byte, which is how comments are kept). Giving
+both, or neither, is a `422`. `soul` is optional; omitting it leaves the soul untouched.
+
+The manifest and the soul move **together** because `agent_id` is in both and validation
+insists they agree — split into two endpoints, renaming a resident's agent id would be
+impossible, since whichever file you wrote first would be refused for disagreeing with the
+other.
+
+It is a **full replacement, not a patch**. Merging a partial edit means steward deciding
+what a missing key meant — cleared, or untouched? — and the declaration is the wrong file
+to be clever with.
+
+`revision` is optional optimistic concurrency: send the one the `GET` returned and a
+second editor who loaded the same version gets `409 stale_revision` instead of silently
+overwriting the first. Omit it to overwrite deliberately, which is what a script wants.
+
+| status | error | meaning |
+|---|---|---|
+| 404 | `unknown_resident` | `PUT` updates; `POST /residents` is how one is declared |
+| 409 | `stale_revision` | somebody changed it first; re-read and reapply |
+| 409 | `soul_file_changed` | renaming `soul.file` would orphan the old file; do it in the checkout |
+| 409 | `not_a_git_checkout` | the tree has no git behind it and this steward refuses to write unrecorded |
+| 422 | `manifest_invalid` | the tree would not validate; `diagnostics` names the fields |
+
+### `GET /skills/{name}` · `POST /skills` · `PUT /skills/{name}`
+
+One skill's frontmatter and body, and the two ways to write one.
+
+```json
+{"name": "triage", "description": "Sort the inbox before anything else.",
+ "body": "Read every message. …", "defaults": false,
+ "revision": "sha256:…", "path": "skills/triage/SKILL.md"}
+```
+
+`POST /skills` adds one and `201`s; a name that already exists is `409 skill_exists`
+rather than an overwrite, because "add" and "rewrite" must not be the same button.
+`PUT /skills/{name}` replaces one and `404`s for a name nobody wrote. Both take
+`description`, `body`, `defaults`, and an optional `revision`.
+
+**`defaults: true` is a grant to the entire fleet.** A default skill is held by every
+resident without any manifest saying so, which makes this one flag the largest blast
+radius in the API. It is validated accordingly: the whole residents tree is re-validated
+against a library holding the candidate, so a skill that would break somebody's grant is
+refused here rather than discovered at the next wake-up.
+
+The write goes into the **library** — the git-tracked `skills/` tree — and never into a
+session's materialized `.claude/skills/`, which `steward.skills.materialize` owns and
+prunes wholesale on every session launch. A skill written there would be deleted silently
+at the next wake-up.
+
+If the fleet has no library yet, the first `POST /skills` creates `skills/` beside the
+residents tree. That is a bigger change than it looks — a configured-but-empty library
+turns every existing grant into an error, where an absent one leaves grants unchecked — so
+it goes through the same gate as everything else, and a first skill that would invalidate
+the fleet is refused before the directory exists.
+
+### `POST /reload`
+
+Re-reads the residents tree and the skills library into **this process**.
+
+The scheduler daemon is a *different* process, usually started by `steward serve`, and no
+HTTP call can reach into it. It does not need one: it watches both trees itself and
+reloads on its next wake-up, which is within a minute. A tree that stops validating does
+not stop it — the last declarations that did validate keep running, and the reason is
+logged once.
+
+What this endpoint is for is the API's own long-lived collaborators — the run-now
+scheduler and the board dispatcher — which are assembled at startup and would otherwise
+fire a routine against the manifest that was on disk when the server booted. The read
+views need no reload at all; they re-read the tree on every request.
+
+```json
+{"request_id": "…", "status": "reloaded", "residents": 3, "routines": 7,
+ "skills": ["daily-summary", "escalate", "research", "write-journal"], "errors": []}
+```
+
+`409 tree_invalid` when the tree does not validate: nothing is swapped in, and this
+process goes on running the last declarations that did — the same judgement the daemon
+makes, for the same reason. Swapping in only what parsed would quietly retire every
+resident whose manifest happened to be mid-edit.
