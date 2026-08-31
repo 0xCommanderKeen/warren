@@ -1,6 +1,7 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import fixture from "./fixtures/complete-v1.json";
+import fixture from "./fixtures/complete-v1.js";
 import { parseSnapshot } from "./parseSnapshot.js";
 
 describe("parseSnapshot", () => {
@@ -11,5 +12,9 @@ describe("parseSnapshot", () => {
     expect(snapshot.villagers).toEqual([
       expect.objectContaining({ id: "claude:keeper", name: "Keeper" }),
     ]);
+  });
+
+  it("reads the contract fixture from Burrow itself, never a vendored copy", () => {
+    expect(existsSync("src/contract/fixtures/complete-v1.json")).toBe(false);
   });
 });

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
-import fixture from "./contract/fixtures/complete-v1.json";
+import fixture from "./contract/fixtures/complete-v1.js";
 import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
