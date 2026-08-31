@@ -5,10 +5,14 @@ on:
     branches: [main]
     paths:
       - "arcadia/**"
+      # Arcadia's contract tests read Burrow's fixture in-tree rather than
+      # vendoring it, so a change to that fixture must run this suite.
+      - "chronicle/tests/fixtures/state-contract/**"
       - ".github/workflows/arcadia.yml"
   pull_request:
     paths:
       - "arcadia/**"
+      - "chronicle/tests/fixtures/state-contract/**"
       - ".github/workflows/arcadia.yml"
 
 concurrency:
