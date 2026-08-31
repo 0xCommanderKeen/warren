@@ -2,10 +2,23 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-if [ "${BURROW_INSTALL_ROOT+x}" = x ]; then
+# CHRONICLE_INSTALL_ROOT, or the pre-rename BURROW_INSTALL_ROOT for one release.
+if [ "${CHRONICLE_INSTALL_ROOT+x}" = x ]; then
+  install_root=$CHRONICLE_INSTALL_ROOT
+elif [ "${BURROW_INSTALL_ROOT+x}" = x ]; then
   install_root=$BURROW_INSTALL_ROOT
 else
-  install_root="${HOME:?HOME is required}/.local/lib/burrow-emitter"
+  lib="${HOME:?HOME is required}/.local/lib"
+  # An existing bundle is upgraded where it already lives. Runner hook configs
+  # name this directory by absolute path, and moving the bundle out from under
+  # them would leave those hooks pointing at nothing — silently, since a missing
+  # hook command is not an error the runner reports. Only a first install picks
+  # the new name; moving an existing one is an operator step.
+  if [ -d "$lib/burrow-emitter" ] && [ ! -d "$lib/chronicle-emitter" ]; then
+    install_root="$lib/burrow-emitter"
+  else
+    install_root="$lib/chronicle-emitter"
+  fi
 fi
 
 case $install_root in
@@ -37,15 +50,21 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 install -m 600 "$repo_root/hooks/emit.py" "$repo_root/hooks/durable.py" "$stage/"
-install -m 700 "$repo_root/hooks/burrow-emit" "$stage/burrow-emit"
+install -m 700 "$repo_root/hooks/chronicle-emit" "$stage/chronicle-emit"
+# The bundle answers to both entry-point names for one release. A hook config
+# written before the rename invokes burrow-emit by absolute path, and an upgrade
+# that published only the new name would break it the next time the runner fired
+# a hook rather than at install time.
+install -m 700 "$repo_root/hooks/chronicle-emit" "$stage/burrow-emit"
 
 # Validate the private, complete candidate before the published path changes.
-[ "$(find "$stage" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3 ]
+[ "$(find "$stage" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4 ]
+[ -x "$stage/chronicle-emit" ]
 [ -x "$stage/burrow-emit" ]
 python3 -m py_compile "$stage/emit.py" "$stage/durable.py"
 rm -rf -- "$stage/__pycache__"
 
-if [ "${BURROW_INSTALL_FAIL_BEFORE_PUBLISH:-}" = 1 ]; then
+if [ "${CHRONICLE_INSTALL_FAIL_BEFORE_PUBLISH:-}" = 1 ]; then
   printf '%s\n' "Injected failure before publication" >&2
   exit 1
 fi
@@ -53,13 +72,13 @@ fi
 # Publish a clean install with rename(2), or atomically exchange complete old and
 # new directories on upgrade. Unsupported platforms fail safely instead of
 # exposing a gap or a partially reconciled bundle.
-BURROW_PUBLISH_STAGE=$stage BURROW_PUBLISH_TARGET=$install_root python3 - <<'PY'
+CHRONICLE_PUBLISH_STAGE=$stage CHRONICLE_PUBLISH_TARGET=$install_root python3 - <<'PY'
 import ctypes
 import os
 import platform
 
-stage = os.environ["BURROW_PUBLISH_STAGE"]
-target = os.environ["BURROW_PUBLISH_TARGET"]
+stage = os.environ["CHRONICLE_PUBLISH_STAGE"]
+target = os.environ["CHRONICLE_PUBLISH_TARGET"]
 if os.path.lexists(target) and os.path.islink(target):
     raise SystemExit("refusing symlink target during publication")
 if not os.path.exists(target):
@@ -88,4 +107,4 @@ PY
 if [ -d "$stage" ]; then rm -rf -- "$stage"; fi
 stage=$parent/.${name}.published
 trap - EXIT HUP INT TERM
-printf '%s\n' "Installed Burrow emitter: $install_root/burrow-emit"
+printf '%s\n' "Installed Chronicle emitter: $install_root/chronicle-emit"
