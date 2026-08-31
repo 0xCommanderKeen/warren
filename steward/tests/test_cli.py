@@ -3106,6 +3106,26 @@ def new_resident_argv(repo: ScratchRepo, charter: Path, *extra: str) -> list[str
     ]
 
 
+def test_the_charter_example_is_a_charter_steward_accepts(
+    runner: CliRunner, scratch_repo: ScratchRepo, tmp_path: Path, nas: LocalTransport
+) -> None:
+    """The example a refusal prints is the only spec `--charter` has (warren#90).
+
+    It is printed at every refusal and reproduced verbatim in the README, so an operator
+    who copies it has to end up with a charter the validator takes. A drifting example
+    would be a file format documented wrongly, which is worse than one documented nowhere.
+    """
+    charter = tmp_path / "from-the-example.yaml"
+    charter.write_text(cli.CHARTER_EXAMPLE, encoding="utf-8")
+
+    result = runner.invoke(main, new_resident_argv(scratch_repo, charter, "--dry-run"))
+
+    assert result.exit_code == 0, result.output
+    assert not nas.touched
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    assert cli.CHARTER_EXAMPLE in readme, "README's charter block has drifted from the CLI's"
+
+
 def test_new_resident_raises_a_resident_end_to_end(
     runner: CliRunner, scratch_repo: ScratchRepo, charter_file: Path, nas: LocalTransport
 ) -> None:
