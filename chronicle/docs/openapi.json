@@ -1,0 +1,1402 @@
+{
+  "components": {
+    "schemas": {
+      "ApprovalWire": {
+        "description": "One projected approval lifecycle.",
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "detail": {
+            "$ref": "#/components/schemas/JsonValue"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "expires_at_present": {
+            "title": "Expires At Present",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "opened_at": {
+            "title": "Opened At",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "resolved",
+              "collision"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "agent_id",
+          "project",
+          "state",
+          "message",
+          "action",
+          "detail",
+          "options",
+          "expires_at_present",
+          "expires_at",
+          "opened_at"
+        ],
+        "title": "ApprovalWire",
+        "type": "object"
+      },
+      "ArtifactWire": {
+        "description": "One projected artifact record.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "artifact": {
+            "title": "Artifact",
+            "type": "string"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id",
+          "project",
+          "artifact",
+          "ts"
+        ],
+        "title": "ArtifactWire",
+        "type": "object"
+      },
+      "DiagnosticWire": {
+        "additionalProperties": true,
+        "description": "One bounded projection diagnostic.",
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          }
+        },
+        "title": "DiagnosticWire",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "Preserved plain-text transport error body.",
+        "title": "ErrorResponse",
+        "type": "string"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IngestStatus": {
+        "properties": {
+          "dedupe_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dedupe Window"
+          },
+          "duplicates": {
+            "title": "Duplicates",
+            "type": "integer"
+          },
+          "durable": {
+            "title": "Durable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "duplicates",
+          "dedupe_window",
+          "durable"
+        ],
+        "title": "IngestStatus",
+        "type": "object"
+      },
+      "JournalWire": {
+        "description": "One projected journal observation.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "day": {
+            "title": "Day",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "routine": {
+            "title": "Routine",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "day",
+          "agent_id",
+          "project",
+          "source",
+          "routine",
+          "path",
+          "observed_at"
+        ],
+        "title": "JournalWire",
+        "type": "object"
+      },
+      "JsonValue": {},
+      "NotificationStatus": {
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "delivered": {
+            "title": "Delivered",
+            "type": "integer"
+          },
+          "dropped": {
+            "title": "Dropped",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "queue_capacity": {
+            "title": "Queue Capacity",
+            "type": "integer"
+          },
+          "queued": {
+            "title": "Queued",
+            "type": "integer"
+          },
+          "retried": {
+            "title": "Retried",
+            "type": "integer"
+          },
+          "saturated": {
+            "title": "Saturated",
+            "type": "integer"
+          },
+          "workers": {
+            "title": "Workers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "configured",
+          "queued",
+          "queue_capacity",
+          "workers",
+          "delivered",
+          "failed",
+          "retried",
+          "saturated",
+          "dropped"
+        ],
+        "title": "NotificationStatus",
+        "type": "object"
+      },
+      "ProjectionCapacity": {
+        "properties": {
+          "approvals": {
+            "title": "Approvals",
+            "type": "integer"
+          },
+          "diagnostics": {
+            "title": "Diagnostics",
+            "type": "integer"
+          },
+          "events_per_villager": {
+            "title": "Events Per Villager",
+            "type": "integer"
+          },
+          "journals": {
+            "title": "Journals",
+            "type": "integer"
+          },
+          "routines": {
+            "title": "Routines",
+            "type": "integer"
+          },
+          "tasks": {
+            "title": "Tasks",
+            "type": "integer"
+          },
+          "villagers": {
+            "title": "Villagers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "villagers",
+          "events_per_villager",
+          "tasks",
+          "approvals",
+          "journals",
+          "routines",
+          "diagnostics"
+        ],
+        "title": "ProjectionCapacity",
+        "type": "object"
+      },
+      "ProtocolEvent": {
+        "additionalProperties": true,
+        "description": "Validated public event-ingestion wire shape.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "cwd": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cwd"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "ts": {
+            "title": "Ts",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "v": {
+            "title": "V",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "v",
+          "ts",
+          "source",
+          "agent_id",
+          "project",
+          "type",
+          "payload"
+        ],
+        "title": "ProtocolEvent",
+        "type": "object"
+      },
+      "ResidentDiagnosticWire": {
+        "description": "One bounded resident-manifest diagnostic.",
+        "properties": {
+          "body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body"
+          },
+          "capabilities": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "declared_home": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Declared Home"
+          },
+          "diagnostic": {
+            "const": true,
+            "title": "Diagnostic",
+            "type": "boolean"
+          },
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "manifest_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manifest Version"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Match",
+            "type": "object"
+          },
+          "meta": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Meta",
+            "type": "object"
+          },
+          "valid": {
+            "const": false,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file",
+          "valid",
+          "diagnostic",
+          "manifest_version",
+          "match",
+          "declared_home",
+          "meta",
+          "body",
+          "capabilities"
+        ],
+        "title": "ResidentDiagnosticWire",
+        "type": "object"
+      },
+      "ResidentReport": {
+        "additionalProperties": true,
+        "properties": {
+          "residents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Residents",
+            "type": "array"
+          }
+        },
+        "required": [
+          "residents"
+        ],
+        "title": "ResidentReport",
+        "type": "object"
+      },
+      "ResidentWire": {
+        "description": "One validated resident manifest projection.",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "capabilities": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "file": {
+            "title": "File",
+            "type": "string"
+          },
+          "home": {
+            "title": "Home",
+            "type": "integer"
+          },
+          "manifest_version": {
+            "const": 1,
+            "title": "Manifest Version",
+            "type": "integer"
+          },
+          "match": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Match",
+            "type": "object"
+          },
+          "meta": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Meta",
+            "type": "object"
+          },
+          "routines": {
+            "items": {
+              "additionalProperties": {
+                "$ref": "#/components/schemas/JsonValue"
+              },
+              "type": "object"
+            },
+            "title": "Routines",
+            "type": "array"
+          },
+          "valid": {
+            "const": true,
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file",
+          "valid",
+          "manifest_version",
+          "match",
+          "home",
+          "meta",
+          "body",
+          "capabilities",
+          "routines"
+        ],
+        "title": "ResidentWire",
+        "type": "object"
+      },
+      "RoutineWire": {
+        "description": "One projected routine lifecycle.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "routine": {
+            "title": "Routine",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "running",
+              "finished",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "trigger": {
+            "title": "Trigger",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "routine",
+          "agent_id",
+          "project",
+          "source",
+          "state",
+          "trigger",
+          "started_at",
+          "updated_at",
+          "outcome",
+          "duration_s",
+          "artifacts",
+          "error"
+        ],
+        "title": "RoutineWire",
+        "type": "object"
+      },
+      "StateEnvelope": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "snapshot",
+              "reset"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/VillageState"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "title": "StateEnvelope",
+        "type": "object"
+      },
+      "TaskWire": {
+        "description": "One projected task lifecycle.",
+        "properties": {
+          "claimant": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Claimant"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "posted_by": {
+            "title": "Posted By",
+            "type": "string"
+          },
+          "required_skills": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Skills",
+            "type": "array"
+          },
+          "state": {
+            "enum": [
+              "open",
+              "claimed",
+              "done",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "state",
+          "required_skills",
+          "posted_by",
+          "claimant",
+          "updated_at"
+        ],
+        "title": "TaskWire",
+        "type": "object"
+      },
+      "TransportStatus": {
+        "properties": {
+          "ingest": {
+            "$ref": "#/components/schemas/IngestStatus"
+          },
+          "notifications": {
+            "$ref": "#/components/schemas/NotificationStatus"
+          }
+        },
+        "required": [
+          "ingest",
+          "notifications"
+        ],
+        "title": "TransportStatus",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VillageState": {
+        "additionalProperties": false,
+        "description": "Complete browser snapshot wire contract.",
+        "properties": {
+          "approvals": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalWire"
+            },
+            "title": "Approvals",
+            "type": "array"
+          },
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactWire"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "capabilities": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "capacity": {
+            "$ref": "#/components/schemas/ProjectionCapacity"
+          },
+          "cursor": {
+            "title": "Cursor",
+            "type": "string"
+          },
+          "diagnostic_residents": {
+            "items": {
+              "$ref": "#/components/schemas/ResidentDiagnosticWire"
+            },
+            "title": "Diagnostic Residents",
+            "type": "array"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticWire"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "evaluated_at": {
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "generation": {
+            "title": "Generation",
+            "type": "integer"
+          },
+          "journals": {
+            "items": {
+              "$ref": "#/components/schemas/JournalWire"
+            },
+            "title": "Journals",
+            "type": "array"
+          },
+          "log_generation": {
+            "title": "Log Generation",
+            "type": "integer"
+          },
+          "residents": {
+            "items": {
+              "$ref": "#/components/schemas/ResidentWire"
+            },
+            "title": "Residents",
+            "type": "array"
+          },
+          "routines": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineWire"
+            },
+            "title": "Routines",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskWire"
+            },
+            "title": "Tasks",
+            "type": "array"
+          },
+          "villagers": {
+            "items": {
+              "$ref": "#/components/schemas/VillagerWire"
+            },
+            "title": "Villagers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generation",
+          "cursor",
+          "log_generation",
+          "evaluated_at",
+          "villagers",
+          "residents",
+          "diagnostic_residents",
+          "artifacts",
+          "tasks",
+          "approvals",
+          "journals",
+          "routines",
+          "diagnostics",
+          "capacity",
+          "capabilities"
+        ],
+        "title": "VillageState",
+        "type": "object"
+      },
+      "VillagerList": {
+        "items": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "title": "VillagerList",
+        "type": "array"
+      },
+      "VillagerWire": {
+        "description": "One projected villager record.",
+        "properties": {
+          "accent": {
+            "title": "Accent",
+            "type": "string"
+          },
+          "base": {
+            "enum": [
+              "home",
+              "lodge"
+            ],
+            "title": "Base",
+            "type": "string"
+          },
+          "char": {
+            "title": "Char",
+            "type": "string"
+          },
+          "cwd": {
+            "title": "Cwd",
+            "type": "string"
+          },
+          "history": {
+            "items": {
+              "$ref": "#/components/schemas/ProtocolEvent"
+            },
+            "title": "History",
+            "type": "array"
+          },
+          "home": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Home"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "last_line": {
+            "title": "Last Line",
+            "type": "string"
+          },
+          "last_ts": {
+            "title": "Last Ts",
+            "type": "string"
+          },
+          "lineage": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Lineage",
+            "type": "object"
+          },
+          "mood": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Mood",
+            "type": "object"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pending_approval_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Pending Approval Ids",
+            "type": "array"
+          },
+          "place": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Place"
+          },
+          "project": {
+            "title": "Project",
+            "type": "string"
+          },
+          "residency": {
+            "enum": [
+              "resident",
+              "visitor"
+            ],
+            "title": "Residency",
+            "type": "string"
+          },
+          "resident_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resident File"
+          },
+          "state": {
+            "enum": [
+              "knocking",
+              "resting",
+              "failed",
+              "stale",
+              "working"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "char",
+          "accent",
+          "residency",
+          "home",
+          "base",
+          "resident_file",
+          "state",
+          "project",
+          "cwd",
+          "last_ts",
+          "last_line",
+          "place",
+          "lineage",
+          "history",
+          "mood",
+          "pending_approval_ids"
+        ],
+        "title": "VillagerWire",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Burrow Village API",
+    "version": "0.6.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/events": {
+      "post": {
+        "operationId": "ingest_event_events_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-burrow-delivery-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Burrow-Delivery-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProtocolEvent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Appended or deduplicated"
+          },
+          "400": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Malformed framing or protocol event"
+          },
+          "401": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "413": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Event body too large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Notification queue unavailable"
+          }
+        },
+        "summary": "Ingest Event"
+      }
+    },
+    "/residents": {
+      "get": {
+        "operationId": "get_residents_residents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidentReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Residents"
+      }
+    },
+    "/state": {
+      "get": {
+        "operationId": "get_state_state_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "generation",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Generation"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StateEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "204": {
+            "description": "Snapshot unchanged"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get State"
+      }
+    },
+    "/state/stream": {
+      "get": {
+        "operationId": "stream_state_state_stream_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "generation",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Generation",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {}
+            },
+            "description": "Complete Village State snapshots"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stream State"
+      }
+    },
+    "/transport/status": {
+      "get": {
+        "operationId": "get_transport_status_transport_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransportStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Transport Status"
+      }
+    },
+    "/villagers": {
+      "get": {
+        "operationId": "get_villagers_villagers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VillagerList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Villagers"
+      }
+    }
+  }
+}

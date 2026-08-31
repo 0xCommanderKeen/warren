@@ -1,0 +1,10 @@
+{"v":0,"source":"fixture","ts":"2026-08-24T11:59:00.000Z","agent_id":"t:fresh","project":"burrow","type":"tool_called","payload":{"tool":"Read","detail":"README.md"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:30:00.000Z","agent_id":"t:stale-edge-inside","project":"burrow","type":"tool_called","payload":{"tool":"Bash","detail":"pytest"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T11:29:59.999Z","agent_id":"t:stale-edge-outside","project":"burrow","type":"tool_called","payload":{"tool":"Bash","detail":"pytest"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T10:00:00.000Z","agent_id":"t:old-idle","project":"life","type":"idle","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-24T10:00:00.000Z","agent_id":"t:old-knocker","project":"mail","type":"needs_human","payload":{"message":"still waiting on you"}}
+{"v":0,"source":"fixture","ts":"2026-08-24T00:00:00.000Z","agent_id":"t:drop-edge-inside","project":"burrow","type":"task_started","payload":{"prompt":"twelve hours ago exactly"}}
+{"v":0,"source":"fixture","ts":"2026-08-23T23:59:59.999Z","agent_id":"t:drop-edge-outside","project":"burrow","type":"task_started","payload":{"prompt":"one millisecond too old"}}
+{"v":0,"source":"fixture","ts":"2026-08-22T09:00:00.000Z","agent_id":"t:ancient-idle","project":"burrow","type":"idle","payload":{}}
+{"v":0,"source":"fixture","ts":"2026-08-22T09:00:00.000Z","agent_id":"t:ancient-knocker","project":"burrow","type":"needs_human","payload":{"message":"nobody came"}}
+{"v":0,"source":"fixture","ts":"not a timestamp","agent_id":"t:unparseable-ts","project":"burrow","type":"tool_called","payload":{"tool":"Read"}}

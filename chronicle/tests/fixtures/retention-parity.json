@@ -1,0 +1,21 @@
+[
+  {
+    "name": "live history remains projection evidence",
+    "now": 1787745600000,
+    "events": [
+      {"v": 0, "ts": "2026-08-26T11:57:00.000Z", "source": "test", "agent_id": "codex:pip", "project": "burrow", "cwd": "/tmp", "type": "tool_called", "payload": {"tool": "Read", "detail": "one"}},
+      {"v": 0, "ts": "2026-08-26T11:58:00.000Z", "source": "test", "agent_id": "codex:pip", "project": "burrow", "cwd": "/tmp", "type": "tool_called", "payload": {"tool": "Read", "detail": "two"}},
+      {"v": 0, "ts": "2026-08-26T11:59:00.000Z", "source": "test", "agent_id": "codex:pip", "project": "burrow", "cwd": "/tmp", "type": "idle", "payload": {}}
+    ],
+    "projection_witnesses": [0, 1, 2]
+  },
+  {
+    "name": "departed villagers leave no projection evidence",
+    "now": 1787745600000,
+    "events": [
+      {"v": 0, "ts": "2026-08-26T11:58:00.000Z", "source": "test", "agent_id": "codex:gone", "project": "burrow", "cwd": "/tmp", "type": "tool_called", "payload": {"tool": "Read"}},
+      {"v": 0, "ts": "2026-08-26T11:59:00.000Z", "source": "test", "agent_id": "codex:gone", "project": "burrow", "cwd": "/tmp", "type": "session_ended", "payload": {}}
+    ],
+    "projection_witnesses": []
+  }
+]

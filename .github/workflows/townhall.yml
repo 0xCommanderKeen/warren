@@ -1,0 +1,37 @@
+name: townhall
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "townhall/**"
+      - ".github/workflows/townhall.yml"
+  pull_request:
+    paths:
+      - "townhall/**"
+      - ".github/workflows/townhall.yml"
+
+concurrency:
+  group: townhall-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: townhall
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.0"
+          cache: pnpm
+          cache-dependency-path: townhall/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build

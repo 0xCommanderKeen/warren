@@ -1,0 +1,53 @@
+{
+  "max_structural_depth": 64,
+  "accepted_detail_containers": 60,
+  "rejected_detail_containers": 61,
+  "authority_event": {
+    "v": 0,
+    "ts": "2026-08-25T10:00:00.000Z",
+    "source": "codex",
+    "agent_id": "codex:capsule-authority",
+    "project": "burrow",
+    "type": "task_started",
+    "payload": {"prompt": "Retained root"}
+  },
+  "raw_event": {
+    "v": 0,
+    "ts": "2026-08-25T11:00:00.000Z",
+    "source": "codex",
+    "agent_id": "codex:raw-witness",
+    "project": "burrow",
+    "type": "idle",
+    "payload": {}
+  },
+  "invalid_mutations": [
+    ["copies", null],
+    ["copies", false],
+    ["copies", {}],
+    ["raw_ordinals", null],
+    ["raw_ordinals", false],
+    ["raw_ordinals", {}],
+    ["raw_indexes", null],
+    ["raw_indexes", false],
+    ["raw_indexes", {}],
+    ["observed", true],
+    ["observed", 1.5],
+    ["raw_count", null],
+    ["raw_count", false],
+    ["raw_count", 0],
+    ["raw_count", 0.0]
+  ],
+  "canonical_schema_mutations": [
+    {"name": "surplus logical field", "field": "surplus", "value": true},
+    {"name": "reordered copies", "field": "copies", "value": ["2", "1"]},
+    {"name": "duplicate copies", "field": "copies", "value": ["1", "1"]}
+  ],
+  "typed_graph_attacks": [
+    "unused node",
+    "shared scalar",
+    "shared container",
+    "nested amplification"
+  ],
+  "amplification_depth": 10,
+  "nonstandard_observed_tokens": ["NaN", "Infinity", "-Infinity"]
+}

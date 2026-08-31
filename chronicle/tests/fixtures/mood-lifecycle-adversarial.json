@@ -1,0 +1,15 @@
+{
+  "now": "2026-08-25T20:00:00.000Z",
+  "events": [
+    {"v":0,"ts":"2026-08-25T12:00:00.000Z","source":"codex","agent_id":"codex:close","project":"burrow","type":"needs_human","payload":{"message":"Deploy q1?","request_id":"q1","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T12:10:00.000Z","source":"steward","agent_id":"codex:close","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"q1","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T12:20:00.000Z","source":"codex","agent_id":"codex:close","project":"burrow","type":"needs_human","payload":{"message":"Deploy q2?","request_id":"q2","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T12:30:00.000Z","source":"codex","agent_id":"codex:close","project":"burrow","type":"needs_human","payload":{"message":"Erase q2?","request_id":"q2","action":"erase","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T12:40:00.000Z","source":"steward","agent_id":"codex:close","project":"burrow","type":"needs_human_resolved","payload":{"request_id":"q2","decision":"approve","decided_by":"human","action":"deploy"}},
+    {"v":0,"ts":"2026-08-25T20:00:00.000Z","source":"codex","agent_id":"codex:close","project":"burrow","type":"idle","payload":{}},
+    {"v":0,"ts":"2026-08-25T13:00:00.000Z","source":"codex","agent_id":"codex:canonical","project":"burrow","type":"needs_human","payload":{"message":"Canonical deploy?","request_id":"cross","action":"deploy","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T13:10:00.000Z","source":"codex","agent_id":"codex:owner","project":"burrow","type":"needs_human","payload":{"message":"Owner erase?","request_id":"cross","action":"erase","detail":null,"options":["approve","deny"]}},
+    {"v":0,"ts":"2026-08-25T13:20:00.000Z","source":"codex","agent_id":"codex:canonical","project":"burrow","type":"session_ended","payload":{}},
+    {"v":0,"ts":"2026-08-25T20:00:00.000Z","source":"codex","agent_id":"codex:owner","project":"burrow","type":"idle","payload":{}}
+  ]
+}

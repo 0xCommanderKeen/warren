@@ -1,0 +1,4 @@
+{"session_id":"parent-redacted","cwd":"/workspace/burrow","hook_event_name":"UserPromptSubmit","prompt":"Delegate two reviews"}
+{"session_id":"parent-redacted","cwd":"/workspace/burrow","hook_event_name":"SubagentStart","agent_id":"child-redacted-a","agent_type":"Explore"}
+{"session_id":"parent-redacted","cwd":"/workspace/burrow","hook_event_name":"SubagentStart","agent_id":"child-redacted-b","agent_type":"general-purpose"}
+{"session_id":"parent-redacted","cwd":"/workspace/burrow","hook_event_name":"SubagentStop","agent_id":"child-redacted-a","agent_type":"Explore"}
