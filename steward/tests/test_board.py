@@ -9,13 +9,14 @@ from typing import Any
 
 import pytest
 
-from conftest import ResidentWriter, SkillWriter, valid_manifest
+from conftest import ClaimHolderSpawner, ResidentWriter, SkillWriter, valid_manifest
 from steward import approvals, prompt
 from steward import board as b
 from steward import budgets as bg
 from steward import events as ev
 from steward import sessions as ss
 from steward import watchdog as w
+from steward.claims import ResidentClaims
 from steward.manifest import Resident, ResidentManifest, load_manifest, validate_path
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.scheduler import Scheduler, SchedulerState, load_scheduled
@@ -1609,3 +1610,114 @@ def test_two_attempts_at_one_task_are_two_credentials(
 
     assert len(runner.credentials) == 2
     assert len(set(runner.credentials)) == 2
+
+
+# ---------------------------------- the cross-process session claim (warren#111)
+
+
+def test_a_dispatch_skips_a_resident_another_process_is_running(
+    write_resident: ResidentWriter,
+    tmp_path: Path,
+    sink: ev.NullEmitter,
+    claim_holder: ClaimHolderSpawner,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two real processes: the scheduler daemon has the resident, so a dispatch leaves it.
+
+    The task stays open rather than being claimed and abandoned — the claim is taken before
+    anything on the board is leased, so a refused resident costs the board nothing.
+    """
+    database = tmp_path / "steward.db"
+    path = write_resident(board_manifest())
+    with Store(database) as store:
+        store.post_job(title="Read the mail")
+        claim_holder(database, "test-agent", ref="daily-summary", run_id="held-run")
+        dispatcher = b.Dispatcher(
+            residents=[load_manifest(path)],
+            store=store,
+            emitter=sink,
+            workdir=tmp_path,
+            runner_factory=lambda _spec, _placement: ScriptedRunner(),
+        )
+        with caplog.at_level("INFO"):
+            run = dispatcher.dispatch(NOW)
+        assert run.reports == ()
+        assert [job.status for job in store.jobs()] == ["open"]
+    assert types(sink) == []
+    assert "already has a live session" in caplog.text
+
+
+def test_a_dispatch_holds_the_claim_while_it_works(make_dispatcher: Dispatch, store: Store) -> None:
+    """A board session is a session: the resident is claimed for it, and freed after."""
+    held: list[object] = []
+    claims = ResidentClaims(store)
+
+    class Watching(Runner):
+        """Reads the resident's claim from inside the session it is running."""
+
+        def run(self, request: RunRequest) -> RunResult:
+            """Record who holds the claim while this session is going."""
+            del request
+            held.append(claims.holder("test-agent"))
+            return RunResult(outcome=Outcome.OK, output="done", exit_status=0)
+
+    store.post_job(title="Read the mail")
+    dispatcher = make_dispatcher(runner=Watching(), clock=lambda: NOW)
+    dispatcher.claims = claims
+    run = dispatcher.dispatch(NOW)
+
+    assert len(run.reports) == 1
+    assert len(held) == 1
+    assert held[0] is not None, "the resident was claimed while its session was running"
+    assert claims.holder("test-agent") is None, "the claim is given back when the work ends"
+
+
+def test_a_rehearsing_dispatch_takes_no_claim(make_dispatcher: Dispatch, store: Store) -> None:
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+    store.post_job(title="Read the mail")
+    dispatcher.dispatch(NOW)
+    assert store.resident_claim("test-agent") is None
+
+
+def test_a_rehearsal_reads_the_claim_and_plans_nothing_for_a_busy_resident(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """A rehearsal says what *would* happen, so it must not promise a session that is refused.
+
+    Read, never taken — the same read-only shape ``budget_pause`` already gets on this path.
+    """
+    dispatcher = make_dispatcher()
+    dispatcher.dry_run = True
+    store.post_job(title="Read the mail")
+    store.claim_resident(
+        "test-agent",
+        token="t",
+        holder="dxp2800:99",
+        kind="routine",
+        ref="daily-summary",
+        stale_before=ev.utc_now_iso(),
+    )
+
+    run = dispatcher.dispatch(NOW)
+
+    assert run.planned == ()
+    assert store.jobs("open")[0].title == "Read the mail", "and the notice is still there"
+
+
+def test_a_rehearsal_is_built_with_no_claims_at_all(store: Store, tmp_path: Path) -> None:
+    """``dry_run`` is the one construction that gets none, so it cannot write by accident."""
+    assert b.Dispatcher(residents=[], store=store, workdir=tmp_path, dry_run=True).claims is None
+    assert b.Dispatcher(residents=[], store=store, workdir=tmp_path).claims is not None
+
+
+def test_a_dispatcher_with_no_claims_works_exactly_as_before(
+    make_dispatcher: Dispatch, store: Store
+) -> None:
+    """Take the claim away and the board is what it was: the guard adds, it does not gate."""
+    dispatcher = make_dispatcher(clock=lambda: NOW)
+    dispatcher.claims = None
+    store.post_job(title="Read the mail")
+    run = dispatcher.dispatch(NOW)
+    assert [report.status for report in run.reports] == ["done"]
+    assert store.resident_claim("test-agent") is None

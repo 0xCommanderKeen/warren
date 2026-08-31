@@ -295,7 +295,7 @@ fire is a fire, not a lesser one (steward #W1).
 | 404 | `unknown_resident` | no such resident in the residents tree |
 | 404 | `unknown_routine` | the manifest declares no routine by that name |
 | 409 | `routine_disabled` | declared but `enabled: false`; enable it in the manifest |
-| 409 | `already_running` | the scheduler's overlap rule: skipped, never queued |
+| 409 | `already_running` | the overlap rule: skipped, never queued. Either this process already has that routine in flight, or another process — the scheduler daemon, a board dispatch — holds the resident's session claim; the message names which, and what is running (warren#111) |
 | 409 | `budget_exceeded` | `paused: budget exceeded`; see [`GET /residents/{id}/budget`](#get-residentsidbudget) |
 | 409 | `resident_invalid` | the resident exists but its manifest does not validate |
 | 409 | `resident_retired` | the manifest declares `retired: true`; it takes no work at all |

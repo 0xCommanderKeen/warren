@@ -12,7 +12,13 @@ from zoneinfo import ZoneInfo
 import pytest
 from croniter import croniter
 
-from conftest import RESIDENTS_DIR, VALID_SOUL, ResidentWriter, valid_manifest
+from conftest import (
+    RESIDENTS_DIR,
+    VALID_SOUL,
+    ClaimHolderSpawner,
+    ResidentWriter,
+    valid_manifest,
+)
 from steward import events as ev
 from steward import journal as j
 from steward import manifest as m
@@ -23,6 +29,7 @@ from steward import sessions as ss
 from steward import skills as sk
 from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
+from steward.claims import ResidentClaims
 from steward.session_auth import (
     SESSION_CREDENTIAL_PREFIX,
     SESSION_TOKEN_ENV,
@@ -556,6 +563,120 @@ def test_an_overlapping_fire_is_skipped_not_queued(build, tmp_path: Path) -> Non
     assert overlapping.skipped_reason == "already running"
     types = [event["type"] for event in emitted(tmp_path / "events.jsonl")]
     assert types == ["routine_started", "routine_finished"], "the skipped fire emitted nothing"
+
+
+# ------------------------------------------------ the cross-process claim (warren#111)
+
+
+def claiming_scheduler(
+    path: Path,
+    store: Store,
+    tmp_path: Path,
+    *,
+    runner_factory: ss.RunnerFactory | None = None,
+    dry_run: bool = False,
+) -> s.Scheduler:
+    """Build a scheduler that honours the durable one-session-per-resident claim."""
+    return s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=runner_factory or (lambda _spec, _placement: r.MockRunner()),
+        claims=ResidentClaims(store),
+        dry_run=dry_run,
+    )
+
+
+def test_a_fire_is_refused_while_another_process_holds_the_resident(
+    write_resident: ResidentWriter, tmp_path: Path, claim_holder: ClaimHolderSpawner
+) -> None:
+    """warren#111, with two real processes: the lock could not see them, the claim can."""
+    path = write_resident(manifest_with(HOURLY))
+    database = tmp_path / "steward.db"
+    claim_holder(database, "test-agent", ref="morning-brief", run_id="held-run")
+
+    with Store(database) as store:
+        engine = claiming_scheduler(path, store, tmp_path)
+        report = engine.fire(engine.scheduled[0])
+
+    assert not report.fired
+    assert "already has a live session" in (report.skipped_reason or "")
+    assert "morning-brief" in (report.skipped_reason or "")
+    assert emitted(tmp_path / "events.jsonl") == [], "a refused fire says nothing started"
+
+
+def test_the_claim_is_given_back_so_the_next_fire_goes(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    path = write_resident(manifest_with(HOURLY))
+    with Store(tmp_path / "steward.db") as store:
+        engine = claiming_scheduler(path, store, tmp_path)
+        first = engine.fire(engine.scheduled[0])
+        second = engine.fire(engine.scheduled[0])
+        assert store.resident_claim("test-agent") is not None
+        assert ResidentClaims(store).holder("test-agent") is None
+    assert first.fired
+    assert second.fired
+
+
+def test_two_routines_of_one_resident_serialise_rather_than_refuse(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The in-process guarantee survives: inside one process the second one waits its turn.
+
+    Refusing here would be a regression the cross-process claim has no business causing —
+    two routines are two pieces of work, not one fire arriving twice.
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow(_request: r.RunRequest) -> r.RunResult:
+        started.set()
+        release.wait(timeout=10)
+        return r.RunResult(outcome=r.Outcome.OK, exit_status=0)
+
+    path = write_resident(manifest_with(HOURLY, DAILY))
+    reports: list[s.FireReport] = []
+    with Store(tmp_path / "steward.db") as store:
+        engine = claiming_scheduler(
+            path,
+            store,
+            tmp_path,
+            runner_factory=lambda _spec, _placement: r.MockRunner(behavior=slow),
+        )
+        hourly, daily = engine.scheduled
+        first = threading.Thread(target=lambda: reports.append(engine.fire(hourly)))
+        second = threading.Thread(target=lambda: reports.append(engine.fire(daily)))
+        first.start()
+        try:
+            assert started.wait(timeout=10)
+            second.start()
+            time.sleep(0.2)  # long enough for the second to be queued on the resident lock
+            assert len(reports) == 0, "the second fire is waiting, not refused"
+        finally:
+            release.set()
+            first.join(timeout=10)
+            second.join(timeout=10)
+
+    assert [report.fired for report in reports] == [True, True]
+
+
+def test_a_rehearsal_claims_nothing(write_resident: ResidentWriter, tmp_path: Path) -> None:
+    """A dry run must leave no trace, in this table like every other."""
+    path = write_resident(manifest_with(HOURLY))
+    with Store(tmp_path / "steward.db") as store:
+        engine = claiming_scheduler(path, store, tmp_path, dry_run=True)
+        report = engine.fire(engine.scheduled[0])
+        assert report.skipped_reason == "dry run"
+        assert store.resident_claim("test-agent") is None
+
+
+def test_a_scheduler_with_no_claims_behaves_exactly_as_before(build) -> None:
+    """No store means no second process to keep apart, and nothing changes."""
+    engine = build(HOURLY)
+    assert engine.claims is None
+    assert engine.fire(engine.scheduled[0]).fired
 
 
 # ------------------------------------------------------------------------------ outcomes

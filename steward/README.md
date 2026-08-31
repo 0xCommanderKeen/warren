@@ -529,7 +529,10 @@ A routine only ever fires while `steward scheduler run` is up — and only one o
 state file: a second daemon refuses to start and names the pid already holding the lock,
 while a cron `steward scheduler tick` beside a running daemon simply takes its turn and
 finds nothing due. Missed schedules are not back-filled, an overlapping fire is skipped
-rather than queued, and a run killed at its timeout is emitted as `routine_failed` — the
+rather than queued — and *overlapping* now means across processes too: one resident has one
+live session, whether the scheduler daemon, a run-now over the API or a board dispatch
+started it, and whoever asks second is told who has it. A run killed at its timeout is
+emitted as `routine_failed` — the
 village must never show work that is not happening. The same rule governs memory: a day
 with no journal entry has no journal entry, and the next session is told nothing rather
 than something plausible. And the same rule governs the board and the door: a task nobody

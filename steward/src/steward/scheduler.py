@@ -12,9 +12,16 @@ all; the routine is re-anchored to now and the next occurrence is scheduled norm
 A daemon that was down all morning does not run the 7am summary at noon and call it
 the morning summary.
 
-**One run per routine at a time.** An overlapping fire is skipped and logged, never
-queued. A queue would turn "Hob is doing the hourly inbox read" into a backlog of
-sessions claiming to be hourly.
+**One run per routine at a time, and one session per resident.** An overlapping fire is
+skipped and logged, never queued. A queue would turn "Hob is doing the hourly inbox read"
+into a backlog of sessions claiming to be hourly. Two routines of one resident that come due
+together are *serialised* here rather than skipped — they are different work, and the second
+is not a duplicate of the first. Both guards used to be ``threading.Lock``s, which the API's
+manual runs, ``steward board dispatch`` and a chat daemon could not see; the resident half is
+now a durable claim in the shared database that every firing process honours
+(:mod:`steward.claims`, warren#111). Serialising is *this* module's answer, not the rule
+everywhere: a run-now asks for a session at a moment, so the API refuses it instead
+(:class:`steward.api.ManualRuns`).
 
 **Restart changes nothing.** The last fire time of every routine is persisted (default
 ``.steward/state/scheduler.json``), so restarting neither re-fires what already ran nor
@@ -71,6 +78,7 @@ from croniter import croniter
 
 from steward import events as ev
 from steward import journal
+from steward.claims import ClaimRefused, ResidentClaims
 from steward.deploy import placement_for
 from steward.manifest import (
     Resident,
@@ -678,6 +686,7 @@ class Scheduler:
         hooks: WakeHooks | None = None,
         guard: RunGuard | None = None,
         registry: RunRegistry | None = None,
+        claims: ResidentClaims | None = None,
         source: TreeSource | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -693,6 +702,10 @@ class Scheduler:
         # No registry means the watchdog is back to reading the fallback log for runs
         # that vanished — which is what it read before steward #39, and no worse.
         self.registry = registry
+        # No claims means the overlap guard is in-process only, exactly as it was before
+        # warren#111 — which is the right answer for a scheduler with no database, because
+        # a steward with no database has no second process firing sessions either.
+        self.claims = claims
         self.clock = clock or (lambda: datetime.now(UTC))
         self.run_transitions = (
             RunTransitions(cast("RunStore", registry)) if registry is not None else None
@@ -1080,10 +1093,45 @@ class Scheduler:
     ) -> FireReport:
         # Hold the resident's lock across allow → run → record, so two of its due routines
         # firing at once cannot both read the budget before either has ledgered and both
-        # sail past an exhausted cap (steward #68). No guard means no ledger and nothing
-        # to serialise, and the run stays as concurrent as it ever was.
-        guard_lock = self._resident_lock(item.resident.id) if self.guard is not None else None
+        # sail past an exhausted cap (steward #68). It is taken for the cross-process claim
+        # too, and that composition is the whole point: *inside* this process the second
+        # routine waits its turn and then runs, because two routines are two pieces of work
+        # rather than a duplicate; *across* processes the claim refuses, because a second
+        # process cannot be waited for without stalling this one's tick. Neither guarantee
+        # weakened the other. No guard and no claims means nothing to serialise, and the run
+        # stays as concurrent as it ever was.
+        serialise = self.guard is not None or self._claims_enabled()
+        guard_lock = self._resident_lock(item.resident.id) if serialise else None
         with guard_lock or contextlib.nullcontext():
+            return self._fire_held(item, run_id, trigger, moment)
+
+    def _claims_enabled(self) -> bool:
+        """Say whether this scheduler takes the durable claim. A rehearsal never does."""
+        return self.claims is not None and not self.dry_run
+
+    def _fire_held(
+        self, item: ScheduledRoutine, run_id: str, trigger: str, moment: datetime
+    ) -> FireReport:
+        """Fire under this resident's cross-process claim, or report why it could not.
+
+        Taken *before* admission rather than around the runner, because the span that must
+        not overlap is the whole of allow → run → record: two processes that both read an
+        unexhausted budget before either ledgered would both fire, which is the in-process
+        hazard steward #68 fixed with a lock a second process could not see.
+
+        A refused fire is a skip with a reason, like every other refusal here — the village
+        is told nothing started, because nothing did.
+        """
+        if self.claims is None or self.dry_run:
+            return self._fire_body(item, run_id, trigger, moment)
+        with self.claims.hold(
+            item.resident.id, kind="routine", ref=item.routine.id, run_id=run_id
+        ) as claim:
+            if isinstance(claim, ClaimRefused):
+                log.warning("%s: %s", item.key, claim.reason)
+                return FireReport(
+                    scheduled=item, run_id=run_id, fired=False, skipped_reason=claim.reason
+                )
             return self._fire_body(item, run_id, trigger, moment)
 
     def _fire_body(

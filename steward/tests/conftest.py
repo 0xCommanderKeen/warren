@@ -1,10 +1,13 @@
 """Shared fixtures: throwaway resident directories, and stub CLIs on PATH."""
 
 import copy
+import json
 import os
 import stat
 import subprocess
-from collections.abc import Callable, Mapping
+import sys
+import time
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -185,6 +188,116 @@ def stub_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> StubWriter:
 def empty_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Blank out PATH so a missing binary is missing for sure."""
     monkeypatch.setenv("PATH", str(tmp_path / "nothing-here"))
+
+
+# --------------------------------------------------------------------------------------
+# a second real process holding a resident's session claim (warren#111)
+# --------------------------------------------------------------------------------------
+
+#: What the other process runs. Deliberately a *real* process rather than a second
+#: ``ResidentClaims`` in this one: the whole point of warren#111 is that in-process locks
+#: are invisible across processes, and a test that proves the guard with two objects in one
+#: interpreter would prove nothing about the bug it exists for.
+CLAIM_HOLDER_SCRIPT = '''
+"""Take one resident's claim in a second real process and sit on it until killed."""
+
+import json
+import os
+import sys
+import time
+
+from steward.claims import ClaimRefused, ResidentClaims
+from steward.store import Store
+
+db, ready, resident, kind, ref, run_id, grace, beat = sys.argv[1:9]
+claims = ResidentClaims(Store(db), grace_s=float(grace), heartbeat_every_s=float(beat))
+with claims.hold(resident, kind=kind, ref=ref, run_id=run_id) as held:
+    payload = {"held": not isinstance(held, ClaimRefused), "pid": os.getpid()}
+    with open(ready + ".tmp", "w") as handle:
+        handle.write(json.dumps(payload))
+    os.replace(ready + ".tmp", ready)
+    time.sleep(600)
+'''
+
+
+@dataclass
+class ClaimHolder:
+    """A second real process sitting on one resident's session claim."""
+
+    process: subprocess.Popen[str]
+
+    @property
+    def pid(self) -> int:
+        """The operating-system process holding the claim."""
+        return self.process.pid
+
+    def kill(self) -> None:
+        """Stop the holder the way a crash does: no release, no finally block."""
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=30)
+
+
+type ClaimHolderSpawner = Callable[..., ClaimHolder]
+
+
+@pytest.fixture
+def claim_holder(tmp_path: Path) -> Iterator[ClaimHolderSpawner]:
+    """Return a factory that spawns another process holding a resident's claim.
+
+    The factory blocks until that process has actually taken the claim, so a test can say
+    "somebody else is running this resident" as a fact rather than as a hope, and every
+    holder is killed when the test ends however it ended.
+    """
+    started: list[ClaimHolder] = []
+    script = tmp_path / "claim-holder.py"
+    script.write_text(CLAIM_HOLDER_SCRIPT, encoding="utf-8")
+
+    def _spawn(  # noqa: PLR0913 — one keyword per fact the held claim records
+        db: Path | str,
+        resident_id: str = "test-agent",
+        *,
+        kind: str = "routine",
+        ref: str = "held-routine",
+        run_id: str = "held-run",
+        grace_s: float = 120.0,
+        beat_s: float = 1.0,
+    ) -> ClaimHolder:
+        ready = tmp_path / f"claim-holder-{len(started)}.json"
+        process = subprocess.Popen(  # noqa: S603 — a fixed interpreter and a generated script
+            [
+                sys.executable,
+                str(script),
+                str(db),
+                str(ready),
+                resident_id,
+                kind,
+                ref,
+                run_id,
+                str(grace_s),
+                str(beat_s),
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        holder = ClaimHolder(process=process)
+        started.append(holder)
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if ready.exists():
+                assert json.loads(ready.read_text(encoding="utf-8"))["held"]
+                return holder
+            if process.poll() is not None:
+                raise AssertionError(f"the claim holder died: {process.communicate()}")
+            time.sleep(0.05)
+        raise AssertionError("the claim holder never took the claim")
+
+    try:
+        yield _spawn
+    finally:
+        for holder in started:
+            holder.kill()
 
 
 @dataclass(frozen=True, slots=True)

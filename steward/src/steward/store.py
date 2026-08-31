@@ -35,6 +35,10 @@ Nothing here emits, renders, or decides. It records facts and hands them back:
   credential lives, as a digest: the run's lease is the credential's expiry, so
   :meth:`Store.session_principal` accepts one exactly while the watchdog could not yet
   bury the run (steward #41).
+- ``resident_claims`` — one row per resident saying which process is currently running a
+  session for it. The scheduler's overlap guard used to be an in-process lock, which the
+  API, the board and a chat daemon could not see; this is the same guard in the one place
+  every firing process can read (warren#111). :mod:`steward.claims` owns what it means.
 """
 
 import json
@@ -47,6 +51,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Self
 
+from steward.claims import ResidentClaim
 from steward.events import utc_now_iso
 from steward.health import HealthJournal
 from steward.operator_auth import OperatorPrincipal
@@ -89,6 +94,7 @@ __all__ = [
     "OriginSpend",
     "PauseRecord",
     "RequestRecord",
+    "ResidentClaim",
     "Store",
     "WatchdogAttempt",
     "default_db_path",
@@ -272,6 +278,18 @@ CREATE TABLE IF NOT EXISTS open_runs (
 CREATE INDEX IF NOT EXISTS open_runs_still_open
     ON open_runs (closed_at, started_at);
 
+CREATE TABLE IF NOT EXISTS resident_claims (
+    resident_id  TEXT PRIMARY KEY,
+    token        TEXT NOT NULL,
+    holder       TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT '',
+    ref          TEXT NOT NULL DEFAULT '',
+    run_id       TEXT NOT NULL DEFAULT '',
+    claimed_at   TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    released_at  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS operator_credentials (
     name        TEXT PRIMARY KEY,
     email       TEXT NOT NULL,
@@ -390,6 +408,28 @@ def new_id() -> str:
 
 def _dumps(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _resident_claim(row: sqlite3.Row) -> ResidentClaim:
+    """Read one claim row back. Column by column, like every other record here.
+
+    :class:`~steward.claims.ResidentClaim` lives in :mod:`steward.claims` rather than beside
+    the other records in this module, because the scheduler needs it and this module imports
+    the scheduler. So it gets a function rather than a ``from_row`` classmethod — the reading
+    is still explicit, which is what matters: a column added to the table later is a column
+    this function does not pass, not a ``TypeError`` on the next read.
+    """
+    return ResidentClaim(
+        resident_id=row["resident_id"],
+        token=row["token"],
+        holder=row["holder"],
+        claimed_at=row["claimed_at"],
+        heartbeat_at=row["heartbeat_at"],
+        kind=row["kind"],
+        ref=row["ref"],
+        run_id=row["run_id"],
+        released_at=row["released_at"],
+    )
 
 
 def _loads(raw: str, fallback: object) -> Any:  # noqa: ANN401 — JSON is Any by nature
@@ -2679,6 +2719,92 @@ class Store:
                 (moment, moment, run_id, event_id),
             )
             return cursor.rowcount == 1
+
+    # -- the resident claim ----------------------------------------------------------------
+
+    def claim_resident(  # noqa: PLR0913 — one parameter per fact the claim records
+        self,
+        resident_id: str,
+        *,
+        token: str,
+        holder: str = "",
+        kind: str = "",
+        ref: str = "",
+        run_id: str = "",
+        stale_before: str,
+        now: str | None = None,
+    ) -> ResidentClaim | None:
+        """Take this resident's one live-session claim, or return ``None``.
+
+        What a claim *means* is :mod:`steward.claims`; this is the write that makes it true.
+        One statement, so the check and the take cannot be separated by another process.
+        The upsert's ``WHERE`` is the whole guard: a claim may be taken only when the last
+        one was given back, or when its holder stopped saying it was alive before
+        ``stale_before``. A live claim leaves the row exactly as it is — ``rowcount`` is 0,
+        nothing is overwritten, and the caller reads back who holds it.
+
+        The row is updated rather than replaced so the resident's ``PRIMARY KEY`` is what
+        makes the claim exclusive; there is no window where two rows exist for one resident.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "INSERT INTO resident_claims (resident_id, token, holder, kind, ref, run_id, "
+                "claimed_at, heartbeat_at, released_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL) "
+                "ON CONFLICT(resident_id) DO UPDATE SET token = excluded.token, "
+                "holder = excluded.holder, kind = excluded.kind, ref = excluded.ref, "
+                "run_id = excluded.run_id, claimed_at = excluded.claimed_at, "
+                "heartbeat_at = excluded.heartbeat_at, released_at = NULL "
+                "WHERE resident_claims.released_at IS NOT NULL "
+                "OR resident_claims.heartbeat_at <= ?",
+                (resident_id, token, holder, kind, ref, run_id, moment, moment, stale_before),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM resident_claims WHERE resident_id = ?", (resident_id,)
+            ).fetchone()
+        return _resident_claim(row)
+
+    def renew_resident_claim(self, resident_id: str, *, token: str, now: str | None = None) -> bool:
+        """Stamp a claim's heartbeat. ``False`` means this token no longer holds it.
+
+        Fenced on the token, like every other write here: a holder that was declared dead
+        and reclaimed must not be able to keep the *new* holder's claim alive under its own
+        name, which is precisely what an unfenced ``UPDATE … WHERE resident_id`` would do.
+        """
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE resident_claims SET heartbeat_at = ? WHERE resident_id = ? "
+                "AND token = ? AND released_at IS NULL",
+                (now or utc_now_iso(), resident_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def release_resident_claim(
+        self, resident_id: str, *, token: str, now: str | None = None
+    ) -> bool:
+        """Give a claim back. ``False`` means somebody else already holds this resident."""
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE resident_claims SET released_at = ? WHERE resident_id = ? "
+                "AND token = ? AND released_at IS NULL",
+                (now or utc_now_iso(), resident_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def resident_claim(self, resident_id: str) -> ResidentClaim | None:
+        """Return the last claim recorded for a resident, live or not.
+
+        Whether it still *holds* is :meth:`steward.claims.ResidentClaim.live_at`'s question,
+        and it needs a cutoff this layer has no business inventing. A released or stale row
+        is kept and handed back because it is the answer to "what ran here last".
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM resident_claims WHERE resident_id = ?", (resident_id,)
+            ).fetchone()
+        return _resident_claim(row) if row is not None else None
 
     def session_principal(self, credential: str, *, fresh_since: str) -> SessionPrincipal | None:
         """Return who a session credential is, or ``None`` if it is not a live one.
