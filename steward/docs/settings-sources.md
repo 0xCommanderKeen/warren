@@ -156,7 +156,7 @@ That is the opposite of `--tools`, where an unknown *tool* name is silently drop
 (see the permission rows above: what a real session may do is unchanged). Four things a
 session used to pick up off the disk stop arriving.
 
-**The one that matters operationally: hooks, and with them the burrow event emitter.**
+**The one that matters operationally: hooks, and with them the chronicle event emitter.**
 Steward's own `EventEmitter` posts the run-level bracket (`routine_started`,
 `routine_finished`, task and delegation events) directly and is untouched. The finer
 per-session events — `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`,

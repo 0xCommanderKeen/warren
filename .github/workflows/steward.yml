@@ -142,6 +142,7 @@ jobs:
       - name: Run the entrypoint and steward-smoke against it
         run: |
           docker run --rm --network village-net \
+            -e CHRONICLE_URL=http://village:8737 \
             -e BURROW_URL=http://village:8737 \
             steward-resident:latest steward-smoke
 

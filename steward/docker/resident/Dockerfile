@@ -19,7 +19,7 @@
 # `@anthropic-ai/…`   Pinned by build arg. A resident whose brain silently changed version
 #                     under it on a rebuild is a resident nobody can say anything true
 #                     about, so the pin lives in the Makefile and moves deliberately.
-# `python3`           The burrow emitter is stdlib-only python. No pip, no venv: emit.py
+# `python3`           The chronicle emitter is stdlib-only python. No pip, no venv: emit.py
 #                     imports json, os, sys, time, urllib, fcntl, hashlib, datetime and
 #                     nothing else, which is exactly why it can be vendored as one file.
 # `git`               claude reads and writes repos; a resident without git is a resident
@@ -75,7 +75,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG IMAGE_REVISION=unknown
 
 LABEL org.opencontainers.image.title="steward-resident"
-LABEL org.opencontainers.image.description="Runtime for a steward resident: claude CLI plus burrow's hook emitter."
+LABEL org.opencontainers.image.description="Runtime for a steward resident: claude CLI plus chronicle's hook emitter."
 LABEL org.opencontainers.image.source="https://github.com/0xCommanderKeen/warren"
 LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 
@@ -109,6 +109,7 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     # developer's laptop convenience: inside a container nothing is ever listening there,
     # and every hook would pay a refused connection and write a breaker file for it.
     BURROW_MIRROR="" \
+    CHRONICLE_MIRROR="" \
     TZ=Europe/Ljubljana
 
 # Baked under /opt/steward, not /root/.claude: that path is a bind mount from the host and

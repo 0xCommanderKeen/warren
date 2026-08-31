@@ -213,7 +213,7 @@ def test_a_declaration_that_cannot_bind_to_the_schema_is_refused(tmp_path: Path)
 
 
 VILLAGE_TOKEN = "s3cret-village-token-nobody-should-see"
-VILLAGE = {"BURROW_URL": "http://dxp2800:8737", "BURROW_TOKEN": VILLAGE_TOKEN}
+VILLAGE = {"CHRONICLE_URL": "http://dxp2800:8737", "CHRONICLE_TOKEN": VILLAGE_TOKEN}
 
 ROUTINE = {
     "id": "tidy-notes",
@@ -295,17 +295,23 @@ def test_the_pipeline_declares_commits_provisions_and_checks(
 def test_the_deployed_container_is_wired_to_the_village(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """BURROW_AGENT_ID, BURROW_PROJECT, BURROW_URL and BURROW_TOKEN, exactly as Hob is."""
+    """The village identity and address, in both spellings, exactly as Hob is."""
     raise_into(scratch_repo, host)
     compose = yaml.safe_load(host.read("~/docker/steward-note-keeper/docker-compose.yaml") or "")
     environment = compose["services"]["note-keeper"]["environment"]
 
+    assert environment["CHRONICLE_AGENT_ID"] == "claude-code:note-keeper"
+    assert environment["CHRONICLE_PROJECT"] == "note-keeper"
+    assert environment["CHRONICLE_URL"].startswith("${CHRONICLE_URL")
+    assert environment["CHRONICLE_TOKEN"].startswith("${CHRONICLE_TOKEN")
+    # The frozen vendored emitter reads only these (warren#234).
     assert environment["BURROW_AGENT_ID"] == "claude-code:note-keeper"
     assert environment["BURROW_PROJECT"] == "note-keeper"
     assert environment["BURROW_URL"].startswith("${BURROW_URL")
     assert environment["BURROW_TOKEN"].startswith("${BURROW_TOKEN")
     assert host.read("~/docker/steward-note-keeper/.env") == (
         f"BURROW_TOKEN={VILLAGE_TOKEN}\nBURROW_URL=http://dxp2800:8737\n"
+        f"CHRONICLE_TOKEN={VILLAGE_TOKEN}\nCHRONICLE_URL=http://dxp2800:8737\n"
     )
 
 
@@ -471,7 +477,7 @@ def test_a_deployment_with_no_village_to_emit_into_is_refused(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
     """A container that cannot emit is a resident that would never appear in burrow."""
-    with pytest.raises(TransportError, match="BURROW_URL"):
+    with pytest.raises(TransportError, match="CHRONICLE_URL"):
         raise_resident(
             spec(),
             residents_dir=scratch_repo.residents,
@@ -553,13 +559,13 @@ def test_a_dry_run_prints_the_whole_plan(scratch_repo: ScratchRepo, host: LocalT
 def test_a_dry_run_needs_no_village_address(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """#84: a rehearsal reaches no host, so BURROW_URL being unset is a warning, not a crash."""
+    """#84: a rehearsal reaches no host, so an unset village URL is a warning, not a crash."""
     report = raise_resident(
         spec(),
         residents_dir=scratch_repo.residents,
         repo=scratch_repo.root,
         transport=host,
-        env={},  # no BURROW_URL, no BURROW_TOKEN
+        env={},  # no village URL or token under either spelling
         dry_run=True,
     )
 
@@ -567,7 +573,7 @@ def test_a_dry_run_needs_no_village_address(
     assert not report.changed
     assert not host.touched
     assert not (scratch_repo.residents / "note-keeper").exists()
-    assert any("BURROW_URL" in warning for warning in report.warnings)
+    assert any("CHRONICLE_URL" in warning for warning in report.warnings)
     assert report.provision is not None
     assert report.provision.env_keys == ()
     assert "services:" in "\n".join(report.render())
@@ -637,7 +643,12 @@ def test_the_report_names_the_secrets_without_showing_them(
     report = raise_into(scratch_repo, host)
 
     assert report.provision is not None
-    assert report.provision.env_keys == ("BURROW_TOKEN", "BURROW_URL")
+    assert report.provision.env_keys == (
+        "BURROW_TOKEN",
+        "BURROW_URL",
+        "CHRONICLE_TOKEN",
+        "CHRONICLE_URL",
+    )
     assert VILLAGE_TOKEN not in json.dumps(report.to_dict())
     assert VILLAGE_TOKEN not in "\n".join(report.render())
 

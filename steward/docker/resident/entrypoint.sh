@@ -61,11 +61,14 @@ PY
 fi
 
 # The village address arrives from the compose .env; say whether it is there, and never
-# say what the token is.
-if [ -n "${BURROW_URL:-}" ]; then
-    echo "steward: emitting to $BURROW_URL as ${BURROW_AGENT_ID:-<no BURROW_AGENT_ID set>}"
+# say what the token is. Steward writes both spellings (warren#216), but an older .env on
+# a host that has not been re-provisioned carries only the old one, so read either.
+village_url="${CHRONICLE_URL:-${BURROW_URL:-}}"
+village_agent="${CHRONICLE_AGENT_ID:-${BURROW_AGENT_ID:-}}"
+if [ -n "$village_url" ]; then
+    echo "steward: emitting to $village_url as ${village_agent:-<no agent id set>}"
 else
-    echo "steward: WARNING BURROW_URL is unset; events fall back to ~/.burrow/events.jsonl in this container"
+    echo "steward: WARNING no CHRONICLE_URL/BURROW_URL; events fall back to ~/.burrow/events.jsonl in this container"
 fi
 
 exec "$@"

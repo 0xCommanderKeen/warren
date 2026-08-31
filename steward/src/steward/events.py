@@ -142,19 +142,28 @@ DETAIL_FIELD_MAX_CHARS = 2_000
 DETAIL_MAX_CHARS = 8_000
 
 FALLBACK_ENV = "STEWARD_EVENTS_FALLBACK"
-URL_ENV = "BURROW_URL"
-TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — an env var name, not a credential
+URL_ENV = "CHRONICLE_URL"
+TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — an env var name, not a credential
+#: The pre-rename spellings (warren#216), still read so an environment written before
+#: the rename keeps configuring steward's own emitter. The new spelling wins.
+LEGACY_URL_ENV = "BURROW_URL"
+LEGACY_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — an env var name, not a credential
 
 _REQUIRED_FIELDS = ("v", "ts", "source", "agent_id", "project", "type", "payload")
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
 
 def default_fallback_path() -> Path:
-    """Where undelivered events land: ``$STEWARD_EVENTS_FALLBACK`` or ``~/.burrow``."""
+    """Where undelivered events land: ``$STEWARD_EVENTS_FALLBACK`` or the local state dir."""
     configured = (os.environ.get(FALLBACK_ENV) or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".burrow" / "events.jsonl"
+    # Same rule as chronicle's own state directory (warren#216): prefer the new name, but
+    # keep using an existing ~/.burrow rather than stranding a record the watchdog reads.
+    home = Path.home()
+    if not (home / ".chronicle").is_dir() and (home / ".burrow").is_dir():
+        return home / ".burrow" / "events.jsonl"
+    return home / ".chronicle" / "events.jsonl"
 
 
 def truncate_error(text: str, limit: int = ERROR_MAX_CHARS) -> str:
@@ -348,12 +357,15 @@ class EventEmitter:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> EventEmitter:
-        """Build an emitter from ``BURROW_URL``/``BURROW_TOKEN``/the fallback var."""
+        """Build an emitter from ``CHRONICLE_URL``/``CHRONICLE_TOKEN``/the fallback var.
+
+        Each is also accepted under its pre-rename ``BURROW_*`` spelling (warren#216).
+        """
         source = os.environ if env is None else env
         fallback = (source.get(FALLBACK_ENV) or "").strip()
         return cls(
-            url=source.get(URL_ENV),
-            token=source.get(TOKEN_ENV),
+            url=source.get(URL_ENV) or source.get(LEGACY_URL_ENV),
+            token=source.get(TOKEN_ENV) or source.get(LEGACY_TOKEN_ENV),
             fallback=Path(fallback).expanduser() if fallback else None,
         )
 

@@ -290,6 +290,11 @@ class RoutineWake:
     def environment(self, resident: Resident) -> Mapping[str, str]:
         """Build the environment facts a routine session inherits."""
         return {
+            "CHRONICLE_AGENT_ID": resident.agent_id,
+            "CHRONICLE_PROJECT": resident.project,
+            # Both spellings: a session may be picked up by an emitter older than the
+            # warren#216 rename, and an unrecognised identity files its events under a
+            # different villager rather than failing.
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "STEWARD_ROUTINE": self.routine.id,
@@ -345,6 +350,11 @@ class _BoardWake:
         killable inside its container as a routine one (steward #58).
         """
         env = {
+            "CHRONICLE_AGENT_ID": resident.agent_id,
+            "CHRONICLE_PROJECT": resident.project,
+            # Both spellings: a session may be picked up by an emitter older than the
+            # warren#216 rename, and an unrecognised identity files its events under a
+            # different villager rather than failing.
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "STEWARD_TASK_ID": self.task_id,

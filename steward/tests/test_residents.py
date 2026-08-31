@@ -28,7 +28,7 @@ def test_hob_is_the_life_agent() -> None:
     escalation = hob.manifest.charter.escalation
     assert isinstance(escalation, m.Escalation)
     assert escalation.how == "needs_human"
-    assert {grant.id for grant in hob.manifest.app_grants} >= {"gmail", "burrow"}
+    assert {grant.id for grant in hob.manifest.app_grants} >= {"gmail", "chronicle"}
     assert {routine.id for routine in hob.manifest.routines} == {
         "daily-summary",
         "inbox-read",
@@ -46,7 +46,7 @@ def test_hob_is_the_life_agent() -> None:
 def test_maren_is_project_scoped() -> None:
     maren = m.load_manifest(RESIDENTS_DIR / "burrow-builder" / "manifest.yaml")
     assert maren.manifest.agent_id is None
-    assert maren.manifest.project == "burrow"
+    assert maren.manifest.project == "chronicle"
     assert maren.manifest.soul.name == "Maren"
     assert maren.manifest.soul.char == "Hunter"
     assert maren.manifest.soul.accent == "#4f7d5b"

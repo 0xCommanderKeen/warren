@@ -2,43 +2,43 @@
 
 The control plane for the agent fleet that [chronicle](../chronicle/) watches.
 
-Burrow is the reader: an ambient pixel-art village that truthfully projects fleet
+Chronicle is the reader: an ambient pixel-art village that truthfully projects fleet
 events and never invents behavior. **Steward is the actor.** It owns agent
 lifecycles: it deploys residents, schedules their routines, injects their charters
 and personalities into headless sessions, routes approvals back to waiting agents,
-and passes work between residents. Everything steward does is emitted as burrow
+and passes work between residents. Everything steward does is emitted as chronicle
 protocol events — to the village, steward is just another emitter.
 
 ## The split
 
 | concern | owner |
 |---|---|
-| Rendering the village, panels, boards | burrow |
+| Rendering the village, panels, boards | chronicle |
 | Souls, resident manifests, charters (source of truth, in git) | steward |
 | Scheduling routines, launching headless sessions (`claude -p` / Agent SDK) | steward |
 | Deploying/retiring resident containers on the NAS | steward |
 | Job board storage and dispatch; inter-resident delegation | steward |
 | Approval routing (human decision → waiting agent) | steward |
 | Watchdog, restarts, per-resident budgets | steward |
-| Event log, ingest, SSE | burrow |
+| Event log, ingest, SSE | chronicle |
 
 They share **contracts, not code**:
 
-1. **The event protocol** — burrow's `docs/protocol.md`. Steward adds event types
+1. **The event protocol** — chronicle's `docs/protocol.md`. Steward adds event types
    (`routine_started`, `routine_finished`, `routine_failed`, `task_posted`,
    `task_claimed`, `task_done`, `task_failed`, `task_session_finished`, `task_delegated`,
    `resident_restarted`,
-   structured `needs_human` payloads, `needs_human_resolved`) and burrow only ever renders
+   structured `needs_human` payloads, `needs_human_resolved`) and chronicle only ever renders
    them.
 2. **The resident manifest** — the versioned declaration of a resident's soul,
    charter, skills, memory, routes, and app grants. Steward deploys from it;
-   burrow reads it for display. References and grants only — never credentials.
+   chronicle reads it for display. References and grants only — never credentials.
 
 ## The write boundary
 
-Human actions in burrow's UI (run a routine now, approve a request, post a job,
+Human actions in chronicle's UI (run a routine now, approve a request, post a job,
 create a resident) call **steward's own token-gated HTTP API** directly, tailnet
-only. Burrow's server never gets write access to agents, and steward never renders
+only. Chronicle's server never gets write access to agents, and steward never renders
 anything. The UI treats the event stream as the only confirmation of effect: no
 optimistic state the fleet hasn't confirmed.
 
@@ -77,7 +77,7 @@ validated in CI.
 **The scheduler and the runner seam** (#2, #11, #21). Routines fire on a cron schedule in
 a declared time zone, through one runner abstraction (`claude` / `codex` / a command
 template / a mock), with the charter, voice, and journal assembled in one place, and every
-run bracketed by real burrow events. Nothing fires unless `steward scheduler run` is up:
+run bracketed by real chronicle events. Nothing fires unless `steward scheduler run` is up:
 an enabled routine is a declaration, not an animation.
 
 **The resident session lifecycle** (#118). Every real wake-up — scheduled routine,
@@ -87,7 +87,7 @@ It owns the safety-critical provision → context → prompt → runner → comp
 owns claims, leases, and task events; production and mock runners remain interchangeable
 at the runner seam.
 
-**Named durable transitions** (#123). Every durable state change and the burrow fact that
+**Named durable transitions** (#123). Every durable state change and the chronicle fact that
 says it happened are coordinated in one place, per domain: posting, claiming, finishing,
 failing and lease expiry in `transitions/task.py`; raising, deciding and expiring in
 `transitions/approval.py`; accepted handoffs in `transitions/delegation.py`; pause and
@@ -120,11 +120,11 @@ $ steward journal life-agent         # what Hob has actually written, newest fir
 $ steward show life-agent            # the exact preamble Hob's next session opens with
 ```
 
-**The HTTP API** (#3). The token-gated write path burrow's viewer calls directly, so
-burrow's server never gets write access to agents: run a routine now, post a job to the
+**The HTTP API** (#3). The token-gated write path chronicle's viewer calls directly, so
+chronicle's server never gets write access to agents: run a routine now, post a job to the
 board, answer an approval, declare a new resident. The contract is acknowledgement, not
 effect — an accepted request returns a request id and the word *accepted*, and the work
-is confirmed only when the matching protocol event lands in burrow's log. Tailnet only,
+is confirmed only when the matching protocol event lands in chronicle's log. Tailnet only,
 one shared token, documented in [docs/api.md](docs/api.md).
 
 ```console
@@ -166,7 +166,7 @@ $ steward board dispatch             # sweep expired leases, then claim and work
 **Structured approvals** (#10). A session that reaches an action its charter gates does
 not do it — it asks, in a `<needs-human>` block in its output or through `steward approval
 raise`, and finishes its turn. Steward turns the ask into a durable request a human
-answers from burrow's panel or a notification, and the decision is delivered at the top
+answers from chronicle's panel or a notification, and the decision is delivered at the top
 of the resident's next session. Two safety properties are the point: **deny by default**
 (past `expires_at`, steward resolves the request as `deny` with `decided_by: "expiry"`,
 and the gated action never ran) and **first decision wins** (a replay changes nothing and
@@ -183,7 +183,7 @@ route of kind `delegation` on the receiver — and steward enforces what no mani
 a depth cap (default three hops) and a flat refusal of any chain that would revisit a
 resident. A session asks with a `<delegate>` block in its output or `steward delegate`;
 steward validates, delivers into the receiver's inbox, and emits `task_delegated` naming
-both ends, so burrow can finally show a villager walking to a *specific* neighbour's door.
+both ends, so chronicle can finally show a villager walking to a *specific* neighbour's door.
 Delivery is pull-based like everything else: the receiver drains its inbox on its own next
 wake-up, ahead of the open board, and works the item as an ordinary session that reads the
 letter as a request from a colleague rather than an instruction. Every item records its
@@ -226,8 +226,8 @@ and attempt number, because a silent restart is a lie by omission; attempts are 
 eternal work. What "never answered" is read from is steward's own **run registry** (#39):
 a row per session, written where the opening event is emitted and closed where the closing
 one is. That row exists whatever happened to the events, so a session that died after its
-`routine_started` reached burrow is found — which it was not while the only thing the
-watchdog could read was the log of events burrow never received.
+`routine_started` reached chronicle is found — which it was not while the only thing the
+watchdog could read was the log of events chronicle never received.
 
 Age alone is not death. Each registry row also carries a renewable ownership lease and
 the absolute path of the complete local event record. The scheduler and board renew the
@@ -242,7 +242,7 @@ refused loudly. Only a malformed final line lacking a newline is treated as a to
 
 ```console
 $ steward budget show                # today's spend against every declared cap
-$ steward budget unpause life-agent  # or approve the knock from burrow's panel
+$ steward budget unpause life-agent  # or approve the knock from chronicle's panel
 $ steward watchdog run                # probe, sweep, bury stale runs, check budgets
 $ steward watchdog tick               # one pass, then exit (external cron)
 ```
@@ -253,7 +253,7 @@ the inbox is gated by the same pause the board is and lands on the ledger under 
 one question, however many neighbours it went through.
 
 **The nursery** (#4). Raising a resident used to be an SSH ritual: hand-write a soul,
-hand-write a compose service, tar it to the NAS, wire `BURROW_TOKEN` and the emitter env by
+hand-write a compose service, tar it to the NAS, wire `CHRONICLE_TOKEN` and the emitter env by
 hand, restart, hope. It is one command now, and three stages — **declare** the soul and
 manifest into this repo and commit them, **provision** the container on the NAS, **register**
 by checking the scheduler can actually run it and reporting when each routine next fires.
@@ -264,7 +264,7 @@ touched, so a failed deploy leaves exactly one commit to revert and one command 
 `--dry-run` prints the files, the compose fragment, the exact ssh commands and the next
 fires, and provably touches nothing — no commit, no ssh, no scheduler state.
 
-Nothing is emitted on the new resident's behalf, ever. A villager appears in burrow when it
+Nothing is emitted on the new resident's behalf, ever. A villager appears in chronicle when it
 genuinely exists and emits its own first event, and `steward retire` is the counterpart: it
 marks the manifest `retired: true`, commits that, and then stops and removes the container.
 A retired resident stops firing routines, claiming board work, taking letters and answering
@@ -288,14 +288,14 @@ with an [operator credential](#operator-credentials) rather than `STEWARD_TOKEN`
 break-glass was lost: every action it offers has a CLI verb, and ssh plus this CLI is the
 real admin hatch — not a static page served by the process being rescued.
 
-Nothing in this repo's build phase is roadmap any more. Burrow-side rendering
+Nothing in this repo's build phase is roadmap any more. Chronicle-side rendering
 counterparts — the journal panel in a villager's house, the notice board, the letter carried
-across the village, the fleet-ops fuel gauges — live in burrow's issues.
+across the village, the fleet-ops fuel gauges — live in chronicle's issues.
 
 ## Deployment
 
 Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
-burrow's own server at `~/docker/burrow`. **Steward puts them there.** This section
+chronicle's own server at `~/docker/burrow`. **Steward puts them there.** This section
 replaces the manual ritual in chronicle's README for anything that is a resident; the
 event server itself is still deployed by hand, now from
 [`warren/chronicle/`](../chronicle/README.md) rather than from a repo of its own.
@@ -350,9 +350,9 @@ The rule, the measurements, what is *not* measured, and the case for teaching su
 ssh later are in [docs/topology.md](docs/topology.md).
 
 ```console
-$ export BURROW_URL=http://dxp2800:8737    # arcadia's origin, which proxies /events to
+$ export CHRONICLE_URL=http://dxp2800:8737    # arcadia's origin, which proxies /events to
                                            # chronicle on 8738 — not a stale port
-$ export BURROW_TOKEN=…                    # the village's shared ingest secret
+$ export CHRONICLE_TOKEN=…                    # the village's shared ingest secret
 
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run   # read the plan first
@@ -418,7 +418,7 @@ was — `org.opencontainers.image.revision`, stamped by `make image` from `git r
 HEAD`. Moving the base digest is its own deliberate commit; the Dockerfile carries the
 `docker buildx imagetools inspect` line that produces the new one. `make vendor-emitter`
 refreshes the emitter copy from `../chronicle` — in-tree since the consolidation, so it
-needs no second checkout and no `BURROW=` argument. CI builds this image on every PR that
+needs no second checkout and no `CHRONICLE=` argument. CI builds this image on every PR that
 touches steward, runs the entrypoint and runs `steward-smoke` against a stub village that
 only knows how to answer 204. There is no registry here, so the image travels like
 everything else does — a pipe over ssh:
@@ -441,11 +441,11 @@ runs it in the process running `steward scheduler run`; `container` runs it as a
 `docker exec` into this container. Either way the docker client is the *local* one, which
 is why [the daemons run on the burrow](#where-the-daemons-run).
 
-**Secrets never enter this repo.** `BURROW_URL` and `BURROW_TOKEN` are read from steward's
+**Secrets never enter this repo.** `CHRONICLE_URL` and `CHRONICLE_TOKEN` are read from steward's
 own environment at provision time and written into a `.env` on the host at mode `0600`.
-The compose file carries `${BURROW_TOKEN-}` — a reference, not a value. The repo's own
+The compose file carries `${CHRONICLE_TOKEN-}` — a reference, not a value. The repo's own
 credential scanners are run over everything the nursery writes into the checkout, as a
-test. Provisioning without `BURROW_URL` is refused: a container with nowhere to emit is a
+test. Provisioning without `CHRONICLE_URL` is refused: a container with nowhere to emit is a
 resident that would never appear in the village at all.
 
 Retiring is the counterpart, and it goes the other way round on purpose:
@@ -469,7 +469,7 @@ The other flags mirror the two commands: `--dry-run` touches nothing, `--no-comm
 the mark without committing it, `--allow-dirty` commits over a dirty worktree, and `--repo`
 names the checkout when it is not the parent of the residents tree.
 
-Burrow's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
+Chronicle's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
 ([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
 never commits, because the server may not own the checkout it is reading, and it says so
 in the response.
@@ -486,7 +486,7 @@ skills/
 ```
 
 Each manifest declares the resident's soul identity, charter (mission, duties, hard
-rules, escalation policy), and the capability dimensions burrow renders — skills,
+rules, escalation policy), and the capability dimensions chronicle renders — skills,
 memory, routes, app grants, and the tools a session may reach — plus the runner steward
 launches sessions through, the
 routines it fires, whether the resident takes work off the job board, and whether it may
@@ -496,11 +496,11 @@ default set every resident gets. References and grants only: a credential-shaped
 an inline secret, in a manifest or in a `SKILL.md`, fails validation and is never stored.
 
 The schema is documented in [docs/manifest.md](docs/manifest.md), and
-`steward schema` emits it as JSON Schema so burrow can read manifests without
+`steward schema` emits it as JSON Schema so chronicle can read manifests without
 translation. The generated copy is committed at
 [schema/resident-manifest-v0.json](schema/resident-manifest-v0.json) — the path the
 schema's own `$id` promises — and a test fails when it drifts from the models, so a
-manifest change that would break burrow's reader shows up as a diff in the pull request
+manifest change that would break chronicle's reader shows up as a diff in the pull request
 that makes it. Regenerate with `make schema-write` and read the diff.
 
 ```console
@@ -550,11 +550,11 @@ the scheduler and the API name the ones they need on startup.
 |---|---|---|
 | `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
-| `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.burrow/events.jsonl`. |
+| `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` on a machine that still has that directory. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
-| `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
-| `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
+| `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
+| `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
 | `STEWARD_BURROW` | doctor, watchdog | What this machine is called when its hostname is not the name manifests use for it (`deploy.host`). Read only to *report* whether supervision reaches a container; never to decide where anything runs. A declaration replaces the hostname rather than joining it, and `docker info`'s own answer outranks both. See [docs/topology.md](docs/topology.md). |
 | `DOCKER_HOST` | docker, so: watchdog + container placement | Docker's own pointer. Steward never sets it and never reads it to decide anything — but every docker call steward makes inherits it (measured), so docker's own remote-endpoint support applies to *supervision*. It does not relocate *execution*: a container-placed session also needs the host side of its memory mount on this filesystem. Reported as **unverified** unless the daemon at the far end names itself as the declared host — that answer is measured; nothing else here can prove where the endpoint lands. |
@@ -576,7 +576,7 @@ costs, are in [docs/settings-sources.md](docs/settings-sources.md).
 allowlist (`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands
 it, and nothing else. The allowlist is the shape of the machine (`PATH`, `HOME`, locale,
 proxy and CA settings), steward's own *configuration* (`STEWARD_STATE`,
-`STEWARD_MAX_DELEGATION_DEPTH`, `BURROW_URL`, …) so a session's own `steward delegate`
+`STEWARD_MAX_DELEGATION_DEPTH`, `CHRONICLE_URL`, …) so a session's own `steward delegate`
 opens the same database under the same caps, and the brain's own provider credentials
 (`ANTHROPIC_API_KEY` for a `claude` runner, `OPENAI_API_KEY` for a `codex` one).
 
@@ -593,7 +593,7 @@ Two names are deliberately missing, and neither is an oversight:
   decides approvals and delegates as any resident. `steward approval raise` and
   `steward delegate` exist precisely so a session never needs it, and until steward #41
   every locally launched session was carrying it anyway.
-- **`BURROW_TOKEN`** is one shared ingest secret whose holder can post events as any
+- **`CHRONICLE_TOKEN`** is one shared ingest secret whose holder can post events as any
   `agent_id`. A session without it loses nothing durable: its emitter queues events in
   `events.jsonl.pending`, and a control-plane `steward events flush` delivers them under
   the control plane's own credential — the events arrive either way. Naming it in
@@ -604,13 +604,13 @@ One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scop
 credential — see [the API's two kinds of caller](docs/api.md#two-kinds-of-caller).
 
 Remote-bound events enter a durable queue before POST. Each retry keeps one
-`X-Burrow-Delivery-ID`, so a crash after Burrow accepts an event but before Steward
-retires it is deduplicated by current Burrow servers. Normal emits replay up to 16 older
+`X-Burrow-Delivery-ID`, so a crash after Chronicle accepts an event but before Steward
+retires it is deduplicated by current Chronicle servers. Normal emits replay up to 16 older
 events, oldest first; operators can drain and inspect the queue explicitly:
 
 ```console
 $ steward events flush
-delivered 7; retired-records 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.burrow/events.jsonl.pending
+delivered 7; retired-records 7; pending 0; corrupt 0; foreign-target 0; queue /home/me/.chronicle/events.jsonl.pending
 ```
 
 The pre-queue `events.jsonl` format recorded every event but no delivery outcome. It is
@@ -629,5 +629,5 @@ History lines carrying a valid
 or its acknowledged delivery was retired. Invalid or torn queue records are preserved in
 `.pending.corrupt`, reported, and make the command exit non-zero. A failed POST likewise
 leaves the suffix pending and exits non-zero.
-Records bound to a different historical `BURROW_URL` are not leaked to the current
+Records bound to a different historical `CHRONICLE_URL` are not leaked to the current
 target; they remain pending, are counted as `foreign-target`, and also exit non-zero.

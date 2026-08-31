@@ -1,8 +1,8 @@
 # The steward HTTP API (v0)
 
-The only write path into the fleet. Human actions in burrow's viewer — run a routine
+The only write path into the fleet. Human actions in chronicle's viewer — run a routine
 now, post a job, answer an approval, create a resident — call this API directly from
-the browser, so burrow's server never holds write access to agents and stays the pure
+the browser, so chronicle's server never holds write access to agents and stays the pure
 reader it claims to be.
 
 ```console
@@ -17,7 +17,7 @@ Every accepted request returns a `request_id` and one of three words — **accep
 **queued**, **recorded**. Never "done", never "ran". The API cannot confirm an effect
 because it does not perform one: it hands work to the scheduler, the board, or the
 disk, and the effect is confirmed only when the matching protocol event lands in
-burrow's log.
+chronicle's log.
 
 | you asked for | the effect is confirmed by |
 |---|---|
@@ -83,7 +83,7 @@ reaches the same things and names a person; a **session** presents the credentia
 minted for its own run and may reach very little. See
 [Three kinds of caller](#three-kinds-of-caller) below.
 
-**The master token** is one shared secret, exactly like burrow's ingest auth.
+**The master token** is one shared secret, exactly like chronicle's ingest auth.
 
 - `STEWARD_TOKEN` in steward's environment; `Authorization: Bearer <token>` on the
   request.
@@ -256,7 +256,7 @@ immediate, and it leaves a record.
 ## CORS
 
 `STEWARD_CORS_ORIGINS` is a comma-separated list of origins allowed to call the API
-from a browser — burrow's viewer origin, typically. Unset means no origin is allowed,
+from a browser — chronicle's viewer origin, typically. Unset means no origin is allowed,
 so no CORS headers are sent to anyone.
 
 ```console
@@ -322,7 +322,7 @@ Anything else is a `422` with `unknown_status` rather than a silently ignored pa
 Each job carries its `claimant`, `lease_expires_at`, `outcome`, `reason`, and `artifacts`
 as they become true.
 
-The lifecycle, all four transitions visible in burrow's log and reconstructible from
+The lifecycle, all four transitions visible in chronicle's log and reconstructible from
 events alone:
 
 | event | when | agent id |
@@ -516,7 +516,7 @@ for the shared rules, including what happens when the tree is not in a checkout 
                           "container": "steward-note-keeper", "image": "steward-resident:latest"},
                "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
                "compose": "services:\n  note-keeper:\n…",
-               "compose_changed": true, "env_keys": ["BURROW_TOKEN", "BURROW_URL"],
+               "compose_changed": true, "env_keys": ["CHRONICLE_TOKEN", "CHRONICLE_URL"],
                "commands": ["ssh Miha@dxp2800 docker compose … up -d"], "sent": true},
  "register": {"ok": true, "problems": [],
               "next_fires": [{"routine": "tidy-notes", "at": "2026-06-15T20:00:00+02:00"}]}}
@@ -538,13 +538,13 @@ does on the way past.
 
 ### Secrets and the nursery
 
-`BURROW_URL` and `BURROW_TOKEN` are read from **steward's own environment** when a
+`CHRONICLE_URL` and `CHRONICLE_TOKEN` are read from **steward's own environment** when a
 resident is provisioned and templated into a `.env` beside the compose file on the host.
-They are never in the compose file (which carries `${BURROW_TOKEN-}`, a reference), never
+They are never in the compose file (which carries `${CHRONICLE_TOKEN-}`, a reference), never
 in a manifest, never in a soul, and never in git — the repo's own credential scanners are
 run over everything the nursery writes into the checkout, as a test.
 
-`POST /residents` with `deploy: true` and no `BURROW_URL` in steward's environment is
+`POST /residents` with `deploy: true` and no `CHRONICLE_URL` in steward's environment is
 refused: a container with nowhere to emit is a resident that would never appear in the
 village, and finding that out three days later from an empty house is worse than finding
 it out now.
@@ -616,7 +616,7 @@ and whether it may hand work to a neighbour and to whom.
 ### `GET /residents/{id}/budget`
 
 Spent against limit for each budget, the window those numbers are counted in, and the
-pause state. This is the read burrow's fleet-ops view (burrow #40) draws from; steward
+pause state. This is the read chronicle's fleet-ops view (chronicle #40) draws from; steward
 invents no village state to serve it.
 
 ```json

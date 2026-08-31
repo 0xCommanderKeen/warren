@@ -2886,8 +2886,8 @@ def test_open_mode_has_no_boundary_and_does_not_pretend_to(api: ApiFactory) -> N
 @pytest.fixture
 def village(monkeypatch: pytest.MonkeyPatch) -> str:
     """Give the API's environment a village to point new containers at."""
-    monkeypatch.setenv("BURROW_URL", "http://dxp2800:8737")
-    monkeypatch.setenv("BURROW_TOKEN", "api-village-token")
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "api-village-token")
     return "api-village-token"
 
 
@@ -3000,7 +3000,12 @@ def test_a_deploy_leaks_no_secret_into_the_response(
     response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
     assert village not in response.text
-    assert response.json()["provision"]["env_keys"] == ["BURROW_TOKEN", "BURROW_URL"]
+    assert response.json()["provision"]["env_keys"] == [
+        "BURROW_TOKEN",
+        "BURROW_URL",
+        "CHRONICLE_TOKEN",
+        "CHRONICLE_URL",
+    ]
 
 
 def test_a_retired_resident_is_listed_and_refuses_a_run_now(api: ApiFactory) -> None:

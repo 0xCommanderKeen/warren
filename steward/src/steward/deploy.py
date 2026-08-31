@@ -14,7 +14,7 @@ deploy genuinely does:
 :class:`SshTransport`
     The real one. ``ssh <user>@<host> …`` for commands, and a **tar-over-ssh pipe** for
     files, because UGOS's ``scp`` is broken on the NAS and a pipe is what actually works
-    (burrow's README has been deploying this way by hand for months). The archive is
+    (chronicle's README has been deploying this way by hand for months). The archive is
     built in memory and fed to ``tar -xf -`` on stdin, so nothing is staged on disk here
     and nothing is staged on disk there.
 :class:`LocalTransport`
@@ -42,7 +42,7 @@ assumptions — every one of them is a field a manifest can override, and
 ``steward new-resident --dry-run`` prints the resolved values before anything moves.
 
 The image is this repo's own: ``docker/resident/Dockerfile``, built by ``make image``,
-carrying the ``claude`` CLI and a vendored copy of burrow's hook emitter. Steward does not
+carrying the ``claude`` CLI and a vendored copy of chronicle's hook emitter. Steward does not
 build it during a deploy and does not check the host has it — provisioning ships a compose
 file, and the host's docker is what says whether the image exists. ``make image-ship`` is
 how it gets there.
@@ -85,8 +85,8 @@ __all__ = [
     "TransportError",
     "bundle_changes",
     "bundle_for",
-    "burrow_env",
     "compose_argv",
+    "emitter_env",
     "memory_host_dir",
     "memory_mount",
     "memory_path_for",
@@ -114,7 +114,7 @@ DEFAULT_ROOT = "~/docker"
 CONTAINER_PREFIX = "steward-"
 
 #: The image a resident runs when its manifest names none: the one this repo builds, from
-#: ``docker/resident/Dockerfile``, carrying the ``claude`` CLI and burrow's hook emitter.
+#: ``docker/resident/Dockerfile``, carrying the ``claude`` CLI and chronicle's hook emitter.
 #: It is a *local* tag, because this fleet has no registry — ``make image`` builds it and
 #: ``make image-ship`` pipes it to the NAS over ssh, the same way everything else here
 #: travels. A host that has never been shipped the image fails at ``docker compose up``
@@ -147,8 +147,24 @@ FALLBACK_MEMORY_PATH = "/data/memory"
 #: The two variables that carry the village's address and its shared secret into the
 #: container. Read from steward's own environment at provision time and written into the
 #: remote ``.env``; never into the compose file, never into a manifest, never into git.
-BURROW_URL_ENV = "BURROW_URL"
-BURROW_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
+CHRONICLE_URL_ENV = "CHRONICLE_URL"
+CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a credential
+
+#: The pre-rename spellings of the same two variables (warren#216), written alongside the
+#: new ones at the same values.
+#:
+#: This pair is not politeness, it is the only thing keeping deployed residents emitting.
+#: A resident container runs the **frozen** vendored emitter, ``docker/resident/burrow-emit.py``,
+#: which predates the rename and reads ``BURROW_*`` and nothing else. Chronicle's current
+#: emitter accepts both spellings, but that is not the file in the image — the vendored copy
+#: is pinned by checksum and deliberately not refreshed until warren#234. Rendering only the
+#: new spelling would leave every resident with no village to post to, and it would fail the
+#: quiet way: the container starts, the agent works, and its events go to a local file
+#: nobody reads.
+#:
+#: warren#234 re-vendors a current emitter and drops this pair.
+LEGACY_URL_ENV = "BURROW_URL"
+LEGACY_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
 
 
 #: ssh's reserved exit status for "ssh itself failed" — connection refused, host
@@ -322,7 +338,7 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
     like a change and every "converged" claim a lie. ``sort_keys=True`` and a header with
     no clock in it keep it stable.
 
-    ``${BURROW_URL:?…}`` and ``${BURROW_TOKEN-}`` are literal string *values* here: docker
+    ``${CHRONICLE_URL:?…}`` and ``${CHRONICLE_TOKEN-}`` are literal string *values* here: docker
     compose interpolates them from the ``.env`` beside the file, and steward never
     substitutes them itself.
     """
@@ -338,7 +354,13 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
         # the container.
         "init": True,
         "working_dir": memory_path,
+        # Both spellings, same values: the new one for a current emitter, the old one for
+        # the frozen vendored copy actually running in the image (see LEGACY_URL_ENV).
         "environment": {
+            "CHRONICLE_AGENT_ID": resident.agent_id,
+            "CHRONICLE_PROJECT": resident.project,
+            "CHRONICLE_URL": ("${CHRONICLE_URL:?steward writes this into .env at provision time}"),
+            "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "BURROW_URL": "${BURROW_URL:?steward writes this into .env at provision time}",
@@ -372,43 +394,55 @@ def render_env(values: Mapping[str, str]) -> str:
     return "\n".join(lines) + "\n" if lines else ""
 
 
-def burrow_env(source: Mapping[str, str]) -> dict[str, str]:
+def emitter_env(source: Mapping[str, str]) -> dict[str, str]:
     """Read the village's address and secret out of steward's own environment.
 
-    Refuses without :data:`BURROW_URL_ENV`, and the refusal is the point: a container with
-    no village to post to is a resident that will never appear in burrow however healthy
-    it is, and finding that out three days later from an empty house is worse than finding
-    it out here. A missing :data:`BURROW_TOKEN_ENV` is *not* a refusal — burrow's ingest is
-    open when its own token is unset — but the plan says so out loud.
+    Reads either spelling — steward's own environment on the NAS still exports the old one
+    — and writes **both** into the resident's ``.env`` at the same value, because the
+    emitter in the image only understands the old one (see :data:`LEGACY_URL_ENV`).
+
+    Refuses without a URL under either spelling, and the refusal is the point: a container
+    with no village to post to is a resident that will never appear in chronicle however
+    healthy it is, and finding that out three days later from an empty house is worse than
+    finding it out here. A missing token is *not* a refusal — chronicle's ingest is open
+    when its own token is unset — but the plan says so out loud.
     """
-    url = (source.get(BURROW_URL_ENV) or "").strip()
+    url = (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip()
     if not url:
         raise TransportError(
-            f"{BURROW_URL_ENV} is unset in steward's environment, so the resident would be "
-            f"deployed with nowhere to emit and would never appear in the village; export "
-            f"{BURROW_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
+            f"{CHRONICLE_URL_ENV} is unset in steward's environment, so the resident would "
+            f"be deployed with nowhere to emit and would never appear in the village; "
+            f"export {CHRONICLE_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
         )
-    values = {BURROW_URL_ENV: url}
-    token = (source.get(BURROW_TOKEN_ENV) or "").strip()
+    values = {CHRONICLE_URL_ENV: url, LEGACY_URL_ENV: url}
+    token = (source.get(CHRONICLE_TOKEN_ENV) or source.get(LEGACY_TOKEN_ENV) or "").strip()
     if token:
-        values[BURROW_TOKEN_ENV] = token
+        values[CHRONICLE_TOKEN_ENV] = token
+        values[LEGACY_TOKEN_ENV] = token
     return values
 
 
 def planned_env(source: Mapping[str, str]) -> dict[str, str]:
     """Read the village variables a run *would* carry, refusing nothing.
 
-    :func:`burrow_env` refuses when :data:`BURROW_URL_ENV` is unset, because a real deploy
-    with nowhere to emit is a resident that never appears in the village. A **rehearsal**
-    reaches no host, so it cannot deploy anything wrong — it must be able to assemble and
-    print the plan whatever the emitter environment says (#84). This is the lenient reader
-    the dry-run path uses: whatever is set, named; nothing raised.
+    :func:`emitter_env` refuses when no URL is set, because a real deploy with nowhere to
+    emit is a resident that never appears in the village. A **rehearsal** reaches no host,
+    so it cannot deploy anything wrong — it must be able to assemble and print the plan
+    whatever the emitter environment says (#84). This is the lenient reader the dry-run
+    path uses: whatever is set, named; nothing raised.
+
+    It names both spellings of whatever it finds, so the rehearsal reports the keys the
+    real run would actually write rather than half of them.
     """
     values: dict[str, str] = {}
-    for key in (BURROW_URL_ENV, BURROW_TOKEN_ENV):
-        value = (source.get(key) or "").strip()
+    for new_key, old_key in (
+        (CHRONICLE_URL_ENV, LEGACY_URL_ENV),
+        (CHRONICLE_TOKEN_ENV, LEGACY_TOKEN_ENV),
+    ):
+        value = (source.get(new_key) or source.get(old_key) or "").strip()
         if value:
-            values[key] = value
+            values[new_key] = value
+            values[old_key] = value
     return values
 
 

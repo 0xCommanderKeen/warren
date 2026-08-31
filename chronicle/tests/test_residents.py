@@ -556,6 +556,58 @@ class ResidentManifestTest(unittest.TestCase):
             {"chronicle.resident.json", "life.resident.json"},
         )
 
+    def test_every_project_match_names_a_service_that_exists(self):
+        """warren#243: a directory rename must not be able to orphan a villager.
+
+        A project label defaults to the basename of the session's working directory, so a
+        project-matched card only ever matches while a service directory by that name
+        exists. When ``burrow/`` became ``chronicle/`` this card went on naming ``burrow``
+        and Maren simply stopped appearing — no error, no diagnostic, just a resident who
+        was never home. Nothing in the manifest schema could catch it, because the
+        manifest was still perfectly valid; only the tree it refers to had moved.
+        """
+        chronicle = pathlib.Path(__file__).resolve().parents[1]
+        services = {
+            child.name for child in chronicle.parent.iterdir() if child.is_dir()
+        }
+        matched = 0
+        for path in sorted((chronicle / "villagers").glob("*.resident.json")):
+            project = json.loads(path.read_text(encoding="utf-8"))["match"].get("project")
+            if project is None:
+                continue  # agent_id-matched cards do not depend on the tree
+            matched += 1
+            self.assertIn(
+                project,
+                services,
+                f"{path.name} matches project {project!r}, which is not a service "
+                f"directory in this monorepo, so it can never match a live session",
+            )
+        self.assertTrue(matched, "expected at least one project-matched villager card")
+
+    def test_every_repository_reference_points_at_a_file_that_exists(self):
+        """The other half of warren#243: ``repository:viewer`` outlived ``viewer/``.
+
+        A ``status_ref`` is echoed to clients as a place to go look. It is never fetched,
+        so a stale one is not an error anywhere — it is just a resident advertising a
+        capability whose evidence was deleted (here, by the zero-JS strip, warren#219).
+        """
+        chronicle = pathlib.Path(__file__).resolve().parents[1]
+        checked = 0
+        for path in sorted((chronicle / "villagers").glob("*.resident.json")):
+            card = json.loads(path.read_text(encoding="utf-8"))
+            refs = [skill.get("status_ref") for skill in card.get("skills", [])]
+            refs += [card.get("memory", {}).get("ref")]
+            for ref in refs:
+                if not isinstance(ref, str) or not ref.startswith("repository:"):
+                    continue
+                checked += 1
+                target = chronicle / ref.removeprefix("repository:")
+                self.assertTrue(
+                    target.exists(),
+                    f"{path.name} points at {ref!r}, which no longer exists",
+                )
+        self.assertTrue(checked, "expected at least one repository: reference")
+
 
 if __name__ == "__main__":
     unittest.main()

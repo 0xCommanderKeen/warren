@@ -264,8 +264,8 @@ class ApprovalTransitions:
         be picking, and every choice of it is made by one of the two public methods above.
         """
         moment = now or datetime.now(UTC)
-        agent_id = manifest.burrow_agent_id
-        project = manifest.burrow_project
+        agent_id = manifest.chronicle_agent_id
+        project = manifest.chronicle_project
         detail: dict[str, Any] = dict(request.detail)
         if request.problem is not None:
             log.warning(

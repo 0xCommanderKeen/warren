@@ -21,7 +21,7 @@ describe("production deployment contract", () => {
     expect(nginx).toContain("rewrite ^ /burrow/state/stream last");
   });
 
-  it("keeps Burrow ingest and Steward writes behind the deployed origin", () => {
+  it("keeps Chronicle ingest and Steward writes behind the deployed origin", () => {
     expect(nginx).toContain("location = /events");
     expect(nginx).toContain("location ~ ^/(jobs|approvals|residents|skills|reload|routines|requests)(/|$)");
     expect(nginx).toContain("host.docker.internal:8738");

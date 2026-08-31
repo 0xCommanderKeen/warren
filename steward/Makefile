@@ -42,8 +42,13 @@ REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)$(shell test 
 #: docker cannot COPY from outside its build context. tests/test_resident_image.py fails
 #: when the copy drifts from the recorded checksum, and CI runs that test in its `check`
 #: job — long before the `image` job builds anything.
-#: Override for a checkout elsewhere: `make vendor-emitter BURROW=/path/to/chronicle`.
-BURROW ?= ../chronicle
+#: Override for a checkout elsewhere: `make vendor-emitter CHRONICLE=/path/to/chronicle`.
+#:
+#: `BURROW=` is still honoured as a deprecated alias (warren#216) so an operator's muscle
+#: memory and any script written before the rename keeps working. It goes away with the
+#: rest of the compat layer.
+BURROW ?=
+CHRONICLE ?= $(if $(BURROW),$(BURROW),../chronicle)
 
 #: The committed JSON Schema artifact, at the path the schema's own id promises. Burrow
 #: validates manifests against this file rather than importing this package, so a manifest
@@ -121,15 +126,15 @@ image-ship:
 # when burrow was its own repo and is `warren/hooks/emit.py` — a path that does not
 # exist — now that the source sits at `chronicle/hooks/emit.py` in this one.
 vendor-emitter:
-	@git -C "$(BURROW)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no checkout at $(BURROW); pass BURROW=/path/to/chronicle"; exit 1; }
-	@git -C "$(BURROW)" cat-file -e HEAD:./hooks/emit.py 2>/dev/null || { echo "$(BURROW)/hooks/emit.py is not committed at HEAD; commit it first"; exit 1; }
-	@git -C "$(BURROW)" diff --quiet HEAD -- hooks/emit.py || { echo "$(BURROW)/hooks/emit.py has uncommitted changes; commit them first"; exit 1; }
+	@git -C "$(CHRONICLE)" rev-parse --git-dir >/dev/null 2>&1 || { echo "no checkout at $(CHRONICLE); pass CHRONICLE=/path/to/chronicle"; exit 1; }
+	@git -C "$(CHRONICLE)" cat-file -e HEAD:./hooks/emit.py 2>/dev/null || { echo "$(CHRONICLE)/hooks/emit.py is not committed at HEAD; commit it first"; exit 1; }
+	@git -C "$(CHRONICLE)" diff --quiet HEAD -- hooks/emit.py || { echo "$(CHRONICLE)/hooks/emit.py has uncommitted changes; commit them first"; exit 1; }
 	@set -eu; \
-	 commit=$$(git -C "$(BURROW)" log -1 --format=%H -- hooks/emit.py); \
-	 when=$$(git -C "$(BURROW)" log -1 --format=%cs -- hooks/emit.py); \
+	 commit=$$(git -C "$(CHRONICLE)" log -1 --format=%H -- hooks/emit.py); \
+	 when=$$(git -C "$(CHRONICLE)" log -1 --format=%cs -- hooks/emit.py); \
 	 test -n "$$commit"; \
 	 test -n "$$when"; \
-	 sum=$$($(PYTHON) -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$(BURROW)/hooks/emit.py"); \
+	 sum=$$($(PYTHON) -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$(CHRONICLE)/hooks/emit.py"); \
 	 test -n "$$sum"; \
 	 { \
 	   echo "# Vendored from chronicle. DO NOT EDIT HERE — edit chronicle/hooks/emit.py and"; \
@@ -144,7 +149,7 @@ vendor-emitter:
 	   echo "# docker/resident/burrow-emit.sha256 on every CI run, so drift is a failed"; \
 	   echo "# test rather than a resident that emits a protocol nobody supports."; \
 	   echo "# --- upstream copy begins below; every byte after this line is burrow's, verbatim ---"; \
-	   cat "$(BURROW)/hooks/emit.py"; \
+	   cat "$(CHRONICLE)/hooks/emit.py"; \
 	 } > docker/resident/burrow-emit.py; \
 	 { \
 	   echo "# Where docker/resident/burrow-emit.py came from, and what it hashed to."; \
