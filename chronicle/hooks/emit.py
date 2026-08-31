@@ -637,8 +637,9 @@ def _journal_outbox(records):
     """Commit bounded auxiliary state without depending on the main lock.
 
     The one transaction lock serializes every authority snapshot/rewrite. Compaction first makes
-    a replacement durable, then retires its input journals, so every accepted
-    event always has at least one durable home.
+    a replacement durable, quarantines any torn suffix it read, then retires
+    its input journals, so every accepted event always has at least one durable
+    home and corrupt bytes outlive the file that carried them.
     """
     records = _stamp_enqueue_order(records)  # allocation precedes lock contention
     spool = _outbox_spool()
@@ -647,11 +648,13 @@ def _journal_outbox(records):
             main = _read_active_outbox(spool)
             journals = spool.generation_paths()
             auxiliary = []
+            quarantine = []
             for journal in journals:
                 generation = spool.read(journal)
-                # Unlike the main path this deliberately drops a torn suffix
-                # instead of quarantining it: see docs/spool.md, G3.
                 if generation is not None:
+                    # Evidence before erasure, as on the main path: the torn
+                    # bytes outlive the journal they came from (spool.md, G3).
+                    quarantine.append((journal, generation.torn))
                     auxiliary.extend(generation.records)
             auxiliary.extend(records)
             auxiliary = spool.arrange(auxiliary)
@@ -670,6 +673,7 @@ def _journal_outbox(records):
                 kept,
                 target=replacement,
                 staging=OUTBOX + ".aux",
+                quarantine=quarantine,
                 retire=journals,
             )
             if not kept:
