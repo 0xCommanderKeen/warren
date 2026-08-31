@@ -26,6 +26,22 @@ import ApprovalsPage from "./pages/ApprovalsPage.jsx";
 import BoardPage from "./pages/BoardPage.jsx";
 import BudgetsPage from "./pages/BudgetsPage.jsx";
 
+/**
+ * Which Chronicle answers `/state`. This origin, unless a developer running vite says so.
+ *
+ * Same shape and same reason as `stewardBase()` in steward/context.jsx: `import.meta.env.DEV`
+ * is `false` in a built bundle, so Vite drops this branch and the deployed townhall has no
+ * `?backend=` to honour (warren#241).
+ */
+function chronicleBase() {
+  if (!import.meta.env.DEV) return "";
+  try {
+    return new URLSearchParams(window.location.search).get("backend") || "";
+  } catch {
+    return "";
+  }
+}
+
 /** Chronicle's snapshot feed. Unchanged: poll once, then stream, and never write. */
 function useFleetState() {
   const [snapshot, setSnapshot] = useState(null);
@@ -34,7 +50,7 @@ function useFleetState() {
     const transport = createStateTransport({
       fetch: window.fetch.bind(window),
       EventSource: window.EventSource,
-      baseUrl: new URLSearchParams(window.location.search).get("backend") || "",
+      baseUrl: chronicleBase(),
       onState: setSnapshot,
       onStatus: setStatus,
       warn: (message) => console.warn("Townhall:", message),

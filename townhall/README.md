@@ -79,7 +79,10 @@ pnpm dev
 The dev server proxies Chronicle's state endpoints to `http://127.0.0.1:8737` and steward's
 routes to `http://127.0.0.1:8801` (`BURROW_URL` / `STEWARD_URL` override both), so the app
 talks to both same-origin exactly as the deployed origin does. `?backend=` and `?steward=`
-point either at a CORS-enabled deployment instead.
+point either at a CORS-enabled deployment instead — **in `pnpm dev` only**. Both reads sit
+behind `import.meta.env.DEV`, so Vite eliminates them from a built bundle and the deployed
+townhall has no such parameter to honour; the steward client refuses to carry the operator
+credential to any base that is not this origin regardless (warren#241).
 
 ## Verify and build
 

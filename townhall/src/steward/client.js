@@ -6,9 +6,11 @@
  * steward said, not what the click intended. Nothing here synthesises a success, retries
  * a write, or merges a partial edit.
  *
- * Requests are same-origin by default (`baseUrl: ""`), because the NAS's nginx proxies
- * steward's write routes behind the deployed origin. A `?steward=` override exists for
- * local development against a CORS-enabled steward.
+ * Requests are same-origin (`baseUrl: ""`), because the NAS's nginx proxies steward's write
+ * routes behind the deployed origin. A `?steward=` override exists for local development
+ * against a CORS-enabled steward, and exists *only* there: it is behind `import.meta.env.DEV`
+ * in steward/context.jsx, and this module refuses to carry the credential to a base that is
+ * not this origin anyway (warren#241).
  */
 
 /** A refusal, or a non-answer, exactly as steward gave it. */
@@ -72,10 +74,43 @@ function codeFrom(detail, status) {
 
 const normalizedBase = (value) => String(value || "").trim().replace(/\/+$/, "");
 
+/**
+ * Is this base the page's own origin?
+ *
+ * `""` and a bare path are; an absolute or protocol-relative URL is only if its origin
+ * matches this one. Anything unparseable is not — a base nobody can resolve is a base
+ * nobody should send a credential to.
+ */
+export function isSameOrigin(base) {
+  const value = normalizedBase(base);
+  if (!value) return true;
+  const here = globalThis.location?.origin;
+  // No document to be same-origin *with* (node, a worker): only a bare path can qualify.
+  if (!here || here === "null") return !/^([a-z][a-z0-9+.-]*:)?\/\//i.test(value);
+  try {
+    return new URL(value, here).origin === here;
+  } catch {
+    return false;
+  }
+}
+
 export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential } = {}) {
   const doFetch = fetchImpl || ((...args) => globalThis.fetch(...args));
 
   async function call(path, { method = "GET", body, signal, query } = {}) {
+    // Defence in depth for warren#241. The operator token is a single shared secret with
+    // no rotation, so it is the whole control plane's master key; the client refuses a base
+    // that is not this origin rather than trusting whoever chose it. `import.meta.env.DEV`
+    // is `false` in every built bundle, so what ships refuses unconditionally — the escape
+    // is only for a human running vite against a CORS-enabled steward on purpose.
+    if (!import.meta.env.DEV && !isSameOrigin(baseUrl)) {
+      throw new StewardError(
+        `Refusing to send the operator credential to ${normalizedBase(baseUrl)}: that is not this origin. ` +
+          "townhall talks to the steward behind the origin it was served from, and to no other.",
+        { code: "cross_origin_base" },
+      );
+    }
+
     const auth = credential?.headers?.();
     if (!auth) {
       throw new StewardError(

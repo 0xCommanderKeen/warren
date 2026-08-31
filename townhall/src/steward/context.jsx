@@ -18,8 +18,18 @@ export function useSteward() {
   return value;
 }
 
-/** Where steward lives. Same-origin unless a developer points somewhere else. */
+/**
+ * Where steward lives. This origin, unless a developer running vite points somewhere else.
+ *
+ * The override is behind `import.meta.env.DEV`, which Vite resolves to `false` at build
+ * time: the branch below is eliminated from the bundle, so a deployed townhall has no
+ * `?steward=` to honour. It used to honour it from any link, and the operator token in
+ * sessionStorage is attached to every steward call — so `/observatory/?steward=https://evil.tld`
+ * opened in an unlocked tab handed the control plane's master key to whoever wrote the
+ * link (warren#241). A dev convenience that ships is not a dev convenience.
+ */
 function stewardBase() {
+  if (!import.meta.env.DEV) return "";
   try {
     return new URLSearchParams(window.location.search).get("steward") || "";
   } catch {
