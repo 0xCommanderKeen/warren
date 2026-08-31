@@ -802,7 +802,9 @@ in this repo. It is `node:22-slim` plus four things a resident cannot work witho
   the whole install;
 - a **vendored copy of burrow's `hooks/emit.py`**, with the commit it came from written in
   its header and its checksum recorded in `docker/resident/burrow-emit.sha256`. Refresh it
-  with `make vendor-emitter BURROW=/path/to/burrow`; `tests/test_resident_image.py` fails
+  with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle` by default,
+  and `BURROW=/path/to/chronicle` overrides that for a checkout elsewhere);
+  `tests/test_resident_image.py` fails
   when the copy drifts, and CI runs that test (CI never builds the image — there is no
   docker in it);
 - a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,

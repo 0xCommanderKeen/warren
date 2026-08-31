@@ -133,12 +133,25 @@ There is one supported setup path for both Claude Code and Codex:
 The detailed protocol sections explain event mappings and privacy, but the steps
 above are the canonical install, validation, test, and deployment sequence.
 
-One village for the whole fleet, served from the NAS over Tailscale:
-<http://dxp2800:8737>. Never exposed to the public internet — the event log is a
-map of everything the fleet does.
+One village for the whole fleet, served from the NAS over Tailscale. Since the
+2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
+on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
+`http://dxp2800:8737/burrow/`. Never exposed to the public internet — the event
+log is a map of everything the fleet does.
 
-- **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`):
-  `python:3.14-slim` installs the locked environment with
+**Run every command below from `warren/chronicle/`.** Since the 2026-08-31
+consolidation this service is a directory in the warren monorepo
+(<https://github.com/0xCommanderKeen/warren>), not its own checkout; the archived
+`burrow` repo is not what gets deployed. The tar recipe packs paths relative to
+the working directory, so running it one level up silently bundles the wrong tree.
+
+The NAS has no git installed and holds no clone: `~/docker/burrow/app` is an
+unpacked copy of the tree the tar below carried. Nothing there pulls — every
+deploy is pushed from a machine that has the repo checked out.
+
+- **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`), which
+  maps host `8738` to the container's `8737`:
+  `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
   `uv sync --frozen --no-dev` and runs `uv run uvicorn serve:app --host 0.0.0.0 --port 8737`
   with `BURROW_HOST=0.0.0.0`,
   `BURROW_EVENTS=/data/events.jsonl`, `BURROW_TOKEN=<shared secret>`. Deploy code
@@ -148,9 +161,12 @@ map of everything the fleet does.
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py hooks villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
-  `docker compose restart burrow`. Manifests
+  `ssh Miha@dxp2800 'cd ~/docker/burrow && docker compose restart burrow'`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
-  deploy — no manual file copying.
+  deploy — no manual file copying. `tests/test_deployment_bundle.py` parses this
+  exact command and boots the tree it packs, so the file list and the test move
+  together — that is what keeps the recipe from drifting into a tree that does not
+  start.
   Clients consume complete authoritative Village State snapshots from
   `/state` and the live snapshot feed at `/state/stream`; the response disables nginx
   buffering itself. If another reverse proxy is placed in front, keep streaming
@@ -342,7 +358,7 @@ this village is drawn with now lives with Arcadia's assets, attribution included
 
 ## Working on burrow
 
-Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/burrow/issues)
+Work is tracked as [GitHub issues](https://github.com/0xCommanderKeen/warren/issues)
 with status labels. The convention, for humans and agents alike:
 
 - `status:ready` — free to pick up. **When you start, swap it to `status:in-progress`**
@@ -382,4 +398,4 @@ captured fixtures clients render against still match the snapshot models.
 
 ## Not this project
 
-Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate project ([arcadia](https://github.com/0xCommanderKeen/arcadia)).
+Game mechanics, inventories, simulated needs, LLM-driven fictional characters, emergent narrative — that is a separate concern, and lives in this monorepo's [arcadia/](../arcadia/).

@@ -115,8 +115,8 @@ def test_the_vendored_emitter_is_burrows_file_byte_for_byte() -> None:
         f"{EMITTER} no longer matches the emitter recorded in {CHECKSUM.name}.\n"
         f"  recorded: {expected['sha256']} (burrow commit {expected['commit']})\n"
         f"  on disk:  {digest}\n"
-        f"Do not hand-edit the vendored copy. Change hooks/emit.py in burrow, commit it "
-        f"there, then run:  make vendor-emitter BURROW=/path/to/burrow"
+        f"Do not hand-edit the vendored copy. Change chronicle/hooks/emit.py, commit it, "
+        f"then run:  make vendor-emitter   (in warren/steward/)"
     )
     assert expected["commit"] in header, "the header must name the commit the bytes came from"
     assert "DO NOT EDIT HERE" in header

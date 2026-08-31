@@ -1,6 +1,6 @@
 # steward
 
-The control plane for the agent fleet that [burrow](https://github.com/0xCommanderKeen/burrow) watches.
+The control plane for the agent fleet that [chronicle](../chronicle/) watches.
 
 Burrow is the reader: an ambient pixel-art village that truthfully projects fleet
 events and never invents behavior. **Steward is the actor.** It owns agent
@@ -272,11 +272,18 @@ across the village, the fleet-ops fuel gauges — live in burrow's issues.
 
 Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
 burrow's own server at `~/docker/burrow`. **Steward puts them there.** This section
-replaces the manual ritual in burrow's README for anything that is a resident; burrow's
-own server is still deployed by hand from that repo.
+replaces the manual ritual in chronicle's README for anything that is a resident; the
+event server itself is still deployed by hand, now from
+[`warren/chronicle/`](../chronicle/README.md) rather than from a repo of its own.
+
+Run every command below from `warren/steward/`, on a machine with the repo checked out and
+ssh access to the NAS. Nothing pulls on the NAS — it has no git and no clone; steward
+pushes the runtime bundle over ssh, and the deploy directories there are unpacked
+artifacts.
 
 ```console
-$ export BURROW_URL=http://dxp2800:8737
+$ export BURROW_URL=http://dxp2800:8737    # arcadia's origin, which proxies /events to
+                                           # chronicle on 8738 — not a stale port
 $ export BURROW_TOKEN=…                    # the village's shared ingest secret
 
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
@@ -336,9 +343,11 @@ Where a resident lands is a manifest question with documented defaults (`dxp2800
 
 **What a resident's container actually is.** `steward-resident` is built from
 [`docker/resident/Dockerfile`](docker/resident/Dockerfile): `node:22-slim`, the `claude`
-CLI pinned by build arg, python3, and a vendored copy of burrow's `hooks/emit.py` wired
-into the same six claude hooks the Mac uses. There is no registry here, so the image
-travels like everything else does — a pipe over ssh:
+CLI pinned by build arg, python3, and a vendored copy of `chronicle/hooks/emit.py` wired
+into the same six claude hooks the Mac uses. `make vendor-emitter` refreshes that copy from
+`../chronicle` — in-tree since the consolidation, so it needs no second checkout and no
+`BURROW=` argument. There is no registry here, so the image travels like everything else
+does — a pipe over ssh:
 
 ```console
 $ make image                                          # linux/amd64, for the NAS
@@ -350,7 +359,7 @@ smoke: PASS this container can reach the village
 ```
 
 `steward-smoke` runs inside the container and is [issue
-#51](https://github.com/0xCommanderKeen/steward/issues/51)'s acceptance criterion made
+#51](https://github.com/0xCommanderKeen/warren/issues/51)'s acceptance criterion made
 executable. The container still runs `sleep infinity`: **the scheduler runs sessions
 locally**, in the process running `steward scheduler run`, and nothing in steward execs
 into a resident's container yet. The image is what makes that step possible, not the step
