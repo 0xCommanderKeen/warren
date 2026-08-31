@@ -181,8 +181,11 @@ SESSION_ENV_BASE = (
     "STEWARD_MAX_DELEGATION_DEPTH",
     "STEWARD_REPEAT_DENY_WINDOW_H",
     "STEWARD_STATE",
-    # Where the village is, so a session's own emitter posts to the same burrow. Its
-    # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
+    # Where the village is, so a session's own emitter posts to the same burrow. Both
+    # spellings pass through, because the emitter on the far side may predate the
+    # warren#216 rename. The ingest token is deliberately *not* here — see
+    # :data:`SESSION_ENV_REFUSED`.
+    "CHRONICLE_URL",
     "BURROW_URL",
 )
 

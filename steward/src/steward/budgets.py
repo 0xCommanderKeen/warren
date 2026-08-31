@@ -416,7 +416,7 @@ class BudgetGuard:
         budgets = manifest.budgets
         return BudgetStatus(
             resident=manifest.id,
-            agent_id=manifest.burrow_agent_id,
+            agent_id=manifest.chronicle_agent_id,
             window=window,
             spend=spend,
             gauges=(
@@ -580,7 +580,7 @@ class BudgetGuard:
         try:
             entry = self.store.record_run(
                 resident=manifest.id,
-                agent_id=manifest.burrow_agent_id,
+                agent_id=manifest.chronicle_agent_id,
                 kind=kind,
                 trigger=trigger,
                 run_id=run_id,

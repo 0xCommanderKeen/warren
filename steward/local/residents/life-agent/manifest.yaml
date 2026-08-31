@@ -89,12 +89,12 @@ routes:
       the same hard rules apply to it as to everything else.
 
 app_grants:
-  - id: burrow
-    name: Burrow
+  - id: chronicle
+    name: Chronicle
     status: granted
     scopes:
       - events.write
-    status_ref: https://github.com/0xCommanderKeen/burrow/blob/main/docs/protocol.md
+    status_ref: https://github.com/0xCommanderKeen/warren/blob/main/chronicle/docs/protocol.md
   - id: gmail
     name: Gmail
     status: pending

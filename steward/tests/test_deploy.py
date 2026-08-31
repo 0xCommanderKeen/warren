@@ -11,19 +11,21 @@ import yaml
 
 from conftest import ResidentWriter, valid_manifest
 from steward.deploy import (
-    BURROW_TOKEN_ENV,
-    BURROW_URL_ENV,
+    CHRONICLE_TOKEN_ENV,
+    CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
     DEFAULT_HOST,
     DEFAULT_USER,
     ENV_FILENAME,
+    LEGACY_TOKEN_ENV,
+    LEGACY_URL_ENV,
     LocalTransport,
     SshTransport,
     TransportError,
     bundle_changes,
     bundle_for,
-    burrow_env,
     compose_argv,
+    emitter_env,
     pack,
     render_compose,
     render_env,
@@ -33,7 +35,10 @@ from steward.deploy import (
 from steward.manifest import Memory, Resident, load_manifest, validate_manifest
 from steward.runners import CommandOutcome
 
-VILLAGE = {BURROW_URL_ENV: "http://dxp2800:8737", BURROW_TOKEN_ENV: "s3cret-village-token"}
+VILLAGE = {
+    CHRONICLE_URL_ENV: "http://dxp2800:8737",
+    CHRONICLE_TOKEN_ENV: "s3cret-village-token",
+}
 
 
 def resident(write_resident: ResidentWriter, **overrides: object) -> Resident:
@@ -105,6 +110,9 @@ def test_the_compose_fragment_is_valid_yaml_naming_this_resident(write_resident)
     service = rendered["services"]["test-agent"]
     assert service["container_name"] == "steward-test-agent"
     assert service["image"] == "steward-resident:latest"
+    assert service["environment"]["CHRONICLE_AGENT_ID"] == "claude-code:test-agent"
+    assert service["environment"]["CHRONICLE_PROJECT"] == "test-agent"
+    # The frozen vendored emitter in the image reads only the old spelling.
     assert service["environment"]["BURROW_AGENT_ID"] == "claude-code:test-agent"
     assert service["environment"]["BURROW_PROJECT"] == "test-agent"
     assert service["command"] == ["sleep", "infinity"]
@@ -119,9 +127,11 @@ def test_the_compose_fragment_references_the_secrets_instead_of_carrying_them(
     one = resident(write_resident)
     text = render_compose(one, target_for(one.manifest))
 
+    assert "${CHRONICLE_TOKEN-}" in text
+    assert "${CHRONICLE_URL:?" in text
     assert "${BURROW_TOKEN-}" in text
     assert "${BURROW_URL:?" in text
-    assert VILLAGE[BURROW_TOKEN_ENV] not in text
+    assert VILLAGE[CHRONICLE_TOKEN_ENV] not in text
 
 
 def test_a_smuggled_memory_path_stays_data_and_makes_no_new_compose_keys(write_resident) -> None:
@@ -169,7 +179,7 @@ def test_rendering_the_same_resident_twice_gives_the_same_bytes(write_resident) 
 
 def test_the_env_file_is_sorted_lines_and_nothing_else() -> None:
     assert render_env(VILLAGE) == (
-        "BURROW_TOKEN=s3cret-village-token\nBURROW_URL=http://dxp2800:8737\n"
+        "CHRONICLE_TOKEN=s3cret-village-token\nCHRONICLE_URL=http://dxp2800:8737\n"
     )
     assert render_env({}) == ""
 
@@ -177,18 +187,52 @@ def test_the_env_file_is_sorted_lines_and_nothing_else() -> None:
 def test_a_secret_with_a_line_break_in_it_is_refused() -> None:
     """A .env has no quoting, so a second line would silently become a second variable."""
     with pytest.raises(TransportError, match="line break"):
-        render_env({BURROW_TOKEN_ENV: "one\ntwo"})
+        render_env({CHRONICLE_TOKEN_ENV: "one\ntwo"})
 
 
 def test_a_village_with_no_address_is_refused_before_anything_is_built() -> None:
-    with pytest.raises(TransportError, match=BURROW_URL_ENV):
-        burrow_env({})
+    with pytest.raises(TransportError, match=CHRONICLE_URL_ENV):
+        emitter_env({})
 
 
 def test_a_village_with_no_token_is_allowed_and_says_so() -> None:
-    """Burrow's ingest is open when its own token is unset; that is a real deployment."""
-    assert burrow_env({BURROW_URL_ENV: "http://dxp2800:8737"}) == {
-        BURROW_URL_ENV: "http://dxp2800:8737"
+    """Chronicle's ingest is open when its own token is unset; that is a real deployment."""
+    assert emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737"}) == {
+        CHRONICLE_URL_ENV: "http://dxp2800:8737",
+        LEGACY_URL_ENV: "http://dxp2800:8737",
+    }
+
+
+def test_the_env_file_carries_both_spellings_at_the_same_value() -> None:
+    """The emitter in the image is frozen at the pre-rename spelling (warren#234).
+
+    A resident container runs docker/resident/burrow-emit.py, a pinned copy that predates
+    warren#216 and reads BURROW_* only. Writing just the new names would leave every
+    deployed resident posting nowhere, and it would do it silently: the container starts,
+    the agent works, the events go to a file nobody reads.
+    """
+    values = emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737", CHRONICLE_TOKEN_ENV: "s3cret"})
+    assert values == {
+        CHRONICLE_URL_ENV: "http://dxp2800:8737",
+        LEGACY_URL_ENV: "http://dxp2800:8737",
+        CHRONICLE_TOKEN_ENV: "s3cret",
+        LEGACY_TOKEN_ENV: "s3cret",
+    }
+
+
+def test_stewards_own_pre_rename_environment_still_provisions() -> None:
+    """Steward on the NAS is itself configured under the old spelling."""
+    values = emitter_env({LEGACY_URL_ENV: "http://dxp2800:8737", LEGACY_TOKEN_ENV: "s3cret"})
+    assert values[CHRONICLE_URL_ENV] == "http://dxp2800:8737"
+    assert values[LEGACY_URL_ENV] == "http://dxp2800:8737"
+    assert values[CHRONICLE_TOKEN_ENV] == "s3cret"
+
+
+def test_the_new_spelling_wins_wherever_both_are_set() -> None:
+    values = emitter_env({CHRONICLE_URL_ENV: "http://new:8737", LEGACY_URL_ENV: "http://old:8737"})
+    assert values == {
+        CHRONICLE_URL_ENV: "http://new:8737",
+        LEGACY_URL_ENV: "http://new:8737",
     }
 
 

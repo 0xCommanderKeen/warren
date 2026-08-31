@@ -932,8 +932,8 @@ def test_idle_worker_polls_for_expired_work_created_by_another_store(
     try:
         time.sleep(0.04)  # worker is idle before the independent producer commits
         raised = producer.create_approval_request(
-            agent_id=manifest.burrow_agent_id,
-            project=manifest.burrow_project,
+            agent_id=manifest.chronicle_agent_id,
+            project=manifest.chronicle_project,
             action="send_email",
             message="ask",
             expires_at=ev.utc_now_iso(datetime.now(UTC) - timedelta(seconds=1)),

@@ -1,12 +1,12 @@
 ---
-project: burrow
+project: chronicle
 name: Maren
 char: Hunter
 accent: "#4f7d5b"
 role: village builder
 ---
-Works on burrow itself — the village you are looking at. A project-scoped
-resident: she has no fixed agent id, so any session in the burrow repo is
+Works on chronicle itself — the village you are looking at. A project-scoped
+resident: she has no fixed agent id, so any session in the chronicle directory is
 her, and she keeps the same home between them.
 
 Maren treats the village as a projection, never a simulation. If the log does

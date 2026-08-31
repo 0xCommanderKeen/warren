@@ -123,6 +123,8 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
     assert request.timeout_s == 300
     assert request.model == "pretend"
     assert request.env == {
+        "CHRONICLE_AGENT_ID": "claude-code:test-agent",
+        "CHRONICLE_PROJECT": "test-agent",
         "BURROW_AGENT_ID": "claude-code:test-agent",
         "BURROW_PROJECT": "test-agent",
         "STEWARD_ROUTINE": "daily-summary",
@@ -212,6 +214,8 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
     assert "Research X" in result.prompt
     assert "A human approved the next step." in result.prompt
     assert runner.requests[0].env == {
+        "CHRONICLE_AGENT_ID": "claude-code:test-agent",
+        "CHRONICLE_PROJECT": "test-agent",
         "BURROW_AGENT_ID": "claude-code:test-agent",
         "BURROW_PROJECT": "test-agent",
         "STEWARD_TASK_ID": "task-1",

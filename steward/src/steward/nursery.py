@@ -59,15 +59,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from steward.deploy import (
     BUNDLE_NAMES,
-    BURROW_URL_ENV,
+    CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
+    LEGACY_URL_ENV,
     DeployTarget,
     Transport,
     TransportError,
     bundle_changes,
     bundle_for,
-    burrow_env,
     compose_argv,
+    emitter_env,
     planned_env,
     render_argv,
     render_compose,
@@ -872,9 +873,9 @@ def _provision(
     target = target_for(resident.manifest)
     # A rehearsal reaches no host, so it must not require the emitter environment a real
     # deploy does: `planned_env` names whatever village variables are set and refuses
-    # nothing, where `burrow_env` refuses without BURROW_URL (#84). The real run below still
-    # goes through `burrow_env`, so a deploy with nowhere to emit is still stopped.
-    values = planned_env(env) if dry_run else burrow_env(env)
+    # nothing, where `emitter_env` refuses without a village URL (#84). The real run below
+    # still goes through `emitter_env`, so a deploy with nowhere to emit is still stopped.
+    values = planned_env(env) if dry_run else emitter_env(env)
     compose = render_compose(resident, target)
     conveyance = transport if transport is not None else transport_for(target)
     up = compose_argv(target, "up", "-d")
@@ -1006,12 +1007,13 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
         elif complaint:
             warnings.append(complaint)
 
-    if provision and dry_run and not (source.get(BURROW_URL_ENV) or "").strip():
+    village_url = (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip()
+    if provision and dry_run and not village_url:
         # The rehearsal still prints the whole plan (#84); it just says out loud that the
         # real run would refuse until the village address is exported.
         warnings.append(
-            f"{BURROW_URL_ENV} is unset, so a real run would refuse to deploy a resident "
-            f"with nowhere to emit; export {BURROW_URL_ENV} before running this for real"
+            f"{CHRONICLE_URL_ENV} is unset, so a real run would refuse to deploy a resident "
+            f"with nowhere to emit; export {CHRONICLE_URL_ENV} before running this for real"
         )
 
     stage, resident = _declare(
