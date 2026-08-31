@@ -19,10 +19,19 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from steward import journal
+from steward.deploy import memory_host_dir, placement_for
 from steward.manifest import ManifestError, Resident, ResidentManifest, Routine
 from steward.manifest import Runner as RunnerSpec
 from steward.prompt import assemble_delegated_prompt, assemble_routine_prompt, assemble_task_prompt
-from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner, skills_home
+from steward.runners import (
+    Outcome,
+    Placement,
+    Runner,
+    RunRequest,
+    RunResult,
+    build_runner,
+    skills_home,
+)
 from steward.session_auth import SESSION_TOKEN_ENV
 from steward.skills import (
     Skill,
@@ -47,13 +56,48 @@ __all__ = [
     "SessionHooks",
     "SessionResult",
     "TaskWake",
+    "declared_directory",
     "session_credential_env",
+    "unprovisioned_reason",
     "workdir_refusal",
 ]
 
 log = logging.getLogger("steward.sessions")
 
-type RunnerFactory = Callable[[RunnerSpec], Runner]
+#: How a runner is built: from the manifest's runner block and its resolved placement.
+#: Two arguments because they are two independent axes — *which brain* and *where it
+#: runs* — and a factory that saw only the runner block could not place a session in the
+#: resident's container (steward #58).
+type RunnerFactory = Callable[[RunnerSpec, Placement], Runner]
+
+
+def declared_directory(resident: Resident) -> Path | None:
+    """Return the host-side directory this resident's session state lives in, or ``None``.
+
+    For a local placement: the declared memory directory, when memory is a directory at
+    all. For a container placement: the *host side* of the memory mount — the same files
+    the session will see at the container's own mount point, and the side every
+    control-plane touch (journal, skills materialization, the admission identity pin)
+    must use. ``None`` means nothing is declared to pin and the session runs in the
+    caller's fallback directory.
+    """
+    manifest = resident.manifest
+    if manifest.runner.placement == "container":
+        return memory_host_dir(manifest)
+    if manifest.memory.kind != "directory":
+        return None
+    return Path(manifest.memory.path).expanduser()
+
+
+def unprovisioned_reason(resident: Resident) -> str:
+    """Why a container-placed resident with no host-side memory directory may not run."""
+    host = memory_host_dir(resident.manifest)
+    return (
+        f"this resident's sessions are placed in container "
+        f"{resident.manifest.deploy.container!r}, but the host side of its memory mount "
+        f"({str(host)!r}) is not a directory on this host; provision the resident "
+        f"(`steward new-resident`) before its sessions have anywhere to happen"
+    )
 
 
 def session_credential_env(credential: str) -> dict[str, str]:
@@ -294,11 +338,17 @@ class _BoardWake:
         return self.origin
 
     def environment(self, resident: Resident) -> Mapping[str, str]:
-        """Build the environment facts a task session inherits."""
+        """Build the environment facts a task session inherits.
+
+        ``STEWARD_RUN_ID`` names this *attempt*, like a routine wake's does: it is what
+        keys a container-placed session's pid file, so a timed-out board session is as
+        killable inside its container as a routine one (steward #58).
+        """
         env = {
             "BURROW_AGENT_ID": resident.agent_id,
             "BURROW_PROJECT": resident.project,
             "STEWARD_TASK_ID": self.task_id,
+            "STEWARD_RUN_ID": self.run_id,
             **session_credential_env(self.session_credential),
         }
         if self.parent_task_id:
@@ -360,6 +410,14 @@ class SessionResult:
 
 def workdir_refusal(resident: Resident, fallback: Path, library: SkillLibrary) -> str | None:
     """Return why materializing skills in this resident's fallback would be unsafe."""
+    if resident.manifest.runner.placement == "container":
+        # A container-placed resident has no fallback to be unsafe *in*: its sessions
+        # happen inside the container, and the host side of its memory mount is the only
+        # place steward may journal and materialize. Missing means unprovisioned, and
+        # that is a refusal in daylight, not a session in the wrong directory.
+        if declared := declared_directory(resident):
+            return None if declared.is_dir() else unprovisioned_reason(resident)
+        return None  # pragma: no cover — container placement always declares a directory
     memory = resident.manifest.memory
     if memory.kind != "directory":
         return None
@@ -423,9 +481,10 @@ class ResidentSessions:
             return timeout_cache[declared_s]
 
         if rehearsal:
+            declared = declared_directory(resident)
             return Admission(
                 resident,
-                resident.workdir(self.workdir),
+                declared if declared is not None and declared.is_dir() else self.workdir,
                 now,
                 rehearsal=True,
                 _resolve_timeout=resolve_timeout,
@@ -459,27 +518,43 @@ class ResidentSessions:
     def _resolve_admitted_workdir(
         self, resident: Resident
     ) -> tuple[Path, _DirectoryIdentity | None] | Refusal:
-        """Resolve the chosen directory and remember when it was the declared memory."""
-        workdir = resident.workdir(self.workdir)
+        """Resolve the chosen host directory and remember when it was the declared one.
+
+        The declared directory is placement-aware (:func:`declared_directory`): the
+        memory directory itself for a local placement, the host side of the memory mount
+        for a container one. A locally placed resident whose declared directory is
+        absent falls back to the caller's working directory, exactly as it always has; a
+        container-placed one is refused instead — its fallback would be a directory the
+        container cannot see, so skills and journal would land where no session looks.
+        """
+        declared = declared_directory(resident)
         identity: _DirectoryIdentity | None = None
         try:
-            memory = resident.manifest.memory
-            if memory.kind == "directory":
-                candidate = Path(memory.path).expanduser()
+            if declared is not None:
                 try:
-                    identity = self._observe_directory(candidate)
+                    identity = self._observe_directory(declared)
                 except FileNotFoundError:
+                    if resident.manifest.runner.placement == "container":
+                        return Refusal(unprovisioned_reason(resident))
                     identity = None
                 else:
                     if identity is None:
                         return Refusal(self._vanished_workdir_reason(resident))
-                workdir = resident.workdir(self.workdir) if identity is None else identity.canonical
+            workdir = self._fallback_workdir(resident) if identity is None else identity.canonical
             workdir = workdir.resolve(strict=identity is not None)
         except _DirectoryChangedError:
             return Refusal(self._changed_workdir_reason(resident))
         except OSError:
             return Refusal(self._vanished_workdir_reason(resident))
         return workdir, identity
+
+    def _fallback_workdir(self, resident: Resident) -> Path:
+        """Where a session runs when nothing declared is pinned: the resident's own say.
+
+        Local placement only — a container placement either pinned its host directory or
+        was refused above, so this never relocates one.
+        """
+        return resident.workdir(self.workdir)
 
     @staticmethod
     def _observe_directory(candidate: Path) -> _DirectoryIdentity | None:
@@ -547,7 +622,7 @@ class ResidentSessions:
                 journal_entry=journal_entry,
                 decisions=decisions,
             )
-            runner = self.runner_factory(resident.manifest.runner)
+            runner = self.runner_factory(resident.manifest.runner, placement_for(resident.manifest))
             result = runner.run(
                 RunRequest(
                     prompt=prompt,
@@ -612,12 +687,11 @@ class ResidentSessions:
         real directory immediately before anything may materialize there.
         """
         resident = admission.resident
-        memory = resident.manifest.memory
-        if memory.kind != "directory":
+        candidate = declared_directory(resident)
+        if candidate is None:
             return None
         if admission.declared_identity is None:
             return None
-        candidate = Path(memory.path).expanduser()
         try:
             observed = self._observe_directory(candidate)
         except _DirectoryChangedError:
@@ -639,16 +713,24 @@ class ResidentSessions:
         if refusal is not None:
             raise SkillError(refusal.reason)
 
+    @staticmethod
+    def _declared_reference(resident: Resident) -> str:
+        """Name the directory a workdir refusal is about, on the side steward touches."""
+        manifest = resident.manifest
+        if manifest.runner.placement == "container":
+            return f"the memory mount's host side {str(memory_host_dir(manifest))!r}"
+        return f"memory.path {manifest.memory.path!r}"
+
     def _vanished_workdir_reason(self, resident: Resident) -> str:
         return (
-            f"memory.path {resident.manifest.memory.path!r} is no longer the directory "
+            f"{self._declared_reference(resident)} is no longer the directory "
             "admitted for this session; steward refuses to fall back to the current "
             "working directory"
         )
 
     def _changed_workdir_reason(self, resident: Resident) -> str:
         return (
-            f"memory.path {resident.manifest.memory.path!r} canonical path or filesystem "
+            f"{self._declared_reference(resident)} canonical path or filesystem "
             "identity changed after admission; steward refuses to provision or run in "
             "the replacement directory"
         )

@@ -60,9 +60,11 @@ import yaml
 from steward.manifest import MANIFEST_FILENAME, Resident, ResidentManifest
 from steward.runners import (
     COMMAND_TIMEOUT_S,
+    LOCAL_PLACEMENT,
     TRANSFER_TIMEOUT_S,
     CommandOutcome,
     PipedRun,
+    Placement,
     run_argv,
 )
 
@@ -85,8 +87,11 @@ __all__ = [
     "bundle_for",
     "burrow_env",
     "compose_argv",
+    "memory_host_dir",
+    "memory_mount",
     "memory_path_for",
     "pack",
+    "placement_for",
     "planned_env",
     "render_argv",
     "render_compose",
@@ -246,6 +251,55 @@ def memory_path_for(manifest: ResidentManifest) -> str:
     return FALLBACK_MEMORY_PATH
 
 
+def memory_mount(manifest: ResidentManifest) -> tuple[str, str]:
+    """Return both sides of one resident's memory volume: ``(host path, container path)``.
+
+    Before steward #58 ``memory.path`` quietly meant two things at once — the control
+    plane's read path and the container's mount point — which only held because nothing
+    ever stood on both sides of the boundary. Container placement does, so the mapping is
+    said once, here, derived from data steward already holds: the host side is the
+    ``memory/`` directory inside the resident's deploy directory (exactly what
+    :func:`render_compose` mounts as ``./memory``), and the container side is
+    :func:`memory_path_for` (exactly what it mounts that directory *at*).
+
+    Every path steward touches then picks a side deliberately: journal reads and writes
+    and skills materialization use the host side; the session's ``docker exec -w``
+    working directory uses the container side.
+    """
+    target = target_for(manifest)
+    return str(PurePosixPath(target.path) / "memory"), memory_path_for(manifest)
+
+
+def memory_host_dir(manifest: ResidentManifest) -> Path:
+    """Return the directory on *this* host that holds the resident's memory.
+
+    The declared ``memory.path`` for a locally placed resident — the meaning it has
+    always had — and the host side of :func:`memory_mount` for a container-placed one,
+    where ``memory.path`` names the mount point inside the container instead.
+    """
+    if manifest.runner.placement == "container":
+        host, _ = memory_mount(manifest)
+        return Path(host).expanduser()
+    return Path(manifest.memory.path).expanduser()
+
+
+def placement_for(manifest: ResidentManifest) -> Placement:
+    """Resolve where this resident's sessions run, as the runner seam's value object.
+
+    The one place a ``runner.placement`` declaration meets the ``deploy`` block's
+    address. Local placement resolves to :data:`~steward.runners.LOCAL_PLACEMENT`;
+    container placement carries the container's resolved name and the *container side*
+    of the memory mount as the session's working directory. Validation refuses a
+    container placement with no declared ``deploy.container``, so the ``target_for``
+    default here is only ever the declared name normalized through one spelling.
+    """
+    if manifest.runner.placement != "container":
+        return LOCAL_PLACEMENT
+    target = target_for(manifest)
+    _, container_workdir = memory_mount(manifest)
+    return Placement(container=target.container, workdir=container_workdir)
+
+
 # --------------------------------------------------------------------------------------
 # rendering
 # --------------------------------------------------------------------------------------
@@ -277,6 +331,12 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
         "image": target.image,
         "container_name": target.container,
         "restart": "unless-stopped",
+        # Docker's own tiny init as PID 1, because the container is where sessions are
+        # killed (steward #58): a timed-out session's processes are reparented to PID 1
+        # when the group dies, and the default `sleep infinity` never reaps, so every
+        # kill would leave zombies accumulating against the PID table for the life of
+        # the container.
+        "init": True,
         "working_dir": memory_path,
         "environment": {
             "BURROW_AGENT_ID": resident.agent_id,

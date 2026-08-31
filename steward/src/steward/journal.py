@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from steward.deploy import memory_host_dir
 from steward.manifest import (
     CLOSE_OF_DAY,
     DEFAULT_JOURNAL_DIR,
@@ -136,6 +137,13 @@ def resolve_journal_dir(manifest: ResidentManifest, *, source: Path | None = Non
 
     Raises :class:`~steward.manifest.ManifestError` — carrying a real diagnostic, with
     the file and the field named — when the memory block cannot hold a journal.
+
+    The base is the *host side* of the resident's memory — which is ``memory.path``
+    itself for a locally placed resident, and the deploy directory's ``memory/`` for a
+    container-placed one, where ``memory.path`` names the container's mount point
+    instead. The session inside the container sees the same entries at
+    ``<memory.path>/<journal>`` through the bind mount; steward reads and writes them
+    from its own side (steward #58).
     """
     complaint = journal_complaint(manifest)
     if complaint is not None:
@@ -149,7 +157,7 @@ def resolve_journal_dir(manifest: ResidentManifest, *, source: Path | None = Non
                 )
             ]
         )
-    return (Path(manifest.memory.path).expanduser() / manifest.memory.journal).resolve()
+    return (memory_host_dir(manifest) / manifest.memory.journal).resolve()
 
 
 def local_day(routine: Routine, moment: dt.datetime) -> dt.date:

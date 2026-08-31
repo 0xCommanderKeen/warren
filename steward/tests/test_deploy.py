@@ -147,6 +147,7 @@ def test_a_smuggled_memory_path_stays_data_and_makes_no_new_compose_keys(write_r
         "image",
         "container_name",
         "restart",
+        "init",
         "working_dir",
         "environment",
         "volumes",

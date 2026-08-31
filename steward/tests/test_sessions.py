@@ -8,8 +8,8 @@ import pytest
 
 from conftest import ResidentWriter, valid_manifest
 from steward import sessions as sessions_module
-from steward.manifest import ResidentManifest, load_manifest
-from steward.runners import Outcome, Runner, RunRequest, RunResult
+from steward.manifest import Resident, ResidentManifest, load_manifest
+from steward.runners import Outcome, Placement, Runner, RunRequest, RunResult
 from steward.session_auth import SESSION_TOKEN_ENV
 from steward.sessions import (
     Admission,
@@ -101,7 +101,7 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
     guard = _RecordingGuard()
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=guard,
         clock=lambda: NOW + timedelta(seconds=5),
     )
@@ -158,7 +158,7 @@ def test_completion_uses_one_actual_clock_read_not_runner_duration(
 
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=guard,
         clock=clock,
     )
@@ -186,7 +186,7 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
     hooks = _RecordingHooks()
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=guard,
         hooks=hooks,
         clock=lambda: NOW + timedelta(seconds=7),
@@ -215,6 +215,7 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
         "BURROW_AGENT_ID": "claude-code:test-agent",
         "BURROW_PROJECT": "test-agent",
         "STEWARD_TASK_ID": "task-1",
+        "STEWARD_RUN_ID": "run-task-1",
     }
     assert guard.records[0]["kind"] == "task"
     assert guard.records[0]["now"] == datetime(2026, 8, 24, 12, 0, 7, tzinfo=UTC)
@@ -233,7 +234,7 @@ def test_admission_refusals_happen_before_context_or_runner_creation(
     hooks = _RecordingHooks()
     runner_builds = 0
 
-    def build_runner(_spec) -> Runner:
+    def build_runner(_spec: object, _placement: object) -> Runner:
         nonlocal runner_builds
         runner_builds += 1
         return _CapturingRunner(RunResult(outcome=Outcome.OK))
@@ -347,7 +348,7 @@ def test_materialization_stays_bound_when_workdir_is_replaced_after_revalidation
     sessions = ResidentSessions(
         workdir=tmp_path / "fallback",
         library=SkillLibrary(path=tmp_path / "skills", skills=skills),
-        runner_factory=lambda _spec: _CapturingRunner(RunResult(outcome=Outcome.OK)),
+        runner_factory=lambda _spec, _placement: _CapturingRunner(RunResult(outcome=Outcome.OK)),
     )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
@@ -462,7 +463,7 @@ def test_admission_fails_closed_when_declared_memory_vanishes_during_capture(
     monkeypatch.chdir(tmp_path)
     sessions = ResidentSessions(
         library=SkillLibrary(path=tmp_path / "configured-skills"),
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
     )
     real_open = os.open
 
@@ -537,7 +538,7 @@ def test_journal_and_harvest_failures_do_not_escape_or_erase_the_run_result(
     monkeypatch.setattr("steward.sessions.journal.latest_entry", unreadable)
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         hooks=BrokenHooks(),
         clock=lambda: NOW + timedelta(seconds=60),
     )
@@ -571,7 +572,9 @@ def test_timeout_is_resolved_once_before_the_caller_opens_its_registry(
             return 123 if self.timeout_calls == 1 else 456
 
     guard = ChangingGuard()
-    sessions = ResidentSessions(workdir=tmp_path, runner_factory=lambda _spec: runner, guard=guard)
+    sessions = ResidentSessions(
+        workdir=tmp_path, runner_factory=lambda _spec, _placement: runner, guard=guard
+    )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
 
@@ -616,7 +619,7 @@ def test_accounting_and_harvest_failures_do_not_erase_the_run_result(
 
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=BrokenGuard(),
         hooks=OrderedHooks(),
     )
@@ -639,7 +642,7 @@ def test_board_runner_exceptions_preserve_their_zero_duration_result(
     data["runner"] = {"kind": "mock"}
     resident = load_manifest(write_resident(data))
 
-    def broken_factory(_spec) -> Runner:
+    def broken_factory(_spec, _placement) -> Runner:
         raise RuntimeError("runner construction failed")
 
     sessions = ResidentSessions(workdir=tmp_path, runner_factory=broken_factory, clock=lambda: NOW)
@@ -684,7 +687,7 @@ def test_a_delegated_letter_and_a_rehearsal_use_the_same_seam_without_dry_run_wr
     )
     sessions = ResidentSessions(
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         library=library,
         guard=guard,
         hooks=hooks,
@@ -769,3 +772,127 @@ def test_a_session_with_no_credential_is_told_nothing_rather_than_nothing_useful
     wake = RoutineWake(resident.manifest.routines[0], "run-1", "schedule")
 
     assert SESSION_TOKEN_ENV not in wake.environment(resident)
+
+
+# ------------------------------------------------- container placement (steward #58)
+
+
+def container_resident(
+    write_resident: ResidentWriter, tmp_path: Path, *, provisioned: bool = True
+) -> tuple[Resident, Path]:
+    """Build a resident whose sessions are placed in its container, deployed under tmp_path."""
+    deploy_path = tmp_path / "deploy" / "steward-test-agent"
+    if provisioned:
+        (deploy_path / "memory").mkdir(parents=True)
+    data = valid_manifest()
+    data["runner"] = {"kind": "mock", "placement": "local"}
+    resident = load_manifest(write_resident(data))
+    # Rebuild with container placement: the mock factory below never launches anything,
+    # so the manifest may say claude while the test injects a capturing runner.
+    data = valid_manifest()
+    data["runner"] = {"kind": "claude", "placement": "container"}
+    data["deploy"] = {"container": "steward-test-agent", "path": str(deploy_path)}
+    del resident
+    return load_manifest(write_resident(data)), deploy_path
+
+
+def test_a_container_placed_resident_admits_the_host_side_of_the_mount(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Journal and skills happen on the host side; the exec workdir is the container's.
+
+    ``memory.path`` names the mount point *inside* the container, which does not exist
+    on this host — before steward #58 that meant a fallback to the process cwd. The
+    admission must pin ``<deploy.path>/memory`` instead, and the factory must be handed
+    the resolved container placement so the session runs behind ``docker exec``.
+    """
+    resident, deploy_path = container_resident(write_resident, tmp_path)
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK, output="done", exit_status=0))
+    placements: list[object] = []
+
+    def factory(_spec: object, placement: object) -> Runner:
+        placements.append(placement)
+        return runner
+
+    sessions = ResidentSessions(workdir=tmp_path, runner_factory=factory, clock=lambda: NOW)
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+    assert admission.workdir == (deploy_path / "memory").resolve()
+
+    result = sessions.run(
+        admission,
+        RoutineWake(routine=resident.manifest.routines[0], run_id="run-1"),
+    )
+
+    assert result.result is not None
+    assert result.result.ok
+    (placement,) = placements
+    assert isinstance(placement, Placement)
+    assert placement.container == "steward-test-agent"
+    assert placement.workdir == "/data/residents/test-agent/memory"
+    assert runner.requests[0].workdir == (deploy_path / "memory").resolve()
+
+
+def test_an_unprovisioned_container_resident_is_refused_not_relocated(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """No host-side memory means nothing the container can see.
+
+    Falling back to the process cwd would journal and materialize where no session
+    ever looks.
+    """
+    resident, _ = container_resident(write_resident, tmp_path, provisioned=False)
+    sessions = ResidentSessions(workdir=tmp_path, clock=lambda: NOW)
+
+    admitted = sessions.admit(resident, now=NOW)
+
+    assert isinstance(admitted, Refusal)
+    assert "provision" in admitted.reason
+    assert "steward-test-agent" in admitted.reason
+
+
+def test_workdir_refusal_reports_an_unprovisioned_container_resident(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The scheduler's startup check and `steward doctor` read this seam.
+
+    A container-placed resident with no host-side mount fails in daylight.
+    """
+    provisioned, _ = container_resident(write_resident, tmp_path)
+    assert sessions_module.workdir_refusal(provisioned, tmp_path, SkillLibrary()) is None
+
+    bare, _ = container_resident(write_resident, tmp_path / "elsewhere", provisioned=False)
+    complaint = sessions_module.workdir_refusal(bare, tmp_path, SkillLibrary())
+    assert complaint is not None
+    assert "provision" in complaint
+
+
+def test_a_container_resident_reads_and_closes_its_journal_on_the_host_side(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The two sides of the mount are the same files, and each party uses its own.
+
+    The session sees `<memory.path>/journal` through the bind mount; steward reads
+    and writes the same entries at `<deploy.path>/memory/journal` (steward #58).
+    """
+    resident, deploy_path = container_resident(write_resident, tmp_path)
+    journal_dir = deploy_path / "memory" / "journal"
+    journal_dir.mkdir(parents=True)
+    (journal_dir / "2026-08-23.md").write_text(
+        "---\ndate: 2026-08-23\n---\nYesterday the shelves were sorted.\n", encoding="utf-8"
+    )
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK, output="done", exit_status=0))
+    sessions = ResidentSessions(
+        workdir=tmp_path,
+        runner_factory=lambda _spec, _placement: runner,
+        clock=lambda: NOW,
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+
+    result = sessions.run(
+        admission,
+        RoutineWake(routine=resident.manifest.routines[0], run_id="run-1"),
+    )
+
+    assert "Yesterday the shelves were sorted." in result.prompt
