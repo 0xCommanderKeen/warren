@@ -16,14 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from approval_protocol import (
-    decode_json_typed_graph,
-    json_semantic_key,
-    structured_approval,
-)
+from approval_protocol import structured_approval
 from journal_observations import reduce_indexed as reduce_journal_indexed
 from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES
 from protocol import validate_event
+from typed_json import canonical_string, decode_graph, semantic_key
 
 _POLICY_PATH = Path(__file__).with_name("retention-policy.json")
 POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
@@ -101,35 +98,6 @@ class Retention(Sequence[str]):
         return NotImplemented
 
 
-def _canonical_json_string(value):
-    """Return canonical compact ASCII JSON string escaping."""
-    encoded = ['"']
-    short = {0x08: "\\b", 0x09: "\\t", 0x0A: "\\n", 0x0C: "\\f", 0x0D: "\\r"}
-    for character in value:
-        codepoint = ord(character)
-        units = (
-            [codepoint]
-            if codepoint <= 0xFFFF
-            else [
-                0xD800 + ((codepoint - 0x10000) >> 10),
-                0xDC00 + ((codepoint - 0x10000) & 0x3FF),
-            ]
-        )
-        for code in units:
-            if code == 0x22:
-                encoded.append('\\"')
-            elif code == 0x5C:
-                encoded.append("\\\\")
-            elif code in short:
-                encoded.append(short[code])
-            elif 0x20 <= code <= 0x7E:
-                encoded.append(chr(code))
-            else:
-                encoded.append(f"\\u{code:04x}")
-    encoded.append('"')
-    return "".join(encoded)
-
-
 def _json_domain_within(value, max_depth=math.inf):
     """Iteratively prove a bounded JSON tree, rejecting cycles and aliases."""
     seen = set()
@@ -201,12 +169,12 @@ def _encode_mood_authority(capsule):
     """Encode logical capsule data as a shallow exact-binary64 typed graph."""
     logical = dict(capsule)
     logical.pop("_burrow_internal", None)
-    graph = json_semantic_key(logical)
+    graph = semantic_key(logical)
     return (
         '{"_burrow_internal":'
-        + _canonical_json_string(MOOD_AUTHORITY_KIND)
+        + canonical_string(MOOD_AUTHORITY_KIND)
         + ',"encoding":'
-        + _canonical_json_string(MOOD_AUTHORITY_ENCODING)
+        + canonical_string(MOOD_AUTHORITY_ENCODING)
         + ',"graph":'
         + graph
         + "}"
@@ -249,7 +217,7 @@ def _mood_authority_from_line_checked(line):
         if set(record) != {"_burrow_internal", "encoding", "graph"}:
             return None
         try:
-            logical = decode_json_typed_graph(record.get("graph"))
+            logical = decode_graph(record.get("graph"))
         except (TypeError, ValueError, OverflowError):
             return None
         if not isinstance(logical, dict):
@@ -379,7 +347,7 @@ def _mood_authority_from_line(line):
 
 def _canonical_identity(value):
     """Language-neutral typed structural identity with exact binary64 values."""
-    return json_semantic_key(value)
+    return semantic_key(value)
 
 
 def _capsule_identity_equal(left, right):
@@ -539,7 +507,7 @@ def _approval_resolution_identity(event, shape=None):
     values = (request_id, event.get("agent_id"), event.get("project"), action)
     if any(not isinstance(value, str) or not value.strip() for value in values):
         return None
-    return json_semantic_key(list(values))
+    return semantic_key(list(values))
 
 
 def _approval_lifecycle_identity(event, shape=None):
@@ -555,7 +523,7 @@ def _approval_lifecycle_identity(event, shape=None):
     shape = shape or structured_approval(event)
     if not isinstance(payload, dict) or shape is None:
         return None
-    return json_semantic_key(
+    return semantic_key(
         {
             "request_id": shape.request_id,
             "agent_id": event.get("agent_id"),

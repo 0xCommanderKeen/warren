@@ -575,9 +575,11 @@ with a bounded diagnostic and cannot later bind when a matching request appears.
 Likewise, request duplicates never replace the first appended immutable request.
 Exact close replays and all later conflicts are ignored with bounded, deduplicated
 diagnostics, so neither an earlier timestamp nor an equal timestamp can replace the
-rendered decision. The shared parity fixture
-`tests/fixtures/approval-lifecycle.json` and `approval-identity.json` drive both the
-JavaScript projection and Python rotation tests so these rules cannot drift.
+rendered decision. `tests/fixtures/approval-lifecycle.json` and
+`approval-identity.json` were written as shared vectors driving the JavaScript
+projection against Python rotation. The JavaScript side is gone and no Python
+test loads them yet, so they record these rules without currently enforcing
+them; wiring them onto `retention._approval_lifecycle_identity` is open work.
 
 The panel keeps at most five newest confirmed request cards (action, detail and
 decision) alongside any newer pending queue. Closing one card therefore does not erase
@@ -755,8 +757,18 @@ extreme JSON exponent such as `1e400`) normalized to one `nonfinite` token.
 The graph is unambiguous with user objects because tags are interpreted only
 inside the reserved internal envelope. It stays shallow regardless of public
 detail depth, so identity, freezing, capsule emission, parsing, structural
-comparison, and byte measurement are iterative and byte-identical in
-JavaScript and Python. Cycles, repeated direct-object container identities, and
+comparison, and byte measurement all stay iterative.
+
+One implementation produces these bytes: `typed_json.py`. It had a JavaScript
+twin, `viewer/typed-json.js`, that had to agree byte for byte; the viewer was
+deleted (warren#219) and the obligation is now to data already on disk. Rotated
+logs and their archives carry `typed-binary64-v1` capsules, and a capsule that
+fails to decode is dropped silently along with Mood authority history — so the
+escaping and the binary64 tokens remain a storage format. `tests/test_typed_json.py`
+pins them with golden strings, including the surviving binary64 vectors in
+`tests/fixtures/mood-capsule-parity.json`. Durable notification identity uses a
+different encoder in `notification_persistence.py` and is not covered by these
+rules. Cycles, repeated direct-object container identities, and
 non-JSON direct inputs fail closed before graph expansion without hiding raw
 public evidence. Legacy direct capsules retain their defensive
 64-container metadata limit; ordinary valid public records and the typed graph

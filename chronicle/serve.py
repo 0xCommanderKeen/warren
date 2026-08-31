@@ -56,7 +56,8 @@ import event_log
 import residents as resident_manifests
 import retention
 from state_coordinator import StateCoordinator
-from approval_protocol import structured_approval, thaw_json
+from approval_protocol import structured_approval
+from typed_json import thaw_json
 from protocol import validate_event
 from config import Config
 
