@@ -794,7 +794,9 @@ so the container's job is to be there.
 ### The image
 
 `steward-resident:latest` is built from [`docker/resident/Dockerfile`](../docker/resident/Dockerfile)
-in this repo. It is `node:22-slim` plus four things a resident cannot work without:
+in this repo. It is `node:22-slim` — **pinned by digest**, not by that tag, because a tag
+moves and an image built twice from one commit has to be one image — plus four things a
+resident cannot work without:
 
 - the **claude CLI** (`@anthropic-ai/claude-code`), pinned by the `CLAUDE_VERSION` build
   arg so a rebuild never silently changes which brain a resident has;
@@ -805,8 +807,8 @@ in this repo. It is `node:22-slim` plus four things a resident cannot work witho
   with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle` by default,
   and `BURROW=/path/to/chronicle` overrides that for a checkout elsewhere);
   `tests/test_resident_image.py` fails
-  when the copy drifts, and CI runs that test (CI never builds the image — there is no
-  docker in it);
+  when the copy drifts, and CI runs that test in the same job that lints and types the
+  package — one job earlier than the `image` job that actually builds this;
 - a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd` — the same six hooks the Mac
   config uses, reading `BURROW_URL` / `BURROW_TOKEN` from the container's environment
@@ -818,6 +820,19 @@ $ make image-ship               # docker save | ssh Miha@dxp2800 docker load
 $ ssh Miha@dxp2800 docker exec steward-<id> steward-smoke
 ```
 
+An image on the NAS can be asked what it was built from, which is the question that matters
+when a resident behaves unlike the repo says it should:
+
+```console
+$ ssh Miha@dxp2800 docker image inspect steward-resident:latest \
+    --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+298fda13783f0ed0b68a35d815549a3b437df6c8
+```
+
+A `-dirty` suffix means the build context had uncommitted changes, so that commit does not
+contain the bytes in the image; `unknown` means it was built by a bare `docker build`
+rather than by `make image`.
+
 `steward-smoke` runs **inside** the container and is issue #51's acceptance criterion made
 executable: claude answers `--version`, the emitter is where `settings.json` says it is,
 and a test event POSTed to `$BURROW_URL/events` comes back **204**. When the village does
@@ -825,6 +840,13 @@ not answer it prints the line the emitter wrote to the local fallback instead, s
 is away" and "the emitter is broken" never look alike. Both events it posts are
 `heartbeat`s under a `steward-smoke:<host>` agent id, never the resident's own: a probe may
 prove the pipe works, and may not conjure a villager who has done no work.
+
+CI runs the same thing against a stub village — an eight-line HTTP handler that answers 204
+on `POST /events` and nothing else, run inside the freshly built image because that image
+already has the python3 for it. It proves the entrypoint seeds the volume, the emitter
+delivers a real hook payload rather than falling back, and `steward-smoke` exits 0. What it
+cannot prove is that a *resident's* container reaches the *real* village on the tailnet;
+that is still the `ssh … docker exec` line above, run after shipping.
 
 There is no registry in this fleet, so the tag is local and the image travels by
 `docker save | ssh … docker load`. A host that has never been shipped it fails at

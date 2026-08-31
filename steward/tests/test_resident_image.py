@@ -1,16 +1,17 @@
-"""The resident runtime image, checked without a docker anywhere near CI.
+"""The resident runtime image, checked off the files rather than by building it.
 
-``docker/resident/`` is the image a provisioned resident runs (steward #51), and CI has no
-docker in it — building here would be slow, unreliable, and would still not prove the
-thing that actually breaks. What actually breaks is *drift*: the vendored emitter falling
-behind burrow's, a hook quietly disappearing out of ``settings.json``, the compose default
-naming an image nobody builds. Those are all readable off the files, so they are asserted
-off the files.
+``docker/resident/`` is the image a provisioned resident runs (steward #51). CI *does* now
+build it — the `image` job in ``.github/workflows/steward.yml`` builds it, runs the
+entrypoint and runs ``smoke.sh`` against a stub village (steward #158) — but a build says
+nothing about *drift*: the vendored emitter falling behind burrow's, a hook quietly
+disappearing out of ``settings.json``, the compose default naming an image nobody builds,
+the two copies of the ``CLAUDE_VERSION`` pin walking apart. Those are all readable off the
+files, and reading them costs a millisecond where a build costs minutes. So they are
+asserted off the files here, and the build job proves the layers actually run.
 
-The one thing these tests cannot say is that the image builds and that a container made
-from it reaches the village. ``docker/resident/smoke.sh`` says that, from inside the
-container, against a real burrow — it is checked for syntax here and run by a human (or by
-the pilot) there.
+The one thing neither can say is that a container made from this image reaches the *real*
+village. ``docker/resident/smoke.sh`` says that, from inside the container, against a real
+burrow — run by a human (or by the pilot) there.
 """
 
 import hashlib
@@ -33,6 +34,7 @@ CHECKSUM = IMAGE_DIR / "burrow-emit.sha256"
 SETTINGS = IMAGE_DIR / "settings.json"
 SMOKE = IMAGE_DIR / "smoke.sh"
 ENTRYPOINT = IMAGE_DIR / "entrypoint.sh"
+MAKEFILE = REPO_ROOT / "Makefile"
 
 #: The line the vendoring header ends with. Everything after it is burrow's file, verbatim.
 MARKER = "# --- upstream copy begins below; every byte after this line is burrow's, verbatim ---\n"
@@ -239,6 +241,75 @@ def test_the_claude_cli_is_pinned_by_build_arg() -> None:
     assert "ARG CLAUDE_VERSION=" in text
     assert "@anthropic-ai/claude-code@${CLAUDE_VERSION}" in text
     assert "claude --version" in text, "the build must fail here, not inside a 07:00 routine"
+
+
+def test_the_two_copies_of_the_claude_pin_agree() -> None:
+    """The pin is written twice, so the two copies have to be held together by a test.
+
+    ``make image`` passes the Makefile's value; a bare ``docker build docker/resident``
+    takes the Dockerfile's ARG default. When they drift, which brain a resident got depends
+    on how somebody happened to build the image — the exact thing the pin exists to stop.
+    """
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    from_makefile = re.search(r"^CLAUDE_VERSION\s*\?=\s*(\S+)", makefile, re.MULTILINE)
+    from_dockerfile = re.search(r"^ARG\s+CLAUDE_VERSION=(\S+)", dockerfile, re.MULTILINE)
+
+    assert from_makefile, f"{MAKEFILE} no longer sets CLAUDE_VERSION"
+    assert from_dockerfile, f"{DOCKERFILE} no longer defaults ARG CLAUDE_VERSION"
+    assert from_makefile[1] == from_dockerfile[1], (
+        f"the claude pin disagrees with itself: Makefile says {from_makefile[1]}, "
+        f"Dockerfile's ARG default says {from_dockerfile[1]}. Bump both, or a bare "
+        f"`docker build docker/resident` builds a different brain than `make image` does."
+    )
+
+
+def test_the_base_image_is_pinned_by_digest() -> None:
+    """A tag is a moving target; a digest is the image. Two rebuilds must mean one image.
+
+    The Dockerfile's own argument for pinning claude — "a resident whose brain silently
+    changed version under it on a rebuild is a resident nobody can say anything true
+    about" — is exactly as true of the ~150MB of Debian and node underneath it (#158).
+    """
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    images = re.findall(r"^\s*FROM\s+(\S+)", text, re.MULTILINE | re.IGNORECASE)
+
+    assert images, f"{DOCKERFILE} has no FROM at all"
+    unpinned = [
+        image for image in images if not re.fullmatch(r"[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}", image)
+    ]
+    assert not unpinned, (
+        f"not pinned: {unpinned}. Every FROM here must read `<image>:<tag>@sha256:<64 hex>` "
+        f"— the tag so a human can see what this is, the digest because that is what docker "
+        f"actually pulls."
+    )
+    assert "docker buildx imagetools inspect" in text, (
+        "a digest with no refresh procedure beside it is a digest nobody dares to move"
+    )
+
+
+def test_the_image_records_the_commit_it_was_built_from() -> None:
+    """An image that cannot say what it was built from is an image nobody can debug.
+
+    ``org.opencontainers.image.revision`` is the one label that turns "the resident is
+    running steward-resident:latest" into a statement with a commit in it. The ARG defaults
+    to ``unknown`` rather than to a lie: a bare ``docker build`` genuinely does not know.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+
+    assert "ARG IMAGE_REVISION=unknown" in dockerfile
+    assert 'LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"' in dockerfile
+    assert "--build-arg IMAGE_REVISION=$(REVISION)" in makefile
+    assert "git rev-parse HEAD" in makefile, "the revision has to come from git, not by hand"
+
+
+def test_the_image_labels_point_at_the_repo_that_exists() -> None:
+    """`steward` was renamed to `warren` (2026-08-31); a label pointing at the tombstone lies."""
+    text = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "github.com/0xCommanderKeen/warren" in text
+    assert "github.com/0xCommanderKeen/steward" not in text
 
 
 def test_the_image_carries_everything_a_session_needs() -> None:
