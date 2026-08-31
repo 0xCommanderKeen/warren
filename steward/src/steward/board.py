@@ -383,6 +383,25 @@ class Dispatcher:
         )
         self.run_transitions = RunTransitions(self.store)
 
+    def refresh(self, residents: Sequence[Resident], library: SkillLibrary) -> None:
+        """Replace the fleet this dispatcher claims work for, without rebuilding it.
+
+        The dispatcher holds two snapshots taken when it was assembled — the residents it
+        may claim for, and the library their grants resolve against — and passes both to
+        the :class:`~steward.sessions.ResidentSessions` it builds in ``__post_init__``. A
+        manifest edited through the control-plane API (steward #214) has to reach all four
+        or a resident declared at noon would be invisible to the board until a restart.
+
+        Rebuilding the dispatcher instead would be the obvious alternative and is wrong:
+        it owns no state worth keeping, but the sessions object it holds is the thing the
+        scheduler is *currently running through*, and swapping it mid-tick would strand
+        whatever was in flight.
+        """
+        self.residents = tuple(residents)
+        self.library = library
+        self.sessions.residents = tuple(residents)
+        self.sessions.library = library
+
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
         cls,

@@ -52,6 +52,7 @@ no runner.
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -63,7 +64,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, cast, runtime_checkable
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -96,7 +97,9 @@ from steward.sessions import (
 )
 from steward.skills import (
     SkillLibrary,
+    default_skills_dir,
     describe_missing,
+    library_for,
     missing_skills,
 )
 
@@ -114,6 +117,7 @@ __all__ = [
     "Scheduler",
     "SchedulerError",
     "SchedulerState",
+    "TreeSource",
     "WakeHooks",
     "default_state_path",
     "latest_fire_at_or_before",
@@ -561,6 +565,101 @@ def load_scheduled(
     ]
 
 
+@runtime_checkable
+class ReloadableHooks(Protocol):
+    """Wake hooks that hold their own snapshot of the fleet and can be handed a new one.
+
+    Separate from :class:`WakeHooks` rather than a fourth method on it: that protocol is
+    satisfied structurally by every fake in the suite, and widening it would make "can this
+    be reloaded" a question nobody could answer no to. :class:`steward.board.Dispatcher`
+    holds both a resident list and a library, so it is the one that needs this.
+    """
+
+    def refresh(self, residents: Sequence[Resident], library: SkillLibrary) -> None:
+        """Replace the fleet this collaborator works on."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class TreeSnapshot:
+    """One reading of the two trees: who exists, what fires, and what they may use."""
+
+    scheduled: list[ScheduledRoutine]
+    residents: tuple[Resident, ...]
+    library: SkillLibrary
+
+
+@dataclass(frozen=True, slots=True)
+class TreeSource:
+    """Where a daemon's routines came from, so it can notice they changed.
+
+    A :class:`Scheduler` is assembled from a *snapshot*: ``load_scheduled`` reads the tree
+    once, and the list it returns holds fully parsed manifests that the daemon then keeps
+    for its whole life. That is invisible while declarations only change through a
+    developer's checkout — the deploy that installs a new manifest restarts the daemon
+    anyway — and becomes wrong the moment a control panel can edit one (steward #214). A
+    charter edited at noon would first be read at the next restart, which might be a week.
+
+    Handing the scheduler its source rather than only its snapshot is what lets it notice.
+    Nothing here reloads on its own; :meth:`Scheduler.reload_if_changed` decides when.
+    """
+
+    residents_dir: Path
+    skills_dir: Path | None = None
+
+    def load(self) -> TreeSnapshot:
+        """Re-read the tree. Raises :class:`SchedulerError` if it does not validate.
+
+        ``residents`` is every *active* resident, not only those with routines: the board
+        dispatcher claims work for residents that may declare no schedule at all, and
+        refreshing it from the scheduled list alone would quietly retire them from the
+        board the first time anything reloaded.
+        """
+        result = validate_path(self.residents_dir, self.skills_dir)
+        return TreeSnapshot(
+            scheduled=load_scheduled(self.residents_dir, self.skills_dir),
+            residents=tuple(active_residents(result.residents)),
+            library=library_for(self.residents_dir, self.skills_dir),
+        )
+
+    def skills_root(self) -> Path | None:
+        """Resolve the library this source actually loads, the way ``library_for`` does.
+
+        Resolved per call rather than once, and it has to be: ``skills_dir=None`` is by far
+        the common case, and :func:`steward.skills.default_skills_dir` answers ``None``
+        until the directory exists. A source that resolved at construction would never
+        notice the library being created, and — the bug this exists to prevent — a
+        fingerprint that skipped the library entirely would leave an edited ``SKILL.md``
+        invisible to the daemon forever, while manifest edits reloaded perfectly.
+        """
+        if self.skills_dir is not None:
+            return Path(self.skills_dir)
+        return default_skills_dir(self.residents_dir)
+
+    def fingerprint(self) -> str:
+        """Summarise the two trees cheaply enough to check on every wake-up.
+
+        Names, sizes and modification times — a stat per file rather than a read, because
+        this runs on a loop that may come round every second and the answer is only ever
+        used to decide whether the expensive thing is worth doing. A tree that changes
+        without any of the three changing would be missed, which in practice means a write
+        that restores a file to a previous size within the same mtime granularity; the
+        explicit reload endpoint exists for anybody who needs certainty rather than
+        cheapness.
+        """
+        parts: list[str] = []
+        for root in (self.residents_dir, self.skills_root()):
+            if root is None or not Path(root).is_dir():
+                continue
+            for path in sorted(Path(root).rglob("*")):
+                try:
+                    info = path.stat()
+                except OSError:  # pragma: no cover — a file removed mid-walk
+                    continue
+                parts.append(f"{path}:{info.st_size}:{info.st_mtime_ns}")
+        return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 class Scheduler:
     """Fires due routines, once each, and tells the village the truth about it."""
 
@@ -579,10 +678,15 @@ class Scheduler:
         hooks: WakeHooks | None = None,
         guard: RunGuard | None = None,
         registry: RunRegistry | None = None,
+        source: TreeSource | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
+        # Where the snapshot came from. ``None`` keeps the old contract exactly: a
+        # scheduler handed a list and no source is a scheduler over that list, forever.
+        self.source = source
+        self._fingerprint = source.fingerprint() if source is not None else ""
         self.dry_run = dry_run
         # No guard means no budget: unbounded, exactly as it was before steward #8.
         self.guard = guard
@@ -628,6 +732,58 @@ class Scheduler:
         # One lock per resident, held across allow → run → record so two due routines of
         # the same resident cannot both pass one pre-ledger budget read (steward #68).
         self._resident_locks: dict[str, threading.Lock] = {}
+
+    # -- picking up a change without a restart ---------------------------------------
+
+    def set_library(self, library: SkillLibrary) -> None:
+        """Point this scheduler and the sessions it opens at a new library, together.
+
+        Both, because :class:`~steward.sessions.ResidentSessions` was handed the library at
+        construction and is what actually materialises skills into a session's workdir.
+        Rebinding only the scheduler's own attribute would leave every run still provisioned
+        from the library the daemon started with — the failure looking exactly like a
+        reload that worked.
+        """
+        self.library = library
+        self.sessions.library = library
+
+    def reload_if_changed(self) -> bool:
+        """Re-read the residents tree when it has changed on disk. Returns whether it did.
+
+        **A tree that stopped validating does not stop the fleet.** The previous snapshot
+        is kept and the reason is logged, so a half-saved manifest means the daemon goes on
+        firing yesterday's declarations rather than falling silent — the same judgement
+        ``load_scheduled`` already makes at startup, where an invalid tree is refused before
+        anything runs. The broken fingerprint is remembered either way, so steward complains
+        once and then waits for the next edit instead of re-reading a broken tree every
+        second.
+        """
+        if self.source is None:
+            return False
+        fingerprint = self.source.fingerprint()
+        if fingerprint == self._fingerprint:
+            return False
+        self._fingerprint = fingerprint
+        try:
+            snapshot = self.source.load()
+        except SchedulerError as exc:
+            log.warning(
+                "the residents tree changed but does not validate; still running the last "
+                "declarations that did: %s",
+                exc,
+            )
+            return False
+        self.scheduled = snapshot.scheduled
+        self.set_library(snapshot.library)
+        if isinstance(self.hooks, ReloadableHooks):
+            self.hooks.refresh(snapshot.residents, snapshot.library)
+        log.info(
+            "reloaded %d routines and %d residents from %s",
+            len(snapshot.scheduled),
+            len(snapshot.residents),
+            self.source.residents_dir,
+        )
+        return True
 
     # -- startup validation ----------------------------------------------------------
 
@@ -1232,6 +1388,11 @@ class Scheduler:
             while max_ticks is None or ticks < max_ticks:
                 ticks += 1
                 moment = clock()
+                # Before the anchors are read, so a routine added a minute ago is due on
+                # this wake-up rather than the next one. Outside the state lock: this reads
+                # the residents tree, and holding a cross-process lock across it would make
+                # every `steward tick` wait on the daemon's file walk.
+                self.reload_if_changed()
                 with self._state_lock():
                     self.state.reload()
                     due = self.due(moment)
