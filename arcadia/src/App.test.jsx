@@ -13,7 +13,7 @@ vi.mock("./game/PhaserGame.jsx", () => ({
 afterEach(cleanup);
 
 describe("Arcadia", () => {
-  it("starts the live Burrow transport and renders its snapshots", async () => {
+  it("starts the live Chronicle transport and renders its snapshots", async () => {
     let options;
     const close = vi.fn();
     const transportFactory = vi.fn((nextOptions) => {
@@ -166,7 +166,7 @@ describe("Arcadia", () => {
     expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
   });
 
-  it("offers each valid Burrow snapshot to the Steward confirmation boundary", () => {
+  it("offers each valid Chronicle snapshot to the Steward confirmation boundary", () => {
     const stewardClient = { confirm: vi.fn() };
 
     render(<App envelope={fixture} stewardClient={stewardClient} />);

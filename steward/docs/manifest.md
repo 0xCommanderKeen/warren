@@ -9,7 +9,7 @@ residents/<id>/
 ```
 
 Editing a resident is edit → commit → deploy. Nothing about a resident lives anywhere
-else: steward injects the charter into every headless session, and burrow reads the same
+else: steward injects the charter into every headless session, and chronicle reads the same
 file for display. One place, two readers.
 
 **Manifests hold references and grants, never credentials.** A manifest with a
@@ -23,9 +23,9 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `version` | yes (defaults to `0`) | Manifest schema version. Only `0` exists. |
 | `uid` | yes | Random UUID minted once by the nursery; durable identity that survives renaming. |
 | `id` | yes | Slug; must equal the directory name under `residents/`. |
-| `agent_id` | one of these two | Exact burrow identity, `<source>:<name>` (e.g. `claude-code:life-agent`). |
-| `project` | one of these two | Project label for a project-scoped soul (e.g. `burrow`). |
-| `summary` | no | One line burrow can display. |
+| `agent_id` | one of these two | Exact chronicle identity, `<source>:<name>` (e.g. `claude-code:life-agent`). |
+| `project` | one of these two | Project label for a project-scoped soul (e.g. `chronicle`). |
+| `summary` | no | One line chronicle can display. |
 | `soul` | yes | Identity dimension — see below. |
 | `charter` | yes | Purpose and obligations — see below. |
 | `skills` | yes | Capability dimension (may be an empty list). |
@@ -47,7 +47,7 @@ name rather than the UUID. It is deliberately random so it can also safely contr
 unguessable public topic name. The nursery writes it at creation and never derives it from
 `id`, `agent_id`, or any other renameable value.
 
-`agent_id` matches before `project`, mirroring burrow's resident matching: an exact
+`agent_id` matches before `project`, mirroring chronicle's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
 with neither cannot be matched to a villager and fails validation.
 
@@ -57,12 +57,12 @@ has no routes"); a missing key is not, because silence must never be read as a g
 
 ## `soul` — identity
 
-Field names match burrow's `villagers/*.md` frontmatter, so no translation is needed.
+Field names match chronicle's `villagers/*.md` frontmatter, so no translation is needed.
 
 ```yaml
 soul:
   name: Hob            # display name
-  char: Monk           # burrow sprite key
+  char: Monk           # chronicle sprite key
   accent: "#a68a4f"    # hex, #rrggbb
   role: life bot       # one line
   file: soul.md        # optional; a file name beside the manifest, never a path
@@ -385,7 +385,7 @@ unchanged.
 **What it costs.** The flag means *load nothing from the filesystem*, and four things stop
 arriving:
 
-- **Hooks — including burrow's event emitter.** The per-session events
+- **Hooks — including chronicle's event emitter.** The per-session events
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SessionEnd`)
   were emitted by hooks in a settings file on whatever machine steward ran on: the
   operator's `~/.claude/settings.json` locally, `/root/.claude/settings.json` inside the
@@ -511,7 +511,7 @@ than relocated to the process working directory.
 **The environment is the named variables and nothing else.** A local session inherits
 the allowlist (`SESSION_ENV_BASE`, the runner's own names, the
 `STEWARD_SESSION_ENV_PASSTHROUGH` hatch) plus the per-wake facts; a container session
-gets **only the per-wake facts**, one `-e` at a time — `BURROW_AGENT_ID`,
+gets **only the per-wake facts**, one `-e` at a time — `CHRONICLE_AGENT_ID`,
 `STEWARD_RUN_ID`, the session credential, and their siblings. Everything else the
 session needs is already in the container: its compose `environment`, its `.env` (the
 operator's hatch here), and the brain's credentials on the `./claude:/root/.claude`
@@ -634,10 +634,10 @@ $ steward scheduler tick --dry-run         # print what would fire, and the whol
 `--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
 manifest says. A rehearsal is not work.
 
-Events go to `BURROW_URL`/events with `Authorization: Bearer $BURROW_TOKEN` when set.
+Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
-`~/.burrow/events.jsonl`) as the watchdog's complete local record. Remote-bound events
-also enter its `.pending` sibling before POST and retain a stable Burrow delivery ID
+`~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` where that already exists) as the watchdog's complete local record. Remote-bound events
+also enter its `.pending` sibling before POST and retain a stable Chronicle delivery ID
 until acknowledged. A failed POST trips a short per-target circuit breaker and leaves
 the event queued; later emits and `steward events flush` replay oldest first. A village
 that cannot be reached loses no queued events, only their immediate remoteness.
@@ -665,7 +665,7 @@ Two things are checked at validation time rather than discovered at midnight:
 - **`claim: true` requires a `job-board` route with `status: active`.** `routes` is
   already this manifest's answer to "how does work reach this resident", and the board is
   a way work reaches it. A resident pulling real work through a channel its own
-  declaration never mentions would render in burrow as a villager with no way in.
+  declaration never mentions would render in chronicle as a villager with no way in.
 - **`lease_s` must outlive `timeout_s`.** A lease that expires while the session is still
   running hands the same task to somebody else, which is the one thing claiming exists to
   prevent.
@@ -813,7 +813,7 @@ person told to "carry on" for the window is left running.
 
 ```console
 $ steward budget show                  # today's spend against every declared cap
-$ steward budget unpause life-agent    # or approve the needs_human from burrow's panel
+$ steward budget unpause life-agent    # or approve the needs_human from chronicle's panel
 ```
 
 Lifting a pause grants an **allowance until the end of the window that tripped**: "carry
@@ -846,7 +846,7 @@ deploy:
 ```
 
 Every field is optional, and every one has a default for the layout this fleet already
-uses — burrow's own server is `~/docker/burrow` on `dxp2800`, and a new resident lands
+uses — chronicle's own server is `~/docker/burrow` on `dxp2800`, and a new resident lands
 beside it:
 
 | field | default |
@@ -887,16 +887,16 @@ resident cannot work without:
   arg so a rebuild never silently changes which brain a resident has;
 - **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
   the whole install;
-- a **vendored copy of burrow's `hooks/emit.py`**, with the commit it came from written in
+- a **vendored copy of chronicle's `hooks/emit.py`**, with the commit it came from written in
   its header and its checksum recorded in `docker/resident/burrow-emit.sha256`. Refresh it
   with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle` by default,
-  and `BURROW=/path/to/chronicle` overrides that for a checkout elsewhere);
+  and `CHRONICLE=/path/to/chronicle` overrides that for a checkout elsewhere);
   `tests/test_resident_image.py` fails
   when the copy drifts, and CI runs that test in the same job that lints and types the
   package — one job earlier than the `image` job that actually builds this;
 - a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd` — the same six hooks the Mac
-  config uses, reading `BURROW_URL` / `BURROW_TOKEN` from the container's environment
+  config uses, reading `CHRONICLE_URL` / `CHRONICLE_TOKEN` from the container's environment
   instead of hardcoding them, because the compose `.env` already carries them.
 
 ```console
@@ -920,7 +920,7 @@ rather than by `make image`.
 
 `steward-smoke` runs **inside** the container and is issue #51's acceptance criterion made
 executable: claude answers `--version`, the emitter is where `settings.json` says it is,
-and a test event POSTed to `$BURROW_URL/events` comes back **204**. When the village does
+and a test event POSTed to `$CHRONICLE_URL/events` comes back **204**. When the village does
 not answer it prints the line the emitter wrote to the local fallback instead, so "the NAS
 is away" and "the emitter is broken" never look alike. Both events it posts are
 `heartbeat`s under a `steward-smoke:<host>` agent id, never the resident's own: a probe may
@@ -988,7 +988,7 @@ What a retired resident stops doing, and where each refusal lives:
 | answers `POST …/run` | the API, as `409 resident_retired` |
 | is probed or restarted | `Watchdog.from_path` |
 
-It drops out of the village the honest way: it stops emitting, and burrow's existing
+It drops out of the village the honest way: it stops emitting, and chronicle's existing
 projection rules do the rest. Steward forges no `session_ended` on its behalf.
 
 Bringing one back is a person's decision written down: set `retired: false`, commit, and
@@ -1001,8 +1001,8 @@ files under `~/docker/<container>/`, deleted after the container is down:
 
 | removed | why |
 |---|---|
-| `.env` | it holds `BURROW_URL` and **`BURROW_TOKEN`** — a village ingest token belonging to a resident that is no longer allowed to act |
-| `docker-compose.yaml` | inert without the `.env`, and worse than inert: `BURROW_URL` is interpolated as `${BURROW_URL:?…}`, so a compose file left beside a removed `.env` makes the *next* `docker compose down` fail on a variable instead of reporting an already-stopped container |
+| `.env` | it holds `CHRONICLE_URL` and **`CHRONICLE_TOKEN`** — a village ingest token belonging to a resident that is no longer allowed to act |
+| `docker-compose.yaml` | inert without the `.env`, and worse than inert: `CHRONICLE_URL` is interpolated as `${CHRONICLE_URL:?…}`, so a compose file left beside a removed `.env` makes the *next* `docker compose down` fail on a variable instead of reporting an already-stopped container |
 
 Both come back byte for byte on the next provision, so removing them costs the way back
 above nothing. The removal runs **after** `docker compose down` for the same interpolation
@@ -1019,7 +1019,7 @@ re-provision does not restore them — so deleting it would make the way back si
 require a re-login. The retire report names it instead, so an operator who wants it gone
 knows there is a step left rather than finding out later.
 
-Removing the file is the narrow lever. The broad one is **rotating `BURROW_TOKEN` fleet-wide**,
+Removing the file is the narrow lever. The broad one is **rotating `CHRONICLE_TOKEN` fleet-wide**,
 and it is the right lever whenever a retirement was a response to something rather than a
 tidy-up: steward writes one token into every resident's `.env` from its own environment, so
 a copy that leaked from one host is a copy that works for all of them. Rotation is a burrow-
@@ -1050,7 +1050,7 @@ One pass does four things:
 - **Closes runs that vanished.** A `routine_started` with no closing event past
   `timeout + grace` becomes `routine_failed` with `error: "run never reported back"`,
   emitted exactly once, so the village never shows eternal work.
-- **Checks every budget**, so a cap trips even on a day nothing was scheduled and burrow's
+- **Checks every budget**, so a cap trips even on a day nothing was scheduled and chronicle's
   fleet-ops fuel gauges are right without waiting for a wake-up that may never come.
 
 ```console
@@ -1100,7 +1100,7 @@ voice at all.
 
 ## The soul body
 
-`soul.md` is markdown with YAML frontmatter, in the same shape as burrow's
+`soul.md` is markdown with YAML frontmatter, in the same shape as chronicle's
 `villagers/*.md`:
 
 ```markdown
@@ -1319,7 +1319,7 @@ $ steward journal life-agent --limit 3
 $ steward journal life-agent --format json     # what the HTTP API serves
 ```
 
-The same path is importable, which is what burrow's house panel will eventually be
+The same path is importable, which is what chronicle's house panel will eventually be
 reading through:
 
 ```python
@@ -1340,7 +1340,7 @@ one knows a path it was not told.
 steward validate                 # the residents/ tree
 steward validate residents/life-agent
 steward validate residents/life-agent/manifest.yaml --format json
-steward schema                   # JSON Schema for the manifest, for burrow and editors
+steward schema                   # JSON Schema for the manifest, for chronicle and editors
 steward doctor                   # can what the manifests declare actually run, here, now?
 steward journal life-agent       # what a resident has actually written, newest first
 steward skills                   # the library, and what each resident effectively holds
@@ -1400,19 +1400,19 @@ residents/life-agent/manifest.yaml: error: charter.mission
 The credential scan runs **before** schema binding, so a secret is never loaded into a
 model or echoed back in a diagnostic.
 
-## Reading manifests from burrow
+## Reading manifests from chronicle
 
-Burrow reads the same files for display (burrow #35). The contract:
+Chronicle reads the same files for display (chronicle #35). The contract:
 
-- Identity fields in `soul` are exactly burrow's villager frontmatter fields.
+- Identity fields in `soul` are exactly chronicle's villager frontmatter fields.
 - Match a villager to a resident by `agent_id` first, then by `project`.
-- The capability dimensions are the panel burrow renders; `app_grants[].status`
+- The capability dimensions are the panel chronicle renders; `app_grants[].status`
   is the only truth about whether access exists, `tools` is either a list of names or
   the string `unrestricted` — never absent — and `workspace` is a list of absolute
   directories that may be empty or missing.
-- `steward schema` emits the JSON Schema, so burrow can validate without depending on
+- `steward schema` emits the JSON Schema, so chronicle can validate without depending on
   this package. The same bytes are committed at `schema/resident-manifest-v0.json`, where
-  the schema's `$id` says they are, so burrow can fetch a file rather than run a command.
+  the schema's `$id` says they are, so chronicle can fetch a file rather than run a command.
   This is a **shape contract**, not the full steward validator: it describes accepted
   document types, fields, required values, and constraints JSON Schema can express.
   `steward validate` remains authoritative for filesystem and fleet context (such as a
@@ -1420,4 +1420,4 @@ Burrow reads the same files for display (burrow #35). The contract:
   as cron/time-zone validity and relationships between fields).
   `tests/test_schema_contract.py` fails when the committed copy drifts from the models —
   changing a field means regenerating with `make schema-write` and reading the diff for
-  what it does to burrow's reader.
+  what it does to chronicle's reader.

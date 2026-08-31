@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { createStateTransport, validateSnapshot } from "./transport.js";
 
-describe("read-only Burrow transport", () => {
+describe("read-only Chronicle transport", () => {
   it("validates the complete versioned snapshot", () => {
     expect(validateSnapshot(fixture.snapshot)).toBeNull();
     expect(validateSnapshot({ ...fixture.snapshot, schema_version: 2 })).toBe("unsupported snapshot schema");

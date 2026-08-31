@@ -56,7 +56,7 @@ export function LiveApp({
     return (
       <main className="grid min-h-screen place-items-center bg-[#eee5d1] p-4 text-[#15241c]">
         <p className="border border-[#d96b54] bg-[#faf6eb] px-5 py-4 font-mono text-sm" role="alert">
-          Burrow is unavailable. Arcadia will keep trying to reconnect.
+          Chronicle is unavailable. Arcadia will keep trying to reconnect.
         </p>
       </main>
     );
@@ -195,7 +195,7 @@ export function App({ envelope, stewardClient = null }) {
       <StewardSnapshotBridge client={stewardClient} snapshot={snapshot} />
       <header className="mx-auto mb-4 flex max-w-7xl items-end justify-between max-sm:flex-col max-sm:items-start max-sm:gap-2">
         <div>
-          <p className={mono}>Burrow · generation {snapshot.generation}</p>
+          <p className={mono}>Chronicle · generation {snapshot.generation}</p>
           <h1 className="text-[clamp(2.5rem,7vw,5rem)] font-normal tracking-[-0.06em]">Arcadia</h1>
         </div>
         <p className={mono}>{snapshot.villagers.length} villager online</p>

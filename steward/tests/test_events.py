@@ -1070,7 +1070,7 @@ def test_the_emitter_reads_burrow_env(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert emitter.fallback == tmp_path / "fallback.jsonl"
 
 
-def test_the_default_fallback_is_burrows_own_log(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_default_fallback_is_chronicles_own_log(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STEWARD_EVENTS_FALLBACK", raising=False)
     assert ev.default_fallback_path() == Path.home() / ".burrow" / "events.jsonl"
 

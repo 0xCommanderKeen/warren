@@ -16,7 +16,7 @@ describe("Observatory presentation model", () => {
 
   it("gives created residents permanent UUID routes and leaves visitors transient", () => {
     const changed = structuredClone(snapshot);
-    changed.residents[0].match = { project: "burrow" };
+    changed.residents[0].match = { project: "chronicle" };
     changed.villagers.push({
       ...changed.villagers[0],
       id: "codex:visitor",

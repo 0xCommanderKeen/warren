@@ -49,7 +49,7 @@ routes:
 ```
 
 The sender names that route by its `id`. A resident may declare more than one — `inbox`
-and `research` are different doors — and burrow renders them like any other route.
+and `research` are different doors — and chronicle renders them like any other route.
 
 Two more guardrails are steward's alone, because no manifest can see far enough to enforce
 them:
@@ -269,7 +269,7 @@ dropped: money steward cannot attribute is still money somebody spent.
 
 ## Over HTTP
 
-Humans and burrow's viewer use the API; sessions use the block or the CLI, neither of which
+Humans and chronicle's viewer use the API; sessions use the block or the CLI, neither of which
 needs the token.
 
 ```console

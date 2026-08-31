@@ -7,7 +7,7 @@ export class UnsupportedSchemaVersionError extends Error {
 
 export function parseSnapshot(envelope) {
   if (envelope?.kind !== "snapshot" && envelope?.kind !== "reset") {
-    throw new TypeError("Expected a Burrow snapshot or reset envelope");
+    throw new TypeError("Expected a Chronicle snapshot or reset envelope");
   }
 
   const snapshot = envelope.snapshot;

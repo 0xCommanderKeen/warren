@@ -1,8 +1,8 @@
 # NAS deployment and cutover
 
 Arcadia owns the NAS origin on port 8737. The static village is served at `/`, townhall is
-mounted at `/observatory/`, Burrow state is exposed at `/burrow/`, and Steward write
-routes remain same-origin. Burrow itself listens on host port 8738 after the cutover; its
+mounted at `/observatory/`, Chronicle state is exposed at `/burrow/`, and Steward write
+routes remain same-origin. Chronicle itself listens on host port 8738 after the cutover; its
 old built-in viewer is no longer reachable at `/`.
 
 This origin serves builds of **two** directories of the warren monorepo — `arcadia/` and
@@ -78,15 +78,15 @@ Two options when it is convenient:
   `location = /observatory { return 301 /townhall/; }` (plus `^~ /observatory/`) so old
   bookmarks survive.
 - **Leave it.** The path is a URL, not an identifier; nothing reads it programmatically.
-  It costs nothing to keep, and warren#216 has not renamed the code's `burrow`/observatory
-  identifiers either.
+  It costs nothing to keep. warren#216 renamed the code's identifiers and deliberately
+  left these deployed paths alone; warren#218 tracks the paths themselves.
 
 Whichever is chosen, rebuild townhall with a matching `base` in the same deploy — the
 nginx alias alone will serve an `index.html` whose assets 404.
 
 The state parser rejects an unknown `schema_version` before applying it and replaces the
 village with a visible contract-mismatch screen. The remedy is to deploy a compatible
-Arcadia build or make Burrow serve a version supported by deployed clients; do not bypass
+Arcadia build or make Chronicle serve a version supported by deployed clients; do not bypass
 the check or partially render the unknown snapshot.
 
 ## Roll back
@@ -94,22 +94,22 @@ the check or partially render the unknown snapshot.
 To undo a bad *arcadia build*, republish the previous revision's `dist/` — step 3 alone,
 no restart. That is the everyday rollback now that the origin is established.
 
-To undo the whole 2026-08-27 cutover: stop Arcadia, restore Burrow's port mapping to
-`8737:8737`, and recreate Burrow. The Arcadia build and configuration remain in
+To undo the whole 2026-08-27 cutover: stop Arcadia, restore Chronicle's port mapping to
+`8737:8737`, and recreate Chronicle. The Arcadia build and configuration remain in
 `~/docker/arcadia/` for diagnosis. No data migration was part of that cutover, so rollback
-does not touch Burrow's event log or Steward's database.
+does not touch Chronicle's event log or Steward's database.
 
-That rollback no longer restores a UI. It used to bring back Burrow's built-in viewer at
+That rollback no longer restores a UI. It used to bring back Chronicle's built-in viewer at
 `/`; warren#219 removed that viewer from chronicle, which is now backend-only, so undoing
 the cutover today leaves an API with nothing in front of it. Arcadia is the village.
 
 ## Cutover record
 
 The first cutover completed on 2026-08-27. Arcadia and Observatory were installed under
-one nginx origin on `dxp2800:8737`; Burrow moved to host port 8738 and was upgraded from
+one nginx origin on `dxp2800:8737`; Chronicle moved to host port 8738 and was upgraded from
 the stale pre-contract server to the stable `main` deployment bundle and documented
 Python 3.14/uv runtime. The automated smoke check verified root delivery, deep-link
 fallback, a live schema-version-1 snapshot, an 18-second unbuffered SSE connection with
 query parameters, and a same-origin Steward authentication preflight returning 401.
-Burrow's event log and Steward database were retained unchanged. The pre-cutover and
-pre-runtime-upgrade Compose files are retained beside Burrow's active Compose file.
+Chronicle's event log and Steward database were retained unchanged. The pre-cutover and
+pre-runtime-upgrade Compose files are retained beside Chronicle's active Compose file.

@@ -158,7 +158,12 @@ def default_fallback_path() -> Path:
     configured = (os.environ.get(FALLBACK_ENV) or "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".burrow" / "events.jsonl"
+    # Same rule as chronicle's own state directory (warren#216): prefer the new name, but
+    # keep using an existing ~/.burrow rather than stranding a record the watchdog reads.
+    home = Path.home()
+    if not (home / ".chronicle").is_dir() and (home / ".burrow").is_dir():
+        return home / ".burrow" / "events.jsonl"
+    return home / ".chronicle" / "events.jsonl"
 
 
 def truncate_error(text: str, limit: int = ERROR_MAX_CHARS) -> str:

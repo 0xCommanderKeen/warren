@@ -8,8 +8,8 @@
 #
 # Four checks, in the order they can fail:
 #   1. the claude CLI is installed and answers --version
-#   2. python3 and the vendored burrow emitter are where settings.json says they are
-#   3. a direct POST to $BURROW_URL/events comes back 204
+#   2. python3 and the vendored chronicle emitter are where settings.json says they are
+#   3. a direct POST to the village's /events comes back 204
 #   4. the emitter itself, fed a real hook payload on stdin, delivers the same way
 #
 # Exit 0 only when the village answered 204. When it did not, check 4's fallback line is
@@ -17,7 +17,7 @@
 # seeing that line is the difference between "the emitter is broken" and "the NAS is away".
 #
 # On honesty: both events this posts are `heartbeat`, under a `steward-smoke:<host>` agent
-# id rather than the resident's own. A heartbeat is liveness-only in burrow's projection —
+# id rather than the resident's own. A heartbeat is liveness-only in chronicle's projection —
 # it never claims a task, an artifact, or a knock — and a probe identity means running the
 # smoke test cannot conjure a villager for a resident that has not done any work yet. The
 # village never lies, including when steward is the one testing it.
@@ -35,7 +35,7 @@ CONFIG_DIR=/root/.claude
 EMITTER="$CONFIG_DIR/burrow-emit.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 AGENT_ID="${SMOKE_AGENT_ID:-steward-smoke:$(hostname)}"
-PROJECT="${BURROW_PROJECT:-steward}"
+PROJECT="${CHRONICLE_PROJECT:-${BURROW_PROJECT:-steward}}"
 FALLBACK="$HOME/.burrow/events.jsonl"
 failed=0
 
@@ -73,20 +73,22 @@ else
 fi
 
 # ------------------------------------------------------------------- 3. the village answers
-if [ -z "${BURROW_URL:-}" ]; then
-    fail "BURROW_URL is unset; there is no village to post to"
+VILLAGE_URL="${CHRONICLE_URL:-${BURROW_URL:-}}"
+VILLAGE_TOKEN="${CHRONICLE_TOKEN:-${BURROW_TOKEN:-}}"
+if [ -z "$VILLAGE_URL" ]; then
+    fail "no CHRONICLE_URL/BURROW_URL; there is no village to post to"
     posted=""
 else
-    url=$(echo "$BURROW_URL" | sed 's:/*$::')
+    url=$(echo "$VILLAGE_URL" | sed 's:/*$::')
     ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
     body=$(printf '{"v":0,"ts":"%s","source":"steward","agent_id":"%s","project":"%s","cwd":"%s","type":"heartbeat","payload":{"tool":"steward-smoke"}}' \
         "$ts" "$AGENT_ID" "$PROJECT" "$(pwd)")
-    if [ -n "${BURROW_TOKEN:-}" ]; then
+    if [ -n "$VILLAGE_TOKEN" ]; then
         posted=$(printf '%s' "$body" | curl -sS -o /dev/null -w '%{http_code}' \
             --max-time 10 \
             -X POST "$url/events" \
             -H 'Content-Type: application/json' \
-            -H "Authorization: Bearer $BURROW_TOKEN" \
+            -H "Authorization: Bearer $VILLAGE_TOKEN" \
             --data-binary @- 2>/dev/null)
     else
         posted=$(printf '%s' "$body" | curl -sS -o /dev/null -w '%{http_code}' \
@@ -97,7 +99,7 @@ else
     fi
     case "$posted" in
         204) say "ok   POST $url/events -> 204" ;;
-        401) fail "POST $url/events -> 401: BURROW_TOKEN is wrong or missing for this village" ;;
+        401) fail "POST $url/events -> 401: the village token is wrong or missing" ;;
         ""|000) fail "POST $url/events -> no answer at all: $url is unreachable from this container" ;;
         *)   fail "POST $url/events -> $posted (expected 204)" ;;
     esac
@@ -108,7 +110,8 @@ if [ -f "$EMITTER" ]; then
     before=0
     [ -f "$FALLBACK" ] && before=$(wc -l < "$FALLBACK" | tr -d ' ')
     printf '{"hook_event_name":"PostToolUse","tool_name":"SmokeTest","session_id":"steward-smoke","cwd":"%s"}' "$(pwd)" \
-        | BURROW_AGENT_ID="$AGENT_ID" BURROW_PROJECT="$PROJECT" python3 "$EMITTER"
+        | BURROW_AGENT_ID="$AGENT_ID" BURROW_PROJECT="$PROJECT" \
+          CHRONICLE_AGENT_ID="$AGENT_ID" CHRONICLE_PROJECT="$PROJECT" python3 "$EMITTER"
     status=$?
     after=0
     [ -f "$FALLBACK" ] && after=$(wc -l < "$FALLBACK" | tr -d ' ')
@@ -117,7 +120,7 @@ if [ -f "$EMITTER" ]; then
     elif [ "$after" -gt "$before" ]; then
         say "note the emitter fell back to $FALLBACK — nothing is lost, but the village did not take it:"
         echo "      $(tail -n 1 "$FALLBACK")"
-        [ "${posted:-}" = "204" ] && fail "the direct POST worked but the emitter did not; check BURROW_URL inside the container"
+        [ "${posted:-}" = "204" ] && fail "the direct POST worked but the emitter did not; check the village URL inside the container"
     else
         say "ok   the emitter delivered without falling back"
     fi

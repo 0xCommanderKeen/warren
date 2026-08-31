@@ -66,7 +66,7 @@ describe("Steward client", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("blocks overlapping writes and unlocks only for the matching Burrow snapshot", async () => {
+  it("blocks overlapping writes and unlocks only for the matching Chronicle snapshot", async () => {
     let resolveFetch;
     const fetch = vi.fn(() => new Promise((resolve) => { resolveFetch = resolve; }));
     const client = createStewardClient({ fetch });
@@ -176,7 +176,7 @@ describe("where Steward lives", () => {
   });
 
   it("is whatever a developer running vite points it at", () => {
-    // Arcadia's dev server proxies Burrow but not Steward, so this override is the only way
+    // Arcadia's dev server proxies Chronicle but not Steward, so this override is the only way
     // to reach a Steward at all in development.
     vi.stubEnv("DEV", true);
     expect(stewardBaseFromLocation("?steward=http://127.0.0.1:8802")).toBe("http://127.0.0.1:8802");

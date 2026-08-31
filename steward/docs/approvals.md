@@ -144,7 +144,7 @@ Hob wants to send email
 
 Token-free and local on purpose: it writes to steward's own database rather than calling
 the HTTP API, because steward's API token is a credential no session should be holding.
-The request appears in `GET /approvals` and knocks in burrow exactly as an output-block
+The request appears in `GET /approvals` and knocks in chronicle exactly as an output-block
 request does. Use `--note` instead of `--detail-json` for an unstructured question.
 
 Bad input is refused loudly with a non-zero exit — a malformed `--detail-json`, an
@@ -157,7 +157,7 @@ turn open waiting for a human is expensive and fragile, and a resident sitting o
 paused session is not resting.
 
 The decision is delivered on the resident's **next wake-up** — a scheduled routine, a
-board task, or a manual `run-now` fired from burrow's viewer, which uses the same wake
+board task, or a manual `run-now` fired from chronicle's viewer, which uses the same wake
 hooks as the scheduler and so delivers decisions and harvests new blocks exactly as a
 scheduled fire does (steward #W1) — injected into its preamble as a
 `DECISIONS SINCE YOU LAST RAN` section, then marked delivered. Delivery is atomic: two
@@ -272,7 +272,7 @@ The guard only answers for actions a *session chose*, and two kinds of knock are
 
 ## The event payloads
 
-`needs_human` — backwards compatible. `message` is still the one-line knock burrow
+`needs_human` — backwards compatible. `message` is still the one-line knock chronicle
 renders and ntfy forwards; everything else is additive, so a consumer that only knows the
 old bare form keeps working.
 
@@ -302,7 +302,7 @@ decision is recorded against.
 **A knock is scrubbed before it leaves the village.** The `message` and every value in
 `detail` — at any depth — are bounded (a knock is a notice, not a transcript) *and*
 scanned for secrets before the event is emitted. A secret a session places in a detail
-field or an unstructured note — an `sk-…` key, a `BURROW_TOKEN=…` assignment, a PEM
+field or an unstructured note — an `sk-…` key, a `CHRONICLE_TOKEN=…` assignment, a PEM
 private key, a JWT, a password in a URL — is replaced with `[redacted:secret]`, using the
 same detectors that refuse a credential in a manifest. Only the secret is removed; the
 rest of the knock is intact, so a person still reads the question. Redaction runs *before*

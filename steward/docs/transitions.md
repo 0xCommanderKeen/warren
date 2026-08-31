@@ -1,6 +1,6 @@
 # Durable transitions and the facts that go with them (v0)
 
-Every durable state change steward makes has a matching fact in burrow's log, and the two
+Every durable state change steward makes has a matching fact in chronicle's log, and the two
 have to agree. A row that changed with no fact is work the village cannot see; a fact with
 no row is the village rendering work that never happened. Neither is recoverable by
 reading the other, because **persistence and event delivery are not one transaction and
@@ -14,9 +14,9 @@ out loud:
 That sentence is the transition modules' whole job. Delivery after that is the emitter's business
 (`docs/api.md`, `steward/events.py`): a remote event is durably queued before POST, a
 failed POST remains queued for oldest-first replay, emitting never raises, and no
-transition is rolled back because a village was unreachable. Burrow's retained delivery
+transition is rolled back because a village was unreachable. Chronicle's retained delivery
 ID authority suppresses retries after the acceptance/retirement crash window; this is
-not global exactly-once delivery after Burrow rotates that authority away.
+not global exactly-once delivery after Chronicle rotates that authority away.
 
 This document is the behavioral contract. Part 1 is the matrix — every transition, its
 guard, its outcomes, and its fact. Part 2 is the two interface designs that were compared.
@@ -315,7 +315,7 @@ between a caller and the thing it is doing. #123 rules it out and it deserves to
 **A store that emits.** Passing the emitter into `Store` and emitting from inside the
 `with self._lock, self._conn` block would look atomic and would not be: the POST happens
 under a database lock, a slow village becomes a slow board, and the failure mode of an
-unreachable burrow changes from "logged locally" to "held the write open for two seconds".
+unreachable chronicle changes from "logged locally" to "held the write open for two seconds".
 It also puts protocol knowledge in the one module that has none.
 
 ### The judgement
@@ -377,7 +377,7 @@ logger name has to follow them:
 Nothing in the repo keys on these names — no handler, no test, no alert — and the message
 text is unchanged, so this is a grep habit to update rather than a breakage. The one line
 that did **not** move is the superseded-close warning: it names the *resident*, the seam
-knows only the claimant's burrow agent id, so it stays in `Dispatcher._record` on
+knows only the claimant's chronicle agent id, so it stays in `Dispatcher._record` on
 `steward.board` exactly as before.
 
 **The honest limit, restated where the code will read it:** a transition is not atomic

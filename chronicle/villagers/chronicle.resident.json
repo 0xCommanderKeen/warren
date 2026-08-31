@@ -10,7 +10,6 @@
     "description": "Works on chronicle itself — the village you are looking at."
   },
   "skills": [
-    { "id": "pixel-art-viewer", "status_ref": "repository:viewer" },
     { "id": "event-projection", "status_ref": "repository:village_state.py" },
     { "id": "runner-hooks", "status_ref": "repository:hooks/emit.py" }
   ],

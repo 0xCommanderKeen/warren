@@ -95,7 +95,7 @@ def recorded() -> dict[str, str]:
     return values
 
 
-def test_the_vendored_emitter_is_burrows_file_byte_for_byte() -> None:
+def test_the_vendored_emitter_is_chronicles_file_byte_for_byte() -> None:
     """The copy in this repo must hash to exactly what was vendored from burrow.
 
     This is the whole safety argument for vendoring rather than submoduling: the copy is
@@ -336,8 +336,15 @@ def test_the_container_still_just_stays_up() -> None:
 
 
 def test_the_local_dev_mirror_is_off_inside_a_container() -> None:
-    """Nothing listens on the container's own loopback; every hook would pay for finding out."""
-    assert 'BURROW_MIRROR=""' in DOCKERFILE.read_text(encoding="utf-8")
+    """Nothing listens on the container's own loopback; every hook would pay for finding out.
+
+    Baked under both spellings (warren#216): the emitter in the image today reads the old
+    one, and the emitter warren#234 vendors will read the new one. Setting only one would
+    hand whichever emitter is running a default mirror it cannot reach.
+    """
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    assert 'BURROW_MIRROR=""' in text
+    assert 'CHRONICLE_MIRROR=""' in text
 
 
 # ------------------------------------------------------------------- life-agent, as it is

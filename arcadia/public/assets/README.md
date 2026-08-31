@@ -11,7 +11,7 @@ Pixel art from the **Ninja Adventure Asset Pack** by [pixel-boy & AAA](https://p
 - `characters/<Name>-idle.png` — 64×16: one standing frame per direction
 - `shadow.png` — blob shadow drawn under villagers
 
-These arrived here from Burrow's retired in-tree viewer, which is where they were first
+These arrived here from Chronicle's retired in-tree viewer, which is where they were first
 used. CC0 asks for nothing, but the attribution travels with the files regardless.
 
 ## Font
