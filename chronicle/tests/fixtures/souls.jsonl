@@ -1,4 +1,0 @@
-{"v":0,"source":"fixture","ts":"2026-08-24T11:59:00.000Z","agent_id":"soul:a-alpha","project":"burrow","cwd":"/w/burrow","type":"tool_called","payload":{"tool":"Edit","detail":"viewer/index.html"}}
-{"v":0,"source":"fixture","ts":"2026-08-24T11:59:01.000Z","agent_id":"soul:b-bravo","project":"burrow","cwd":"/w/burrow","type":"idle","payload":{}}
-{"v":0,"source":"fixture","ts":"2026-08-24T11:59:02.000Z","agent_id":"soul:c-charlie","project":"life","cwd":"/srv/life","type":"task_started","payload":{"prompt":"summarize the day"}}
-{"v":0,"source":"fixture","ts":"2026-08-24T11:59:03.000Z","agent_id":"soul:d-delta","project":"solo","cwd":"/w/solo","type":"tool_called","payload":{"tool":"Grep","detail":"reduce("}}
