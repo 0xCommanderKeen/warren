@@ -10,6 +10,7 @@ import pytest
 
 from steward import health, scheduler
 from steward.events import utc_now_iso
+from steward.operator_auth import new_operator_credential
 from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE
 from steward.session_auth import credential_digest, new_session_credential
 from steward.store import (
@@ -1400,3 +1401,171 @@ def test_a_task_attempt_credential_dies_with_the_binding_that_lost_the_race(
 
     assert store.open_runs() == []
     assert store.session_principal(credential, fresh_since=EARLY) is None
+
+
+# ------------------------------------------------ named operator credentials (warren#225)
+
+
+def test_an_operator_credential_resolves_to_the_person_it_was_minted_for(store: Store) -> None:
+    """The credential *is* the identity: the name is read from the row, not from a header."""
+    credential = new_operator_credential()
+    store.mint_operator(name="Miha", email="miha@example.invalid", credential=credential)
+
+    principal = store.operator_principal(credential)
+
+    assert principal is not None
+    assert principal.name == "Miha"
+    assert principal.email == "miha@example.invalid"
+    assert principal.identity == ("Miha", "miha@example.invalid")
+
+
+def test_only_the_digest_of_an_operator_credential_is_written(store: Store) -> None:
+    """A copy of steward.db must not yield live credentials."""
+    credential = new_operator_credential()
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=credential)
+
+    (row,) = store._conn.execute("SELECT * FROM operator_credentials").fetchall()
+
+    assert credential not in set(dict(row).values())
+    assert row["digest"] == credential_digest(credential)
+
+
+def test_a_revoked_credential_resolves_to_nobody(store: Store) -> None:
+    """Revocation is the whole difference from the master token, so it has to be total."""
+    credential = new_operator_credential()
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=credential, now=EARLY)
+
+    revoked = store.revoke_operator("Miha", now=LATER)
+
+    assert revoked is not None
+    assert revoked.revoked_at == LATER
+    assert store.operator_principal(credential) is None
+
+
+def test_revoking_twice_does_not_move_the_moment_it_first_stopped(store: Store) -> None:
+    """The answer is about *this* call, and the audit keeps the first stamp."""
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=new_operator_credential())
+    store.revoke_operator("Miha", now=EARLY)
+
+    assert store.revoke_operator("Miha", now=LATER) is None
+    assert store.operators()[0].revoked_at == EARLY
+
+
+def test_a_revoked_row_is_kept_rather_than_deleted(store: Store) -> None:
+    """Who could act as this fleet's operator, and until when, is what an audit asks."""
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=new_operator_credential())
+    store.revoke_operator("Miha", now=LATER)
+
+    listed = store.operators()
+
+    assert [(record.name, record.live) for record in listed] == [("Miha", False)]
+    assert store.operators(live_only=True) == []
+
+
+def test_a_name_that_already_holds_a_live_credential_is_refused(store: Store) -> None:
+    """Re-minting in place would leave the old holder with no way to tell it had stopped."""
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=new_operator_credential())
+
+    with pytest.raises(ValueError, match="already holds a live credential"):
+        store.mint_operator(name="Miha", email="m@x.invalid", credential=new_operator_credential())
+
+
+def test_a_revoked_name_may_be_minted_again(store: Store) -> None:
+    """Revoke-then-mint is the rotation, and it has to actually work."""
+    first = new_operator_credential()
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=first)
+    store.revoke_operator("Miha")
+
+    second = new_operator_credential()
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=second)
+
+    assert store.operator_principal(first) is None
+    assert store.operator_principal(second) is not None
+
+
+def test_an_empty_credential_is_not_a_master_key(store: Store) -> None:
+    """No row can hold the empty digest, and a query that would match one is not written."""
+    store.mint_operator(name="Miha", email="m@x.invalid", credential=new_operator_credential())
+
+    assert store.operator_principal("") is None
+
+
+def test_a_credential_nobody_minted_resolves_to_nobody(store: Store) -> None:
+    """Shaped like one is not the same as being one."""
+    assert store.operator_principal(new_operator_credential()) is None
+
+
+# ------------------------------------------------------ the last run of a routine (#104)
+
+
+def record_routine_run(  # noqa: PLR0913 — one keyword per fact about the run
+    store: Store,
+    *,
+    resident: str = "hob",
+    routine: str = "daily-summary",
+    run_id: str = "r1",
+    trigger: str = TRIGGER_SCHEDULE,
+    outcome: str = "ok",
+    now: str = LATER,
+) -> None:
+    """Write the ledger row a finished routine session leaves behind."""
+    store.record_run(
+        resident=resident,
+        agent_id=f"claude-code:{resident}",
+        kind="routine",
+        trigger=trigger,
+        run_id=run_id,
+        ref=routine,
+        outcome=outcome,
+        now=now,
+    )
+
+
+def test_the_latest_run_of_each_routine_is_keyed_the_way_the_scheduler_keys_it(
+    store: Store,
+) -> None:
+    """``<resident>/<routine>`` is the scheduler's own state key, so the ledger joins on it."""
+    record_routine_run(store)
+
+    runs = store.latest_routine_runs()
+
+    assert list(runs) == ["hob/daily-summary"]
+    assert runs["hob/daily-summary"].trigger == TRIGGER_SCHEDULE
+
+
+def test_the_newest_row_wins_per_routine(store: Store) -> None:
+    """One answer per routine, and it is the latest — not whichever the scan reached first."""
+    record_routine_run(store, run_id="old", outcome="failed", now=EARLY)
+    record_routine_run(store, run_id="new", outcome="ok", now=LATER)
+
+    runs = store.latest_routine_runs()
+
+    assert runs["hob/daily-summary"].run_id == "new"
+    assert runs["hob/daily-summary"].outcome == "ok"
+
+
+def test_two_residents_running_the_same_routine_name_do_not_collide(store: Store) -> None:
+    """Routine ids are unique within a resident, not across the fleet."""
+    record_routine_run(store, resident="hob", run_id="h1")
+    record_routine_run(store, resident="pip", run_id="p1")
+
+    runs = store.latest_routine_runs()
+
+    assert {key: entry.run_id for key, entry in runs.items()} == {
+        "hob/daily-summary": "h1",
+        "pip/daily-summary": "p1",
+    }
+
+
+def test_a_run_that_is_not_a_routine_is_not_a_routines_last_run(store: Store) -> None:
+    """A claimed board task is a run, and it is not this routine firing."""
+    store.record_run(
+        resident="hob",
+        agent_id="claude-code:hob",
+        kind="task",
+        run_id="t1",
+        ref="task-42",
+        outcome="ok",
+    )
+
+    assert store.latest_routine_runs() == {}

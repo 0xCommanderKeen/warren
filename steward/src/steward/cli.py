@@ -68,6 +68,7 @@ from steward.nursery import (
     raise_resident,
     retire_resident,
 )
+from steward.operator_auth import new_operator_credential, operator_email
 from steward.prompt import assemble_preamble
 from steward.runners import Placement, check_cli_support, check_runner, skills_home
 from steward.scheduler import (
@@ -1826,6 +1827,123 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
     # passes into an exit status.  An individual recoverable pass never kills the daemon.
     if any(_watchdog_failed(report) for report in passes):
         sys.exit(EXIT_INVALID)
+
+
+# --------------------------------------------------------------------------------------
+# operator credentials
+# --------------------------------------------------------------------------------------
+
+
+@main.group()
+def operator() -> None:
+    """Mint, revoke and list the named credentials humans present to the API.
+
+    The master ``STEWARD_TOKEN`` is a shared secret: it names nobody, it cannot be revoked
+    without restarting the server, and it is the same key that boots the process. That is
+    the right credential for the CLI and the environment, and the wrong one for a browser
+    tab — so townhall's operators get one of these instead (warren#225).
+
+    An operator credential reaches exactly what the master token reaches. What it adds is a
+    name: writes made with one are committed by that person rather than by
+    ``steward (api)``, jobs are posted by them and approvals decided by them. What it
+    subtracts is permanence: revoking one takes effect on the next request.
+
+    There is no HTTP path that mints, revokes or lists one. A credential that could mint
+    its own successor would make revocation a suggestion, so this terminal is the only door.
+    """
+
+
+@operator.command("mint")
+@click.argument("name")
+@click.option("--email", default=None, help="Git author address. Derived from the name if omitted.")
+@click.option("--note", default="", help="What this credential is for. Shown by `operator list`.")
+@_DB_OPTION
+def operator_mint(name: str, email: str | None, note: str, db: Path | None) -> None:
+    """Mint a credential for one named operator and print it once.
+
+    Printed once and stored as a digest, so steward cannot show it again — losing it means
+    revoking and minting another, which is the correct amount of inconvenient for a bearer
+    secret that does not expire.
+    """
+    cleaned = name.strip()
+    if not cleaned:
+        click.secho(
+            "an operator needs a name: it is what their commits are authored by", fg="red", err=True
+        )
+        sys.exit(EXIT_INVALID)
+    credential = new_operator_credential()
+    with _open_store(db) as store:
+        try:
+            record = store.mint_operator(
+                name=cleaned,
+                email=(email or "").strip() or operator_email(cleaned),
+                credential=credential,
+                note=note.strip(),
+            )
+        except ValueError as exc:
+            click.secho(str(exc), fg="red", err=True)
+            click.secho(
+                f"revoke it first if this is a rotation: steward operator revoke {cleaned!r}",
+                fg="bright_black",
+                err=True,
+            )
+            sys.exit(EXIT_INVALID)
+    click.secho(f"minted an operator credential for {record.name}", fg="green")
+    click.secho(f"commits will be authored by {record.name} <{record.email}>", fg="bright_black")
+    click.secho(
+        "this is the only time steward can show it — only its digest is stored:",
+        fg="yellow",
+    )
+    click.echo(credential)
+
+
+@operator.command("revoke")
+@click.argument("name")
+@_DB_OPTION
+def operator_revoke(name: str, db: Path | None) -> None:
+    """Stop accepting one operator's credential, from the next request onward.
+
+    The row is stamped rather than deleted: who could act as this fleet's operator, and
+    until when, is exactly what an audit asks, and a missing row cannot answer it.
+    """
+    with _open_store(db) as store:
+        record = store.revoke_operator(name.strip())
+    if record is None:
+        click.secho(f"no live operator credential for {name!r}", fg="yellow")
+        click.secho("steward operator list shows every one, revoked included", fg="bright_black")
+        return
+    click.secho(f"revoked {record.name}'s credential at {record.revoked_at}", fg="green")
+    click.secho(
+        "anything already committed with it keeps their name on it — that is the history, "
+        "not an access grant",
+        fg="bright_black",
+    )
+
+
+@operator.command("list")
+@_DB_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def operator_list(db: Path | None, output_format: str) -> None:
+    """List operator credentials, oldest first. Revoked ones are shown, not hidden."""
+    with _open_store(db) as store:
+        records = store.operators()
+    if output_format == "json":
+        click.echo(json.dumps([record.to_dict() for record in records], indent=2))
+        return
+    if not records:
+        click.echo("no operator credentials — every human caller is presenting STEWARD_TOKEN")
+        return
+    for record in records:
+        state = "live" if record.live else f"revoked {record.revoked_at}"
+        click.secho(
+            f"{'live' if record.live else 'gone':<5} {record.name}  <{record.email}>",
+            fg="green" if record.live else "bright_black",
+        )
+        click.secho(
+            f"      minted {record.issued_at} · {state}"
+            + (f" · {record.note}" if record.note else ""),
+            fg="bright_black",
+        )
 
 
 # --------------------------------------------------------------------------------------

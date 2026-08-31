@@ -77,12 +77,13 @@ limits are documented here rather than advertised at `/openapi.json`.
 
 ## Auth
 
-Two kinds of caller present two kinds of credential. A **human** presents
-`STEWARD_TOKEN` and may reach everything; a **session** presents the credential steward
+Three kinds of caller present three kinds of credential. The **master token**
+(`STEWARD_TOKEN`) reaches everything and names nobody; a named **operator credential**
+reaches the same things and names a person; a **session** presents the credential steward
 minted for its own run and may reach very little. See
-[Two kinds of caller](#two-kinds-of-caller) below.
+[Three kinds of caller](#three-kinds-of-caller) below.
 
-**The human token** is one shared secret, exactly like burrow's ingest auth.
+**The master token** is one shared secret, exactly like burrow's ingest auth.
 
 - `STEWARD_TOKEN` in steward's environment; `Authorization: Bearer <token>` on the
   request.
@@ -120,22 +121,33 @@ its tailnet address and is never exposed to the public internet. One shared huma
 the whole of its auth against an operator — session credentials narrow what a *resident*
 may do, not what an intruder may — and that is only enough behind a private network.
 
-## Two kinds of caller
+## Three kinds of caller
 
 `STEWARD_TOKEN` is a master key, not an identity: one shared secret, one constant-time
-compare, no principals. That is the right shape for a human operator and the wrong shape
+compare, no principals. That is the right shape for a terminal and the wrong shape
 for a session — with it, the resident that *raises* an approval can also *decide* it, and
 a resident can sign a letter with any other resident's name. So a session gets its own
 credential instead (steward #41).
 
-| | human | session |
-|---|---|---|
-| credential | `STEWARD_TOKEN` | `$STEWARD_SESSION_TOKEN`, in the session's environment |
-| minted | by the operator, once | by steward, per run, at fire time |
-| identity | none — it is a shared secret | the resident whose run it is |
-| expires | when the operator rotates it | with the run: on close, timeout, or a stale lease |
-| may read | everything | everything |
-| may write | everything | `POST /delegate`, and nothing else |
+It is also the wrong shape for a **browser**. Townhall is a write surface on the shared
+origin, and pasting the master token into a tab hands every operator the key that also
+boots the server, that nobody can revoke without a redeploy, and that names nobody in the
+audit trail it leaves behind. So a named operator gets their own credential too
+(warren#225) — see [Operator credentials](#operator-credentials).
+
+| | master token | operator | session |
+|---|---|---|---|
+| credential | `STEWARD_TOKEN` | `steward-operator-…`, minted by name | `$STEWARD_SESSION_TOKEN`, in the session's environment |
+| minted | by the operator, once, in the environment | `steward operator mint <name>` | by steward, per run, at fire time |
+| identity | none — it is a shared secret | the person it was minted for | the resident whose run it is |
+| stored | in steward's environment | as a SHA-256 digest in `operator_credentials` | as a SHA-256 digest in `open_runs` |
+| ends | when the operator rotates it and restarts | `steward operator revoke <name>`, on the next request | with the run: on close, timeout, or a stale lease |
+| may read | everything | everything | everything |
+| may write | everything | everything | `POST /delegate`, and nothing else |
+| commits as | `steward (api)` | that person, by name | — |
+
+The write allowlist below is about **sessions** and is untouched by operator credentials.
+It exists to keep a running resident out of human acts, and an operator is the human.
 
 **What a session may reach.** Every `GET`, plus `POST /delegate`. Every other write path
 is `403 session_credential_forbidden`, and nothing is recorded — it is refused at the door,
@@ -199,6 +211,47 @@ so every caller is the human one and a session can reach any route with no heade
 The credential is still minted, so nothing about a run changes shape between modes — only
 what the API is able to enforce does.
 
+## Operator credentials
+
+The credential a browser holds (warren#225). It reaches exactly what `STEWARD_TOKEN`
+reaches — the session allowlist is about sessions and is untouched — and what it adds is a
+name, which is what makes an audit trail worth keeping.
+
+```
+$ steward operator mint Miha --email miha@example.invalid --note townhall
+minted an operator credential for Miha
+commits will be authored by Miha <miha@example.invalid>
+this is the only time steward can show it — only its digest is stored:
+steward-operator-XQ0v…
+
+$ steward operator list
+live  Miha  <miha@example.invalid>
+      minted 2026-08-31T18:04:11.902Z · live · townhall
+
+$ steward operator revoke Miha
+revoked Miha's credential at 2026-08-31T19:22:03.118Z
+```
+
+- **Printed once.** Only `sha256(credential)` reaches `steward.db`, so a copy of the
+  database yields no live credentials and steward cannot show one again. Losing one means
+  revoking and minting another.
+- **Revocable, immediately.** `revoke` stamps the row and the next request presenting it is
+  `401`. The row is kept rather than deleted: *who could act as this fleet's operator, and
+  until when* is exactly what an audit asks, and a missing row cannot answer it.
+- **Named.** A write made with one is committed by that person rather than by
+  `steward (api)`, the commit trailer says so, and a job posted or an approval decided with
+  one records their name instead of `api`. `STEWARD_COMMIT_IDENTITY` remains what the
+  master token and open mode commit as.
+- **No HTTP path mints, revokes, or lists one.** A credential that could mint its successor
+  would make revocation a suggestion, so the terminal is the only door.
+- **Recognisable, and therefore redactable.** The `steward-operator-` prefix is in
+  steward's secret-value patterns, so one pasted into a manifest fails validation and one
+  echoed by a session never survives into a village event.
+
+There is no expiry. A second clock would be a promise steward would then have to keep
+across restarts, and revocation is the honest mechanism: it is one command, it is
+immediate, and it leaves a record.
+
 ## CORS
 
 `STEWARD_CORS_ORIGINS` is a comma-separated list of origins allowed to call the API
@@ -213,8 +266,8 @@ $ STEWARD_CORS_ORIGINS=http://village.local:8080 STEWARD_TOKEN=… steward serve
 
 ### `POST /residents/{id}/routines/{routine}/run`
 
-**Human callers only.** A session credential is refused here — see
-[Two kinds of caller](#two-kinds-of-caller).
+**Human callers only** — the master token or an operator credential. A session credential is refused here; see
+[Three kinds of caller](#three-kinds-of-caller).
 
 Fire one routine now. Validated against the resident's manifest before anything is
 queued: an unknown resident or routine is a `404`, not an enqueue.
@@ -295,7 +348,7 @@ any board-enabled resident.
 Hand work from one resident to another. The human path into delegation — a session usually
 uses the `<delegate>` block or `steward delegate`, neither of which holds a token at all.
 It is also the one write path a session credential reaches, and it behaves differently for
-one: see [Two kinds of caller](#two-kinds-of-caller).
+one: see [Three kinds of caller](#three-kinds-of-caller).
 
 ```json
 {"from": "burrow-builder", "to": "life-agent", "route": "handoff",
@@ -353,7 +406,7 @@ must make, the block grammar, and the guardrails are in
 ### `GET /approvals` · `GET /approvals/{request_id}` · `POST /approvals/{request_id}`
 
 The two reads are open to both kinds of caller; **the decision is human-only** — see
-[Two kinds of caller](#two-kinds-of-caller).
+[Three kinds of caller](#three-kinds-of-caller).
 
 `GET /approvals` lists gated actions. `?status=pending` (the default), `resolved`, or
 `all`; anything else is a `422` with `unknown_status`. The default is unchanged from
@@ -410,8 +463,8 @@ one. A request nobody answers before its `expires_at` resolves itself as `deny` 
 
 ### `POST /residents`
 
-**Human callers only.** A session credential is refused here — see
-[Two kinds of caller](#two-kinds-of-caller).
+**Human callers only** — the master token or an operator credential. A session credential is refused here; see
+[Three kinds of caller](#three-kinds-of-caller).
 
 ```json
 {
@@ -671,7 +724,9 @@ from three things steward already knows and nothing it does not.
      "schedule_tz": "Europe/Ljubljana", "enabled": true, "retired": false,
      "requires": ["read-inbox"], "timeout_s": 600, "journal": null,
      "anchor": "2026-08-24T21:15:00+00:00", "next_fire": "2026-08-25T02:15:00+02:00",
-     "last_request": {"request_id": "…", "outcome": "ran", "detail": {"routine": "…"}}}
+     "last_request": {"request_id": "…", "outcome": "ran", "detail": {"routine": "…"}},
+     "last_run": {"run_id": "…", "trigger": "schedule", "outcome": "ok",
+                  "recorded_at": "2026-08-25T02:15:41.220Z", "duration_s": 41.2}}
   ],
   "state_path": "/srv/steward/.steward/state/scheduler.json",
   "scheduler": {"last_tick": "2026-08-25T09:31:02+00:00", "stale_after_s": 360.0,
@@ -696,8 +751,20 @@ moment steward first saw the routine. `null` means it has never fired, and calli
 last run would let a routine that has never worked look like one that has.
 
 `last_request` is the newest entry in the request log for this routine — what became of
-the last run **somebody asked for through this API**. A routine that fired on its own
-schedule leaves its record in burrow's event log, not here. `null` is the ordinary case.
+the last run **somebody asked for through this API**. A scheduled fire is not an HTTP
+request, so it never appears here, and `null` is the ordinary case.
+
+`last_run` is the newest **run ledger** row for this routine, and it is the one to read for
+"did this actually fire" (warren#104). Every finished session writes a ledger row whatever
+started it, so this carries `trigger` — `schedule` or `manual` — and the `outcome` the run
+came to. `null` means no run of this routine has ever finished, which is not the same as
+one that failed.
+
+Both are here because they answer different questions and their disagreement is a
+diagnosis. A panel that showed only `last_request` reported a healthy resident firing on
+its schedule as one that had never run, and the operator's honest conclusion from it —
+"it only runs when I trigger it manually" — was false. A `last_request` of `queued` with an
+older `last_run` is the opposite case: something was asked for and has not happened.
 
 `scheduler` is the heartbeat the rest of this ledger has to be read against: `last_tick` is
 when a scheduler process was last alive against that state file — stamped every tick,
@@ -777,6 +844,7 @@ there is no endpoint that would let it. See the README for what it shows.
 | `budget_allowances` | a human's "carry on", and the moment it runs out |
 | `watchdog_attempts` | the restart budget of each resident, so three attempts means three |
 | `watchdog_passes` | when the watchdog last swept, which is how `doctor` can say nothing is watching |
+| `operator_credentials` | one row per named human operator: their git author identity, the SHA-256 digest of their credential, and when it was minted and revoked |
 
 Budget accounting has one deliberately separate durable file: `steward.db.health.jsonl`.
 It records a bounded, redacted error when a completed run cannot be ledgered or its
@@ -802,8 +870,8 @@ move the *typing* into a control panel while keeping every guarantee that rule b
 
 Four rules hold for all of them.
 
-**Human callers only.** A session credential is `403` on every route in this section — see
-[Two kinds of caller](#two-kinds-of-caller).
+**Human callers only** — the master token or an operator credential. A session credential is `403` on every route in this section; see
+[Three kinds of caller](#three-kinds-of-caller).
 
 **An invalid write is never written.** The candidate is applied to a throwaway *copy* of
 the tree and validated there with the same gate `steward validate` runs, and only a copy
