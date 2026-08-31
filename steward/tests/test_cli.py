@@ -2297,7 +2297,7 @@ def test_doctor_says_nothing_here_needs_docker_when_nothing_declares_a_container
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """The ordinary case must stay one quiet line, and must not shell out to docker."""
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", "echo 'doctor must not have asked me'; exit 1")
     residents_dir = write_resident(valid_manifest()).parent.parent
 
@@ -2315,7 +2315,7 @@ def test_doctor_names_the_burrow_that_supervises_a_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", docker_naming_itself("dxp2800"))
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2340,7 +2340,7 @@ def test_doctor_warns_but_does_not_fail_over_a_container_on_another_burrow(
     `_report_scheduler` makes about a state file this host cannot see. The watchdog,
     which *is* the supervisor, says it in red instead.
     """
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2359,7 +2359,7 @@ def test_doctor_says_when_docker_itself_did_not_answer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", "exit 1")
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
