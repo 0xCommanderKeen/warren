@@ -44,6 +44,7 @@ from pydantic import (
     model_validator,
 )
 
+from steward.operator_auth import OPERATOR_CREDENTIAL_PATTERN
 from steward.session_auth import SESSION_CREDENTIAL_PATTERN
 
 __all__ = [
@@ -409,6 +410,11 @@ SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # be able to leak its credential into a burrow event, *and* a credential must never be
     # committed into a manifest, a soul, or a skill.
     (SESSION_CREDENTIAL_PATTERN, "an inline steward session credential"),
+    # And steward's own named-operator credential (warren#225), for both halves of the
+    # same rule: it is the credential a browser holds, so it is the one most likely to be
+    # pasted somewhere by hand, and it outlives a run rather than dying with one — which
+    # makes leaking it worse than leaking a session's, not better.
+    (OPERATOR_CREDENTIAL_PATTERN, "an inline steward operator credential"),
 )
 
 # A reference field holds a pointer (path, URL, scheme-prefixed handle). A long run of

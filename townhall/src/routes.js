@@ -64,13 +64,22 @@ export function matchRoute(route) {
   }
   if (parts[0] === "residents") {
     if (parts.length === 1) return { page: "residents", params: {} };
+    // Before the id branch, or a resident could be declared with the id "new" and take
+    // this address away from the form that declares it.
+    if (parts.length === 2 && parts[1] === "new") return { page: "residentNew", params: {} };
     if (parts.length === 2) return { page: "resident", params: { id: parts[1] } };
+    if (parts.length === 3 && parts[2] === "declaration") {
+      return { page: "residentDeclaration", params: { id: parts[1] } };
+    }
   }
   if (parts[0] === "skills") {
     if (parts.length === 1) return { page: "skills", params: {} };
     if (parts.length === 2 && parts[1] === "new") return { page: "skillNew", params: {} };
     if (parts.length === 2) return { page: "skill", params: { name: parts[1] } };
   }
+  if (parts[0] === "routines" && parts.length === 1) return { page: "routines", params: {} };
+  if (parts[0] === "approvals" && parts.length === 1) return { page: "approvals", params: {} };
+  if (parts[0] === "board" && parts.length === 1) return { page: "board", params: {} };
   if (parts[0] === "budgets") {
     if (parts.length === 1) return { page: "budgets", params: {} };
     if (parts.length === 2) return { page: "budgets", params: { id: parts[1] } };
@@ -83,19 +92,32 @@ export const routeTo = {
   fleet: () => "/",
   agent: (uuid) => `/agents/${encodeURIComponent(uuid)}`,
   residents: () => "/residents",
+  // Addressed by uid rather than id, the way the console decided to (steward #112): an id
+  // is a directory name, so retiring `pip` and raising a new one next month moves it, and
+  // a bookmarked /residents/pip would quietly come to mean somebody else. The uid never
+  // moves, and steward's routes resolve either spelling — ids first and exhaustively — so
+  // a link written against an id keeps working.
   resident: (id) => `/residents/${encodeURIComponent(id)}`,
+  residentNew: () => "/residents/new",
+  residentDeclaration: (id) => `/residents/${encodeURIComponent(id)}/declaration`,
   skills: () => "/skills",
   skill: (name) => `/skills/${encodeURIComponent(name)}`,
   skillNew: () => "/skills/new",
+  routines: () => "/routines",
+  approvals: () => "/approvals",
+  board: () => "/board",
   budgets: (id) => (id ? `/budgets/${encodeURIComponent(id)}` : "/budgets"),
 };
 
 /** The sidebar, in the console's order. `nav` is which entry a page lights up. */
 export const NAV = [
   { index: "01", label: "Fleet", nav: "fleet", route: routeTo.fleet(), pages: ["fleet", "agent"] },
-  { index: "02", label: "Residents", nav: "residents", route: routeTo.residents(), pages: ["residents", "resident"] },
-  { index: "03", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
-  { index: "04", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
+  { index: "02", label: "Residents", nav: "residents", route: routeTo.residents(), pages: ["residents", "resident", "residentNew", "residentDeclaration"] },
+  { index: "03", label: "Routines", nav: "routines", route: routeTo.routines(), pages: ["routines"] },
+  { index: "04", label: "Approvals", nav: "approvals", route: routeTo.approvals(), pages: ["approvals"] },
+  { index: "05", label: "Board", nav: "board", route: routeTo.board(), pages: ["board"] },
+  { index: "06", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
+  { index: "07", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
 ];
 
 /** Which sidebar entry owns a page, or null when none does (the 404). */

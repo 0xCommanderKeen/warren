@@ -75,7 +75,7 @@ const normalizedBase = (value) => String(value || "").trim().replace(/\/+$/, "")
 export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential } = {}) {
   const doFetch = fetchImpl || ((...args) => globalThis.fetch(...args));
 
-  async function call(path, { method = "GET", body, signal } = {}) {
+  async function call(path, { method = "GET", body, signal, query } = {}) {
     const auth = credential?.headers?.();
     if (!auth) {
       throw new StewardError(
@@ -89,7 +89,8 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
 
     let response;
     try {
-      response = await doFetch(`${normalizedBase(baseUrl)}${path}`, {
+      const search = query ? `?${new URLSearchParams(query)}` : "";
+      response = await doFetch(`${normalizedBase(baseUrl)}${path}${search}`, {
         method,
         headers,
         cache: "no-store",
@@ -119,7 +120,8 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
       // presenting, and the human is about to be asked for another one.
       credential.forget?.();
       throw new StewardError(
-        "steward refused that credential. It compares what you paste against STEWARD_TOKEN in its own environment.",
+        "steward refused that credential. An operator credential that has been revoked reads " +
+          "exactly like one that was never minted — `steward operator list` says which.",
         { status: 401, code: "unauthorized", raw: payload },
       );
     }
@@ -148,21 +150,42 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     return payload;
   }
 
+  const at = (id) => encodeURIComponent(id);
+
   return {
     call,
     // -- reads -----------------------------------------------------------------------
+    //
+    // One method per path the steward console's own ROUTES map declared, which is the
+    // authoritative list of what a control panel for this fleet has to be able to ask
+    // (warren#225). Chronicle's `/state` answers none of these: its projection carries
+    // journal *metadata* but no text, no inbox at all, and no budget — so the three
+    // panels a resident page is judged on are steward's, not the village's.
     listResidents: (options) => call("/residents", options),
+    readResident: (id, options) => call(`/residents/${at(id)}`, options),
     listSkills: (options) => call("/skills", options),
-    readSkill: (name, options) => call(`/skills/${encodeURIComponent(name)}`, options),
-    readDeclaration: (id, options) => call(`/residents/${encodeURIComponent(id)}/declaration`, options),
-    readBudget: (id, options) => call(`/residents/${encodeURIComponent(id)}/budget`, options),
+    readSkill: (name, options) => call(`/skills/${at(name)}`, options),
+    readDeclaration: (id, options) => call(`/residents/${at(id)}/declaration`, options),
+    readBudget: (id, options) => call(`/residents/${at(id)}/budget`, options),
+    readJournal: (id, options) => call(`/residents/${at(id)}/journal`, options),
+    readInbox: (id, options) => call(`/residents/${at(id)}/inbox`, options),
+    listRoutines: (options) => call("/routines", options),
+    listJobs: (options) => call("/jobs", options),
+    listApprovals: (status, options) => call("/approvals", { ...options, query: { status } }),
+    // The one read that exists so a write can be believed: every mutating route answers
+    // with a request id and the word "accepted", and this is where the outcome turns up.
+    readRequest: (id, options) => call(`/requests/${at(id)}`, options),
 
     // -- writes ----------------------------------------------------------------------
     // Each returns steward's whole answer, `commit` included. No caller invents one.
     createSkill: (body) => call("/skills", { method: "POST", body }),
-    updateSkill: (name, body) => call(`/skills/${encodeURIComponent(name)}`, { method: "PUT", body }),
-    writeDeclaration: (id, body) =>
-      call(`/residents/${encodeURIComponent(id)}/declaration`, { method: "PUT", body }),
+    updateSkill: (name, body) => call(`/skills/${at(name)}`, { method: "PUT", body }),
+    writeDeclaration: (id, body) => call(`/residents/${at(id)}/declaration`, { method: "PUT", body }),
+    createResident: (body) => call("/residents", { method: "POST", body }),
+    runRoutine: (residentId, routineId) =>
+      call(`/residents/${at(residentId)}/routines/${at(routineId)}/run`, { method: "POST" }),
+    postJob: (body) => call("/jobs", { method: "POST", body }),
+    decideApproval: (requestId, body) => call(`/approvals/${at(requestId)}`, { method: "POST", body }),
     reload: () => call("/reload", { method: "POST" }),
   };
 }

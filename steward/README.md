@@ -42,6 +42,31 @@ only. Burrow's server never gets write access to agents, and steward never rende
 anything. The UI treats the event stream as the only confirmation of effect: no
 optimistic state the fleet hasn't confirmed.
 
+### Operator credentials
+
+`STEWARD_TOKEN` is the credential of a terminal and an environment: it names nobody, it is
+the same key that boots the process, and rotating it means a restart. A **browser** needs
+something else, so a named operator gets their own credential (warren#225):
+
+```console
+$ steward operator mint Miha --email miha@example.invalid --note townhall
+minted an operator credential for Miha
+commits will be authored by Miha <miha@example.invalid>
+this is the only time steward can show it — only its digest is stored:
+steward-operator-…
+
+$ steward operator list          # revoked ones are listed too, not hidden
+$ steward operator revoke Miha   # takes effect on the next request
+```
+
+It reaches exactly what the master token reaches — the session allowlist below is about
+*sessions* and is untouched — and what it adds is a name. Writes made with one are
+committed by that person rather than by `steward (api)`, jobs are posted by them, and
+approvals record them as the decider. Only the SHA-256 digest is stored, there is no HTTP
+path that mints or revokes one, and the `steward-operator-` prefix is in steward's
+secret-value patterns so a leaked one is refused by validation and scrubbed on egress. See
+[docs/api.md](docs/api.md#operator-credentials).
+
 ## Status
 
 Ten pieces exist.
@@ -475,9 +500,11 @@ which uuid it is.
 
 Four things are worth knowing about it.
 
-**One token, once.** The first load asks for `STEWARD_TOKEN`, keeps it in this tab's
+**One token, once.** The first load asks for a credential, keeps it in this tab's
 `sessionStorage`, and sends it as a bearer header on every request. A `401` forgets it and
-asks again. The three static files are the one thing on the server *not* behind the token,
+asks again. Paste an [operator credential](#operator-credentials) rather than
+`STEWARD_TOKEN`: it is revocable, it names you in every commit it makes, and the master
+token then never lands in a browser at all. The three static files are the one thing on the server *not* behind the token,
 because the browser has to load the script before there is anything to ask a person with —
 they carry no fleet data, and every byte the console displays it fetched with the token.
 

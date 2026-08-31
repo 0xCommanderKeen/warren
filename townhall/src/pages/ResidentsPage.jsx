@@ -21,23 +21,53 @@ import {
 } from "../manifest.js";
 import { Gate } from "../console/Gate.jsx";
 import {
-  Actions, Badge, Badges, Button, Empty, Facts, Field, Gauge, Input, Loading, Note, PageHead,
-  Panel, Problem, Receipt, Row, Rows, Section, Select, Stack, Textarea, Verbatim, Who,
-  buttonClass,
+  Actions, Badge, Badges, Button, Clock, Empty, Facts, Field, Gauge, Input, Loading, Note,
+  PageHead, Panel, Problem, Receipt, Row, Rows, Section, Select, Stack, Textarea, Verbatim,
+  Who, buttonClass,
 } from "../console/ui.jsx";
+import { soonest } from "../console/time.js";
+import ResidentDetail from "./ResidentDetail.jsx";
+import ResidentNew from "./ResidentNew.jsx";
 
-const COLUMNS = "1.5fr .85fr .7fr 1.1fr 1.15fr";
+const COLUMNS = "1.5fr .85fr .95fr 1.1fr 1.15fr";
+
+/**
+ * The soonest upcoming fire of one resident's routines (#155).
+ *
+ * `next_fire` comes back in the routine's *own* `schedule_tz`, so a fleet spanning zones
+ * produces strings with different offsets and the console's `localeCompare` ordered the
+ * local wall-clock text rather than the instants — naming a fire that was not the soonest
+ * whenever the offsets disagreed. `soonest` parses before it compares.
+ */
+function nextFireOf(resident, routines) {
+  const mine = (routines || []).filter((row) => row.resident === resident.id);
+  return soonest(mine, (row) => row.next_fire)?.next_fire ?? null;
+}
 
 /* -- the list ------------------------------------------------------------------------ */
 
 function ResidentList() {
   const { client } = useSteward();
-  const { data, error, loading } = useStewardQuery((signal) => client.listResidents({ signal }), []);
+  const { data, error, loading } = useStewardQuery(
+    (signal) =>
+      Promise.all([
+        client.listResidents({ signal }),
+        // The fleet ledger, for the "next fire" sub-line. Settled rather than awaited: a
+        // residents list that vanished because the scheduler ledger was unreadable would be
+        // a worse answer than one that simply says nothing about next fires.
+        client.listRoutines({ signal }).then(
+          (value) => value,
+          () => null,
+        ),
+      ]).then(([listing, ledger]) => ({ ...listing, routines: ledger?.routines || [] })),
+    [],
+  );
 
   if (loading) return <Loading>reading the fleet…</Loading>;
   if (error) return <Problem error={error} />;
 
   const residents = data?.residents || [];
+  const routines = data?.routines || [];
 
   return (
     <>
@@ -62,7 +92,8 @@ function ResidentList() {
               href={undefined}
               className="hover:bg-ink/[.03]"
             >
-              <Link to={routeTo.resident(resident.id)} className="no-underline text-inherit">
+              {/* Addressed by uid, not id — see routeTo.resident. */}
+              <Link to={routeTo.resident(resident.uid)} className="no-underline text-inherit">
                 <Who
                   accent={resident.soul.accent}
                   name={resident.soul.name}
@@ -72,7 +103,19 @@ function ResidentList() {
                 />
               </Link>
               <Stack sub={resident.runner.model || "no model named"}>{resident.runner.kind}</Stack>
-              <Stack sub={`${resident.skills.length} granted`}>
+              <Stack
+                sub={
+                  <>
+                    {`${resident.skills.length} granted`}
+                    {nextFireOf(resident, routines) ? (
+                      <>
+                        {" · next "}
+                        <Clock at={nextFireOf(resident, routines)} mode="until" />
+                      </>
+                    ) : null}
+                  </>
+                }
+              >
                 {resident.effective_skills.length} effective
               </Stack>
               <Gauge budget={resident.budget} />
@@ -429,8 +472,8 @@ function DeclarationEditor({ id }) {
         <Button tone="primary" type="submit" disabled={saving}>
           {saving ? "asking steward…" : "Write declaration"}
         </Button>
-        <Link to={routeTo.residents()} className={buttonClass("ghost")}>
-          Back to residents
+        <Link to={routeTo.resident(id)} className={buttonClass("ghost")}>
+          Back to the record
         </Link>
         <Link to={routeTo.budgets(id)} className={buttonClass("ghost")}>
           Budget
@@ -446,42 +489,67 @@ function DeclarationEditor({ id }) {
 
 /* -- the page ------------------------------------------------------------------------ */
 
+const HEADS = {
+  residents: [
+    "Residents",
+    "Everything steward could validate under its residents tree. A manifest that did not " +
+      "validate is named below rather than quietly left out — a fleet list that hides a broken " +
+      "resident is worse than one that shows nothing.",
+  ],
+  residentNew: [
+    "New resident",
+    "This writes residents/<id>/manifest.yaml and soul.md, reads them straight back through " +
+      "the ordinary validator, and commits them. Tick deploy and the same declaration goes to " +
+      "the nursery, which provisions it on the host the manifest names.",
+  ],
+  residentDeclaration: [
+    null,
+    "The editable source of one resident — both files, together. Not the projection the fleet " +
+      "page draws, but what is actually in git. It is a full replacement rather than a patch, " +
+      "because merging a partial edit would mean steward deciding whether a missing key meant " +
+      "cleared or untouched.",
+  ],
+};
+
+const GATES = {
+  residents: "The residents tree",
+  residentNew: "Declaring a resident",
+  residentDeclaration: "A resident's declaration",
+  resident: "A resident's record",
+};
+
 export default function ResidentsPage({ page, params }) {
   const { locked } = useSteward();
-  const editing = page === "resident";
+
+  // The detail page draws its own head, because the head carries the resident's own accent
+  // and its name is a thing this page has not read yet.
+  const head = HEADS[page];
+  const [title, standfirst] = head || [];
 
   return (
     <>
-      <PageHead title={editing ? params.id : "Residents"}>
-        {editing ? (
-          <>
-            The editable source of one resident — both files, together. Not the projection the
-            fleet page draws, but what is actually in git. It is a full replacement rather than
-            a patch, because merging a partial edit would mean steward deciding whether a
-            missing key meant cleared or untouched.
-          </>
-        ) : (
-          <>
-            Everything steward could validate under its residents tree. A manifest that did not
-            validate is named below rather than quietly left out — a fleet list that hides a
-            broken resident is worse than one that shows nothing.
-          </>
-        )}
-      </PageHead>
+      {head ? <PageHead title={title ?? params.id}>{standfirst}</PageHead> : null}
 
       {locked ? (
-        <Gate what={editing ? "A resident's declaration" : "The residents tree"} />
-      ) : editing ? (
+        <Gate what={GATES[page] || "This page"} />
+      ) : page === "residentDeclaration" ? (
         <DeclarationEditor id={params.id} />
+      ) : page === "residentNew" ? (
+        <ResidentNew />
+      ) : page === "resident" ? (
+        <ResidentDetail id={params.id} />
       ) : (
         <>
           <ResidentList />
-          <Section>Creating one</Section>
+          <Section>Declaring one</Section>
           <p className="max-w-[78ch] text-[12px] leading-[1.7] text-dim">
-            This page edits residents that already exist. Declaring a new one — the nursery flow
-            behind <code>POST /residents</code> — is warren#225's half of the console migration
-            and is not here yet; <code>steward new-resident</code> does it from a terminal in the
-            meantime.
+            The nursery flow behind <code>POST /residents</code> writes both files, validates
+            them, and commits — and deploys them too, if you ask it to.
+          </p>
+          <p className="mt-3">
+            <Link to={routeTo.residentNew()} className={buttonClass("primary")}>
+              New resident
+            </Link>
           </p>
         </>
       )}

@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 
 const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
 
+/** Every page component in the tree. Adding a page means adding it here. */
+const PAGES = [
+  "FleetPage", "ResidentsPage", "ResidentDetail", "ResidentNew", "RoutinesPage",
+  "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage",
+];
+
+/** The ones the shell itself dispatches. ResidentsPage owns its own two sub-pages. */
+const MOUNTED = [
+  "FleetPage", "ResidentsPage", "RoutinesPage", "ApprovalsPage", "BoardPage", "SkillsPage",
+  "BudgetsPage",
+];
+
 describe("frontend foundation", () => {
   it("uses Tailwind directly without legacy style layers", () => {
     expect(read("./styles.css")).toContain('@import "tailwindcss"');
@@ -25,8 +37,35 @@ describe("the console shell", () => {
 
     expect(app).toContain("NAV.map");
     expect(app).toContain("rail:fixed");
-    for (const page of ["FleetPage", "SkillsPage", "ResidentsPage", "BudgetsPage"]) {
+    for (const page of MOUNTED) {
       expect(app).toContain(page);
+    }
+  });
+
+  it("keeps the pending ledger above every page rather than inside one", () => {
+    // An action asked for on Routines is still unconfirmed while you read the Board, so the
+    // ledger outlives the page that raised it. A ledger owned by a page would vanish on
+    // navigation and take the only record of an in-flight write with it.
+    const app = read("./App.jsx");
+    expect(app).toContain("LedgerProvider");
+    for (const page of PAGES) {
+      expect(read(`./pages/${page}.jsx`)).not.toContain("LedgerProvider");
+    }
+  });
+
+  it("never writes 'confirmed' anywhere but behind a read of steward's own store", () => {
+    // The console's hardest rule, and the one a port is most likely to lose. Every
+    // occurrence of the word lives in ledger.jsx, inside a function that has already
+    // awaited an answer from steward — never in a page, where it would be a click's
+    // intention rather than steward's word.
+    for (const page of PAGES) {
+      expect(read(`./pages/${page}.jsx`)).not.toContain('"confirmed"');
+    }
+    const ledger = read("./console/ledger.jsx");
+    for (const [before] of [...ledger.matchAll(/state: "confirmed"/g)].map((match) => [
+      ledger.slice(0, match.index),
+    ])) {
+      expect(before).toMatch(/await client\.\w+\(/);
     }
   });
 
@@ -47,15 +86,16 @@ describe("the console shell", () => {
     expect(navigation).toContain("stripBase");
     expect(read("./App.jsx")).toContain("import.meta.env.BASE_URL");
 
-    for (const page of ["FleetPage", "SkillsPage", "ResidentsPage", "BudgetsPage"]) {
+    for (const page of PAGES) {
       expect(read(`./pages/${page}.jsx`)).not.toContain("window.location.pathname");
     }
   });
 
   it("never bakes a steward credential into the bundle", () => {
     const sources = [
-      "./App.jsx", "./navigation.jsx", "./console/Gate.jsx",
+      "./App.jsx", "./navigation.jsx", "./console/Gate.jsx", "./console/ledger.jsx",
       "./steward/client.js", "./steward/credential.js", "./steward/context.jsx",
+      ...PAGES.map((page) => `./pages/${page}.jsx`),
     ].map(read).join("\n");
 
     // No literal token anywhere, and no Authorization header built from a literal.

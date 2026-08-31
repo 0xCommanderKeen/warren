@@ -49,6 +49,7 @@ from typing import Any, Self
 
 from steward.events import utc_now_iso
 from steward.health import HealthJournal
+from steward.operator_auth import OperatorPrincipal
 from steward.runs import (
     RUN_DELEGATED,
     RUN_KINDS,
@@ -84,6 +85,7 @@ __all__ = [
     "JobRecord",
     "LedgerEntry",
     "OpenRun",
+    "OperatorRecord",
     "OriginSpend",
     "PauseRecord",
     "RequestRecord",
@@ -269,6 +271,18 @@ CREATE TABLE IF NOT EXISTS open_runs (
 
 CREATE INDEX IF NOT EXISTS open_runs_still_open
     ON open_runs (closed_at, started_at);
+
+CREATE TABLE IF NOT EXISTS operator_credentials (
+    name        TEXT PRIMARY KEY,
+    email       TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    issued_at   TEXT NOT NULL,
+    revoked_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS operator_credentials_live
+    ON operator_credentials (digest, revoked_at);
 """
 
 #: Columns added after the first database was written. Applied with ``ALTER TABLE`` at
@@ -637,6 +651,53 @@ class LedgerEntry:
             "duration_s": round(self.duration_s, 3),
             "usage_known": self.usage_known,
             "recorded_at": self.recorded_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorRecord:
+    """One named operator credential, as the table holds it (warren#225).
+
+    The plaintext is not here and never was: ``digest`` is all steward keeps, so this
+    record can be listed, printed and logged freely. ``revoked_at`` rather than a deleted
+    row, because "who could act as this fleet's operator, and until when" is a question an
+    audit asks and a missing row cannot answer.
+    """
+
+    name: str
+    email: str
+    digest: str
+    note: str
+    issued_at: str
+    revoked_at: str | None = None
+
+    @property
+    def live(self) -> bool:
+        """Whether this credential is still one steward will accept."""
+        return self.revoked_at is None
+
+    @classmethod
+    def from_row(cls, row: sqlite3.Row) -> OperatorRecord:
+        """Rebuild one operator credential from its database row."""
+        return cls(
+            name=row["name"],
+            email=row["email"],
+            digest=row["digest"],
+            note=row["note"],
+            issued_at=row["issued_at"],
+            revoked_at=row["revoked_at"],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view. The digest is included; the plaintext does not exist."""
+        return {
+            "name": self.name,
+            "email": self.email,
+            "digest": self.digest,
+            "note": self.note,
+            "issued_at": self.issued_at,
+            "revoked_at": self.revoked_at,
+            "live": self.live,
         }
 
 
@@ -2655,6 +2716,131 @@ class Store:
         if row is None:
             return None
         return SessionPrincipal(run_id=row["run_id"], resident_id=row["resident_id"])
+
+    # -- operator credentials (warren#225) ---------------------------------------------
+
+    def mint_operator(
+        self,
+        *,
+        name: str,
+        email: str,
+        credential: str,
+        note: str = "",
+        now: str | None = None,
+    ) -> OperatorRecord:
+        """Record a named operator credential. Raises :class:`ValueError` for a live name.
+
+        Only the digest is stored — the caller has just generated the plaintext and is
+        about to print it once, and this method is deliberately unable to hand it back.
+
+        A name is refused rather than silently rotated. Re-minting in place would leave the
+        person holding the old credential with no way to tell it had stopped working, and
+        "revoke, then mint" says the same thing in two steps that each leave a stamp.
+        """
+        moment = now or utc_now_iso()
+        record = OperatorRecord(
+            name=name,
+            email=email,
+            digest=credential_digest(credential),
+            note=note,
+            issued_at=moment,
+        )
+        if not record.digest:
+            raise ValueError("an operator credential cannot be empty")
+        with self._lock, self._conn:
+            existing = self._conn.execute(
+                "SELECT revoked_at FROM operator_credentials WHERE name = ?", (name,)
+            ).fetchone()
+            if existing is not None and existing["revoked_at"] is None:
+                raise ValueError(f"operator {name!r} already holds a live credential")
+            # A revoked name may be minted again: the stamp on the old row is the audit
+            # trail, and REPLACE keeps the primary key honest without a second table.
+            self._conn.execute(
+                "INSERT OR REPLACE INTO operator_credentials "
+                "(name, email, digest, note, issued_at, revoked_at) VALUES (?, ?, ?, ?, ?, NULL)",
+                (record.name, record.email, record.digest, record.note, record.issued_at),
+            )
+        return record
+
+    def revoke_operator(self, name: str, *, now: str | None = None) -> OperatorRecord | None:
+        """Stamp an operator's credential dead. ``None`` when there was no live one.
+
+        Conditional on ``revoked_at IS NULL``, so the answer is about *this* call and a
+        second revocation does not move the moment the first one recorded.
+        """
+        moment = now or utc_now_iso()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE operator_credentials SET revoked_at = ? "
+                "WHERE name = ? AND revoked_at IS NULL",
+                (moment, name),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._conn.execute(
+                "SELECT * FROM operator_credentials WHERE name = ?", (name,)
+            ).fetchone()
+        return OperatorRecord.from_row(row)
+
+    def operators(self, *, live_only: bool = False) -> list[OperatorRecord]:
+        """List operator credentials, oldest first. Revoked ones are included by default."""
+        clause = " WHERE revoked_at IS NULL" if live_only else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM operator_credentials{clause} ORDER BY issued_at, name"  # noqa: S608
+            ).fetchall()
+        return [OperatorRecord.from_row(row) for row in rows]
+
+    def operator_principal(self, credential: str) -> OperatorPrincipal | None:
+        """Return who an operator credential is, or ``None`` if it is not a live one.
+
+        Looked up by digest, so the plaintext is never compared against anything on disk,
+        and gated on ``revoked_at IS NULL``, which is the whole of what revocation means:
+        there is no cache, no session, and nothing to expire. An empty credential is
+        refused before the query — a row can never store the empty digest, but a query
+        that would match one is a query worth not writing.
+        """
+        digest = credential_digest(credential)
+        if not digest:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT name, email FROM operator_credentials "
+                "WHERE digest = ? AND revoked_at IS NULL",
+                (digest,),
+            ).fetchone()
+        if row is None:
+            return None
+        return OperatorPrincipal(name=row["name"], email=row["email"])
+
+    # -- what actually ran (warren#104) ------------------------------------------------
+
+    def latest_routine_runs(self) -> dict[str, LedgerEntry]:
+        """Return the newest recorded run of each routine, keyed ``<resident>/<routine>``.
+
+        The answer to warren#104. The routine ledger used to report ``last_request`` and
+        nothing else, which is the *API request log*: a run somebody asked for over HTTP
+        leaves a row there, and a run the scheduler fired on its own schedule does not.
+        An operator reading that panel concluded a healthy resident "only runs when I
+        trigger it manually", which was false.
+
+        This reads the run ledger instead, which every finished session writes to whatever
+        started it, so the answer carries the trigger (``schedule`` or ``manual``) and the
+        outcome. The two facts stay side by side rather than one replacing the other: they
+        are different questions, and a request that was accepted and never ran is exactly
+        the case where the difference matters.
+
+        The bare-column-with-``MAX`` form is SQLite's documented idiom for "the whole row
+        at the maximum", and ``recorded_at`` is a sortable protocol timestamp, so this is
+        one indexed pass rather than a full ledger read and a fold in Python.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT *, MAX(recorded_at) FROM run_ledger "
+                "WHERE kind = ? AND ref <> '' GROUP BY resident, ref",
+                (RUN_ROUTINE,),
+            ).fetchall()
+        return {f"{row['resident']}/{row['ref']}": LedgerEntry.from_row(row) for row in rows}
 
     def close_run(self, run_id: str, *, now: str | None = None) -> bool:
         """Record that a session reported back. Returns whether this call closed the row.

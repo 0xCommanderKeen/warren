@@ -14,6 +14,7 @@
 import { useState } from "react";
 import { Actions, Button, Field, Input, Note, Panel } from "./ui.jsx";
 import { useSteward } from "../steward/context.jsx";
+import { OPERATOR_PREFIX } from "../steward/credential.js";
 
 export function Gate({ what = "this page" }) {
   const { credential } = useSteward();
@@ -23,18 +24,22 @@ export function Gate({ what = "this page" }) {
   return (
     <Panel title="Unlock the write path" tone="ember" className="max-w-[560px]">
       <p className="mt-0 mb-4 text-[12px] leading-[1.7] text-dim">
-        {what} reads and writes through steward, which gates every route on one shared
-        secret — <code className="text-ember">STEWARD_TOKEN</code>. Paste it and it stays in
-        this tab's <code className="text-ember">sessionStorage</code>, sent as a bearer header
-        to this same origin. Closing the tab forgets it, and nothing is ever written into the
-        build.
+        {what} reads and writes through steward, which gates every route on a bearer
+        credential. Paste your <strong className="text-ink">operator credential</strong> and it
+        stays in this tab's <code className="text-ember">sessionStorage</code>, sent as a bearer
+        header to this same origin. Closing the tab forgets it, and nothing is ever written
+        into the build.
+      </p>
+      <p className="mt-0 mb-4 text-[12px] leading-[1.7] text-dim">
+        You mint one on a terminal, once, and steward prints it once:
+        <code className="mt-1.5 block text-ember">steward operator mint &lt;your name&gt;</code>
       </p>
       <form
         onSubmit={(event) => {
           event.preventDefault();
           if (!value.trim()) {
             setComplaint(
-              "Paste the token, or say out loud that this steward runs open (steward serve --allow-open).",
+              "Paste your operator credential, or say out loud that this steward runs open (steward serve --allow-open).",
             );
             return;
           }
@@ -42,12 +47,15 @@ export function Gate({ what = "this page" }) {
           setValue("");
         }}
       >
-        <Field label="token" hint="Compared against STEWARD_TOKEN in steward's own environment.">
+        <Field
+          label="operator credential"
+          hint="Looked up by digest against the operators steward has minted. Revoking it takes effect on the next request."
+        >
           <Input
             type="password"
             autoComplete="off"
             spellCheck="false"
-            placeholder="the value of STEWARD_TOKEN"
+            placeholder={`${OPERATOR_PREFIX}…`}
             value={value}
             invalid={Boolean(complaint)}
             onChange={(event) => {
@@ -66,7 +74,7 @@ export function Gate({ what = "this page" }) {
       </form>
       {credential.ephemeral ? (
         <p className="mb-0 mt-4 text-[10.5px] leading-[1.6] text-faint">
-          This browser refuses storage, so the token lives only until this page reloads.
+          This browser refuses storage, so the credential lives only until this page reloads.
         </p>
       ) : null}
       <p className="mb-0 mt-4 text-[10.5px] leading-[1.6] text-faint">
@@ -75,9 +83,10 @@ export function Gate({ what = "this page" }) {
       </p>
       <p className="mb-0 mt-2">
         <Note>
-          Swapping this for a real operator credential — so the master token never lands in a
-          browser again — is warren#225. The client behind it takes any credential with the
-          same two methods.
+          The master <code>STEWARD_TOKEN</code> is still accepted, and is still the wrong thing
+          to paste here: it names nobody in the audit trail, it is the same secret that boots
+          the server, and revoking it means restarting. An operator credential is revocable on
+          the next request and puts your name on every commit it makes.
         </Note>
       </p>
     </Panel>

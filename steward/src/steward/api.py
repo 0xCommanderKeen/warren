@@ -77,6 +77,7 @@ from steward.nursery import (
     NurseryReport,
     raise_resident,
 )
+from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.scheduler import (
@@ -99,6 +100,7 @@ from steward.store import (
     JOB_STATUSES,
     STATUS_OPEN,
     ApprovalRecord,
+    LedgerEntry,
     RequestRecord,
     Store,
     default_db_path,
@@ -170,8 +172,13 @@ UI_INDEX = "index.html"
 REQUESTS_DEFAULT_LIMIT = 50
 REQUESTS_MAX_LIMIT = 500
 
-POSTED_BY = "api"
-DECIDED_BY = "api"
+#: What steward records as the actor when the caller has no name: the master token, which
+#: is a shared secret, or open mode, where there is no credential at all. A *named*
+#: operator (warren#225) replaces this with their own name — see ``acted_by`` — because a
+#: board and an approval ledger whose every row says ``api`` cannot answer "who did this".
+ACTED_BY_API = "api"
+POSTED_BY = ACTED_BY_API
+DECIDED_BY = ACTED_BY_API
 
 #: What ``GET /approvals?status=`` accepts. ``pending`` is the default, so a panel that
 #: never passed the parameter sees exactly what it always saw.
@@ -308,6 +315,25 @@ def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str,
         if isinstance(key, str):
             latest[key] = record.to_dict()
     return latest
+
+
+def last_run_view(entry: LedgerEntry | None) -> dict[str, Any] | None:
+    """Return the small "what actually ran" block a routine row carries, or ``None``.
+
+    Deliberately five fields rather than the whole ledger entry: a routine ledger answers
+    *did this fire, how was it started, and how did it go*, and the money is
+    ``GET /residents/{id}/budget``'s question. ``None`` means no run of this routine has
+    ever finished — which is a real answer and not the same as one that failed.
+    """
+    if entry is None:
+        return None
+    return {
+        "run_id": entry.run_id,
+        "trigger": entry.trigger,
+        "outcome": entry.outcome,
+        "recorded_at": entry.recorded_at,
+        "duration_s": round(entry.duration_s, 3),
+    }
 
 
 def resolve_token(token: str | None, *, allow_open: bool) -> str | None:
@@ -819,32 +845,75 @@ def _session_refusal(path: str) -> str:
     return "this write path is not one a session credential reaches"
 
 
+def _presented_bearer_ascii(headers: Sequence[tuple[bytes, bytes]]) -> str:
+    """Return the presented bearer value as text, or ``""`` if it is not even ASCII.
+
+    Every credential steward mints is ASCII by construction, so a value that does not
+    decode is not one of them and never needs to reach a shape test.
+    """
+    try:
+        return _presented_bearer(headers).decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+
+
 def _presented_session_credential(headers: Sequence[tuple[bytes, bytes]]) -> str:
     """Return the presented bearer value if it is *shaped* like a session credential.
 
     A cheap syntactic test that grants nothing: the API tries the human token first and
     only reaches for the run registry when what was presented could not be anything else.
-    A credential is ASCII by construction, so a value that is not decodable is not one.
     """
-    try:
-        presented = _presented_bearer(headers).decode("ascii")
-    except UnicodeDecodeError:
-        return ""
+    presented = _presented_bearer_ascii(headers)
     return presented if looks_like_session_credential(presented) else ""
 
 
+def _presented_operator_credential(headers: Sequence[tuple[bytes, bytes]]) -> str:
+    """Return the presented bearer value if it is *shaped* like an operator credential.
+
+    The same grant-nothing test as its session sibling, against the other prefix. The two
+    prefixes are distinct precisely so this dispatch cannot be ambiguous.
+    """
+    presented = _presented_bearer_ascii(headers)
+    return presented if looks_like_operator_credential(presented) else ""
+
+
 type PrincipalLookup = Callable[[str], SessionPrincipal | None]
+type OperatorLookup = Callable[[str], OperatorPrincipal | None]
 
 
 def _auth_dependency(
-    token: str | None, principal_for: PrincipalLookup
+    token: str | None, principal_for: PrincipalLookup, operator_for: OperatorLookup
 ) -> Callable[[Request], None]:
-    """Build the gate every endpoint hangs off, and record who got through it."""
+    """Build the gate every endpoint hangs off, and record who got through it.
+
+    Three kinds of caller, tried in the order that keeps the cheapest check first and the
+    database out of the common path:
+
+    **The master token** (``STEWARD_TOKEN``), one constant-time compare, no principal —
+    the CLI's and the environment's credential.
+
+    **A named operator** (warren#225), looked up by digest against ``operator_credentials``.
+    A *human* principal: it reaches exactly what the master token reaches, and the only
+    difference is that steward can say who it was, which is the difference the audit trail
+    lives on. This is what a browser is given, so the master token stops going into one.
+
+    **A session** (steward #41), looked up against the live run registry, and then held to
+    the reads-plus-``/delegate`` allowlist below. Unchanged by any of the above: that
+    allowlist exists to keep *sessions* out of human acts, and an operator is a human.
+    """
 
     def require_token(request: Request) -> None:
         headers = request.scope.get("headers", [])
+        # Set before any branch: a route reading these must never see a principal left
+        # over from the request before it.
+        request.state.session = None
+        request.state.operator = None
         if _authorized(headers, token):
-            request.state.session = None
+            return
+        presented_operator = _presented_operator_credential(headers)
+        operator = operator_for(presented_operator) if presented_operator else None
+        if operator is not None:
+            request.state.operator = operator
             return
         presented = _presented_session_credential(headers)
         principal = principal_for(presented) if presented else None
@@ -854,7 +923,8 @@ def _auth_dependency(
                 detail={
                     "error": "unauthorized",
                     "message": (
-                        f"this endpoint needs Authorization: Bearer <{TOKEN_ENV}>, or the "
+                        f"this endpoint needs Authorization: Bearer <{TOKEN_ENV}>, an "
+                        f"operator credential minted with `steward operator mint`, or the "
                         f"credential steward minted for a live run (${SESSION_TOKEN_ENV})"
                     ),
                 },
@@ -873,14 +943,28 @@ def _auth_dependency(
     return require_token
 
 
+def operator_of(request: Request) -> OperatorPrincipal | None:
+    """Return the named operator who made this request, or ``None`` for anyone else.
+
+    ``None`` covers the master token — a shared secret with no person behind it — and open
+    mode, where there is no credential to name anybody by. Both are honest answers, and
+    both make steward fall back to describing the *door* a change came through rather than
+    inventing a person for it.
+
+    Set by the gate, which runs before any route.
+    """
+    principal = getattr(request.state, "operator", None)
+    return principal if isinstance(principal, OperatorPrincipal) else None
+
+
 def session_of(request: Request) -> SessionPrincipal | None:
     """Return the resident whose session made this request, or ``None`` for a human.
 
-    Two kinds of caller, and the difference is the whole of steward #41. A **human**
-    presents ``STEWARD_TOKEN``, a master key with no principal behind it — one shared
-    secret, one constant-time compare — and may reach everything. A **session** presents the
-    credential minted for its own run, which *is* a principal: it names a resident, dies
-    with the run, and reaches only what a session legitimately needs.
+    The distinction is the whole of steward #41. A **session** presents the credential
+    minted for its own run, which *is* a principal: it names a resident, dies with the run,
+    and reaches only what a session legitimately needs. Every other caller is a human —
+    the master ``STEWARD_TOKEN``, or a named operator credential (see :func:`operator_of`,
+    warren#225) — and reaches everything.
 
     ``None`` also covers open mode (``--allow-open``), where there is no token to compare
     and so no caller steward can tell apart. That is not a gap this function can close: a
@@ -945,9 +1029,15 @@ class _ApprovalBodyDepthMiddleware:
         # A session credential is *authenticated* and then refused by the route policy, so
         # it reaches body parsing the way the human token does. Bound it here on shape
         # alone — no database lookup in the middleware — or the depth guard would hold for
-        # one credential kind and not the other.
+        # one credential kind and not the other. An operator credential is on the same
+        # footing and for the same reason: it decides approvals, so it is the credential
+        # most likely to be carrying one of these bodies (warren#225).
         headers = scope.get("headers", [])
-        if not (_authorized(headers, self.token) or _presented_session_credential(headers)):
+        if not (
+            _authorized(headers, self.token)
+            or _presented_operator_credential(headers)
+            or _presented_session_credential(headers)
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -1077,6 +1167,20 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             log.exception("could not check a presented session credential")
             return None
 
+    def operator_principal(credential: str) -> OperatorPrincipal | None:
+        """Resolve a presented operator credential against the credentials table.
+
+        No freshness clause and no lease: an operator credential lives until somebody
+        revokes it, which is the whole of what makes it revocable. A table that cannot be
+        read refuses rather than admits, for the same reason the session lookup does — an
+        unreadable database is not a reason to let somebody in.
+        """
+        try:
+            return db.operator_principal(credential)
+        except Exception:
+            log.exception("could not check a presented operator credential")
+            return None
+
     tasks = TaskTransitions(store=db, emitter=sink)
     approvals = ApprovalTransitions(store=db, emitter=sink)
     # One guard for the whole app: the run-now path refuses through it before it accepts
@@ -1160,7 +1264,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(_auth_dependency(token, session_principal))],
+        dependencies=[Depends(_auth_dependency(token, session_principal, operator_principal))],
         lifespan=lifespan,
     )
     app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
@@ -1294,8 +1398,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 written,
                 au.DECLARE_SUBJECT.format(id=body.id),
                 request_id=request_id,
-                principal=API_PRINCIPAL,
-                **write_settings(),
+                principal=acting_principal(request),
+                **write_settings(request),
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
@@ -1365,12 +1469,42 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"somebody else changed it first — re-read it and reapply your change",
             )
 
-    def write_settings() -> dict[str, Any]:
-        """Return the two knobs every write shares, resolved from configuration."""
-        return {
-            "identity": settings.commit_identity or au.DEFAULT_IDENTITY,
-            "allow_uncommitted": settings.allow_uncommitted_writes,
-        }
+    def write_settings(request: Request) -> dict[str, Any]:
+        """Return the two knobs every write shares, and who git records as the author.
+
+        Configuration decides the author until a *named* caller turns up. An operator
+        credential is one (warren#225): it was minted for a person, so their writes are
+        committed by them rather than by the generic ``steward (api)`` that is all a shared
+        secret can honestly be signed with. ``STEWARD_COMMIT_IDENTITY`` remains what the
+        master token and open mode commit as — a single-operator install naming itself.
+        """
+        operator = operator_of(request)
+        identity = (
+            CommitIdentity(name=operator.name, email=operator.email)
+            if operator is not None
+            else settings.commit_identity or au.DEFAULT_IDENTITY
+        )
+        return {"identity": identity, "allow_uncommitted": settings.allow_uncommitted_writes}
+
+    def acting_principal(request: Request) -> str:
+        """How this caller is described in a commit trailer.
+
+        :data:`API_PRINCIPAL` names the door because a shared secret is all there is to
+        name; an operator credential names the person, which is the point of having one.
+        """
+        operator = operator_of(request)
+        return operator.principal if operator is not None else API_PRINCIPAL
+
+    def acted_by(request: Request) -> str:
+        """Who steward's own records say did this — an operator's name, else ``api``.
+
+        The same substitution as the commit author, in the two places steward stores a
+        "who" of its own rather than handing one to git: the board's ``posted_by`` and an
+        approval's ``decided_by``. An audit view whose every row says ``api`` is an audit
+        view that cannot answer the only question it is for.
+        """
+        operator = operator_of(request)
+        return operator.name if operator is not None else ACTED_BY_API
 
     @app.get("/residents/{resident_id}/declaration")
     def get_declaration(resident_id: str) -> dict[str, Any]:
@@ -1442,9 +1576,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 resident.id,
                 declaration,
                 request_id=request_id,
-                principal=API_PRINCIPAL,
+                principal=acting_principal(request),
                 skills_dir=settings.skills_dir,
-                **write_settings(),
+                **write_settings(request),
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
@@ -1525,9 +1659,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 root,
                 document,
                 request_id=request_id,
-                principal=API_PRINCIPAL,
+                principal=acting_principal(request),
                 created=created,
-                **write_settings(),
+                **write_settings(request),
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
@@ -1673,11 +1807,22 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         meaning anything is up, and the verdict. ``alive: null`` — never ticked — is its
         own answer, distinct from a daemon that died. A ledger is still a declaration; this
         is what says whether the declarations have anything to fire them.
+
+        ``last_run`` and ``last_request`` are two different facts and both are here
+        (warren#104). ``last_request`` is the *API request log*: a run somebody asked for
+        over HTTP. A scheduled fire is not an HTTP request, so it never appears there — and
+        a panel that showed only that one concluded a perfectly healthy resident "only runs
+        when I trigger it manually", which was false. ``last_run`` is the run ledger, which
+        every finished session writes to whatever started it, so it carries the trigger
+        (``schedule`` or ``manual``) and the outcome. Keeping both is the point: a request
+        that was accepted and never ran is exactly the case where they disagree, and that
+        disagreement is the diagnosis.
         """
         result = validate_path(residents_dir, settings.skills_dir)
         state = SchedulerState.load(default_state_path())
         now = datetime.now(UTC)
         latest = latest_run_requests(db.requests())
+        runs_by_key = db.latest_routine_runs()
         routines = []
         for resident in result.residents:
             for routine in resident.manifest.routines:
@@ -1702,6 +1847,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                         if routine.enabled and not resident.retired
                         else None,
                         "last_request": latest.get(item.key),
+                        "last_run": last_run_view(runs_by_key.get(item.key)),
                     }
                 )
         return {
@@ -1786,7 +1932,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             title=body.title,
             detail=body.detail,
             required_skills=body.required_skills,
-            posted_by=POSTED_BY,
+            posted_by=acted_by(request),
         ).require()
         request_id = accept(request, "posted", {"task_id": job.task_id})
         return {
@@ -1992,7 +2138,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         decided = approvals.decide(
             request_id,
             body.decision,
-            decided_by=DECIDED_BY,
+            decided_by=acted_by(request),
             edit=edit,
             now=moment,
             request_log=(ledger_id, request.method, request.url.path),
