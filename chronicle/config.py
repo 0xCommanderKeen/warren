@@ -1,7 +1,8 @@
-"""Immutable Burrow configuration and its process-entry parsing seam."""
+"""Immutable Chronicle configuration and its process-entry parsing seam."""
 
 from __future__ import annotations
 
+import functools
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -9,6 +10,50 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def state_dir() -> Path:
+    """The local state directory: ``~/.chronicle``, or ``~/.burrow`` if that is
+    what this machine already has.
+
+    An existing ``~/.burrow`` is live state — the emitter's offline fallback log
+    and its durable outbox — belonging to sessions that are running right now.
+    Preferring the new name unconditionally would silently strand a spool that
+    still has events in it, so the old directory keeps being used where it exists
+    and only a machine with neither gets the new name. Renaming the directory is
+    therefore an operator step, safe to take whenever the spool is drained, and
+    not something a deploy does underneath a running fleet.
+    """
+    home = Path("~").expanduser()
+    new = home / ".chronicle"
+    if new.is_dir():
+        return new
+    old = home / ".burrow"
+    if old.is_dir():
+        return old
+    return new
+
+
+DEFAULT_EVENTS = state_dir() / "events.jsonl"
+
+
+def setting(environ: Mapping[str, str], name: str) -> str | None:
+    """Read ``CHRONICLE_<name>``, falling back to the pre-rename ``BURROW_<name>``.
+
+    Both spellings are accepted for one release: the compose file and ``.env`` on
+    the NAS were written before the rename, and a redeploy that flipped the names
+    in the same breath as the code would leave no window in which either could be
+    wrong. The new spelling wins wherever both are set, so a half-migrated
+    environment resolves one way rather than per setting.
+
+    Presence — not truthiness — selects the spelling. ``CHRONICLE_TOKEN=`` means
+    "open ingest", and must override a stale ``BURROW_TOKEN`` rather than fall
+    through to it.
+    """
+    new = "CHRONICLE_" + name
+    if new in environ:
+        return environ[new]
+    return environ.get("BURROW_" + name)
 
 
 def _integer(value: str | None, default: int) -> int:
@@ -31,12 +76,12 @@ def _floating(value: str | None, default: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """Complete settings value consumed by one Burrow application runtime."""
+    """Complete settings value consumed by one Chronicle application runtime."""
 
     host: str = "127.0.0.1"
     port: int = 8737
     root: Path = ROOT
-    events: Path = Path("~/.burrow/events.jsonl").expanduser()
+    events: Path = DEFAULT_EVENTS
     villagers_dir: Path = ROOT / "villagers"
     token: str = ""
     archive_dir: Path | None = None
@@ -68,30 +113,26 @@ class Config:
         """
         environ = os.environ if environ is None else environ
         defaults = cls()
+        read = functools.partial(setting, environ)
         port = int(argv[0]) if argv and argv[0].isdigit() else defaults.port
-        events = Path(environ.get("BURROW_EVENTS") or str(defaults.events)).expanduser()
-        archive = (environ.get("BURROW_ARCHIVE") or "").strip()
-        knock_records = _integer(
-            environ.get("BURROW_KNOCK_RECORDS"), defaults.knock_records
-        )
-        knock_bytes = _integer(environ.get("BURROW_KNOCK_BYTES"), defaults.knock_bytes)
+        events = Path(read("EVENTS") or str(defaults.events)).expanduser()
+        archive = (read("ARCHIVE") or "").strip()
+        knock_records = _integer(read("KNOCK_RECORDS"), defaults.knock_records)
+        knock_bytes = _integer(read("KNOCK_BYTES"), defaults.knock_bytes)
+        host = read("HOST")
         return cls(
-            host=environ.get("BURROW_HOST", defaults.host),
+            host=defaults.host if host is None else host,
             port=port,
             events=events,
             villagers_dir=Path(
-                environ.get("BURROW_VILLAGERS") or str(defaults.villagers_dir)
+                read("VILLAGERS") or str(defaults.villagers_dir)
             ).expanduser(),
-            token=(environ.get("BURROW_TOKEN") or "").strip(),
+            token=(read("TOKEN") or "").strip(),
             archive_dir=Path(archive).expanduser() if archive else None,
-            max_log_bytes=_integer(
-                environ.get("BURROW_MAX_LOG"), defaults.max_log_bytes
-            ),
-            notify_url=(environ.get("BURROW_NOTIFY_URL") or "").strip(),
-            notify_token=(environ.get("BURROW_NOTIFY_TOKEN") or "").strip(),
-            notify_timeout=_floating(
-                environ.get("BURROW_NOTIFY_TIMEOUT"), defaults.notify_timeout
-            ),
+            max_log_bytes=_integer(read("MAX_LOG"), defaults.max_log_bytes),
+            notify_url=(read("NOTIFY_URL") or "").strip(),
+            notify_token=(read("NOTIFY_TOKEN") or "").strip(),
+            notify_timeout=_floating(read("NOTIFY_TIMEOUT"), defaults.notify_timeout),
             knock_records=knock_records,
             knock_bytes=knock_bytes,
             ledger_records=knock_records,
