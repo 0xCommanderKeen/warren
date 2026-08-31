@@ -6,14 +6,12 @@ attempt state, recovery handoff, and replay retirement.
 """
 
 import collections
-import fcntl
 import hashlib
 import json
 import math
 import os
 import struct
 import threading
-import uuid
 
 from approval_protocol import structured_approval
 from hooks import durable
@@ -117,6 +115,19 @@ def knock_key(event):
     return legacy_knock_key(event)
 
 
+def journal_event(entry):
+    """The event a journal entry carries, or ``None`` if it carries none.
+
+    A journal line is an object, but nothing guarantees its ``event`` member
+    is one: an older producer, or a hand-edited file, can leave a null or a
+    scalar there. Such a line is skipped rather than trusted, because
+    ``knock_key`` would raise on it and the resulting ``AttributeError`` would
+    sail straight through the ``OSError`` handling every caller degrades on.
+    """
+    event = entry.get("event", entry)
+    return event if isinstance(event, dict) else None
+
+
 def terminal_key(event):
     return (
         "burrow-sha256-"
@@ -170,46 +181,82 @@ class NotificationPersistence:
     def journal_path(self):
         return self.ledger_path(KNOCKS)
 
+    def journal_spool(self, path=None):
+        """The knock journal as one bounded generational log.
+
+        A blank line is absent rather than damage, and every read tolerates a
+        torn line by skipping it and marking the generation incomplete — which
+        is what keeps that generation out of ``retire_replay_if_terminal``.
+        """
+        return durable.Spool(
+            path or self.journal_path(),
+            self._limits,
+            decode=durable.json_entry,
+            encode=durable.encode_compact_json,
+            key=lambda entry: knock_key(journal_event(entry) or entry),
+        )
+
+    def ledger_spool(self, kind):
+        """One terminal ledger: opaque keys, one generation, no replay."""
+        return durable.Spool(
+            self.ledger_path(kind),
+            self._ledger_limits,
+            decode=durable.decode_text,
+            encode=durable.encode_text,
+            key=lambda item: item,
+        )
+
     @staticmethod
     def journal_paths(path):
-        return [path] + durable.replay_paths(path)
+        return durable.Spool(path).generations()
 
     def load_ledger(self, kind):
         cache = self._caches[kind]
-        path = self.ledger_path(kind)
+        spool = self.ledger_spool(kind)
         remembered = set()
         try:
-            with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_SH)
-                try:
-                    with open(path, encoding="utf-8") as stream:
-                        remembered.update(
-                            line.rstrip("\n") for line in stream if line.strip()
-                        )
-                except OSError:
-                    pass
+            with self._ledger_lock, spool.lock(exclusive=False) as held:
+                # Skip past a damaged line rather than stopping at it: every
+                # key we can still read is one an answered notification cannot
+                # use to knock again.
+                generation = (
+                    spool.read(damage=durable.SKIP_DAMAGE) if held is not None else None
+                )
+                if generation is not None:
+                    remembered.update(generation.records)
         except OSError:
             pass
-        cache[path] = remembered
+        cache[spool.path] = remembered
         return remembered
 
     def remember_batch(self, kind, keys, preserve_existing=()):
+        """Remember terminal keys, refusing rather than dropping under pressure.
+
+        This is the one site that inverts the usual capacity rule. Everywhere
+        else a capacity victim is durably reported and then dropped; here a
+        terminal outcome that will not fit is a refusal, because forgetting one
+        would let an already-answered notification knock again forever. The
+        ledger is left byte-identical when that happens.
+
+        Re-remembering a key promotes it to newest: eviction order *is* the
+        retention policy, so this spool is LRU where the others are FIFO.
+        """
         cache = self._caches[kind]
-        path = self.ledger_path(kind)
-        records, byte_limit = self._ledger_limits()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            remembered = collections.OrderedDict()
-            try:
-                with open(path, encoding="utf-8") as stream:
-                    for line in stream:
-                        prior_key = line.rstrip("\n")
-                        if prior_key:
-                            remembered[prior_key] = None
-            except OSError:
-                pass
+        spool = self.ledger_spool(kind)
+        with self._ledger_lock, spool.lock(create=True):
+            generation = spool.read(damage=durable.SKIP_DAMAGE)
+            remembered = collections.OrderedDict(
+                (key, None) for key in (generation.records if generation else ())
+            )
             prior = set(remembered)
+            # A damaged ledger must never be rewritten. Publishing only the
+            # lines we could decode would silently forget the rest, and a
+            # forgotten terminal outcome lets an already-answered notification
+            # knock again forever -- the same loss the capacity refusal below
+            # exists to prevent, arriving by a different road.
+            if generation is not None and not generation.complete:
+                cache[spool.path] = prior
+                raise OSError("damaged durable ledger must not be rewritten")
             required = prior.intersection(preserve_existing)
             requested = set()
             changed = False
@@ -222,19 +269,15 @@ class NotificationPersistence:
                 remembered[key] = None
                 changed = True
             if not changed:
-                cache[path] = set(remembered)
-                return cache[path]
-            lines = [(item, item + "\n") for item in remembered]
-            total = sum(len(line.encode("utf-8")) for _, line in lines)
-            while lines and (len(lines) > records or total > byte_limit):
-                _, line = lines.pop(0)
-                total -= len(line.encode("utf-8"))
-            retained = {item for item, _ in lines}
+                cache[spool.path] = set(remembered)
+                return cache[spool.path]
+            kept, _ = spool.bound(list(remembered))
+            retained = set(kept)
             if not (requested | required) <= retained:
-                cache[path] = prior
+                cache[spool.path] = prior
                 raise OSError("terminal batch exceeds durable ledger capacity")
-            durable.publish_lines(path, (line for _, line in lines))
-            cache[path] = retained
+            spool.publish(kept)
+            cache[spool.path] = retained
             return retained
 
     def remember(self, kind, key):
@@ -242,86 +285,57 @@ class NotificationPersistence:
 
     def contains(self, kind, key):
         try:
-            path = self.ledger_path(kind)
-            with self._ledger_lock, open(durable.lock_path(path), "a+") as lock:
-                fcntl.flock(lock, fcntl.LOCK_SH)
-                try:
-                    with open(path, encoding="utf-8") as stream:
-                        return any(line.rstrip("\n") == key for line in stream)
-                except OSError:
+            spool = self.ledger_spool(kind)
+            with self._ledger_lock, spool.lock(exclusive=False) as held:
+                if held is None:
                     return False
+                generation = spool.read(damage=durable.SKIP_DAMAGE)
+                return generation is not None and key in generation.records
         except OSError:
             return False
 
     def read_journal_keys(self, path=None):
-        path = path or self.journal_path()
-        known = set()
-        for generation in self.journal_paths(path):
-            try:
-                with open(generation, encoding="utf-8") as stream:
-                    for line in stream:
-                        try:
-                            prior = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(prior, dict):
-                            event = prior.get("event", prior)
-                            if isinstance(event, dict):
-                                known.add(knock_key(event))
-            except OSError:
-                continue
-        return known
+        spool = self.journal_spool(path)
+        return {
+            knock_key(event)
+            for generation in spool.snapshot(damage=durable.SKIP_DAMAGE)
+            for event in map(journal_event, generation.records)
+            if event is not None
+        }
 
     def compact_locked(self, path=None, addition=None):
-        path = path or self.journal_path()
+        spool = self.journal_spool(path)
         terminal = self.load_ledger(NOTIFIED) | self.load_ledger(DROPPED)
-        self.prune_terminal_generations(path, terminal)
+        self.prune_terminal_generations(spool.path, terminal)
 
-        latest = collections.OrderedDict()
-        for generation in self.journal_paths(path):
-            try:
-                with open(generation, encoding="utf-8") as stream:
-                    for line in stream:
-                        try:
-                            entry = json.loads(line)
-                        except ValueError:
-                            continue
-                        event = (
-                            entry.get("event", entry)
-                            if isinstance(entry, dict)
-                            else None
-                        )
-                        if isinstance(event, dict):
-                            if not is_terminal(event, terminal):
-                                latest[knock_key(event)] = entry
-            except OSError:
-                pass
-        if addition is not None:
-            event = addition.get("event", addition)
-            if not is_terminal(event, terminal):
-                latest[knock_key(event)] = addition
-        lines = [
-            (key, json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-            for key, entry in latest.items()
-        ]
-        records, byte_limit = self._limits()
-        total = sum(len(line.encode("utf-8")) for _, line in lines)
+        live = []
+        for generation in spool.snapshot(damage=durable.SKIP_DAMAGE):
+            for entry in generation.records:
+                event = journal_event(entry)
+                if event is not None and not is_terminal(event, terminal):
+                    live.append(entry)
+        if addition is not None and not is_terminal(
+            addition.get("event", addition), terminal
+        ):
+            live.append(addition)
+        latest = spool.dedupe(live)
+        kept, evicted = spool.bound(latest)
+
         victims = []
-        while lines and (len(lines) > records or total > byte_limit):
-            key, line = lines.pop(0)
-            total -= len(line.encode("utf-8"))
-            victim = terminal_key(latest[key].get("event", latest[key]))
+        for entry in evicted:
+            victim = terminal_key(entry.get("event", entry))
             if victim not in victims:
                 victims.append(victim)
-        retained = [
-            terminal_key(latest[key].get("event", latest[key])) for key, _ in lines
-        ]
+        retained = [terminal_key(entry.get("event", entry)) for entry in kept]
+        # A victim is fsynced into the drop ledger before the compaction that
+        # omits it is published, so a restart can never resurrect it.
         durable_drops = self.remember_batch(
             DROPPED, victims, preserve_existing=retained
         )
         if not set(victims) <= durable_drops:
             raise OSError("knock victims exceed durable terminal capacity")
-        self.publish_compaction(path, lines)
+        lines = [(spool.key(entry), entry) for entry in kept]
+        self.publish_compaction(spool.path, lines)
         return {key for key, _ in lines}
 
     def prune_terminal_generations(self, path, terminal):
@@ -348,137 +362,129 @@ class NotificationPersistence:
             if changed:
                 self.publish_generation_prune(path, generation, retained)
 
-    @staticmethod
-    def publish_generation_prune(path, generation, lines):
-        identity = hashlib.sha256(os.path.abspath(generation).encode()).hexdigest()
-        # Keep staging outside the replay glob, with one stable name per target.
-        pending = durable.stage_lines(path + ".prune-" + identity, lines)
-        durable.publish_staged(((pending, generation),))
+    def publish_generation_prune(self, path, generation, lines):
+        """Rewrite one generation in place, without folding the others in.
 
-    @staticmethod
-    def publish_compaction(path, lines):
-        durable.publish_lines(
-            path, (line for _, line in lines), retire=durable.replay_paths(path)
+        ``recover`` accounts for completeness per generation, so pruning must
+        not combine them. The already-encoded lines are passed through, and
+        staging uses one stable name per target chosen to sit outside the
+        replay glob so a pending prune is never mistaken for a generation.
+        """
+        identity = hashlib.sha256(os.path.abspath(generation).encode()).hexdigest()
+        self.journal_spool(path).publish(
+            lines,
+            target=generation,
+            staging=path + ".prune-" + identity,
+            encode=durable.encode_raw,
+        )
+
+    def publish_compaction(self, path, lines):
+        """Publish one journal generation, then retire every replay it absorbed."""
+        spool = self.journal_spool(path)
+        spool.publish(
+            [entry for _, entry in lines], retire=spool.generation_paths()
         )
 
     def commit_terminal(self, event, kind):
         if kind not in (NOTIFIED, DROPPED):
             raise ValueError("invalid knock terminal ledger")
-        path = self.journal_path()
+        spool = self.journal_spool()
         key = terminal_key(event)
         try:
-            with self._journal_lock:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(durable.lock_path(path), "a+") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    self.compact_locked(path)
-                    self.remember(kind, key)
-                    self.compact_locked(path)
+            with self._journal_lock, spool.lock(create=True):
+                # Already-terminal sources are compacted away before the new
+                # outcome can evict their suppression, and again afterwards so
+                # the source of this outcome is retired under the same lock.
+                self.compact_locked(spool.path)
+                self.remember(kind, key)
+                self.compact_locked(spool.path)
             return True
         except OSError:
             return self.contains(kind, key)
 
     def journal(self, event):
-        path = self.journal_path()
+        spool = self.journal_spool()
         try:
-            with self._journal_lock:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(durable.lock_path(path), "a+") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    known = self.read_journal_keys(path)
-                    if knock_key(event) not in known:
-                        known = self.compact_locked(
-                            path, {"event": event, "attempts": 0}
-                        )
-                    self._caches[KNOCKS][path] = known
+            with self._journal_lock, spool.lock(create=True):
+                known = self.read_journal_keys(spool.path)
+                if knock_key(event) not in known:
+                    known = self.compact_locked(
+                        spool.path, {"event": event, "attempts": 0}
+                    )
+                self._caches[KNOCKS][spool.path] = known
             return True
         except OSError:
             return False
 
     def record_attempt(self, event, attempts):
-        path = self.journal_path()
+        spool = self.journal_spool()
         try:
-            with self._journal_lock:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(durable.lock_path(path), "a+") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    self.compact_locked(path, {"event": event, "attempts": attempts})
+            with self._journal_lock, spool.lock(create=True):
+                self.compact_locked(
+                    spool.path, {"event": event, "attempts": attempts}
+                )
             return True
         except OSError:
             return False
 
     def recover(self):
-        """Hand off journal authority and return parsed replay generations."""
-        path = self.journal_path()
+        """Hand off journal authority and return parsed replay generations.
+
+        Collapsing a surviving generation before handing off another is what
+        bounds the physical footprint: without it every recovery would add a
+        generation to the ones a previous crash left behind.
+        """
+        spool = self.journal_spool()
         try:
-            with self._journal_lock:
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-                with open(durable.lock_path(path), "a+") as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX)
-                    try:
-                        has_active = os.path.getsize(path) > 0
-                    except OSError:
-                        has_active = False
-                    generations = durable.replay_paths(path)
-                    if (generations and has_active) or len(generations) > 1:
-                        self.compact_locked(path)
-                        has_active = os.path.getsize(path) > 0
-                    if has_active:
-                        os.replace(path, durable.replay_path(path, uuid.uuid4().hex))
-                        durable.fsync_parent(path)
-                    generations = durable.replay_paths(path)
+            with self._journal_lock, spool.lock(create=True):
+                generations = spool.generation_paths()
+                try:
+                    has_active = os.path.getsize(spool.path) > 0
+                except OSError:
+                    has_active = False
+                if (generations and has_active) or len(generations) > 1:
+                    self.compact_locked(spool.path)
+                spool.handoff()
+                generations = spool.generation_paths()
         except OSError:
             return []
         recovered = []
-        for generation in generations:
-            complete = True
-            events = collections.OrderedDict()
-            try:
-                with open(generation, encoding="utf-8") as stream:
-                    for line in stream:
-                        if not line.strip():
-                            continue
-                        try:
-                            entry = json.loads(line)
-                        except ValueError:
-                            complete = False
-                            continue
-                        if not isinstance(entry, dict):
-                            complete = False
-                            continue
-                        attempts = (
-                            entry.get("attempts", 0)
-                            if isinstance(entry.get("event"), dict)
-                            else 0
-                        )
-                        event = (
-                            dict(entry["event"])
-                            if isinstance(entry.get("event"), dict)
-                            else entry
-                        )
-                        if type(attempts) is not int or attempts < 0:
-                            attempts = 0
-                        key = knock_key(event)
-                        if key not in events or attempts >= events[key][0]:
-                            events[key] = (attempts, event)
-            except OSError:
+        for path in generations:
+            parsed = spool.read(path, damage=durable.SKIP_DAMAGE)
+            if parsed is None:
                 continue
+            events = collections.OrderedDict()
+            for entry in parsed.records:
+                journaled = isinstance(entry.get("event"), dict)
+                attempts = entry.get("attempts", 0) if journaled else 0
+                event = dict(entry["event"]) if journaled else entry
+                if type(attempts) is not int or attempts < 0:
+                    attempts = 0
+                key = knock_key(event)
+                if key not in events or attempts >= events[key][0]:
+                    events[key] = (attempts, event)
             with self._attempts_lock:
                 for attempts, event in events.values():
                     key = terminal_key(event)
                     self._attempts[key] = max(self._attempts.get(key, 0), attempts)
             recovered.append(
-                (generation, complete, [item[1] for item in events.values()])
+                (path, parsed.complete, [item[1] for item in events.values()])
             )
         return recovered
 
     def retire_replay_if_terminal(self, generation, complete, events):
+        """Retire a drained generation only once nothing in it can be lost.
+
+        An incomplete generation is never retired: a torn line may hide a knock
+        this process never saw, so the bytes stay until a compaction folds them
+        back in. That is this site's answer to torn-tail quarantine.
+        """
         if not complete:
             return False
         terminal = self.load_ledger(NOTIFIED) | self.load_ledger(DROPPED)
         if not all(is_terminal(event, terminal) for event in events):
             return False
-        durable.retire_files((generation,))
+        self.journal_spool().retire((generation,))
         return True
 
     def terminal_counts(self):
