@@ -1070,9 +1070,35 @@ def test_the_emitter_reads_burrow_env(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert emitter.fallback == tmp_path / "fallback.jsonl"
 
 
-def test_the_default_fallback_is_chronicles_own_log(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ((), ".chronicle"),
+        ((".burrow",), ".burrow"),
+        ((".chronicle",), ".chronicle"),
+        ((".burrow", ".chronicle"), ".chronicle"),
+    ],
+)
+def test_the_default_fallback_is_chronicles_own_log(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    existing: tuple[str, ...],
+    expected: str,
+) -> None:
+    """Prefer ~/.chronicle, but keep using ~/.burrow where the machine already has one.
+
+    Parameterised over a fake home rather than asserting one path, because the answer
+    depends on what is on disk: a developer who has been running the fleet has ~/.burrow
+    and a clean CI runner has neither, so a single hard-coded expectation passes on one
+    and fails on the other. The rule is what is being pinned here, not one machine's
+    answer to it.
+    """
     monkeypatch.delenv("STEWARD_EVENTS_FALLBACK", raising=False)
-    assert ev.default_fallback_path() == Path.home() / ".burrow" / "events.jsonl"
+    for name in existing:
+        (tmp_path / name).mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+
+    assert ev.default_fallback_path() == tmp_path / expected / "events.jsonl"
 
 
 def test_repr_never_shows_the_token() -> None:
