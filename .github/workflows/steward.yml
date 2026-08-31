@@ -28,11 +28,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: steward/.node-version
-
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:

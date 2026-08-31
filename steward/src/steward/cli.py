@@ -2009,8 +2009,6 @@ def serve(
     click.echo(
         f"steward api on http://{host}:{port} (cors: {origins_summary(config.cors_origins)})"
     )
-    if app.state.ui_dir is not None:
-        click.echo(f"management console on http://{host}:{port}/ui/ (from {app.state.ui_dir})")
     run_server(app, host=host, port=port)
 
 

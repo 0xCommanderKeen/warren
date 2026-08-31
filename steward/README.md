@@ -277,17 +277,15 @@ $ steward new-resident … --skills research     # declare, commit, build, check
 $ steward retire note-keeper                    # stop it, and say so in git
 ```
 
-**The management console** (#13). A browser console for the fleet, served by steward's own
-API at `/ui` — static HTML, CSS, and one JavaScript file, no framework and no build step,
-so it runs on a NAS with the internet unplugged. Residents, a new-resident form, the
-fleet-wide routine ledger, approvals, the job board, and the skills library, all of it read
-from the endpoints above and none of it invented. It is a pure client: the repo stays the
-source of truth, and there is no page here that edits a manifest, because there is no
-endpoint that would let one. The one thing it does beyond reading is raise a resident —
-the form's **deploy** checkbox drives the nursery above through `POST /residents`, and the
-ledger then prints the plan and the pipeline's own report back, verbatim. Retired residents
-wear a badge and refuse run-now, the same `409` the API gives. Details and the shape of it
-are in [Management UI](#management-ui) below.
+**The control panel** (#13, warren#225). Steward serves no UI. It used to: a browser
+console at `/ui`, static HTML and one JavaScript file, no build step. That console was the
+fleet's *third* UI and its only browser holder of the master token, so it has been retired
+and its every view now lives in [townhall](../townhall) — residents and one resident's whole
+record, the new-resident form, the fleet-wide routine ledger, approvals, the job board and
+the skills library. Townhall reaches these endpoints same-origin through the NAS's nginx,
+with an [operator credential](#operator-credentials) rather than `STEWARD_TOKEN`. No
+break-glass was lost: every action it offers has a CLI verb, and ssh plus this CLI is the
+real admin hatch — not a static page served by the process being rescued.
 
 Nothing in this repo's build phase is roadmap any more. Burrow-side rendering
 counterparts — the journal panel in a villager's house, the notice board, the letter carried
@@ -463,79 +461,9 @@ Diagnostics always name the file, the field path, the problem, and an example of
 value, and the same check is importable (`steward.validate_tree`, `steward.load_manifest`)
 so the scheduler, the API, and CI share one load-and-validate path.
 
-## Management UI
-
-The operator console. Burrow renders what the fleet *does*; this manages what the fleet
-*is*. Steward serves it from its own API, so there is nothing else to deploy:
-
-```console
-$ STEWARD_TOKEN=… steward serve
-steward api on http://127.0.0.1:8801 (cors: none (same-origin only))
-management console on http://127.0.0.1:8801/ui/ (from /srv/steward/ui)
-```
-
-<!-- screenshot: ui/ at 1440×900, Residents tab, dark. Replace this comment with
-     ![The residents list](docs/images/ui-residents.png) once one is taken. -->
-
-*(Screenshot placeholder — the residents list, dark, at 1440×900.)*
-
-```
-ui/
-  index.html    the shell: rail, main, the token gate, the pending ledger
-  app.css       one stylesheet — no framework, no CDN, no webfont
-  app.js        one script — one ROUTES map, one fetch, seven views
-```
-
-Six views behind hash routing: **Residents** (list, then soul, charter, voice, effective
-skills, routines, budget, journal, inbox), **New resident**, **Routines** (fleet-wide,
-with run-now), **Approvals**, **Job board**, and **Skills**.
-
-A resident's own page is addressed by its **uid**, not its id — `#/residents/<uid>`. An id
-is a directory name and can be retired and raised again, so a bookmarked `#/residents/pip`
-could quietly come to mean a different resident a year from now; the uid never moves. Every
-`/residents/{resident_id}` route resolves either spelling, matching ids first and
-exhaustively, so links and scripts written against ids keep working. The page prints its own
-uid in the soul panel, because a URL made of an opaque uuid is only usable if you can read
-which uuid it is.
-
-Four things are worth knowing about it.
-
-**One token, once.** The first load asks for a credential, keeps it in this tab's
-`sessionStorage`, and sends it as a bearer header on every request. A `401` forgets it and
-asks again. Paste an [operator credential](#operator-credentials) rather than
-`STEWARD_TOKEN`: it is revocable, it names you in every commit it makes, and the master
-token then never lands in a browser at all. The three static files are the one thing on the server *not* behind the token,
-because the browser has to load the script before there is anything to ask a person with —
-they carry no fleet data, and every byte the console displays it fetched with the token.
-
-**No optimistic success.** Every mutating action moves through three states, visible in a
-ledger in the corner: **asked** → **accepted** (with the request id steward returned) →
-**confirmed** or **failed**. Nothing reaches the last state on the strength of a 202: a
-run-now is confirmed by polling `GET /requests/{id}` until steward's own log says `ran`, a
-posted job by finding it on the board, a decision by reading the approval record back, a
-declaration by watching the new manifest come through the validator. Until then it says
-*accepted, not yet confirmed*, and if three minutes pass with no outcome it says that too.
-
-**Empty states say why.** No residents, no routines, an empty journal, an empty library —
-each explains what would have to be true for it to be full, because *nothing here* and
-*steward cannot see it* are different facts. Refusals render the API's own `error` code and
-`message` verbatim, with the whole response one click away.
-
-**It is a client, not an editor.** Skills are read-only, and so are manifests: a skill is
-added by committing a `SKILL.md` and granted by committing a manifest. The one thing it
-writes is a new resident, and the form's **deploy** checkbox — `window.STEWARD_UI.deploy`
-in `index.html`, on now that the endpoint is real — sends `deploy: true` and runs the whole
-nursery. What comes back is printed rather than paraphrased: the target, every file in the
-bundle, the `.env` key *names*, the exact commands steward ran, the compose fragment
-verbatim, and each routine's next fire. Steward still never commits from the server, and
-the answer says so. Retired residents wear a badge in the list and the detail header, and
-their run-now button is dead with `409 resident_retired` written on it — a control that can
-only fail should look like one before it is pressed.
-
 ## Development
 
-Python 3.14, Node.js 22, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest. Node runs the
-browser-free UI behavior tests as part of pytest; `.node-version` is the supported major.
+Python 3.14, [uv](https://docs.astral.sh/uv/), ruff, ty, pytest.
 
 ```console
 make dev       # uv sync --all-groups
@@ -568,7 +496,6 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
 | `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.burrow/events.jsonl`. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
-| `STEWARD_UI` | API | Directory of the management console's static files. Unset looks for `ui/` beside the package and then in the checkout. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
 | `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |

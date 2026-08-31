@@ -110,11 +110,12 @@ Reads are gated too. Every endpoint here is a write path except the resident vie
 the skills listing, and gating those as well is simpler than explaining which is which
 — there is one door. The OpenAPI schema and `/docs` are not served at all, for the same reason.
 
-**The one exception is `/ui`.** The management console's three static files are served
-unauthenticated, because the browser has to load the script before there is anything to
-ask a human for a token with. They contain no fleet data: everything the console displays
-it fetches from the endpoints below, with the token, and a `401` on any of them makes it
-forget what it holds and ask again. See [`/ui`](#ui) at the end of this document.
+**There is no exception.** Steward used to mount a management console at `/ui` and serve
+its three static files unauthenticated, because a browser has to load a script before there
+is anything to ask a human for a token with. That console is retired (warren#225) — its
+views live in townhall, which is served from its own origin and reaches these routes
+same-origin through the NAS's nginx with an operator credential. Steward is a pure API: no
+byte it serves is unauthenticated.
 
 **Tailnet only.** The default bind is `127.0.0.1`; in deployment steward listens on
 its tailnet address and is never exposed to the public internet. One shared human token is
@@ -652,7 +653,7 @@ were rather than inventing a number.
 
 The resident's own journal, **newest first** — the entries it wrote at the close of its
 own days, never anything steward synthesised. `?limit=` bounds how many (default 14,
-clamped to 100). The console reads this to show a resident's recent history.
+clamped to 100). A control panel reads this to show a resident's recent history.
 
 ```console
 $ curl -sS -H "Authorization: Bearer $STEWARD_TOKEN" \
@@ -809,24 +810,6 @@ handoff `delegated`. A client polls one of these rather than deciding on its own
 1–500). `404 unknown_request` for an id nobody logged — and only *accepted* mutating
 requests are logged, so a refused one has no id to look up. That is the same promise as
 everywhere else here: nothing is written for a request that was refused.
-
-### `/ui`
-
-The management console: `index.html`, `app.css`, `app.js`, mounted as static files.
-
-**Not behind the token**, and it has to be — the browser must load the script before there
-is anything to ask a human for a token with. Three static files with no fleet data in
-them; every byte the console displays it fetches from the endpoints above, with the token.
-
-Steward serves whatever `STEWARD_UI` names, else `ui/` in the checkout. A directory with
-no `index.html` in it is not mounted at all, because answering `/ui` with a 404 shaped
-like a working console is worse than not offering one. An install that ships no console
-serves the API and says nothing about a console; `steward serve` prints the URL only when
-there is one to print.
-
-The console is a pure client. It calls only the endpoints in this document, writes nothing
-the API would not accept from anyone else, and has no path that edits a manifest — because
-there is no endpoint that would let it. See the README for what it shows.
 
 ## Storage
 

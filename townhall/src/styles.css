@@ -2,7 +2,7 @@
 
 /* townhall — the warren control panel.
  *
- * The look is the steward operator console's, ported from `steward/ui/app.css` onto this
+ * The look is the steward operator console's, ported from its `ui/app.css` onto this
  * stack rather than redesigned (warren#225): a night desk, not a dashboard. Warm ink on
  * near-black, hairline rules, an old-style serif for the things a person reads and a
  * monospace for every single fact, because a fact that shifts width when it changes is a

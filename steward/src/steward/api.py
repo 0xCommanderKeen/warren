@@ -22,10 +22,12 @@ blank token means the server refuses to start unless ``--allow-open`` says out l
 that this is local development. The default bind is ``127.0.0.1``; in deployment
 steward listens on the tailnet interface and is never exposed to the public internet.
 
-The one exception is ``/ui``: the management console's own HTML, CSS, and JavaScript
-are served unauthenticated, because the browser has to load the script *before* there
-is anything to ask a human for a token with. Those three files contain no fleet data —
-every byte the console displays it fetches from the endpoints above, with the token.
+**Every path here is authenticated, with no exceptions.** This server used to mount a
+management console at ``/ui`` and serve its three static files unauthenticated, because a
+browser has to load a script before there is anything to ask a human for a token with.
+That console has been retired (warren#225): townhall is the fleet's one governance UI, it
+is served from its own origin, and it reaches these routes through the shared nginx with an
+operator credential. steward is a pure API again, and no byte it serves is unauthenticated.
 """
 
 import asyncio
@@ -46,7 +48,6 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -118,7 +119,6 @@ __all__ = [
     "NurseryPipeline",
     "ResidentPost",
     "create_app",
-    "default_ui_dir",
     "run_server",
 ]
 
@@ -140,7 +140,6 @@ APPROVAL_EXPIRY_INTERVAL_S = 30.0
 TOKEN_ENV = "STEWARD_TOKEN"  # noqa: S105 — an env var name, not a credential
 CORS_ENV = "STEWARD_CORS_ORIGINS"
 RESIDENTS_ENV = "STEWARD_RESIDENTS"
-UI_ENV = "STEWARD_UI"
 COMMIT_IDENTITY_ENV = "STEWARD_COMMIT_IDENTITY"
 ALLOW_UNCOMMITTED_ENV = "STEWARD_ALLOW_UNCOMMITTED_WRITES"
 
@@ -161,14 +160,8 @@ WRITE_STATUS: Mapping[str, int] = {
     "commit_failed": 409,
 }
 
-#: The management console's mount point, and the file that must exist for a directory to
-#: count as one. Serving a directory without it would hand the browser a 404 shaped like
-#: a working console.
-UI_MOUNT = "/ui"
-UI_INDEX = "index.html"
-
 #: How many rows ``GET /requests`` will hand back at most, and how many it hands back
-#: when nobody asks. The console polls this to confirm what a 202 only accepted.
+#: when nobody asks. A control panel polls this to confirm what a 202 only accepted.
 REQUESTS_DEFAULT_LIMIT = 50
 REQUESTS_MAX_LIMIT = 500
 
@@ -223,9 +216,6 @@ class ApiConfig:
     #: fleet whose declarations have no history is a thing to choose out loud rather than
     #: to discover on the day somebody needs to undo something.
     allow_uncommitted_writes: bool = False
-    #: The management console's static files. ``None`` looks for ``ui/`` in the checkout;
-    #: a directory with no ``index.html`` in it is not served at all.
-    ui_dir: Path | None = None
     approval_poll_interval_s: float = 1.0
     approval_close_timeout_s: float = 5.0
 
@@ -239,12 +229,10 @@ class ApiConfig:
         allow_open: bool = False,
         workdir: Path | str | None = None,
         skills_dir: Path | str | None = None,
-        ui_dir: Path | str | None = None,
     ) -> ApiConfig:
         """Read the token, the CORS origins, and the residents tree from the environment."""
         source = os.environ if env is None else env
         configured_residents = residents_dir or (source.get(RESIDENTS_ENV) or "").strip()
-        configured_ui = ui_dir or (source.get(UI_ENV) or "").strip()
         return cls(
             residents_dir=Path(configured_residents) if configured_residents else Path("residents"),
             db_path=Path(db_path) if db_path is not None else None,
@@ -253,7 +241,6 @@ class ApiConfig:
             cors_origins=parse_origins(source.get(CORS_ENV)),
             workdir=Path(workdir) if workdir is not None else None,
             skills_dir=Path(skills_dir) if skills_dir is not None else None,
-            ui_dir=Path(configured_ui) if configured_ui else None,
             commit_identity=parse_identity(source.get(COMMIT_IDENTITY_ENV)),
             allow_uncommitted_writes=_flag(source.get(ALLOW_UNCOMMITTED_ENV)),
         )
@@ -285,21 +272,6 @@ def parse_identity(raw: str | None) -> CommitIdentity | None:
 def _flag(raw: str | None) -> bool:
     """Read an environment switch. Only an explicit yes counts as one."""
     return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def default_ui_dir() -> Path | None:
-    """Find the management console's static files, or ``None`` if this install has none.
-
-    Looked for beside the package first, so a future wheel that ships the console wins,
-    then at the root of the checkout, which is where ``ui/`` lives in this repo. A
-    directory without an ``index.html`` does not count: mounting one would answer ``/ui``
-    with a 404 shaped like a working console.
-    """
-    here = Path(__file__).resolve()
-    for candidate in (here.parent / "ui", here.parents[2] / "ui"):
-        if (candidate / UI_INDEX).is_file():
-            return candidate
-    return None
 
 
 def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str, Any]]:
@@ -658,7 +630,7 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     without re-deriving it from two places.
 
     ``voice`` is the soul's own ``## Voice`` section, exactly the text
-    :mod:`steward.prompt` injects. It is already parsed and in memory here, and a console
+    :mod:`steward.prompt` injects. It is already parsed and in memory here, and a panel
     that showed a resident's charter but not the style it writes in would be showing half
     of who it is. ``None`` means the soul declares no voice, which is a real answer.
     """
@@ -745,7 +717,7 @@ def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Pa
             return resident
     # A uid also names a resident here. An id is a directory name: retire `pip` and raise a
     # new `pip` next month and the name has moved, while the uid (#112) never does — so a
-    # link, a bookmark or a console route that must still mean *this* resident a year from
+    # link, a bookmark or a UI route that must still mean *this* resident a year from
     # now can carry the uid instead. Ids are matched first and exhaustively, so no caller
     # that works today can change meaning: a uid only ever resolves what an id did not.
     for resident in result.residents:
@@ -1409,7 +1381,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             deployed = "nothing is deployed and no routine is scheduled: this is a file for review"
         elif report.register is not None and not report.register.ok:
             # The container went up; the check that follows it did not pass. Saying only
-            # the first half would be the console's one unforgivable sin, so say both and
+            # the first half would be a control panel's one unforgivable sin, so say both and
             # let `register.problems` carry the detail.
             deployed = (
                 "the container is up, but the schedule check did not pass — see "
@@ -1794,7 +1766,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         ``retired: true`` with ``next_fire: null`` for the same reason a disabled routine
         does: :func:`steward.scheduler.load_scheduled` leaves retired residents out, so
         there is no next occurrence to promise. Run-now refuses them with ``409
-        resident_retired``, which is what the console reads to grey the button out.
+        resident_retired``, which is what townhall reads to grey the button out.
 
         ``anchor`` is the scheduler's own state file, read fresh on every request because
         the daemon is a different process — and it is called an anchor rather than a last
@@ -2226,7 +2198,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         The endpoint that makes "accepted" survivable as an answer. Every mutating call
         here returns a ``request_id`` and refuses to claim an effect; this is where the
         effect eventually shows up — ``queued`` becomes ``ran``, ``skipped: …``, or
-        ``failed`` when the run it stands for finishes. A console polls one of these
+        ``failed`` when the run it stands for finishes. A control panel polls one of these
         rather than deciding on its own that a 202 went well.
         """
         window = max(1, min(limit, REQUESTS_MAX_LIMIT))
@@ -2245,18 +2217,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"so a refused one has no id to look up",
             )
         return record.to_dict()
-
-    # -- the management console ------------------------------------------------------
-
-    ui_dir = settings.ui_dir if settings.ui_dir is not None else default_ui_dir()
-    app.state.ui_dir = ui_dir if ui_dir is not None and (ui_dir / UI_INDEX).is_file() else None
-    if app.state.ui_dir is not None:
-        # Deliberately outside the token gate: a mount is a plain ASGI app, so the
-        # dependency above does not reach it, and it must not — the browser has to load
-        # the script before there is anything to ask a human for a token with. What is
-        # served here is three static files with no fleet data in them; everything the
-        # console displays it fetches from the endpoints above, with the token.
-        app.mount(UI_MOUNT, StaticFiles(directory=app.state.ui_dir, html=True), name="ui")
 
     return app
 
