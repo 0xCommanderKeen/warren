@@ -21,9 +21,24 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EMIT = os.path.join(ROOT, "hooks", "emit.py")
 
-_spec = importlib.util.spec_from_file_location("burrow_emit", EMIT)
+_spec = importlib.util.spec_from_file_location("chronicle_emit", EMIT)
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
+
+# The emitter answers to both spellings for one release, so a test that clears
+# only the new one is not isolated: whatever the developer or the NAS has
+# exported under the old name would leak straight back in through the fallback.
+TRANSPORT_SETTINGS = ("URL", "TOKEN", "MIRROR", "MIRROR_TOKEN", "AGENT_ID", "PROJECT")
+BOTH_SPELLINGS = tuple(
+    prefix + name
+    for name in TRANSPORT_SETTINGS
+    for prefix in ("CHRONICLE_", "BURROW_")
+)
+
+
+def without_transport_settings(environ):
+    """A copy of ``environ`` with every transport setting, either spelling, gone."""
+    return {k: v for k, v in environ.items() if k not in BOTH_SPELLINGS}
 
 
 def _increment_diagnostics(path, count):
@@ -170,9 +185,9 @@ class DetailPolicyTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_DETAIL": policy,
-                    "BURROW_URL": "http://village",
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_DETAIL": policy,
+                    "CHRONICLE_URL": "http://village",
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(
@@ -270,7 +285,7 @@ class DetailPolicyTest(unittest.TestCase):
         ):
             with (
                 self.subTest(policy),
-                mock.patch.dict(os.environ, {"BURROW_DETAIL": policy}),
+                mock.patch.dict(os.environ, {"CHRONICLE_DETAIL": policy}),
             ):
                 redacted = emit.redact_event(self.EVENT)
                 self.assertEqual(redacted["cwd"], cwd)
@@ -279,7 +294,7 @@ class DetailPolicyTest(unittest.TestCase):
         self.assertEqual(self.EVENT["payload"]["artifact"], "/secret/project/notes.md")
 
     def test_unknown_policy_fails_private(self):
-        with mock.patch.dict(os.environ, {"BURROW_DETAIL": "typo"}):
+        with mock.patch.dict(os.environ, {"CHRONICLE_DETAIL": "typo"}):
             self.assertEqual(emit.detail_policy(), "safe")
 
     def test_delivery_redacts_before_each_remote_transport(self):
@@ -288,9 +303,9 @@ class DetailPolicyTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_DETAIL": "safe",
-                    "BURROW_URL": "http://village",
-                    "BURROW_MIRROR": "http://mirror",
+                    "CHRONICLE_DETAIL": "safe",
+                    "CHRONICLE_URL": "http://village",
+                    "CHRONICLE_MIRROR": "http://mirror",
                 },
             ),
             mock.patch.object(
@@ -315,9 +330,9 @@ class DetailPolicyTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_DETAIL": "off",
-                    "BURROW_URL": "",
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_DETAIL": "off",
+                    "CHRONICLE_URL": "",
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "LOG_DIR", directory),
@@ -331,9 +346,9 @@ class DetailPolicyTest(unittest.TestCase):
 
     def project_from_main(self, cwd, policy, project=None):
         delivered = []
-        environment = {"BURROW_DETAIL": policy}
+        environment = {"CHRONICLE_DETAIL": policy}
         if project is not None:
-            environment["BURROW_PROJECT"] = project
+            environment["CHRONICLE_PROJECT"] = project
         hook = {"hook_event_name": "Stop", "session_id": "s1", "cwd": cwd}
         with (
             mock.patch.dict(os.environ, environment, clear=True),
@@ -365,10 +380,8 @@ class EndToEndTest(unittest.TestCase):
     """Run the real hook script and read back the event it appended."""
 
     def run_hook(self, home, hook):
-        env = dict(os.environ, HOME=home, BURROW_MIRROR="")
-        env.pop("BURROW_URL", None)
-        env.pop("BURROW_AGENT_ID", None)
-        env.pop("BURROW_PROJECT", None)
+        env = without_transport_settings(os.environ)
+        env |= {"HOME": home, "CHRONICLE_MIRROR": ""}
         proc = subprocess.run(
             [sys.executable, EMIT],
             input=json.dumps(hook),
@@ -390,7 +403,7 @@ class EndToEndTest(unittest.TestCase):
                     "tool_input": {"command": "make build"},
                 },
             )
-            with open(os.path.join(home, ".burrow", "events.jsonl")) as f:
+            with open(os.path.join(home, ".chronicle", "events.jsonl")) as f:
                 events = [json.loads(line) for line in f if line.strip()]
         self.assertEqual(len(events), 1)
         event = events[0]
@@ -408,9 +421,9 @@ class EndToEndTest(unittest.TestCase):
             env = dict(
                 os.environ,
                 HOME=unusable_home,
-                BURROW_URL="http://offline",
-                BURROW_MIRROR="",
-                BURROW_DETAIL="off",
+                CHRONICLE_URL="http://offline",
+                CHRONICLE_MIRROR="",
+                CHRONICLE_DETAIL="off",
             )
             proc = subprocess.run(
                 [sys.executable, EMIT],
@@ -426,24 +439,128 @@ class EndToEndTest(unittest.TestCase):
                 env=env,
             )
         self.assertEqual(proc.returncode, 0)
-        self.assertRegex(proc.stderr, r"^burrow transport failure: \w+\n$")
+        self.assertRegex(proc.stderr, r"^chronicle transport failure: \w+\n$")
         self.assertNotIn("secret", proc.stderr)
         self.assertLess(len(proc.stderr), 128)
+
+
+class SettingCompatibilityTest(unittest.TestCase):
+    """Both spellings are live during the rename; neither may lose events.
+
+    Hook environment is frozen when a session starts, so on the day this ships
+    the fleet is a mixture: old sessions still exporting BURROW_URL, new ones
+    exporting CHRONICLE_URL. An emitter that honoured only one of them would
+    keep exiting 0 and keep writing locally while the village quietly stopped
+    hearing from half the fleet — the exact failure the emitter is built to make
+    impossible.
+    """
+
+    def setUp(self):
+        self.saved = {k: os.environ.get(k) for k in BOTH_SPELLINGS}
+        for key in BOTH_SPELLINGS:
+            os.environ.pop(key, None)
+
+    def tearDown(self):
+        for key, value in self.saved.items():
+            os.environ.pop(key, None) if value is None else os.environ.__setitem__(
+                key, value
+            )
+
+    def test_the_pre_rename_spelling_still_routes_the_event(self):
+        os.environ["BURROW_URL"] = "http://village:8737"
+        os.environ["BURROW_TOKEN"] = "s3cret"
+        os.environ["BURROW_MIRROR"] = ""
+        self.assertEqual(emit.targets(), [("http://village:8737", "s3cret")])
+
+    def test_the_new_spelling_wins_wherever_both_are_set(self):
+        os.environ["BURROW_URL"] = "http://old:8737"
+        os.environ["CHRONICLE_URL"] = "http://new:8737"
+        os.environ["BURROW_TOKEN"] = "old-secret"
+        os.environ["CHRONICLE_TOKEN"] = "new-secret"
+        os.environ["BURROW_MIRROR"] = "http://old-mirror:9000"
+        os.environ["CHRONICLE_MIRROR"] = ""
+        self.assertEqual(emit.targets(), [("http://new:8737", "new-secret")])
+
+    def test_an_empty_new_spelling_turns_the_mirror_off_over_a_stale_old_one(self):
+        """"" is a value: it must override, not fall through to the old name."""
+        os.environ["CHRONICLE_URL"] = "http://village:8737"
+        os.environ["BURROW_MIRROR"] = "http://leftover:9000"
+        os.environ["CHRONICLE_MIRROR"] = ""
+        self.assertEqual(emit.targets(), [("http://village:8737", "")])
+
+    def test_neither_spelling_set_still_means_mirror_to_the_local_dev_server(self):
+        """``None`` has to survive the fallback, or the default mirror is lost."""
+        self.assertEqual(emit.targets(), [(emit.DEFAULT_MIRROR, "")])
+
+    def test_the_resident_identity_reads_either_spelling(self):
+        for spelling in ("BURROW_AGENT_ID", "CHRONICLE_AGENT_ID"):
+            with self.subTest(spelling=spelling):
+                os.environ.pop("BURROW_AGENT_ID", None)
+                os.environ.pop("CHRONICLE_AGENT_ID", None)
+                os.environ[spelling] = "life-agent"
+                self.assertEqual(emit._setting("AGENT_ID"), "life-agent")
+
+    def test_the_detail_policy_default_survives_the_fallback(self):
+        self.assertEqual(emit.detail_policy(), "full")
+        os.environ["BURROW_DETAIL"] = "safe"
+        self.assertEqual(emit.detail_policy(), "safe")
+        os.environ["CHRONICLE_DETAIL"] = "off"
+        self.assertEqual(emit.detail_policy(), "off")
+
+
+class StateDirectoryTest(unittest.TestCase):
+    """Where the offline fallback log lives across the rename."""
+
+    def resolved(self, existing):
+        with tempfile.TemporaryDirectory() as home:
+            for name in existing:
+                os.mkdir(os.path.join(home, name))
+            with mock.patch.dict(os.environ, {"HOME": home}):
+                return os.path.relpath(emit._state_dir(), home)
+
+    def test_a_machine_with_neither_directory_gets_the_new_name(self):
+        self.assertEqual(self.resolved([]), ".chronicle")
+
+    def test_an_existing_burrow_directory_keeps_being_used(self):
+        """It holds an outbox that may still owe the village events."""
+        self.assertEqual(self.resolved([".burrow"]), ".burrow")
+
+    def test_the_new_directory_wins_once_the_operator_has_migrated(self):
+        self.assertEqual(self.resolved([".chronicle", ".burrow"]), ".chronicle")
+
+    def test_the_emitter_falls_back_into_an_existing_burrow_directory(self):
+        """End to end: the real script, a HOME that predates the rename."""
+        with tempfile.TemporaryDirectory() as home:
+            os.mkdir(os.path.join(home, ".burrow"))
+            env = without_transport_settings(os.environ)
+            env |= {"HOME": home, "CHRONICLE_MIRROR": ""}
+            proc = subprocess.run(
+                [sys.executable, EMIT],
+                input=json.dumps(
+                    {
+                        "hook_event_name": "PostToolUse",
+                        "session_id": "s1",
+                        "cwd": "/w/chronicle",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "make build"},
+                    }
+                ),
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(
+                os.path.exists(os.path.join(home, ".burrow", "events.jsonl"))
+            )
+            self.assertFalse(os.path.exists(os.path.join(home, ".chronicle")))
 
 
 class TargetsTest(unittest.TestCase):
     """Delivery targets: the village plus any mirror (a local dev server)."""
 
     def setUp(self):
-        self.saved = {
-            k: os.environ.get(k)
-            for k in (
-                "BURROW_URL",
-                "BURROW_TOKEN",
-                "BURROW_MIRROR",
-                "BURROW_MIRROR_TOKEN",
-            )
-        }
+        self.saved = {k: os.environ.get(k) for k in BOTH_SPELLINGS}
         for k in self.saved:
             os.environ.pop(k, None)
 
@@ -454,28 +571,28 @@ class TargetsTest(unittest.TestCase):
     def test_local_dev_server_is_mirrored_by_default(self):
         """The whole point: run serve.py locally and see the live fleet without
         touching settings or deploying to the village."""
-        os.environ["BURROW_URL"] = "http://village:8737"
-        os.environ["BURROW_TOKEN"] = "s3cret"
+        os.environ["CHRONICLE_URL"] = "http://village:8737"
+        os.environ["CHRONICLE_TOKEN"] = "s3cret"
         self.assertEqual(
             emit.targets(),
             [("http://village:8737", "s3cret"), (emit.DEFAULT_MIRROR, "")],
         )
 
     def test_mirror_never_gets_the_village_secret(self):
-        os.environ["BURROW_URL"] = "http://village:8737"
-        os.environ["BURROW_TOKEN"] = "s3cret"
-        os.environ["BURROW_MIRROR"] = "http://127.0.0.1:9000"
+        os.environ["CHRONICLE_URL"] = "http://village:8737"
+        os.environ["CHRONICLE_TOKEN"] = "s3cret"
+        os.environ["CHRONICLE_MIRROR"] = "http://127.0.0.1:9000"
         self.assertEqual(dict(emit.targets())["http://127.0.0.1:9000"], "")
-        os.environ["BURROW_MIRROR_TOKEN"] = "dev"
+        os.environ["CHRONICLE_MIRROR_TOKEN"] = "dev"
         self.assertEqual(dict(emit.targets())["http://127.0.0.1:9000"], "dev")
 
     def test_empty_mirror_turns_it_off(self):
-        os.environ["BURROW_URL"] = "http://village:8737"
-        os.environ["BURROW_MIRROR"] = ""
+        os.environ["CHRONICLE_URL"] = "http://village:8737"
+        os.environ["CHRONICLE_MIRROR"] = ""
         self.assertEqual(emit.targets(), [("http://village:8737", "")])
 
     def test_a_url_named_twice_does_not_double_the_event(self):
-        os.environ["BURROW_URL"] = "http://127.0.0.1:8737/"
+        os.environ["CHRONICLE_URL"] = "http://127.0.0.1:8737/"
         self.assertEqual(emit.targets(), [("http://127.0.0.1:8737", "")])
 
     def test_one_breaker_per_target(self):
@@ -508,11 +625,8 @@ class MirrorDeliveryTest(unittest.TestCase):
             posted.append(req.full_url)
             return Ctx()
 
-        env = {"BURROW_URL": "http://village:8737", "BURROW_TOKEN": "s3cret"}
-        saved_env = {
-            k: os.environ.get(k)
-            for k in list(env) + ["BURROW_MIRROR", "BURROW_AGENT_ID", "BURROW_PROJECT"]
-        }
+        env = {"CHRONICLE_URL": "http://village:8737", "CHRONICLE_TOKEN": "s3cret"}
+        saved_env = {k: os.environ.get(k) for k in BOTH_SPELLINGS}
         saved = (
             emit.LOG_DIR,
             emit.LOG,
@@ -522,9 +636,8 @@ class MirrorDeliveryTest(unittest.TestCase):
             emit.urllib.request.urlopen,
             sys.stdin,
         )
-        os.environ.pop("BURROW_MIRROR", None)
-        os.environ.pop("BURROW_AGENT_ID", None)
-        os.environ.pop("BURROW_PROJECT", None)
+        for key in BOTH_SPELLINGS:
+            os.environ.pop(key, None)
         os.environ.update(env)
         emit.LOG_DIR = home
         emit.LOG = os.path.join(home, "events.jsonl")
@@ -611,9 +724,9 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_DETAIL": "safe",
-                    "BURROW_URL": "http://primary",
-                    "BURROW_MIRROR": "http://mirror",
+                    "CHRONICLE_DETAIL": "safe",
+                    "CHRONICLE_URL": "http://primary",
+                    "CHRONICLE_MIRROR": "http://mirror",
                 },
             ),
         ]
@@ -687,8 +800,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": "http://one,http://two",
-                    "BURROW_MIRROR": "http://three",
+                    "CHRONICLE_URL": "http://one,http://two",
+                    "CHRONICLE_MIRROR": "http://three",
                 },
             ),
             mock.patch.object(
@@ -726,8 +839,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": "http://one,http://two",
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": "http://one,http://two",
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "post_event", return_value=False),
@@ -838,8 +951,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": target,
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": target,
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(
@@ -897,7 +1010,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             return original_journal(records)
 
         with (
-            mock.patch.dict(os.environ, {"BURROW_URL": target, "BURROW_MIRROR": ""}),
+            mock.patch.dict(os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}),
             mock.patch.object(emit, "_new_enqueue_order", return_value="0001"),
             mock.patch.object(emit, "_update_outbox", return_value=(0, False)),
             mock.patch.object(emit, "_journal_outbox", side_effect=paused_fallback),
@@ -1006,7 +1119,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
     def test_targets_over_worker_cap_are_durably_deferred(self):
         urls = ",".join(f"http://primary-{index}" for index in range(10))
         with (
-            mock.patch.dict(os.environ, {"BURROW_URL": urls, "BURROW_MIRROR": ""}),
+            mock.patch.dict(os.environ, {"CHRONICLE_URL": urls, "CHRONICLE_MIRROR": ""}),
             mock.patch.object(emit, "MAX_TARGETS", 2),
             mock.patch.object(emit, "post_event", return_value=False),
         ):
@@ -1020,8 +1133,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": ",".join(urls),
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": ",".join(urls),
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "MAX_TARGETS", 2),
@@ -1047,8 +1160,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": ",".join(urls),
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": ",".join(urls),
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "MAX_TARGETS", 2),
@@ -1066,7 +1179,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         attempted = []
         with (
             mock.patch.dict(
-                os.environ, {"BURROW_URL": ",".join(live), "BURROW_MIRROR": ""}
+                os.environ, {"CHRONICLE_URL": ",".join(live), "CHRONICLE_MIRROR": ""}
             ),
             mock.patch.object(emit, "MAX_TARGETS", 1),
             mock.patch.object(
@@ -1132,7 +1245,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         ):
             emit.run_hook_bounded("claude")
         self.assertEqual(waits, [emit.os.WNOHANG] * 3)
-        self.assertEqual(stderr.getvalue(), "burrow transport timeout\n")
+        self.assertEqual(stderr.getvalue(), "chronicle transport timeout\n")
 
 
 class LocalOnlyDeliveryTest(unittest.TestCase):
@@ -1254,8 +1367,8 @@ class LocalOnlyDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": "",
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": "",
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "LOG_DIR", directory),
@@ -1275,8 +1388,8 @@ class LocalOnlyDeliveryTest(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "BURROW_URL": "",
-                    "BURROW_MIRROR": "",
+                    "CHRONICLE_URL": "",
+                    "CHRONICLE_MIRROR": "",
                 },
             ),
             mock.patch.object(emit, "LOG_DIR", directory),

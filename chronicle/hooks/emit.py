@@ -1,28 +1,36 @@
 #!/usr/bin/env python3
-"""burrow v0 emitter: adapts runner hook callbacks (JSON on stdin) to burrow
-protocol events. Claude Code is the default; Codex hooks pass ``--runner codex``.
-See docs/protocol.md.
+"""chronicle v0 emitter: adapts runner hook callbacks (JSON on stdin) to
+chronicle protocol events. Claude Code is the default; Codex hooks pass
+``--runner codex``. See docs/protocol.md.
 
-Transport: if BURROW_URL is set, POST the event to <BURROW_URL>/events; if no
-target takes it, fall back to appending to ~/.burrow/events.jsonl locally. A
-failed POST trips a per-target circuit breaker so an unreachable server never
-slows hooks down. If BURROW_TOKEN is set it is sent as `Authorization: Bearer
+Every setting below is read under its CHRONICLE_ name and, for one release, its
+pre-rename BURROW_ name (see ``_setting``). Hook environment is captured when a
+session *starts*, so at any moment there are live sessions holding either
+spelling; both have to work or the rename would silence whichever fleet had not
+been restarted yet.
+
+Transport: if CHRONICLE_URL is set, POST the event to <CHRONICLE_URL>/events; if
+no target takes it, fall back to appending to ~/.chronicle/events.jsonl locally
+(or ~/.burrow/events.jsonl on a machine that still has that directory). A failed
+POST trips a per-target circuit breaker so an unreachable server never slows
+hooks down. If CHRONICLE_TOKEN is set it is sent as `Authorization: Bearer
 <token>`; a server that rejects it (401) is just another failed POST — the event
 still lands in the local log, so a wrong or missing token loses no events, only
 remoteness.
 
-The same event is also POSTed to every BURROW_MIRROR target (default
-http://127.0.0.1:8737, the local dev server). A mirror is how you work on burrow
-against your own live fleet without deploying: run `python3 serve.py` and your
-real sessions show up locally *and* in the shared village. Nothing is listening
-most of the time, and a refused loopback connection costs nothing, so this is on
-by default; set BURROW_MIRROR= (empty) to turn it off. Mirrors get
-BURROW_MIRROR_TOKEN, not BURROW_TOKEN — a dev server runs with ingest open, and
-the shared secret has no business being handed to whatever holds port 8737.
+The same event is also POSTed to every CHRONICLE_MIRROR target (default
+http://127.0.0.1:8737, the local dev server). A mirror is how you work on
+chronicle against your own live fleet without deploying: run `python3 serve.py`
+and your real sessions show up locally *and* in the shared village. Nothing is
+listening most of the time, and a refused loopback connection costs nothing, so
+this is on by default; set CHRONICLE_MIRROR= (empty) to turn it off. Mirrors get
+CHRONICLE_MIRROR_TOKEN, not CHRONICLE_TOKEN — a dev server runs with ingest
+open, and the shared secret has no business being handed to whatever holds port
+8737.
 
 Resident agents (services that outlive any one Claude session, like a Telegram
-bot running claude -p per message) set BURROW_AGENT_ID (stable villager
-identity, e.g. "life-agent") and optionally BURROW_PROJECT (label). For a
+bot running claude -p per message) set CHRONICLE_AGENT_ID (stable villager
+identity, e.g. "life-agent") and optionally CHRONICLE_PROJECT (label). For a
 resident, SessionEnd maps to `idle` rather than `session_ended`: the session's
 process is gone but the agent-as-service is still home, resting.
 
@@ -46,7 +54,49 @@ try:
 except ImportError:  # standalone deployment invokes this file from hooks/
     import durable
 
-LOG_DIR = os.path.expanduser("~/.burrow")
+
+def _setting(name, default=None):
+    """Read CHRONICLE_<name>, falling back to the pre-rename BURROW_<name>.
+
+    Both spellings are live at once during the rollout: a hook's environment is
+    fixed when its session starts, so sessions already running when this file is
+    updated keep handing it BURROW_URL for as long as they last, while new ones
+    get CHRONICLE_URL. Dropping the old spelling would make those sessions go
+    quiet — events would still be logged locally, but the village would stop
+    seeing them — which is exactly the silent failure the emitter exists to
+    avoid.
+
+    Presence, not truthiness, selects the spelling. CHRONICLE_MIRROR= means "no
+    mirrors" and must not fall through to a leftover BURROW_MIRROR; the caller
+    also relies on ``None`` meaning neither spelling was set at all, which is
+    what turns the default mirror on.
+    """
+    key = "CHRONICLE_" + name
+    value = os.environ[key] if key in os.environ else os.environ.get("BURROW_" + name)
+    return default if value is None else value
+
+
+def _state_dir():
+    """~/.chronicle, or ~/.burrow on a machine that already has one.
+
+    This directory is not a cache: it holds the offline fallback log and the
+    durable primary outbox, so an existing one can be carrying events that no
+    server has seen yet. Switching to the new name unconditionally would leave
+    those behind with nothing left to replay them. A machine with neither gets
+    the new name; renaming an existing directory is an operator step, safe once
+    the outbox has drained.
+    """
+    home = os.path.expanduser("~")
+    new = os.path.join(home, ".chronicle")
+    if os.path.isdir(new):
+        return new
+    old = os.path.join(home, ".burrow")
+    if os.path.isdir(old):
+        return old
+    return new
+
+
+LOG_DIR = _state_dir()
 LOG = os.path.join(LOG_DIR, "events.jsonl")
 BREAKER = os.path.join(LOG_DIR, ".post-failed")
 OUTBOX = os.path.join(LOG_DIR, "primary-outbox.jsonl")
@@ -77,6 +127,9 @@ DEFERRED_TORN_BYTES = 256 * 1024
 DIAGNOSTIC_HISTORY = 20
 _OUTBOX_LOCK = threading.Lock()
 _DIAGNOSTIC_LOCK = threading.Lock()
+# Persisted inside spool records on disk. Deliberately NOT renamed: a record
+# written before an upgrade must still be replayable after it, and this name is
+# part of that stored shape rather than part of the service's vocabulary.
 _DEFERRED_ID_FIELD = "_burrow_deferred_id"
 OutboxRecordKey = collections.namedtuple("OutboxRecordKey", "target delivery_id")
 
@@ -381,17 +434,17 @@ def breaker_path(url):
 
 
 def targets():
-    """Where this event goes, in order, as (url, token) — BURROW_URL first, then
+    """Where this event goes, in order, as (url, token) — CHRONICLE_URL first, then
     the mirrors. Both vars take a comma-separated list; duplicates collapse so a
     URL named twice never doubles the event."""
     out = []
     seen = set()
-    mirror = os.environ.get("BURROW_MIRROR")
+    mirror = _setting("MIRROR")
     groups = (
-        (os.environ.get("BURROW_URL"), os.environ.get("BURROW_TOKEN")),
+        (_setting("URL"), _setting("TOKEN")),
         (
             DEFAULT_MIRROR if mirror is None else mirror,
-            os.environ.get("BURROW_MIRROR_TOKEN"),
+            _setting("MIRROR_TOKEN"),
         ),
     )
     for raw, token in groups:
@@ -439,7 +492,7 @@ def _target_groups(pending=()):
     configured = targets()
     primary_urls = {
         u.strip().rstrip("/")
-        for u in (os.environ.get("BURROW_URL") or "").split(",")
+        for u in (_setting("URL") or "").split(",")
         if u.strip()
     }
     primary = [item for item in configured if item[0] in primary_urls]
@@ -557,7 +610,7 @@ def _stamp_enqueue_order(records):
 def _bounded_schedule(schedule, durable_targets):
     primary_urls = [
         url.strip().rstrip("/")
-        for url in (os.environ.get("BURROW_URL") or "").split(",")
+        for url in (_setting("URL") or "").split(",")
         if url.strip()
     ]
     configured = {_target_id(url) for url in primary_urls}
@@ -1101,7 +1154,7 @@ def deliver(event):
 
 
 def detail_policy():
-    value = os.environ.get("BURROW_DETAIL", "full").strip().lower()
+    value = _setting("DETAIL", "full").strip().lower()
     return value if value in ("full", "safe", "off") else "safe"
 
 
@@ -1143,7 +1196,7 @@ def main(runner="claude"):
     specs = adapt_hook(runner, hook)
     if not specs:
         return
-    resident_id = os.environ.get("BURROW_AGENT_ID")
+    resident_id = _setting("AGENT_ID")
     agent_id = hook_agent_id(runner, hook, resident_id)
     resident_parent = None
     if resident_id:
@@ -1167,7 +1220,7 @@ def main(runner="claude"):
                 "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                 "source": RUNNER_SOURCES[runner],
                 "agent_id": agent_id,
-                "project": os.environ.get("BURROW_PROJECT")
+                "project": _setting("PROJECT")
                 or (_safe_path(cwd) if cwd else "unknown"),
                 "cwd": cwd,
                 "type": etype,
@@ -1189,14 +1242,14 @@ def run_hook_bounded(runner="claude"):
         pid = os.fork()
     except OSError:
         # Starting an unbounded fallback would violate the hook contract.
-        sys.stderr.write("burrow transport failure: ProcessStartError\n")
+        sys.stderr.write("chronicle transport failure: ProcessStartError\n")
         return
     if pid == 0:
         try:
             main(runner)
         except Exception as error:
             sys.stderr.write(
-                "burrow transport failure: " + type(error).__name__[:80] + "\n"
+                "chronicle transport failure: " + type(error).__name__[:80] + "\n"
             )
         finally:
             os._exit(0)
@@ -1205,7 +1258,7 @@ def run_hook_bounded(runner="claude"):
         if waited == pid:
             return
         time.sleep(min(0.005, max(0, work_deadline - time.monotonic())))
-    sys.stderr.write("burrow transport timeout\n")
+    sys.stderr.write("chronicle transport timeout\n")
     try:
         os.kill(pid, 9)
     except ProcessLookupError:
@@ -1230,7 +1283,7 @@ if __name__ == "__main__":
             # unavailable. Never echo exception text: it may contain a path,
             # URL, credential, or event detail.
             sys.stderr.write(
-                "burrow transport failure: " + type(error).__name__[:80] + "\n"
+                "chronicle transport failure: " + type(error).__name__[:80] + "\n"
             )
     if runner == "codex":
         # Stop/SubagentStop require JSON on stdout; an empty object is advisory
