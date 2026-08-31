@@ -70,6 +70,7 @@ from croniter import croniter
 
 from steward import events as ev
 from steward import journal
+from steward.deploy import placement_for
 from steward.manifest import (
     Resident,
     ResidentManifest,
@@ -605,7 +606,9 @@ class Scheduler:
         self.max_workers = max_workers
         # A rehearsal must not be able to reach a real brain, whatever the manifest says.
         self._runner_factory = (
-            (lambda spec: build_runner(spec, force_mock=True)) if dry_run else runner_factory
+            (lambda spec, placement: build_runner(spec, placement, force_mock=True))
+            if dry_run
+            else runner_factory
         )
         self.sessions = ResidentSessions(
             workdir=self.workdir,
@@ -647,7 +650,7 @@ class Scheduler:
             seen.add(item.resident.id)
             missing = missing_skills(item.resident.manifest, self.library)
             complaints = (
-                check_runner(item.resident.manifest.runner),
+                check_runner(item.resident.manifest.runner, placement_for(item.resident.manifest)),
                 journal.journal_complaint(item.resident.manifest),
                 describe_missing(item.resident.id, missing, self.library) if missing else None,
                 workdir_refusal(item.resident, self.workdir, self.library),

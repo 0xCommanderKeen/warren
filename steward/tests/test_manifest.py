@@ -1486,3 +1486,101 @@ def test_the_schema_carries_the_delegation_block() -> None:
     schema = m.manifest_json_schema()
     assert "delegation" in schema["properties"]
     assert m.DELEGATION_ROUTE_KIND in schema["$defs"]["Route"]["properties"]["kind"]["enum"]
+
+
+# ------------------------------------------------- placement — where a session runs (#58)
+
+
+def placement_manifest(**overrides: object) -> dict[str, Any]:
+    """Build a valid manifest whose sessions are placed in the resident's container."""
+    data = valid_manifest()
+    data["runner"] = {"kind": "claude", "placement": "container"}
+    data["deploy"] = {"container": "steward-test-agent"}
+    data.update(overrides)
+    return data
+
+
+def test_placement_defaults_to_local() -> None:
+    """A manifest that says nothing runs where every manifest has always run."""
+    assert m.Runner(kind="claude").placement == "local"
+
+
+def test_container_placement_with_a_named_container_is_legal(
+    write_resident: ResidentWriter,
+) -> None:
+    result = m.validate_manifest(write_resident(placement_manifest()))
+    assert result.ok, [d.render() for d in result.diagnostics]
+    assert result.residents[0].manifest.runner.placement == "container"
+
+
+def test_container_placement_without_a_named_container_is_refused(
+    write_resident: ResidentWriter,
+) -> None:
+    """The address must be written down, not defaulted into.
+
+    The nursery's default container name is what it *would* create, and relocating a
+    resident's execution should never hang off a name nobody wrote. A refusal here is a
+    diagnostic in daylight; the alternative is a 7am `docker exec` against a container
+    that may or may not be the one somebody meant.
+    """
+    data = placement_manifest()
+    del data["deploy"]
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "runner.placement"]
+    assert len(complaints) == 1
+    assert "deploy.container" in complaints[0].problem
+    assert "deploy" in complaints[0].example
+
+
+def test_container_placement_with_an_empty_deploy_block_is_refused(
+    write_resident: ResidentWriter,
+) -> None:
+    data = placement_manifest(deploy={"host": "dxp2800"})
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert any(d.field_path == "runner.placement" for d in result.errors)
+
+
+@pytest.mark.parametrize(
+    ("kind", "runner_extra"),
+    [("mock", {}), ("command", {"command": ["tool", "{prompt}", "{workdir}"]})],
+)
+def test_container_placement_under_a_kind_it_cannot_hold_is_refused(
+    write_resident: ResidentWriter, kind: str, runner_extra: dict[str, object]
+) -> None:
+    """A declaration that would read as containment while the session ran elsewhere.
+
+    `mock` spawns nothing, and a `command` template substitutes `{workdir}` with the
+    control plane's path.
+    """
+    data = placement_manifest()
+    data["runner"] = {"kind": kind, "placement": "container", **runner_extra}
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    complaints = [d for d in result.errors if d.field_path == "runner.placement"]
+    assert len(complaints) == 1
+    assert f"'{kind}'" in complaints[0].problem
+
+
+def test_container_placement_under_codex_is_legal(write_resident: ResidentWriter) -> None:
+    """The launcher is brain-agnostic: a codex argv carries no host paths."""
+    data = placement_manifest()
+    data["runner"] = {"kind": "codex", "placement": "container"}
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_an_unknown_placement_is_refused(write_resident: ResidentWriter) -> None:
+    data = placement_manifest()
+    data["runner"]["placement"] = "cloud"
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert any(d.field_path.startswith("runner.placement") for d in result.diagnostics)
+
+
+def test_the_schema_carries_placement() -> None:
+    schema = m.manifest_json_schema()
+    assert "placement" in schema["$defs"]["Runner"]["properties"]

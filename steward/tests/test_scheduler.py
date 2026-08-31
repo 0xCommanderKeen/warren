@@ -117,7 +117,7 @@ def journaling(build, tmp_path: Path):
         return build(
             *routines,
             memory={"kind": "directory", "path": str(tmp_path / "memory"), **memory},
-            runner_factory=lambda _spec: r.MockRunner(
+            runner_factory=lambda _spec, _placement: r.MockRunner(
                 behavior=lambda _req: r.RunResult(
                     outcome=r.Outcome.OK, output=output, exit_status=0
                 )
@@ -423,7 +423,7 @@ def _blocking_runner() -> tuple[threading.Event, threading.Event, s.RunnerFactor
         release.wait(timeout=5)
         return r.RunResult(outcome=r.Outcome.OK, exit_status=0)
 
-    return started, release, lambda _spec: r.MockRunner(behavior=slow)
+    return started, release, lambda _spec, _placement: r.MockRunner(behavior=slow)
 
 
 def _beat_after(path: Path, after: datetime) -> datetime | None:
@@ -539,7 +539,7 @@ def test_an_overlapping_fire_is_skipped_not_queued(build, tmp_path: Path) -> Non
         release.wait(timeout=5)
         return r.RunResult(outcome=r.Outcome.OK, exit_status=0)
 
-    engine = build(HOURLY, runner_factory=lambda _spec: r.MockRunner(behavior=slow))
+    engine = build(HOURLY, runner_factory=lambda _spec, _placement: r.MockRunner(behavior=slow))
     item = engine.scheduled[0]
 
     worker = threading.Thread(target=engine.fire, args=(item,))
@@ -566,7 +566,9 @@ def test_a_timeout_is_reported_as_routine_failed(build, tmp_path: Path) -> None:
         duration_s=900.0,
         error="exceeded its 900s timeout and was killed",
     )
-    engine = build(HOURLY, runner_factory=lambda _spec: r.MockRunner(behavior=lambda _: timed_out))
+    engine = build(
+        HOURLY, runner_factory=lambda _spec, _placement: r.MockRunner(behavior=lambda _: timed_out)
+    )
     report = engine.fire(engine.scheduled[0])
 
     assert report.fired
@@ -580,7 +582,7 @@ def test_a_timeout_is_reported_as_routine_failed(build, tmp_path: Path) -> None:
 
 
 def test_a_runner_that_explodes_is_a_failed_routine_not_a_crash(build, tmp_path: Path) -> None:
-    def explode(_spec: object) -> r.Runner:
+    def explode(_spec: object, _placement: object) -> r.Runner:
         raise RuntimeError("the config is nonsense")
 
     engine = build(HOURLY, runner_factory=explode)
@@ -606,7 +608,8 @@ def test_artifacts_are_reported_when_the_runner_actually_knows_them(build, tmp_p
         outcome=r.Outcome.OK, exit_status=0, duration_s=1.5, artifacts=("journal/today.md",)
     )
     engine = build(
-        HOURLY, runner_factory=lambda _spec: r.MockRunner(behavior=lambda _: with_artifacts)
+        HOURLY,
+        runner_factory=lambda _spec, _placement: r.MockRunner(behavior=lambda _: with_artifacts),
     )
     engine.fire(engine.scheduled[0])
     finished = emitted(tmp_path / "events.jsonl")[1]
@@ -629,7 +632,7 @@ def test_the_session_is_told_charter_voice_and_task(build) -> None:
 
 def test_the_session_inherits_this_residents_identity(build) -> None:
     mock = r.MockRunner()
-    engine = build(HOURLY, runner_factory=lambda _spec: mock)
+    engine = build(HOURLY, runner_factory=lambda _spec, _placement: mock)
     engine.fire(engine.scheduled[0])
     env = mock.requests[0].env
     assert env["BURROW_AGENT_ID"] == "claude-code:test-agent"
@@ -641,7 +644,7 @@ def test_the_prompt_reaches_the_runner_intact(build) -> None:
     seen: list[r.RunRequest] = []
     mock = r.MockRunner()
 
-    def factory(_spec: object) -> r.Runner:
+    def factory(_spec: object, _placement: object) -> r.Runner:
         return mock
 
     engine = build(HOURLY, runner_factory=factory)
@@ -759,7 +762,7 @@ def test_a_failed_close_of_day_writes_nothing(build, tmp_path: Path) -> None:
     engine = build(
         CLOSER,
         memory={"kind": "directory", "path": str(tmp_path / "memory")},
-        runner_factory=lambda _spec: r.MockRunner(behavior=lambda _: failed),
+        runner_factory=lambda _spec, _placement: r.MockRunner(behavior=lambda _: failed),
     )
     report = engine.fire(engine.scheduled[0], now=EVENING)
     assert report.journal_path is None
@@ -825,7 +828,7 @@ def test_a_journal_declaration_steward_cannot_use_never_fails_a_fire(build, tmp_
     engine = build(
         HOURLY,
         memory={"kind": "file", "path": str(tmp_path / "memory.md")},
-        runner_factory=lambda _spec: r.MockRunner(),
+        runner_factory=lambda _spec, _placement: r.MockRunner(),
     )
     report = engine.fire(engine.scheduled[0])
     assert report.fired
@@ -913,7 +916,7 @@ def test_a_dry_run_never_builds_a_real_runner(write_resident: ResidentWriter, tm
     )
     declared = engine.scheduled[0].resident.manifest.runner
     assert declared.kind == "claude"
-    assert isinstance(engine._runner_factory(declared), r.MockRunner)
+    assert isinstance(engine._runner_factory(declared, r.LOCAL_PLACEMENT), r.MockRunner)
     engine.require_ready()  # a rehearsal is never blocked by a missing binary
 
 
@@ -1258,7 +1261,7 @@ def provisioned(write_resident: ResidentWriter, write_skill, tmp_path: Path):
         data["runner"] = {"kind": runner_kind, "model": "pretend"}
         path = write_resident(data)
 
-        def factory(spec: m.Runner) -> r.Runner:
+        def factory(spec: m.Runner, _placement: r.Placement = r.LOCAL_PLACEMENT) -> r.Runner:
             def behavior(request: r.RunRequest) -> r.RunResult:
                 if recorder is not None:
                     recorder.append(request)
@@ -1543,7 +1546,7 @@ def test_a_crash_after_saving_the_anchor_does_not_re_fire(
         emitter=ev.NullEmitter(),
         state=s.SchedulerState.load(state_path),
         workdir=tmp_path,
-        runner_factory=lambda _spec: Crashing(),
+        runner_factory=lambda _spec, _placement: Crashing(),
     )
     crashed.tick(datetime(2026, 8, 24, 10, 15, 30, tzinfo=UTC))
 
@@ -1706,7 +1709,7 @@ def test_a_resident_with_an_absent_memory_dir_is_refused_not_run_in_cwd(
 
     seen: list[r.RunRequest] = []
 
-    def factory(spec: m.Runner) -> r.Runner:
+    def factory(spec: m.Runner, _placement: r.Placement = r.LOCAL_PLACEMENT) -> r.Runner:
         return r.MockRunner(
             spec,
             behavior=lambda req: (
@@ -1749,7 +1752,7 @@ def test_scheduler_refuses_a_same_path_replacement_immediately_before_provisioni
     path = write_resident(data)
     runner_builds = 0
 
-    def build_runner(_spec: m.Runner) -> r.Runner:
+    def build_runner(_spec: m.Runner, _placement: r.Placement) -> r.Runner:
         nonlocal runner_builds
         runner_builds += 1
         return r.MockRunner()
@@ -1872,7 +1875,7 @@ def test_a_fired_session_is_handed_a_credential_its_own_run_backs(
             return r.RunResult(outcome=r.Outcome.OK, output="done", exit_status=0)
 
         engine = _engine_with_registry(
-            path, store, tmp_path, lambda _spec: r.MockRunner(behavior=ask_from_inside)
+            path, store, tmp_path, lambda _spec, _placement: r.MockRunner(behavior=ask_from_inside)
         )
 
         report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
@@ -1899,7 +1902,7 @@ def test_a_registry_that_will_not_take_the_run_hands_over_no_credential(
         emitter=ev.NullEmitter(),
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: mock,
+        runner_factory=lambda _spec, _placement: mock,
     )
 
     engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
@@ -1960,7 +1963,7 @@ def test_scheduler_registry_and_ledger_share_actual_completion(
             workdir=tmp_path,
             registry=store,
             guard=RecordingGuard(),
-            runner_factory=lambda _spec: r.MockRunner(
+            runner_factory=lambda _spec, _placement: r.MockRunner(
                 behavior=lambda _request: r.RunResult(outcome=r.Outcome.OK, duration_s=2)
             ),
             clock=lambda: completed,
@@ -1999,7 +2002,7 @@ def test_a_run_that_never_finishes_leaves_its_row_open(
     """The whole point: a session that dies mid-run is a row the watchdog can still read."""
     path = write_resident(manifest_with(HOURLY))
 
-    def dies(_spec: m.Runner) -> r.Runner:
+    def dies(_spec: m.Runner, _placement: r.Placement) -> r.Runner:
         raise KeyboardInterrupt("the machine went away")
 
     with Store(":memory:") as store:

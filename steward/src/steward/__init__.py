@@ -52,7 +52,15 @@ from steward.prompt import (
     assemble_routine_prompt,
     assemble_task_prompt,
 )
-from steward.runners import Outcome, Runner, RunRequest, RunResult, build_runner
+from steward.runners import (
+    LOCAL_PLACEMENT,
+    Outcome,
+    Placement,
+    Runner,
+    RunRequest,
+    RunResult,
+    build_runner,
+)
 from steward.scheduler import (
     ScheduledRoutine,
     Scheduler,
@@ -87,6 +95,7 @@ from steward.transitions import (
 from steward.watchdog import DockerSupervisor, Health, LocalProbe, ProcessSupervisor, Watchdog
 
 __all__ = [
+    "LOCAL_PLACEMENT",
     "Admission",
     "ApiConfig",
     "ApiError",
@@ -116,6 +125,7 @@ __all__ = [
     "NullEmitter",
     "Outcome",
     "PauseRecord",
+    "Placement",
     "ProcessSupervisor",
     "Refusal",
     "Resident",

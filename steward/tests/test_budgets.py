@@ -699,7 +699,7 @@ def test_the_scheduler_runs_a_session_under_the_capped_timeout(
         emitter=ev.NullEmitter(),
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=bg.BudgetGuard(store),
     )
     engine.fire(engine.scheduled[0], now=NOON)
@@ -719,7 +719,7 @@ def test_a_run_killed_by_the_cap_is_a_routine_failed_and_is_still_ledgered(
         emitter=sink,
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(killed),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(killed),
         guard=bg.BudgetGuard(store),
     )
     engine.fire(engine.scheduled[0], now=NOON)
@@ -767,7 +767,7 @@ def test_a_paused_resident_does_not_fire_and_does_not_eat_a_decision(
         emitter=sink,
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         hooks=Hooks(),
         guard=guard,
     )
@@ -840,7 +840,7 @@ def test_a_guard_that_cannot_resolve_a_timeout_stops_the_run(
         emitter=sink,
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=Broken(),
     )
 
@@ -878,7 +878,7 @@ def test_a_broken_ledger_does_not_fail_the_routine(
         emitter=sink,
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
         guard=HalfBroken(),
     )
     report = engine.fire(engine.scheduled[0], now=NOON)
@@ -912,7 +912,7 @@ def test_a_paused_resident_claims_nothing_off_the_board(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
         guard=guard,
     ).dispatch(NOON)
 
@@ -934,7 +934,7 @@ def test_a_board_task_lands_in_the_ledger(
         store=store,
         emitter=ev.NullEmitter(),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(spent(cost=0.25, tokens=40)),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(spent(cost=0.25, tokens=40)),
         guard=guard,
     ).dispatch(NOON)
 
@@ -957,7 +957,7 @@ def test_a_board_session_is_capped_by_max_run_seconds(
         store=store,
         emitter=ev.NullEmitter(),
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=bg.BudgetGuard(store),
     ).dispatch(NOON)
     assert runner.requests[0].timeout_s == 90
@@ -1186,7 +1186,7 @@ def test_a_nightly_over_cap_run_that_crosses_midnight_still_pauses(
         emitter=ev.NullEmitter(),
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(over_and_long),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(over_and_long),
         guard=bg.BudgetGuard(store, ev.NullEmitter()),
     )
     item = engine.scheduled[0]
@@ -1217,7 +1217,7 @@ def test_concurrent_due_routines_of_one_resident_respect_the_cap(
         emitter=ev.NullEmitter(),
         state=s.SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(spent(cost=2.0)),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(spent(cost=2.0)),
         guard=bg.BudgetGuard(store, ev.NullEmitter()),
     )
     reports: list[s.FireReport] = []

@@ -93,7 +93,7 @@ def make_dispatcher(
             store=store,
             emitter=sink,
             workdir=tmp_path,
-            runner_factory=lambda _spec: runner or ScriptedRunner(),
+            runner_factory=lambda _spec, _placement: runner or ScriptedRunner(),
             guard=guard,
             **kwargs,
         )
@@ -171,7 +171,7 @@ def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(
 ) -> None:
     store.post_job(title="Doomed")
 
-    def explode(_spec: object) -> Runner:
+    def explode(_spec: object, _placement: object) -> Runner:
         raise RuntimeError("no brain here")
 
     class Guard:
@@ -231,7 +231,7 @@ def test_a_broken_timeout_guard_fails_each_claim_without_aborting_the_dispatch(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         guard=BrokenGuard(),
     )
 
@@ -307,7 +307,7 @@ def test_a_board_session_is_provisioned_with_its_skills_on_disk(
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
     ).dispatch(NOW)
 
     written = tmp_path / ".claude" / "skills" / "research" / "SKILL.md"
@@ -342,7 +342,7 @@ def test_a_grant_the_library_does_not_have_fails_the_task_before_it_runs(
             emitter=sink,
             workdir=tmp_path,
             library=library_for(tmp_path / "residents"),
-            runner_factory=lambda _spec: runner,
+            runner_factory=lambda _spec, _placement: runner,
         )
         .dispatch(NOW)
         .reports
@@ -419,7 +419,7 @@ def test_a_default_skill_makes_a_task_claimable_by_a_resident_granted_nothing(
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
     )
     (report,) = dispatcher.dispatch(NOW).reports
 
@@ -466,7 +466,7 @@ def test_a_claimed_task_preamble_puts_skills_then_decisions_then_the_charter(
         emitter=sink,
         workdir=tmp_path,
         library=library_for(residents_dir),
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
     )
     store.post_job(title="Look it up")
     dispatcher.dispatch(NOW)
@@ -692,14 +692,14 @@ def test_the_scheduler_dispatches_the_board_on_every_tick(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
     )
     engine = Scheduler(
         load_scheduled(residents_dir),
         emitter=sink,
         state=SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
         hooks=dispatcher,
     )
     engine.tick(NOW)
@@ -727,7 +727,7 @@ def test_a_broken_board_does_not_take_the_scheduler_down(
         emitter=ev.NullEmitter(),
         state=SchedulerState(path=tmp_path / "state.json"),
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
         hooks=Exploding(),
     )
     assert engine.tick(NOW) == []
@@ -864,7 +864,7 @@ def test_the_second_claim_in_a_slow_dispatch_gets_a_full_lease(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
         clock=lambda: next(ticks),
     )
     dispatcher.dispatch(NOW)
@@ -933,7 +933,7 @@ def test_a_provision_failure_does_not_consume_the_decision(
             emitter=sink,
             workdir=tmp_path,
             library=library_for(tmp_path / "residents"),
-            runner_factory=lambda _spec: ScriptedRunner(),
+            runner_factory=lambda _spec, _placement: ScriptedRunner(),
         )
         .dispatch(NOW)
         .reports
@@ -992,7 +992,7 @@ def test_a_delegated_claim_and_close_carry_the_parent_task_id(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
     )
     (report,) = dispatcher.dispatch(NOW).reports
     assert report.delegated
@@ -1043,7 +1043,7 @@ def test_the_board_refuses_a_resident_that_would_run_in_cwd(
         emitter=sink,
         workdir=tmp_path,  # equals the (patched) cwd: the dangerous fallback
         library=library_for(tmp_path / "residents"),
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
     )
     run = dispatcher.dispatch(NOW)
     assert run.reports == ()
@@ -1081,7 +1081,7 @@ def test_the_board_refuses_an_initial_symlink_without_touching_cwd(
         emitter=(sink := ev.NullEmitter()),
         workdir=cwd,
         library=library_for(tmp_path / "residents"),
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
     )
 
     run = dispatcher.dispatch(NOW)
@@ -1122,7 +1122,7 @@ def test_a_memory_dir_that_vanishes_after_claim_fails_without_touching_cwd(
         emitter=(sink := ev.NullEmitter()),
         workdir=cwd,
         library=library_for(tmp_path / "residents"),
-        runner_factory=lambda _spec: runner,
+        runner_factory=lambda _spec, _placement: runner,
     )
     claim = dispatcher.claim
 
@@ -1167,7 +1167,7 @@ def test_a_memory_dir_recreated_at_the_same_path_fails_before_provision_or_runne
     store.post_job(title="Do not trust a recycled path", required_skills=["research"])
     runner_builds = 0
 
-    def build_runner(_spec) -> Runner:
+    def build_runner(_spec: object, _placement: object) -> Runner:
         nonlocal runner_builds
         runner_builds += 1
         return ScriptedRunner()
@@ -1234,7 +1234,7 @@ def test_a_memory_dir_vanishing_mid_drain_leaves_later_tasks_open(
         emitter=ev.NullEmitter(),
         workdir=tmp_path / "fallback",
         library=library_for(tmp_path / "residents"),
-        runner_factory=lambda _spec: VanishingRunner(),
+        runner_factory=lambda _spec, _placement: VanishingRunner(),
     ).dispatch(NOW)
 
     assert [report.task.title for report in run.reports] == ["First"]
@@ -1350,7 +1350,9 @@ def test_task_board_registry_and_ledger_share_actual_completion(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(RunResult(outcome=Outcome.OK, duration_s=2)),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(
+            RunResult(outcome=Outcome.OK, duration_s=2)
+        ),
         guard=Recording(),
         clock=lambda: next(ticks),
     )
@@ -1387,7 +1389,7 @@ def test_an_accounting_failure_cannot_leave_a_completed_task_registry_row_open(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: ScriptedRunner(),
+        runner_factory=lambda _spec, _placement: ScriptedRunner(),
         guard=BrokenGuard(),
     )
 
@@ -1461,7 +1463,7 @@ def test_the_ledger_row_names_the_session_the_registry_opened(
         store=store,
         emitter=sink,
         workdir=tmp_path,
-        runner_factory=lambda _spec: Peeking(),
+        runner_factory=lambda _spec, _placement: Peeking(),
         guard=Recording(),
     )
 

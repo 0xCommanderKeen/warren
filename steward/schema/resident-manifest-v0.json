@@ -552,6 +552,16 @@
           "title": "Kind",
           "type": "string"
         },
+        "placement": {
+          "default": "local",
+          "description": "Where a session runs: on the control plane, or inside deploy.container.",
+          "enum": [
+            "local",
+            "container"
+          ],
+          "title": "Placement",
+          "type": "string"
+        },
         "model": {
           "anyOf": [
             {

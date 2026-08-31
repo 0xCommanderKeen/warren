@@ -148,7 +148,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             emitter=(
                 emitter if emitter is not None else ev.EventEmitter(url=None, fallback=events_path)
             ),
-            runner_factory=lambda spec: MockRunner(spec, behavior=behavior),
+            runner_factory=lambda spec, placement: MockRunner(spec, placement, behavior=behavior),
             nursery=nursery,
             transport=transport,
             approval_expiry_interval_s=approval_expiry_interval_s,

@@ -24,6 +24,12 @@ Every runner returns the same :class:`RunResult` with a truthful ``outcome``:
 ``ok`` only when the process exited zero, ``timeout`` only when steward killed it,
 ``failed`` for everything else.
 
+Where the process runs is a second, independent axis (steward #58): a resolved
+:class:`Placement` says whether the session happens in this process's own machine or
+inside the resident's container over ``docker exec``. The kind keeps answering *what
+argv* — which is what keeps ``--output-format json`` and the budget ledger's cost parse
+working wherever the session is placed.
+
 One more thing lives here, and it is not a session: :func:`run_argv`, a short bounded
 command whose exit status is the whole answer. The watchdog needs it to ask ``docker``
 whether a container is running and to restart it when it is not. It is in this module
@@ -39,6 +45,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import select
 import shutil
 import signal
@@ -52,12 +59,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
+from steward.manifest import UNPLACEABLE_RUNNER_KINDS, ToolGrant
 from steward.manifest import Runner as RunnerSpec
-from steward.manifest import ToolGrant
 from steward.session_auth import SESSION_TOKEN_ENV
 
 __all__ = [
     "COST_USD_MAX",
+    "LOCAL_PLACEMENT",
     "SESSION_ENV_BASE",
     "SESSION_ENV_PASSTHROUGH_ENV",
     "SESSION_ENV_REFUSED",
@@ -71,6 +79,7 @@ __all__ = [
     "MockRunner",
     "Outcome",
     "PipedRun",
+    "Placement",
     "RunRequest",
     "RunResult",
     "Runner",
@@ -329,7 +338,57 @@ class Outcome(StrEnum):
 
 
 class RunnerError(Exception):
-    """Raised when a runner cannot be built from a manifest declaration."""
+    """Raised when a runner cannot be built, or placed, from a manifest declaration."""
+
+
+@dataclass(frozen=True, slots=True)
+class Placement:
+    """Where a session's process runs. The second axis of a runner (steward #58).
+
+    ``runner.kind`` answers *which brain*; this answers *on which machine, in which
+    filesystem*. It is a resolved value object rather than the manifest itself, so the
+    runner seam stays ignorant of deploy blocks: whoever builds a runner resolves the
+    address once (``steward.deploy.placement_for``) and hands it over.
+
+    ``container=None`` is local placement — the process the scheduler runs in, exactly
+    as every session has always launched. A named container means sessions happen inside
+    it via ``docker exec``; ``workdir`` is then the *container-side* working directory
+    (the mount point of the resident's memory volume), which is deliberately a separate
+    string from :attr:`RunRequest.workdir` — that one stays the control plane's own path
+    to the same files, where the journal is read and skills are materialized.
+    """
+
+    container: str | None = None
+    workdir: str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuse a container workdir with no container: half an address is none."""
+        if self.workdir is not None and self.container is None:
+            raise RunnerError("a placement workdir names a path inside a container; name one")
+
+    @property
+    def is_container(self) -> bool:
+        """True when sessions are placed inside the resident's own container."""
+        return self.container is not None
+
+    @property
+    def container_name(self) -> str:
+        """Return the container's name, on the paths only reached when :attr:`is_container`.
+
+        The one place the ``str | None`` is narrowed: every caller is behind an
+        ``is_container`` guard, and spelling ``container or ""`` at each would restate
+        the invariant four times over.
+        """
+        return self.container or ""
+
+    def describe(self) -> str:
+        """One word or one name, for the line that answers 'where does Hob run'."""
+        return f"container {self.container}" if self.container is not None else "local"
+
+
+#: The placement every session has always had: the scheduler's own machine and process
+#: environment. The default everywhere a placement is not explicitly resolved.
+LOCAL_PLACEMENT = Placement()
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,9 +492,10 @@ class Runner(ABC):
     #: way it hears about a skill. Steward owns the directory it names.
     skills_dir: ClassVar[str | None] = None
 
-    def __init__(self, spec: RunnerSpec | None = None) -> None:
-        """Hold the manifest declaration this runner was built from."""
+    def __init__(self, spec: RunnerSpec | None = None, placement: Placement | None = None) -> None:
+        """Hold the manifest declaration and resolved placement this runner was built from."""
         self.spec = spec if spec is not None else RunnerSpec(kind="mock")
+        self.placement = placement if placement is not None else LOCAL_PLACEMENT
 
     @abstractmethod
     def run(self, request: RunRequest) -> RunResult:
@@ -450,9 +510,12 @@ class Runner(ABC):
         return None
 
     def describe(self) -> str:
-        """One line naming the brain in use — 'which model is Hob on' is answerable."""
+        """One line naming the brain and where it runs — both axes of one question."""
         model = self.spec.model or "default model"
-        return f"{self.kind} ({model})"
+        described = f"{self.kind} ({model})"
+        if self.placement.is_container:
+            described += f" in {self.placement.describe()}"
+        return described
 
 
 # --------------------------------------------------------------------------------------
@@ -552,6 +615,54 @@ def _await_descriptor_launch(
     )
 
 
+#: Where a container-placed session's pid file lives inside the container. Written by the
+#: launch shim, read and removed by the kill path, removed by the shim itself on an
+#: ordinary exit — so in steady state the directory is empty.
+_PID_DIR = "/run/steward"
+
+#: What a pid file may be named after. ``STEWARD_RUN_ID`` is minted by steward, but the
+#: name still crosses into a shell script, so anything that does not match is replaced by
+#: a random token rather than trusted. No ``/`` in the class, so no name can climb out of
+#: :data:`_PID_DIR`.
+_SAFE_PID_NAME = re.compile(r"[A-Za-z0-9._-]{1,120}")
+
+
+def _pid_file_path(env: Mapping[str, str]) -> str:
+    """Name the in-container pid file for one session, keyed on its run id.
+
+    The run id when the wake carries one — so an operator debugging a stuck container can
+    match ``/run/steward/<run id>.pid`` to the ledger — and a random token otherwise. Every
+    kind of wake does carry one (``STEWARD_RUN_ID``), so the fallback is for requests built
+    outside the session lifecycle.
+    """
+    run_id = env.get("STEWARD_RUN_ID", "")
+    name = run_id if _SAFE_PID_NAME.fullmatch(run_id) else secrets.token_hex(12)
+    return f"{_PID_DIR}/{name}.pid"
+
+
+def _container_shim(pid_path: str) -> str:
+    """Return the ``sh -c`` script a container-placed session launches through.
+
+    It records its own pid and then runs the brain as ``"$0" "$@"`` — the argv elements
+    travel as data after the script, never inside it, so a prompt full of quotes cannot
+    reopen the script. ``$$`` is the whole point: measured against docker 27, a process
+    ``docker exec`` starts is the leader of its own process group and session, and every
+    child the brain spawns stays in that group — so the recorded pid is exactly what
+    ``kill -9 -<pid>`` needs to take the whole session down (:meth:`_kill_in_container`).
+
+    The brain is *not* ``exec``-ed: this shell outlives it to remove the pid file, which
+    keeps :data:`_PID_DIR` from accumulating one file per run in a directory no tmpfs
+    clears. The exit status is carried out explicitly so the cleanup cannot launder a
+    failed session into ``exit 0``, and a shim that could not even record its pid exits
+    125 without running the brain at all — steward must never be unable to stop a session
+    it started.
+    """
+    return (
+        f'mkdir -p {_PID_DIR} && printf %s "$$" > {pid_path} || exit 125; '
+        f'"$0" "$@"; status=$?; rm -f {pid_path}; exit $status'
+    )
+
+
 class _ProcessRunner(Runner):
     """Shared body for every runner that launches a real process."""
 
@@ -574,7 +685,16 @@ class _ProcessRunner(Runner):
         return result
 
     def check(self) -> str | None:
-        """Report a missing binary by name, with the runner kind that wants it."""
+        """Report why this runner cannot run: a missing binary, or a container that is not.
+
+        For a container placement the local PATH is irrelevant and the two questions that
+        matter are asked instead, reusing the exact probe :class:`~steward.watchdog.
+        DockerSupervisor` health-checks with: is the container running, and is the brain
+        on PATH *inside* it. A container-placed resident whose container is down must
+        fail ``steward doctor`` and the scheduler's startup check, not its next fire.
+        """
+        if self.placement.is_container:
+            return self._check_container(self.placement.container_name)
         if not self.binary:
             return None
         if shutil.which(self.binary) is None:
@@ -584,12 +704,41 @@ class _ProcessRunner(Runner):
             )
         return None
 
+    def _check_container(self, container: str) -> str | None:
+        """Ask docker, on this host, whether the named container can hold a session."""
+        outcome = run_argv(["docker", "inspect", "--format", "{{.State.Running}}", container])
+        if not outcome.ok:
+            return (
+                f"docker could not answer for container {container!r} on this host "
+                f"({outcome.summary()}); a container-placed resident needs its container "
+                f"where the scheduler runs"
+            )
+        if outcome.stdout.strip().lower() != "true":
+            return (
+                f"container {container!r} is not running, so this resident's sessions "
+                f"have nowhere to happen; `docker compose up -d` in its deploy directory "
+                f"brings it back"
+            )
+        if not self.binary:
+            return None
+        probe = run_argv(
+            ["docker", "exec", container, "sh", "-c", 'command -v "$1"', "sh", self.binary]
+        )
+        if not probe.ok:
+            return (
+                f"runner kind {self.kind!r} needs the {self.binary!r} executable inside "
+                f"container {container!r}, which is not on the container's PATH"
+            )
+        return None
+
     def environment(self, request: RunRequest) -> dict[str, str]:
         """Return this session's whole environment: the allowlist, then ``request.env``."""
         return session_environment(request, allowed=(*SESSION_ENV_BASE, *self.env_names))
 
     def run(self, request: RunRequest) -> RunResult:
         """Launch the session, bound by its timeout, and report what happened."""
+        if self.placement.is_container:
+            return self._run_in_container(request)
         started = time.monotonic()
         argv = self.argv(request)
         env = self.environment(request)
@@ -661,6 +810,16 @@ class _ProcessRunner(Runner):
             # before the hang is honest output and must remain available to its harvester.
             return _timeout_result(process, started=started, timeout_s=request.timeout_s)
 
+        return self._conclude(process, raw_out, raw_err, started)
+
+    def _conclude(
+        self,
+        process: subprocess.Popen[bytes],
+        raw_out: bytes,
+        raw_err: bytes,
+        started: float,
+    ) -> RunResult:
+        """Turn one reaped process into the uniform result, whichever launcher ran it."""
         duration = time.monotonic() - started
         stdout = raw_out.decode("utf-8", "replace")
         stderr = raw_err.decode("utf-8", "replace")
@@ -676,6 +835,118 @@ class _ProcessRunner(Runner):
             error_is_child=outcome is not Outcome.OK,
         )
         return self.parse(result, stdout)
+
+    def _run_in_container(self, request: RunRequest) -> RunResult:
+        """Run the session inside the resident's own container, over ``docker exec``.
+
+        The brain argv is exactly what :meth:`argv` builds — same flags, same
+        ``--output-format json``, so :meth:`parse` still feeds tokens and cost into the
+        budget ledger — wrapped in the pid-recording shim (:func:`_container_shim`) so a
+        timeout can be a real kill inside the container, not just a dead local client.
+
+        Two deliberate differences from local placement:
+
+        - **The session sees only the named variables.** ``docker exec -e NAME`` — the
+          bare name, whose value docker reads from the *client's* environment (measured
+          against docker 27) — carries ``request.env``, the facts steward chose to tell
+          this session, and nothing else: no :data:`SESSION_ENV_BASE`, no passthrough,
+          no control-plane ``STEWARD_TOKEN``. By name and not ``NAME=value``, because
+          the values include the per-run session credential and an argv is readable in
+          any host ``ps`` for the life of the run. The container already has its own
+          environment from its compose file and ``.env``, and the brain's credentials
+          live on its ``/root/.claude`` volume; the compose ``.env`` is the operator's
+          hatch here, where :data:`SESSION_ENV_PASSTHROUGH_ENV` is the local one.
+        - **``request.workdir_fd`` is ignored.** The descriptor pins a directory in the
+          control plane's mount namespace, which means nothing across ``docker exec``;
+          the working directory inside the container is the placement's own
+          (``docker exec -w``), and the control plane keeps using the descriptor for
+          what happens on its side of the mount (skills, journal).
+
+        The local ``docker`` client inherits the control plane's environment (plus the
+        named values above, for ``-e`` to read) — it is a control-plane tool, like the
+        nursery's ``ssh``, and needs its own ``DOCKER_HOST`` and config; none of that
+        environment crosses into the container beyond the named variables.
+        """
+        started = time.monotonic()
+        argv = self.argv(request)
+        pid_path = _pid_file_path(request.env)
+        launch_argv = ["docker", "exec"]
+        if self.placement.workdir:
+            launch_argv += ["-w", self.placement.workdir]
+        for name in sorted(request.env):
+            launch_argv += ["-e", name]
+        launch_argv += [self.placement.container_name, "sh", "-c", _container_shim(pid_path)]
+        launch_argv += argv
+        try:
+            process = subprocess.Popen(  # noqa: S603 — argv list, shell=False
+                launch_argv,
+                env={**os.environ, **request.env},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            return RunResult(
+                outcome=Outcome.FAILED,
+                duration_s=time.monotonic() - started,
+                error=f"cannot launch 'docker': {exc.strerror or exc}",
+            )
+        try:
+            raw_out, raw_err = process.communicate(timeout=_remaining(started, request.timeout_s))
+        except subprocess.TimeoutExpired:
+            # Inside first: killing the local client alone leaves the session running in
+            # the container, burning tokens behind a ledger row that says timeout — the
+            # exact lie this launcher exists to refuse (steward #58). Once the group is
+            # dead in there, the client exits by itself and the usual reap drains the
+            # partial output it had already streamed.
+            undelivered = self._kill_in_container(pid_path)
+            result = _timeout_result(process, started=started, timeout_s=request.timeout_s)
+            if undelivered is not None:
+                # The ledger row still says timeout — steward did give up on the run —
+                # but the words must not claim a kill that may not have landed: a
+                # session possibly still burning tokens behind a clean "was killed" is
+                # the same lie in a different tense.
+                return replace(
+                    result,
+                    error=(
+                        f"{result.error}, but the kill inside container "
+                        f"{self.placement.container_name!r} could not be delivered "
+                        f"({undelivered}); the session may still be running there"
+                    ),
+                )
+            return result
+        return self._conclude(process, raw_out, raw_err, started)
+
+    def _kill_in_container(self, pid_path: str) -> str | None:
+        """Kill the timed-out session's whole process group inside the container.
+
+        The group kill is the real one — the recorded pid leads its own group, so
+        ``kill -9 -<pid>`` takes the brain and every child it spawned. The direct kill is
+        a fallback for a pid that somehow stopped leading a group, and the ``rm`` keeps a
+        dead run's pid file from shadowing a future one. A kill that finds no pid file or
+        no such process is success — the session is already gone.
+
+        Returns ``None`` when the kill command ran inside the container, and steward's
+        own one-line reason when it could not be delivered at all (no docker, a wedged
+        daemon, a container that stopped answering) — which the caller must surface,
+        because a timeout whose kill never arrived is a session that may still be
+        running.
+        """
+        script = (
+            f'pid="$(cat {pid_path} 2>/dev/null)"; '
+            f'if [ -n "$pid" ]; then '
+            f'kill -9 -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null; fi; '
+            f"rm -f {pid_path}"
+        )
+        outcome = run_argv(["docker", "exec", self.placement.container_name, "sh", "-c", script])
+        if outcome.ok:
+            return None
+        log.warning(
+            "could not deliver the kill inside container %s: %s",
+            self.placement.container,
+            outcome.summary(),
+        )
+        return outcome.summary()
 
 
 class ClaudeRunner(_ProcessRunner):
@@ -797,9 +1068,9 @@ class CommandRunner(_ProcessRunner):
 
     kind: ClassVar[str] = "command"
 
-    def __init__(self, spec: RunnerSpec | None = None) -> None:
+    def __init__(self, spec: RunnerSpec | None = None, placement: Placement | None = None) -> None:
         """Refuse to exist without the template the manifest promised."""
-        super().__init__(spec)
+        super().__init__(spec, placement)
         if not self.spec.command:
             raise RunnerError("runner kind 'command' requires a command template")
         self.template: tuple[str, ...] = tuple(self.spec.command)
@@ -833,11 +1104,12 @@ class MockRunner(Runner):
     def __init__(
         self,
         spec: RunnerSpec | None = None,
+        placement: Placement | None = None,
         *,
         behavior: Callable[[RunRequest], RunResult] | None = None,
     ) -> None:
         """Optionally take a behavior that decides each result."""
-        super().__init__(spec)
+        super().__init__(spec, placement)
         self.behavior = behavior
         self.requests: list[RunRequest] = []
 
@@ -970,20 +1242,34 @@ RUNNER_KINDS: Mapping[str, type[Runner]] = {
 }
 
 
-def build_runner(spec: RunnerSpec, *, force_mock: bool = False) -> Runner:
-    """Build the runner a manifest declares.
+def build_runner(
+    spec: RunnerSpec, placement: Placement | None = None, *, force_mock: bool = False
+) -> Runner:
+    """Build the runner a manifest declares, placed where its manifest says it runs.
 
     ``force_mock`` is how ``--dry-run`` keeps its promise: a rehearsal must not be
-    able to reach a real brain, whatever the manifest says.
+    able to reach a real brain, whatever the manifest says — nor a real container,
+    which is why the mock is built before placement is even looked at.
+
+    The container refusal mirrors :func:`steward.manifest._check_placement` (one set,
+    :data:`~steward.manifest.UNPLACEABLE_RUNNER_KINDS`, read by both): validation is the
+    daylight diagnostic, this is the seam refusing to build what validation would have
+    refused to admit, for specs that never crossed a validator.
     """
+    resolved = placement if placement is not None else LOCAL_PLACEMENT
     if force_mock:
         return MockRunner(spec)
+    if resolved.is_container and spec.kind in UNPLACEABLE_RUNNER_KINDS:
+        raise RunnerError(
+            f"runner kind {spec.kind!r} cannot be placed in a container; "
+            f"placement 'container' needs a kind that runs a real brain argv"
+        )
     try:
         factory = RUNNER_KINDS[spec.kind]
     except KeyError:
         known = ", ".join(sorted(RUNNER_KINDS))
         raise RunnerError(f"unknown runner kind {spec.kind!r}; known kinds: {known}") from None
-    return factory(spec)
+    return factory(spec, resolved)
 
 
 def skills_home(spec: RunnerSpec) -> str | None:
@@ -996,23 +1282,38 @@ def skills_home(spec: RunnerSpec) -> str | None:
     return getattr(runner, "skills_dir", None) if runner is not None else None
 
 
-def check_runner(spec: RunnerSpec) -> str | None:
-    """Return why a declared runner cannot run, or ``None``. Never launches anything."""
+def check_runner(spec: RunnerSpec, placement: Placement | None = None) -> str | None:
+    """Return why a declared runner cannot run, or ``None``. Never launches a session.
+
+    A container placement makes this *does-it-answer* probe ask docker instead of PATH —
+    which is a process, like :func:`check_cli_support`'s, and lands here for the same
+    reason: steward starts processes in exactly one file.
+    """
     try:
-        return build_runner(spec).check()
+        return build_runner(spec, placement).check()
     except RunnerError as exc:
         return str(exc)
 
 
-def _cli_help(binary: str) -> str | None:
+def _cli_help(binary: str, placement: Placement) -> str | None:
     """Return ``<binary> --help``, or ``None`` when the binary would not answer.
+
+    Asked *where the sessions run*: on this host's PATH for a local placement, and inside
+    the container for a container one — which is the whole point of the probe, since the
+    CLI a provisioned container carries is pinned by its image, not by the laptop that
+    validated the manifest.
 
     Deliberately not cached. The answer is a property of the installed CLI rather than of
     the resident asking, so a cache looks free — but the only caller is ``steward doctor``,
     which asks once per *bounded* resident and then exits, and a module-global cache over a
     PATH lookup is a stale answer waiting to be given to somebody who just upgraded.
     """
-    outcome = run_argv([binary, "--help"])
+    argv = (
+        ["docker", "exec", placement.container_name, binary, "--help"]
+        if placement.is_container
+        else [binary, "--help"]
+    )
+    outcome = run_argv(argv)
     if not outcome.ok:
         return None
     return outcome.stdout + outcome.stderr
@@ -1034,7 +1335,12 @@ def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str])
     return tuple(flags)
 
 
-def check_cli_support(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> str | None:
+def check_cli_support(
+    spec: RunnerSpec,
+    tools: ToolGrant,
+    workspace: Sequence[str],
+    placement: Placement | None = None,
+) -> str | None:
     """Return why the *installed* brain cannot honour what this manifest declares, or ``None``.
 
     The CLI is the part of the boundary steward does not ship, and a manifest that declares
@@ -1058,9 +1364,14 @@ def check_cli_support(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[st
     if not needed:
         return None
     binary = ClaudeRunner.binary
-    help_text = _cli_help(binary)
+    resolved = placement if placement is not None else LOCAL_PLACEMENT
+    help_text = _cli_help(binary, resolved)
     if help_text is None:
-        return f"cannot ask {binary!r} what it supports, so what this manifest declares is unproven"
+        where = f" inside {resolved.describe()}" if resolved.is_container else ""
+        return (
+            f"cannot ask {binary!r}{where} what it supports, "
+            f"so what this manifest declares is unproven"
+        )
     missing = [flag for flag in needed if flag not in help_text]
     if missing:
         return (

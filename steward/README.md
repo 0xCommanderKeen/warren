@@ -536,20 +536,27 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `BURROW_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
 | `BURROW_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
-| `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a session may inherit, on top of the allowlist below. `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
+| `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
 
 Most take a matching CLI flag where a command needs one — `--state`, `--db`, `--host`,
 `--allow-open`, `--residents` — and the flag wins over the variable.
 
 ### What a session inherits
 
-**A session does not get steward's environment.** It gets an allowlist
-(`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands it, and
-nothing else. The allowlist is the shape of the machine (`PATH`, `HOME`, locale, proxy and
-CA settings), steward's own *configuration* (`STEWARD_STATE`, `STEWARD_MAX_DELEGATION_DEPTH`,
-`BURROW_URL`, …) so a session's own `steward delegate` opens the same database under the
-same caps, and the brain's own provider credentials (`ANTHROPIC_API_KEY` for a `claude`
-runner, `OPENAI_API_KEY` for a `codex` one).
+**A session does not get steward's environment.** A locally placed session gets an
+allowlist (`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands
+it, and nothing else. The allowlist is the shape of the machine (`PATH`, `HOME`, locale,
+proxy and CA settings), steward's own *configuration* (`STEWARD_STATE`,
+`STEWARD_MAX_DELEGATION_DEPTH`, `BURROW_URL`, …) so a session's own `steward delegate`
+opens the same database under the same caps, and the brain's own provider credentials
+(`ANTHROPIC_API_KEY` for a `claude` runner, `OPENAI_API_KEY` for a `codex` one).
+
+A **container-placed** session (`runner.placement: container`, steward #58) gets less
+still: only the per-wake facts, passed by name over `docker exec -e` — no allowlist and
+no `STEWARD_SESSION_ENV_PASSTHROUGH`, because the container already carries its own
+environment from its compose file and `.env` (the operator's hatch there), and the
+brain's credentials live on its `/root/.claude` volume. See
+[`placement`](docs/manifest.md#placement--where-a-session-runs).
 
 Two names are deliberately missing, and neither is an oversight:
 
