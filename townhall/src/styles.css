@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Cousine Observatory";
+  src: url("/fonts/CousineSnapshot.ttf") format("truetype");
+  font-display: swap;
+}
+
+@theme {
+  --font-mono: "Cousine Observatory", ui-monospace, monospace;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, serif;
+}
+
+@layer base {
+  * { box-sizing: border-box; }
+  html { background: #080b0f; color-scheme: dark; }
+  body { margin: 0; min-width: 320px; min-height: 100vh; }
+  button, select { font: inherit; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+}
+
+.star-field {
+  z-index: 0;
+  opacity: .55;
+  background-image:
+    radial-gradient(circle at 18% 14%, rgba(121, 215, 208, .08), transparent 22rem),
+    radial-gradient(circle at 77% 30%, rgba(243, 179, 61, .08), transparent 28rem),
+    radial-gradient(circle, rgba(255, 255, 255, .18) .6px, transparent .8px);
+  background-size: auto, auto, 31px 31px;
+  mask-image: linear-gradient(to bottom, black, transparent 90%);
+}
+
+.orbit-sweep {
+  background: conic-gradient(from 210deg, transparent 0 65%, rgba(243, 179, 61, .22) 82%, transparent 89%);
+  animation: orbit 14s linear infinite;
+  mask-image: radial-gradient(circle, transparent 68%, black 69% 70%, transparent 71%);
+}
+
+@keyframes orbit { to { transform: rotate(1turn); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
+}
