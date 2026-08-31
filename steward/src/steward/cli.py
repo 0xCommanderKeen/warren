@@ -92,6 +92,7 @@ from steward.store import (
     Store,
     default_db_path,
 )
+from steward.topology import Survey, survey
 from steward.transitions.approval import ApprovalTransitions
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
@@ -536,6 +537,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
+        problems += _report_topology(result.residents)
         problems += _report_health_failures(store.health.latest())
         problems += _report_watchdog(store.last_watchdog_pass())
     problems += _report_scheduler(SchedulerState.load(default_state_path()))
@@ -708,6 +710,41 @@ def _report_inbox(resident: Resident, store: Store) -> int:
         )
         return 1
     click.secho(f"{resident.id}: inbox 0 open — route closed: {shut}", fg="yellow")
+    return 0
+
+
+def _print_topology(report: Survey, *, alarm: str, ok_lines: bool = True) -> None:
+    """Print one topology survey (#59), each line green or in the caller's alarm colour.
+
+    Two callers and two alarm colours, and the difference between them is a judgement
+    about who is reading. ``steward doctor`` says it in **yellow** and does not fail: it
+    is routinely run on a laptop while the daemons live on the NAS, and a container this
+    host cannot see is not a broken fleet — the same judgement :func:`_report_scheduler`
+    makes about a state file this host cannot see. ``steward watchdog`` says it in
+    **red**: that process *is* the supervisor, so a container it cannot reach is not a
+    report about a gap, it is the gap.
+
+    Every complaint goes to **stderr**, which is what lets ``ok_lines=False`` exist: a
+    caller writing a JSON document to stdout drops the green lines that would corrupt it
+    and keeps the ones somebody needs to see. A machine-readable pass and a silent one are
+    not the same thing.
+    """
+    for note in report.notes():
+        if note.ok and not ok_lines:
+            continue
+        click.secho(note.text, fg="green" if note.ok else alarm, err=not note.ok)
+
+
+def _report_topology(residents: Sequence[Resident]) -> int:
+    """Say whether the docker this host reaches holds the containers manifests name (#59).
+
+    Never a problem worth exiting on — :func:`_print_topology` has the reason. What *is*
+    worth saying out loud is which of the two situations this is, because the failure it
+    catches is indistinguishable from health at run time: a watchdog pointed at the wrong
+    docker gets "no such container", reports the resident as unsupervised, and never
+    restarts anything.
+    """
+    _print_topology(survey(residents), alarm="yellow")
     return 0
 
 
@@ -1787,7 +1824,14 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
     """Make one pass: probe, sweep deadlines, bury stale runs, check budgets. Then exit."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
-        report = Watchdog.from_path(residents, store).tick()
+        dog = Watchdog.from_path(residents, store)
+        # Before the pass, not after: a reader who sees "unsupervised" for every resident
+        # deserves to have already been told the docker being asked is the wrong one. The
+        # JSON caller still gets the complaints — on stderr, where they cannot corrupt the
+        # document — because an unattended consumer is the last one who should be told
+        # nothing.
+        _print_topology(dog.topology(), alarm="red", ok_lines=output_format != "json")
+        report = dog.tick()
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
     else:
@@ -1816,6 +1860,9 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
         dog = Watchdog.from_path(residents, store)
+        # Once, at startup, before the daemon settles into its loop: which containers this
+        # process can actually reach is a property of where it is running, not of a pass.
+        _print_topology(dog.topology(), alarm="red")
         try:
             passes = dog.run(interval_s=interval, max_passes=max_passes)
         except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon

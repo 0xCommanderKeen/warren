@@ -2200,7 +2200,13 @@ def test_watchdog_commands_carry_pass_outcomes(  # noqa: PLR0913, PLR0917
         health=(),
         __bool__=lambda: failure is not None,
     )
-    dog = SimpleNamespace(tick=lambda: report, run=lambda **_kwargs: [report])
+    # `topology` because the CLI asks the watchdog where it is before it asks it to work
+    # (#59); an empty survey is the honest answer for a double with no residents.
+    dog = SimpleNamespace(
+        tick=lambda: report,
+        run=lambda **_kwargs: [report],
+        topology=lambda: cli.survey([]),
+    )
     monkeypatch.setattr(cli.Watchdog, "from_path", lambda *_args, **_kwargs: dog)
 
     result = runner.invoke(
@@ -2220,7 +2226,7 @@ def test_watchdog_daemon_interrupt_is_a_clean_operator_stop(
     monkeypatch.setattr(
         cli.Watchdog,
         "from_path",
-        lambda *_args, **_kwargs: SimpleNamespace(run=interrupted),
+        lambda *_args, **_kwargs: SimpleNamespace(run=interrupted, topology=lambda: cli.survey([])),
     )
     result = runner.invoke(
         main,
@@ -2245,6 +2251,163 @@ def test_doctor_reports_the_budget_and_the_watchdog(
     assert result.exit_code == 0, result.output
     assert "test-agent: budget daily_cost_usd: 2 of 5" in result.output
     assert "watchdog: has never made a pass" in result.output
+
+
+# ------------------------------------------------------------- supervision topology (#59)
+
+
+def supervised_manifest(**deploy: object) -> dict[str, Any]:
+    """Build a manifest that names a container, so there is something to supervise."""
+    data = valid_manifest()
+    data["runner"] = {"kind": "claude"}
+    data["deploy"] = {"container": "steward-test-agent", **deploy}
+    return data
+
+
+def docker_naming_itself(name: str) -> str:
+    """Return a `docker` stub that answers `info` with a name and refuses everything else.
+
+    Only `info`, deliberately: a stub that answered every subcommand the same way would
+    have `docker inspect --format {{.State.Running}}` print a daemon name, which the
+    watchdog reads as "not running" and dutifully restarts — turning a topology test into
+    a restart test.
+    """
+    return f"case \"$1\" in info) printf '{name}\\t27.3.1\\n' ;; *) exit 1 ;; esac"
+
+
+def test_doctor_says_nothing_here_needs_docker_when_nothing_declares_a_container(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """The ordinary case must stay one quiet line, and must not shell out to docker."""
+    stub_bin("claude", "exit 0")
+    stub_bin("docker", "echo 'doctor must not have asked me'; exit 1")
+    residents_dir = write_resident(valid_manifest()).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing here needs docker" in result.output
+    assert "doctor must not have asked me" not in result.output
+
+
+def test_doctor_names_the_burrow_that_supervises_a_container(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stub_bin("claude", "exit 0")
+    stub_bin("docker", docker_naming_itself("dxp2800"))
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "docker at dxp2800's own docker answers as dxp2800 27.3.1" in result.output
+    assert "container steward-test-agent on dxp2800 — supervised from here" in result.output
+
+
+def test_doctor_warns_but_does_not_fail_over_a_container_on_another_burrow(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Doctor is routinely run from a laptop while the daemons live on the NAS (#59).
+
+    So the gap is said out loud and is not an exit code — the same judgement
+    `_report_scheduler` makes about a state file this host cannot see. The watchdog,
+    which *is* the supervisor, says it in red instead.
+    """
+    stub_bin("claude", "exit 0")
+    stub_bin("docker", docker_naming_itself("laptop"))
+    monkeypatch.setenv("STEWARD_BURROW", "laptop")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "container steward-test-agent runs on dxp2800" in result.output
+    assert "the watchdog cannot see it" in result.output
+
+
+def test_doctor_says_when_docker_itself_did_not_answer(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stub_bin("claude", "exit 0")
+    stub_bin("docker", "exit 1")
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
+
+    assert result.exit_code == 0, result.output
+    assert "docker did not answer" in result.output
+    assert "nothing is supervising test-agent" in result.output
+
+
+def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The #59 gap where it matters: this process *is* the supervisor, and it cannot see.
+
+    It still makes the pass — burying stale runs, sweeping leases, checking budgets need
+    no docker at all — so the exit code is unchanged and only the report grows a line.
+    """
+    stub_bin("docker", docker_naming_itself("laptop"))
+    monkeypatch.setenv("STEWARD_BURROW", "laptop")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
+
+    result = runner.invoke(
+        main,
+        ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "container steward-test-agent runs on dxp2800" in result.output
+    assert "Run steward's daemons on dxp2800" in result.output
+
+
+def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`--format json` keeps stdout parseable, and still says the gap out loud on stderr.
+
+    An unattended consumer is the last caller who should be told nothing (#59), so the
+    complaint goes where it cannot corrupt the document rather than nowhere.
+    """
+    stub_bin("docker", docker_naming_itself("laptop"))
+    monkeypatch.setenv("STEWARD_BURROW", "laptop")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
+
+    result = runner.invoke(
+        main,
+        [
+            "watchdog", "tick", "--residents", str(residents_dir),
+            "--db", str(tmp_path / "s.db"), "--format", "json",
+        ],
+    )  # fmt: skip
+
+    assert result.exit_code == 0, result.output
+    assert "the watchdog cannot see it" in result.output
+    document = result.output[result.output.index("{") :]
+    assert json.loads(document)["interventions"] == 0
+    assert "topology: docker at" not in result.output, "a green line would corrupt the JSON"
 
 
 def test_doctor_fails_loudly_when_completed_spend_was_dropped(

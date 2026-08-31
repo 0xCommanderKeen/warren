@@ -68,6 +68,7 @@ from steward.store import (
     OpenRun,
     Store,
 )
+from steward.topology import Survey, survey
 from steward.transitions.approval import ApprovalTransitions
 
 __all__ = [
@@ -886,6 +887,22 @@ class Watchdog:
             state=state,
             grace_s=grace_s,
         )
+
+    def topology(self) -> Survey:
+        """Report whether this process's docker holds the containers it supervises (#59).
+
+        Asked once, by whoever starts the daemon, rather than on every pass: it shells out
+        to ``docker info``, and the answer is a property of where this process is running,
+        which does not change under it. A pass keeps its own per-resident
+        :meth:`DockerSupervisor.health` probe — this is the prior question of whether
+        those probes are being asked of the right machine at all.
+
+        The watchdog does not refuse to start on a bad answer. Two thirds of a pass —
+        burying runs that never reported back, sweeping expired leases and approvals,
+        checking budgets — need no docker at all, and stopping those because a container
+        is on another host would turn one gap into three.
+        """
+        return survey(self.residents)
 
     # -- probing -----------------------------------------------------------------------
 

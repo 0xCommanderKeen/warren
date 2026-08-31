@@ -61,6 +61,15 @@ write routes to steward. So a townhall release is published into *arcadia's* dep
 directory, and `BURROW_URL=http://dxp2800:8737` is correct even though chronicle listens on
 8738 — the origin proxies `/events` through.
 
+**Steward's daemons run on the burrow whose containers they supervise** — today, the NAS.
+`steward scheduler run` and `steward watchdog run` reach containers by shelling out to a
+*local* `docker` client, so a watchdog anywhere else gets "no such container", reports
+every resident as unsupervised, and restarts nothing — silently, since that is
+indistinguishable from having nothing to supervise. `steward doctor` and `steward watchdog`
+now both print a topology report naming any container the process cannot reach.
+[`steward/docs/topology.md`](steward/docs/topology.md) has the rule, what it costs to break
+it, and how far `DOCKER_HOST` actually goes.
+
 Run each runbook from its own service directory (`warren/chronicle/`, `warren/arcadia/`, …).
 The tar recipes pack paths relative to the working directory, so the directory you stand in
 is part of the command.

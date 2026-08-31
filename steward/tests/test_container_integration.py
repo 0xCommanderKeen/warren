@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from steward import runners as r
+from steward import topology
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import ToolGrant
 from steward.skills import Skill, materialize
@@ -35,15 +36,28 @@ DOCKER = shutil.which("docker") or "docker"
 
 
 def _docker_answers() -> bool:
+    """Report whether a docker *daemon* answers here, not merely whether a client exists.
+
+    ``docker version --format '{{.Server.Version}}'`` rather than ``docker info``: measured
+    against docker 27.3.1, ``info`` prints the client's half of the report and **exits 0**
+    when nothing is listening at ``DOCKER_HOST`` (see
+    ``test_docker_info_exits_zero_at_an_endpoint_with_no_daemon``). This gate is what makes
+    the module's "skipped wholesale when no docker daemon answers" promise true, so it has
+    to be the probe that can actually tell — otherwise a host with the CLI and no daemon
+    skips nothing and fails everything.
+    """
     if shutil.which("docker") is None:
         return False
     try:
         probe = subprocess.run(  # noqa: S603 — fixed argv, a capability probe
-            [DOCKER, "info"], capture_output=True, timeout=15, check=False
+            [DOCKER, "version", "--format", "{{.Server.Version}}"],
+            capture_output=True,
+            timeout=15,
+            check=False,
         )
     except OSError, subprocess.TimeoutExpired:
         return False
-    return probe.returncode == 0
+    return probe.returncode == 0 and bool(probe.stdout.strip())
 
 
 pytestmark = pytest.mark.skipif(not _docker_answers(), reason="no docker daemon on this host")
@@ -176,6 +190,59 @@ def test_a_container_session_runs_in_the_mount_with_only_named_env_and_reports_c
     assert not _pid_file_exists(container, "run-int-ok"), (
         "an ordinary exit must remove its own pid file"
     )
+
+
+# ------------------------------------------------- where the docker client points (#59)
+
+#: A TCP endpoint no docker daemon is ever listening on. Port 1 is privileged and
+#: reserved, so this fails at connect rather than reaching somebody's real daemon.
+NOWHERE = "tcp://127.0.0.1:1"
+
+
+def test_a_bogus_docker_host_reaches_the_real_docker_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The measurement steward #59's documentation rests on, against a real client.
+
+    ``test_runners.py`` proves ``run_argv`` passes the parent environment through by
+    reading it back out of a stub. This proves the consequence that matters: the *real*
+    docker client honours the ``DOCKER_HOST`` steward's daemon was started with, so
+    pointing it at another machine genuinely moves supervision there. The failure is the
+    proof — a client that had ignored the variable would have answered from this host.
+
+    What it deliberately does not prove is that a remote ``DOCKER_HOST`` is enough for
+    *container-placed execution*: that half also needs the host side of the resident's
+    memory mount on the control plane's own filesystem, which
+    :func:`steward.sessions.workdir_refusal` requires and no endpoint can supply. See
+    ``docs/topology.md``.
+    """
+    monkeypatch.setenv("DOCKER_HOST", NOWHERE)
+
+    outcome = r.run_argv([DOCKER, "ps"])
+
+    assert not outcome.ok
+    assert NOWHERE in outcome.stderr, outcome.stderr
+
+
+def test_docker_info_exits_zero_at_an_endpoint_with_no_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why `steward.topology` does not trust the exit status of its own probe.
+
+    Against an unreachable endpoint, `docker info` prints the *client's* half of the
+    report, writes "Cannot connect to the Docker daemon" to stderr, and exits **0** — so a
+    status-only reachability check reports a client talking to itself as a healthy daemon.
+    `_ask_docker` requires the server fields to be filled in instead, and this is the
+    measurement that rule rests on; a future docker that starts exiting non-zero here is
+    welcome to break this test.
+    """
+    monkeypatch.setenv("DOCKER_HOST", NOWHERE)
+
+    outcome = r.run_argv([DOCKER, "info", "--format", topology.DAEMON_FORMAT])
+
+    assert outcome.ok, "docker info stopped exiting 0 at a dead endpoint; simplify the probe"
+    assert outcome.stdout.strip() == "", outcome.stdout
+    assert topology._ask_docker(r.run_argv).complaint == topology.NO_SERVER
 
 
 def test_a_granted_skill_crosses_the_mount_and_pruning_removes_it(tmp_path: Path) -> None:
