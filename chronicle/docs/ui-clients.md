@@ -1,28 +1,40 @@
 # UI client routing
 
-Burrow supports multiple UI clients over one authoritative backend. All clients consume
-`/state` and `/state/stream`; none consume `/events` or reconstruct projected state.
+Burrow has no user interface. It is the event log, the projection and the HTTP API; every
+UI is a separate client consuming the versioned state contract over one authoritative
+backend. Clients read `/state` and `/state/stream`; none consume `/events` or reconstruct
+projected state for themselves.
+
+Nothing is served to a browser from this repository. Burrow answers its documented API
+paths and 404s everything else, so a client pointed at a path that used to return the
+retired in-tree viewer fails loudly instead of rendering a stale page.
+
+## The clients
+
+- **Arcadia** — the pixel-art village, and the successor to the viewer this repository used
+  to serve. Phaser and React over the same `/state` contract.
+- **Townhall** — the control panel.
+
+Both are maintained outside this service and follow their own development and deployment
+instructions. Burrow supplies only the authoritative `/state` and `/state/stream` read
+interfaces, and knows nothing about either client's routes.
 
 ## Client transport
 
-`createStateTransport(options)` accepts an optional `baseUrl`. It defaults to the current
-origin, so a client normally relies on its web server to proxy Burrow:
+A client points itself at a backend origin or path prefix; endpoint names and the versioned
+state contract never change with it. Arcadia's `createStateTransport` is the reference
+implementation of the read loop and the shape to copy:
 
-```js
-const state = BurrowStateTransport.createStateTransport({
-  fetch: window.fetch.bind(window),
-  EventSource: window.EventSource,
-  baseUrl: "/burrow",
-  onState(snapshot, meta) {
-    render(snapshot, meta);
-  },
-});
-```
+- Load `/state` for a complete snapshot, then open `/state/stream` from the generation and
+  cursor that response returned.
+- Reconnect by catching up from the last applied boundary before reopening the stream.
+- Treat every snapshot as a complete replacement. Never fold raw events client-side.
+- Refuse an unsupported `snapshot.schema_version` before applying any state, rather than
+  rendering a version the client does not understand.
 
-The option selects only the backend origin or path prefix. Endpoint names and the versioned
-state contract do not change. It applies equally to initial polling, unchanged-snapshot
-polling, the SSE connection, and reconnects with generation and cursor resume parameters.
-A trailing slash is accepted and normalized.
+`/state` answers `204` when nothing changed, and carries the cursor in `X-Burrow-Cursor`.
+A stale cursor receives one atomic reset snapshot; see
+[state-contract.md](state-contract.md) for the full contract and versioning policy.
 
 ## Development
 
@@ -32,8 +44,8 @@ Run Burrow on its standard local port:
 uv run uvicorn serve:app --host 127.0.0.1 --port 8737
 ```
 
-Configure the Observatory dev server to proxy both read endpoints to that backend. For
-example, a Vite configuration can keep the client same-origin and avoid adding CORS policy:
+Configure the client's dev server to proxy both read endpoints to that backend. For example,
+a Vite configuration can keep the client same-origin and avoid adding CORS policy:
 
 ```js
 export default {
@@ -49,29 +61,18 @@ export default {
 Order matters in proxy systems that choose the first matching route: place
 `/state/stream` before `/state` if the proxy does not use longest-prefix matching. The proxy
 must stream the response instead of buffering it, must not impose a timeout shorter than the
-15-second SSE keepalive interval, and must pass query parameters unchanged. The client then
-uses the default empty `baseUrl`.
+15-second SSE keepalive interval, and must pass query parameters unchanged.
 
 Captured snapshots in `tests/fixtures/state-contract/` let clients render identical state
 without a live backend. Run `sh tests/ui-contract.sh` before using a fixture in a client.
 
-The Observatory is an external client maintained in
-[`0xCommanderKeen/observatory`](https://github.com/0xCommanderKeen/observatory). Follow that
-repository's development and deployment instructions; Burrow supplies only the authoritative
-`/state` and `/state/stream` read interfaces. Burrow does not serve `/observatory/`.
-
 ## Production
 
-When hosting an external client under the same origin, proxy Burrow's state endpoints under
-`/burrow/`. This nginx shape serves Burrow's village at `/village/` and exposes the shared
-state transport for independently deployed clients:
+When hosting a client under the same origin, proxy Burrow's state endpoints under
+`/burrow/`. The client itself is served by its own deployment; this shape exposes only the
+shared state transport:
 
 ```nginx
-location /village/ {
-    alias /srv/burrow/viewer/;
-    try_files $uri $uri/ /village/index.html;
-}
-
 location = /burrow/state {
     proxy_pass http://127.0.0.1:8737/state;
     proxy_http_version 1.1;
@@ -93,7 +94,7 @@ location = /burrow/transport/status {
 }
 ```
 
-External clients set `baseUrl: "/burrow"`. The proxy preserves the SSE body, event type, query
-string, and connection lifetime, so the transport retains keepalive, reconnection,
+Clients set their backend prefix to `/burrow`. The proxy preserves the SSE body, event type,
+query string, and connection lifetime, so the transport retains keepalive, reconnection,
 generation, cursor, and reset semantics. Routes for Steward writes are deliberately absent
 from this read-only client setup.

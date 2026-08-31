@@ -1,10 +1,16 @@
 # burrow
 
-A living village that shows what your AI agents are actually doing.
+The backend behind a living village that shows what your AI agents are actually doing.
 
 Each real agent — the one summarizing your day, reviewing your code, reading your email, researching, or supervising the others — is a villager with a house. When an agent works, its villager works. When it's idle, it rests. When it needs you, it walks to your door and knocks.
 
 **burrow is not a game and not a simulation.** It is an ambient interface to a real agent fleet. The village is a projection of live events; it never invents behavior.
+
+**burrow runs no browser code.** It is the event protocol, the log, the projection and the
+HTTP API, in Python. Every UI is a separate client consuming the versioned state contract:
+**Arcadia** renders the pixel-art village, **Townhall** is the control panel. Requests for
+paths this repository used to serve a viewer on now 404 — see
+[docs/ui-clients.md](docs/ui-clients.md).
 
 ## The one rule
 
@@ -18,7 +24,9 @@ Each real agent — the one summarizing your day, reviewing your code, reading y
 1. **The fleet** — real agents, running wherever they run. burrow does not own them.
 2. **Event protocol** — agents emit structured events (`task_started`, `tool_called`, `artifact_produced`, `needs_human`, `idle`). This is the core of the project; everything else consumes it.
 3. **Projection** — maps events to village state (agent started reading inbox → villager walks to the post office).
-4. **Client** — pixel-art renderer. Open a villager to inspect its current task and retained event log.
+4. **Clients** — pixel-art renderers and control panels, each its own project. They read
+   complete snapshots from `/state` and `/state/stream` and render them; they never fold raw
+   events. burrow ships none of them.
 
 The notice board in the village square opens a fleet-wide review of the 30 most
 recent `artifact_produced` events. It shows each artifact path, its maker and
@@ -138,12 +146,12 @@ map of everything the fleet does.
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
-  residents.py hooks viewer villagers | ssh
+  residents.py hooks villagers | ssh
   Miha@dxp2800 'tar -xf - -C ~/docker/burrow/app'`, then
   `docker compose restart burrow`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying.
-  The viewer consumes complete authoritative Village State snapshots from
+  Clients consume complete authoritative Village State snapshots from
   `/state` and the live snapshot feed at `/state/stream`; the response disables nginx
   buffering itself. If another reverse proxy is placed in front, keep streaming
   responses unbuffered and give them an idle timeout longer than the 15-second
@@ -180,7 +188,7 @@ map of everything the fleet does.
   turns instead of leaving.
 - **Local-only mode** — `uv run uvicorn serve:app --host 127.0.0.1 --port 8737` and no
   `BURROW_URL` still works: same
-  viewer over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
+  API over the local log. Leave `BURROW_TOKEN` unset and ingest stays open.
 
 ### Working on burrow locally
 
@@ -239,7 +247,7 @@ test suite with `sh tests/run.sh`.
 Anything on the tailnet could otherwise POST fake events, and the village never lies.
 When the server has `BURROW_TOKEN` set, `POST /events` must carry it as
 `Authorization: Bearer <token>` (or `X-Burrow-Token`) or it gets a 401. GET endpoints —
-the viewer, `/events`, `/villagers` — are not gated. With the var unset, ingest is open,
+`/state`, `/events`, `/villagers` — are not gated. With the var unset, ingest is open,
 which is what local dev uses.
 
 Emitters send the token from their own `BURROW_TOKEN`. A rejected POST is just a failed
@@ -247,7 +255,7 @@ POST: the event falls back to the local JSONL file, so a missing token costs vis
 never events. **Roll it out server-first:** deploy the token-aware server with the var
 unset, set `BURROW_TOKEN` on every emitter, then set it on the server and restart. Full
 order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
-  viewer over the local log.
+  API over the local log.
 - **Knocks on your phone** — set `BURROW_NOTIFY_URL` on the server and every
   `needs_human` event is also pushed there with a stable receiver dedupe ID. Plain knocks carry the
   villager's name, project, and message; structured approvals carry action and detail
@@ -265,7 +273,7 @@ order and rotation: [docs/protocol.md](docs/protocol.md#ingest-auth).
   `dropped` as the current bounded counts in their authoritative durable ledgers;
   these survive restart but can decrease when older keys leave the retention window.
   Retry, failure, and saturation counters describe only the current server process.
-  The live viewer consumes this report.
+  Live clients consume this report.
 - **Log rotation** — the server keeps `events.jsonl` bounded on its own. Past
   `BURROW_MAX_LOG` bytes (default 5 MiB) it rolls the log into
   `archive/events-<UTC timestamp>.jsonl` and restarts it from the tail the
@@ -294,20 +302,14 @@ sky. After dark, a house's windows and doorway light up only while its villager
 is genuinely home, your porch lights only while somebody is actually knocking,
 and the working glow, the knock orange and the stale fade all stay legible.
 
-For development, the clock can be overridden — and whenever it is, the viewer
-says so in the corner, so a pinned tint never passes as the real thing:
+The tint is a client concern and burrow ships no client: the rule it must obey is that
+the phase comes from the real clock, and any development override says so on screen so a
+pinned tint never passes as the real thing.
 
-| query param      | effect                                        |
-|------------------|-----------------------------------------------|
-| `?phase=night`   | pin a phase: `dawn`, `day`, `dusk`, `night`   |
-| `?time=20:45`    | pin an exact local time                       |
-| `?cycle=60`      | sweep a full 24 h in N seconds (default 60)   |
-
-Without a query param the viewer always shows the real clock.
-## Testing the viewer
+## Driving a client without a fleet
 
 The village has no fleet of its own to test against, so there is a fixture that
-writes a synthetic event log:
+writes a synthetic event log for a client to render:
 
 ```sh
 python3 tests/fixture_walks.py --fresh          # nine agents, a transition every 3 s
@@ -315,9 +317,8 @@ BURROW_EVENTS=/tmp/burrow-fixture.jsonl python3 serve.py 8899
 ```
 
 It forces the longest walks on the map — corner plots to your door and back — so
-pathfinding, fence gates and the knock queue all get exercised. The viewer checks
-its own map on boot and logs one line; `__burrow.village.checkMap()` in the console
-re-runs it and returns any spot that stands on solid ground or cannot be reached.
+pathfinding, fence gates and the knock queue all get exercised in whichever client is
+pointed at that server.
 
 ## Residents and visitors
 
@@ -335,9 +336,9 @@ metadata, never raw manifest objects or app credentials. Exact agent identity wi
 before a project fallback. Invalid or incomplete declarations remain Visitors and
 advertise no access.
 
-Visitors get a stable hash-based name and sprite for their event identity. The viewer's
-pixel art is the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
-(see `viewer/assets/README.md`).
+Visitors get a stable hash-based name and sprite for their event identity. Sprites belong to
+the client that draws them; the CC0 [Ninja Adventure pack](https://pixel-boy.itch.io/ninja-adventure-asset-pack)
+this village is drawn with now lives with Arcadia's assets, attribution included.
 
 ## Working on burrow
 
@@ -358,28 +359,26 @@ server test can be run directly with `python3 test_serve.py`.
 
 ### Tests
 
-The authoritative test command discovers every tracked `test_*.py`, `test_*.js`,
-and `*.test.js` file anywhere in the repository and runs each exactly once:
+The authoritative test command discovers every tracked `test_*.py` file anywhere in the
+repository and runs each exactly once. One language, no framework, no build step:
 
 ```sh
 sh tests/run.sh
 sh tests/run.sh --list  # show the tests that would run
 ```
 
-The authoritative projection lives in `village_state.py`; `state_coordinator.py`
-publishes complete snapshots, and `viewer/state-transport.js` validates and swaps
-them for rendering. There is no browser domain reducer and no build step:
+The authoritative projection lives in `village_state.py` and `state_coordinator.py`
+publishes complete snapshots. That is the whole reduction: no second reducer in a client,
+no browser tests here, no build step:
 
 ```sh
 python3 -m unittest tests.test_village_state tests.test_state_coordinator
-node tests/state-transport.test.js
-node tests/browser-state-runtime.test.js
 sh tests/ui-contract.sh
 ```
 
 Projection tests use fixed evaluation times so stale and absent clock boundaries
-remain deterministic. Browser tests consume representative Village State fixtures;
-they do not replay raw events through a second reducer.
+remain deterministic. `tests/ui-contract.sh` checks that the published contract and the
+captured fixtures clients render against still match the snapshot models.
 
 ## Not this project
 
