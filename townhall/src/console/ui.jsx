@@ -1,10 +1,15 @@
 /* The steward console's vocabulary, on this stack.
  *
- * Every piece here is a translation of a rule in `steward/ui/app.css` into Tailwind
- * utilities — the same hairlines, the same uppercase micro-labels, the same one meaning
- * per colour. warren#225 decided this is a port and not a redesign, so where this file and
- * that stylesheet disagree, that stylesheet is right. The single intentional divergence is
- * the contrast correction documented at the top of `styles.css` (#152).
+ * Every piece here is a translation of a rule in the steward console's `ui/app.css` into
+ * Tailwind utilities — the same hairlines, the same uppercase micro-labels, the same one
+ * meaning per colour. warren#225 decided this is a port and not a redesign, so where this
+ * file and that stylesheet disagreed, that stylesheet was right. The single intentional
+ * divergence is the contrast correction documented at the top of `styles.css` (#152).
+ *
+ * That stylesheet no longer exists: `steward/ui/` was deleted when the console was retired,
+ * and this file is now the only copy of those decisions. Read it in git history —
+ * `git show <the commit before the retirement>:steward/ui/app.css` — rather than looking
+ * for a file to diff against.
  */
 
 import { useEffect, useState } from "react";

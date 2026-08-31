@@ -4,7 +4,7 @@ The warren control panel: the governance surface for the fleet, built with Vite,
 Tailwind CSS. It watches the village through [Chronicle](../chronicle) and writes to it
 through [steward](../steward).
 
-The look is the steward operator console's (`steward/ui/`), ported onto this stack rather
+The look is the retired steward operator console's, ported onto this stack rather
 than redesigned — a sidebar hosting every section, warm ink on near-black, one meaning per
 colour. The read-only fleet atlas this directory used to be is now one page inside that
 shell.
