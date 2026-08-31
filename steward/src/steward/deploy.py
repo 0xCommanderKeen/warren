@@ -154,15 +154,17 @@ CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a
 #: new ones at the same values.
 #:
 #: This pair is not politeness, it is the only thing keeping deployed residents emitting.
-#: A resident container runs the **frozen** vendored emitter, ``docker/resident/burrow-emit.py``,
-#: which predates the rename and reads ``BURROW_*`` and nothing else. Chronicle's current
-#: emitter accepts both spellings, but that is not the file in the image — the vendored copy
-#: is pinned by checksum and deliberately not refreshed until warren#234. Rendering only the
-#: new spelling would leave every resident with no village to post to, and it would fail the
-#: quiet way: the container starts, the agent works, and its events go to a local file
-#: nobody reads.
+#: warren#234 re-vendored the emitter, so the copy *in this repository* now reads
+#: ``CHRONICLE_*`` with a ``BURROW_*`` fallback — but the copy in a **running container**
+#: is whatever image that host was last shipped, and until every one of them has been
+#: rebuilt and recreated there are residents out there running the frozen pre-rename
+#: emitter, which reads ``BURROW_*`` and nothing else. Rendering only the new spelling
+#: would leave those with no village to post to, and it would fail the quiet way: the
+#: container starts, the agent works, and its events go to a local file nobody reads.
 #:
-#: warren#234 re-vendors a current emitter and drops this pair.
+#: Dropping this pair is therefore a rollout step, not a code change: `make image` +
+#: `make image-ship` to every host, re-provision, confirm each resident is emitting, then
+#: delete it.
 LEGACY_URL_ENV = "BURROW_URL"
 LEGACY_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
 
@@ -355,7 +357,8 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
         "init": True,
         "working_dir": memory_path,
         # Both spellings, same values: the new one for a current emitter, the old one for
-        # the frozen vendored copy actually running in the image (see LEGACY_URL_ENV).
+        # the pre-rename copy still running in any image that predates warren#234's
+        # re-vendoring (see LEGACY_URL_ENV).
         "environment": {
             "CHRONICLE_AGENT_ID": resident.agent_id,
             "CHRONICLE_PROJECT": resident.project,

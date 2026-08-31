@@ -204,12 +204,13 @@ def test_a_village_with_no_token_is_allowed_and_says_so() -> None:
 
 
 def test_the_env_file_carries_both_spellings_at_the_same_value() -> None:
-    """The emitter in the image is frozen at the pre-rename spelling (warren#234).
+    """Deployed containers can still be running the pre-rename emitter (warren#234).
 
-    A resident container runs docker/resident/burrow-emit.py, a pinned copy that predates
-    warren#216 and reads BURROW_* only. Writing just the new names would leave every
-    deployed resident posting nowhere, and it would do it silently: the container starts,
-    the agent works, the events go to a file nobody reads.
+    The vendored copy in this repository reads both spellings since #234 re-vendored it,
+    but a running container has whatever image its host was last shipped, and the older one
+    reads BURROW_* only. Writing just the new names would leave those residents posting
+    nowhere, and it would do it silently: the container starts, the agent works, the events
+    go to a file nobody reads. The pair goes away when every host has been rebuilt.
     """
     values = emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737", CHRONICLE_TOKEN_ENV: "s3cret"})
     assert values == {

@@ -19,9 +19,13 @@
 # `@anthropic-ai/…`   Pinned by build arg. A resident whose brain silently changed version
 #                     under it on a rebuild is a resident nobody can say anything true
 #                     about, so the pin lives in the Makefile and moves deliberately.
-# `python3`           The chronicle emitter is stdlib-only python. No pip, no venv: emit.py
-#                     imports json, os, sys, time, urllib, fcntl, hashlib, datetime and
-#                     nothing else, which is exactly why it can be vendored as one file.
+# `python3`           The chronicle emitter is stdlib-only python. No pip, no venv: it
+#                     imports json, os, sys, time, urllib, fcntl, hashlib, datetime,
+#                     collections, threading, uuid, re and nothing else. Its *source* is
+#                     two files (hooks/emit.py and the durable outbox it grew in
+#                     warren#221); what is copied in below is the one-file bundle
+#                     chronicle's hooks/build.py flattens them into, because a build
+#                     context is a directory and an image should not have to carry one.
 # `git`               claude reads and writes repos; a resident without git is a resident
 #                     that cannot do most of the work it would be asked to do.
 # `curl`              For `steward-smoke`, which needs an HTTP status code it can assert on.

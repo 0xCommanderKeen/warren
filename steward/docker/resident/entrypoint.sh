@@ -9,9 +9,10 @@
 # somebody's afternoon with scp.
 #
 # What it will and will not overwrite:
-#   burrow-emit.py   always replaced. It is vendored from burrow and pinned by checksum in
-#                    this repo, so the image is its source of truth and a stale copy in the
-#                    volume is a bug, not a local edit worth keeping.
+#   burrow-emit.py   always replaced. It is a generated artifact — chronicle's emitter
+#                    bundle, vendored into this repo and compared against a live rebuild by
+#                    steward's suite — so the image is its source of truth and a stale copy
+#                    in the volume is a bug, not a local edit worth keeping.
 #   settings.json    written only when absent. A resident may legitimately have grown a
 #                    permissions block or an extra hook; clobbering that every restart
 #                    would make the container hostile to the person maintaining it. When a
@@ -68,7 +69,20 @@ village_agent="${CHRONICLE_AGENT_ID:-${BURROW_AGENT_ID:-}}"
 if [ -n "$village_url" ]; then
     echo "steward: emitting to $village_url as ${village_agent:-<no agent id set>}"
 else
-    echo "steward: WARNING no CHRONICLE_URL/BURROW_URL; events fall back to ~/.burrow/events.jsonl in this container"
+    echo "steward: WARNING no CHRONICLE_URL/BURROW_URL; events fall back to ~/.chronicle/ in this container"
+fi
+
+# Where the emitter keeps its durable outbox, said out loud at start (warren#234). The
+# emitter vendored here journals undelivered events and replays them when the village comes
+# back, which is what an unattended container needs — but it does that under $HOME, and the
+# only volume this container mounts for claude is /root/.claude. So the queue survives a
+# restart and does NOT survive `docker compose down` or an image upgrade. Mounting it is an
+# operator decision, not a default this script should make; docs/manifest.md states the
+# options. Printing the path is how a human finds the queue when it matters.
+if [ ! -d "$HOME/.chronicle" ] && [ -d "$HOME/.burrow" ]; then
+    echo "steward: durable outbox in $HOME/.burrow (container-local unless compose mounts it)"
+else
+    echo "steward: durable outbox in $HOME/.chronicle (container-local unless compose mounts it)"
 fi
 
 exec "$@"

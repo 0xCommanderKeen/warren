@@ -1002,6 +1002,30 @@ directory and returns zero even if the bundle is incomplete or the emitter hits
 an unexpected runtime failure. Transport failures remain handled by `emit.py` and
 fall back to its bounded durable local storage.
 
+### One-file bundle, for deployments that cannot carry a directory
+
+Some hosts can only take a single file: steward's resident image is built from one
+directory with no pip in it, and vendors the emitter into it. `hooks/build.py`
+flattens the two source files into one self-contained stdlib-only script for exactly
+that case.
+
+```sh
+python3 hooks/build.py --output /somewhere/emit.py   # or to stdout, with no --output
+```
+
+The artifact is `emit.py` verbatim with its `import durable` block replaced by
+`durable.py`'s own source, materialized as a module — no rewriting, no import
+analysis, and a traceback still names `durable.py` and the right line. The build is
+deterministic: the same two sources produce byte-identical output, which is what lets
+a consumer rebuild it and compare rather than trust a checksum somebody recorded.
+`tests/test_bundle.py` holds it to being one file, stdlib-only across both embedded
+sources, compilable, fail-open, deterministic, and — the assertion that matters, since
+the emitter swallows everything by charter — actually able to deliver an event.
+
+It is built on demand and committed nowhere in this repository. The copy in
+`steward/docker/resident/burrow-emit.py` is refreshed by `make vendor-emitter` in
+`warren/steward/`, and both suites compare it against a fresh build.
+
 > **Both spellings work during the rename.** Every `CHRONICLE_*` variable below
 > is also read under its pre-rename `BURROW_*` name, and the same is true of the
 > server's settings. The new spelling wins wherever both are set. A hook's
