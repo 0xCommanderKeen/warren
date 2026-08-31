@@ -1,10 +1,23 @@
-name: Tests
+name: chronicle
 
 on:
-  pull_request:
   push:
-    branches:
-      - main
+    branches: [main]
+    paths:
+      - "chronicle/**"
+      - ".github/workflows/chronicle.yml"
+  pull_request:
+    paths:
+      - "chronicle/**"
+      - ".github/workflows/chronicle.yml"
+
+concurrency:
+  group: chronicle-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: chronicle
 
 jobs:
   test:
@@ -26,6 +39,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: burrow-visual-linux
+          name: chronicle-visual-linux
           path: /tmp/burrow-visual-*/
           if-no-files-found: ignore

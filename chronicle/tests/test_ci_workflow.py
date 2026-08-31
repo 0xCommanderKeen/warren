@@ -2,8 +2,8 @@ import pathlib
 import unittest
 
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "chronicle.yml"
 
 
 class CiWorkflowTests(unittest.TestCase):

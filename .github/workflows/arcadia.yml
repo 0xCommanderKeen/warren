@@ -1,7 +1,23 @@
-name: CI
+name: arcadia
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "arcadia/**"
+      - ".github/workflows/arcadia.yml"
   pull_request:
+    paths:
+      - "arcadia/**"
+      - ".github/workflows/arcadia.yml"
+
+concurrency:
+  group: arcadia-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: arcadia
 
 jobs:
   verify:
@@ -15,6 +31,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: arcadia/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build

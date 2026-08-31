@@ -1,9 +1,23 @@
-name: Tests
+name: townhall
 
 on:
-  pull_request:
   push:
     branches: [main]
+    paths:
+      - "townhall/**"
+      - ".github/workflows/townhall.yml"
+  pull_request:
+    paths:
+      - "townhall/**"
+      - ".github/workflows/townhall.yml"
+
+concurrency:
+  group: townhall-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: townhall
 
 jobs:
   test:
@@ -17,6 +31,7 @@ jobs:
         with:
           node-version: "22.22.0"
           cache: pnpm
+          cache-dependency-path: townhall/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
