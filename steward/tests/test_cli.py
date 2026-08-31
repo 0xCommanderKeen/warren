@@ -36,6 +36,11 @@ from steward.scheduler import STALE_TICK_AFTER_S, SchedulerState
 from steward.skills import effective_skills, library_for
 from steward.store import Store
 
+#: A `claude` current enough for the flag every session carries (steward #206). Doctor
+#: probes `--setting-sources` for *every* claude resident, declarations or not, so a stub
+#: that answers `--help` with nothing is now a red doctor rather than a quiet one.
+CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"'
+
 
 @pytest.fixture
 def runner() -> CliRunner:
@@ -358,7 +363,7 @@ def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
 def test_doctor_names_the_brain_and_the_next_fire(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
@@ -379,7 +384,7 @@ def test_doctor_fails_loudly_when_the_binary_is_missing(
 
 
 #: A `claude --help` that knows how to bound a session, and one too old to.
-NEW_CLAUDE_HELP = 'echo "  --tools <tools...>"; echo "  --strict-mcp-config"'
+NEW_CLAUDE_HELP = CURRENT_CLAUDE + '; echo "  --tools <tools...>"; echo "  --strict-mcp-config"'
 OLD_CLAUDE_HELP = 'echo "  --allowed-tools <tools...>"'
 
 
@@ -447,14 +452,21 @@ def test_doctor_fails_when_the_brain_cannot_widen_a_session(
     assert "--add-dir" in result.output
 
 
-def test_doctor_does_not_ask_the_brain_about_a_resident_that_declared_no_bound(
+def test_doctor_asks_the_brain_about_a_resident_that_declared_nothing_at_all(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:
-    """An old CLI is only a problem for a resident that declared something it must hold."""
+    """Declaring nothing stopped meaning *asking nothing* (steward #206).
+
+    Every claude session is launched with `--setting-sources`, whatever the manifest
+    says, so an old CLI is now a problem for every claude resident: it exits 1 on the
+    unknown option rather than running with the host's settings, and that is a failed
+    session at the resident's next fire unless doctor says it here.
+    """
     stub_bin("claude", OLD_CLAUDE_HELP)
     result = runner.invoke(main, ["doctor", str(write_resident(valid_manifest()).parent)])
 
-    assert result.exit_code == 0
+    assert result.exit_code == 1
+    assert "--setting-sources" in result.output
 
 
 def test_doctor_reports_an_invalid_tree(runner: CliRunner, write_resident: ResidentWriter) -> None:
@@ -469,7 +481,7 @@ def test_doctor_reports_an_invalid_tree(runner: CliRunner, write_resident: Resid
 def test_doctor_says_so_when_nothing_is_scheduled(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = valid_manifest()
     data["routines"] = []
     path = write_resident(data)
@@ -481,7 +493,7 @@ def test_doctor_says_so_when_nothing_is_scheduled(
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
@@ -496,7 +508,7 @@ def test_doctor_warns_when_the_journal_location_is_not_writable(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """Doctor probes writability and says so — a warning, not a failure (#89)."""
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     blocker = tmp_path / "blocker"
     blocker.write_text("a file where the journal's parent should be", encoding="utf-8")
     data = valid_manifest()
@@ -511,7 +523,7 @@ def test_doctor_warns_when_the_journal_location_is_not_writable(
 def test_doctor_complains_about_a_memory_that_cannot_hold_a_journal(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = valid_manifest()
     data["memory"] = {"kind": "file", "path": "/data/test-agent/memory.md"}
     path = write_resident(data)
@@ -535,7 +547,7 @@ def test_doctor_preflights_a_board_only_claimant(
     resident it schedules; nothing asked it of a resident that only claims. A warning, not
     a failure: the missing path may be a container path this host was never meant to have.
     """
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     blocker = tmp_path / "blocker"
     blocker.write_text("a file where the memory directory should be", encoding="utf-8")
     data = board_manifest()
@@ -614,7 +626,7 @@ def test_doctor_will_not_call_a_claimant_ready_because_it_looked_at_no_library(
     that materializes no skills deletes nothing. The claimant was then called ready on the
     grounds that nothing had been checked.
     """
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     write_skill("research", defaults=True)
     data = board_manifest()
     data["runner"] = {"kind": "claude"}
@@ -1266,7 +1278,11 @@ def test_skills_lists_the_shipped_library_and_every_resident(
         result.output
     )
     assert "burrow-builder: daily-summary, escalate, research, write-journal" in result.output
-    assert ".claude/skills/ in the session's working directory" in result.output
+    # Named as a copy the CLI does not discover: since steward #206 a claude session is
+    # launched with `--setting-sources ""`, and `.claude/skills` is discovered through the
+    # project setting source. The prompt is the delivery path; printing two working
+    # channels here would be the claim that is no longer true.
+    assert "a copy in .claude/skills/ the session's CLI does not discover" in result.output
 
 
 def test_skills_reports_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2241,7 +2257,7 @@ def test_watchdog_daemon_interrupt_is_a_clean_operator_stop(
 def test_doctor_reports_the_budget_and_the_watchdog(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = budgeted_manifest(daily_cost_usd=5.0)
     data["runner"] = {"kind": "claude"}
     residents_dir = write_resident(data).parent.parent
@@ -2281,7 +2297,7 @@ def test_doctor_says_nothing_here_needs_docker_when_nothing_declares_a_container
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
     """The ordinary case must stay one quiet line, and must not shell out to docker."""
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", "echo 'doctor must not have asked me'; exit 1")
     residents_dir = write_resident(valid_manifest()).parent.parent
 
@@ -2299,7 +2315,7 @@ def test_doctor_names_the_burrow_that_supervises_a_container(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", docker_naming_itself("dxp2800"))
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2324,7 +2340,7 @@ def test_doctor_warns_but_does_not_fail_over_a_container_on_another_burrow(
     `_report_scheduler` makes about a state file this host cannot see. The watchdog,
     which *is* the supervisor, says it in red instead.
     """
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2343,7 +2359,7 @@ def test_doctor_says_when_docker_itself_did_not_answer(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     stub_bin("docker", "exit 1")
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2415,7 +2431,7 @@ def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
 def test_doctor_fails_loudly_when_completed_spend_was_dropped(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = budgeted_manifest()
     data["runner"] = {"kind": "claude"}
     residents_dir = write_resident(data).parent.parent
@@ -2438,7 +2454,7 @@ def test_doctor_fails_loudly_when_completed_spend_was_dropped(
 def test_doctor_says_a_paused_resident_will_not_fire_tonight(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = budgeted_manifest(daily_cost_usd=1.0)
     data["runner"] = {"kind": "claude"}
     residents_dir = write_resident(data).parent.parent
@@ -2458,7 +2474,7 @@ def test_doctor_says_a_paused_resident_will_not_fire_tonight(
 def test_doctor_names_the_last_watchdog_pass(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter, tmp_path: Path
 ) -> None:
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = budgeted_manifest()
     data["runner"] = {"kind": "claude"}
     residents_dir = write_resident(data).parent.parent
@@ -2481,7 +2497,7 @@ def test_doctor_says_whether_a_scheduler_is_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The list of next fires below is a promise; this is the line that says who keeps it."""
-    stub_bin("claude", "exit 0")
+    stub_bin("claude", CURRENT_CLAUDE)
     data = budgeted_manifest()
     data["runner"] = {"kind": "claude"}
     residents_dir = write_resident(data).parent.parent

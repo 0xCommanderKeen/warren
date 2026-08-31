@@ -346,7 +346,16 @@ def test_claude_runner_passes_prompt_model_and_cwd(stub_bin: StubWriter, tmp_pat
     )
 
     argv = argv_dump.read_text().splitlines()
-    assert argv == ["-p", "write it", "--output-format", "json", "--model", "claude-opus-5"]
+    assert argv == [
+        "-p",
+        "write it",
+        "--output-format",
+        "json",
+        "--setting-sources",
+        "",
+        "--model",
+        "claude-opus-5",
+    ]
     assert Path(cwd_dump.read_text().strip()).resolve() == workdir.resolve()
 
     assert result.outcome is r.Outcome.OK
@@ -396,17 +405,47 @@ def claude_argv(  # noqa: PLR0913 — one keyword per thing a test wants to vary
     return (tmp_path / "argv.txt").read_text().splitlines()
 
 
-def test_an_unrestricted_resident_gets_the_argv_it_always_got(
+def test_an_unrestricted_resident_declares_no_bound_and_still_loads_no_settings(
     stub_bin: StubWriter, tmp_path: Path
 ) -> None:
-    """Migrating a resident to `tools: unrestricted` must change nothing about its run.
+    """`tools: unrestricted` compiles no bound — and the settings sources go anyway.
 
-    Every live resident is migrated that way, so this is the assertion that says the
-    migration is a change in what the manifest *says*, not in what steward *does*.
+    Which sources a session loads is not a manifest dimension: it is a property of how
+    steward launches every session, so an unrestricted resident is as closed to a
+    settings file as a bounded one.
     """
     argv = claude_argv(stub_bin, tmp_path, UNRESTRICTED, model="claude-opus-5")
 
-    assert argv == ["-p", "say hello", "--output-format", "json", "--model", "claude-opus-5"]
+    assert argv == [
+        "-p",
+        "say hello",
+        "--output-format",
+        "json",
+        "--setting-sources",
+        "",
+        "--model",
+        "claude-opus-5",
+    ]
+
+
+def test_every_claude_session_names_its_setting_sources_and_names_none(
+    stub_bin: StubWriter, tmp_path: Path
+) -> None:
+    """The one flag every session carries, bounded or not (steward #206).
+
+    Measured 2026-08-31 against CLI 2.1.243 and 2.1.252 (`docs/settings-sources.md`): a
+    settings file at *any* source registers a `SessionStart` hook that runs, and can set
+    `permissions.defaultMode: bypassPermissions`, and neither is gated by workspace
+    trust. `--setting-sources ""` stopped both. A resident's working directory is its
+    memory directory, so `project` and `local` are files under the constrained session's
+    own hand, and `user` is whatever the launching machine happens to hold.
+    """
+    for tools in (UNRESTRICTED, ToolGrant(["Read"]), ToolGrant([])):
+        argv = claude_argv(stub_bin, tmp_path, tools)
+        index = argv.index("--setting-sources")
+        # the literal, not the constant: sourcing both sides from `SETTING_SOURCES` would
+        # pass just as happily over `--setting-sources user`
+        assert argv[index + 1] == ""
 
 
 def test_a_bounded_resident_is_launched_with_the_names_and_strict_mcp(
@@ -518,16 +557,40 @@ def test_two_requests_that_differ_only_in_workspace_are_two_requests(tmp_path: P
 
 # --------------------------------------------- whether the installed CLI can hold a bound
 
-#: A `claude --help` that knows both flags, and one that knows neither.
-HELP_STUB = 'echo "  --tools <tools...>  bound the built-in set"; echo "  --strict-mcp-config"'
+#: A `claude --help` that knows every flag steward emits, and one that knows none of them.
+HELP_STUB = (
+    'echo "  --tools <tools...>  bound the built-in set"; echo "  --strict-mcp-config"; '
+    'echo "  --setting-sources <sources>"'
+)
 OLD_HELP_STUB = 'echo "  --allowed-tools <tools...>  pre-approve permission rules"'
 
 
-def test_an_unrestricted_resident_asks_the_cli_nothing(
+def test_an_unrestricted_resident_is_still_probed_for_the_settings_flag(
     stub_bin: StubWriter,
 ) -> None:
-    """Nothing is declared, so there is nothing the installed CLI could fail to hold."""
+    """Declaring nothing no longer means asking the CLI nothing (steward #206).
+
+    Every claude session is launched with `--setting-sources`, so every claude resident
+    has something the installed binary could fail to carry out — and a `claude` without
+    the flag exits 1 rather than running with the host's settings, which is a failed
+    session at the resident's next fire unless doctor says so first.
+    """
     stub_bin("claude", OLD_HELP_STUB)
+    complaint = r.check_cli_support(RunnerSpec(kind="claude"), UNRESTRICTED, ())
+
+    assert complaint is not None
+    assert "--setting-sources" in complaint
+
+
+def test_an_unrestricted_resident_on_a_current_cli_has_no_complaint(
+    stub_bin: StubWriter,
+) -> None:
+    """The other half of the probe: a CLI that has the flag must not be complained about.
+
+    Without this, the assertion above would pass on a probe that complained about every
+    claude resident unconditionally.
+    """
+    stub_bin("claude", HELP_STUB)
     assert r.check_cli_support(RunnerSpec(kind="claude"), UNRESTRICTED, ()) is None
 
 
@@ -584,13 +647,21 @@ def test_a_cli_that_cannot_widen_a_session_is_a_complaint_too(stub_bin: StubWrit
     assert "--add-dir" in complaint
 
 
-def test_the_flags_a_manifest_needs_are_exactly_what_it_declared() -> None:
-    """Nothing declared, nothing probed — and a kind that compiles none is asked for none."""
+def test_the_flags_a_manifest_needs_are_exactly_what_argv_writes() -> None:
+    """What a declaration compiles into, plus the one flag every claude session carries.
+
+    A kind that compiles none is asked for none: `codex` and `command` never see
+    `--setting-sources` because they never see `claude`.
+    """
     claude = RunnerSpec(kind="claude")
 
-    assert r.required_flags(claude, UNRESTRICTED, ()) == ()
-    assert r.required_flags(claude, UNRESTRICTED, ("/data",)) == ("--add-dir",)
+    assert r.required_flags(claude, UNRESTRICTED, ()) == ("--setting-sources",)
+    assert r.required_flags(claude, UNRESTRICTED, ("/data",)) == (
+        "--setting-sources",
+        "--add-dir",
+    )
     assert r.required_flags(claude, ToolGrant(["Read"]), ()) == (
+        "--setting-sources",
         "--tools",
         "--strict-mcp-config",
     )
@@ -1298,6 +1369,8 @@ def test_a_container_placed_session_execs_into_the_container(
         "say hello",
         "--output-format",
         "json",
+        "--setting-sources",
+        "",
         "--model",
         "claude-opus-5",
     ]
@@ -1499,7 +1572,10 @@ def test_the_flag_probe_asks_the_container_cli(
     that validated the manifest.
     """
     log = docker_stub(
-        stub_bin, monkeypatch, tmp_path, help_flags="--tools --strict-mcp-config --add-dir"
+        stub_bin,
+        monkeypatch,
+        tmp_path,
+        help_flags="--tools --strict-mcp-config --add-dir --setting-sources",
     )
 
     assert r.check_cli_support(RunnerSpec(kind="claude"), ToolGrant(["Read"]), (), PLACED) is None

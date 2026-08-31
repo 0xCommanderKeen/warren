@@ -35,8 +35,8 @@ session at its timeout. A hung session must never look like work.
 
 **Every session is provisioned with the skills its manifest grants.** At fire time the
 resident's effective set — the library's defaults plus its own grants
-(:mod:`steward.skills`) — is injected into the prompt, and for a runner that loads
-skills off disk it is also written into the session's working directory. A granted
+(:mod:`steward.skills`) — is injected into the prompt, and for a runner that takes a copy
+on disk it is also written into the session's working directory. A granted
 skill the library does not have fails the run before it starts; steward will not launch
 a session that believes it has a capability nobody gave it.
 

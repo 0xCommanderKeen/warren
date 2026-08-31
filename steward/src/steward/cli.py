@@ -438,11 +438,20 @@ def _render_library(library: SkillLibrary) -> None:
 def _render_effective_set(
     resident: Resident, skills: Sequence[Skill], library: SkillLibrary
 ) -> None:
+    """Name a resident's effective skill set, and how each copy of it reaches a session.
+
+    The on-disk copy is named as a copy the CLI does not discover, because since steward
+    #206 it is not: every claude session is launched with ``--setting-sources ""``, and a
+    skill under ``.claude/skills`` is discovered through the project setting source. The
+    prompt is the delivery path; the directory is a file a session with ``Read`` can open.
+    Saying "prompt + on disk" here would read as two working channels, which is the shape
+    of claim this repo refuses elsewhere.
+    """
     names = ", ".join(skill.name for skill in skills) or "none"
     click.secho(f"{resident.id}: {names}", fg="green")
     disk = skills_home(resident.manifest.runner)
     where = (
-        f"prompt + {disk}/ in the session's working directory"
+        f"prompt — plus a copy in {disk}/ the session's CLI does not discover"
         if disk and library.configured
         else "prompt only"
     )

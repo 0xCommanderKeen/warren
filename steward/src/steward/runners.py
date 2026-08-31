@@ -303,6 +303,17 @@ TOOL_BOUND_FLAGS = ("--tools", "--strict-mcp-config")
 #: (:attr:`RunRequest.workspace`), read by the same two places for the same reason.
 WORKSPACE_FLAG = "--add-dir"
 
+#: The flag naming which settings files a session loads, and the value steward gives it —
+#: the CLI's spelling for *none of them* (steward #206). One tuple for the same reason
+#: :data:`TOOL_BOUND_FLAGS` is one: :meth:`ClaudeRunner.argv` spends it and
+#: :func:`required_flags` hands the spelling to the doctor probe, and a second copy is a
+#: probe that can go on passing over an argv it no longer describes.
+#:
+#: Unlike the two above, this is not compiled from anything a manifest says — it is a
+#: property of how steward launches every ``claude`` session, so every claude resident is
+#: probed for it whether or not it declared a thing.
+SETTING_SOURCES = ("--setting-sources", "")
+
 _PLACEHOLDER = re.compile(r"\{(prompt|workdir)\}")
 
 log = logging.getLogger("steward.runners")
@@ -955,8 +966,12 @@ class ClaudeRunner(_ProcessRunner):
     kind: ClassVar[str] = "claude"
     binary: str = "claude"
     env_names: ClassVar[tuple[str, ...]] = CLAUDE_ENV_NAMES
-    #: ``claude`` discovers skills under the working directory, so a granted skill is
-    #: both injected into the prompt and written here before the run.
+    #: Where a granted skill is written before the run. Not where the session finds it:
+    #: since steward #206 every claude session is launched with ``--setting-sources ""``
+    #: and ``.claude/skills`` is discovered through the *project* setting source, so the
+    #: CLI no longer sees this directory. The prompt carries each skill's body and is the
+    #: delivery path; this copy is a file a session with ``Read`` can open, and the thing
+    #: a future design that restores discovery would build on.
     skills_dir: ClassVar[str | None] = ".claude/skills"
 
     def argv(self, request: RunRequest) -> list[str]:
@@ -981,11 +996,21 @@ class ClaudeRunner(_ProcessRunner):
         acceptEdits`` still had no Bash. A permissive mode cannot hand back a tool this
         argv took away.
 
-        ``unrestricted`` emits neither flag, so an unbounded resident's argv is byte for
-        byte what it was before this field existed. An empty list emits ``--tools ""``,
+        ``unrestricted`` emits neither flag, so an unbounded resident's tool argv is byte
+        for byte what it was before that field existed. An empty list emits ``--tools ""``,
         which the CLI documents — and which measured out — as *no tools at all*.
+
+        ``--setting-sources ""`` goes on every claude session, bounded or not, and is the
+        one flag here that no manifest asks for (steward #206). Measured 2026-08-31, in
+        ``docs/settings-sources.md``: a settings file at any of the three sources registers
+        a ``SessionStart`` hook that runs, and sets ``permissions.defaultMode``, and neither
+        is gated by the workspace trust flag that was the only thing standing in the way.
+        A session's working directory *is* the resident's memory directory, so ``project``
+        and ``local`` are files under the constrained session's own hand; ``user`` is
+        whatever the launching machine happens to hold. None of the three is a source a
+        resident should read, so none of them is named.
         """
-        argv = [self.binary, "-p", request.prompt, "--output-format", "json"]
+        argv = [self.binary, "-p", request.prompt, "--output-format", "json", *SETTING_SOURCES]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
@@ -1273,10 +1298,13 @@ def build_runner(
 
 
 def skills_home(spec: RunnerSpec) -> str | None:
-    """Return where this runner kind loads on-disk skills from, or ``None``.
+    """Return where this runner kind wants on-disk skills written, or ``None``.
 
-    Answered from the class rather than an instance, so asking "does this brain read
-    skills off disk" never builds a runner, let alone launches one.
+    Answered from the class rather than an instance, so asking "does this brain take a
+    copy on disk" never builds a runner, let alone launches one.
+
+    *Wants written*, not *reads*: since steward #206 a claude session loads no setting
+    sources and does not discover ``.claude/skills`` (see :attr:`ClaudeRunner.skills_dir`).
     """
     runner = RUNNER_KINDS.get(spec.kind)
     return getattr(runner, "skills_dir", None) if runner is not None else None
@@ -1320,14 +1348,20 @@ def _cli_help(binary: str, placement: Placement) -> str | None:
 
 
 def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> tuple[str, ...]:
-    """Return the CLI flags this manifest's declarations compile into, in argv order.
+    """Return the CLI flags a session for this manifest is launched with, in argv order.
 
     Empty for a kind that compiles none — which, for both declarations, is a kind
     validation refuses to pair with the declaration in the first place.
+
+    Never empty for ``claude``, though nothing may be declared at all:
+    :data:`SETTING_SOURCES` is on every claude argv rather than compiled from a
+    declaration, so every claude resident has something the installed binary has to
+    support.
     """
     if spec.kind != ClaudeRunner.kind:
         return ()
-    flags: list[str] = []
+    setting_sources_flag, _value = SETTING_SOURCES
+    flags: list[str] = [setting_sources_flag]
     if not tools.unrestricted:
         flags.extend(TOOL_BOUND_FLAGS)
     if workspace:

@@ -137,10 +137,11 @@ written as instructions. A documented default set (`write-journal`, `daily-summa
 `research`, `escalate`) is held by every resident; everything else is granted by name in
 a manifest, and a name the library does not have fails validation with the closest match
 named. At run time the resident session lifecycle resolves the effective set, injects it into the prompt
-under a frame saying a skill is how-to and never authority, and — for runners that load
-skills off disk — writes it into the session's working directory, removing what is no
-longer granted. The library is shared, so improving a skill improves every resident that
-holds it.
+under a frame saying a skill is how-to and never authority, and — for runners that take a
+copy on disk — writes it into the session's working directory, removing what is no
+longer granted. The prompt is the delivery path: a claude session loads no setting sources
+([docs/settings-sources.md](docs/settings-sources.md)) and so does not discover the on-disk
+copy. The library is shared, so improving a skill improves every resident that holds it.
 
 ```console
 $ steward skills                     # the library, and each resident's effective set
@@ -562,6 +563,14 @@ Most take a matching CLI flag where a command needs one — `--state`, `--db`, `
 `--allow-open`, `--residents` — and the flag wins over the variable.
 
 ### What a session inherits
+
+**A session does not get the machine's settings either.** Every `claude` session is
+launched with `--setting-sources ""`, so none of `~/.claude/settings.json`,
+`<workdir>/.claude/settings.json` or its `.local` sibling is read: a settings file at any
+of those registers hooks that run and sets the permission mode, none of it gated by the
+workspace trust flag that used to be the only thing in the way, and the working directory
+is the resident's own memory directory. The measurement, and what closing the channel
+costs, are in [docs/settings-sources.md](docs/settings-sources.md).
 
 **A session does not get steward's environment.** A locally placed session gets an
 allowlist (`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands
