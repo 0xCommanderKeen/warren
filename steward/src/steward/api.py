@@ -58,6 +58,7 @@ from steward import manifest as m
 from steward.approvals import WithheldValueError, redact_decision, restore_withheld
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.claims import ResidentClaims
 from steward.deploy import Transport
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
@@ -517,8 +518,26 @@ DELEGATION_REFUSED_STATUS = 409
 # --------------------------------------------------------------------------------------
 
 
+#: The error code a run-now is refused with when the resident is already busy — whether
+#: this process is running it or another one is (warren#111). One code, because from the
+#: caller's side it is one fact: ask again when the session that is going has finished.
+ALREADY_RUNNING_ERROR = "already_running"
+
+
 class AlreadyRunningError(Exception):
-    """Raised when a routine is asked to run while its previous run is still going."""
+    """Raised when a resident is asked to run while a session of its own is still going.
+
+    ``reason`` is the sentence the refusal is served with, because the two ways this can
+    happen are worth telling apart: this process already has that routine in flight, or
+    another process — the scheduler daemon, a dispatch, a chat daemon — is running the
+    resident right now (warren#111). Same 409 and the same code either way; a caller that
+    only needs to know when to ask again reads either sentence the same way.
+    """
+
+    def __init__(self, reason: str) -> None:
+        """Carry the sentence this refusal is served with."""
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(slots=True)
@@ -531,9 +550,11 @@ class ManualRuns:
     Only the ``trigger`` differs — ``manual`` instead of ``schedule`` — so the ledger
     can tell work steward decided to do from work a human asked for (steward #23).
 
-    The scheduler's other promise carries over too: one run per routine at a time. A
-    second run-now while the first is still going is refused with a 409 rather than
-    queued, because a queue would let the village show an hourly routine as a backlog.
+    The scheduler's other promise carries over too, now in both halves: one run per routine
+    at a time here, and one session per resident across every process, read from the
+    scheduler's own claim (:mod:`steward.claims`). A second run-now while the first is
+    still going is refused with a 409 rather than queued, because a queue would let the
+    village show an hourly routine as a backlog.
     """
 
     scheduler: Scheduler
@@ -549,10 +570,27 @@ class ManualRuns:
         self._pool = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="run-now")
 
     def submit(self, item: ScheduledRoutine, request_id: str) -> None:
-        """Queue exactly one run of ``item``, or refuse because one is already going."""
+        """Queue exactly one run of ``item``, or refuse because one is already going.
+
+        The cross-process claim is *read* here and taken in the fire path, which is the
+        same division ``guard.allow`` already lives on: this read is what turns a genuine
+        overlap into a 409 a human sees, and the claim the fire actually takes is what
+        settles a race two reads could both pass. So a refusal here is never wrong, and a
+        pass here is not yet a promise.
+        """
+        claims = self.scheduler.claims
+        holder = claims.holder(item.resident.id) if claims is not None else None
+        if holder is not None:
+            raise AlreadyRunningError(
+                f"{item.resident.id} is already running — {holder.describe()}; steward runs "
+                "one session per resident at a time, so ask again when it has finished"
+            )
         with self._lock:
             if item.key in self._inflight:
-                raise AlreadyRunningError(item.key)
+                raise AlreadyRunningError(
+                    f"a run of {item.key} is still going; steward skips an overlapping fire "
+                    "rather than queueing one, so ask again when it has finished"
+                )
             self._inflight.add(item.key)
             future = self._pool.submit(self._fire, item, request_id)
             self._futures.append(future)
@@ -1184,6 +1222,12 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         library=library,
         guard=guard,
     )
+    # The one-session-per-resident claim, shared by the two things in this process that can
+    # start a session: a manual fire and the board dispatch the hooks above run
+    # (:mod:`steward.claims`, warren#111). The API is the *other* process the scheduler
+    # daemon has always been unable to see, so this is the surface the issue is about.
+    claims = ResidentClaims(db)
+    hooks.claims = claims
     runs = ManualRuns(
         scheduler=Scheduler(
             [],
@@ -1195,6 +1239,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             guard=guard,
             hooks=hooks,
             registry=db,
+            claims=claims,
         ),
         store=db,
     )
@@ -1863,14 +1908,15 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         request_id = accept(request, "queued", {"routine": item.key})
         try:
             runs.submit(item, request_id)
-        except AlreadyRunningError:
+        except AlreadyRunningError as exc:
+            # Two overlaps, one refusal: this process already has that routine in flight, or
+            # another process is running the resident and said so in the shared claim
+            # (warren#111). The scheduler daemon's in-process lock was invisible here until
+            # that claim became durable, which is the whole of the issue. Recorded in the
+            # request log either way, so a run somebody asked for and did not get is a fact
+            # rather than a silence.
             db.set_request_outcome(request_id, "refused: already running")
-            _refuse(
-                409,
-                "already_running",
-                f"a run of {item.key} is still going; steward skips an overlapping fire "
-                f"rather than queueing one, so ask again when it has finished",
-            )
+            _refuse(409, ALREADY_RUNNING_ERROR, exc.reason)
         return {
             "request_id": request_id,
             "status": "accepted",

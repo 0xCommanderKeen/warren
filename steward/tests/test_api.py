@@ -28,6 +28,7 @@ from conftest import (
     SECOND_RESIDENT_UID,
     VALID_RESIDENT_UID,
     VALID_SOUL,
+    ClaimHolderSpawner,
     ResidentWriter,
     SkillWriter,
     valid_manifest,
@@ -35,7 +36,16 @@ from conftest import (
 from steward import events as ev
 from steward import journal
 from steward import manifest as m
-from steward.api import ApiConfig, ApiError, _ApprovalBodyDepthMiddleware, create_app
+from steward.api import (
+    AlreadyRunningError as ApiAlreadyRunningError,
+)
+from steward.api import (
+    ApiConfig,
+    ApiError,
+    ManualRuns,
+    _ApprovalBodyDepthMiddleware,
+    create_app,
+)
 from steward.deploy import LocalTransport
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
@@ -56,7 +66,13 @@ from steward.operator_auth import new_operator_credential, operator_email
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
 from steward.runs import RUN_ROUTINE, RUN_TASK
-from steward.scheduler import FireReport, ScheduledRoutine
+from steward.scheduler import (
+    FireReport,
+    ScheduledRoutine,
+    Scheduler,
+    SchedulerState,
+    load_scheduled,
+)
 from steward.session_auth import (
     SESSION_CREDENTIAL_PREFIX,
     credential_digest,
@@ -404,6 +420,96 @@ def test_an_overlapping_run_is_refused_rather_than_queued(api: ApiFactory) -> No
 
     refused = [r for r in harness.store.requests() if r.outcome.startswith("refused")]
     assert len(refused) == 1
+
+
+def test_the_in_process_guard_still_catches_a_second_submit(
+    tmp_path: Path, write_resident: ResidentWriter
+) -> None:
+    """One routine, one run, even in the same millisecond.
+
+    The durable claim is taken in the fire path, not at submit, so this guard still earns
+    its keep: a second submit arriving before the first has reached the claim is refused
+    here, and would otherwise be two sessions of one routine.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    def block(_request: RunRequest) -> RunResult:
+        entered.set()
+        release.wait(timeout=10.0)
+        return RunResult(outcome=Outcome.OK, exit_status=0)
+
+    path = write_resident(valid_manifest())
+    with Store(":memory:") as store:
+        scheduler = Scheduler(
+            load_scheduled(path.parent),
+            emitter=ev.NullEmitter(),
+            state=SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+            runner_factory=lambda spec, placement: MockRunner(spec, placement, behavior=block),
+        )
+        assert scheduler.claims is None, "no durable claim: this is the in-process guard alone"
+        runs = ManualRuns(scheduler=scheduler, store=store)
+        item = scheduler.scheduled[0]
+        try:
+            runs.submit(item, "request-one")
+            assert entered.wait(timeout=10.0)
+            with pytest.raises(ApiAlreadyRunningError, match="is still going"):
+                runs.submit(item, "request-two")
+        finally:
+            release.set()
+            runs.wait(timeout=10.0)
+            runs.shutdown()
+
+
+def test_a_run_now_is_refused_while_another_process_runs_the_resident(
+    api: ApiFactory, tmp_path: Path, claim_holder: ClaimHolderSpawner
+) -> None:
+    """warren#111 at its loudest surface: the daemon's lock was invisible to this process.
+
+    A real second process holds the resident's claim, so the API refuses with a 409 that
+    names what is running rather than accepting a 202 it would later record as skipped.
+    """
+    database = tmp_path / "steward.db"
+    harness = api(db_path=database)
+    claim_holder(database, "test-agent", ref="daily-summary", run_id="held-run")
+
+    response = harness.client.post("/residents/test-agent/routines/daily-summary/run")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["error"] == "already_running"
+    assert "daily-summary" in detail["message"]
+    assert "held-run" in detail["message"]
+    assert harness.events("routine_started") == []
+    refused = [r for r in harness.store.requests() if r.outcome.startswith("refused")]
+    assert len(refused) == 1, "a run somebody asked for and did not get is still a fact"
+
+
+def test_a_run_now_goes_ahead_once_the_other_process_lets_go(
+    api: ApiFactory, tmp_path: Path, claim_holder: ClaimHolderSpawner
+) -> None:
+    database = tmp_path / "steward.db"
+    harness = api(db_path=database)
+    holder = claim_holder(database, "test-agent")
+    assert (
+        harness.client.post("/residents/test-agent/routines/daily-summary/run").status_code == 409
+    )
+
+    holder.kill()
+    # A killed holder released nothing, so the row is still there — and still refused,
+    # because the grace has not run out. That is the lease doing its job, not a bug: the
+    # cost of a crash is one grace window, not a wedged resident (see tests/test_claims.py
+    # for the reclaim itself, which is far too slow to wait out here).
+    stranded = harness.store.resident_claim("test-agent")
+    assert stranded is not None
+    assert stranded.released_at is None
+    harness.store.release_resident_claim("test-agent", token=stranded.token)
+
+    second = harness.client.post("/residents/test-agent/routines/daily-summary/run")
+    assert second.status_code == 202
+    harness.settle()
+    assert len(harness.events("routine_started")) == 1
 
 
 # --------------------------------------------------------------------------------------

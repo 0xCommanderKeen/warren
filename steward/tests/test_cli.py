@@ -23,7 +23,9 @@ from conftest import (
     valid_manifest,
 )
 from steward import cli
+from steward import events as ev
 from steward.budgets import BudgetGuard
+from steward.claims import CLAIM_GRACE_S
 from steward.cli import main
 from steward.deploy import LocalTransport, TransportError
 from steward.journal import latest_entry, write_entry
@@ -2577,6 +2579,74 @@ def test_doctor_says_so_when_a_resident_takes_no_letters(
 
     assert result.exit_code == 0, result.output
     assert "test-agent: inbox — takes no letters" in result.output
+
+
+# ------------------------------------------ the cross-process session claim (warren#111)
+
+
+def test_doctor_names_the_process_running_a_resident(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """Where an operator finds out what the 409 they just got was actually about."""
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.claim_resident(
+            "test-agent",
+            token="t",
+            holder="dxp2800:4242",
+            kind="routine",
+            ref="daily-summary",
+            run_id="run-abc",
+            stale_before=ev.utc_now_iso(),
+        )
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: running — routine 'daily-summary' (run run-abc) held by dxp2800:4242" in (
+        result.output
+    )
+
+
+def test_doctor_says_a_stale_claim_frees_itself(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A crashed holder is a fact worth showing, and worth showing as temporary."""
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    db = tmp_path / "steward.db"
+    long_ago = datetime.now(UTC) - timedelta(seconds=CLAIM_GRACE_S * 10)
+    with Store(db) as store:
+        store.claim_resident(
+            "test-agent",
+            token="t",
+            holder="dxp2800:4242",
+            kind="routine",
+            ref="daily-summary",
+            stale_before=ev.utc_now_iso(),
+            now=ev.utc_now_iso(long_ago),
+        )
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: a stale session claim is on file" in result.output
+    assert "the next fire reclaims it" in result.output
+
+
+def test_doctor_says_nothing_is_running_after_a_session_ends(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    residents_dir = write_resident(budgeted_manifest()).parent.parent
+    db = tmp_path / "steward.db"
+    with Store(db) as store:
+        store.claim_resident("test-agent", token="t", holder="h", stale_before=ev.utc_now_iso())
+        store.release_resident_claim("test-agent", token="t")
+
+    result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(db)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: no session running" in result.output
 
 
 # --------------------------------------------------------------------------------------

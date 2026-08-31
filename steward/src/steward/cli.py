@@ -6,7 +6,7 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ from steward.approvals import (
 )
 from steward.board import BoardReport, Dispatcher, board_preflight, claimable_skills
 from steward.budgets import BudgetGuard, BudgetStatus
+from steward.claims import CLAIM_GRACE_S, ResidentClaims
 from steward.delegation import DelegationError, Delegator, Handoff, max_depth
 from steward.deploy import TransportError, placement_for
 from steward.health import HealthFailure
@@ -537,6 +538,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
             problems += _report_journal(resident)
             problems += _report_budget(guard.status(resident.manifest))
             problems += _report_inbox(resident, store)
+            problems += _report_session_claim(resident, store)
         problems += _report_topology(result.residents)
         problems += _report_health_failures(store.health.latest())
         problems += _report_watchdog(store.last_watchdog_pass())
@@ -745,6 +747,34 @@ def _report_topology(residents: Sequence[Resident]) -> int:
     restarts anything.
     """
     _print_topology(survey(residents), alarm="yellow")
+    return 0
+
+
+def _report_session_claim(resident: Resident, store: Store) -> int:
+    """Say who is running this resident right now, if anybody is (warren#111).
+
+    Never a problem on its own — a resident with a session going is a resident doing its
+    job. It is here because the *refusal* it causes turns up somewhere else entirely: a
+    routine skipped as "already has a live session", a 409 on a run-now, a resident the
+    board passed over. This is where an operator finds out which process has it, and — when
+    the holder died and left the claim behind — that it frees itself rather than needing a
+    hand. Saying "reclaimable" is the whole point of printing the stale case at all.
+    """
+    claim = store.resident_claim(resident.id)
+    if claim is None:
+        return 0
+    now = datetime.now(UTC)
+    if claim.released_at is not None:
+        click.secho(f"{resident.id}: no session running", fg="bright_black")
+        return 0
+    if claim.live_at(ev.utc_now_iso(now - timedelta(seconds=CLAIM_GRACE_S))):
+        click.secho(f"{resident.id}: running — {claim.describe()}", fg="green")
+        return 0
+    click.secho(
+        f"{resident.id}: a stale session claim is on file — {claim.describe()}; its holder "
+        "stopped reporting in, so the next fire reclaims it",
+        fg="yellow",
+    )
     return 0
 
 
@@ -1020,13 +1050,20 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     # one by expiry, or spend a budget. With no hooks and no guard the scheduler simply
     # fires routines, as it did before the board, approvals, and budgets existed.
     registry = None
+    claims = None
     try:
         if dry_run:
             hooks, guard = None, None
         else:
             registry = _open_store(db)
             guard = BudgetGuard(registry, ev.EventEmitter.from_env())
-            hooks = Dispatcher.from_path(residents, registry, workdir=workdir, guard=guard)
+            # One claim object for the daemon, shared with the board dispatch it runs on
+            # every tick, so the two things this process can start a session with agree on
+            # who is busy — and so does every other process (warren#111).
+            claims = ResidentClaims(registry)
+            hooks = Dispatcher.from_path(
+                residents, registry, workdir=workdir, guard=guard, claims=claims
+            )
         yield Scheduler(
             scheduled,
             state=SchedulerState.load(state if state is not None else default_state_path()),
@@ -1037,6 +1074,7 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
             hooks=hooks,
             guard=guard,
             registry=registry,
+            claims=claims,
             # What makes `steward serve` notice a manifest that changed under it. A
             # rehearsal is given no source: `--dry-run` reports on the tree as it was read,
             # and a reload halfway through would make the report describe two of them.

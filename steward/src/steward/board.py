@@ -48,7 +48,7 @@ reconstructible from those four events alone.
 
 import contextlib
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cached_property
@@ -58,6 +58,7 @@ from typing import cast
 from steward import approvals
 from steward import delegation as dg
 from steward import events as ev
+from steward.claims import ClaimHeld, ClaimRefused, ResidentClaims
 from steward.deploy import placement_for
 from steward.manifest import (
     DEFAULT_BOARD_LEASE_S,
@@ -367,11 +368,20 @@ class Dispatcher:
     #: the same honest defaults the board ships with.
     delegation_lease_s: int = DEFAULT_BOARD_LEASE_S
     delegation_timeout_s: int = DEFAULT_BOARD_TIMEOUT_S
+    #: The cross-process "one session per resident" claim (:mod:`steward.claims`,
+    #: warren#111). Built from this dispatcher's own store when nothing is injected,
+    #: because a dispatch is one of the processes the claim exists to keep apart: the
+    #: scheduler daemon firing a routine and ``steward board dispatch`` picking up a task
+    #: for the same resident used to be able to open two sessions at once. A rehearsal is
+    #: given none — it claims nothing, in the database or anywhere else.
+    claims: ResidentClaims | None = None
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the dispatcher's existing dependencies."""
+        if self.claims is None and not self.dry_run:
+            self.claims = ResidentClaims(self.store)
         self.sessions = ResidentSessions(
             workdir=self.workdir,
             runner_factory=self.runner_factory,
@@ -417,6 +427,7 @@ class Dispatcher:
         sweep_only: bool = False,
         dry_run: bool = False,
         max_delegation_depth: int | None = None,
+        claims: ResidentClaims | None = None,
     ) -> Dispatcher:
         """Build a dispatcher over the valid residents of a residents tree.
 
@@ -443,6 +454,7 @@ class Dispatcher:
             max_delegation_depth=(
                 max_delegation_depth if max_delegation_depth is not None else dg.max_depth()
             ),
+            claims=claims,
         )
 
     @cached_property
@@ -1015,6 +1027,7 @@ class Dispatcher:
                 admissions,
                 pick=self.take_delivery,
                 count_for=lambda _r: self.max_delegations_per_wake,
+                kind="delegated",
             )
             reports += self._drain(
                 board_residents(self.residents),
@@ -1023,6 +1036,7 @@ class Dispatcher:
                 admissions,
                 pick=self.claim,
                 count_for=lambda r: r.manifest.board.max_claims_per_wake,
+                kind="board",
             )
         finally:
             for admission in admissions.values():
@@ -1042,6 +1056,7 @@ class Dispatcher:
         *,
         pick: Callable[[Resident, datetime], JobRecord | None],
         count_for: Callable[[Resident], int],
+        kind: str = "",
     ) -> list[BoardReport]:
         """Let each un-refused resident claim and work up to its cap. Never raises.
 
@@ -1052,21 +1067,54 @@ class Dispatcher:
         ``pick`` is the claim — an inbox pickup or a board claim — and the clock is read
         *per claim*, not once, so a slow drain's Nth lease is measured from when it was
         actually handed out rather than from the top of the dispatch (steward #73).
+
+        The resident's cross-process session claim is taken *before* ``pick``, and held for
+        the whole of its turn. Before, because a task claimed and then not worked would sit
+        leased to a resident that never started it; and for the whole turn, because the cap
+        lets one resident work several tasks in a row and each of them is a session. A
+        resident somebody else is already running is skipped with a line saying who has it,
+        which is what this loop already does for every other reason not to work.
         """
         reports: list[BoardReport] = []
         for resident in residents:
             if resident.id in refusals:
                 continue
-            for _ in range(count_for(resident)):
-                admission = admissions[resident.id]
-                refusal = self.sessions.revalidate(admission)
-                if refusal is not None:
-                    log.warning("%s: not working — %s", resident.id, refusal.reason)
-                    break
-                job = pick(resident, self.clock())
-                if job is None:
-                    break
-                reports.append(self.work(resident, job, moment, admission=admission))
+            with self._session_claim(resident, kind) as claim:
+                if isinstance(claim, ClaimRefused):
+                    log.info("%s: not working — %s", resident.id, claim.reason)
+                    continue
+                reports.extend(self._drain_one(resident, moment, admissions, pick, count_for))
+        return reports
+
+    @contextlib.contextmanager
+    def _session_claim(self, resident: Resident, kind: str) -> Iterator[ClaimHeld | ClaimRefused]:
+        """Hold this resident's cross-process claim, or nothing at all when none is configured."""
+        if self.claims is None:
+            yield ClaimHeld()
+            return
+        with self.claims.hold(resident.id, kind=kind) as claim:
+            yield claim
+
+    def _drain_one(
+        self,
+        resident: Resident,
+        moment: datetime,
+        admissions: Mapping[str, Admission],
+        pick: Callable[[Resident, datetime], JobRecord | None],
+        count_for: Callable[[Resident], int],
+    ) -> list[BoardReport]:
+        """Work one claimed resident's turn, up to its cap. See :meth:`_drain`."""
+        reports: list[BoardReport] = []
+        for _ in range(count_for(resident)):
+            admission = admissions[resident.id]
+            refusal = self.sessions.revalidate(admission)
+            if refusal is not None:
+                log.warning("%s: not working — %s", resident.id, refusal.reason)
+                break
+            job = pick(resident, self.clock())
+            if job is None:
+                break
+            reports.append(self.work(resident, job, moment, admission=admission))
         return reports
 
     def _claimants(self) -> list[Resident]:
