@@ -171,6 +171,11 @@ def encode_text(value):
     return value + "\n"
 
 
+def encode_raw(line):
+    """Pass an already-encoded line through unchanged."""
+    return line
+
+
 Generation = collections.namedtuple("Generation", "path records torn complete")
 
 
@@ -191,7 +196,7 @@ class Spool:
     def __init__(
         self,
         path,
-        limits,
+        limits=None,
         decode=json_record,
         encode=encode_json,
         key=None,
@@ -201,7 +206,8 @@ class Spool:
         torn_bytes=256 * 1024,
     ):
         self.path = path
-        self.limits = limits if callable(limits) else (lambda: limits)
+        # A spool used only to name, read, publish or retire needs no capacity.
+        self.limits = limits if limits is None or callable(limits) else (lambda: limits)
         self.decode = decode
         self.encode = encode
         self.key = key
@@ -355,7 +361,9 @@ class Spool:
         Capacity is measured in encoded UTF-8 bytes, never in-memory size, so
         the bound describes what the file will actually cost.
         """
-        limit_records, limit_bytes = self.limits()
+        if self.limits is None and (max_records is None or max_bytes is None):
+            raise ValueError("spool has no capacity to bound records against")
+        limit_records, limit_bytes = self.limits() if self.limits else (0, 0)
         if max_records is not None:
             limit_records = max_records
         if max_bytes is not None:
@@ -372,7 +380,14 @@ class Spool:
     # -- writing -------------------------------------------------------
 
     def publish(
-        self, records, target=None, staging=None, retire=(), quarantine=(), extra=()
+        self,
+        records,
+        target=None,
+        staging=None,
+        retire=(),
+        quarantine=(),
+        extra=(),
+        encode=None,
     ):
         """Publish one generation, keep the evidence, then retire the sources.
 
@@ -390,9 +405,10 @@ class Spool:
         (:meth:`discard_staging`), so a crash during step 1 changes nothing.
         """
         target = self.path if target is None else target
+        encode = self.encode if encode is None else encode
         pending = stage_lines(
             target if staging is None else staging,
-            (self.encode(record) for record in records),
+            (encode(record) for record in records),
         )
         publish_staged([(pending, target)] + list(extra))
         for source, torn in quarantine:
