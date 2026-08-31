@@ -241,6 +241,29 @@ def test_a_docker_that_does_not_answer_names_what_is_left_unsupervised(
     assert "nothing is supervising test-agent" in complaint.text
 
 
+def test_a_docker_that_exits_zero_with_no_server_did_not_answer(
+    write_resident: ResidentWriter,
+) -> None:
+    """The trap the status alone walks into, and the reason this is not a status check.
+
+    Measured against docker 27.3.1: `docker info` against an unreachable `DOCKER_HOST`
+    prints the client's half of the report and exits **0**, with the server fields empty.
+    Believing the status there would report a client talking to itself as a healthy
+    daemon — the exact false "everything is fine" this module exists to stop telling. The
+    real client's behaviour is pinned in `test_container_integration.py`.
+    """
+    report = t.survey(
+        [supervised_resident(write_resident, host="dxp2800")],
+        env={t.BURROW_ENV: "laptop", t.DOCKER_HOST_ENV: "tcp://127.0.0.1:1"},
+        command=FakeDocker("\t\n"),
+    )
+
+    assert not report.daemon.answered
+    assert report.daemon.complaint == t.NO_SERVER
+    assert not report.ok
+    assert "no server version" in report.notes()[0].text
+
+
 def test_an_unanswerable_docker_never_makes_a_container_look_reachable(
     write_resident: ResidentWriter,
 ) -> None:

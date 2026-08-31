@@ -110,6 +110,17 @@ descending order of how much they are worth:
    an operator who has to name their burrow is saying the hostname is the wrong answer.
 3. **The hostname**, and its first label, as the fallback nobody has to configure.
 
+One measured detail about that probe, because it caught this implementation out: **`docker
+info` exits 0 even when no daemon answers.** Against a `DOCKER_HOST` pointing at nothing,
+docker 27.3.1 prints the *client's* half of the report, writes "Cannot connect to the
+Docker daemon" to stderr, and still exits zero — while `docker version --format
+'{{.Server.Version}}'` exits 1 on the same endpoint. A status-only check therefore reports
+a client talking to itself as a healthy daemon, which is the exact false "everything is
+fine" this report exists to stop telling. So "answered" means *the server fields came back
+filled in*, and the real client's behaviour is pinned by a test
+(`test_docker_info_exits_zero_at_an_endpoint_with_no_daemon`) that will fail if a future
+docker fixes it.
+
 The severities differ on purpose:
 
 - **`steward doctor` warns, and still exits 0.** Doctor is routinely run on a laptop while

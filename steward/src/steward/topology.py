@@ -90,6 +90,21 @@ DAEMON_FORMAT = "{{.Name}}\t{{.ServerVersion}}"
 #: steward did not ask, and the difference is the whole point of this module.
 NOT_ASKED = "docker was not asked: no resident here declares a container"
 
+#: Why an exit status of zero is not enough to say a daemon answered.
+#:
+#: Measured against docker 27.3.1: with ``DOCKER_HOST`` pointing at nothing,
+#: ``docker info`` prints the *client's* half of the report, writes "Cannot connect to the
+#: Docker daemon at …" to stderr, and **exits 0** — while ``docker version --format
+#: '{{.Server.Version}}'`` exits 1 on the same endpoint. A status-only check therefore
+#: reports a client talking to itself as a healthy daemon, which is precisely the false
+#: "everything is fine" this module exists to stop telling.
+#:
+#: ``docker version`` would be the cleaner reachability probe and does not carry
+#: ``.Name`` — and the daemon's own name is the one *measured* signal this module is built
+#: on, worth more than any hostname. So the probe stays ``info`` and the server fields
+#: being filled in is what "answered" means.
+NO_SERVER = "docker exited 0 but reported no server version, so no daemon answered there"
+
 
 def this_burrow(env: Mapping[str, str] | None = None) -> str:
     """Return what this machine is called, for a line a human reads.
@@ -293,6 +308,8 @@ def _ask_docker(command: CommandRun, binary: str = "docker") -> Daemon:
     # Partition before stripping: a daemon that will not name itself answers with a
     # leading tab, and stripping first would slide the version into the name field.
     name, _, version = outcome.stdout.partition("\t")
+    if not version.strip():
+        return Daemon(complaint=NO_SERVER)
     return Daemon(name=name.strip(), version=version.strip())
 
 

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from steward import runners as r
+from steward import topology
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import ToolGrant
 from steward.skills import Skill, materialize
@@ -208,6 +209,27 @@ def test_a_bogus_docker_host_reaches_the_real_docker_client(
 
     assert not outcome.ok
     assert NOWHERE in outcome.stderr, outcome.stderr
+
+
+def test_docker_info_exits_zero_at_an_endpoint_with_no_daemon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Why `steward.topology` does not trust the exit status of its own probe.
+
+    Against an unreachable endpoint, `docker info` prints the *client's* half of the
+    report, writes "Cannot connect to the Docker daemon" to stderr, and exits **0** — so a
+    status-only reachability check reports a client talking to itself as a healthy daemon.
+    `_ask_docker` requires the server fields to be filled in instead, and this is the
+    measurement that rule rests on; a future docker that starts exiting non-zero here is
+    welcome to break this test.
+    """
+    monkeypatch.setenv("DOCKER_HOST", NOWHERE)
+
+    outcome = r.run_argv([DOCKER, "info", "--format", topology.DAEMON_FORMAT])
+
+    assert outcome.ok, "docker info stopped exiting 0 at a dead endpoint; simplify the probe"
+    assert outcome.stdout.strip() == "", outcome.stdout
+    assert topology._ask_docker(r.run_argv).complaint == topology.NO_SERVER
 
 
 def test_a_granted_skill_crosses_the_mount_and_pruning_removes_it(tmp_path: Path) -> None:
