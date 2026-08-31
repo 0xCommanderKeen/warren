@@ -14,7 +14,8 @@
 #                     python3 — is installed below by name, and a resident's image should
 #                     be readable in one screen. (life-agent's hand-rolled container uses
 #                     full `node:22` and apt-gets the rest *at runtime, on every cold
-#                     start*; baking it is the whole point of moving.)
+#                     start*; baking it is the whole point of moving.) Pinned by digest,
+#                     not by that tag — see "The base pin" below.
 # `@anthropic-ai/…`   Pinned by build arg. A resident whose brain silently changed version
 #                     under it on a rebuild is a resident nobody can say anything true
 #                     about, so the pin lives in the Makefile and moves deliberately.
@@ -44,17 +45,48 @@
 # The NAS (dxp2800) is x86_64 and this repo is usually edited on an arm64 Mac, so
 # `make image` builds `--platform linux/amd64` through buildx. Building without buildx on
 # an Apple Silicon machine produces an arm64 image that will not start on the NAS.
+#
+# ## The base pin
+#
+# `node:22-slim` is a tag, and a tag moves: the same `docker build` a month apart is two
+# different images, and nothing afterwards can say which one a resident got. The digest
+# below is the *manifest list* for that tag — one digest that still resolves per-arch, so
+# it works for both the amd64 build for the NAS and an arm64 build on the Mac. Pinning a
+# per-arch digest instead would build on exactly one of those two machines.
+#
+# Resolved 2026-08-31 from `node:22-slim` = `22-bookworm-slim`, pushed 2026-08-25.
+# To move it — deliberately, as its own commit, with the date above updated:
+#
+#   $ docker buildx imagetools inspect node:22-slim \
+#       --format '{{.Manifest.Digest}} {{.Manifest.MediaType}}'
+#
+# The MediaType must say `index` or `manifest.list` — that is how you know you copied the
+# multi-arch digest and not one architecture's. CI builds this image on every PR that
+# touches it (.github/workflows/steward.yml), so a bad digest fails there, not on the NAS.
 
-ARG NODE_TAG=22-slim
-FROM node:${NODE_TAG}
+FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 ARG CLAUDE_VERSION=2.1.243
 ARG DEBIAN_FRONTEND=noninteractive
 
+# What commit this image was built from. `make image` passes the real one; the default is
+# `unknown` because a bare `docker build docker/resident` genuinely does not know, and a
+# label that guessed would be worse than one that admits it.
+ARG IMAGE_REVISION=unknown
+
 LABEL org.opencontainers.image.title="steward-resident"
 LABEL org.opencontainers.image.description="Runtime for a steward resident: claude CLI plus burrow's hook emitter."
-LABEL org.opencontainers.image.source="https://github.com/0xCommanderKeen/steward"
+LABEL org.opencontainers.image.source="https://github.com/0xCommanderKeen/warren"
+LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 
+# Not version-pinned, deliberately, and this is the one floating input left. Debian points
+# a suite at whatever is current, so `curl=7.88.1-10+deb12u5` stops resolving the moment
+# bookworm ships the next security update and the build starts failing for the one reason
+# nobody wants: because a patch landed. Freezing it properly means snapshot.debian.org and
+# a second thing to refresh; what these four packages actually give a resident (a CA
+# bundle, an HTTP client, git, a python) is stable across bookworm point releases in a way
+# the claude CLI and the node runtime are not — which is why those two are pinned and this
+# is not. Revisit if a bookworm update ever breaks a resident.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \

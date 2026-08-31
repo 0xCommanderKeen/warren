@@ -17,16 +17,32 @@ PLATFORM ?= linux/amd64
 NAS ?= Miha@dxp2800
 
 #: The claude CLI is pinned, not floating: an image whose brain changes under it on a
-#: rebuild is an image nobody can say anything true about. Bump this deliberately.
+#: rebuild is an image nobody can say anything true about. Bump this deliberately — and in
+#: both places: the Dockerfile carries the same literal as its `ARG CLAUDE_VERSION`
+#: default, for `docker build` without this Makefile, and tests/test_resident_image.py
+#: fails when the two disagree.
 CLAUDE_VERSION ?= 2.1.243
+
+#: What the built image records as `org.opencontainers.image.revision`, so that "this
+#: resident runs steward-resident:latest" can be turned back into a commit.
+#:
+#: `-dirty` when anything the build reads is uncommitted: an image built from bytes that
+#: are in no commit must not name one, or the label is a lie that reads like provenance.
+#: `git status --porcelain` rather than `git diff`, because docker's build context includes
+#: *untracked* files and a diff cannot see those; over this Makefile as well as
+#: docker/resident, because CLAUDE_VERSION — which decides which brain the image gets — is
+#: passed from here. Outside a git checkout both halves are empty and the label reads
+#: `unknown`, which is the honest answer.
+REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)$(shell test -z "$$(git status --porcelain -- docker/resident Makefile 2>/dev/null)" || echo -dirty)
 
 #: Where the emitter's source lives, for `make vendor-emitter`. Since the warren monorepo
 #: (2026-08-31) that is the sibling directory `../chronicle`, not a separate checkout.
 #: hooks/emit.py is still *vendored* into docker/resident/burrow-emit.py — a copy, not a
 #: symlink into ../chronicle — because the image is built from this directory alone and
 #: docker cannot COPY from outside its build context. tests/test_resident_image.py fails
-#: when the copy drifts from the recorded checksum, and CI runs that test; it does not run
-#: docker. Override for a checkout elsewhere: `make vendor-emitter BURROW=/path/to/chronicle`.
+#: when the copy drifts from the recorded checksum, and CI runs that test in its `check`
+#: job — long before the `image` job builds anything.
+#: Override for a checkout elsewhere: `make vendor-emitter BURROW=/path/to/chronicle`.
 BURROW ?= ../chronicle
 
 #: The committed JSON Schema artifact, at the path the schema's own id promises. Burrow
@@ -72,13 +88,21 @@ build:
 clean:
 	rm -rf dist .pytest_cache .ruff_cache .coverage htmlcov
 
-# Build the image a provisioned resident runs. Not part of `check`: CI has no docker and
-# never builds this, so the tests around it are lint-level (see tests/test_resident_image.py).
+# Build the image a provisioned resident runs. Not part of `check` — `check` must stay
+# runnable without docker — but CI runs exactly this target in its own `image` job
+# (.github/workflows/steward.yml), which is what gives the apt and npm layers, the
+# entrypoint and smoke.sh any execution coverage at all.
+#
+# No `--pull`: the base is pinned by digest, so there is nothing newer for a pull to find.
+# A layer cache can still hand back an old apt layer, which is what `--no-cache` would be
+# for — but a rebuild that reruns apt is also a rebuild that can differ from the last one,
+# and the honest fix for that is a snapshot, not a flag. See the Dockerfile's apt layer.
 image:
 	docker buildx build \
 	  --platform $(PLATFORM) \
 	  --load \
 	  --build-arg CLAUDE_VERSION=$(CLAUDE_VERSION) \
+	  --build-arg IMAGE_REVISION=$(REVISION) \
 	  -t $(IMAGE):$(IMAGE_VERSION) \
 	  -t $(IMAGE):latest \
 	  docker/resident
