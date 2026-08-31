@@ -304,9 +304,22 @@ class NotificationTests(unittest.TestCase):
         }
         self.assertEqual(len(keys), 1 + len(variants))
 
-    def test_structured_notification_identity_matches_shared_cross_language_vector(
-        self,
-    ):
+    def test_structured_notification_identity_pins_the_persisted_digest_format(self):
+        """``notification-identity.json`` is a golden digest, not a parity vector.
+
+        It was written when a JavaScript half had to agree on the same key; that
+        half is gone (warren#219) and no other language computes this digest.
+        What survives is a storage obligation: the `structured-v3-sha256-` key is
+        written to the durable notification store, so changing how it is derived
+        would re-notify every knock already on disk. The vector deliberately
+        carries untrimmed whitespace, an astral-plane character, a repeated
+        option, unsorted keys and `1.0`, because `_canonical_json_bytes` folds
+        key order and number spelling but not whitespace or array order.
+
+        This encoder is intentionally not ``typed_json`` (warren#249): it hashes
+        UTF-16BE code units for a JavaScript-shaped key sort, while typed_json
+        owns the on-disk capsule format. The two must be free to diverge.
+        """
         path = os.path.join(
             os.path.dirname(__file__), "tests", "fixtures", "notification-identity.json"
         )

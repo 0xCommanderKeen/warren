@@ -577,9 +577,11 @@ Exact close replays and all later conflicts are ignored with bounded, deduplicat
 diagnostics, so neither an earlier timestamp nor an equal timestamp can replace the
 rendered decision. `tests/fixtures/approval-lifecycle.json` and
 `approval-identity.json` were written as shared vectors driving the JavaScript
-projection against Python rotation. The JavaScript side is gone and no Python
-test loads them yet, so they record these rules without currently enforcing
-them; wiring them onto `retention._approval_lifecycle_identity` is open work.
+projection against Python rotation. The JavaScript side is gone (warren#219), but
+the rules were always rotation's, so `tests/test_retention_approvals.py` enforces
+both files against the Python that owns them: identity against
+`retention._approval_lifecycle_identity`, lifecycle against the single close
+`retention._approval_keep_indexes` carries forward.
 
 The panel keeps at most five newest confirmed request cards (action, detail and
 decision) alongside any newer pending queue. Closing one card therefore does not erase
@@ -795,11 +797,13 @@ attachments remain inside the same strict 160-record per-owner ceiling.
 Breakdown ages are rendered losslessly through milliseconds, so
 threshold-adjacent evidence is never rounded onto the safer side. This evidence
 is attached only to an already
-projected villager; specialized events never manufacture presence. Panel,
-resident-card, and Visitor-lodge views render the same `Mood` object through
-`viewer/mood-glyph.js`. Its native details control has visible text and a full
-`dl`, works by hover, focus, tap, and keyboard, closes with Escape, never
-animates, and treats stale alpha as an unscored presence wrapper.
+projected villager; specialized events never manufacture presence. Every view of
+a resident reads the same `Mood` object. The glyph that used to render it,
+`viewer/mood-glyph.js`, was deleted with the viewer (warren#219): the object now
+travels in the `/state` envelope and each client owns its own presentation
+(Townhall renders `mood.name` on the fleet page). What Chronicle owes a client is
+the object, not the widget — stale alpha stays an unscored presence wrapper
+rather than a score, so a client cannot read missing evidence as a calm resident.
 
 ## Log rotation
 
@@ -871,10 +875,13 @@ The mapping is `_place()` in `village_state.py`; tool names and their public
 snapshot locations therefore have one Python source of truth. The post office is
 ready for email/inbox adapters through their `Email` and `Inbox` tool names.
 
-A place is a destination, not a name: the viewer resolves each one to a
-`{ kind }` value — `home`, `door`, `{ building, id }` or `{ plot }` — in
-`viewer/destinations.js`, and coordinates, slots, doorway glow and the panel
-label all read that one value.
+A place is a destination, not a name: `/state` carries it as a `{ kind }` value —
+`home`, `door`, `{ building, id }` or `{ plot }` — and the client resolves that
+one value into map geometry. The resolver was `viewer/destinations.js` until the
+viewer was deleted (warren#219); Arcadia's `src/game/villageModel.js` does it now.
+Coordinates, slots, doorway glow and panel labels all stay downstream of the
+single value Chronicle publishes, so a new client inherits the mapping rather
+than inventing one.
 
 ### What delegation may claim
 
