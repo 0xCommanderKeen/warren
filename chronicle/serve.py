@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""burrow v0 server: serves viewer/index.html, the raw event log, and accepts
-protocol events over HTTP (POST /events, one JSON event per request).
+"""burrow v0 server: the event log, the village projection and the HTTP API.
+
+Accepts protocol events (POST /events, one JSON event per request) and publishes
+the projection over /state and /state/stream. It serves no browser client of its
+own; UIs are separate repositories consuming the versioned state contract (see
+docs/ui-clients.md).
 
     python3 serve.py [port]     # default 8737
 
@@ -142,15 +146,6 @@ VIEWER_EVENT_TYPES = {
     "needs_human",
     "idle",
     "session_ended",
-}
-
-
-CTYPES = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript",
-    ".css": "text/css",
-    ".png": "image/png",
-    ".json": "application/json",
 }
 
 
@@ -1193,27 +1188,6 @@ async def retention_policy_file():
     return FileResponse(
         os.path.join(ROOT, "retention-policy.json"), media_type="application/json"
     )
-
-
-def _static_file(base_name: str, asset_path: str):
-    base = os.path.realpath(os.path.join(ROOT, base_name))
-    full = os.path.realpath(os.path.join(base, asset_path or "index.html"))
-    if not full.startswith(base + os.sep) or not os.path.isfile(full):
-        return _error(404, "not found")
-    return FileResponse(
-        full,
-        media_type=CTYPES.get(os.path.splitext(full)[1], "application/octet-stream"),
-    )
-
-
-@app.get("/village/{asset_path:path}", include_in_schema=False)
-async def static_village(asset_path: str):
-    return _static_file("viewer", asset_path)
-
-
-@app.get("/{asset_path:path}", include_in_schema=False)
-async def static_viewer(asset_path: str):
-    return _static_file("viewer", asset_path)
 
 
 def create_app(config: Config) -> FastAPI:

@@ -30,15 +30,5 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - run: uv sync --frozen
       - run: uv run sh tests/run.sh
-      - name: Upload visual regression artifacts
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: chronicle-visual-linux
-          path: /tmp/burrow-visual-*/
-          if-no-files-found: ignore

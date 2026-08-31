@@ -1,6 +1,5 @@
 #!/bin/sh
-# Run every burrow test. No framework, no deps: python3 for the emitter/server,
-# node for the viewer's projection logic.
+# Run every burrow test. No framework, no deps, one language: python3.
 #
 #     sh tests/run.sh
 #     sh tests/run.sh --list
