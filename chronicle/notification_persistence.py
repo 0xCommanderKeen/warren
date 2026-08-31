@@ -115,6 +115,19 @@ def knock_key(event):
     return legacy_knock_key(event)
 
 
+def journal_event(entry):
+    """The event a journal entry carries, or ``None`` if it carries none.
+
+    A journal line is an object, but nothing guarantees its ``event`` member
+    is one: an older producer, or a hand-edited file, can leave a null or a
+    scalar there. Such a line is skipped rather than trusted, because
+    ``knock_key`` would raise on it and the resulting ``AttributeError`` would
+    sail straight through the ``OSError`` handling every caller degrades on.
+    """
+    event = entry.get("event", entry)
+    return event if isinstance(event, dict) else None
+
+
 def terminal_key(event):
     return (
         "burrow-sha256-"
@@ -180,7 +193,7 @@ class NotificationPersistence:
             self._limits,
             decode=durable.json_entry,
             encode=durable.encode_compact_json,
-            key=lambda entry: knock_key(entry.get("event", entry)),
+            key=lambda entry: knock_key(journal_event(entry) or entry),
         )
 
     def ledger_spool(self, kind):
@@ -203,7 +216,12 @@ class NotificationPersistence:
         remembered = set()
         try:
             with self._ledger_lock, spool.lock(exclusive=False) as held:
-                generation = spool.read() if held is not None else None
+                # Skip past a damaged line rather than stopping at it: every
+                # key we can still read is one an answered notification cannot
+                # use to knock again.
+                generation = (
+                    spool.read(damage=durable.SKIP_DAMAGE) if held is not None else None
+                )
                 if generation is not None:
                     remembered.update(generation.records)
         except OSError:
@@ -226,11 +244,19 @@ class NotificationPersistence:
         cache = self._caches[kind]
         spool = self.ledger_spool(kind)
         with self._ledger_lock, spool.lock(create=True):
-            generation = spool.read()
+            generation = spool.read(damage=durable.SKIP_DAMAGE)
             remembered = collections.OrderedDict(
                 (key, None) for key in (generation.records if generation else ())
             )
             prior = set(remembered)
+            # A damaged ledger must never be rewritten. Publishing only the
+            # lines we could decode would silently forget the rest, and a
+            # forgotten terminal outcome lets an already-answered notification
+            # knock again forever -- the same loss the capacity refusal below
+            # exists to prevent, arriving by a different road.
+            if generation is not None and not generation.complete:
+                cache[spool.path] = prior
+                raise OSError("damaged durable ledger must not be rewritten")
             required = prior.intersection(preserve_existing)
             requested = set()
             changed = False
@@ -263,7 +289,7 @@ class NotificationPersistence:
             with self._ledger_lock, spool.lock(exclusive=False) as held:
                 if held is None:
                     return False
-                generation = spool.read()
+                generation = spool.read(damage=durable.SKIP_DAMAGE)
                 return generation is not None and key in generation.records
         except OSError:
             return False
@@ -271,9 +297,10 @@ class NotificationPersistence:
     def read_journal_keys(self, path=None):
         spool = self.journal_spool(path)
         return {
-            spool.key(entry)
+            knock_key(event)
             for generation in spool.snapshot(damage=durable.SKIP_DAMAGE)
-            for entry in generation.records
+            for event in map(journal_event, generation.records)
+            if event is not None
         }
 
     def compact_locked(self, path=None, addition=None):
@@ -281,12 +308,12 @@ class NotificationPersistence:
         terminal = self.load_ledger(NOTIFIED) | self.load_ledger(DROPPED)
         self.prune_terminal_generations(spool.path, terminal)
 
-        live = [
-            entry
-            for generation in spool.snapshot(damage=durable.SKIP_DAMAGE)
-            for entry in generation.records
-            if not is_terminal(entry.get("event", entry), terminal)
-        ]
+        live = []
+        for generation in spool.snapshot(damage=durable.SKIP_DAMAGE):
+            for entry in generation.records:
+                event = journal_event(entry)
+                if event is not None and not is_terminal(event, terminal):
+                    live.append(entry)
         if addition is not None and not is_terminal(
             addition.get("event", addition), terminal
         ):

@@ -664,8 +664,13 @@ def _recover_outbox():
     A syntactically valid prefix (including an empty file) says nothing about
     whether the writer completed its intended generation. Atomic replacement
     commits a generation; surviving staging bytes are therefore never promoted.
+
+    The schedule is staged in the same transaction, so its orphan is swept
+    here too rather than being left for the next writer to overwrite.
     """
-    _outbox_spool().discard_staging()
+    spool = _outbox_spool()
+    spool.discard_staging()
+    spool.discard_staging(_schedule_path())
 
 
 def _update_outbox(delivered_keys, additions, attempted_targets=()):
@@ -845,12 +850,14 @@ def _retire_quietly(spool, paths):
 
     These removals are pure housekeeping: every record in them is provably
     also somewhere else. Letting a permission or I/O error here abort the
-    caller would turn tidying into event loss.
+    caller would turn tidying into event loss. One at a time, so a failure on
+    one path does not strand the ones behind it.
     """
-    try:
-        spool.retire(paths)
-    except OSError:
-        pass
+    for path in paths:
+        try:
+            spool.retire((path,))
+        except OSError:
+            pass
 
 
 def _compact_deferred_locked(path, addition=None):

@@ -129,7 +129,12 @@ def publish_lines(path, lines, retire=()):
 
 
 def torn_path(source):
-    """Quarantine name whose lexical order is also its creation order."""
+    """Quarantine name that sorts by creation time within one root.
+
+    Retention orders by mtime and breaks ties on this name, because samples
+    torn from different generations have different roots and their names are
+    not comparable across them.
+    """
     return source + TORN_PREFIX + "%020d.%s" % (time.time_ns(), uuid.uuid4().hex)
 
 
@@ -148,12 +153,6 @@ def json_entry(line):
     return json_record(line)
 
 
-def json_mapping(line):
-    """One JSON object per line, where a decoded non-object is simply absent."""
-    record = json.loads(line)
-    return record if isinstance(record, dict) else None
-
-
 def encode_json(record):
     return json.dumps(record, ensure_ascii=False) + "\n"
 
@@ -163,8 +162,8 @@ def encode_compact_json(record):
 
 
 def decode_text(line):
-    """One opaque key per line, where a blank line is absent."""
-    return line.rstrip("\n") or None
+    """One opaque key per line, where a blank or blank-looking line is absent."""
+    return line.rstrip("\n") if line.strip() else None
 
 
 def encode_text(value):
@@ -309,28 +308,24 @@ class Spool:
                 records.append(record)
         return Generation(path, records, b"", complete)
 
-    def snapshot(self, damage=STOP_AT_DAMAGE, active_damage=None):
+    def snapshot(self, damage=STOP_AT_DAMAGE):
         """Every readable generation, active first.
 
-        ``active_damage`` exists because the active authority and its
-        auxiliary generations can warrant different tolerance: an authority
-        published by this spool is trusted to be whole, while a generation
-        inherited from a crashed writer is not.
+        A caller wanting different tolerance for the active authority than for
+        generations inherited from a crashed writer reads them separately;
+        ``emit.py``'s outbox is the one place that needs to.
         """
         found = []
         for path in self.generations():
-            policy = damage
-            if path == self.path and active_damage is not None:
-                policy = active_damage
-            generation = self.read(path, policy)
+            generation = self.read(path, damage)
             if generation is not None:
                 found.append(generation)
         return found
 
-    def collect(self, damage=STOP_AT_DAMAGE, active_damage=None):
+    def collect(self, damage=STOP_AT_DAMAGE):
         """Deduped, ordered records across every readable generation."""
         records = []
-        for generation in self.snapshot(damage, active_damage):
+        for generation in self.snapshot(damage):
             records.extend(generation.records)
         return self.arrange(records)
 

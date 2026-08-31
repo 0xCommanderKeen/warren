@@ -238,9 +238,14 @@ code and all of the subtle ordering.
 
    The *shape* check is a codec concern and also differs: a decoded non-object is
    damage to the outbox and an absent line to the deferred spool. `json_record`
-   raises `ValueError` for the former, `json_mapping` returns `None` for the
-   latter, and `json_entry` additionally treats a blank line as absent so the
-   knock journal's blank-line tolerance survives.
+   raises `ValueError` for the former, `emit.py`'s own `_deferred_record` returns
+   `None` for the latter (it also synthesizes the replay id), and `json_entry`
+   additionally treats a blank line as absent so the knock journal's blank-line
+   tolerance survives.
+
+   The two terminal ledgers read with `SKIP_DAMAGE` and then *refuse to write*
+   when the generation was not whole — see "Two things the migration got wrong
+   first" below.
 7. **`_journal_outbox`'s silent torn discard** (G3 deviation above), preserved
    verbatim.
 8. **Where a quarantine file is named.** The outbox names every sample after the
@@ -298,6 +303,34 @@ pending files is immaterial — staging is never authority.
 `Spool` owns no locks it is not asked for, no process state, and no delivery
 policy. It owns exactly the crash ordering — the level the issue said
 `durable.py` sat one step below.
+
+## Two things the migration got wrong first
+
+Both were found by a differential review of old versus new on the same
+fixtures, not by the suite — neither was covered by a test, which is why both
+now have one.
+
+1. **A dropped `isinstance(event, dict)` guard.** A journal line is an object,
+   but its `event` member may be `null` or a scalar. The old code checked this
+   in two places; the first migration checked it in neither, so such a line
+   raised `AttributeError` out of `read_journal_keys`, `compact_locked`,
+   `journal`, `record_attempt` and `commit_terminal`. `AttributeError` is not
+   `OSError`, so it escaped the degradation every one of those callers relies
+   on. `journal_event(entry)` now holds the guard in one place.
+
+2. **A damaged ledger was silently truncated.** Reading the old ledger in text
+   mode meant an undecodable byte raised and the file was *never rewritten*.
+   Reading it through `Spool` under `STOP_AT_DAMAGE` returned only the prefix,
+   and `remember_batch` then published exactly that — permanently forgetting
+   every key behind the damage. That is the same loss the capacity refusal
+   exists to prevent, arriving by a different road. Ledger reads now use
+   `SKIP_DAMAGE` (so a key behind the damage still suppresses a knock), and
+   `remember_batch` refuses to rewrite a ledger it could not read whole.
+
+The general lesson for anyone extending `Spool`: a shared reader makes damage
+*policy* explicit, which is the win, but it also means every call site inherits
+whatever the default happens to be. Damage tolerance is a durability decision
+at each site. Choose it deliberately.
 
 ## What this did not change
 
