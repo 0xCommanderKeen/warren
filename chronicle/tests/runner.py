@@ -24,9 +24,7 @@ def discover_tests():
         if not (ROOT / path).is_file():
             continue
         name = pathlib.PurePosixPath(path).name
-        if (
-            name.startswith("test_") and name.endswith((".py", ".js"))
-        ) or name.endswith(".test.js"):
+        if name.startswith("test_") and name.endswith(".py"):
             tests.append((raw_path, path))
     return sorted(tests, key=lambda item: item[0])
 
@@ -41,11 +39,7 @@ def main(argv):
         print(f"== {path}", flush=True)
         if argv == ["--list"]:
             continue
-        command = (
-            [os.environ.get("PYTHON", "python3"), path]
-            if path.endswith(".py")
-            else ["node", path]
-        )
+        command = [os.environ.get("PYTHON", "python3"), path]
         subprocess.run(command, cwd=ROOT, check=True)
 
     if not argv:

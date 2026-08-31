@@ -114,7 +114,7 @@ event is a lie with extra steps. Ingest is protected by one shared secret:
   empty/whitespace-only value counts as unset.
 - **When unset**, ingest is open — exactly today's behavior, which is what local-only
   mode (`python3 serve.py` with no `BURROW_URL`) relies on.
-- **GET is never gated.** `/`, `/events`, `/villagers`, `/transport/status`, and the static viewer stay open;
+- **GET is never gated.** `/state`, `/events`, `/villagers` and `/transport/status` stay open;
   the token guards writes, not reads. The event log is still a map of everything the
   fleet does, so the server stays off the public internet either way.
 
@@ -141,7 +141,7 @@ Rotating the secret runs the same loop in reverse: unset on the server, re-issue
 emitters, set again.
 `GET /events?since=<cursor>` remains available for internal audit and diagnostics.
 It returns complete JSONL records after that position and supplies the next cursor
-in `X-Burrow-Cursor`. It is not a production viewer transport; the viewer uses the
+in `X-Burrow-Cursor`. It is not a production client transport; clients use the
 projected-state endpoints described above.
 
 Server-issued cursors are opaque, versioned values with four explicit identity layers:
@@ -166,7 +166,7 @@ requests and in-process log rotations.
 `GET /events/stream?since=<cursor>` likewise remains an internal raw-event diagnostic
 stream. Production live updates use `GET /state/stream`, which sends complete
 `snapshot` envelopes. A cursor-namespace change is represented by a complete `reset`
-envelope, allowing the viewer to replace all rendered state atomically.
+envelope, allowing a client to replace all rendered state atomically.
 
 Closing a browser tab, navigating away, or a proxy closing an SSE socket is an
 expected lifecycle event: broken-pipe, connection-reset, and connection-aborted
@@ -364,7 +364,7 @@ remains exact. Fleet labels both counts so a bounded detail list is not presente
 the complete malformed history.
 Reset discards the authority and rebuilds it from empty. Rotation derives this
 bounded journal authority from the full pre-rotation log before allocating the
-remaining ordinary evidence inside the viewer's global 4,000-line transport
+remaining ordinary evidence inside the global 4,000-line transport
 window, then preserves original append order while merging the retained records.
 Village rotation and grouped bootstrap use the same bounded projection-witness
 rule over the complete validated segment. Ordinary agents still enter through the
@@ -446,7 +446,7 @@ matching start at or before that watermark, without retained exact terminal evid
 evidence retained or received later still resolves the state to completed or failed.
 
 The village notice board is a bounded cross-agent view of this stream. It keeps
-the 30 most recent valid `artifact_produced` events from the viewer's live log
+the 30 most recent valid `artifact_produced` events from the live log
 window, newest first, including artifacts from agents who have since left.
 
 The separate job board is reconstructed only from valid Steward `task_posted`,

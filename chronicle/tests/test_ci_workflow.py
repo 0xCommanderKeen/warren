@@ -15,6 +15,15 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("uv sync --frozen", workflow)
         self.assertIn("uv run sh tests/run.sh", workflow)
 
+    def test_ci_installs_no_node_toolchain(self):
+        """The suite is single-language; a Node step here would be dead weight."""
+        workflow = WORKFLOW.read_text()
+
+        self.assertNotIn("setup-node", workflow)
+        self.assertNotIn("node-version", workflow)
+        self.assertNotIn("pnpm", workflow)
+        self.assertNotIn("npm ", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

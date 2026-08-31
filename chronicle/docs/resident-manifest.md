@@ -43,7 +43,7 @@ The optional `routines` array mirrors Steward's public schedule fields: `id`, fi
 `schedule`, `schedule_tz`, and `enabled`. `steward_resident` names the URL path segment
 used by Steward's run-now endpoint. Prompts, skill grants, internals, and credentials are
 not copied into Burrow. Schedules are rendered as “declared, not observed”; observed
-outcomes come only from `routine_*` events. The Steward token is entered into the viewer
+outcomes come only from `routine_*` events. The Steward token is entered into the client
 and retained in memory only, then sent directly to Steward—never to Burrow's server.
 The manifest validator accepts a safe five-field declaration envelope, including
 croniter names and operators such as `MON`, `JAN`, `L`, `?`, ranges, lists, and steps.
@@ -57,7 +57,7 @@ also includes the installed single-segment aliases Steward accepts (`GMT`, `CET`
 
 Burrow also reads Steward's authenticated `GET /routines` directly from the browser to
 show its computed `next_fire`; it never computes that promise from the local cron text.
-Configure Steward with Burrow's exact viewer origin, for example
+Configure Steward with the client's exact origin, for example
 `STEWARD_CORS_ORIGINS=http://village.local:8080`. When it is unset or does not match,
 the browser blocks both the schedule read and run-now request as cross-origin failures.
 Do not work around that by exposing Steward publicly: its documented deployment remains

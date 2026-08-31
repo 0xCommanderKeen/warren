@@ -11,21 +11,37 @@ import serve
 
 
 class ASGITransportContractTests(unittest.TestCase):
-    def test_village_is_served_and_removed_observatory_routes_are_not(self):
-        with TestClient(serve.app) as client:
-            village = client.get("/village/")
-            observatory = client.get("/observatory/")
-            agent_page = client.get("/observatory/agents/keeper")
-            transport = client.get("/village/state-transport.js")
+    def test_no_browser_client_is_served_from_any_path(self):
+        """Burrow is the log, the projection and the API; clients are separate repos.
 
-        self.assertEqual(village.status_code, 200)
-        self.assertIn("Burrow", village.text)
-        self.assertEqual(observatory.status_code, 404)
-        self.assertNotIn("Burrow", observatory.text)
-        self.assertEqual(agent_page.status_code, 404)
-        self.assertNotIn("Burrow", agent_page.text)
-        self.assertEqual(transport.status_code, 200)
-        self.assertIn("createStateTransport", transport.text)
+        The old in-tree viewer answered `/`, `/village/…` and every unmatched path.
+        Those paths must now fail honestly rather than return a stale page, so a
+        client pinned to this origin breaks loudly instead of rendering old state.
+        """
+        removed_client_paths = [
+            "/",
+            "/index.html",
+            "/village/",
+            "/village/index.html",
+            "/village/state-transport.js",
+            "/observatory/",
+            "/observatory/agents/keeper",
+        ]
+
+        with TestClient(serve.app) as client:
+            responses = {path: client.get(path) for path in removed_client_paths}
+
+        for path, response in responses.items():
+            with self.subTest(path=path):
+                self.assertEqual(response.status_code, 404, path)
+                self.assertNotIn("<html", response.text.lower())
+                self.assertNotIn("createStateTransport", response.text)
+
+    def test_live_api_surface_survives_the_client_removal(self):
+        with TestClient(serve.app) as client:
+            self.assertEqual(client.get("/villagers").status_code, 200)
+            self.assertEqual(client.get("/transport/status").status_code, 200)
+            self.assertEqual(client.get("/retention-policy.json").status_code, 200)
 
     def test_fastapi_openapi_names_public_wire_contracts(self):
         schema = serve.app.openapi()
