@@ -1035,7 +1035,7 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
             click.option(
                 "--dry-run",
                 is_flag=True,
-                help="Print what would fire, with the assembled prompt. Emits nothing.",
+                help="Print what is due right now, with the assembled prompt. Emits nothing.",
             ),
         ]
     ):
@@ -1139,13 +1139,23 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     catchup_seconds: float,
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
 ) -> None:
-    """Fire everything due right now, sweep the board, then exit. Good under cron."""
+    """Fire everything due right now, sweep the board, then exit. Good under cron.
+
+    `--dry-run` rehearses *this* tick and no other: it reports the routines that are due
+    at this moment, which is the question a rehearsal is asked. It used to print every
+    routine in the tree as "would fire", which was untrue of all but the due ones and
+    unreadable on a fleet with more than a handful (warren#90). For a routine that is not
+    due, `steward show <resident>` prints everything above the task and the manifest holds
+    the task; `steward doctor` says when each one fires next.
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _build_scheduler(
         residents, state, workdir, db, catchup_seconds, dry_run=dry_run
     ) as engine:
         if dry_run:
-            reports = [engine.fire(item) for item in engine.scheduled]
+            # Through tick(), so "due" has exactly one definition. A dry-run tick takes no
+            # lock, persists no anchor, and sweeps no board — see Scheduler.tick.
+            reports = engine.tick()
         else:
             try:
                 engine.require_ready()
@@ -1173,13 +1183,17 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
     max_ticks: int | None,
 ) -> None:
-    """Run the scheduler daemon: sleep to the next due routine, fire, repeat."""
+    """Run the scheduler daemon: sleep to the next due routine, fire, repeat.
+
+    `--dry-run` never enters the loop: it rehearses one tick, prints what is due now, and
+    returns — the same report `scheduler tick --dry-run` prints, for the same reason.
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _build_scheduler(
         residents, state, workdir, db, catchup_seconds, dry_run=dry_run
     ) as engine:
         if dry_run:
-            _report_fires([engine.fire(item) for item in engine.scheduled], dry_run=True)
+            _report_fires(engine.tick(), dry_run=True)
             return
         try:
             reports = engine.run(max_ticks=max_ticks)
