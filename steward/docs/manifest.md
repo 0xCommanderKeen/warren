@@ -972,9 +972,9 @@ under `$HOME` in the container — `/root`, since the image runs as root:
 | path | what it is |
 | --- | --- |
 | `/root/.chronicle/events.jsonl` | the offline fallback log |
-| `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`) | deferred events waiting to be replayed |
-| `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`) | the durable outbox and its delivery schedule |
-| `/root/.chronicle/transport-diagnostics.json`, `.post-failed` | last failures, and the circuit breaker |
+| `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`, `.lock`) | deferred events waiting to be replayed |
+| `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`, `.lock`) | the durable outbox and its delivery schedule |
+| `/root/.chronicle/transport-diagnostics.json`, `.post-failed-<target>` | the last failures, and the per-target circuit breaker |
 
 `/root/.chronicle` on a container that has never had a `/root/.burrow`; on one that has,
 the emitter keeps using the old directory rather than stranding events nobody would replay.
