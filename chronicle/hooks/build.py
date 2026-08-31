@@ -4,6 +4,12 @@
     python3 hooks/build.py                     # to stdout
     python3 hooks/build.py --output emit.py    # atomically, to a file
 
+**Two shapes, one emitter.** ``scripts/install-emitter.sh`` publishes the *installed
+bundle*: a directory holding ``emit.py``, ``durable.py`` and the ``chronicle-emit``
+launcher. This build produces the *one-file bundle*: the same emitter flattened into a
+single script, for a host that can only take one file. Bare "the bundle" means neither;
+docs/protocol.md says which is which.
+
 ``hooks/emit.py`` is the emitter's source and stays directly runnable in place — it is
 what the operator's own ``~/.claude/settings.json`` fires on every tool use, and it is
 allowed to grow siblings. ``hooks/durable.py`` is the first of those. Anywhere the
@@ -127,7 +133,9 @@ def bundle(emit_source, durable_source):
             "in. Use double quotes there, or change how build.py embeds it." % DELIMITER
         )
     if not durable_source.endswith("\n"):
-        raise ValueError("durable.py must end with a newline, or the closing delimiter joins its last line")
+        raise ValueError(
+            "durable.py must end with a newline, or the closing delimiter joins its last line"
+        )
 
     header = HEADER.format(emit=digest(emit_source), durable=digest(durable_source))
     embed = EMBED.format(delimiter=DELIMITER, source=durable_source)

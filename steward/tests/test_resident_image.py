@@ -15,6 +15,7 @@ chronicle — run by a human (or by the pilot) there.
 """
 
 import ast
+import hashlib
 import json
 import re
 import subprocess
@@ -97,9 +98,8 @@ def test_the_vendored_emitter_is_the_bundle_chronicle_builds_today(tmp_path: Pat
     What used to stand here re-hashed the copy against a checksum ``make vendor-emitter``
     had written down beside it. That can only ever catch somebody editing the *copy*: a
     pinned hash stays green forever while the source sails away, which is exactly what
-    happened — 1,200 lines of durable-outbox client that no resident was running
-    (warren#234). Comparing against a live build cannot go stale, because there is nothing
-    recorded to go stale.
+    happened (warren#234). Comparing against a live build cannot go stale, because there
+    is nothing recorded to go stale.
 
     An emitter that drifted would put a resident on a protocol version the village does not
     read, and would do it silently — a villager that simply never appears.
@@ -118,8 +118,15 @@ def test_the_vendored_emitter_is_the_bundle_chronicle_builds_today(tmp_path: Pat
     )
 
     assert result.returncode == 0, f"chronicle's bundle build failed:\n{result.stderr}"
-    assert built.read_text(encoding="utf-8") == EMITTER.read_text(encoding="utf-8"), (
+    # Compared as digests rather than as two 70KB strings: the answer is yes or no, and a
+    # failure should say what to run, not print a two-thousand-line diff nobody reads.
+    on_disk = hashlib.sha256(EMITTER.read_bytes()).hexdigest()
+    rebuilt = hashlib.sha256(built.read_bytes()).hexdigest()
+
+    assert on_disk == rebuilt, (
         f"{EMITTER} is not what chronicle/hooks builds today.\n"
+        f"  vendored: {on_disk}\n"
+        f"  rebuilt:  {rebuilt}\n"
         f"Do not hand-edit the vendored copy — it is a generated artifact. Change "
         f"chronicle/hooks/emit.py or chronicle/hooks/durable.py, commit it, then run:  "
         f"make vendor-emitter   (in warren/steward/)"
@@ -131,7 +138,7 @@ def test_ci_runs_this_suite_when_the_emitters_source_changes() -> None:
 
     The root workflows are path-filtered per service, so a chronicle-only change would not
     have run steward's suite at all — the drift would have waited for whoever next ran
-    `make vendor-emitter`, which is exactly how the copy got 1,200 lines behind.
+    `make vendor-emitter`, which is exactly how the copy went stale in the first place.
     """
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     # `on:` is YAML 1.1's boolean true, and pyyaml reads it as one.
@@ -144,20 +151,45 @@ def test_ci_runs_this_suite_when_the_emitters_source_changes() -> None:
         )
 
 
-def test_the_vendored_emitter_still_needs_only_the_standard_library() -> None:
-    """One file, no pip: it is why the image installs python3 and nothing else for this.
-
-    Chronicle's own suite owns the authoritative version of this check — it is the side
-    that can break the constraint, and it looks inside the embedded module too
-    (``chronicle/tests/test_bundle.py``). This one is the image's own stake in it: what
-    ``apt-get install python3`` has to be enough for.
-    """
-    imported = set()
-    for node in ast.walk(ast.parse(EMITTER.read_text(encoding="utf-8"))):
+def imported_modules(source: str) -> set[str]:
+    """Every top-level module a source imports, wherever in the file the import sits."""
+    found = set()
+    for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            imported |= {alias.name.split(".")[0] for alias in node.names}
+            found |= {alias.name.split(".")[0] for alias in node.names}
         elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            imported.add(node.module.split(".")[0])
+            found.add(node.module.split(".")[0])
+    return found
+
+
+def embedded_module(source: str) -> str:
+    """Read the durable-outbox source the bundle carries, statically, off the artifact.
+
+    It lives in a string literal, so an import walk over the file cannot see what it
+    imports — and what the artifact *executes* is both halves.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and "_DURABLE_SOURCE" in [t.id for t in node.targets if isinstance(t, ast.Name)]
+        ):
+            return str(node.value.value)
+    raise AssertionError(f"{EMITTER} carries no embedded module; the bundle format changed")
+
+
+def test_the_vendored_emitter_still_needs_only_the_standard_library() -> None:
+    """No pip: it is why the image installs python3 and nothing else for this.
+
+    Both halves of the artifact, because both halves run. Chronicle's suite owns the
+    authoritative version of this check — it is the side that can break the constraint —
+    and this is the image's own stake in it: what ``apt-get install python3`` has to be
+    enough for. What it cannot say is that the *image's* python is new enough to run the
+    file; the `image` job says that, by running it inside the container, where a
+    SyntaxError is an exit status ``smoke.sh`` fails on.
+    """
+    artifact = EMITTER.read_text(encoding="utf-8")
+    imported = imported_modules(artifact) | imported_modules(embedded_module(artifact))
 
     assert imported <= sys.stdlib_module_names, (
         f"the emitter grew a dependency ({sorted(imported - sys.stdlib_module_names)}); "

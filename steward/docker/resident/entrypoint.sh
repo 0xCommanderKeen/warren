@@ -79,10 +79,7 @@ fi
 # restart and does NOT survive `docker compose down` or an image upgrade. Mounting it is an
 # operator decision, not a default this script should make; docs/manifest.md states the
 # options. Printing the path is how a human finds the queue when it matters.
-if [ ! -d "$HOME/.chronicle" ] && [ -d "$HOME/.burrow" ]; then
-    echo "steward: durable outbox in $HOME/.burrow (container-local unless compose mounts it)"
-else
-    echo "steward: durable outbox in $HOME/.chronicle (container-local unless compose mounts it)"
-fi
+echo "steward: durable outbox under $HOME/.chronicle (or ~/.burrow where that already"
+echo "steward:          exists) — container-local unless the compose file mounts it"
 
 exec "$@"

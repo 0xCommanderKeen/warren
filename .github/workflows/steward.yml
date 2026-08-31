@@ -5,7 +5,7 @@ name: steward
 # tests/test_resident_image.py rebuilds the bundle and compares it byte for byte. Without
 # this line a chronicle-only PR would never run that comparison, and the drift would first
 # be noticed by whoever next ran `make vendor-emitter` — which is precisely how the copy
-# got 1,200 lines behind its source. An emitter change now turns steward red until it is
+# went stale in the first place. An emitter change now turns steward red until it is
 # re-vendored, in the same PR that made it.
 on:
   push:

@@ -1004,6 +1004,11 @@ fall back to its bounded durable local storage.
 
 ### One-file bundle, for deployments that cannot carry a directory
 
+**Two shapes, one emitter.** The *installed bundle* above is a directory — `emit.py`,
+`durable.py` and the launcher, installed together. The *one-file bundle* below is the
+same emitter flattened into a single script, for a host that can only take one file.
+Where both are in play, say which; bare "the bundle" is ambiguous.
+
 Some hosts can only take a single file: steward's resident image is built from one
 directory with no pip in it, and vendors the emitter into it. `hooks/build.py`
 flattens the two source files into one self-contained stdlib-only script for exactly

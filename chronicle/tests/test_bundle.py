@@ -9,6 +9,7 @@ in the suite of the repository that can break them.
 
 import ast
 import contextlib
+import hashlib
 import http.server
 import importlib.util
 import json
@@ -37,13 +38,12 @@ BOTH_SPELLINGS = tuple(
 
 def build_to(destination):
     """Run the build the way a human or a Makefile does, and return the artifact."""
-    result = subprocess.run(
+    subprocess.run(
         [sys.executable, str(BUILD), "--output", str(destination)],
         capture_output=True,
         text=True,
         check=True,
     )
-    assert result.returncode == 0, result.stderr
     return pathlib.Path(destination).read_text(encoding="utf-8")
 
 
@@ -66,19 +66,8 @@ class BundleShapeTest(unittest.TestCase):
             self.assertIn("DO NOT EDIT", header)
             self.assertIn("hooks/build.py", header)
             for name in ("emit.py", "durable.py"):
-                digest = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        "import hashlib,sys;"
-                        "print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest())",
-                        str(HOOKS / name),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                ).stdout.strip()
-                self.assertIn(digest, header)
+                digest = hashlib.sha256((HOOKS / name).read_bytes()).hexdigest()
+                self.assertIn(digest, header, "%s's digest is not in the header" % name)
 
     def test_the_bundle_carries_durables_source_verbatim(self):
         """Not a rewrite of durable.py: the same bytes, materialized as a module."""
@@ -235,9 +224,12 @@ class BundleContractTest(unittest.TestCase):
             self.skipTest("no steward checkout beside this one")
 
         with tempfile.TemporaryDirectory() as temporary:
+            # Digests, not two 70KB strings: the answer is yes or no, and a failure should
+            # say what to run rather than print a diff of the whole emitter.
+            built = build_to(pathlib.Path(temporary) / "emit-bundle.py")
             self.assertEqual(
-                vendored.read_text(encoding="utf-8"),
-                build_to(pathlib.Path(temporary) / "emit-bundle.py"),
+                hashlib.sha256(vendored.read_bytes()).hexdigest(),
+                hashlib.sha256(built.encode("utf-8")).hexdigest(),
                 "the resident image's vendored emitter is not what hooks/ builds today; "
                 "run `make vendor-emitter` in warren/steward/ and commit the result",
             )

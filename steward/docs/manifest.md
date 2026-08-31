@@ -1003,6 +1003,39 @@ steward picks for you:
 `steward-smoke` prints the path when it sees a fallback, and the entrypoint prints it at
 every start, so the queue is never something you have to go looking for.
 
+### Rolling out a re-vendored emitter
+
+**Order: chronicle first, then images.** A resident's emitter is chronicle's own client,
+so the deployed server should be at least as new as the client that will be talking to it.
+What is actually on the wire, read off `chronicle/hooks/emit.py`:
+
+- the request **body** is a plain protocol-v0 event — no new fields, and chronicle's own
+  contract says "unknown extension fields remain allowed" ([protocol](../../chronicle/docs/protocol.md#strict-v0-validation-contract));
+- the delivery identity travels as the **header** `X-Burrow-Delivery-ID`. A server that
+  predates it ignores it, which costs only server-side dedupe: a replayed event it already
+  has is accepted twice rather than recognised;
+- one **event type** is new relative to the emitter that was frozen in the image:
+  `tool_failed`. A chronicle old enough not to know it answers 400, and the emitter keeps
+  the event in its local log — nothing is lost, but those events stay invisible until the
+  server is updated.
+
+So: confirm the deployed chronicle's version, deploy chronicle if it is behind, then
+`make image`, `make image-ship`, and re-provision. Re-verify at rollout time rather than
+trusting this paragraph — it describes the code, not the box.
+
+**A `docker compose down && up` discards the durable outbox** (see above), and rolling out
+a new image is exactly that. Roll out while the village is up, when the queue is empty.
+
+**Who is actually running which emitter.** `steward-resident` containers get the vendored
+copy from the image, replaced by the entrypoint at every start — so they converge on the
+next `make image-ship` + re-provision, with no per-container step. **life-agent does not**:
+it predates steward provisioning, runs `node:22` rather than this image (its manifest says
+so, and a test holds it to saying so), and carries its own emitter installed into its
+claude-config volume at `/root/.claude/burrow/`. It converges when somebody re-runs
+chronicle's `scripts/install-emitter.sh` against that volume, or when it is migrated onto
+`steward-resident` — a cutover, not a rebuild. Nothing in this repository will do either on
+its own.
+
 **Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
 up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A
 value carrying a space, a quote, a `;` or a `$(…)` would be a manifest that runs arbitrary

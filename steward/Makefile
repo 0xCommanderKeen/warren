@@ -131,7 +131,7 @@ image-ship:
 # commit is a copy nobody can trace back to anything. build.py is in that list because it
 # decides the artifact's shape as much as the two sources do.
 #
-# Every revspec below is written `HEAD:./hooks/emit.py`, cwd-relative. Plain
+# The revspecs below are written `HEAD:./hooks/emit.py`, cwd-relative. Plain
 # `HEAD:hooks/emit.py` is resolved from the *repository root*, which was the same thing
 # when burrow was its own repo and is `warren/hooks/emit.py` — a path that does not
 # exist — now that the source sits at `chronicle/hooks/emit.py` in this one.

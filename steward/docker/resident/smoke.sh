@@ -131,8 +131,8 @@ if [ -f "$EMITTER" ]; then
     elif [ "$after" -gt "$before" ]; then
         say "note the emitter fell back to $FALLBACK — nothing is lost, but the village did not take it:"
         echo "      $(tail -n 1 "$FALLBACK")"
-        say "     it is also queued in $STATE_DIR/primary-outbox.jsonl and replays when the village returns —"
-        say "     that directory is container-local unless compose mounts it (docs/manifest.md#the-durable-outbox)"
+        echo "      also queued in $STATE_DIR/primary-outbox.jsonl, to replay when the village returns;"
+        echo "      that directory is container-local unless the compose file mounts it"
         [ "${posted:-}" = "204" ] && fail "the direct POST worked but the emitter did not; check the village URL inside the container"
     else
         say "ok   the emitter delivered without falling back"
