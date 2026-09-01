@@ -2593,6 +2593,10 @@ def test_delegation_needs_the_token_like_everything_else(api: ApiFactory) -> Non
     anonymous = TestClient(harness.client.app)
     assert anonymous.post("/delegate", json=HANDOFF).status_code == 401
     assert anonymous.get("/residents/test-agent/inbox").status_code == 401
+    # Refused before the task is looked up, so an unknown id is 401 and not 404. Arcadia's
+    # deploy smoke script reads exactly that to tell "the origin proxies /tasks" apart from
+    # "the origin fell through to the SPA and served index.html" (warren#242).
+    assert anonymous.get("/tasks/no-such-task/lineage").status_code == 401
     assert harness.store.jobs() == []
 
 

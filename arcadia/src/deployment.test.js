@@ -21,12 +21,75 @@ describe("production deployment contract", () => {
     expect(nginx).toContain("rewrite ^ /burrow/state/stream last");
   });
 
-  it("keeps Chronicle ingest and Steward writes behind the deployed origin", () => {
+  it("keeps Chronicle ingest and Steward's API behind the deployed origin", () => {
     expect(nginx).toContain("location = /events");
-    expect(nginx).toContain("location ~ ^/(jobs|approvals|residents|skills|reload|routines|requests)(/|$)");
     expect(nginx).toContain("host.docker.internal:8738");
     expect(nginx).toContain("host.docker.internal:8802");
     expect(readFileSync("deploy/smoke.sh", "utf8")).toContain("steward-preflight=401");
+  });
+});
+
+/* -- one origin, two services, no path claimed twice (#242) ---------------------------- */
+
+/**
+ * Steward's own top-level route segments, read off the `@app` decorators that declare them.
+ *
+ * Derived rather than listed, because the regression this guards against is Steward growing
+ * a route and the origin not learning it — which is exactly how `/tasks/{id}/lineage` and
+ * `POST /delegate` came to answer with the village's index.html (#242). A hand-kept copy
+ * here could not see the new route, so it could not fail. `.github/workflows/arcadia.yml`
+ * lists `api.py` among this suite's paths so the change that breaks this runs it.
+ *
+ * FastAPI is read as text on purpose — the alternative is booting Steward from a JS suite.
+ * Every route in that file is an `@app` decorator today; a router mounted elsewhere would
+ * be invisible here, so add it to the file or to this reader.
+ */
+const stewardApiRoutes = () => {
+  const api = readFileSync("../steward/src/steward/api.py", "utf8");
+  const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
+  expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+  return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
+};
+
+describe("the origin's route table matches the services behind it", () => {
+  /** The alternation inside the one regex `location` that fronts Steward. */
+  const stewardRoutes = () => {
+    // One block fronts Steward, so one alternation is the whole answer. Split a path into a
+    // `location` of its own and this reader stops being true — fail here rather than pass a
+    // config it can no longer see all of.
+    expect([...nginx.matchAll(/host\.docker\.internal:8802/g)]).toHaveLength(1);
+    const match = nginx.match(/location ~ \^\/\(([^)]*)\)\(\/\|\$\)/);
+    expect(match, "no Steward regex location to read").not.toBeNull();
+    return [...new Set(match[1].split("|"))].sort();
+  };
+
+  it("proxies every top-level Steward route", () => {
+    // An unproxied route does not 404: it falls through to the SPA and answers 200 with
+    // index.html, so a Townhall page built on it looks alive and confirms nothing.
+    expect(stewardRoutes()).toEqual(stewardApiRoutes());
+    // The two #242 was filed for. Named as well as derived, so the fix cannot quietly
+    // regress into a set that merely agrees with a Steward that lost them too.
+    expect(stewardRoutes()).toEqual(expect.arrayContaining(["tasks", "delegate"]));
+  });
+
+  it("leaves /residents unambiguously Steward's, and gives Chronicle's report its own path", () => {
+    // Both services answer `GET /residents` — Steward's is the fleet's resident listing,
+    // Chronicle's is the manifest-validation report its runbook checks after a deploy. The
+    // regex hands the bare path to Steward, so Chronicle's answers under the `/burrow/`
+    // prefix that already fronts its state routes.
+    expect(stewardRoutes()).toContain("residents");
+    expect(nginx).toContain("location = /burrow/residents");
+    expect(nginx).toContain("proxy_pass http://host.docker.internal:8738/residents;");
+    // Exact matches take one spelling each; the other one must not reach the SPA.
+    expect(nginx).toContain("location = /burrow/residents/");
+    expect(nginx).toContain("return 301 /burrow/residents;");
+  });
+
+  it("smoke-tests both gaps against a running origin", () => {
+    const smoke = readFileSync("deploy/smoke.sh", "utf8");
+    expect(smoke).toContain("$origin/burrow/residents");
+    // 401 is Steward answering; the SPA fallback would be a 200 carrying index.html.
+    expect(smoke).toContain("lineage-preflight=401");
   });
 });
 

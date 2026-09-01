@@ -13,10 +13,23 @@ export default defineConfig({
           "http://127.0.0.1:8737",
         changeOrigin: true,
       },
-      // Steward's write routes, so `pnpm dev` reaches them same-origin exactly as the
-      // deployed nginx does. The token is still typed by a human at runtime.
+      // Steward's routes, so `pnpm dev` reaches them same-origin exactly as the deployed
+      // nginx does. The token is still typed by a human at runtime. This list and the
+      // regex in `arcadia/deploy/nginx.conf` are the same route table written twice: a
+      // path in one and not the other is a page that works in dev and 404s deployed, or
+      // the reverse (warren#242).
       ...Object.fromEntries(
-        ["/residents", "/skills", "/reload", "/jobs", "/approvals", "/routines", "/requests"].map(
+        [
+          "/residents",
+          "/skills",
+          "/reload",
+          "/jobs",
+          "/tasks",
+          "/delegate",
+          "/approvals",
+          "/routines",
+          "/requests",
+        ].map(
           (path) => [
             path,
             { target: process.env.STEWARD_URL || "http://127.0.0.1:8801", changeOrigin: true },

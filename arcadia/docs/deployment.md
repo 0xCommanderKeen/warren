@@ -1,8 +1,10 @@
 # NAS deployment and cutover
 
 Arcadia owns the NAS origin on port 8737. The static village is served at `/`, townhall is
-mounted at `/observatory/`, Chronicle state is exposed at `/burrow/`, and Steward write
-routes remain same-origin. Chronicle itself listens on host port 8738 after the cutover; its
+mounted at `/observatory/`, Chronicle state and its resident report are exposed at
+`/burrow/`, and Steward's API is same-origin — all of it, reads included, since a route the
+origin does not carry answers 200 with the village's index.html rather than a 404
+(warren#242). Chronicle itself listens on host port 8738 after the cutover; its
 old built-in viewer is no longer reachable at `/`.
 
 This origin serves builds of **two** directories of the warren monorepo — `arcadia/` and
