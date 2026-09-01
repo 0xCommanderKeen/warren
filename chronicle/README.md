@@ -44,7 +44,9 @@ snapshot carries:
   one session and claimed in another. A `task_failed` whose reason is `lease_expired`
   reopens the job rather than failing it — matching Steward's own queue — and keeps naming
   the attempt that expired. A blank skill name in an otherwise valid event stays a blank
-  name; that is not the same fact as an empty requirement list.
+  name; that is not the same fact as an empty requirement list. A *delegated* job is
+  announced as `task_delegated` and never posted, so it is villager activity here and not
+  yet a row — the gap is warren#277.
 - **`approvals`** — one record per `needs_human` carrying a `request_id`: the action, the
   semantic detail, Steward's approve/deny/edit options, the declared expiry, and the
   decision once a matching `needs_human_resolved` arrives. The question is immutable — a
@@ -65,7 +67,11 @@ snapshot carries:
 - **`diagnostics`**, **`capacity`** and **`capabilities`** — malformed records, the bounds
   this server actually applied, and which event families this build projects (`ingest`,
   `approvals`, `jobs`, `routines`), so a client can tell an older backend from a feature
-  the fleet is simply not using.
+  the fleet is simply not using. `diagnostics` also carries one
+  `chat_message_dropped` record per message that reached a resident's chat route and was
+  deliberately not answered — the door, who knocked, and why they got silence. That is
+  the only place a knock on a sleeping resident shows up, because an outsider's message
+  is never allowed to put its villager back on the map.
 
 Every villager also carries a **`mood`**: one deterministic operational reading built from
 retained failures, work density, exact human interactions and unresolved needs — not

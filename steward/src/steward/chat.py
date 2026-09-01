@@ -28,11 +28,10 @@ can find out that somebody knocked. A message in a group chat is dropped the sam
 when an operator sent it: the reply would be readable by everyone else in that group, and a
 resident's answers are not a broadcast.
 
-    Chronicle does not accept that event type yet — its own ``EVENT_TYPES`` gate refuses
-    anything outside its set, as it already does for ``task_delegated`` and
-    ``resident_restarted`` — so today the drop reaches steward's local event log and not the
-    village. One line in ``chronicle/protocol.py`` closes that, and it is deliberately not
-    made here (``docs/chat.md``).
+    Chronicle accepts that type as of warren#276 and treats it as ambient evidence: the
+    drop becomes a bounded ``diagnostics`` record naming the door and who knocked, and it
+    never animates the resident's villager — a stranger's message is not a sign of life
+    (``docs/chat.md``).
 
 **A busy resident says so.** The bridge takes the same cross-process claim every other
 firing process takes (:mod:`steward.claims`, warren#111). A refused claim means the
