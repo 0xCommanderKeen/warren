@@ -17,5 +17,15 @@
       {"v": 0, "ts": "2026-08-26T11:59:00.000Z", "source": "test", "agent_id": "codex:gone", "project": "burrow", "cwd": "/tmp", "type": "session_ended", "payload": {}}
     ],
     "projection_witnesses": []
+  },
+  {
+    "name": "a knock at a departed villager's door leaves no projection evidence",
+    "now": 1787745600000,
+    "events": [
+      {"v": 0, "ts": "2026-08-26T11:58:00.000Z", "source": "test", "agent_id": "codex:gone", "project": "burrow", "cwd": "/tmp", "type": "tool_called", "payload": {"tool": "Read"}},
+      {"v": 0, "ts": "2026-08-26T11:59:00.000Z", "source": "test", "agent_id": "codex:gone", "project": "burrow", "cwd": "/tmp", "type": "session_ended", "payload": {}},
+      {"v": 0, "ts": "2026-08-26T11:59:30.000Z", "source": "steward", "agent_id": "codex:gone", "project": "burrow", "type": "chat_message_dropped", "payload": {"route": "telegram", "address": "@gone_bot", "from": "87654321", "reason": "not an operator"}}
+    ],
+    "projection_witnesses": []
   }
 ]

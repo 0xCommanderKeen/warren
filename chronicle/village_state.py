@@ -54,7 +54,7 @@ ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
 #: one in the village, decide its state, refresh its clock, or age its mood. A stranger
 #: messaging a resident's chat bot at three in the morning must not make the village show
 #: that resident at work.
-AMBIENT = frozenset({"chat_message_dropped"})
+AMBIENT_TYPES = frozenset({"chat_message_dropped"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -547,12 +547,15 @@ def project_village(
             pending_by_agent[approval["agent_id"]].append(approval)
     for agent_id in sorted(by_agent):
         history = by_agent[agent_id]
-        evidence = [item for item in history if item[1]["type"] not in AMBIENT]
+        # Three readings of one log: what this villager *did* decides its state and its
+        # clock, what it did other than beat decides the line shown, and everything but
+        # the beats — a knock at its door included — is the history worth keeping.
+        evidence = [item for item in history if item[1]["type"] not in AMBIENT_TYPES]
         if not evidence:
             continue
         last = evidence[-1][1]
         visible_history = [item for item in history if item[1]["type"] != "heartbeat"]
-        acted = [item for item in visible_history if item[1]["type"] not in AMBIENT]
+        acted = [item for item in evidence if item[1]["type"] != "heartbeat"]
         visible_last = acted[-1][1] if acted else last
         age = (now - _instant(last["ts"])).total_seconds()
         pending = pending_by_agent[agent_id]

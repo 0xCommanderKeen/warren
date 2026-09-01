@@ -370,6 +370,10 @@ on, who knocked (`from`), the `reason`, and the event `ts`. Those named fields o
 raw record still reaches that villager's history exactly as it arrived, which is why
 Steward keeps the stranger's text out of the event in the first place.
 
+Rotation holds the same line: `retention` imports the reducer's ambient set rather than
+mirroring it, so a knock is never carried forward as a villager's state witness and a
+departed villager cannot be resurrected by somebody ringing its bell.
+
 It is also the one event type an *outsider* causes, and nothing rate-limits it yet, so a
 knock storm consumes the same bounded channels the fleet's own evidence uses — the newest
 200 diagnostics and a villager's retained events. Volume, unlike animation, is unbounded

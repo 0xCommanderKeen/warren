@@ -22,6 +22,10 @@ from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES
 from protocol import validate_event
 from typed_json import canonical_string, decode_graph, semantic_key
 
+# The reducer's own set, imported rather than mirrored: retention and the projection
+# disagreeing about what counts as evidence of life is precisely the bug this prevents.
+from village_state import AMBIENT_TYPES
+
 _POLICY_PATH = Path(__file__).with_name("retention-policy.json")
 POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
 
@@ -1215,8 +1219,14 @@ def _projection_keep_indexes(
     last_nonroutine = {}
     all_routine_facts = collections.defaultdict(list)
     for index, event in parsed:
-        if event["type"] not in ignored and (
-            index >= baseline_start or event["agent_id"] in routine_agents
+        # Ambient events are retained as visible history below but decide nothing here:
+        # the reducer reads them as somebody else's action, so a knock at a departed
+        # villager's door must not make this selector treat the agent as alive and spend
+        # witness budget an actually working agent needs.
+        if (
+            event["type"] not in ignored
+            and event["type"] not in AMBIENT_TYPES
+            and (index >= baseline_start or event["agent_id"] in routine_agents)
         ):
             agent_id = event["agent_id"]
             latest_raw[agent_id] = (index, event)
@@ -1533,6 +1543,7 @@ def carry_forward(lines, now_ms, policy):
         event_type = event.get("type", "")
         return (
             event_type not in TASK_EVENT_TYPES
+            and event_type not in AMBIENT_TYPES
             and event_type != "journal_written"
             and event_type != "needs_human_resolved"
         )

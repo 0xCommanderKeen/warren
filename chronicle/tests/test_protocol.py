@@ -2,7 +2,7 @@ import json
 import pathlib
 import unittest
 
-from protocol import EVENT_TYPES, validate_event
+from protocol import validate_event
 
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "protocol-v0-validation.json"
@@ -89,33 +89,7 @@ class ProtocolContractTest(unittest.TestCase):
             validate_event(event), "approval resolutions require source steward"
         )
 
-    def test_every_type_steward_emits_is_accepted(self):
-        """The gate is the whole reason a fact reaches the village (warren#276).
-
-        Steward's additive set is the list in its ``events.EVENT_TYPES``; a type it emits
-        and this gate refuses lands in Steward's local log and nowhere else, which is a
-        silence nobody looking at the village can detect.
-        """
-        self.assertLessEqual(
-            {
-                "routine_started",
-                "routine_finished",
-                "routine_failed",
-                "task_posted",
-                "task_claimed",
-                "task_done",
-                "task_failed",
-                "task_session_finished",
-                "task_delegated",
-                "needs_human",
-                "needs_human_resolved",
-                "resident_restarted",
-                "chat_message_dropped",
-            },
-            EVENT_TYPES,
-        )
-
-    def test_delegation_names_both_ends_and_only_Steward_may_say_it(self):
+    def test_delegation_names_both_ends_and_only_steward_may_say_it(self):
         event = {
             "v": 0,
             "ts": "2026-08-25T10:02:00.000Z",

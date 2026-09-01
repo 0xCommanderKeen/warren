@@ -65,7 +65,30 @@ def _nonempty_text(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def _validate_routine_payload(event_type, payload):
+def _artifacts_error(payload):
+    """Evidence of what a finished piece of work left behind, or nothing it can mean."""
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list) or not all(
+        _nonempty_text(item) for item in artifacts
+    ):
+        return "invalid payload.artifacts"
+    return None
+
+
+def _duration_error(payload):
+    """How long a run took: a real, finite, non-negative number of seconds."""
+    duration = payload.get("duration_s")
+    if (
+        type(duration) not in (int, float)
+        or not math.isfinite(duration)
+        or duration < 0
+    ):
+        return "invalid payload.duration_s"
+    return None
+
+
+def _validate_routine(event):
+    event_type, payload = event["type"], event["payload"]
     for field in ("routine", "run_id"):
         if not _nonempty_text(payload.get(field)):
             return f"invalid payload.{field}"
@@ -75,33 +98,19 @@ def _validate_routine_payload(event_type, payload):
     elif event_type == "routine_finished":
         if not _nonempty_text(payload.get("outcome")):
             return "invalid payload.outcome"
-        artifacts = payload.get("artifacts")
-        if not isinstance(artifacts, list) or not all(
-            _nonempty_text(item) for item in artifacts
-        ):
-            return "invalid payload.artifacts"
-        duration = payload.get("duration_s")
-        if (
-            type(duration) not in (int, float)
-            or not math.isfinite(duration)
-            or duration < 0
-        ):
-            return "invalid payload.duration_s"
+        return _artifacts_error(payload) or _duration_error(payload)
     elif event_type == "routine_failed":
         if not _nonempty_text(payload.get("error")):
             return "invalid payload.error"
+        # A watchdog closing a run nobody watched knows no duration and says so by
+        # leaving the field out; a present one is still held to the same shape.
         if "duration_s" in payload:
-            duration = payload["duration_s"]
-            if (
-                type(duration) not in (int, float)
-                or not math.isfinite(duration)
-                or duration < 0
-            ):
-                return "invalid payload.duration_s"
+            return _duration_error(payload)
     return None
 
 
-def _validate_task_payload(event_type, payload, agent_id):
+def _validate_task(event):
+    event_type, payload, agent_id = event["type"], event["payload"], event["agent_id"]
     for field in ("task_id", "title"):
         if not _nonempty_text(payload.get(field)):
             return f"invalid payload.{field}"
@@ -121,17 +130,14 @@ def _validate_task_payload(event_type, payload, agent_id):
     if "parent_task_id" in payload and not _nonempty_text(payload["parent_task_id"]):
         return "invalid payload.parent_task_id"
     if event_type == "task_done":
-        artifacts = payload.get("artifacts")
-        if not isinstance(artifacts, list) or not all(
-            _nonempty_text(item) for item in artifacts
-        ):
-            return "invalid payload.artifacts"
+        return _artifacts_error(payload)
     if event_type == "task_failed" and not _nonempty_text(payload.get("reason")):
         return "invalid payload.reason"
     return None
 
 
-def _validate_approval_resolution(payload):
+def _validate_approval_resolution(event):
+    payload = event["payload"]
     for field in ("request_id", "decided_by", "action"):
         if not _nonempty_text(payload.get(field)):
             return f"invalid payload.{field}"
@@ -166,19 +172,7 @@ def _validate_session_report(event):
             return f"invalid payload.{field}"
     if payload["claimant"] != agent_id:
         return "payload.claimant must match agent_id"
-    artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list) or not all(
-        _nonempty_text(item) for item in artifacts
-    ):
-        return "invalid payload.artifacts"
-    duration = payload.get("duration_s")
-    if (
-        type(duration) not in (int, float)
-        or not math.isfinite(duration)
-        or duration < 0
-    ):
-        return "invalid payload.duration_s"
-    return None
+    return _artifacts_error(payload) or _duration_error(payload)
 
 
 def _validate_resident_restart(event):
@@ -210,19 +204,28 @@ def _validate_chat_drop(event):
     return None
 
 
-#: Facts only Steward can witness, because only Steward runs the board, the watchdog and
-#: the chat routes. Each names the payload rule and the authority error a forgery gets.
+_ROUTINE_AUTHORITY = "routine events require source steward"
+_TASK_AUTHORITY = "task events require source steward"
+_APPROVAL_AUTHORITY = "approval resolutions require source steward"
+_RESIDENT_AUTHORITY = "resident lifecycle events require source steward"
+_CHAT_AUTHORITY = "chat events require source steward"
+
+#: Every fact only Steward can witness, because only Steward runs the routines, the board,
+#: the watchdog and the chat routes. One table so the trust boundary is a list somebody can
+#: read: each type names the payload rule it must satisfy and the error a forgery gets.
 _STEWARD_AUTHORED = {
-    "task_delegated": (_validate_delegation, "task events require source steward"),
-    "task_session_finished": (
-        _validate_session_report,
-        "task events require source steward",
-    ),
-    "resident_restarted": (
-        _validate_resident_restart,
-        "resident lifecycle events require source steward",
-    ),
-    "chat_message_dropped": (_validate_chat_drop, "chat events require source steward"),
+    "routine_started": (_validate_routine, _ROUTINE_AUTHORITY),
+    "routine_finished": (_validate_routine, _ROUTINE_AUTHORITY),
+    "routine_failed": (_validate_routine, _ROUTINE_AUTHORITY),
+    "task_posted": (_validate_task, _TASK_AUTHORITY),
+    "task_claimed": (_validate_task, _TASK_AUTHORITY),
+    "task_done": (_validate_task, _TASK_AUTHORITY),
+    "task_failed": (_validate_task, _TASK_AUTHORITY),
+    "task_delegated": (_validate_delegation, _TASK_AUTHORITY),
+    "task_session_finished": (_validate_session_report, _TASK_AUTHORITY),
+    "needs_human_resolved": (_validate_approval_resolution, _APPROVAL_AUTHORITY),
+    "resident_restarted": (_validate_resident_restart, _RESIDENT_AUTHORITY),
+    "chat_message_dropped": (_validate_chat_drop, _CHAT_AUTHORITY),
 }
 
 
@@ -257,24 +260,6 @@ def validate_event(event):
     for field in _REQUIRED_TEXT.get(event_type, ()):
         if not isinstance(payload.get(field), str) or not payload[field].strip():
             return f"invalid payload.{field}"
-    if event_type.startswith("routine_"):
-        error = _validate_routine_payload(event_type, payload)
-        if error:
-            return error
-        if event["source"] != "steward":
-            return "routine events require source steward"
-    if event_type in ("task_posted", "task_claimed", "task_done", "task_failed"):
-        error = _validate_task_payload(event_type, payload, event["agent_id"])
-        if error:
-            return error
-        if event["source"] != "steward":
-            return "task events require source steward"
-    if event_type == "needs_human_resolved":
-        error = _validate_approval_resolution(payload)
-        if error:
-            return error
-        if event["source"] != "steward":
-            return "approval resolutions require source steward"
     steward_authored = _STEWARD_AUTHORED.get(event_type)
     if steward_authored:
         validator, authority = steward_authored
