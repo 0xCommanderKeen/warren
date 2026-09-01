@@ -16,7 +16,7 @@ import { Link, NavigationProvider, useNavigation } from "./navigation.jsx";
 import { StewardProvider, useSteward } from "./steward/context.jsx";
 import { Button, Label, PageHead } from "./console/ui.jsx";
 import { viewModel } from "./model.js";
-import { KNOCK } from "./diagnostics.js";
+import { knockCount, plural } from "./diagnostics.js";
 import { createStateTransport } from "./transport.js";
 import { LedgerProvider } from "./console/ledger.jsx";
 import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
@@ -98,8 +98,6 @@ const CREDENTIAL_NOTE = {
   other: ["not an operator credential: likely the master token, which names nobody and cannot be revoked without a restart"],
 };
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
 /**
  * What the snapshot is complaining about, in the rail rather than only on its own page.
  *
@@ -111,7 +109,7 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 function Complaints({ snapshot }) {
   const diagnostics = snapshot?.diagnostics || [];
   if (!diagnostics.length) return null;
-  const knocks = diagnostics.filter((item) => item.kind === KNOCK).length;
+  const knocks = knockCount(diagnostics);
   return (
     <Link
       to={routeTo.diagnostics()}

@@ -38,6 +38,21 @@ export function bySoonest(left, right) {
   return a - b;
 }
 
+/**
+ * Order two ISO timestamps newest first, with an unreadable one last (#155, the other way).
+ *
+ * Not `bySoonest` reversed: reversing it puts the unparseable values at the *top*, which is
+ * the one place a record nobody can date must not be — "what happened most recently" would
+ * answer with the row whose clock is broken.
+ */
+export function byLatest(left, right) {
+  const a = instant(left);
+  const b = instant(right);
+  if (Number.isNaN(a)) return Number.isNaN(b) ? 0 : 1;
+  if (Number.isNaN(b)) return -1;
+  return b - a;
+}
+
 /** The row whose `pick(row)` names the soonest moment, or `null` when none does. */
 export function soonest(rows, pick) {
   return (

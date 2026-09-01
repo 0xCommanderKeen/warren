@@ -58,13 +58,16 @@ A resident's journal text, its inbox and its spend come from steward rather than
 Chronicle, because the projection carries none of the three: it has journal *metadata* — a
 day, a routine, a path — and no delegation or budget at all.
 
-The diagnostics page has one rule the others do not: **a knock never renders text**. The
-`chat_message_dropped` event carries none by design — a stranger's message is the one string
-in the system written by somebody steward has no relationship with — so the panel folds a
-knock down to named fields (the door, the route, who knocked, why) and there is nowhere for
-text to land even if a record arrived carrying some. Repeated knocks from one sender are one
-line with a count, because nothing rate-limits the event yet (warren#278) and a storm is one
-fact rather than two hundred rows.
+The diagnostics page has one rule the others do not: **a knock renders six named fields and
+nothing else** — the door, the route and address, who knocked, why. The
+`chat_message_dropped` event carries no message text by design (a stranger's message is the
+one string in the system written by somebody steward has no relationship with), and the
+whitelist is what makes that structural here rather than assumed: a record arriving with text
+has nowhere to put it. Every other kind is drawn from whatever fields it carries, which is
+how an unfamiliar kind stays visible at all; what keeps *that* safe is Chronicle's own rule
+that a diagnostic names what went wrong without quoting the input that caused it. Repeated
+knocks from one sender are one line with a count, because nothing rate-limits the event yet
+(warren#278) and a storm is one fact rather than two hundred rows.
 
 ### Nothing here claims an effect steward has not confirmed
 

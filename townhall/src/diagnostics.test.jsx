@@ -10,7 +10,7 @@
  * arriving text ever reaches the screen.
  */
 
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { viewModel } from "./model.js";
@@ -182,11 +182,9 @@ describe("the diagnostics page", () => {
   it("names the door, the route, who knocked and why they got silence", () => {
     show([knock()]);
 
-    const row = screen.getByText("telegram:pip").closest("div[style]");
-    expect(within(row).getByText("claude:keeper")).toBeTruthy();
-    expect(within(row).getByText("chat")).toBeTruthy();
-    expect(within(row).getByText("88213311")).toBeTruthy();
-    expect(within(row).getByText("not an operator")).toBeTruthy();
+    for (const fact of ["claude:keeper", "warren", "chat", "telegram:pip", "88213311", "not an operator"]) {
+      expect(screen.getByText(fact), fact).toBeTruthy();
+    }
   });
 
   it("draws a knock storm as one line with a count, not two hundred rows", () => {

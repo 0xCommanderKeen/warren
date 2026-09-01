@@ -10,6 +10,7 @@ describe("Observatory presentation model", () => {
     expect(model.people).toHaveLength(snapshot.villagers.length);
     expect(model.tasks).toBe(snapshot.tasks);
     expect(model.approvals).toBe(snapshot.approvals);
+    expect(model.diagnostics).toBe(snapshot.diagnostics);
     expect(model.active).toBe(1);
     expect(model.people.every((person) => Number.isFinite(person.x) && Number.isFinite(person.y))).toBe(true);
   });

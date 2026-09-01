@@ -10,12 +10,13 @@
  * silence — the only diagnostic somebody outside the fleet causes, and the only one whose
  * entire reason for existing is that an operator should notice it.
  *
- * The functions are here rather than in the page because both rules worth having are about
- * data and not about pixels: a knock storm is *one* fact, and what a stranger typed is not
- * a fact this system holds at all.
+ * The rules are here rather than in the page because they are about the data and not about
+ * pixels: a knock storm is *one* fact, and what a stranger typed is not a fact this system
+ * holds at all. `fields` sits with them because it answers the same question — what does a
+ * record carry — for the kinds nobody has written a renderer for.
  */
 
-import { bySoonest, instant } from "./console/time.js";
+import { byLatest, bySoonest } from "./console/time.js";
 
 /** The one record an outsider causes. Spelled once; the page and the rail both read it. */
 export const KNOCK = "chat_message_dropped";
@@ -32,11 +33,18 @@ export const UNNAMED = "(no kind)";
 /**
  * The fields a knock is allowed to keep.
  *
- * A whitelist, deliberately, and it is the whole of warren#279's "do not render message
- * text" requirement made structural. The event carries no text by design
- * (`steward/docs/chat.md`) and `DiagnosticWire` is `extra="allow"`, so the only way a
- * stranger's words could ever reach an operator's screen is a renderer that spreads the
- * record. Nothing here spreads it.
+ * A whitelist, deliberately: warren#279 asks that the panel never render a stranger's
+ * message and never grow a field for one. The event carries no text by design
+ * (`steward/docs/chat.md`), `DiagnosticWire` is `extra="allow"`, and this is what stops a
+ * record that arrived carrying some from reaching a screen.
+ *
+ * **Say what this covers, exactly**: a record whose `kind` is `chat_message_dropped`. The
+ * `fields` renderer below spreads any *other* record, which is its job — a kind nobody has
+ * written a panel for is still worth showing. What keeps that honest is Chronicle's own
+ * rule rather than this list: a diagnostic names what went wrong without quoting the input
+ * that caused it (`chronicle/docs/resident-manifest.md` — rejected values are refused
+ * "without echoing their values in diagnostics"). Two halves, in two repositories'
+ * directories, and this is the half townhall owns.
  */
 const KNOCK_FIELDS = ["agent_id", "project", "route", "address", "from", "reason"];
 
@@ -47,9 +55,9 @@ export const KIND_WORDS = {
     note:
       "Somebody who is not a named operator messaged a resident's chat bot, or messaged it " +
       "in a group, and was answered with silence — a reply of any kind would confirm to a " +
-      "scanner that something is listening. What they wrote is not recorded anywhere: the " +
-      "sender id is the part steward keeps, and it is enough to recognise a wrong number, " +
-      "add a second account to STEWARD_CHAT_OPERATORS, or notice a stranger.",
+      "scanner that something is listening. What they wrote is recorded nowhere; the sender " +
+      "id is enough to recognise a wrong number or add a second account to " +
+      "STEWARD_CHAT_OPERATORS.",
   },
   malformed_event: {
     title: "Event log lines that did not validate",
@@ -100,19 +108,12 @@ const KIND_ORDER = [
 const kindOf = (record) =>
   typeof record?.kind === "string" && record.kind ? record.kind : UNNAMED;
 
-/**
- * Newest first, with an unreadable clock sorting last rather than becoming the newest.
- *
- * Not `bySoonest` reversed: reversing it would put the unreadable ones at the *top*, which
- * is the one place a record nobody can date must not be.
- */
-function byNewest(left, right) {
-  const a = instant(left.last);
-  const b = instant(right.last);
-  if (Number.isNaN(a)) return Number.isNaN(b) ? 0 : 1;
-  if (Number.isNaN(b)) return -1;
-  return b - a;
-}
+/** "3 knocks", "1 knock" — the counting both the page and the rail do. */
+export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** How many of these records are somebody outside the fleet ringing a doorbell. */
+export const knockCount = (records) =>
+  (records || []).filter((record) => kindOf(record) === KNOCK).length;
 
 /**
  * One line per sender, per door, per reason — however many times they knocked.
@@ -137,11 +138,9 @@ export function foldKnocks(records) {
     }
     seen.count += 1;
     if (bySoonest(record?.ts, seen.first) < 0) seen.first = record?.ts;
-    if (bySoonest(record?.ts, seen.last) > 0 || Number.isNaN(instant(seen.last))) {
-      seen.last = record?.ts;
-    }
+    if (byLatest(record?.ts, seen.last) < 0) seen.last = record?.ts;
   }
-  return [...lines.values()].sort(byNewest);
+  return [...lines.values()].sort((left, right) => byLatest(left.last, right.last));
 }
 
 /**

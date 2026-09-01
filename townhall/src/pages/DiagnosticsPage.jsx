@@ -11,9 +11,13 @@
  *
  * Two rules, both enforced in `../diagnostics.js` rather than here:
  *   - a knock storm is one line with a count, because it is one fact;
- *   - what the stranger typed is not on this page, and there is no field for it to land in.
- *     The event carries none by design (steward/docs/chat.md), and this panel must never be
- *     the thing that gives a chat bot a way to publish text into the operator's own screen.
+ *   - a knock renders six named fields and nothing else, so there is nowhere for a
+ *     stranger's message to land. The event carries none by design (steward/docs/chat.md),
+ *     and this panel must never be the thing that gives a chat bot a way to publish text
+ *     into the operator's own screen. Every *other* kind is drawn from whatever fields it
+ *     carries — that is what makes an unfamiliar kind visible at all — and what keeps that
+ *     safe is Chronicle's rule rather than this file's: a diagnostic names what went wrong
+ *     without quoting the input that caused it.
  *
  * Arcadia is deliberately not the place for this: the village scene shows what villagers are
  * *doing*, and a knock is precisely not the villager doing anything.
@@ -21,14 +25,12 @@
 
 import { Badge, Clock, Empty, Facts, Loading, PageHead, Row, Rows, Section, Stack } from "../console/ui.jsx";
 import { instant, span } from "../console/time.js";
-import { KIND_WORDS, KNOCK, UNNAMED, fields, groupDiagnostics } from "../diagnostics.js";
+import { KIND_WORDS, KNOCK, UNNAMED, fields, groupDiagnostics, plural } from "../diagnostics.js";
 
 const KNOCK_COLUMNS = "1.1fr 1.1fr .9fr 1fr auto auto";
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
 /** How long a storm went on for, or nothing when it was one knock or an unreadable clock. */
-function over(first, last) {
+function stormSpan(first, last) {
   const from = instant(first);
   const to = instant(last);
   return Number.isNaN(from) || Number.isNaN(to) || to <= from ? null : `over ${span(from, to)}`;
@@ -60,7 +62,7 @@ function Knocks({ lines }) {
           {/* The count, not the rows: two hundred knocks from one scanner is one fact, and
               two hundred rows of it would bury the two that are not. */}
           <Badge>{line.count}×</Badge>
-          <Stack sub={line.count > 1 ? over(line.first, line.last) : null}>
+          <Stack sub={line.count > 1 ? stormSpan(line.first, line.last) : null}>
             <Clock at={line.last} />
           </Stack>
         </Row>
@@ -114,7 +116,7 @@ export default function DiagnosticsPage({ model }) {
     );
   }
 
-  const diagnostics = model.snapshot.diagnostics || [];
+  const diagnostics = model.diagnostics;
   const capacity = model.snapshot.capacity?.diagnostics;
   const groups = groupDiagnostics(diagnostics);
   const brimming = Boolean(capacity) && diagnostics.length >= capacity;
@@ -123,11 +125,13 @@ export default function DiagnosticsPage({ model }) {
     <>
       <Head />
 
-      {diagnostics.length ? (
+      {/* Whether you are looking at everything. A bounded array that has reached its bound is
+          no longer the whole story, and a panel that did not say so would be lying quietly. */}
+      {diagnostics.length && capacity ? (
         <p className="max-w-[74ch] text-[11.5px] leading-[1.7] text-faint">
           {brimming ? (
             <>
-              This channel is <strong className="font-normal text-wait">full</strong>: the
+              This channel is <strong className="font-normal text-ink">full</strong>: the
               projection keeps the newest {capacity} records and has already dropped whatever came
               before these. Nothing rate-limits a knock yet (warren#278), so an outsider knocking
               in a loop can push the fleet's own evidence out on their own.
@@ -173,8 +177,8 @@ export default function DiagnosticsPage({ model }) {
       ) : (
         <Empty title="Nothing to report.">
           This snapshot's projection folded every event it was given, every manifest validated,
-          and nobody has knocked on a resident's chat door. The array is bounded at {capacity}{" "}
-          records and is empty, which is the village saying so rather than nobody having looked.
+          and nobody has knocked on a resident's chat door. The village is saying so, which is
+          not the same as nobody having looked.
         </Empty>
       )}
     </>
