@@ -14,6 +14,7 @@ import click
 import yaml
 from pydantic import ValidationError
 
+from steward import chat as ch
 from steward import events as ev
 from steward import notify as nf
 from steward.api import (
@@ -1635,6 +1636,145 @@ def notify_test(resident_id: str, residents: Path) -> None:
         err=True,
     )
     sys.exit(EXIT_INVALID)
+
+
+# --------------------------------------------------------------------------------------
+# chat
+# --------------------------------------------------------------------------------------
+
+
+@main.group("chat")
+def chat_group() -> None:
+    """Talk to residents: who is reachable, and the daemon that carries it."""
+
+
+@chat_group.command("list")
+@_RESIDENTS_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def chat_list(residents: Path, output_format: str) -> None:
+    """Print every declared chat route and what still stands between it and a message.
+
+    The operator's setup path (warren#108), and it is deliberately the *only* one: a route
+    declares a reference like ``telegram:pip`` and the bot's token lives in this process's
+    environment, so "which variable does this bot read" is a question only steward can answer
+    from the two halves together.
+
+    It prints the variable's **name** and whether something is in it, and there is nowhere in
+    this command for its value. A bot token is the whole capability — whoever holds it can
+    read every message the operator sends and can speak as the resident — so it is checked
+    here and printed nowhere.
+    """
+    result = validate_paths([residents])
+    reports = ch.describe_chat(list(result.residents))
+    if output_format == "json":
+        click.echo(json.dumps([report.to_dict() for report in reports], indent=2))
+        return
+    if not reports:
+        click.secho(f"no resident under {residents} declares a chat route", fg="yellow")
+        return
+    for report in reports:
+        state = "reachable" if report.reachable else f"{report.status} — not reachable yet"
+        click.secho(
+            f"{report.resident}/{report.route}: {report.address} — {state}",
+            fg="cyan" if report.reachable else "yellow",
+        )
+        click.echo(
+            f"  token:   {report.token_env or 'unknown'} ({'set' if report.token_set else 'unset'})"
+        )
+        if report.note:
+            click.echo(f"  note:    {report.note}")
+
+
+@chat_group.command("run")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Fallback working directory when a resident's memory dir is absent.",
+)
+@click.option(
+    "--state",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where the daemon lock lives. Defaults to beside $STEWARD_STATE.",
+)
+@click.option(
+    "--catchup-seconds",
+    type=float,
+    default=ch.DEFAULT_CATCHUP_S,
+    show_default=True,
+    help="How old a message may be and still be answered rather than replied to as missed.",
+)
+@click.option("--max-polls", type=int, default=None, help="Stop after this many polls.")
+def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    residents: Path,
+    db: Path | None,
+    workdir: Path | None,
+    state: Path | None,
+    catchup_seconds: float,
+    max_polls: int | None,
+) -> None:
+    """Run the chat bridge daemon: long-poll every reachable bot and answer its operator.
+
+    A separate process from the scheduler and the watchdog, sharing their state directory
+    and their one ``steward.db`` — which is exactly why the cross-process session claim
+    exists (warren#111): a message arriving mid-routine finds the resident busy and is told
+    so rather than opening a second session for it.
+
+    Nothing here listens on a port. Long polling means every connection is outbound, so a
+    resident is reachable from a phone without anything on the internet being able to reach
+    the burrow.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with _open_store(db) as store:
+        guard = BudgetGuard(store, ev.EventEmitter.from_env())
+        claims = ResidentClaims(store)
+        try:
+            bridge = ch.ChatBridge.from_path(
+                residents,
+                store,
+                workdir=workdir,
+                guard=guard,
+                # The board, for the two things a conversation needs from it: the decisions
+                # this resident is owed, and the sweep that hands over anything it delegated
+                # while the operator was still reading the reply.
+                hooks=Dispatcher.from_path(
+                    residents, store, workdir=workdir, guard=guard, claims=claims
+                ),
+                claims=claims,
+                state_path=state,
+                catchup_s=catchup_seconds,
+            )
+            outcomes = bridge.run(max_polls=max_polls)
+        except ch.ChatError as exc:
+            click.secho(str(exc), fg="red", err=True)
+            sys.exit(EXIT_INVALID)
+        except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon
+            click.echo("stopped")
+            return
+    for outcome in outcomes:
+        _report_chat(outcome)
+
+
+def _report_chat(outcome: ch.ChatOutcome) -> None:
+    """Print what one message came to, scrubbed of anything a session wrote.
+
+    The reply is not printed at all, and that is the point: it is a private message between
+    an operator and their resident, and a daemon's stdout is a log file. What a reader of
+    this needs is that a message arrived, who it was for, and how it ended.
+    """
+    label = f"{outcome.resident_id}/{outcome.route}"
+    loud = (ch.ChatStatus.FAILED, ch.ChatStatus.UNREACHABLE)
+    if outcome.status is ch.ChatStatus.ANSWERED:
+        colour = "green"
+    elif outcome.status in loud:
+        colour = "red"
+    else:
+        colour = "yellow"
+    reason = f": {redact_secrets(outcome.reason)}" if outcome.reason else ""
+    click.secho(f"{outcome.status} {label}{reason}", fg=colour, err=outcome.status in loud)
 
 
 # --------------------------------------------------------------------------------------

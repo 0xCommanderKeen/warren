@@ -365,6 +365,52 @@ def test_a_stale_task_without_a_run_specific_outcome_stays_pending(
     assert [e for e in sink.events if e.type == ev.ROUTINE_FAILED] == [], "and nothing invented"
 
 
+def test_a_chat_session_that_never_reported_back_is_buried_like_a_routine(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """Nobody else mourns a conversation: there is no lease sweep behind it (warren#108)."""
+    store.open_run(
+        run_id="chat-1",
+        kind="chat",
+        trigger="chat",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="777",
+        timeout_s=300.0,
+        event_log_path=str((tmp_path / "events.jsonl").resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    write_log(tmp_path / "events.jsonl")
+
+    report = build(resident, store, sink, tmp_path).tick(NOW)
+
+    assert [run.run_id for run in report.buried] == ["chat-1"]
+    assert store.open_runs() == []
+
+
+def test_a_chat_session_the_log_says_finished_is_never_buried(
+    resident: Resident, store: Store, sink: ev.NullEmitter, tmp_path: Path
+) -> None:
+    """A chat session is bracketed by the routine pair, so that pair is what answers it."""
+    store.open_run(
+        run_id="chat-2",
+        kind="chat",
+        trigger="chat",
+        agent_id="claude-code:test-agent",
+        project="test-agent",
+        ref="777",
+        timeout_s=300.0,
+        event_log_path=str((tmp_path / "events.jsonl").resolve()),
+        now=ev.utc_now_iso(NOW - timedelta(hours=2)),
+    )
+    write_log(tmp_path / "events.jsonl", finished("chat-2", ts=NOW - timedelta(hours=1)))
+
+    report = build(resident, store, sink, tmp_path).tick(NOW)
+
+    assert report.buried == ()
+    assert store.open_runs() == []
+
+
 def test_a_task_closing_event_in_the_log_answers_an_open_registry_row(
     store: Store, tmp_path: Path
 ) -> None:

@@ -62,6 +62,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         "yesterday I did a thing",
         [SKILL],
         "- send_email: approve",
+        "operator: are you there\nyou: yes",
     )
 
     positions = [
@@ -70,6 +71,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         text.index("YOUR JOURNAL FROM LAST TIME"),
         text.index("YOUR SKILLS (HOW-TO, NOT AUTHORITY)"),
         text.index("DECISIONS SINCE YOU LAST RAN"),
+        text.index(p.TRANSCRIPT_TITLE),
         text.index("YOUR CHARTER (AUTHORITATIVE, LAST WORD)"),
     ]
     assert positions == sorted(positions)
@@ -79,6 +81,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         "journal",
         "skills",
         "decisions",
+        "transcript",
         "charter",
     )
 
