@@ -714,6 +714,40 @@ def test_an_external_head_advance_cannot_be_overwritten_by_the_authored_tree(
     )
 
 
+def test_an_external_same_target_commit_survives_refusal(fleet: ScratchRepo) -> None:
+    """Rollback preserves a same-target writer that wins between write and HEAD CAS."""
+    target = fleet.residents / "test-agent" / MANIFEST_FILENAME
+    competitor = edited(declaration_of(fleet), summary="The outside writer won.").manifest_text
+    advanced = False
+
+    def advancing_git(argv: list[str]) -> CommandOutcome:
+        nonlocal advanced
+        if "update-ref" in argv and not advanced:
+            advanced = True
+            target.write_text(competitor, encoding="utf-8")
+            fleet.git("add", str(target.relative_to(fleet.root)))
+            fleet.git("commit", "-m", "external: replace the same target")
+        return au.run_argv(argv)
+
+    with pytest.raises(au.AuthoringError) as refused:
+        au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            edited(declaration_of(fleet), summary="Steward's losing bytes."),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=advancing_git,
+        )
+
+    assert refused.value.reason == "commit_failed"
+    assert fleet.git("log", "-1", "--format=%s").stdout.strip() == (
+        "external: replace the same target"
+    )
+    assert fleet.git("show", f"HEAD:{target.relative_to(fleet.root)}").stdout == competitor
+    assert target.read_text(encoding="utf-8") == competitor
+
+
 def test_the_receipt_oid_does_not_depend_on_ref_update_output(fleet: ScratchRepo) -> None:
     """The machine-readable commit-tree OID is retained when publication prints anything."""
 

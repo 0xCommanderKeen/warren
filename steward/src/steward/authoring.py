@@ -39,6 +39,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
@@ -754,20 +755,69 @@ class _FileState:
 
     @classmethod
     def capture(cls, path: Path) -> _FileState:
-        return cls(
-            path=path,
-            existed=path.is_file(),
-            contents=path.read_bytes() if path.is_file() else b"",
-            mode=path.stat().st_mode if path.is_file() else 0,
-        )
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            # A symlink (or any other non-regular target) is not a file state Steward may
+            # compare or restore through.  Treat it as absent for capture; ``matches``
+            # below still distinguishes it from a genuinely absent path.
+            return cls(path=path, existed=False)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                return cls(path=path, existed=False)
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                contents = source.read()
+            return cls(path=path, existed=True, contents=contents, mode=metadata.st_mode)
+        finally:
+            os.close(descriptor)
+
+    def matches(self) -> bool:
+        """Whether the path is still exactly this regular-file state, without following links."""
+        if not self.existed:
+            try:
+                self.path.lstat()
+            except FileNotFoundError, NotADirectoryError:
+                return True
+            return False
+        return self == self.capture(self.path)
 
     def restore(self) -> None:
         if not self.existed:
             self.path.unlink(missing_ok=True)
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_bytes(self.contents)
-        self.path.chmod(self.mode)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.steward-restore-", dir=self.path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(self.contents)
+            temporary.chmod(self.mode)
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+@dataclass(slots=True)
+class _AuthoringFiles:
+    """The before and Steward-authored states needed for compare-and-restore rollback."""
+
+    before: tuple[_FileState, ...]
+    authored: tuple[_FileState, ...] | None = None
+
+    def mark_authored(self) -> None:
+        self.authored = tuple(_FileState.capture(state.path) for state in self.before)
+
+    def rollback(self) -> None:
+        # An outside writer that replaced the same path after Steward's write owns it.  Only
+        # put the old bytes back while the exact bytes and mode Steward authored remain.
+        if self.authored is None:
+            return
+        for old, authored in zip(self.before, self.authored, strict=True):
+            if authored.matches():
+                old.restore()
 
 
 def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
@@ -784,7 +834,7 @@ def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
 @contextmanager
 def _authoring_transaction(
     residents_dir: Path, paths: Sequence[Path], *, git: PipedRun
-) -> Iterator[Path | None]:
+) -> Iterator[_AuthoringFiles]:
     """Serialize an authoring request and restore its target files on refusal."""
     repo = repo_toplevel(residents_dir, git=git)
     lock_path = (
@@ -799,13 +849,12 @@ def _authoring_transaction(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        file_states = tuple(_FileState.capture(path) for path in paths)
+        files = _AuthoringFiles(tuple(_FileState.capture(path) for path in paths))
         try:
-            yield repo
+            yield files
         except Exception:
-            for state in file_states:
-                state.restore()
-            for path, state in zip(paths, file_states, strict=True):
+            files.rollback()
+            for path, state in zip(paths, files.before, strict=True):
                 if not state.existed:
                     parent = path.parent
                     while parent != residents_dir.parent and parent.exists():
@@ -859,10 +908,11 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
 ) -> WriteResult:
     """Validate, write, and commit one resident's declaration. Refusals write nothing."""
     paths = declaration_paths(residents_dir, resident_id, declaration.soul_filename)
-    with _authoring_transaction(residents_dir, paths, git=git):
+    with _authoring_transaction(residents_dir, paths, git=git) as files:
         _check_revision(expected_revision, paths)
         result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
         _write_declaration_into(residents_dir / resident_id, declaration)
+        files.mark_authored()
         written = tuple(path for path in paths if path.is_file())
         revision = revision_of(*written)
         commit = commit_write(
@@ -893,7 +943,7 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
 ) -> WriteResult:
     """Validate, write, and commit one skill. Refusals write nothing."""
     path = skills_dir / document.name / SKILL_FILENAME
-    with _authoring_transaction(residents_dir, [path], git=git):
+    with _authoring_transaction(residents_dir, [path], git=git) as files:
         if created and path.is_file():
             raise AuthoringError(
                 f"skill {document.name!r} already exists; PUT replaces it", reason="skill_exists"
@@ -902,6 +952,7 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
         result = validate_skill(residents_dir, skills_dir, document)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(document.text(), encoding="utf-8")
+        files.mark_authored()
         revision = revision_of(path)
         subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(
             name=document.name
