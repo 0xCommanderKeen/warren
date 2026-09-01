@@ -14,6 +14,12 @@
  * pixels: a knock storm is *one* fact, and what a stranger typed is not a fact this system
  * holds at all. `fields` sits with them because it answers the same question — what does a
  * record carry — for the kinds nobody has written a renderer for.
+ *
+ * warren#278 then bounded the storm at both ends — Steward records one knock per stranger
+ * per door per window, Chronicle caps what knocks may take of the channel — which means the
+ * number of records here stopped being the number of knocks. `suppressed` is the
+ * difference, and folding it back in is why this file reads a field the whitelist does not
+ * carry.
  */
 
 import { byLatest, bySoonest } from "./console/time.js";
@@ -57,7 +63,8 @@ export const KIND_WORDS = {
       "in a group, and was answered with silence — a reply of any kind would confirm to a " +
       "scanner that something is listening. What they wrote is recorded nowhere; the sender " +
       "id is enough to recognise a wrong number or add a second account to " +
-      "STEWARD_CHAT_OPERATORS.",
+      "STEWARD_CHAT_OPERATORS. Steward records one knock per sender per door per catch-up " +
+      "window and counts the rest, so the number beside a line is knocks and not records.",
   },
   malformed_event: {
     title: "Event log lines that did not validate",
@@ -108,12 +115,33 @@ const KIND_ORDER = [
 const kindOf = (record) =>
   typeof record?.kind === "string" && record.kind ? record.kind : UNNAMED;
 
+/**
+ * How many knocks one record stands for: itself, plus the ones Steward counted into it.
+ *
+ * Chronicle validates `suppressed` as a non-negative integer before a record can reach a
+ * snapshot, but `DiagnosticWire` is `extra="allow"` and this number is drawn on a screen as
+ * a count of things that happened — so anything that is not a whole positive number stands
+ * for nothing beyond the record itself.
+ */
+const knocksIn = (record) => {
+  const suppressed = record?.suppressed;
+  return Number.isSafeInteger(suppressed) && suppressed > 0 ? suppressed + 1 : 1;
+};
+
 /** "3 knocks", "1 knock" — the counting both the page and the rail do. */
 export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-/** How many of these records are somebody outside the fleet ringing a doorbell. */
+/**
+ * How many times somebody outside the fleet rang a doorbell.
+ *
+ * Knocks, not records — the rail and the page have to agree, and since warren#278 one
+ * record can stand for two hundred knocks. A rail reading "1 knock" beside a page reading
+ * "200×" would make the count look like a bug in whichever the operator saw second.
+ */
 export const knockCount = (records) =>
-  (records || []).filter((record) => kindOf(record) === KNOCK).length;
+  (records || [])
+    .filter((record) => kindOf(record) === KNOCK)
+    .reduce((total, record) => total + knocksIn(record), 0);
 
 /**
  * One line per sender, per door, per reason — however many times they knocked.
@@ -123,8 +151,11 @@ export const knockCount = (records) =>
  * is part of the key rather than folded away: "not an operator" and "not a private
  * conversation" are different mistakes, and one person can make both.
  *
- * Nothing rate-limits the event yet (warren#278), so the storm this folds is a real shape
- * and not a defensive one.
+ * Since warren#278 the fold is done twice over: Steward already collapses a storm into one
+ * event per stranger per door per catch-up window, and the knocks it swallowed arrive as
+ * `suppressed` on the record it did emit. So `count` adds those back — three records
+ * standing for two hundred knocks read "200×", not "3×", which is the same lie this fold
+ * exists to avoid told the other way round.
  */
 export function foldKnocks(records) {
   const lines = new Map();
@@ -133,10 +164,11 @@ export function foldKnocks(records) {
     const key = JSON.stringify(KNOCK_FIELDS.map((field) => named[field] ?? null));
     const seen = lines.get(key);
     if (!seen) {
-      lines.set(key, { key, ...named, count: 1, first: record?.ts, last: record?.ts });
+      const count = knocksIn(record);
+      lines.set(key, { key, ...named, count, first: record?.ts, last: record?.ts });
       continue;
     }
-    seen.count += 1;
+    seen.count += knocksIn(record);
     if (bySoonest(record?.ts, seen.first) < 0) seen.first = record?.ts;
     if (byLatest(record?.ts, seen.last) < 0) seen.last = record?.ts;
   }

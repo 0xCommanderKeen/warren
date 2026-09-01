@@ -32,7 +32,7 @@
     "journals": [{"day": "2026-08-27", "agent_id": "claude:keeper", "project": "burrow", "source": "steward", "routine": "daily", "path": "journals/2026-08-27.md", "observed_at": "2026-08-27T11:56:00.000Z"}],
     "routines": [{"run_id": "run-1", "routine": "daily", "agent_id": "claude:keeper", "project": "burrow", "source": "steward", "state": "finished", "trigger": "schedule", "started_at": "2026-08-27T11:50:00.000Z", "updated_at": "2026-08-27T11:55:00.000Z", "outcome": "ok", "duration_s": 300, "artifacts": ["report.md"], "error": null}],
     "diagnostics": [{"kind": "malformed_event", "file": "events.jsonl", "message": "invalid record"}],
-    "capacity": {"villagers": 80, "events_per_villager": 160, "tasks": 200, "approvals": 200, "journals": 200, "routines": 200, "diagnostics": 200},
+    "capacity": {"villagers": 80, "events_per_villager": 160, "ambient_events_per_villager": 4, "tasks": 200, "approvals": 200, "journals": 200, "routines": 200, "diagnostics": 200, "ambient_diagnostics": 40},
     "capabilities": {"ingest": true, "approvals": true, "jobs": true, "routines": true}
   }
 }

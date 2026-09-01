@@ -490,10 +490,139 @@ class VillageProjectionTests(unittest.TestCase):
                 "address": "@life_agent_bot",
                 "from": "87654321",
                 "reason": "not an operator",
+                "suppressed": 0,
                 "ts": "2026-08-26T12:00:00.000Z",
             },
             diagnostic,
         )
+
+    def test_a_drop_carries_the_knocks_it_stands_for(self):
+        """Steward emits one record per stranger per window and counts the rest."""
+        state = project_village(
+            [
+                event(
+                    "chat_message_dropped",
+                    source="steward",
+                    route="telegram",
+                    address="@life_agent_bot",
+                    reason="not an operator",
+                    suppressed=199,
+                    **{"from": "87654321"},
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [diagnostic] = state["diagnostics"]
+        self.assertEqual(199, diagnostic["suppressed"])
+
+    def test_a_knock_storm_cannot_evict_the_projections_own_complaints(self):
+        """An outsider gets a share of the channel, never the whole of it (warren#278)."""
+        policy = ProjectionPolicy(diagnostics=10, ambient_diagnostics=3)
+        complaints = [
+            event(
+                "needs_human_resolved",
+                agent="agent-1",
+                minutes=index,
+                source="steward",
+                request_id=f"req-{index}",
+                decided_by="miha",
+                action="deploy",
+                decision="approve",
+            )
+            for index in range(4)
+        ]
+        knocks = [
+            event(
+                "chat_message_dropped",
+                agent="agent-1",
+                minutes=10 + index,
+                source="steward",
+                route="telegram",
+                address="@life_agent_bot",
+                reason="not an operator",
+                **{"from": "87654321"},
+            )
+            for index in range(50)
+        ]
+        state = project_village(
+            complaints + knocks, [], NOW + dt.timedelta(minutes=61), policy
+        )
+        kinds = [item["kind"] for item in state["diagnostics"]]
+        # Every knock arrived after every complaint, so newest-wins alone would have left
+        # nothing but knocks. The knocks still take the room the complaints did not want:
+        # the outsider's number is a floor, not a ceiling, or a full channel of ten would
+        # be holding seven.
+        self.assertEqual(4, kinds.count("orphan_approval_resolution"))
+        self.assertEqual(policy.diagnostics, len(kinds))
+        # Append order survives the split: the channel still reads oldest to newest.
+        self.assertEqual(
+            ["orphan_approval_resolution"] * 4 + ["chat_message_dropped"] * 6, kinds
+        )
+
+    def test_a_contested_channel_gives_an_outsider_exactly_their_floor(self):
+        """When everybody wants the channel, the fleet is served out of all but the share."""
+        policy = ProjectionPolicy(diagnostics=10, ambient_diagnostics=3)
+        complaints = [
+            event(
+                "needs_human_resolved",
+                agent="agent-1",
+                minutes=index,
+                source="steward",
+                request_id=f"req-{index}",
+                decided_by="miha",
+                action="deploy",
+                decision="approve",
+            )
+            for index in range(20)
+        ]
+        knocks = [
+            event(
+                "chat_message_dropped",
+                agent="agent-1",
+                minutes=30 + index,
+                source="steward",
+                route="telegram",
+                address="@life_agent_bot",
+                reason="not an operator",
+                **{"from": "87654321"},
+            )
+            for index in range(50)
+        ]
+        state = project_village(
+            complaints + knocks, [], NOW + dt.timedelta(minutes=90), policy
+        )
+        kinds = [item["kind"] for item in state["diagnostics"]]
+
+        self.assertEqual(3, kinds.count("chat_message_dropped"))
+        self.assertEqual(7, kinds.count("orphan_approval_resolution"))
+
+    def test_a_knock_storm_cannot_push_a_villager_off_its_own_card(self):
+        """The same share, on the history the village actually draws."""
+        policy = ProjectionPolicy(events_per_villager=10, ambient_events_per_villager=3)
+        work = [
+            event("tool_called", agent="agent-1", minutes=index, tool="Read")
+            for index in range(20)
+        ]
+        knocks = [
+            event(
+                "chat_message_dropped",
+                agent="agent-1",
+                minutes=30 + index,
+                source="steward",
+                route="telegram",
+                address="@life_agent_bot",
+                reason="not an operator",
+                **{"from": "87654321"},
+            )
+            for index in range(50)
+        ]
+        state = project_village(work + knocks, [], NOW + dt.timedelta(minutes=90), policy)
+        [villager] = state["villagers"]
+        types = [item["type"] for item in villager["history"]]
+
+        self.assertEqual(7, types.count("tool_called"))
+        self.assertEqual(3, types.count("chat_message_dropped"))
 
     def test_snapshot_is_bounded_deterministic_and_json_serializable(self):
         policy = ProjectionPolicy(events_per_villager=2, tasks=2, diagnostics=2)

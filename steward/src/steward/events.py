@@ -1302,6 +1302,7 @@ def chat_message_dropped_event(  # noqa: PLR0913 — one keyword per fact worth 
     address: str,
     sender: str,
     reason: str,
+    suppressed: int = 0,
 ) -> Event:
     """Say that a message reached a resident's chat route and was dropped without a reply.
 
@@ -1317,6 +1318,13 @@ def chat_message_dropped_event(  # noqa: PLR0913 — one keyword per fact worth 
     into the operator's own panel. The sender id is enough to recognise a wrong number, add
     a second account to :data:`steward.chat.OPERATORS_ENV`, or notice a stranger — and it is
     the only part of the message steward needs to keep.
+
+    ``suppressed`` is how many *other* knocks this one record stands for (warren#278). It
+    is the one field here a stranger does not cause: this is the only event in the log
+    somebody outside the fleet triggers, so :class:`steward.chat.KnockLimiter` emits one
+    per door per stranger per window and counts the rest into the next record. A reader
+    who wants the number of knocks adds one to it; a reader who does not care sees the
+    zero every unrepeated knock carries.
     """
     return Event(
         type=CHAT_MESSAGE_DROPPED,
@@ -1327,6 +1335,7 @@ def chat_message_dropped_event(  # noqa: PLR0913 — one keyword per fact worth 
             "address": address,
             "from": truncate_error(sender),
             "reason": truncate_error(reason),
+            "suppressed": suppressed,
         },
     )
 

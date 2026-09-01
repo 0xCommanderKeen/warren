@@ -66,8 +66,10 @@ whitelist is what makes that structural here rather than assumed: a record arriv
 has nowhere to put it. Every other kind is drawn from whatever fields it carries, which is
 how an unfamiliar kind stays visible at all; what keeps *that* safe is Chronicle's own rule
 that a diagnostic names what went wrong without quoting the input that caused it. Repeated
-knocks from one sender are one line with a count, because nothing rate-limits the event yet
-(warren#278) and a storm is one fact rather than two hundred rows.
+knocks from one sender are one line with a count, because a storm is one fact rather than
+two hundred rows — and the count is *knocks*, not records: steward records one knock per
+sender per door per catch-up window and counts the rest into `suppressed`, which the fold
+and the rail's own tally both add back (warren#278).
 
 ### Nothing here claims an effect steward has not confirmed
 

@@ -173,6 +173,33 @@ class ProtocolContractTest(unittest.TestCase):
         event["source"] = "claude-code"
         self.assertEqual(validate_event(event), "chat events require source steward")
 
+    def test_a_drop_may_say_how_many_knocks_it_stands_for(self):
+        """The count Steward's limiter puts on the record it did emit (warren#278)."""
+        event = {
+            "v": 0,
+            "ts": "2026-08-25T10:04:00.000Z",
+            "source": "steward",
+            "agent_id": "claude-code:life-agent",
+            "project": "life",
+            "type": "chat_message_dropped",
+            "payload": {
+                "route": "telegram",
+                "address": "@life_agent_bot",
+                "from": "87654321",
+                "reason": "not an operator",
+                "suppressed": 199,
+            },
+        }
+        self.assertIsNone(validate_event(event))
+        # Optional: a Steward older than the limiter emits every knock and counts none.
+        del event["payload"]["suppressed"]
+        self.assertIsNone(validate_event(event))
+        # A count is a count. Anything else is somebody inventing a number the panel
+        # renders, and a negative one would read as knocks that never happened.
+        for bad in (-1, "12", 1.0, True, None):
+            event["payload"]["suppressed"] = bad
+            self.assertEqual(validate_event(event), "invalid payload.suppressed")
+
     def test_a_restart_counts_its_attempt_so_a_crash_loop_reads_as_one(self):
         event = {
             "v": 0,

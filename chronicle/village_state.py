@@ -77,6 +77,15 @@ class ProjectionPolicy:
     journals: int = 200
     routines: int = 200
     diagnostics: int = 200
+    #: How much of ``diagnostics`` an outsider is *guaranteed*, and all they get when the
+    #: channel is contested. A knock is the one diagnostic somebody outside the fleet
+    #: causes, so without a share of its own a knock storm decides what an operator can
+    #: see — the malformed events and approval collisions this channel exists for would
+    #: age out behind it (warren#278).
+    ambient_diagnostics: int = 40
+    #: The same share of one villager's rendered history. A stranger knocking all night
+    #: must not push off the card what the resident actually did.
+    ambient_events_per_villager: int = 4
 
 
 def _instant(value):
@@ -100,6 +109,41 @@ def _identity(agent_id):
         CHARS[number % len(CHARS)],
         ACCENTS[number % len(ACCENTS)],
     )
+
+
+def ambient_share(ordinary, ambient, capacity, floor):
+    """Split one bounded channel between the fleet's own records and an outsider's.
+
+    Every collection here is bounded by dropping the oldest, which is right when the fleet
+    is what fills them. Ambient events are the exception: they are the records an outsider
+    causes, and newest-wins alone hands a knock storm the power to age out the evidence the
+    channel exists for. So the fleet is served first, out of everything but the outsider's
+    `floor` — and then the outsider takes whatever is genuinely left, which is the whole
+    channel when nobody else wants it and exactly `floor` when everybody does.
+
+    A floor rather than a ceiling, deliberately: capping ambient outright would leave a
+    channel of two hundred holding ninety records with room to spare, and "the newest 200"
+    would stop being true of a full one.
+
+    Returns how many of each to keep, newest first; the caller decides what to do with the
+    numbers. Shared rather than copied — and imported by `retention`, the way `AMBIENT_TYPES`
+    is — because rotation and the reducer disagreeing about this would mean rotation
+    discarding history the snapshot would have shown (warren#278).
+    """
+    kept_ordinary = min(ordinary, capacity - min(ambient, min(floor, capacity)))
+    return kept_ordinary, min(ambient, capacity - kept_ordinary)
+
+
+def _ambient_tail(records, capacity, floor, is_ambient):
+    """Keep the newest of a channel under :func:`ambient_share`, in append order."""
+    ambient = [index for index, record in enumerate(records) if is_ambient(record)]
+    ordinary = [index for index in range(len(records)) if index not in set(ambient)]
+    take_ordinary, take_ambient = ambient_share(
+        len(ordinary), len(ambient), capacity, floor
+    )
+    kept = set(ordinary[len(ordinary) - take_ordinary :])
+    kept.update(ambient[len(ambient) - take_ambient :])
+    return [record for index, record in enumerate(records) if index in kept]
 
 
 def _resident_indexes(manifests):
@@ -496,6 +540,11 @@ def project_village(
             # all when a stranger finds its bot. Named fields only — the record itself
             # is carried into that villager's history exactly as it arrived, which is
             # why Steward keeps what the stranger said out of it.
+            #
+            # `suppressed` is how many other knocks this one record stands for: Steward
+            # records one per stranger per door per window and counts the rest into it
+            # (warren#278), so the number of knocks is one more than this. Absent from a
+            # Steward older than the limiter, which emitted every knock and counted none.
             diagnostics.append(
                 {
                     "kind": kind,
@@ -505,6 +554,7 @@ def project_village(
                     "address": payload["address"],
                     "from": payload["from"],
                     "reason": payload["reason"],
+                    "suppressed": payload.get("suppressed", 0),
                     "ts": event["ts"],
                 }
             )
@@ -607,7 +657,18 @@ def project_village(
                 else "working"
             )
         )
-        recent = [item for _, item in visible_history[-policy.events_per_villager :]]
+        # The same rule the diagnostics channel gets, and for the same reason: a knock is
+        # in this villager's history without being anything the villager did, so a storm
+        # must not be able to push what it *did* do off the end of its own card.
+        recent = [
+            item
+            for _, item in _ambient_tail(
+                visible_history,
+                policy.events_per_villager,
+                policy.ambient_events_per_villager,
+                lambda item: item[1]["type"] in AMBIENT_TYPES,
+            )
+        ]
         mood = _mood(agent_id, evidence, approvals)
         resident = manifest is not None
         villagers.append(
@@ -658,15 +719,22 @@ def project_village(
         "approvals": approvals[-policy.approvals :],
         "journals": journals[-policy.journals :],
         "routines": routines[-policy.routines :],
-        "diagnostics": diagnostics[-policy.diagnostics :],
+        "diagnostics": _ambient_tail(
+            diagnostics,
+            policy.diagnostics,
+            policy.ambient_diagnostics,
+            lambda record: record.get("kind") in AMBIENT_TYPES,
+        ),
         "capacity": {
             "villagers": policy.villagers,
             "events_per_villager": policy.events_per_villager,
+            "ambient_events_per_villager": policy.ambient_events_per_villager,
             "tasks": policy.tasks,
             "approvals": policy.approvals,
             "journals": policy.journals,
             "routines": policy.routines,
             "diagnostics": policy.diagnostics,
+            "ambient_diagnostics": policy.ambient_diagnostics,
         },
         "capabilities": dict(capabilities or {}),
     }

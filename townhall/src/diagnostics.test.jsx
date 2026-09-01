@@ -14,7 +14,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { viewModel } from "./model.js";
-import { KNOCK, UNNAMED, fields, foldKnocks, groupDiagnostics } from "./diagnostics.js";
+import { KNOCK, UNNAMED, fields, foldKnocks, groupDiagnostics, knockCount } from "./diagnostics.js";
 import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
 
 const knock = (overrides = {}) => ({
@@ -51,6 +51,31 @@ describe("folding knocks", () => {
     expect(folded[0].count).toBe(200);
     expect(folded[0].first).toBe("2026-09-01T09:00:00.000Z");
     expect(folded[0].last).toBe("2026-09-01T09:03:19.000Z");
+  });
+
+  it("counts the knocks a record stands for, not the records", () => {
+    // Steward records one knock per stranger per door per window and counts the rest into
+    // `suppressed` (warren#278), so the number of records stopped being the number of
+    // knocks. A line that showed "3×" for a storm of two hundred would be the same lie the
+    // fold was written to avoid, in the other direction.
+    const folded = foldKnocks([knock(), knock({ suppressed: 197 }), knock()]);
+
+    expect(folded).toHaveLength(1);
+    expect(folded[0].count).toBe(200);
+  });
+
+  it("refuses a suppressed count that is not one", () => {
+    // Chronicle validates the number before it can reach a snapshot, but `DiagnosticWire`
+    // is `extra="allow"` and this is a count drawn on a screen: anything but a whole
+    // positive number stands for nothing beyond the record itself.
+    const folded = foldKnocks([
+      knock({ suppressed: "199" }),
+      knock({ from: "1", suppressed: -5 }),
+      knock({ from: "2", suppressed: 1.5 }),
+      knock({ from: "3", suppressed: null }),
+    ]);
+
+    expect(folded.map((line) => line.count)).toEqual([1, 1, 1, 1]);
   });
 
   it("keeps a different sender, a different door and a different reason apart", () => {
@@ -117,6 +142,16 @@ describe("grouping diagnostics by kind", () => {
 
     expect(knocks.records).toBe(200);
     expect(knocks.entries).toHaveLength(1);
+  });
+
+  it("counts knocks rather than records, so the rail and the page agree", () => {
+    // The rail reads `knockCount` and the page reads a folded line's `count`; one saying
+    // "1 knock" beside the other saying "200×" would read as a bug in whichever was seen
+    // second.
+    const records = [knock({ suppressed: 197 }), knock(), knock(), { kind: "malformed_event" }];
+
+    expect(knockCount(records)).toBe(200);
+    expect(foldKnocks(records.slice(0, 3))[0].count).toBe(200);
   });
 
   it("keeps a kind chronicle grew after this page was written", () => {
@@ -195,6 +230,12 @@ describe("the diagnostics page", () => {
     // How long it went on for: one knock and a knock every second for three minutes are
     // different facts, and the folded line is the only place left to say which.
     expect(screen.getByText("over 3m")).toBeTruthy();
+  });
+
+  it("draws the knocks a storm stood for, not the records steward sent", () => {
+    show([knock({ suppressed: 199, ts: "2026-09-01T09:03:19.000Z" })]);
+
+    expect(screen.getByText("200×")).toBeTruthy();
   });
 
   it("renders no message text, even from a record that arrived carrying one", () => {

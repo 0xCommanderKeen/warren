@@ -268,7 +268,8 @@ The stricter journal observation fields are additionally shared through
   `resident_restarted` carries a non-empty `reason` and an `attempt` counted from one,
   plus an optional non-empty `supervisor`. `chat_message_dropped` carries the `route` and
   `address` that were knocked on, who knocked (`from`), and the `reason` they were not
-  answered — and never what they said.
+  answered — and never what they said — plus an optional `suppressed`, a non-negative
+  integer counting the other knocks that record stands for.
 
 Invalid HTTP records return 400 and are never appended or notified. Projection
 silently ignores the same invalid records. Unknown extension fields remain
@@ -314,7 +315,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `task_session_finished` | a claimant's session reported back after losing its claim | `task_id`, `title`, `claimant`, `run_id`, `outcome`, `artifacts`, `duration_s`, `reason` |
 | `task_delegated`    | Steward accepted a handoff and put it in somebody's inbox | `task_id`, `title`, `from`, `to`, `route`, `parent_task_id`, `depth` |
 | `resident_restarted` | Steward's watchdog took a resident down and brought it back | `reason`, `attempt`; optional `supervisor` |
-| `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason` |
+| `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason`; optional `suppressed` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
@@ -375,7 +376,8 @@ village show that resident at work. It rides along in the history of a villager 
 exists for its own reasons, and — because a resident may have no villager at all when a
 stranger finds its bot — every drop is also a bounded `diagnostics` record carrying
 `kind: "chat_message_dropped"`, the agent and project, the `route` and `address` knocked
-on, who knocked (`from`), the `reason`, and the event `ts`. Those named fields only: the
+on, who knocked (`from`), the `reason`, the `suppressed` count (zero when the event carried
+none) and the event `ts`. Those named fields only: the
 raw record still reaches that villager's history exactly as it arrived, which is why
 Steward keeps the stranger's text out of the event in the first place.
 
@@ -383,10 +385,32 @@ Rotation holds the same line: `retention` imports the reducer's ambient set rath
 mirroring it, so a knock is never carried forward as a villager's state witness and a
 departed villager cannot be resurrected by somebody ringing its bell.
 
-It is also the one event type an *outsider* causes, and nothing rate-limits it yet, so a
-knock storm consumes the same bounded channels the fleet's own evidence uses — the newest
-200 diagnostics and a villager's retained events. Volume, unlike animation, is unbounded
-here: warren#278.
+It is also the one event type an *outsider* causes, which is why its **volume** is bounded
+as deliberately as its meaning (warren#278). A knock is a diagnostic and a retained event
+like any other, so without a share of its own a scanner that finds a resident's bot decides
+what an operator can see: the newest 200 diagnostics would fill with knocks, and a
+villager's own tools, tasks and sessions would age out of its retained history early.
+Neither is data loss — but both are an outsider choosing what the projection shows, which
+is the thing it is otherwise careful about.
+
+So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
+(`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+the fleet's own records are served first out of everything but the outsider's floor, and the
+outsider then takes whatever is genuinely left. The floors are `ambient_events_per_agent` (8
+of a villager's 80 retained events), `ambient_events_per_villager` (4 of the 40 rendered on
+its card) and `ambient_diagnostics` (40 of the snapshot's 200). A floor rather than a
+ceiling, deliberately: a knock storm alone still fills a channel nobody else wants, so "the
+newest 200" stays true of a full one. Both halves keep their newest records and append order
+survives the split. `capacity` publishes the two projection floors; rotation's is in
+`retention-policy.json`.
+
+Steward bounds the same storm at the other end: it records one knock per stranger per door
+per reason per catch-up window and counts the rest into `payload.suppressed`, an optional
+non-negative integer saying how many *other* knocks that one record stands for. A record
+therefore stands for `1 + suppressed` knocks, and the count is carried into the diagnostic so
+a fold that shows "one line per sender" can still show a true total. The two halves are
+complementary, and this one is what holds when the limiter is outrun — by a scanner rotating
+sender ids, by a daemon that restarted, or by a Steward too old to have a limiter at all.
 
 ### Journal-written observation
 
@@ -436,7 +460,10 @@ agents consume no ordinary witness capacity. If routine identities alone exceed
 the cap, their newest routine append chooses the candidate set. Newest live
 candidates are admitted first
 with their latest state, latest lineage declaration, and heartbeat action support;
-remaining capacity keeps newest visible history, at most 80 events per agent. The
+remaining capacity keeps newest visible history, at most 80 events per agent — divided so
+that ambient events are guaranteed 8 of those and get no more than 8 when the agent's own
+records want the rest, which is what stops a knock storm ageing a resident's own tools,
+tasks and sessions out of its history (warren#278). The
 composed projection has at most 4,000 witnesses. At the boundary, an agent whose
 indivisible support does not fit is omitted, then older optional history is
 truncated. Preselected journal and approval facts participate in the same set union,
