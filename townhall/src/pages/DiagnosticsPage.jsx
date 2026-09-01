@@ -10,7 +10,8 @@
  * nowhere in the fleet's own surfaces to see one.
  *
  * Two rules, both enforced in `../diagnostics.js` rather than here:
- *   - a knock storm is one line with a count, because it is one fact;
+ *   - a knock storm is one line with a count of knocks — which is not the count of records,
+ *     since warren#278 bounded how often a knock may become one;
  *   - a knock renders six named fields and nothing else, so there is nowhere for a
  *     stranger's message to land. The event carries none by design (steward/docs/chat.md),
  *     and this panel must never be the thing that gives a chat bot a way to publish text
@@ -59,8 +60,9 @@ function Knocks({ lines }) {
           </Stack>
           <span className="truncate text-dim">{line.from}</span>
           <span className="text-dim">{line.reason}</span>
-          {/* The count, not the rows: two hundred knocks from one scanner is one fact, and
-              two hundred rows of it would bury the two that are not. */}
+          {/* Knocks, not rows and not records: two hundred knocks from one scanner is one
+              fact, and since warren#278 steward sends far fewer records than that — the
+              ones it swallowed are counted back in here. */}
           <Badge>{line.count}×</Badge>
           <Stack sub={line.count > 1 ? stormSpan(line.first, line.last) : null}>
             <Clock at={line.last} />
@@ -133,8 +135,9 @@ export default function DiagnosticsPage({ model }) {
             <>
               This channel is <strong className="font-normal text-ink">full</strong>: the
               projection keeps the newest {capacity} records and has already dropped whatever came
-              before these. Nothing rate-limits a knock yet (warren#278), so an outsider knocking
-              in a loop can push the fleet's own evidence out on their own.
+              before these. Knocks are capped at a share of it (warren#278), so what has been
+              dropped here is the fleet's own account of itself rather than somebody else's
+              doorbell.
             </>
           ) : (
             <>

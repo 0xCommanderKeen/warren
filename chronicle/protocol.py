@@ -196,11 +196,22 @@ def _validate_chat_drop(event):
     The payload carries the door and who knocked, never what they said: a stranger's text
     is the one string here written by somebody the fleet has no relationship with, and
     the village renders what it is given.
+
+    ``suppressed`` is the one number an outsider's volume decides, so it is checked as
+    strictly as anything else here. Steward records one knock per stranger per door per
+    window and counts the rest into it (warren#278), so a record stands for ``1 +
+    suppressed`` knocks. Optional, because a Steward older than the limiter emits every
+    knock and counts none — and a missing count reads as the zero that means the same
+    thing.
     """
     payload = event["payload"]
     for field in ("route", "address", "from", "reason"):
         if not _nonempty_text(payload.get(field)):
             return f"invalid payload.{field}"
+    if "suppressed" in payload:
+        suppressed = payload["suppressed"]
+        if type(suppressed) is not int or suppressed < 0:
+            return "invalid payload.suppressed"
     return None
 
 

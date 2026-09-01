@@ -130,7 +130,23 @@ def test_a_dropped_message_names_who_knocked_and_never_what_they_said():
         "address": "telegram:pip",
         "from": "4242",
         "reason": "not an operator",
+        # An unrepeated knock stands for itself alone (warren#278).
+        "suppressed": 0,
     }
+
+
+def test_a_drop_record_says_how_many_knocks_it_stands_for():
+    event = ev.chat_message_dropped_event(
+        agent_id="steward:pip",
+        project="pip",
+        route="chat",
+        address="telegram:pip",
+        sender="4242",
+        reason="not an operator",
+        suppressed=17,
+    )
+    assert not ev.validate_event(event.to_dict())
+    assert event.payload["suppressed"] == 17
 
 
 # --------------------------------------------------------------------------------------
@@ -308,6 +324,14 @@ def store(tmp_path: Path) -> Iterator[Store]:
 @pytest.fixture
 def sink() -> ev.NullEmitter:
     return ev.NullEmitter()
+
+
+@pytest.fixture
+def chat_door(write_resident: ResidentWriter, tmp_path: Path) -> ch.ChatRoute:
+    """One doorway, for the tests that are about the doorway rather than about a bridge."""
+    resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
+    [route] = ch.chat_routes([resident])
+    return route
 
 
 type BridgeMaker = Callable[..., ch.ChatBridge]
@@ -653,6 +677,122 @@ def test_a_group_chat_is_never_answered_even_when_an_operator_speaks(
     assert outcome.status == ch.ChatStatus.DROPPED
     assert transport.sent == []
     assert sink.events[0].payload["reason"] == "not a private conversation"
+
+
+# --------------------------------------------------------------------------------------
+# how loudly a stranger may knock
+# --------------------------------------------------------------------------------------
+
+
+def test_one_stranger_knocking_at_one_door_is_one_event(
+    make_bridge: BridgeMaker, sink: ev.NullEmitter
+):
+    """A scanner that sends twenty messages has done one thing, not twenty (warren#278)."""
+    transport = FakeTransport([[message(sender="9999", update_id=n) for n in range(1, 21)]])
+    bridge = make_bridge(transport=transport)
+
+    outcomes = bridge.poll_once()
+
+    assert [outcome.status for outcome in outcomes] == [ch.ChatStatus.DROPPED] * 20
+    assert transport.sent == []
+    assert types(sink) == [ev.CHAT_MESSAGE_DROPPED]
+    assert sink.events[0].payload["suppressed"] == 0
+
+
+def test_a_storm_that_stopped_is_still_reported_once_its_window_closes(
+    make_bridge: BridgeMaker, sink: ev.NullEmitter
+):
+    """Bounding the events must not turn a flood into a silence: the count is the fact."""
+    transport = FakeTransport([[message(sender="9999", update_id=n) for n in range(1, 21)]])
+    bridge = make_bridge(transport=transport)
+
+    bridge.poll_once()
+    bridge.poll_once(NOW + timedelta(seconds=ch.DEFAULT_CATCHUP_S))
+
+    # Twenty knocks, two records: the first knock, and one closing the window that stands
+    # for the other nineteen — itself and the eighteen nobody was told about separately.
+    assert types(sink) == [ev.CHAT_MESSAGE_DROPPED] * 2
+    assert [event.payload["suppressed"] for event in sink.events] == [0, 18]
+    assert sink.events[1].payload["from"] == "9999"
+
+
+def test_a_quiet_window_closes_without_inventing_a_knock(
+    make_bridge: BridgeMaker, sink: ev.NullEmitter
+):
+    transport = FakeTransport([[message(sender="9999")]])
+    bridge = make_bridge(transport=transport)
+
+    bridge.poll_once()
+    bridge.poll_once(NOW + timedelta(seconds=ch.DEFAULT_CATCHUP_S))
+
+    assert types(sink) == [ev.CHAT_MESSAGE_DROPPED]
+
+
+def test_a_second_stranger_is_never_hidden_by_the_first(
+    make_bridge: BridgeMaker, sink: ev.NullEmitter
+):
+    """The bound is per stranger per door — one scanner must not mute the next knock."""
+    transport = FakeTransport(
+        [
+            [
+                message(sender="9999", update_id=1),
+                message(sender="8888", update_id=2),
+                message(sender="9999", update_id=3),
+            ]
+        ]
+    )
+    bridge = make_bridge(transport=transport)
+
+    bridge.poll_once()
+
+    assert [event.payload["from"] for event in sink.events] == ["9999", "8888"]
+
+
+def test_a_knock_after_the_window_reopens_it_carrying_what_was_swallowed(
+    chat_door: ch.ChatRoute,
+):
+    limiter = ch.KnockLimiter(window_s=300.0)
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW) == 0
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW) is None
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW) is None
+    # The window ran out with two knocks nobody heard about; the next one says so rather
+    # than opening a fresh, innocent-looking record.
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW + timedelta(seconds=300)) == 2
+
+
+def test_a_closed_window_is_forgotten_so_the_limiter_cannot_grow_for_ever(
+    chat_door: ch.ChatRoute,
+):
+    limiter = ch.KnockLimiter(window_s=300.0)
+    limiter.admit(chat_door, "9999", "not an operator", NOW)
+    assert len(limiter) == 1
+    assert limiter.sweep(NOW + timedelta(seconds=300)) == []
+    assert len(limiter) == 0
+
+
+def test_a_sweep_reports_the_storm_it_forgets(chat_door: ch.ChatRoute):
+    limiter = ch.KnockLimiter(window_s=300.0)
+    limiter.admit(chat_door, "9999", "not an operator", NOW)
+    limiter.admit(chat_door, "9999", "not a private conversation", NOW)
+    limiter.admit(chat_door, "9999", "not a private conversation", NOW)
+    [storm] = limiter.sweep(NOW + timedelta(seconds=300))
+
+    assert (storm.sender, storm.suppressed) == ("9999", 1)
+    # The record it becomes is one of the swallowed knocks, so it carries that knock's
+    # reason rather than the one that opened the window.
+    assert storm.reason == "not a private conversation"
+    assert len(limiter) == 0
+
+
+def test_a_scanner_rotating_senders_cannot_make_the_limiter_the_leak(
+    chat_door: ch.ChatRoute,
+):
+    """The bound on doors is the last one: an outsider must not choose steward's memory."""
+    limiter = ch.KnockLimiter(window_s=300.0, doors=2)
+    for sender in ("1", "2", "3", "4"):
+        limiter.admit(chat_door, sender, "not an operator", NOW)
+
+    assert len(limiter) == 2
 
 
 def test_a_message_older_than_the_catch_up_window_fires_nothing_and_says_nothing(

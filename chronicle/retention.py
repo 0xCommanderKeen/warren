@@ -32,6 +32,12 @@ POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
 
 EVENT_TYPES = set(PROTOCOL_EVENT_TYPES)
 KEEP_PER_AGENT = POLICY["events_per_agent"]
+#: How much of an agent's budget somebody *else* may fill. A knock is an ordinary event
+#: for every bound in this file, and the one event an outsider causes, so without a share
+#: of its own a knock storm ages a resident's own tools, tasks and sessions out of the
+#: village early (warren#278). Small: a knock is worth carrying and worth carrying a few
+#: of, and Steward already folds a storm into one record per stranger per window.
+KEEP_AMBIENT_PER_AGENT = POLICY["ambient_events_per_agent"]
 VIEWER_LINE_LIMIT = POLICY["viewer_line_limit"]
 DROP_MS = POLICY["drop_ms"]
 KEEP_TASKS = POLICY["tasks"]
@@ -1311,6 +1317,7 @@ def _projection_keep_indexes(
     live.sort(key=lambda item: item[1][2], reverse=True)
     candidates = {agent_id for agent_id, _ in live}
     history = collections.defaultdict(list)
+    ambient_kept = collections.Counter()
     lineage = {}
     previous_action = {}
     previous_ordinary_seen = set()
@@ -1326,8 +1333,18 @@ def _projection_keep_indexes(
         if agent_id not in lineage and payload.get("parent_agent_id"):
             lineage[agent_id] = index
         if event["type"] != "heartbeat":
-            if len(history[agent_id]) < KEEP_PER_AGENT:
+            # Ambient events are visible history, but on a smaller budget of their own:
+            # they are somebody else's action filed under this villager's door, and
+            # newest-wins alone would let a knock storm spend the whole of an agent's
+            # budget on itself. Counted before the shared cap so the two bounds compose —
+            # a knock consumes an ordinary slot as well as an ambient one.
+            ambient = event["type"] in AMBIENT_TYPES
+            if len(history[agent_id]) < KEEP_PER_AGENT and not (
+                ambient and ambient_kept[agent_id] >= KEEP_AMBIENT_PER_AGENT
+            ):
                 history[agent_id].append(index)
+                if ambient:
+                    ambient_kept[agent_id] += 1
             if agent_id not in previous_ordinary_seen:
                 previous_ordinary_seen.add(agent_id)
                 if event["type"] in PROJECTION_ACTION_TYPES:

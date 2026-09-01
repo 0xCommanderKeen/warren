@@ -490,9 +490,73 @@ class VillageProjectionTests(unittest.TestCase):
                 "address": "@life_agent_bot",
                 "from": "87654321",
                 "reason": "not an operator",
+                "suppressed": 0,
                 "ts": "2026-08-26T12:00:00.000Z",
             },
             diagnostic,
+        )
+
+    def test_a_drop_carries_the_knocks_it_stands_for(self):
+        """Steward emits one record per stranger per window and counts the rest."""
+        state = project_village(
+            [
+                event(
+                    "chat_message_dropped",
+                    source="steward",
+                    route="telegram",
+                    address="@life_agent_bot",
+                    reason="not an operator",
+                    suppressed=199,
+                    **{"from": "87654321"},
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [diagnostic] = state["diagnostics"]
+        self.assertEqual(199, diagnostic["suppressed"])
+
+    def test_a_knock_storm_cannot_evict_the_projections_own_complaints(self):
+        """An outsider gets a share of the channel, never the whole of it (warren#278)."""
+        policy = ProjectionPolicy(diagnostics=10, ambient_diagnostics=3)
+        complaints = [
+            event(
+                "needs_human_resolved",
+                agent="agent-1",
+                minutes=index,
+                source="steward",
+                request_id=f"req-{index}",
+                decided_by="miha",
+                action="deploy",
+                decision="approve",
+            )
+            for index in range(4)
+        ]
+        knocks = [
+            event(
+                "chat_message_dropped",
+                agent="agent-1",
+                minutes=10 + index,
+                source="steward",
+                route="telegram",
+                address="@life_agent_bot",
+                reason="not an operator",
+                **{"from": "87654321"},
+            )
+            for index in range(50)
+        ]
+        state = project_village(
+            complaints + knocks, [], NOW + dt.timedelta(minutes=61), policy
+        )
+        kinds = [item["kind"] for item in state["diagnostics"]]
+        # Every knock arrived after every complaint, so newest-wins alone would have left
+        # nothing but knocks.
+        self.assertEqual(4, kinds.count("orphan_approval_resolution"))
+        self.assertEqual(3, kinds.count("chat_message_dropped"))
+        self.assertLessEqual(len(kinds), policy.diagnostics)
+        # Append order survives the split: the channel still reads oldest to newest.
+        self.assertEqual(
+            ["orphan_approval_resolution"] * 4 + ["chat_message_dropped"] * 3, kinds
         )
 
     def test_snapshot_is_bounded_deterministic_and_json_serializable(self):

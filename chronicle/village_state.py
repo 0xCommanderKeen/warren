@@ -77,6 +77,11 @@ class ProjectionPolicy:
     journals: int = 200
     routines: int = 200
     diagnostics: int = 200
+    #: How much of ``diagnostics`` an outsider may fill. A knock is the one diagnostic
+    #: somebody outside the fleet causes, so without a share of its own a knock storm
+    #: decides what an operator can see — the malformed events and approval collisions
+    #: this channel exists for would age out behind it (warren#278).
+    ambient_diagnostics: int = 40
 
 
 def _instant(value):
@@ -100,6 +105,35 @@ def _identity(agent_id):
         CHARS[number % len(CHARS)],
         ACCENTS[number % len(ACCENTS)],
     )
+
+
+def _bounded_diagnostics(diagnostics, policy):
+    """Keep the newest of the channel, with the outsider's share taken out of its own cap.
+
+    Every other collection here is bounded by dropping the oldest, which is right when the
+    fleet is what fills them. `chat_message_dropped` is the exception: it is the one record
+    an outsider causes, and newest-wins alone hands a knock storm the power to age out the
+    complaints an operator reads this channel for. So knocks are bounded first, at their
+    own smaller cap, and everything else divides what is left — capped at the whole channel
+    when nobody has knocked, which is the ordinary case.
+
+    Both halves keep their newest records and the result is returned in append order, so a
+    snapshot still reads oldest to newest and the same log always gives the same answer.
+
+    Steward bounds the same storm at the other end by emitting one record per stranger per
+    door per window (warren#278). This half is what holds when that one is outrun — by a
+    scanner rotating sender ids, by a daemon that restarted, or by a Steward too old to
+    have a limiter at all.
+    """
+    ambient_cap = min(policy.ambient_diagnostics, policy.diagnostics)
+    ambient, ordinary = [], []
+    for index, record in enumerate(diagnostics):
+        bucket = ambient if record.get("kind") in AMBIENT_TYPES else ordinary
+        bucket.append(index)
+    kept = set(ambient[-ambient_cap:] if ambient_cap else ())
+    room = policy.diagnostics - len(kept)
+    kept.update(ordinary[-room:] if room else ())
+    return [record for index, record in enumerate(diagnostics) if index in kept]
 
 
 def _resident_indexes(manifests):
@@ -496,6 +530,11 @@ def project_village(
             # all when a stranger finds its bot. Named fields only — the record itself
             # is carried into that villager's history exactly as it arrived, which is
             # why Steward keeps what the stranger said out of it.
+            #
+            # `suppressed` is how many other knocks this one record stands for: Steward
+            # records one per stranger per door per window and counts the rest into it
+            # (warren#278), so the number of knocks is one more than this. Absent from a
+            # Steward older than the limiter, which emitted every knock and counted none.
             diagnostics.append(
                 {
                     "kind": kind,
@@ -505,6 +544,7 @@ def project_village(
                     "address": payload["address"],
                     "from": payload["from"],
                     "reason": payload["reason"],
+                    "suppressed": payload.get("suppressed", 0),
                     "ts": event["ts"],
                 }
             )
@@ -658,7 +698,7 @@ def project_village(
         "approvals": approvals[-policy.approvals :],
         "journals": journals[-policy.journals :],
         "routines": routines[-policy.routines :],
-        "diagnostics": diagnostics[-policy.diagnostics :],
+        "diagnostics": _bounded_diagnostics(diagnostics, policy),
         "capacity": {
             "villagers": policy.villagers,
             "events_per_villager": policy.events_per_villager,
