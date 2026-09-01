@@ -29,6 +29,7 @@ from village_state import (
     AMBIENT_TYPES,
     TASK_LEDGER_TYPES,
     TASK_ORIGIN_TYPES,
+    reopened_by_lease,
     ambient_share,
 )
 
@@ -455,10 +456,7 @@ def _task_tie_rank(event):
         # A handoff opens the row exactly as a post does, so it ranks with one: a
         # claim in the same millisecond must still be the newer fact.
         return 0
-    if (
-        event["type"] == "task_failed"
-        and event["payload"].get("reason", "").strip() == "lease_expired"
-    ):
+    if event["type"] == "task_failed" and reopened_by_lease(event["payload"]):
         return 1
     if event["type"] == "task_claimed":
         return 2
@@ -496,8 +494,7 @@ def _closed_row(transition):
         return False
     event = transition[1]
     return event["type"] == "task_done" or (
-        event["type"] == "task_failed"
-        and event["payload"].get("reason", "").strip() != "lease_expired"
+        event["type"] == "task_failed" and not reopened_by_lease(event["payload"])
     )
 
 

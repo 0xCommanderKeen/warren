@@ -65,6 +65,16 @@ TASK_ORIGIN_TYPES = frozenset({"task_posted", "task_delegated"})
 TASK_LEDGER_TYPES = TASK_ORIGIN_TYPES | {"task_claimed", "task_done", "task_failed"}
 
 
+def reopened_by_lease(payload):
+    """Whether this ``task_failed`` is Steward's sweep reopening a job, not a defeat.
+
+    Exported for the same reason the type sets above are: retention and the projection
+    disagreeing about whether a row is closed is precisely the bug that costs the board
+    its honesty. Read forgivingly — a padded reason is still the sweep's word.
+    """
+    return payload.get("reason", "").strip() == "lease_expired"
+
+
 @dataclasses.dataclass(frozen=True)
 class ProjectionPolicy:
     stale_seconds: int = 30 * 60
@@ -400,15 +410,11 @@ def _row_origin(event):
 
 
 def _opened_row(event):
-    """The row Steward's two doors open onto, open and untaken until something moves it."""
-    origin = _row_origin(event)
+    """The row Steward's two doors open onto: untaken until something moves it."""
     return {
         "id": event["payload"]["task_id"],
-        "title": origin["title"],
+        **_row_origin(event),
         "state": "open",
-        "required_skills": origin["required_skills"],
-        "posted_by": origin["posted_by"],
-        "assignee": origin["assignee"],
         "claimant": None,
         "updated_at": event["ts"],
     }
@@ -421,9 +427,7 @@ def _move_row(record, event):
     record["state"] = {
         "task_claimed": "claimed",
         "task_done": "done",
-        "task_failed": (
-            "open" if payload.get("reason") == "lease_expired" else "failed"
-        ),
+        "task_failed": "open" if reopened_by_lease(payload) else "failed",
     }[event["type"]]
     record["updated_at"] = event["ts"]
 
@@ -487,7 +491,7 @@ def project_village(
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
-    tasks, task_by_id, held_transitions, moved_rows = [], {}, {}, set()
+    tasks, task_by_id, task_transitions = [], {}, {}
     journals, journal_by_key = [], {}
     routines, routine_by_run = [], {}
     artifacts = []
@@ -510,30 +514,28 @@ def project_village(
                     record = _opened_row(event)
                     task_by_id[task_id] = record
                     tasks.append(record)
-                    held = held_transitions.pop(task_id, None)
+                    held = task_transitions.get(task_id)
                     if held is not None:
                         _move_row(record, held)
-                        moved_rows.add(task_id)
                 else:
                     record.update(_row_origin(event))
-                    if task_id not in moved_rows:
+                    if task_id not in task_transitions:
                         # Nothing has taken this job, so its clock is still its posted
                         # age, and the newest origin is where that age comes from. Once
                         # a transition owns the clock the row keeps it: a replayed post
                         # is not news about work already under way.
                         record["updated_at"] = event["ts"]
-            elif record is not None:
-                _move_row(record, event)
-                moved_rows.add(task_id)
             else:
-                # The row is not open yet, and this is not the event that opens one.
-                # Rotation keeps a row's newest origin and its newest transition, so a
-                # replayed post lands *after* the claim it did not undo; reading the
-                # claim here in log order would drop it and put the job back on the
-                # open board. Hold it instead. Only the newest matters: every
-                # transition overwrites all three fields it owns. Nothing is invented —
-                # a held transition whose row never opens is discarded with the rest.
-                held_transitions[task_id] = event
+                # The newest transition, whether or not the row it belongs to is open
+                # yet. Rotation keeps a row's newest origin and its newest transition,
+                # so a restated origin lands *after* the claim it did not undo; reading
+                # that claim in log order and dropping it would put the job back on the
+                # open board. Only the newest is worth holding: every transition
+                # overwrites all three fields it owns. Nothing is invented — one whose
+                # row never opens is discarded with the rest of the unclaimed evidence.
+                task_transitions[task_id] = event
+                if record is not None:
+                    _move_row(record, event)
         shape = _approval_shape(event)
         if shape:
             previous = approval_by_id.get(shape["request_id"])

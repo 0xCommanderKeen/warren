@@ -79,9 +79,7 @@ class ProjectionWitnessVectorTests(unittest.TestCase):
         agent could start carrying witnesses forward unnoticed.
         """
         departed = next(
-            item
-            for item in load("retention-parity.json")
-            if not item["projection_witnesses"]
+            item for item in load("retention-parity.json") if not item["projection_witnesses"]
         )
         self.assertEqual(
             "session_ended", departed["events"][-1]["type"], "vector still departs"

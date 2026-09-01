@@ -568,8 +568,8 @@ preserves Steward's expiry-then-reclaim hand-off while even 10,000 distinct
 same-millisecond transitions retain only the latest origin and transition. Those two ends
 are tracked apart: a row's standing is read from its newest transition, not its newest
 event of any kind, so an origin restated after a close neither unfinishes that row nor
-takes capacity from an open one. A later origin supplies the canonical title, skills,
-addressee, and posted age even when its claim arrived first. Open and claimed jobs remain.
+takes capacity from an open one. A later origin supplies the canonical title, skills and
+addressee even when its claim arrived first. Open and claimed jobs remain.
 When a claim or terminal event is retained without the event that opened its row, Chronicle
 renders required skills as unavailable rather than inventing an empty requirement set.
 An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
@@ -931,8 +931,8 @@ the 12 h drop window — in their original order. Separately, it keeps the canon
 and latest transition for the same bounded 24 task IDs the job board selects, using the
 same per-event capacity and constant-space equal-time order, tracking the newest origin and
 the newest transition in separate slots so a restated origin cannot evict the claim beneath
-it. An already-evicted post is not
-reconstructed merely because a transition for that task appears later in the retained input.
+it. An already-evicted post is not reconstructed merely because a transition for that task
+appears later in the retained input.
 Task-ID retention crosses agent groups: a central `steward:api` post remains paired with
 claim/done/failed/lease-expiry evidence after the claimant session ends.
 Structured approvals are independently retained by lifecycle: at most 40 bounded

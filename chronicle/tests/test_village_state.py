@@ -829,9 +829,7 @@ class VillageProjectionTests(unittest.TestCase):
             )
             for index in range(50)
         ]
-        state = project_village(
-            work + knocks, [], NOW + dt.timedelta(minutes=90), policy
-        )
+        state = project_village(work + knocks, [], NOW + dt.timedelta(minutes=90), policy)
         [villager] = state["villagers"]
         types = [item["type"] for item in villager["history"]]
 
