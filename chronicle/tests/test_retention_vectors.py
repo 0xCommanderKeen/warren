@@ -86,6 +86,27 @@ class ProjectionWitnessVectorTests(unittest.TestCase):
         )
         self.assertEqual(frozenset(), result.witnesses["projection"])
 
+    def test_an_ambient_knock_cannot_resurrect_a_departed_villager(self):
+        """Retention's liveness must agree with the reducer's (warren#276).
+
+        `village_state` reads a `chat_message_dropped` as somebody else's action, so it
+        decides no state and cannot keep a villager. If rotation still counted one as the
+        agent's latest evidence, a departed villager would spend witness budget here that
+        the projection has no use for — and under pressure that budget is taken from an
+        agent that really is working.
+        """
+        knocked = next(
+            item
+            for item in load("retention-parity.json")
+            if item["events"][-1]["type"] == "chat_message_dropped"
+        )
+        result = retention.carry_forward(
+            [json.dumps(event) for event in knocked["events"]],
+            knocked["now"],
+            retention.POLICY,
+        )
+        self.assertEqual(frozenset(), result.witnesses["projection"])
+
 
 class MoodCapsuleDomainVectorTests(unittest.TestCase):
     """``mood-capsule-malformed.json`` against the capsule reader.

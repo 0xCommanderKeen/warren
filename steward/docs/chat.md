@@ -90,13 +90,12 @@ string in this system written by somebody steward has no relationship with, and 
 renders what it is given. A group chat is dropped the same way even when an operator speaks,
 because the reply would be readable by everyone else in the group.
 
-> **Known gap.** `chat_message_dropped` is a type steward emits and chronicle does not yet
-> accept: its `EVENT_TYPES` gate refuses anything outside its own set, so today the drop
-> lands in steward's local event log (`STEWARD_EVENTS_FALLBACK`) and not in the village.
-> It is in company — `task_delegated`, `task_session_finished` and `resident_restarted`
-> are missing there too — and the fix is one line in `chronicle/protocol.py`, deliberately
-> not made here. Until then, `grep chat_message_dropped ~/.chronicle/events.jsonl` is how
-> you see who knocked.
+Chronicle accepts the type as of warren#276 and treats it as *ambient*: a stranger's knock
+never puts its resident on the village map or makes it look awake, so the drop shows up as
+a `chat_message_dropped` record in the snapshot's `diagnostics` (the door, who knocked, the
+reason) and in that villager's history when it has one for its own reasons. An older
+chronicle 400s the event and it stays in steward's local log (`STEWARD_EVENTS_FALLBACK`),
+where `grep chat_message_dropped ~/.chronicle/events.jsonl` still finds it.
 
 **Messages have a shelf life.** Telegram holds undelivered updates for a day, so a bridge
 that was down all night would otherwise come up and fire a session for every message that

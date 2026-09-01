@@ -102,8 +102,12 @@ NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 RESIDENT_RESTARTED = "resident_restarted"
 CHAT_MESSAGE_DROPPED = "chat_message_dropped"
 
-#: The event types steward adds to the protocol. Additive: a v0 consumer that does not
-#: know them ignores them, which is why burrow needs no change to stay correct.
+#: The event types steward adds to the protocol. Additive in *shape* — a v0 consumer that
+#: does not know one still parses the record — but not free: chronicle validates ``type``
+#: against its own frozenset and 400s anything outside it. A type added here and not added
+#: to ``chronicle/protocol.py`` in the same change reaches steward's local fallback log and
+#: never the village, which is a silence nobody looking at the village can see. warren#276
+#: was exactly that drift, four types deep.
 EVENT_TYPES = (
     ROUTINE_STARTED,
     ROUTINE_FINISHED,

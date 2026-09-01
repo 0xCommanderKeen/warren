@@ -256,6 +256,19 @@ The stricter journal observation fields are additionally shared through
 - `task_posted.required_skills` follows Steward's exact `list[str]` contract. The
   list may be empty and individual strings may be blank or whitespace-only; Chronicle
   preserves those values instead of rejecting or normalizing valid evidence.
+- Steward's own lifecycle facts are validated as strictly as the job events, and
+  `source: "steward"` is the whole of their authority. `task_delegated` names both ends —
+  `from`, exactly equal to the emitting `agent_id` because the carrier is the villager
+  that walks, `to`, and the `route` the letter was delivered into — always carries
+  `parent_task_id` explicitly (`null` starts a chain; blank is invalid, unlike the job
+  events where the field is simply absent), and a non-negative integer `depth`.
+  `task_session_finished` repeats the close contract (`task_id`, `title`, `claimant`
+  equal to `agent_id`, non-empty `artifacts` strings) and adds the late run's `run_id`,
+  `outcome`, finite non-negative `duration_s`, and the `reason` its claim was gone.
+  `resident_restarted` carries a non-empty `reason` and an `attempt` counted from one,
+  plus an optional non-empty `supervisor`. `chat_message_dropped` carries the `route` and
+  `address` that were knocked on, who knocked (`from`), and the `reason` they were not
+  answered — and never what they said.
 
 Invalid HTTP records return 400 and are never appended or notified. Projection
 silently ignores the same invalid records. Unknown extension fields remain
@@ -298,6 +311,10 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `task_claimed`      | a resident atomically claimed that job       | `task_id`, `title`, `claimant` |
 | `task_done`         | the claimant finished the job                | `task_id`, `title`, `claimant`, `artifacts` |
 | `task_failed`       | the claimant failed or its lease expired      | `task_id`, `title`, `claimant`, `reason` |
+| `task_session_finished` | a claimant's session reported back after losing its claim | `task_id`, `title`, `claimant`, `run_id`, `outcome`, `artifacts`, `duration_s`, `reason` |
+| `task_delegated`    | Steward accepted a handoff and put it in somebody's inbox | `task_id`, `title`, `from`, `to`, `route`, `parent_task_id`, `depth` |
+| `resident_restarted` | Steward's watchdog took a resident down and brought it back | `reason`, `attempt`; optional `supervisor` |
+| `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
@@ -325,6 +342,42 @@ slots inside the visible 80-record transport allowance rather than extending it.
 Only events whose source is exactly `steward` are routine lifecycle evidence. This is
 Steward's `EVENT_SOURCE` contract; a `routine_*` event from any other producer is
 diagnosed and ignored, including for run-now acknowledgement.
+
+### Steward's lifecycle facts
+
+`task_delegated`, `task_session_finished` and `resident_restarted` are ordinary villager
+activity: they enter the villager's bounded visible history and read as sentences — “handed
+“Draft the letter” to codex:keeper”, “reported back on “Research X” after losing the claim”,
+“was restarted (attempt 2): container was not running”.
+
+Neither task fact moves the job board. A late session report describes the *run*, not the
+row: the lease sweep remains the authority on the task, so `task_session_finished` never
+claims, closes or reopens one. A delegated job opens no board row either — the `tasks`
+ledger is still folded from `task_posted`, `task_claimed`, `task_done` and `task_failed`
+alone, so delegated work is visible as villager activity and not yet as a job (warren#277).
+
+`chat_message_dropped` is **ambient**, the one class of event that is filed under a
+villager without being that villager's action. It records that an outsider knocked on a
+resident's chat route and was deliberately not answered, and it is not evidence the
+resident is alive, present, or working. So it never creates a villager, never keeps one
+in the village, and never decides its state, its visible line, its clock or its mood
+anchor: a stranger messaging a resident's bot at three in the morning must not make the
+village show that resident at work. It rides along in the history of a villager that
+exists for its own reasons, and — because a resident may have no villager at all when a
+stranger finds its bot — every drop is also a bounded `diagnostics` record carrying
+`kind: "chat_message_dropped"`, the agent and project, the `route` and `address` knocked
+on, who knocked (`from`), the `reason`, and the event `ts`. Those named fields only: the
+raw record still reaches that villager's history exactly as it arrived, which is why
+Steward keeps the stranger's text out of the event in the first place.
+
+Rotation holds the same line: `retention` imports the reducer's ambient set rather than
+mirroring it, so a knock is never carried forward as a villager's state witness and a
+departed villager cannot be resurrected by somebody ringing its bell.
+
+It is also the one event type an *outsider* causes, and nothing rate-limits it yet, so a
+knock storm consumes the same bounded channels the fleet's own evidence uses — the newest
+200 diagnostics and a villager's retained events. Volume, unlike animation, is unbounded
+here: warren#278.
 
 ### Journal-written observation
 
@@ -651,6 +704,10 @@ The villager's state is decided by its **latest** event:
   villager frozen mid-swing would be a lie
 - no event for 12 hours → dropped from ordinary village activity. A valid structured
   approval is the exception: its villager remains at the door until its exact close.
+- an **ambient** event (`chat_message_dropped`) → nothing at all. It is somebody else's
+  action filed under this villager, so it decides no state, refreshes no clock, and
+  cannot by itself put a villager in the village. See
+  [Steward's lifecycle facts](#stewards-lifecycle-facts).
 
 These rules have exactly one implementation:
 `village_state.project_village()`, exercised by `tests/test_village_state.py`.
@@ -672,7 +729,9 @@ projection ignore heartbeats when deciding what to *show*.
 append-ordered events and has no DOM, random input, or client-owned threshold. Each agent's
 greatest retained valid timestamp is anchor `A`; every displayed duration is
 non-negative **log age as of A**. Consequently an unchanged log is byte-stable
-across wall-clock ticks, and events for another agent cannot age a mood.
+across wall-clock ticks, and events for another agent cannot age a mood. Ambient
+events are excluded for the same reason they decide no state: a stranger knocking is
+not this agent's evidence, so it neither anchors nor ages the reading.
 
 The reducer observes exactly four operational signals. Its rolling terminal
 stream uses `(A-24h,A]`, append order, failures `tool_failed`, `routine_failed`,

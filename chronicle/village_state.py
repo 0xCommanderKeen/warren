@@ -48,6 +48,13 @@ CHARS = (
     "Monk",
 )
 ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
+#: Events filed under a villager that are somebody *else's* action, recorded against the
+#: door they knocked on. They ride along in that villager's history and are never
+#: evidence it is alive, present, or doing anything: they cannot create a villager, keep
+#: one in the village, decide its state, refresh its clock, or age its mood. A stranger
+#: messaging a resident's chat bot at three in the morning must not make the village show
+#: that resident at work.
+AMBIENT_TYPES = frozenset({"chat_message_dropped"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,6 +140,17 @@ def _description(event):
         return "went home"
     if kind in {"idle", "routine_finished"}:
         return "finished, resting"
+    if kind == "task_delegated":
+        return (
+            f"handed “{payload.get('title', '…')}” to {payload.get('to', 'somebody')}"
+        )
+    if kind == "task_session_finished":
+        return f"reported back on “{payload.get('title', '…')}” after losing the claim"
+    if kind == "resident_restarted":
+        return (
+            f"was restarted (attempt {payload.get('attempt', '?')}): "
+            f"{payload.get('reason', 'no reason given')}"
+        )
     return kind.replace("_", " ")
 
 
@@ -449,6 +467,24 @@ def project_village(
                         "request_id": payload["request_id"],
                     }
                 )
+        if kind == "chat_message_dropped":
+            # A knock nobody answered is only visible if the village says so, and the
+            # villager's own history is not enough: a resident may have no villager at
+            # all when a stranger finds its bot. Named fields only — the record itself
+            # is carried into that villager's history exactly as it arrived, which is
+            # why Steward keeps what the stranger said out of it.
+            diagnostics.append(
+                {
+                    "kind": kind,
+                    "agent_id": event["agent_id"],
+                    "project": event["project"],
+                    "route": payload["route"],
+                    "address": payload["address"],
+                    "from": payload["from"],
+                    "reason": payload["reason"],
+                    "ts": event["ts"],
+                }
+            )
         if kind == "journal_written":
             key = (payload["day"], event["agent_id"])
             if key not in journal_by_key:
@@ -511,9 +547,16 @@ def project_village(
             pending_by_agent[approval["agent_id"]].append(approval)
     for agent_id in sorted(by_agent):
         history = by_agent[agent_id]
-        last = history[-1][1]
+        # Three readings of one log: what this villager *did* decides its state and its
+        # clock, what it did other than beat decides the line shown, and everything but
+        # the beats — a knock at its door included — is the history worth keeping.
+        evidence = [item for item in history if item[1]["type"] not in AMBIENT_TYPES]
+        if not evidence:
+            continue
+        last = evidence[-1][1]
         visible_history = [item for item in history if item[1]["type"] != "heartbeat"]
-        visible_last = visible_history[-1][1] if visible_history else last
+        acted = [item for item in evidence if item[1]["type"] != "heartbeat"]
+        visible_last = acted[-1][1] if acted else last
         age = (now - _instant(last["ts"])).total_seconds()
         pending = pending_by_agent[agent_id]
         if not pending and (
@@ -542,7 +585,7 @@ def project_village(
             )
         )
         recent = [item for _, item in visible_history[-policy.events_per_villager :]]
-        mood = _mood(agent_id, history, approvals)
+        mood = _mood(agent_id, evidence, approvals)
         resident = manifest is not None
         villagers.append(
             {

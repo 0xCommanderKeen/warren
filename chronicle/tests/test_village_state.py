@@ -228,6 +228,174 @@ class VillageProjectionTests(unittest.TestCase):
         )
         self.assertEqual("malformed_event", state["diagnostics"][0]["kind"])
 
+    def test_steward_lifecycle_facts_reach_the_villager_as_readable_activity(self):
+        """warren#276: the four Steward types the gate used to refuse."""
+        delegated = project_village(
+            [
+                event("task_started", prompt="work"),
+                event(
+                    "task_delegated",
+                    minutes=1,
+                    source="steward",
+                    task_id="t2",
+                    title="Draft the letter",
+                    to="agent-2",
+                    route="inbox",
+                    parent_task_id=None,
+                    depth=1,
+                    **{"from": "agent-1"},
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=2),
+        )
+        [villager] = delegated["villagers"]
+        self.assertEqual("handed “Draft the letter” to agent-2", villager["last_line"])
+        self.assertEqual(
+            ["task_started", "task_delegated"],
+            [item["type"] for item in villager["history"]],
+        )
+
+        reported = project_village(
+            [
+                event(
+                    "task_session_finished",
+                    source="steward",
+                    task_id="t1",
+                    title="Research X",
+                    claimant="agent-1",
+                    run_id="run-7",
+                    outcome="ok",
+                    artifacts=[],
+                    duration_s=42.5,
+                    reason="lease_lost",
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        self.assertEqual(
+            "reported back on “Research X” after losing the claim",
+            reported["villagers"][0]["last_line"],
+        )
+
+        restarted = project_village(
+            [
+                event(
+                    "resident_restarted",
+                    source="steward",
+                    reason="container was not running",
+                    attempt=2,
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        self.assertEqual(
+            "was restarted (attempt 2): container was not running",
+            restarted["villagers"][0]["last_line"],
+        )
+
+    def test_a_late_session_report_never_closes_the_board_row(self):
+        """The lease sweep owns the task; this fact describes only the late run."""
+        state = project_village(
+            [
+                event(
+                    "task_posted",
+                    source="steward",
+                    task_id="t1",
+                    title="Fix it",
+                    posted_by="me",
+                    required_skills=[],
+                ),
+                event(
+                    "task_claimed",
+                    minutes=1,
+                    source="steward",
+                    task_id="t1",
+                    title="Fix it",
+                    claimant="agent-1",
+                ),
+                event(
+                    "task_session_finished",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Fix it",
+                    claimant="agent-1",
+                    run_id="run-7",
+                    outcome="ok",
+                    artifacts=[],
+                    duration_s=1.0,
+                    reason="lease_lost",
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        [task] = state["tasks"]
+        self.assertEqual("claimed", task["state"])
+        self.assertEqual("agent-1", task["claimant"])
+
+    def test_a_dropped_chat_message_never_creates_or_animates_a_villager(self):
+        """A stranger knocking is not evidence the resident is awake or at work."""
+        drop = event(
+            "chat_message_dropped",
+            minutes=5,
+            source="steward",
+            route="telegram",
+            address="@life_agent_bot",
+            reason="not an operator",
+            **{"from": "87654321"},
+        )
+        alone = project_village([drop], [], NOW + dt.timedelta(minutes=6))
+        self.assertEqual([], alone["villagers"])
+
+        idle = event("idle", minutes=1)
+        resting = project_village([idle, drop], [], NOW + dt.timedelta(minutes=6))
+        [villager] = resting["villagers"]
+        self.assertEqual("resting", villager["state"])
+        self.assertEqual("finished, resting", villager["last_line"])
+        # Neither the villager's clock nor its mood is aged by somebody else's knock.
+        self.assertEqual(idle["ts"], villager["last_ts"])
+        self.assertEqual(idle["ts"], villager["mood"]["anchor"])
+        # It is still in the history, which is the whole point of recording it.
+        self.assertEqual(
+            ["idle", "chat_message_dropped"],
+            [item["type"] for item in villager["history"]],
+        )
+
+    def test_a_dropped_chat_message_is_a_bounded_diagnostic(self):
+        """The door, the knocker and the rule that refused them — nothing else."""
+        state = project_village(
+            [
+                event(
+                    "chat_message_dropped",
+                    source="steward",
+                    route="telegram",
+                    address="@life_agent_bot",
+                    reason="not an operator",
+                    **{"from": "87654321"},
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [diagnostic] = state["diagnostics"]
+        self.assertEqual(
+            {
+                "kind": "chat_message_dropped",
+                "agent_id": "agent-1",
+                "project": "life",
+                "route": "telegram",
+                "address": "@life_agent_bot",
+                "from": "87654321",
+                "reason": "not an operator",
+                "ts": "2026-08-26T12:00:00.000Z",
+            },
+            diagnostic,
+        )
+
     def test_snapshot_is_bounded_deterministic_and_json_serializable(self):
         policy = ProjectionPolicy(events_per_villager=2, tasks=2, diagnostics=2)
         events = [
