@@ -748,6 +748,44 @@ def test_an_external_same_target_commit_survives_refusal(fleet: ScratchRepo) -> 
     assert target.read_text(encoding="utf-8") == competitor
 
 
+def test_unsafe_winner_survives_while_other_declaration_target_rolls_back(
+    fleet: ScratchRepo,
+) -> None:
+    """A non-regular winner cannot mask publication failure or abort later rollback."""
+    declaration = declaration_of(fleet)
+    manifest = fleet.residents / "test-agent" / MANIFEST_FILENAME
+    soul = fleet.residents / "test-agent" / declaration.soul_filename
+    old_soul = soul.read_bytes()
+    winner = fleet.root / "winner"
+    winner.write_text("outside writer\n", encoding="utf-8")
+
+    def failing_publication(argv: list[str]) -> CommandOutcome:
+        if "update-ref" in argv:
+            manifest.unlink()
+            manifest.symlink_to(winner)
+            return CommandOutcome(tuple(argv), exit_status=1, stderr="injected publication failure")
+        return au.run_argv(argv)
+
+    with pytest.raises(au.AuthoringError) as refused:
+        au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            au.Declaration(
+                manifest_text=edited(declaration, summary="Steward's losing bytes.").manifest_text,
+                soul_text=f"{declaration.soul_text}\nSteward's losing soul.\n",
+            ),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=failing_publication,
+        )
+
+    assert refused.value.reason == "commit_failed"
+    assert manifest.is_symlink()
+    assert manifest.readlink() == winner
+    assert soul.read_bytes() == old_soul
+
+
 @pytest.mark.parametrize("kind", ["declaration", "skill"])
 def test_a_writer_in_the_old_replace_capture_gap_survives_rollback(
     fleet: ScratchRepo, monkeypatch: pytest.MonkeyPatch, kind: str

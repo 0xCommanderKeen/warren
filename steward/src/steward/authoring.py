@@ -832,8 +832,17 @@ class _FileState:
                 self.path.lstat()
             except FileNotFoundError, NotADirectoryError:
                 return True
+            except OSError:
+                return False
             return False
-        return self == self.capture(self.path)
+        try:
+            return self == self.capture(self.path)
+        except AuthoringError, OSError:
+            # Comparison is deliberately fail-closed.  A concurrent writer may replace
+            # Steward's regular file with a link, FIFO, device, or another inode while it
+            # is being captured.  That state belongs to the writer, and must not prevent
+            # rollback from considering the transaction's other paths.
+            return False
 
     def restore(self) -> None:
         if not self.existed:
