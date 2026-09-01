@@ -7,7 +7,8 @@ curl -fsS "$origin/" | grep -q '<div id="root"></div>'
 curl -fsS "$origin/deep/link" | grep -q '<div id="root"></div>'
 curl -fsS "$origin/burrow/state" >/dev/null
 # Chronicle's manifest-validation report, on the prefixed path Steward's `/residents` left
-# free (warren#242). `-f` fails the script on the 200-with-index.html the SPA would answer.
+# free (warren#242). The `grep` is the real check, not `-f`: an unproxied path is not a 404
+# here, it is the SPA's index.html under a 200, which `-f` is happy with.
 curl -fsS "$origin/burrow/residents" | grep -q '"residents"'
 
 headers=$(mktemp)

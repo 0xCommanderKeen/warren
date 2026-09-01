@@ -164,10 +164,11 @@ above are the canonical install, validation, test, and deployment sequence.
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
 on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/burrow/`. That prefix carries `/state`, `/state/stream` and
-`/residents`; `/events` is proxied unprefixed, and the origin's remaining routes are
-steward's. Never exposed to the public internet — the event log is a map of
-everything the fleet does.
+`http://dxp2800:8737/burrow/`, which carries `/state`, `/state/stream` and `/residents`.
+The origin also answers `/state` and `/state/stream` unprefixed (they rewrite to the
+same place) and proxies `/events` there; what it does not send here it serves itself —
+the village at `/`, townhall at `/observatory/` — or hands to steward. Never exposed to
+the public internet — the event log is a map of everything the fleet does.
 
 **Run every command below from `warren/chronicle/`.** Since the 2026-08-31
 consolidation this service is a directory in the warren monorepo

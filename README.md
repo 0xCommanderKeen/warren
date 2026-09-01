@@ -58,8 +58,10 @@ There is no registry either: images travel as `docker save | ssh … docker load
 | steward | `:8802` → container `8801` | `~/docker/steward`, residents in `~/docker/steward-<id>` | [steward README](steward/README.md#deployment) |
 
 One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
-`/observatory/`, and proxies `/burrow/state`, `/state`, `/events` to chronicle and the
-write routes to steward. So a townhall release is published into *arcadia's* deploy
+`/observatory/`, proxies `/burrow/state`, `/state`, `/events` and `/burrow/residents` to
+chronicle, and hands steward every one of its own top-level routes. Both services answer
+`GET /residents`, so the bare path is steward's and chronicle's report is the prefixed
+one (warren#242). So a townhall release is published into *arcadia's* deploy
 directory, and `CHRONICLE_URL=http://dxp2800:8737` (still accepted as `BURROW_URL`)
 is correct even though chronicle listens on 8738 — the origin proxies `/events` through.
 

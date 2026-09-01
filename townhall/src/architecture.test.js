@@ -118,6 +118,43 @@ const functionBody = (source, name) => {
   return source.slice(start, source.indexOf("\n}", start));
 };
 
+describe("the dev proxy is the deployed origin's route table", () => {
+  // warren#242: `vite.config.js` and `arcadia/deploy/nginx.conf` carry the same list of
+  // Steward paths, one for `pnpm dev` and one for the NAS. A path in one and not the other
+  // is a page that works in dev and serves the village's index.html deployed, or the
+  // reverse — which is how `/tasks/{id}/lineage` and `POST /delegate` were absent from both
+  // and nothing said so. Both are checked against Steward itself rather than each other.
+  // `.github/workflows/townhall.yml` lists `api.py` among this suite's paths.
+
+  /** Steward's top-level route segments, from the `@app` decorators that declare them. */
+  const stewardApiRoutes = () => {
+    const api = read("../../steward/src/steward/api.py");
+    const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
+    expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+    return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
+  };
+
+  it("proxies every top-level Steward route to Steward", () => {
+    const config = read("../vite.config.js");
+    const list = config.slice(
+      config.indexOf("...Object.fromEntries("),
+      config.indexOf("].map("),
+    );
+    expect(list, "no proxy path list to read").toContain("/residents");
+
+    const proxied = [...list.matchAll(/"\/([a-z]+)"/g)].map((match) => match[1]).sort();
+    expect(proxied).toEqual(stewardApiRoutes());
+  });
+
+  it("sends Chronicle's snapshot somewhere else entirely", () => {
+    // The one path in this proxy that is not Steward's, and the reason the list above is
+    // read from its own block rather than from every quoted path in the file.
+    const config = read("../vite.config.js");
+    expect(config).toContain('"/state"');
+    expect(stewardApiRoutes()).not.toContain("state");
+  });
+});
+
 describe("the origin overrides are a development convenience, enforced as one", () => {
   // warren#241: `?steward=` and `?backend=` were honest-system dev conveniences that the
   // deployed bundle also honoured, so `/observatory/?steward=https://evil.tld` opened in an
