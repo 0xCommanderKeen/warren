@@ -15,6 +15,106 @@ from config import Config
 
 
 class ASGITransportContractTests(unittest.TestCase):
+    def test_workers_render_identity_from_their_own_runtime_resident_directory(self):
+        received = [[], []]
+
+        def handler_for(index):
+            class RecordingWebhook(http.server.BaseHTTPRequestHandler):
+                def do_POST(self):
+                    body = self.rfile.read(int(self.headers["Content-Length"]))
+                    received[index].append((self.headers["Title"], body.decode()))
+                    self.send_response(200)
+                    self.end_headers()
+
+                def log_message(self, *_args):
+                    pass
+
+            return RecordingWebhook
+
+        webhooks = [
+            http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_for(index))
+            for index in range(2)
+        ]
+        threads = [
+            threading.Thread(target=webhook.serve_forever, daemon=True)
+            for webhook in webhooks
+        ]
+        for thread in threads:
+            thread.start()
+
+        event = {
+            "v": 0,
+            "ts": "2026-08-24T12:00:00.000Z",
+            "source": "test",
+            "agent_id": "test:resident-owner",
+            "project": "chronicle",
+            "cwd": "",
+            "type": "needs_human",
+            "payload": {"message": "runtime identity"},
+        }
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                configs = []
+                for index, (name, webhook) in enumerate(
+                    zip(("Aster", "Birch"), webhooks, strict=True)
+                ):
+                    villagers = root / f"villagers-{index}"
+                    villagers.mkdir()
+                    (villagers / "resident.md").write_text(
+                        f"---\nagent_id: test:resident-owner\nname: {name}\n---\n",
+                        encoding="utf-8",
+                    )
+                    configs.append(
+                        dataclasses.replace(
+                            Config(),
+                            events=root / f"events-{index}.jsonl",
+                            villagers_dir=villagers,
+                            notify_url=f"http://127.0.0.1:{webhook.server_port}/",
+                            notify_workers=1,
+                        )
+                    )
+
+                with (
+                    TestClient(serve.create_app(configs[0])) as first,
+                    TestClient(serve.create_app(configs[1])) as second,
+                ):
+                    self.assertEqual(first.post("/events", json=event).status_code, 204)
+                    self.assertEqual(
+                        second.post("/events", json=event).status_code, 204
+                    )
+                    deadline = time.monotonic() + 3
+                    while (
+                        any(not items for items in received)
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.01)
+
+                self.assertEqual(
+                    received[0],
+                    [
+                        (
+                            "Aster is at your door (chronicle)",
+                            "Aster · chronicle\nruntime identity",
+                        )
+                    ],
+                )
+                self.assertEqual(
+                    received[1],
+                    [
+                        (
+                            "Birch is at your door (chronicle)",
+                            "Birch · chronicle\nruntime identity",
+                        )
+                    ],
+                )
+        finally:
+            for webhook in webhooks:
+                webhook.shutdown()
+                webhook.server_close()
+            for thread in threads:
+                thread.join(3)
+
     def test_configured_notification_queue_capacity_is_enforced_and_reported(self):
         entered = threading.Event()
         release = threading.Event()
@@ -52,7 +152,9 @@ class ASGITransportContractTests(unittest.TestCase):
                     "payload": {"message": "bounded"},
                 }
                 with TestClient(serve.create_app(config)) as client:
-                    self.assertEqual(client.post("/events", json=event).status_code, 204)
+                    self.assertEqual(
+                        client.post("/events", json=event).status_code, 204
+                    )
                     self.assertTrue(entered.wait(3))
                     for index in (1, 2):
                         queued = dict(event, agent_id=f"test:capacity-{index}")

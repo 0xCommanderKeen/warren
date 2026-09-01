@@ -29,9 +29,7 @@ import dataclasses
 import datetime
 import email.header
 import fcntl
-import functools
 import hmac
-import inspect
 import json
 import os
 import queue
@@ -153,10 +151,12 @@ VIEWER_EVENT_TYPES = {
 }
 
 
-def read_villagers():
+def read_villagers(villagers_dir=None):
     """Validated residents plus legacy soul files for v0 client compatibility."""
-    out = read_residents()["residents"]
-    villagers_dir = _villagers_path()
+    out = read_residents(villagers_dir)["residents"]
+    villagers_dir = (
+        str(villagers_dir) if villagers_dir is not None else _villagers_path()
+    )
     if not os.path.isdir(villagers_dir):
         return out
     for fn in sorted(os.listdir(villagers_dir)):
@@ -180,9 +180,10 @@ def read_villagers():
     return out
 
 
-def read_residents():
+def read_residents(villagers_dir=None):
     """Load valid resident declarations and actionable validation diagnostics."""
-    return resident_manifests.load_resident_manifests(_villagers_path())
+    path = str(villagers_dir) if villagers_dir is not None else _villagers_path()
+    return resident_manifests.load_resident_manifests(path)
 
 
 # ————— knocks: push a needs_human event to a webhook —————
@@ -212,14 +213,6 @@ NAMES = [
     "Willow",
 ]
 
-_notified = collections.OrderedDict()
-_notifying = set()
-_notified_lock = threading.Lock()
-_knock_queue = queue.Queue(maxsize=NOTIFY_QUEUE)
-_knock_workers_started = False
-_knock_workers_lock = threading.Lock()
-_knock_worker_stop = threading.Event()
-_knock_worker_threads = []
 _transport_lock = threading.Lock()
 _transport_counters = {
     "ingest_duplicates": 0,
@@ -244,85 +237,6 @@ _notification_store = notification_persistence.NotificationPersistence(
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
-class _LegacyNotificationRuntime:
-    """One compatibility boundary for direct callers of the old module API."""
-
-    @property
-    def config(self):
-        return _legacy_config()
-
-    notification_store = _notification_store
-
-    @property
-    def notified(self):
-        return _notified
-
-    @property
-    def notifying(self):
-        return _notifying
-
-    @property
-    def notified_lock(self):
-        return _notified_lock
-
-    @property
-    def knock_queue(self):
-        return _knock_queue
-
-    @property
-    def knock_workers_started(self):
-        return _knock_workers_started
-
-    @knock_workers_started.setter
-    def knock_workers_started(self, value):
-        global _knock_workers_started
-        _knock_workers_started = value
-
-    @property
-    def knock_workers_lock(self):
-        return _knock_workers_lock
-
-    @property
-    def knock_worker_stop(self):
-        return _knock_worker_stop
-
-    @property
-    def knock_worker_threads(self):
-        return _knock_worker_threads
-
-    @property
-    def transport_lock(self):
-        return _transport_lock
-
-    @property
-    def transport_counters(self):
-        return _transport_counters
-
-
-_legacy_notification_runtime = _LegacyNotificationRuntime()
-
-
-def _legacy_notification_call(function):
-    """Adapt omitted Runtime arguments only at the deprecated direct-call edge."""
-    signature = inspect.signature(function)
-
-    @functools.wraps(function)
-    def adapted(*args, **kwargs):
-        bound = signature.bind_partial(*args, **kwargs)
-        if "runtime" not in bound.arguments:
-            kwargs["runtime"] = _legacy_notification_runtime
-        return function(*args, **kwargs)
-
-    return adapted
-
-
-def _notification_dependency(function, *args, runtime):
-    """Keep one-argument legacy test doubles behind the same compatibility edge."""
-    if runtime is _legacy_notification_runtime:
-        return function(*args)
-    return function(*args, runtime)
-
-
 def js_hash(s):
     """Return the stable signed 32-bit identity hash over UTF-16 code units."""
     h = 0
@@ -335,7 +249,7 @@ def js_hash(s):
     return abs(h)
 
 
-def villager_names(events):
+def villager_names(events, villagers_dir=None):
     """Resolve stable names for a fleet.
 
     Souls and fallback names are unique within the fleet, so resolving an event in
@@ -366,7 +280,7 @@ def villager_names(events):
         if current is None or is_resident(soul) or not is_resident(current):
             index[key] = soul
 
-    for soul in read_villagers():
+    for soul in read_villagers(villagers_dir):
         meta = soul.get("meta") or {}
         if meta.get("agent_id"):
             index_soul(soul_by_agent, meta["agent_id"], soul)
@@ -420,7 +334,6 @@ def villager_names(events):
     return names
 
 
-@_legacy_notification_call
 def _fleet_events(event, runtime):
     """Read the same bounded event window as the viewer and include this event."""
     events = []
@@ -459,12 +372,11 @@ def _fleet_events(event, runtime):
     return [item for item in events if str(item["agent_id"]) in visible_agents]
 
 
-@_legacy_notification_call
 def villager_name(event, runtime):
     agent_id = str(event.get("agent_id") or "")
-    return villager_names(_fleet_events(event, runtime)).get(
-        agent_id, NAMES[js_hash(agent_id) % len(NAMES)]
-    )
+    return villager_names(
+        _fleet_events(event, runtime), runtime.config.villagers_dir
+    ).get(agent_id, NAMES[js_hash(agent_id) % len(NAMES)])
 
 
 def receiver_delivery_id(event):
@@ -472,7 +384,6 @@ def receiver_delivery_id(event):
     return notification_persistence.terminal_key(event)
 
 
-@_legacy_notification_call
 def persist_knock(event, runtime):
     """Durably journal notification work before the ingest acknowledges it."""
     if not runtime.config.notify_url or event.get("type") != "needs_human":
@@ -480,7 +391,6 @@ def persist_knock(event, runtime):
     return runtime.notification_store.journal(event)
 
 
-@_legacy_notification_call
 def claim_knock(event, runtime):
     """Claim a knock unless it is in flight or has already been delivered."""
     store = runtime.notification_store
@@ -506,7 +416,6 @@ def claim_knock(event, runtime):
     return True
 
 
-@_legacy_notification_call
 def finish_knock(event, delivered, runtime):
     """Release an attempt, remembering only successful deliveries."""
     key = notification_persistence.terminal_key(event)
@@ -530,7 +439,6 @@ def finish_knock(event, delivered, runtime):
     return not delivered
 
 
-@_legacy_notification_call
 def notify(event, runtime):
     """POST one knock and return whether it was delivered. Never raises."""
     try:
@@ -581,7 +489,6 @@ def notify(event, runtime):
         return False
 
 
-@_legacy_notification_call
 def deliver_knock(event, runtime):
     """Attempt under a bounded cross-process claim and commit its outcome.
 
@@ -604,7 +511,7 @@ def deliver_knock(event, runtime):
         ):
             finish_knock(event, False, runtime)
             return True
-        delivered = _notification_dependency(notify, event, runtime=runtime)
+        delivered = notify(event, runtime)
         if delivered:
             if not store.commit_terminal(event, LEDGER_NOTIFIED):
                 delivered = False
@@ -615,7 +522,6 @@ def deliver_knock(event, runtime):
     return delivered
 
 
-@_legacy_notification_call
 def notify_async(event, runtime):
     ensure_knock_workers(runtime)
     work_queue = runtime.knock_queue
@@ -631,7 +537,6 @@ def notify_async(event, runtime):
         return False
 
 
-@_legacy_notification_call
 def _process_knock(event, runtime):
     store = runtime.notification_store
     work_queue = runtime.knock_queue
@@ -646,7 +551,7 @@ def _process_knock(event, runtime):
         _recover_knocks(runtime)
         return
 
-    delivered = _notification_dependency(deliver_knock, event, runtime=runtime)
+    delivered = deliver_knock(event, runtime)
     if delivered:
         store.clear_attempts(event)
     else:
@@ -671,7 +576,6 @@ def _process_knock(event, runtime):
     _recover_knocks(runtime)
 
 
-@_legacy_notification_call
 def _knock_worker(runtime):
     worker_stop = runtime.knock_worker_stop
     work_queue = runtime.knock_queue
@@ -686,7 +590,6 @@ def _knock_worker(runtime):
             work_queue.task_done()
 
 
-@_legacy_notification_call
 def _recover_knocks(runtime):
     """Atomically hand off new work and replay immutable generations.
 
@@ -716,7 +619,6 @@ def _recover_knocks(runtime):
             pass
 
 
-@_legacy_notification_call
 def ensure_knock_workers(runtime):
     started = runtime.knock_workers_started
     workers_lock = runtime.knock_workers_lock
@@ -743,7 +645,6 @@ def ensure_knock_workers(runtime):
         _recover_knocks(runtime)
 
 
-@_legacy_notification_call
 def stop_knock_workers(runtime):
     """Stop and join transport-owned notification workers at ASGI shutdown."""
     workers_lock = runtime.knock_workers_lock
@@ -762,7 +663,6 @@ def stop_knock_workers(runtime):
         runtime.knock_workers_started = False
 
 
-@_legacy_notification_call
 def transport_status(runtime):
     """Bounded machine-readable diagnostics for the browser live-status module."""
     transport_lock = runtime.transport_lock

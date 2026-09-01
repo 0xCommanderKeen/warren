@@ -1,4 +1,5 @@
 import collections
+import functools
 import glob
 import json
 import multiprocessing
@@ -64,9 +65,25 @@ class NotificationTests(unittest.TestCase):
         for patcher in self.patches:
             patcher.start()
             self.addCleanup(patcher.stop)
-        serve._notified.clear()
-        serve._notifying.clear()
-        serve._store().reset_process_state()
+        self.runtime = serve.Runtime(serve._legacy_config())
+        self.addCleanup(serve.stop_knock_workers, self.runtime)
+        for name in (
+            "claim_knock",
+            "deliver_knock",
+            "finish_knock",
+            "notify",
+            "notify_async",
+            "persist_knock",
+            "transport_status",
+            "villager_name",
+            "_process_knock",
+            "_recover_knocks",
+        ):
+            setattr(
+                self,
+                name,
+                functools.partial(getattr(serve, name), runtime=self.runtime),
+            )
 
     @staticmethod
     def event(
@@ -119,13 +136,13 @@ class NotificationTests(unittest.TestCase):
 
     def test_failed_delivery_can_be_claimed_again_but_success_is_deduplicated(self):
         event = self.event()
-        self.assertTrue(serve.claim_knock(event))
+        self.assertTrue(self.claim_knock(event))
         with mock.patch.object(serve, "notify", return_value=False):
-            serve.deliver_knock(event)
-        self.assertTrue(serve.claim_knock(event))
+            self.deliver_knock(event)
+        self.assertTrue(self.claim_knock(event))
         with mock.patch.object(serve, "notify", return_value=True):
-            serve.deliver_knock(event)
-        self.assertFalse(serve.claim_knock(event))
+            self.deliver_knock(event)
+        self.assertFalse(self.claim_knock(event))
 
     def test_structured_knock_push_uses_action_and_detail(self):
         event = self.event(message="legacy fallback")
@@ -139,7 +156,7 @@ class NotificationTests(unittest.TestCase):
         )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
         request = opened.call_args.args[0]
         self.assertEqual(request.headers["Title"], "send_email")
         self.assertEqual(
@@ -161,7 +178,7 @@ class NotificationTests(unittest.TestCase):
         )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
         request = opened.call_args.args[0]
         self.assertEqual(request.headers["Title"], "restart_service")
         self.assertIsNone(json.loads(request.data.decode("utf-8")))
@@ -171,7 +188,7 @@ class NotificationTests(unittest.TestCase):
         event["payload"].update({"action": "send_email", "detail": {}, "options": [{}]})
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
         request = opened.call_args.args[0]
         self.assertIn("is at your door", request.headers["Title"])
         self.assertIn("please inspect", request.data.decode("utf-8"))
@@ -241,13 +258,13 @@ class NotificationTests(unittest.TestCase):
         second["payload"]["request_id"] = "request-b"
         self.assertNotEqual(knocks.knock_key(first), knocks.knock_key(second))
         self.assertNotEqual(knocks.terminal_key(first), knocks.terminal_key(second))
-        self.assertTrue(serve.claim_knock(first))
-        self.assertTrue(serve.claim_knock(second))
-        self.assertTrue(serve.finish_knock(first, True))
-        self.assertTrue(serve.finish_knock(second, True))
-        self.assertFalse(serve.claim_knock(first), "exact replay stays terminal")
+        self.assertTrue(self.claim_knock(first))
+        self.assertTrue(self.claim_knock(second))
+        self.assertTrue(self.finish_knock(first, True))
+        self.assertTrue(self.finish_knock(second, True))
+        self.assertFalse(self.claim_knock(first), "exact replay stays terminal")
         self.assertFalse(
-            serve.claim_knock(second), "each distinct request is terminal once"
+            self.claim_knock(second), "each distinct request is terminal once"
         )
 
     def test_structured_notification_identity_covers_exact_wire_and_immutable_shape(
@@ -339,9 +356,9 @@ class NotificationTests(unittest.TestCase):
             }
         )
         self.assertNotEqual(knocks.knock_key(plain), knocks.knock_key(structured))
-        self.assertTrue(serve.claim_knock(plain))
-        self.assertTrue(serve.finish_knock(plain, True))
-        self.assertTrue(serve.claim_knock(structured))
+        self.assertTrue(self.claim_knock(plain))
+        self.assertTrue(self.finish_knock(plain, True))
+        self.assertTrue(self.claim_knock(structured))
 
     def test_ambiguous_pre_v3_terminal_keys_do_not_suppress_structured_upgrade(self):
         event = self.event(ts="2026-08-24T12:00:00.000Z")
@@ -386,7 +403,7 @@ class NotificationTests(unittest.TestCase):
         serve._store().remember(serve.LEDGER_NOTIFIED, v2)
         self.assertEqual(knocks.terminal_keys(event), (knocks.terminal_key(event),))
         self.assertTrue(
-            serve.claim_knock(event),
+            self.claim_knock(event),
             "ambiguous historical aliases favor one safe re-notification",
         )
 
@@ -395,7 +412,7 @@ class NotificationTests(unittest.TestCase):
         key = knocks.terminal_key(event)
         serve._store().remember(serve.LEDGER_NOTIFIED, key)
         self.assertEqual(knocks.terminal_keys(event), (key,))
-        self.assertFalse(serve.claim_knock(event))
+        self.assertFalse(self.claim_knock(event))
 
     def test_repeated_options_are_structured_in_notification_and_survive_restart_once(
         self,
@@ -414,25 +431,25 @@ class NotificationTests(unittest.TestCase):
         )
         with mock.patch.object(serve.urllib.request, "urlopen") as opened:
             opened.return_value.__enter__.return_value = object()
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
         request = opened.call_args.args[0]
         self.assertEqual(request.headers["Title"], "send_email")
         self.assertEqual(
             json.loads(request.data.decode("utf-8")), {"subject": "Repeated approval"}
         )
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         recovered = queue.Queue()
-        with mock.patch.object(serve, "_knock_queue", recovered):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
+            self._recover_knocks()
         replay = recovered.get_nowait()
-        self.assertIn(knocks.terminal_key(replay), serve._notifying)
+        self.assertIn(knocks.terminal_key(replay), self.runtime.notifying)
         with mock.patch.object(serve, "notify", return_value=True):
-            self.assertTrue(serve.deliver_knock(replay))
-        serve._notified.clear()
-        serve._notifying.clear()
+            self.assertTrue(self.deliver_knock(replay))
+        self.runtime.notified.clear()
+        self.runtime.notifying.clear()
         serve._store().reset_process_state()
         self.assertFalse(
-            serve.claim_knock(event), "durable exact replay stays claimed once"
+            self.claim_knock(event), "durable exact replay stays claimed once"
         )
 
     def test_project_soul_is_consumed_once_across_the_fleet(self):
@@ -444,8 +461,8 @@ class NotificationTests(unittest.TestCase):
         # Keep the fixture fleet inside the viewer's visibility window regardless
         # of the wall-clock date on the machine running the suite.
         with mock.patch.object(serve.time, "time", return_value=1787574600):
-            self.assertEqual("Maren", serve.villager_name(first))
-            self.assertEqual("Poppy", serve.villager_name(second))
+            self.assertEqual("Maren", self.villager_name(first))
+            self.assertEqual("Poppy", self.villager_name(second))
 
     def test_fallback_names_probe_hash_collisions_across_the_fleet(self):
         first = self.event(agent_id="a")
@@ -523,7 +540,7 @@ class NotificationTests(unittest.TestCase):
         names = serve.villager_names([child_start, child_tool, parent, child_knock])
         self.assertEqual("Maren", names["z-parent"])
         self.assertNotEqual("Maren", names["a-child"])
-        self.assertEqual(names["a-child"], serve.villager_name(child_knock))
+        self.assertEqual(names["a-child"], self.villager_name(child_knock))
 
     def test_unicode_title_is_ascii_safe_for_http(self):
         event = self.event(project="项目")
@@ -539,7 +556,7 @@ class NotificationTests(unittest.TestCase):
         with mock.patch.object(
             serve.urllib.request, "urlopen", side_effect=open_request
         ):
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
 
         title = captured["request"].get_header("Title")
         title.encode("latin-1")
@@ -557,9 +574,9 @@ class NotificationTests(unittest.TestCase):
         with mock.patch.object(
             serve.urllib.request, "urlopen", side_effect=open_request
         ):
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
 
-        name = serve.villager_name(event)
+        name = self.villager_name(event)
         self.assertEqual(
             f"{name} · burrow\n  first line\nsecond line\n".encode(), captured["body"]
         )
@@ -568,7 +585,7 @@ class NotificationTests(unittest.TestCase):
         with mock.patch.object(
             serve.urllib.request, "urlopen", side_effect=open_request
         ):
-            self.assertTrue(serve.notify(empty))
+            self.assertTrue(self.notify(empty))
         self.assertEqual(f"{name} · burrow\n".encode(), captured["body"])
 
     def test_notification_has_stable_receiver_dedupe_header(self):
@@ -582,7 +599,7 @@ class NotificationTests(unittest.TestCase):
         with mock.patch.object(
             serve.urllib.request, "urlopen", side_effect=open_request
         ):
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
         self.assertEqual(
             captured["request"].get_header("X-burrow-delivery-id"),
             serve.receiver_delivery_id(event),
@@ -591,38 +608,38 @@ class NotificationTests(unittest.TestCase):
     def test_notification_queue_saturation_is_bounded_and_inspectable(self):
         tiny = serve.queue.Queue(maxsize=1)
         with (
-            mock.patch.object(serve, "_knock_queue", tiny),
+            mock.patch.object(self.runtime, "knock_queue", tiny),
             mock.patch.object(serve, "ensure_knock_workers"),
         ):
-            self.assertTrue(serve.notify_async(self.event(agent_id="first")))
-            self.assertFalse(serve.notify_async(self.event(agent_id="second")))
-        status = serve.transport_status()
+            self.assertTrue(self.notify_async(self.event(agent_id="first")))
+            self.assertFalse(self.notify_async(self.event(agent_id="second")))
+        status = self.transport_status()
         self.assertGreaterEqual(status["notifications"]["saturated"], 1)
 
     def test_successful_knock_is_not_reclaimed_after_restart_or_log_retention(self):
         event = self.event()
         event["delivery_id"] = "durable-delivery-id-0001"
-        self.assertTrue(serve.claim_knock(event))
+        self.assertTrue(self.claim_knock(event))
         with mock.patch.object(serve, "notify", return_value=True):
-            serve.deliver_knock(event)
-        serve._notified.clear()
-        serve._notifying.clear()
+            self.deliver_knock(event)
+        self.runtime.notified.clear()
+        self.runtime.notifying.clear()
         serve._store().reset_process_state()
         self.write_events()
-        self.assertFalse(serve.claim_knock(event))
+        self.assertFalse(self.claim_knock(event))
 
     def test_accepted_knock_is_recovered_from_journal_after_restart(self):
         event = self.event()
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         recovered = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", recovered):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
+            self._recover_knocks()
         self.assertEqual(recovered.get_nowait(), event)
 
     def test_recovery_handoff_does_not_lose_a_concurrent_append(self):
         first = self.event(agent_id="first")
         second = self.event(agent_id="second", ts="2026-08-24T12:00:01Z")
-        self.assertTrue(serve.persist_knock(first))
+        self.assertTrue(self.persist_knock(first))
         real_replace = os.replace
         appended = []
         appenders = []
@@ -630,30 +647,30 @@ class NotificationTests(unittest.TestCase):
         def append_after_handoff(source, destination):
             real_replace(source, destination)
             worker = threading.Thread(
-                target=lambda: appended.append(serve.persist_knock(second))
+                target=lambda: appended.append(self.persist_knock(second))
             )
             worker.start()
             appenders.append(worker)
 
         recovered = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", recovered):
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
             with mock.patch.object(
                 serve.os, "replace", side_effect=append_after_handoff
             ):
-                serve._recover_knocks()
+                self._recover_knocks()
             appenders[0].join(1)
             self.assertEqual(appended, [True])
             self.assertEqual(recovered.get_nowait(), first)
-            serve._recover_knocks()
+            self._recover_knocks()
             self.assertEqual(recovered.get_nowait(), second)
 
     def test_recovery_preserves_unresolved_replay_and_new_active_work(self):
         old = self.event(agent_id="old")
         new = self.event(agent_id="new", ts="2026-08-24T12:00:01Z")
-        self.assertTrue(serve.persist_knock(old))
+        self.assertTrue(self.persist_knock(old))
         first_restart = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", first_restart):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", first_restart):
+            self._recover_knocks()
         self.assertEqual(first_restart.get_nowait(), old)
         # A concurrent/newer writer may have created an active generation after
         # the old replay was handed off.
@@ -663,10 +680,10 @@ class NotificationTests(unittest.TestCase):
             os.fsync(stream.fileno())
 
         # Simulate a restart: neither unresolved in-memory claim survives.
-        serve._notifying.clear()
+        self.runtime.notifying.clear()
         second_restart = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", second_restart):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", second_restart):
+            self._recover_knocks()
         recovered = {
             knocks.knock_key(second_restart.get_nowait()),
             knocks.knock_key(second_restart.get_nowait()),
@@ -689,8 +706,8 @@ class NotificationTests(unittest.TestCase):
             "urlopen",
             side_effect=lambda request, timeout: requests.append(request) or Response(),
         ):
-            self.assertTrue(serve.notify(event))
-            self.assertTrue(serve.notify(event))
+            self.assertTrue(self.notify(event))
+            self.assertTrue(self.notify(event))
         values = [request.get_header("X-burrow-delivery-id") for request in requests]
         self.assertEqual(values[0], values[1])
         self.assertTrue(values[0].isascii())
@@ -698,21 +715,21 @@ class NotificationTests(unittest.TestCase):
 
     def test_recovery_is_idempotent_after_crash_leaves_handoff(self):
         event = self.event()
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         recovered = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", recovered):
-            serve._recover_knocks()
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
+            self._recover_knocks()
+            self._recover_knocks()
         self.assertEqual(recovered.get_nowait(), event)
         with self.assertRaises(serve.queue.Empty):
             recovered.get_nowait()
 
     def test_repeated_crash_recovery_never_accumulates_replay_generations(self):
-        self.assertTrue(serve.persist_knock(self.event()))
+        self.assertTrue(self.persist_knock(self.event()))
         recovered = serve.queue.Queue(maxsize=20)
-        with mock.patch.object(serve, "_knock_queue", recovered):
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
             for _ in range(8):
-                serve._recover_knocks()
+                self._recover_knocks()
                 generations = glob.glob(self.events + ".knocks.replay.*")
                 self.assertEqual(len(generations), 1)
                 # Simulate compaction crashing after the active publish but
@@ -727,34 +744,34 @@ class NotificationTests(unittest.TestCase):
 
     def test_partial_crash_tail_does_not_hide_a_complete_knock(self):
         event = self.event()
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         with open(self.events + ".knocks", "a", encoding="utf-8") as stream:
             stream.write('{"partial":')
         recovered = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", recovered):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
+            self._recover_knocks()
         self.assertEqual(recovered.get_nowait(), event)
 
     def test_completed_replay_generation_is_reclaimed_only_after_durable_outcomes(self):
         delivered = self.event(agent_id="delivered")
         dropped = self.event(agent_id="dropped", ts="2026-08-24T12:00:01Z")
-        self.assertTrue(serve.persist_knock(delivered))
-        self.assertTrue(serve.persist_knock(dropped))
+        self.assertTrue(self.persist_knock(delivered))
+        self.assertTrue(self.persist_knock(dropped))
         recovered = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", recovered):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", recovered):
+            self._recover_knocks()
         generations = glob.glob(self.events + ".knocks.replay.*")
         self.assertEqual(len(generations), 1)
         serve._store().remember("notified", knocks.terminal_key(delivered))
-        serve._recover_knocks()
+        self._recover_knocks()
         self.assertTrue(os.path.exists(generations[0]))
         serve._store().remember("notify-dropped", knocks.terminal_key(dropped))
-        serve._recover_knocks()
+        self._recover_knocks()
         self.assertFalse(os.path.exists(generations[0]))
 
     def test_server_startup_recovers_pending_knocks_without_new_ingest(self):
         event = self.event()
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         from fastapi.testclient import TestClient
 
         with (
@@ -770,54 +787,54 @@ class NotificationTests(unittest.TestCase):
     def test_knock_is_not_acknowledgeable_when_durable_journal_fails(self):
         event = self.event()
         with mock.patch("builtins.open", side_effect=OSError("disk full")):
-            self.assertFalse(serve.persist_knock(event))
+            self.assertFalse(self.persist_knock(event))
 
     def test_failed_worker_delivery_has_bounded_retry_and_drop_accounting(self):
         event = self.event()
         tiny = serve.queue.Queue(maxsize=4)
         with (
-            mock.patch.object(serve, "_knock_queue", tiny),
+            mock.patch.object(self.runtime, "knock_queue", tiny),
             mock.patch.object(serve, "notify", return_value=False),
             mock.patch.object(serve, "_recover_knocks"),
         ):
-            self.assertTrue(serve.claim_knock(event))
-            serve._process_knock(event)
-            serve._process_knock(tiny.get_nowait())
-            serve._process_knock(tiny.get_nowait())
-        status = serve.transport_status()["notifications"]
+            self.assertTrue(self.claim_knock(event))
+            self._process_knock(event)
+            self._process_knock(tiny.get_nowait())
+            self._process_knock(tiny.get_nowait())
+        status = self.transport_status()["notifications"]
         self.assertGreaterEqual(status["retried"], 2)
         self.assertGreaterEqual(status["dropped"], 1)
         serve._store().reset_process_state()
-        self.assertFalse(serve.claim_knock(event))
+        self.assertFalse(self.claim_knock(event))
 
     def test_failed_attempts_survive_restart_and_reach_terminal_drop(self):
         event = self.event()
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         first_queue = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", first_queue):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", first_queue):
+            self._recover_knocks()
         with (
-            mock.patch.object(serve, "_knock_queue", first_queue),
+            mock.patch.object(self.runtime, "knock_queue", first_queue),
             mock.patch.object(serve, "notify", return_value=False),
             mock.patch.object(serve, "_recover_knocks"),
         ):
-            serve._process_knock(first_queue.get_nowait())
+            self._process_knock(first_queue.get_nowait())
 
-        serve._notifying.clear()
+        self.runtime.notifying.clear()
         serve._store().reset_process_state()
         restarted = serve.queue.Queue(maxsize=4)
-        with mock.patch.object(serve, "_knock_queue", restarted):
-            serve._recover_knocks()
+        with mock.patch.object(self.runtime, "knock_queue", restarted):
+            self._recover_knocks()
         with (
-            mock.patch.object(serve, "_knock_queue", restarted),
+            mock.patch.object(self.runtime, "knock_queue", restarted),
             mock.patch.object(serve, "notify", return_value=False),
             mock.patch.object(serve, "_recover_knocks"),
         ):
-            serve._process_knock(restarted.get_nowait())
-            serve._process_knock(restarted.get_nowait())
+            self._process_knock(restarted.get_nowait())
+            self._process_knock(restarted.get_nowait())
 
         serve._store().reset_process_state()
-        self.assertFalse(serve.claim_knock(event))
+        self.assertFalse(self.claim_knock(event))
         self.assertTrue(os.path.exists(self.events + ".notify-dropped"))
 
 
@@ -851,7 +868,7 @@ class TransportDiagnosticsTests(unittest.TestCase):
         self.assertFalse(serve.append_event(event))
         with open(self.events, encoding="utf-8") as stream:
             self.assertEqual(sum(1 for line in stream if line.strip()), 1)
-        self.assertGreaterEqual(serve.transport_status()["ingest"]["duplicates"], 1)
+        self.assertGreaterEqual(serve._transport_counters["ingest_duplicates"], 1)
 
     def test_delivery_id_dedupe_survives_restart_and_live_log_retention(self):
         event = self.event("persistent-delivery-0001")
