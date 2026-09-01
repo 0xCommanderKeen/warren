@@ -350,11 +350,20 @@ activity: they enter the villager's bounded visible history and read as sentence
 “Draft the letter” to codex:keeper”, “reported back on “Research X” after losing the claim”,
 “was restarted (attempt 2): container was not running”.
 
-Neither task fact moves the job board. A late session report describes the *run*, not the
-row: the lease sweep remains the authority on the task, so `task_session_finished` never
-claims, closes or reopens one. A delegated job opens no board row either — the `tasks`
-ledger is still folded from `task_posted`, `task_claimed`, `task_done` and `task_failed`
-alone, so delegated work is visible as villager activity and not yet as a job (warren#277).
+A late session report describes the *run*, not the row: the lease sweep remains the
+authority on the task, so `task_session_finished` never claims, closes or reopens one.
+
+`task_delegated` is the exception that is both at once. It is the delegator's visible
+action *and* the event that opens the row, because Steward writes a handoff into the same
+table as a posted job — open, unclaimed, addressed to one resident. So it folds into the
+`tasks` ledger as that row's origin: `state: "open"`, `posted_by` the delegator, no
+required skills, and `assignee` naming who it is for. Both are the `agent_id` spellings
+the event carries, not the resident ids Steward's own store addresses a handoff by, so
+`assignee` compares directly against a later `claimant`. Only that resident may claim it,
+so an open row with an addressee is not work anybody can take. Rotation follows the same
+rule: whatever keeps a handoff — the ledger, the villager's history, mood — keeps the
+newest transition on its row with it, because an origin retained alone would show claimed
+or finished work as open.
 
 `chat_message_dropped` is **ambient**, the one class of event that is filed under a
 villager without being that villager's action. It records that an outsider knocked on a
@@ -503,22 +512,29 @@ the 30 most recent valid `artifact_produced` events from the live log
 window, newest first, including artifacts from agents who have since left.
 
 The separate job board is reconstructed only from valid Steward `task_posted`,
-`task_claimed`, `task_done`, and `task_failed` events. A post requires the complete
-Steward payload, including non-empty `posted_by`; a failure requires its reason. It keeps
-at most 24 task identities, keyed by
+`task_delegated`, `task_claimed`, `task_done`, and `task_failed` events. A row opens on a
+post or on a handoff: a post requires the complete Steward payload, including non-empty
+`posted_by`, a handoff requires both ends and its route, and a failure requires its
+reason. Rotation's board selection keeps at most 24 task identities, keyed by
 `task_id`; duplicates cannot create another card. Capacity is applied after every valid
 event, including each record in a grouped bootstrap/reset response. A later transition can
-reintroduce an identity whose post was already evicted, but cannot recover that missing post
-metadata; only a genuinely re-observed post can. This makes one-event SSE delivery, grouped
+reintroduce an identity whose origin was already evicted, but cannot recover that missing
+metadata; only a genuinely re-observed post or handoff can. That 24 bounds what the board
+selection keeps, not what the retained log can still show: a handoff is also the
+delegator's own activity, so villager retention keeps one on its own terms even when the
+board selection evicted its row, and such a row keeps its newest transition too rather
+than reappearing as an untaken job. The snapshot's own `tasks` capacity is the outer
+bound in every case. This makes one-event SSE delivery, grouped
 replay, and rotation/reset batch-invariant without inventing skills. The greatest event
 timestamp is the current state. Equal-millisecond facts use a constant-space total order:
-post, lease expiry, claim, ordinary failure, then done, with stable event identity deciding
-conflicts within one kind. Exact duplicates compare equal. This preserves Steward's
-expiry-then-reclaim hand-off while even 10,000 distinct same-millisecond transitions retain
-only the latest post and transition. A later post supplies the canonical title,
-skills, and posted age even when its claim arrived first. Open and claimed jobs remain.
-When a claim or terminal event is retained without its post, Chronicle renders required
-skills as unavailable rather than inventing an empty requirement set.
+origin (post or handoff), lease expiry, claim, ordinary failure, then done, with stable
+event identity deciding conflicts within one kind. Exact duplicates compare equal. This
+preserves Steward's expiry-then-reclaim hand-off while even 10,000 distinct
+same-millisecond transitions retain only the latest origin and transition. A later origin
+supplies the canonical title, skills, addressee, and posted age even when its claim
+arrived first. Open and claimed jobs remain.
+When a claim or terminal event is retained without the event that opened its row, Chronicle
+renders required skills as unavailable rather than inventing an empty requirement set.
 An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
 entry in a non-empty list renders as an accessible “unnamed skill” marker, one marker per
 entry, so it cannot be confused with either an empty list or unavailable orphan metadata.

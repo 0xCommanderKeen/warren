@@ -756,13 +756,20 @@ class ArtifactWire(BaseModel):
 
 
 class TaskWire(BaseModel):
-    """One projected task lifecycle."""
+    """One projected task lifecycle.
+
+    ``assignee`` names the resident a job was handed to, and is null for a job posted
+    to the open board. Only its addressee may claim it, so an open row with an
+    assignee is not work anybody can take — that is the whole difference between the
+    two ways Steward opens a row.
+    """
 
     id: str
     title: str
     state: Literal["open", "claimed", "done", "failed"]
     required_skills: list[str]
     posted_by: str
+    assignee: str | None
     claimant: str | None
     updated_at: str
 

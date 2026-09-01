@@ -39,14 +39,19 @@ snapshot carries:
 - **`artifacts`** — the newest 30 `artifact_produced` records, each with its path, maker,
   project and time. Empty means the *retained log* holds no artifacts, which is not the
   same claim as the fleet having produced none.
-- **`tasks`** — Steward's current job queue, folded from `task_posted`, `task_claimed`,
-  `task_done` and `task_failed` by task ID, so a job's lifecycle survives being posted in
-  one session and claimed in another. A `task_failed` whose reason is `lease_expired`
-  reopens the job rather than failing it — matching Steward's own queue — and keeps naming
-  the attempt that expired. A blank skill name in an otherwise valid event stays a blank
-  name; that is not the same fact as an empty requirement list. A *delegated* job is
-  announced as `task_delegated` and never posted, so it is villager activity here and not
-  yet a row — the gap is warren#277.
+- **`tasks`** — Steward's current job queue, folded by task ID, so a job's lifecycle
+  survives being opened in one session and claimed in another. A row opens two ways,
+  because Steward's own table has two: `task_posted` puts a job on the open board, and
+  `task_delegated` hands one to a named resident — that row carries the addressee in
+  `assignee`, no required skills, and the delegator as `posted_by`, mirroring the open,
+  unclaimed record Steward writes for a handoff. The identities are the village's own:
+  Steward's store addresses a handoff by *resident* id, while the event carries the agent
+  ids the village walks villagers by, which is what a later claim can be compared against.
+  `task_claimed`, `task_done` and `task_failed` then move whichever row it is.
+  A `task_failed` whose reason is `lease_expired` reopens the job rather than failing it —
+  matching Steward's own queue — and keeps naming the attempt that expired. A blank skill
+  name in an otherwise valid event stays a blank name; that is not the same fact as an
+  empty requirement list.
 - **`approvals`** — one record per `needs_human` carrying a `request_id`: the action, the
   semantic detail, Steward's approve/deny/edit options, the declared expiry, and the
   decision once a matching `needs_human_resolved` arrives. The question is immutable — a
@@ -107,11 +112,12 @@ credentials of its own. A write reaches this service only later, as the event th
 produced.
 
 That is what keeps the one rule enforceable across a write, and it is why both clients are
-built to distrust their own receipts. A job enters `tasks` when its `task_posted` event
-arrives, not when the POST was accepted — a claim or a completion for a job this log never
-saw posted is dropped rather than invented. A villager stops `knocking` on
-`needs_human_resolved`, not on a `200`, and one whose session already ended stays at your
-door for exactly as long as its approval is still open.
+built to distrust their own receipts. A job enters `tasks` when the event that opened it —
+`task_posted`, or `task_delegated` for a handoff — arrives, not when the POST was accepted;
+a claim or a completion for a job this log never saw opened is dropped rather than
+invented. A villager stops `knocking` on `needs_human_resolved`, not on a `200`, and one
+whose session already ended stays at your door for exactly as long as its approval is
+still open.
 
 Which refusals are safe to retry, how an ambiguous delivery is reconciled later, and where
 the operator credential lives are each that client's business, and documented with it:

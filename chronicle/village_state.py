@@ -55,6 +55,14 @@ ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
 #: messaging a resident's chat bot at three in the morning must not make the village show
 #: that resident at work.
 AMBIENT_TYPES = frozenset({"chat_message_dropped"})
+#: How Steward opens a row on the board. It has two doors and one table: a job posted to
+#: the open board, and a job handed to one named resident. Both write the same open,
+#: unclaimed record in Steward's own store, so both open a row here — the delegated one
+#: carrying an addressee and no required skills, because nobody else may pick it up.
+TASK_ORIGIN_TYPES = frozenset({"task_posted", "task_delegated"})
+#: Everything the ``tasks`` ledger folds. A transition for a task whose origin this log
+#: never saw is dropped rather than inventing the job it belongs to.
+TASK_LEDGER_TYPES = TASK_ORIGIN_TYPES | {"task_claimed", "task_done", "task_failed"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -324,6 +332,29 @@ def _mood(agent_id, indexed_history, approvals):
     }
 
 
+def _opened_row(event):
+    """The row Steward's two doors open onto, told apart by which one it came through.
+
+    A posted job names the skills it needs and nobody in particular; a handed-over one
+    names a resident and no skills, because an addressee is the stronger requirement.
+    The identifiers here are the village's own: Steward's store keys a handoff by
+    *resident* id, while the event carries the agent id, which is what a later claim
+    can be compared against.
+    """
+    payload = event["payload"]
+    handed_over = event["type"] == "task_delegated"
+    return {
+        "id": payload["task_id"],
+        "title": payload["title"],
+        "state": "open",
+        "required_skills": [] if handed_over else list(payload["required_skills"]),
+        "posted_by": payload["from"] if handed_over else payload["posted_by"],
+        "assignee": payload["to"] if handed_over else None,
+        "claimant": None,
+        "updated_at": event["ts"],
+    }
+
+
 def _approval_shape(event):
     payload = event["payload"]
     request_id = payload.get("request_id")
@@ -398,19 +429,11 @@ def project_village(
                     "ts": event["ts"],
                 }
             )
-        if kind in {"task_posted", "task_claimed", "task_done", "task_failed"}:
+        if kind in TASK_LEDGER_TYPES:
             task_id = payload["task_id"]
             record = task_by_id.get(task_id)
-            if kind == "task_posted":
-                record = {
-                    "id": task_id,
-                    "title": payload["title"],
-                    "state": "open",
-                    "required_skills": list(payload["required_skills"]),
-                    "posted_by": payload["posted_by"],
-                    "claimant": None,
-                    "updated_at": event["ts"],
-                }
+            if kind in TASK_ORIGIN_TYPES:
+                record = _opened_row(event)
                 task_by_id[task_id] = record
                 tasks.append(record)
             elif record:

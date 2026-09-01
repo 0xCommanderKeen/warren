@@ -296,6 +296,105 @@ class VillageProjectionTests(unittest.TestCase):
             restarted["villagers"][0]["last_line"],
         )
 
+    def test_a_delegated_job_opens_its_own_board_row(self):
+        """warren#277: a handoff is how Steward opens a row for a named resident."""
+        state = project_village(
+            [
+                event(
+                    "task_delegated",
+                    source="steward",
+                    task_id="t2",
+                    title="Draft the letter",
+                    to="agent-2",
+                    route="inbox",
+                    parent_task_id=None,
+                    depth=1,
+                    **{"from": "agent-1"},
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [task] = state["tasks"]
+        self.assertEqual(
+            {
+                "id": "t2",
+                "title": "Draft the letter",
+                "state": "open",
+                "required_skills": [],
+                "posted_by": "agent-1",
+                "assignee": "agent-2",
+                "claimant": None,
+                "updated_at": "2026-08-26T12:00:00.000Z",
+            },
+            task,
+        )
+
+    def test_the_receiver_moves_the_row_a_delegation_opened(self):
+        """The claim used to be dropped with its row, taking the close with it."""
+        state = project_village(
+            [
+                event(
+                    "task_delegated",
+                    source="steward",
+                    task_id="t2",
+                    title="Draft the letter",
+                    to="agent-2",
+                    route="inbox",
+                    parent_task_id=None,
+                    depth=1,
+                    **{"from": "agent-1"},
+                ),
+                event(
+                    "task_claimed",
+                    agent="agent-2",
+                    minutes=1,
+                    source="steward",
+                    task_id="t2",
+                    title="Draft the letter",
+                    claimant="agent-2",
+                ),
+                event(
+                    "task_done",
+                    agent="agent-2",
+                    minutes=2,
+                    source="steward",
+                    task_id="t2",
+                    title="Draft the letter",
+                    claimant="agent-2",
+                    artifacts=["letter.md"],
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        [task] = state["tasks"]
+        self.assertEqual("done", task["state"])
+        self.assertEqual("agent-2", task["claimant"])
+        # The addressee outlives the claim: it is who the work was *for*, not who took it.
+        self.assertEqual("agent-2", task["assignee"])
+        self.assertEqual("agent-1", task["posted_by"])
+
+    def test_a_posted_job_is_addressed_to_nobody(self):
+        """The open board is the absence of an addressee, not an empty string."""
+        state = project_village(
+            [
+                event(
+                    "task_posted",
+                    source="steward",
+                    task_id="t1",
+                    title="Fix it",
+                    posted_by="me",
+                    required_skills=["python"],
+                )
+            ],
+            [],
+            NOW + dt.timedelta(minutes=1),
+        )
+        [task] = state["tasks"]
+        self.assertIsNone(task["assignee"])
+        self.assertEqual(["python"], task["required_skills"])
+
     def test_a_late_session_report_never_closes_the_board_row(self):
         """The lease sweep owns the task; this fact describes only the late run."""
         state = project_village(
