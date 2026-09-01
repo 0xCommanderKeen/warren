@@ -544,6 +544,14 @@ stands, which is how a resident carrying a field no body can express gets built 
 person's decision, written into the manifest and committed, not something an HTTP call
 does on the way past.
 
+`409 provision_refused` when `deploy: true` and there was nobody to ask — in practice a
+steward whose own environment has no `CHRONICLE_URL` to give the container. **This used to
+be a `500` with a traceback**, which told a control panel nothing it could act on. The
+declare stage has already written its two files by the time the deploy is attempted and
+nothing has committed them, so the refusal says what the next move is: post the same body
+again once the address is exported, and it converges on the skeleton rather than colliding
+with it. Same error name as the provision door's, because it is the same refusal.
+
 ### `POST /residents/{id}/provision`
 
 **Human callers only** — the master token or an operator credential. A session credential is refused here; see

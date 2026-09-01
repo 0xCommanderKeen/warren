@@ -2952,6 +2952,50 @@ def test_deploy_true_runs_the_whole_pipeline(api: ApiFactory, tmp_path: Path) ->
     assert host.read("~/docker/steward-note-keeper/.env") is not None
 
 
+def test_a_deploy_with_nowhere_to_emit_is_a_refusal_not_a_traceback(
+    api: ApiFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A steward with no village address answers, rather than spilling a 500.
+
+    `emitter_env` refuses before the transport is ever reached, and that refusal is a
+    `TransportError` — which this endpoint did not catch, so `deploy: true` on a steward
+    whose own environment is missing `CHRONICLE_URL` was an unhandled exception. The
+    `village` fixture sets it, which is exactly why nothing here ever noticed.
+    """
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
+    monkeypatch.delenv("BURROW_URL", raising=False)
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "provision_refused"
+    assert "CHRONICLE_URL" in response.json()["detail"]["message"]
+    assert not host.touched
+
+
+def test_a_refused_deploy_says_the_same_body_will_pick_up_where_it_stopped(
+    api: ApiFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the claim is true, not a comfort: the retry converges rather than colliding."""
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
+    monkeypatch.delenv("BURROW_URL", raising=False)
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    refused = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+    assert "post the same body again" in refused.json()["detail"]["message"]
+
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    retried = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
+
+    assert retried.status_code == 201
+    assert retried.json()["declare"]["written"] is False, "the skeleton was already there"
+    assert retried.json()["provision"]["sent"] is True
+    assert (host.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+
+
 @pytest.mark.usefixtures("village")
 def test_the_api_calls_the_same_pipeline_the_cli_does(
     api: ApiFactory,

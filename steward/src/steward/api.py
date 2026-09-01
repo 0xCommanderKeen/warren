@@ -1501,6 +1501,25 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         except NurseryError as exc:
             status = 409 if (residents_dir / body.id).exists() else 400
             _refuse(status, exc.reason or "resident_not_declared", str(exc))
+        except TransportError as exc:
+            # `deploy: true` and there was nobody to ask — in practice a steward whose own
+            # environment has no `CHRONICLE_URL` to give the container, since `emitter_env`
+            # refuses before a transport is reached and every later one is already wrapped
+            # as a `NurseryError`. This was an unhandled 500: a control panel got a
+            # traceback where it needed a sentence (warren#270).
+            #
+            # The declare stage has already written its two files by now and nothing has
+            # committed them, so the refusal says what the next move is. That is a promise
+            # the pipeline actually keeps — declaring is idempotent, so the same body
+            # converges on the skeleton rather than colliding with it — and a test holds it
+            # to that rather than taking the sentence's word for it.
+            _refuse(
+                409,
+                PROVISION_REFUSED,
+                f"{exc}; nothing was deployed and this request committed nothing — post "
+                f"the same body again once that is fixed and it will pick up where it "
+                f"stopped rather than collide",
+            )
         request_id = accept(
             request, "deployed" if body.deploy else "declared", {"resident": body.id}
         )
