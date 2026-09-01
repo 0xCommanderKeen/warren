@@ -328,7 +328,7 @@ def test_the_uncommitted_mode_writes_and_says_so_in_the_response(
     assert data["summary"] == "Written without a net."
 
 
-@pytest.mark.parametrize("failure", ["add", "commit"])
+@pytest.mark.parametrize("failure", ["status", "commit"])
 @pytest.mark.parametrize("kind", ["declaration", "skill"])
 def test_a_git_failure_restores_the_target_and_index_exactly(
     fleet: ScratchRepo, failure: str, kind: str
@@ -390,19 +390,111 @@ def test_a_git_failure_restores_the_target_and_index_exactly(
     assert index.read_bytes() == index_before
 
 
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_failed_write_never_erases_unrelated_staging_added_during_it(
+    fleet: ScratchRepo, kind: str
+) -> None:
+    """The checkout index belongs to its operator even while Steward holds its own lock."""
+    unrelated = fleet.root / "README.md"
+    staged_bytes = b"staged concurrently by an editor\n"
+    unrelated.write_bytes(staged_bytes)
+
+    def failing_commit(argv: list[str]) -> CommandOutcome:
+        if "commit" in argv:
+            fleet.git("add", "README.md")
+            return CommandOutcome(tuple(argv), exit_status=1, stderr="injected failure")
+        return au.run_argv(argv)
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                edited(declaration_of(fleet), summary="A refused edit."),
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                git=failing_commit,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            au.SkillDocument(name="daily-summary", description="A refused edit.", body="Do it.\n"),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=failing_commit,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "commit_failed"
+    assert fleet.git("show", ":README.md").stdout.encode() == staged_bytes
+
+
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_nothing_fallible_runs_after_the_commit_advances_head(
+    fleet: ScratchRepo, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """A successful commit cannot become a refusal followed by a worktree rollback."""
+    committed = False
+    real_revision_of = au.revision_of
+
+    def observing_git(argv: list[str]) -> CommandOutcome:
+        nonlocal committed
+        outcome = au.run_argv(argv)
+        if "commit" in argv and outcome.ok:
+            committed = True
+        return outcome
+
+    def revision_before_commit_only(*paths: Path) -> str:
+        if committed:
+            raise OSError("injected post-commit read failure")
+        return real_revision_of(*paths)
+
+    monkeypatch.setattr(au, "revision_of", revision_before_commit_only)
+
+    if kind == "declaration":
+        result = au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            edited(declaration_of(fleet), summary="Committed exactly once."),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=observing_git,
+        )
+    else:
+        result = au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            au.SkillDocument(
+                name="daily-summary", description="Committed exactly once.", body="Do it.\n"
+            ),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=observing_git,
+        )
+
+    assert result.commit.committed
+    assert result.commit.sha == fleet.head()
+
+
 def test_concurrent_declaration_writers_serialize_revision_through_commit(
     fleet: ScratchRepo,
 ) -> None:
     """Only one request made against one revision may write and commit its bytes."""
     paths = au.declaration_paths(fleet.residents, "test-agent", "soul.md")
     revision = au.revision_of(*paths)
-    entered_add = threading.Event()
-    release_add = threading.Event()
+    entered_commit = threading.Event()
+    release_commit = threading.Event()
 
     def slow_first_git(argv: list[str]) -> CommandOutcome:
-        if threading.current_thread().name == "first" and "add" in argv:
-            entered_add.set()
-            assert release_add.wait(timeout=5)
+        if threading.current_thread().name == "first" and "commit" in argv:
+            entered_commit.set()
+            assert release_commit.wait(timeout=5)
         return au.run_argv(argv)
 
     outcomes: dict[str, object] = {}
@@ -427,10 +519,10 @@ def test_concurrent_declaration_writers_serialize_revision_through_commit(
     )
     second = threading.Thread(target=writer, args=("second", "Second bytes."), name="second")
     first.start()
-    assert entered_add.wait(timeout=5)
+    assert entered_commit.wait(timeout=5)
     second.start()
     time.sleep(0.2)
-    release_add.set()
+    release_commit.set()
     first.join(timeout=5)
     second.join(timeout=5)
 
@@ -447,13 +539,13 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
     """Skill replacement has the same one-revision/one-commit boundary as declarations."""
     path = fleet.skills / "daily-summary" / "SKILL.md"
     revision = au.revision_of(path)
-    entered_add = threading.Event()
-    release_add = threading.Event()
+    entered_commit = threading.Event()
+    release_commit = threading.Event()
 
     def slow_first_git(argv: list[str]) -> CommandOutcome:
-        if threading.current_thread().name == "first-skill" and "add" in argv:
-            entered_add.set()
-            assert release_add.wait(timeout=5)
+        if threading.current_thread().name == "first-skill" and "commit" in argv:
+            entered_commit.set()
+            assert release_commit.wait(timeout=5)
         return au.run_argv(argv)
 
     outcomes: dict[str, object] = {}
@@ -478,10 +570,10 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
     )
     second = threading.Thread(target=writer, args=("second", "Second skill bytes."))
     first.start()
-    assert entered_add.wait(timeout=5)
+    assert entered_commit.wait(timeout=5)
     second.start()
     time.sleep(0.2)
-    release_add.set()
+    release_commit.set()
     first.join(timeout=5)
     second.join(timeout=5)
 

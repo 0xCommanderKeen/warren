@@ -36,6 +36,7 @@ control plane from working at all.
 
 import fcntl
 import hashlib
+import re
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -53,8 +54,8 @@ from steward.manifest import (
     ValidationResult,
     validate_tree,
 )
-from steward.nursery import DECLARE_SUBJECT, CommitIdentity, NurseryError, commit_paths
-from steward.runners import PipedRun, run_argv
+from steward.nursery import DECLARE_SUBJECT, CommitIdentity
+from steward.runners import CommandOutcome, PipedRun, run_argv
 from steward.skills import (
     SKILL_FILENAME,
     Skill,
@@ -465,6 +466,52 @@ def commit_message(subject: str, request_id: str, principal: str) -> str:
     )
 
 
+def _commit_with_isolated_index(
+    repo: Path,
+    relative: Sequence[str],
+    message: str,
+    identity: CommitIdentity,
+    git: PipedRun,
+) -> CommandOutcome:
+    """Build one path-limited commit without reading or writing the checkout's index."""
+    index_dir = _git_path(repo, "index", git).parent
+    with tempfile.NamedTemporaryFile(prefix="steward-index-", dir=index_dir) as scratch:
+        isolated_index = Path(scratch.name)
+
+    def isolated(argv: list[str]) -> CommandOutcome:
+        return git(["env", f"GIT_INDEX_FILE={isolated_index}", *argv])
+
+    try:
+        head = git(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"])
+        prepared = isolated(
+            ["git", "-C", str(repo), "read-tree", "HEAD"]
+            if head.ok
+            else ["git", "-C", str(repo), "read-tree", "--empty"]
+        )
+        if prepared.ok:
+            prepared = isolated(["git", "-C", str(repo), "add", "--", *relative])
+        if not prepared.ok:
+            raise AuthoringError(
+                f"git could not prepare the authored paths: {prepared.summary()}",
+                reason="commit_failed",
+            )
+        return isolated(
+            [
+                "git",
+                "-C",
+                str(repo),
+                *identity.config_args(),
+                "-c",
+                "core.abbrev=40",
+                "commit",
+                "-m",
+                message,
+            ]
+        )
+    finally:
+        isolated_index.unlink(missing_ok=True)
+
+
 def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
     residents_dir: Path,
     paths: Sequence[Path],
@@ -506,10 +553,54 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
             ),
         )
     message = commit_message(subject, request_id, principal)
-    try:
-        sha = commit_paths(repo, list(paths), message, identity=identity, git=git)
-    except NurseryError as exc:
-        raise AuthoringError(str(exc), reason="commit_failed") from exc
+    relative = [str(path.resolve().relative_to(repo.resolve())) for path in paths]
+    if not relative:
+        return CommitReport(
+            committed=False,
+            sha=None,
+            message=message,
+            note="nothing to commit: what is on disk was already what is in git",
+        )
+    changed = git(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--",
+            *relative,
+        ]
+    )
+    if not changed.ok:
+        raise AuthoringError(
+            f"git could not compare the authored paths: {changed.summary()}",
+            reason="commit_failed",
+        )
+    if not changed.stdout.strip():
+        sha = None
+    else:
+        # This index begins as HEAD and contains only Steward's path changes. The
+        # checkout's shared index is neither staged through nor restored from a stale
+        # snapshot, so concurrent unrelated staging remains byte-for-byte intact.
+        committed = _commit_with_isolated_index(repo, relative, message, identity, git)
+        if not committed.ok:
+            raise AuthoringError(
+                f"git could not commit the authored paths: {committed.summary()}",
+                reason="commit_failed",
+            )
+        # The commit command is deliberately the final fallible operation. With a
+        # full-length summary its ordinary output contains the complete object id, so the
+        # response needs no post-commit rev-parse that could turn success into refusal.
+        match = re.search(r"\b([0-9a-f]{40,64})\]", committed.stdout)
+        sha = match.group(1) if match is not None else None
+        if sha is None:  # HEAD advanced; response completion must now be infallible.
+            sha = "committed"
+        # HEAD has advanced, so cleanup is explicitly best-effort success completion: it
+        # may refresh only Steward's entries in the real index, but can never refuse the
+        # already-committed request or roll its worktree back.
+        git(["git", "-C", str(repo), "reset", "--quiet", "HEAD", "--", *relative])
     if sha is None:
         return CommitReport(
             committed=False,
@@ -564,7 +655,7 @@ def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
 def _authoring_transaction(
     residents_dir: Path, paths: Sequence[Path], *, git: PipedRun
 ) -> Iterator[Path | None]:
-    """Serialize an authoring request and restore its worktree/index on refusal."""
+    """Serialize an authoring request and restore its target files on refusal."""
     repo = repo_toplevel(residents_dir, git=git)
     lock_path = (
         _git_path(repo, "steward-authoring.lock", git)
@@ -579,16 +670,11 @@ def _authoring_transaction(
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         file_states = tuple(_FileState.capture(path) for path in paths)
-        index_state = (
-            _FileState.capture(_git_path(repo, "index", git)) if repo is not None else None
-        )
         try:
             yield repo
         except Exception:
             for state in file_states:
                 state.restore()
-            if index_state is not None:
-                index_state.restore()
             for path, state in zip(paths, file_states, strict=True):
                 if not state.existed:
                     parent = path.parent
@@ -648,6 +734,7 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
         result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
         _write_declaration_into(residents_dir / resident_id, declaration)
         written = tuple(path for path in paths if path.is_file())
+        revision = revision_of(*written)
         commit = commit_write(
             residents_dir,
             written,
@@ -658,9 +745,7 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
             allow_uncommitted=allow_uncommitted,
             git=git,
         )
-        return WriteResult(
-            paths=written, revision=revision_of(*written), commit=commit, validation=result
-        )
+        return WriteResult(paths=written, revision=revision, commit=commit, validation=result)
 
 
 def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
@@ -687,6 +772,7 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
         result = validate_skill(residents_dir, skills_dir, document)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(document.text(), encoding="utf-8")
+        revision = revision_of(path)
         subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(
             name=document.name
         )
@@ -700,6 +786,4 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
             allow_uncommitted=allow_uncommitted,
             git=git,
         )
-        return WriteResult(
-            paths=(path,), revision=revision_of(path), commit=commit, validation=result
-        )
+        return WriteResult(paths=(path,), revision=revision, commit=commit, validation=result)
