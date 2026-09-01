@@ -34,6 +34,7 @@ from conftest import (
     SkillWriter,
     valid_manifest,
 )
+from steward import authoring as au
 from steward import events as ev
 from steward import journal
 from steward import manifest as m
@@ -3485,6 +3486,55 @@ def test_two_editors_are_told_rather_than_one_silently_winning(
     assert declaration(harness)["manifest"]["summary"] == "The first editor's summary."
 
 
+def test_declaration_successor_waits_for_failed_writer_rollback(
+    writable: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-revision successor never preflights a failed writer's transient declaration."""
+    harness = writable()
+    loaded = declaration(harness)
+    first = copy.deepcopy(loaded["manifest"])
+    second = copy.deepcopy(loaded["manifest"])
+    first["summary"] = "Transient bytes from the failed writer."
+    second["summary"] = "The successor's committed declaration."
+    installed = threading.Event()
+    release = threading.Event()
+    original = au.write_declaration
+
+    def failing_first_git(argv: list[str]) -> au.CommandOutcome:
+        if "update-ref" in argv and not installed.is_set():
+            installed.set()
+            assert release.wait(5)
+            return au.CommandOutcome(
+                tuple(argv), exit_status=1, stderr="injected publication failure"
+            )
+        return au.run_argv(argv)
+
+    def injected_write(*args: Any, **kwargs: Any) -> au.WriteResult:  # noqa: ANN401
+        kwargs["git"] = failing_first_git
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(au, "write_declaration", injected_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        failed = pool.submit(
+            harness.client.put,
+            "/residents/test-agent/declaration",
+            json={"manifest": first, "soul": loaded["soul"], "revision": loaded["revision"]},
+        )
+        assert installed.wait(5)
+        successor = pool.submit(
+            harness.client.put,
+            "/residents/test-agent/declaration",
+            json={"manifest": second, "soul": loaded["soul"], "revision": loaded["revision"]},
+        )
+        assert not successor.done()
+        release.set()
+        assert failed.result().status_code == 409
+        accepted = successor.result()
+
+    assert accepted.status_code == 200
+    assert declaration(harness)["manifest"]["summary"] == second["summary"]
+
+
 def test_a_declaration_needs_exactly_one_spelling(writable: Callable[..., Harness]) -> None:
     """`manifest` and `text` are two ways to say one thing; neither may silently win."""
     harness = writable()
@@ -3586,6 +3636,61 @@ def test_a_skill_is_replaced_by_put(writable: Callable[..., Harness]) -> None:
 
     assert response.status_code == 200
     assert harness.client.get("/skills/triage").json()["description"] == "Sort the inbox, gently."
+
+
+def test_skill_successor_waits_for_failed_writer_rollback(
+    writable: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-revision successor never preflights a failed writer's transient skill bytes."""
+    harness = writable()
+    loaded = harness.client.get("/skills/daily-summary").json()
+    installed = threading.Event()
+    release = threading.Event()
+    original = au.write_skill
+
+    def failing_first_git(argv: list[str]) -> au.CommandOutcome:
+        if "update-ref" in argv and not installed.is_set():
+            installed.set()
+            assert release.wait(5)
+            return au.CommandOutcome(
+                tuple(argv), exit_status=1, stderr="injected publication failure"
+            )
+        return au.run_argv(argv)
+
+    def injected_write(*args: Any, **kwargs: Any) -> au.WriteResult:  # noqa: ANN401
+        kwargs["git"] = failing_first_git
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(au, "write_skill", injected_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        failed = pool.submit(
+            harness.client.put,
+            "/skills/daily-summary",
+            json={
+                "description": "Transient failed skill.",
+                "body": "Fail.\n",
+                "revision": loaded["revision"],
+            },
+        )
+        assert installed.wait(5)
+        successor = pool.submit(
+            harness.client.put,
+            "/skills/daily-summary",
+            json={
+                "description": "The successor skill.",
+                "body": "Succeed.\n",
+                "revision": loaded["revision"],
+            },
+        )
+        assert not successor.done()
+        release.set()
+        assert failed.result().status_code == 409
+        accepted = successor.result()
+
+    assert accepted.status_code == 200
+    assert harness.client.get("/skills/daily-summary").json()["description"] == (
+        "The successor skill."
+    )
 
 
 def test_editing_an_unknown_skill_is_404(writable: Callable[..., Harness]) -> None:

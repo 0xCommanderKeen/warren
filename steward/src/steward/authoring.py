@@ -901,7 +901,13 @@ class _AuthoringFiles:
             return
         for old, authored in zip(self.before, self.authored, strict=True):
             if old.path not in preserve and authored.matches():
-                old.restore()
+                try:
+                    old.restore()
+                except OSError:
+                    # Recovery is best-effort per target.  One path becoming unwritable
+                    # must neither hide the refusal that caused rollback nor strand later
+                    # targets in Steward's transient state.
+                    continue
 
 
 def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
@@ -916,10 +922,8 @@ def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
 
 
 @contextmanager
-def _authoring_transaction(
-    residents_dir: Path, paths: Sequence[Path], *, git: PipedRun
-) -> Iterator[_AuthoringFiles]:
-    """Serialize an authoring request and restore its target files on refusal."""
+def _authoring_lock(residents_dir: Path, *, git: PipedRun) -> Iterator[Path | None]:
+    """Hold the checkout-scoped authoring lock across every mutation preflight and write."""
     repo = repo_toplevel(residents_dir, git=git)
     lock_path = (
         _git_path(repo, "steward-authoring.lock", git)
@@ -933,26 +937,61 @@ def _authoring_transaction(
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+b") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        files = _AuthoringFiles(tuple(_FileState.capture(path) for path in paths))
-        try:
-            yield files
-        except Exception as error:
-            preserve = (
-                frozenset(repo / path for path in getattr(error, "preserve_paths", ()))
-                if repo is not None
-                else frozenset()
-            )
-            files.rollback(preserve)
-            for path, state in zip(paths, files.before, strict=True):
-                if not state.existed:
-                    parent = path.parent
-                    while parent != residents_dir.parent and parent.exists():
-                        try:
-                            parent.rmdir()
-                        except OSError:
-                            break
-                        parent = parent.parent
-            raise
+        yield repo
+
+
+@contextmanager
+def _authoring_files(
+    residents_dir: Path, paths: Sequence[Path], *, repo: Path | None
+) -> Iterator[_AuthoringFiles]:
+    """Capture targets and restore them on refusal; caller already holds authoring lock."""
+    files = _AuthoringFiles(tuple(_FileState.capture(path) for path in paths))
+    try:
+        yield files
+    except Exception as error:
+        preserve = (
+            frozenset(repo / path for path in getattr(error, "preserve_paths", ()))
+            if repo is not None
+            else frozenset()
+        )
+        files.rollback(preserve)
+        for path, state in zip(paths, files.before, strict=True):
+            if state.existed:
+                continue
+            parent = path.parent
+            while parent != residents_dir.parent:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        raise
+
+
+def _existing_declaration(
+    residents_dir: Path, resident_id: str, skills_dir: Path | None
+) -> tuple[str, str]:
+    """Resolve an editable resident by id or uid while the checkout lock is held."""
+    named_directory = residents_dir / resident_id
+    if named_directory.is_dir():
+        # Preserve the write seam's stronger target-safety refusal even when replacing the
+        # manifest with a special file also makes the resident disappear from validation.
+        _FileState.capture(named_directory / MANIFEST_FILENAME)
+    result = validate_tree(residents_dir, skills_dir)
+    resident = next((item for item in result.residents if item.id == resident_id), None)
+    if resident is None:
+        resident = next((item for item in result.residents if item.uid == resident_id), None)
+    if resident is not None:
+        return resident.id, resident.manifest.soul.file
+    if (residents_dir / resident_id).is_dir():
+        raise AuthoringError(
+            f"resident {resident_id!r} exists but its manifest does not validate; "
+            "run `steward validate` for the field-by-field diagnostics",
+            reason="resident_invalid",
+        )
+    raise AuthoringError(
+        f"no resident {resident_id!r} in {residents_dir}", reason="unknown_resident"
+    )
 
 
 def _check_revision(expected: str | None, paths: Sequence[Path]) -> None:
@@ -996,27 +1035,36 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one resident's declaration. Refusals write nothing."""
-    paths = declaration_paths(residents_dir, resident_id, declaration.soul_filename)
-    with _authoring_transaction(residents_dir, paths, git=git) as files:
-        _check_revision(expected_revision, paths)
-        result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
-        intended = {paths[0]: declaration.manifest_text.encode()}
-        if declaration.soul_text is not None:
-            intended[paths[1]] = declaration.soul_text.encode()
-        files.replace(intended)
-        written = tuple(path for path in paths if path.is_file())
-        revision = revision_of(*written)
-        commit = commit_write(
-            residents_dir,
-            written,
-            subject if subject is not None else UPDATE_SUBJECT.format(id=resident_id),
-            request_id=request_id,
-            principal=principal,
-            identity=identity,
-            allow_uncommitted=allow_uncommitted,
-            git=git,
-        )
-        return WriteResult(paths=written, revision=revision, commit=commit, validation=result)
+    with _authoring_lock(residents_dir, git=git) as repo:
+        resolved_id, soul_filename = _existing_declaration(residents_dir, resident_id, skills_dir)
+        if declaration.soul_filename != soul_filename:
+            raise AuthoringError(
+                f"this declaration renames the soul from {soul_filename!r} to "
+                f"{declaration.soul_filename!r}; steward will not leave the old file orphaned "
+                "in the tree, so rename it in the checkout and commit that yourself",
+                reason="soul_file_changed",
+            )
+        paths = declaration_paths(residents_dir, resolved_id, soul_filename)
+        with _authoring_files(residents_dir, paths, repo=repo) as files:
+            _check_revision(expected_revision, paths)
+            result = validate_declaration(residents_dir, resolved_id, declaration, skills_dir)
+            intended = {paths[0]: declaration.manifest_text.encode()}
+            if declaration.soul_text is not None:
+                intended[paths[1]] = declaration.soul_text.encode()
+            files.replace(intended)
+            written = tuple(path for path in paths if path.is_file())
+            revision = revision_of(*written)
+            commit = commit_write(
+                residents_dir,
+                written,
+                subject if subject is not None else UPDATE_SUBJECT.format(id=resolved_id),
+                request_id=request_id,
+                principal=principal,
+                identity=identity,
+                allow_uncommitted=allow_uncommitted,
+                git=git,
+            )
+            return WriteResult(paths=written, revision=revision, commit=commit, validation=result)
 
 
 def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
@@ -1034,10 +1082,17 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
 ) -> WriteResult:
     """Validate, write, and commit one skill. Refusals write nothing."""
     path = skills_dir / document.name / SKILL_FILENAME
-    with _authoring_transaction(residents_dir, [path], git=git) as files:
+    with (
+        _authoring_lock(residents_dir, git=git) as repo,
+        _authoring_files(residents_dir, [path], repo=repo) as files,
+    ):
         if created and path.is_file():
             raise AuthoringError(
                 f"skill {document.name!r} already exists; PUT replaces it", reason="skill_exists"
+            )
+        if not created and not path.is_file():
+            raise AuthoringError(
+                f"no skill {document.name!r}; POST /skills adds one", reason="unknown_skill"
             )
         _check_revision(expected_revision, [path])
         result = validate_skill(residents_dir, skills_dir, document)

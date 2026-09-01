@@ -786,6 +786,45 @@ def test_unsafe_winner_survives_while_other_declaration_target_rolls_back(
     assert soul.read_bytes() == old_soul
 
 
+def test_one_restore_failure_does_not_mask_publication_failure_or_abort_later_restore(
+    fleet: ScratchRepo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rollback is best-effort per target; the publication refusal remains authoritative."""
+    declaration = declaration_of(fleet)
+    manifest, soul = au.declaration_paths(fleet.residents, "test-agent", declaration.soul_filename)
+    old_soul = soul.read_bytes()
+    real_restore = au._FileState.restore
+
+    def fail_manifest_restore(state: au._FileState) -> None:
+        if state.path == manifest:
+            raise OSError("injected restore failure")
+        real_restore(state)
+
+    monkeypatch.setattr(au._FileState, "restore", fail_manifest_restore)
+
+    def failing_publication(argv: list[str]) -> CommandOutcome:
+        if "update-ref" in argv:
+            return CommandOutcome(tuple(argv), exit_status=1, stderr="injected publication failure")
+        return au.run_argv(argv)
+
+    with pytest.raises(au.AuthoringError) as refused:
+        au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            au.Declaration(
+                manifest_text=edited(declaration, summary="Steward's losing bytes.").manifest_text,
+                soul_text=f"{declaration.soul_text}\nSteward's losing soul.\n",
+            ),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=failing_publication,
+        )
+
+    assert refused.value.reason == "commit_failed"
+    assert soul.read_bytes() == old_soul
+
+
 @pytest.mark.parametrize("kind", ["declaration", "skill"])
 def test_a_writer_in_the_old_replace_capture_gap_survives_rollback(
     fleet: ScratchRepo, monkeypatch: pytest.MonkeyPatch, kind: str

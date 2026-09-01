@@ -164,6 +164,10 @@ WRITE_STATUS: Mapping[str, int] = {
     "manifest_invalid": 422,
     "skill_invalid": 422,
     "unknown_skill": 404,
+    "unknown_resident": 404,
+    "resident_invalid": 409,
+    "soul_file_changed": 409,
+    "skill_exists": 409,
     "not_a_git_checkout": 409,
     "commit_failed": 409,
 }
@@ -1580,21 +1584,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             },
         )
 
-    def check_revision(offered: str | None, actual: str) -> None:
-        """Refuse an edit made against a version that is no longer what is on disk.
-
-        Optional, and deliberately so: a caller that omits ``revision`` is saying it means
-        to overwrite whatever is there, which is what a script wants. A UI sends the
-        revision it loaded, and gets told rather than silently winning.
-        """
-        if offered is not None and offered != actual:
-            _refuse(
-                409,
-                "stale_revision",
-                f"this edit was made against {offered}, and what is on disk is now {actual}; "
-                f"somebody else changed it first — re-read it and reapply your change",
-            )
-
     def write_settings(request: Request) -> dict[str, Any]:
         """Return the two knobs every write shares, and who git records as the author.
 
@@ -1734,30 +1723,17 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         including the checks that only exist across residents. A refusal has written
         nothing, committed nothing, and left the resident exactly as it was.
         """
-        result = validate_path(residents_dir, settings.skills_dir)
-        resident = _find_resident(result, resident_id, residents_dir)
-        soul_file = resident.manifest.soul.file
-        current = au.declaration_paths(residents_dir, resident.id, soul_file)
-        check_revision(body.revision, au.revision_of(*current))
         manifest_text = (
             body.text
             if body.text is not None
             else yaml.safe_dump(body.manifest, sort_keys=False, allow_unicode=True)
         )
         declaration = au.Declaration(manifest_text=manifest_text, soul_text=body.soul)
-        if declaration.soul_filename != soul_file:
-            _refuse(
-                409,
-                "soul_file_changed",
-                f"this declaration renames the soul from {soul_file!r} to "
-                f"{declaration.soul_filename!r}; steward will not leave the old file orphaned "
-                f"in the tree, so rename it in the checkout and commit that yourself",
-            )
-        request_id = accept(request, "written", {"resident": resident.id})
+        request_id = accept(request, "written", {"resident": resident_id})
         try:
             written = au.write_declaration(
                 residents_dir,
-                resident.id,
+                resident_id,
                 declaration,
                 request_id=request_id,
                 principal=acting_principal(request),
@@ -1771,7 +1747,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "request_id": request_id,
             "status": "accepted",
-            "id": resident.id,
+            "id": written.paths[0].parent.name,
             "revision": written.revision,
             "paths": [str(p) for p in written.paths],
             "commit": written.commit.to_dict(),
@@ -1882,13 +1858,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         by every resident in the fleet without any manifest granting it, so this one flag
         changes what every session is given.
         """
-        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
-        if root is not None and (root / body.name / "SKILL.md").is_file():
-            _refuse(
-                409,
-                "skill_exists",
-                f"skill {body.name!r} already exists; PUT /skills/{body.name} replaces it",
-            )
         return write_one_skill(
             au.SkillDocument(
                 name=body.name,
@@ -1906,10 +1875,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
         **Human callers only**, like every write here.
         """
-        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
-        if root is None or not (root / name / "SKILL.md").is_file():
-            _refuse(404, "unknown_skill", f"no skill {name!r}; POST /skills adds one")
-        check_revision(body.revision, au.revision_of(root / name / "SKILL.md"))
         return write_one_skill(
             au.SkillDocument(
                 name=name, description=body.description, body=body.body, default=body.defaults
