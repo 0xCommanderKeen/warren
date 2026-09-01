@@ -343,8 +343,15 @@ stay in git; retirement is a lifecycle state, not a deletion.
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run
 $ steward new-resident … --skills write-blog-post   # declare, commit, build, check
+$ steward provision note-keeper                 # build the manifest a person wrote
 $ steward retire note-keeper                    # stop it, and say so in git
 ```
+
+`new-resident` describes a resident in flags and so can only ever build one a command line
+can describe. `steward provision <id>` is the door for every other resident: it skips
+declare and builds `residents/<id>/manifest.yaml` exactly as it stands — routes, app grants,
+`runner.placement` and all — which is the only way the fleet's hand-written residents get
+onto this path at all (warren#270).
 
 **The control panel** (#13, warren#225). Steward serves no UI. It used to: a browser
 console at `/ui`, static HTML and one JavaScript file, no build step. That console was the
@@ -528,7 +535,37 @@ credential scanners are run over everything the nursery writes into the checkout
 test. Provisioning without `CHRONICLE_URL` is refused: a container with nowhere to emit is a
 resident that would never appear in the village at all.
 
-Retiring is the counterpart, and it goes the other way round on purpose:
+**The other door.** `new-resident` describes a resident in flags, and refuses to converge
+those flags onto a manifest a person has since edited: silently overwriting a soul somebody
+wrote is not something a command line should be able to do. That refusal is right, and on
+its own it was a dead end. There are no flags for `routes`, for `app_grants`, for a skill's
+`note` or for `runner.placement`, so a manifest carrying any of them could never match a
+spec built from flags — which left the fleet's oldest and most carefully written residents
+with no supported way onto the nursery path at all (warren#270).
+
+`steward provision` is the way in for a manifest somebody wrote:
+
+```console
+$ steward provision life-agent --dry-run    # the same plan, from the declaration itself
+$ steward provision life-agent
+```
+
+The declare stage is already done — by a person, in a file, in a commit — so this reads
+`residents/<id>/manifest.yaml` as the source of truth and runs provision and register
+against it, exactly as it stands. It is `retire`'s counterpart: same argument, same source
+of truth, opposite direction.
+
+It writes nothing into the repo, which is why it has no `--commit`, no `--allow-dirty`, and
+no dirty-worktree refusal: there is no commit here for a failed deploy to leave behind, so
+there is nothing for that refusal to protect, and somebody else's half-finished afternoon
+is none of this command's business. What it will not do is ship in silence — a declaration
+whose *own* bytes are in no commit is named in a warning, because a container built from
+bytes nobody committed is a container nobody can turn back into a diff.
+
+The flags it does have are `--residents`, `--repo`, `--dry-run` and `--format`, and each
+means what it means for the other two commands.
+
+**Retiring** is the counterpart, and it goes the other way round on purpose:
 
 ```console
 $ steward retire note-keeper --dry-run
@@ -549,10 +586,11 @@ The other flags mirror the two commands: `--dry-run` touches nothing, `--no-comm
 the mark without committing it, `--allow-dirty` commits over a dirty worktree, and `--repo`
 names the checkout when it is not the parent of the residents tree.
 
-Chronicle's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
-([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
-never commits, because the server may not own the checkout it is reading, and it says so
-in the response.
+Chronicle's viewer reaches the same pipelines over HTTP: `POST /residents` with
+`deploy: true` ([docs/api.md](docs/api.md#post-residents)) is `new-resident`, and
+`POST /residents/{id}/provision` ([docs/api.md](docs/api.md#post-residentsidprovision)) is
+this command — one implementation each, two front doors each, verified by injecting the
+pipeline into the route rather than by a convention somebody has to keep.
 
 ## Residents
 

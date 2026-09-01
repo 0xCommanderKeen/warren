@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 import yaml
@@ -68,6 +68,7 @@ from steward.nursery import (
     NurseryError,
     NurseryReport,
     RetireReport,
+    provision_resident,
     raise_resident,
     retire_resident,
 )
@@ -2449,7 +2450,35 @@ def _report_nursery(report: NurseryReport) -> None:
     elif not report.changed:
         click.secho("converged: nothing needed changing", fg="green")
     else:
-        click.secho(f"{report.resident_id} is raised", fg="green")
+        click.secho(f"{report.resident_id} is {report.verb}", fg="green")
+
+
+def _refuse_nursery(exc: NurseryError) -> NoReturn:
+    """Print a nursery refusal and every diagnostic behind it, and exit non-zero.
+
+    One place, because all three nursery verbs answer a refusal the same way and a
+    diagnostic list that only two of them printed would be a diagnostic list somebody
+    stopped seeing after switching command.
+    """
+    click.secho(str(exc), fg="red", err=True)
+    for diagnostic in exc.diagnostics:
+        click.secho(diagnostic.render(), fg="red", err=True)
+    sys.exit(EXIT_INVALID)
+
+
+def _finish_nursery(report: NurseryReport, output_format: str) -> None:
+    """Print the report the caller asked for, and exit non-zero if nothing can fire.
+
+    The exit status is the whole reason this is shared: a container that went up with a
+    schedule check that did not pass must not answer `0` from one command and `1` from
+    the other.
+    """
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        _report_nursery(report)
+    if report.register is not None and report.register.problems:
+        sys.exit(EXIT_INVALID)
 
 
 @main.command("new-resident")
@@ -2527,22 +2556,67 @@ def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per o
             dry_run=dry_run,
         )
     except NurseryError as exc:
-        click.secho(str(exc), fg="red", err=True)
-        for diagnostic in exc.diagnostics:
-            click.secho(diagnostic.render(), fg="red", err=True)
-        sys.exit(EXIT_INVALID)
+        _refuse_nursery(exc)
     except TransportError as exc:
         # The declaration succeeded and the host did not answer: an ssh timeout, no route,
         # a refused key. That is an operator problem, not a stack trace — say what failed in
         # one line and exit non-zero rather than spilling a traceback (steward #90).
         click.secho(f"could not reach the host to provision: {exc}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
-    if output_format == "json":
-        click.echo(json.dumps(report.to_dict(), indent=2))
-    else:
-        _report_nursery(report)
-    if report.register is not None and report.register.problems:
+    _finish_nursery(report, output_format)
+
+
+@main.command("provision")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+@click.option(
+    "--repo",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The checkout the declaration lives in. Defaults to the parent of the residents tree.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the whole plan and touch nothing.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def provision_command(
+    resident_id: str,
+    residents: Path,
+    repo: Path | None,
+    dry_run: bool,  # noqa: FBT001 — click passes flags positionally
+    output_format: str,
+) -> None:
+    """Build a resident from the manifest somebody wrote, and check its schedule.
+
+    `new-resident` describes a resident in flags and refuses to converge those flags onto
+    a manifest a person has since edited. This is the other door: the declaration is
+    already there, so `residents/<id>/manifest.yaml` is read as the source of truth and
+    the container is built from it exactly as it stands — including the routes, app grants
+    and `runner.placement` no flag can say (warren#270).
+
+    The counterpart to `retire`, which already works off the declared manifest alone: same
+    argument, same source of truth, opposite direction.
+
+    Nothing is written into the repo, so there is no commit and no `--allow-dirty` — a
+    dirty worktree is somebody else's afternoon and none of this command's business. A
+    declaration whose own bytes are in no commit is named in a warning instead, because
+    the commit this command cannot make is not one it should refuse over.
+    """
+    try:
+        report = provision_resident(
+            resident_id,
+            residents_dir=residents,
+            repo=repo,
+            dry_run=dry_run,
+        )
+    except NurseryError as exc:
+        _refuse_nursery(exc)
+    except TransportError as exc:
+        # "There was nobody to ask" — a host that did not answer, *or* a steward with no
+        # village address to give the container. One line and a non-zero exit rather than a
+        # traceback (steward #90), and phrased to cover both: the exception's own message
+        # already says which one it was.
+        click.secho(f"could not provision {resident_id}: {exc}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
+    _finish_nursery(report, output_format)
 
 
 def _report_retire(report: RetireReport) -> None:
@@ -2612,10 +2686,7 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
             dry_run=dry_run,
         )
     except NurseryError as exc:
-        click.secho(str(exc), fg="red", err=True)
-        for diagnostic in exc.diagnostics:
-            click.secho(diagnostic.render(), fg="red", err=True)
-        sys.exit(EXIT_INVALID)
+        _refuse_nursery(exc)
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
         return
