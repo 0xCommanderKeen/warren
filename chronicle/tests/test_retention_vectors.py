@@ -233,6 +233,131 @@ class TaskLedgerVectorTests(unittest.TestCase):
         )
         self.assertEqual(list(rotated.lines), list(again.lines))
 
+    def test_a_restated_handoff_cannot_reopen_a_row_the_ledger_evicted(self):
+        """The pairing pass owes a retained origin its newest *transition*.
+
+        It used to take the newest event of any kind, which is the restated handoff
+        itself — pairing the origin with itself and retaining nothing. The row the
+        ledger evicted at capacity then came back through the delegator's own history
+        as an open job, with the claim that moved it left behind (warren#282).
+        """
+
+        def handoff(task_id, stamp, title, to):
+            return {
+                "v": 0,
+                "ts": stamp,
+                "source": "steward",
+                "agent_id": "claude-code:life-agent",
+                "project": "life",
+                "type": "task_delegated",
+                "payload": {
+                    "task_id": task_id,
+                    "title": title,
+                    "from": "claude-code:life-agent",
+                    "to": to,
+                    "route": "inbox",
+                    "parent_task_id": None,
+                    "depth": 1,
+                },
+            }
+
+        events = []
+        for index in range(retention.KEEP_TASKS + 1):
+            task_id, title = f"t{index}", f"Handoff {index}"
+            stamp = f"2026-08-26T12:{index:02d}:%02d.000Z"
+            events.append(handoff(task_id, stamp % 0, title, "codex:keeper"))
+            events.append(
+                {
+                    "v": 0,
+                    "ts": stamp % 20,
+                    "source": "steward",
+                    "agent_id": "codex:keeper",
+                    "project": "life",
+                    "type": "task_claimed",
+                    "payload": {
+                        "task_id": task_id,
+                        "title": title,
+                        "claimant": "codex:keeper",
+                    },
+                }
+            )
+            # The second origin, and the newest event on the row by a clear margin.
+            events.append(handoff(task_id, stamp % 40, title, "codex:hunter"))
+
+        now = "2026-08-26T13:00:00.000Z"
+        rotated = self.rotate({"events": events, "now": now})
+        board = project_village(self.events_in(rotated), [], now)["tasks"]
+        self.assertEqual(
+            project_village(events, [], now)["tasks"],
+            board,
+            "rotation must show the board the whole log shows",
+        )
+        self.assertEqual(retention.KEEP_TASKS + 1, len(board))
+        for row in board:
+            self.assertEqual("claimed", row["state"], row["id"])
+            self.assertEqual("codex:keeper", row["claimant"], row["id"])
+            self.assertEqual("codex:hunter", row["assignee"], row["id"])
+
+    def test_a_replayed_post_does_not_buy_capacity_for_a_finished_row(self):
+        """The ledger reads a row's standing off its newest *transition*.
+
+        It used to read the newest event of any kind. A post replayed after the
+        ``task_done`` it does not undo is newer than that close, so a finished row
+        stopped sorting as finished and kept its place at capacity — pushing a
+        genuinely open row off the board to hold a job nobody is doing (warren#282).
+        """
+
+        def post(minute, task_id, title):
+            return {
+                "v": 0,
+                "ts": f"2026-08-26T12:{minute:02d}:00.000Z",
+                "source": "steward",
+                "agent_id": "steward:api",
+                "project": "life",
+                "type": "task_posted",
+                "payload": {
+                    "task_id": task_id,
+                    "title": title,
+                    "required_skills": [],
+                    "posted_by": "steward:api",
+                },
+            }
+
+        # t0 is closed early and posted again late, so it is the newest row on the
+        # board by timestamp and the only finished one. Everything else is open.
+        events = [
+            post(0, "t0", "Job 0"),
+            {
+                "v": 0,
+                "ts": "2026-08-26T12:01:00.000Z",
+                "source": "steward",
+                "agent_id": "codex:keeper",
+                "project": "life",
+                "type": "task_done",
+                "payload": {
+                    "task_id": "t0",
+                    "title": "Job 0",
+                    "claimant": "codex:keeper",
+                    "artifacts": [],
+                },
+            },
+        ]
+        open_rows = retention.KEEP_TASKS - 1
+        events.extend(
+            post(minute, f"t{minute - 1}", f"Job {minute - 1}")
+            for minute in range(2, 2 + open_rows)
+        )
+        events.append(post(30, "t0", "Job 0, restated"))
+        # The row that tips the ledger over capacity, and the newest of them all.
+        events.append(post(31, f"t{retention.KEEP_TASKS}", "The last job"))
+
+        keep = retention._task_keep_indexes(list(enumerate(events)))
+        self.assertEqual(
+            set(range(2, 2 + open_rows)) | {len(events) - 1},
+            keep,
+            "capacity gives up the finished row, not the oldest open one",
+        )
+
 
 class MoodCapsuleDomainVectorTests(unittest.TestCase):
     """``mood-capsule-malformed.json`` against the capsule reader.
@@ -260,7 +385,9 @@ class MoodCapsuleDomainVectorTests(unittest.TestCase):
 
     def test_the_unmutated_capsule_is_accepted(self):
         """Anchors every rejection below: the base must decode, or they are free."""
-        self.assertIsNotNone(retention._mood_authority_from_line(self.encode(self.base)))
+        self.assertIsNotNone(
+            retention._mood_authority_from_line(self.encode(self.base))
+        )
 
     def test_every_recorded_invalid_field_mutation_is_rejected(self):
         self.assertTrue(self.matrix["invalid_mutations"])
@@ -341,9 +468,7 @@ class MoodLifecycleVectorTests(unittest.TestCase):
         self.assertIn(
             0, indexes, "the exact close independently carries its canonical knock"
         )
-        self.assertIn(
-            6, indexes, "the owner's cross-agent canonical truth is carried"
-        )
+        self.assertIn(6, indexes, "the owner's cross-agent canonical truth is carried")
 
         rotated = retention.carry_forward(
             [json.dumps(item, separators=(",", ":")) for item in events],

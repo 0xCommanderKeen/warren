@@ -41,5 +41,49 @@
       {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"claude-code:life-agent","project":"life","type":"task_delegated","payload":{"task_id":"t3","title":"Answer the letter","from":"claude-code:life-agent","to":"codex:keeper","route":"inbox","parent_task_id":null,"depth":1}},
       {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_claimed","payload":{"task_id":"t3","title":"Answer the letter","claimant":"codex:keeper"}}
     ]
+  },
+  {
+    "name": "a replayed post cannot unclaim the row it already opened",
+    "now": "2026-08-26T12:10:00.000Z",
+    "task_witnesses": [1, 2],
+    "board": [
+      {
+        "id": "t4",
+        "title": "Write the letter, again",
+        "state": "claimed",
+        "required_skills": ["rust"],
+        "posted_by": "steward:api",
+        "assignee": null,
+        "claimant": "codex:keeper",
+        "updated_at": "2026-08-26T12:01:00.000Z"
+      }
+    ],
+    "events": [
+      {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"steward:api","project":"life","type":"task_posted","payload":{"task_id":"t4","title":"Write the letter","required_skills":["python"],"posted_by":"steward:api"}},
+      {"v":0,"ts":"2026-08-26T12:01:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_claimed","payload":{"task_id":"t4","title":"Write the letter","claimant":"codex:keeper"}},
+      {"v":0,"ts":"2026-08-26T12:02:00.000Z","source":"steward","agent_id":"steward:api","project":"life","type":"task_posted","payload":{"task_id":"t4","title":"Write the letter, again","required_skills":["rust"],"posted_by":"steward:api"}}
+    ]
+  },
+  {
+    "name": "a handoff of a claimed job restates the row rather than reopening it",
+    "now": "2026-08-26T12:10:00.000Z",
+    "task_witnesses": [1, 2],
+    "board": [
+      {
+        "id": "t5",
+        "title": "Write the letter",
+        "state": "claimed",
+        "required_skills": [],
+        "posted_by": "claude-code:life-agent",
+        "assignee": "codex:hunter",
+        "claimant": "codex:keeper",
+        "updated_at": "2026-08-26T12:01:00.000Z"
+      }
+    ],
+    "events": [
+      {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"steward:api","project":"life","type":"task_posted","payload":{"task_id":"t5","title":"Write the letter","required_skills":["python"],"posted_by":"steward:api"}},
+      {"v":0,"ts":"2026-08-26T12:01:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_claimed","payload":{"task_id":"t5","title":"Write the letter","claimant":"codex:keeper"}},
+      {"v":0,"ts":"2026-08-26T12:02:00.000Z","source":"steward","agent_id":"claude-code:life-agent","project":"life","type":"task_delegated","payload":{"task_id":"t5","title":"Write the letter","from":"claude-code:life-agent","to":"codex:hunter","route":"inbox","parent_task_id":null,"depth":1}}
+    ]
   }
 ]

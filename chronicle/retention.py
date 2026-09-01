@@ -29,6 +29,7 @@ from village_state import (
     AMBIENT_TYPES,
     TASK_LEDGER_TYPES,
     TASK_ORIGIN_TYPES,
+    reopened_by_lease,
     ambient_share,
 )
 
@@ -455,10 +456,7 @@ def _task_tie_rank(event):
         # A handoff opens the row exactly as a post does, so it ranks with one: a
         # claim in the same millisecond must still be the newer fact.
         return 0
-    if (
-        event["type"] == "task_failed"
-        and event["payload"].get("reason", "").strip() == "lease_expired"
-    ):
+    if event["type"] == "task_failed" and reopened_by_lease(event["payload"]):
         return 1
     if event["type"] == "task_claimed":
         return 2
@@ -485,6 +483,21 @@ def _remember_task_event(task, slot, index, event):
         task[slot] = (index, event)
 
 
+def _closed_row(transition):
+    """Whether the board shows this row finished — the newest transition decides.
+
+    Not the newest *event*: a replayed post is newer than the ``task_done`` before it
+    and closes nothing, so reading the row's standing off the newest event of any kind
+    would call a finished job unfinished and spend capacity keeping it (warren#282).
+    """
+    if transition is None:
+        return False
+    event = transition[1]
+    return event["type"] == "task_done" or (
+        event["type"] == "task_failed" and not reopened_by_lease(event["payload"])
+    )
+
+
 def _ledger_events(parsed):
     """Yield every valid board event with the row identity it belongs to."""
     for index, event in parsed:
@@ -507,14 +520,8 @@ def _task_keep_indexes(parsed):
         left_id, left_task = left
         right_id, right_task = right
         left_event, right_event = left_task["latest"][1], right_task["latest"][1]
-        left_terminal = left_event["type"] == "task_done" or (
-            left_event["type"] == "task_failed"
-            and left_event["payload"].get("reason", "").strip() != "lease_expired"
-        )
-        right_terminal = right_event["type"] == "task_done" or (
-            right_event["type"] == "task_failed"
-            and right_event["payload"].get("reason", "").strip() != "lease_expired"
-        )
+        left_terminal = _closed_row(left_task["transition"])
+        right_terminal = _closed_row(right_task["transition"])
         if left_terminal != right_terminal:
             return 1 if left_terminal else -1
         if event_ms(left_event) != event_ms(right_event):
@@ -525,9 +532,13 @@ def _task_keep_indexes(parsed):
 
     tasks = {}
     for index, event, task_id in _ledger_events(parsed):
-        task = tasks.setdefault(task_id, {"origin": None, "latest": None})
+        task = tasks.setdefault(
+            task_id, {"origin": None, "transition": None, "latest": None}
+        )
         if event["type"] in TASK_ORIGIN_TYPES:
             _remember_task_event(task, "origin", index, event)
+        else:
+            _remember_task_event(task, "transition", index, event)
         _remember_task_event(task, "latest", index, event)
         if len(tasks) > KEEP_TASKS:
             # Mirror the browser after every accepted event. An origin evicted at
@@ -544,9 +555,12 @@ def _task_keep_indexes(parsed):
     selected = sorted(tasks.items(), key=functools.cmp_to_key(compare))[:KEEP_TASKS]
     keep = set()
     for _, task in selected:
-        keep.add(task["latest"][0])
-        if task["origin"] is not None:
-            keep.add(task["origin"][0])
+        # Both ends, tracked apart. Reading the second end off "the newest event"
+        # loses the claim as soon as a replayed origin is newer than it, and the row
+        # then rotates into a job nobody has taken (warren#282).
+        for slot in ("origin", "transition"):
+            if task[slot] is not None:
+                keep.add(task[slot][0])
     return keep
 
 
@@ -573,7 +587,10 @@ def _paired_transition_keep_indexes(parsed, keep):
         return set()
     latest = {}
     for index, event, task_id in _ledger_events(parsed):
-        if task_id in origins:
+        # Transitions only. A row whose origin was restated has a *newer* origin than
+        # its claim, and pairing that with itself retains nothing — the row rotates
+        # into an open job all over again (warren#282).
+        if task_id in origins and event["type"] not in TASK_ORIGIN_TYPES:
             _remember_task_event(latest, task_id, index, event)
     return {item[0] for item in latest.values()} - keep
 

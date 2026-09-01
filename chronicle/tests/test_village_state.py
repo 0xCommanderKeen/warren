@@ -395,6 +395,218 @@ class VillageProjectionTests(unittest.TestCase):
         self.assertIsNone(task["assignee"])
         self.assertEqual(["python"], task["required_skills"])
 
+    def test_a_repeat_origin_refreshes_the_row_it_already_opened(self):
+        """warren#282: one job is one card, whatever the log replayed.
+
+        A second post for a live row restates where the job came from — never that
+        nobody has taken it. It supplies the canonical title, skills and poster; the
+        claim between the two posts still owns the state, the claimant and the clock.
+        """
+        state = project_village(
+            [
+                event(
+                    "task_posted",
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    posted_by="steward:api",
+                    required_skills=["python"],
+                ),
+                event(
+                    "task_claimed",
+                    agent="agent-2",
+                    minutes=1,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    claimant="agent-2",
+                ),
+                event(
+                    "task_posted",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter, again",
+                    posted_by="steward:api",
+                    required_skills=["rust"],
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        self.assertEqual(
+            [
+                {
+                    "id": "t1",
+                    "title": "Write the letter, again",
+                    "state": "claimed",
+                    "required_skills": ["rust"],
+                    "posted_by": "steward:api",
+                    "assignee": None,
+                    "claimant": "agent-2",
+                    "updated_at": "2026-08-26T12:01:00.000Z",
+                }
+            ],
+            state["tasks"],
+        )
+
+    def test_a_handoff_of_a_claimed_job_reopens_nothing(self):
+        """The second origin arriving through the *other* door changes nothing here.
+
+        warren#277 made a repeat origin reachable through two different event types.
+        A handoff restates the row as addressed work — an addressee and no required
+        skills — and leaves the claim standing.
+        """
+        state = project_village(
+            [
+                event(
+                    "task_posted",
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    posted_by="steward:api",
+                    required_skills=["python"],
+                ),
+                event(
+                    "task_claimed",
+                    agent="agent-2",
+                    minutes=1,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    claimant="agent-2",
+                ),
+                event(
+                    "task_delegated",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    to="agent-3",
+                    route="inbox",
+                    parent_task_id=None,
+                    depth=1,
+                    **{"from": "agent-1"},
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        self.assertEqual(
+            [
+                {
+                    "id": "t1",
+                    "title": "Write the letter",
+                    "state": "claimed",
+                    "required_skills": [],
+                    "posted_by": "agent-1",
+                    "assignee": "agent-3",
+                    "claimant": "agent-2",
+                    "updated_at": "2026-08-26T12:01:00.000Z",
+                }
+            ],
+            state["tasks"],
+        )
+
+    def test_a_repeat_post_of_an_untaken_job_is_its_new_posted_age(self):
+        """An open row's clock is its posted age, so the newest post supplies it.
+
+        Once something moves the row the clock belongs to that transition instead —
+        a replayed post is not news about work already under way.
+        """
+        state = project_village(
+            [
+                event(
+                    "task_posted",
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    posted_by="steward:api",
+                    required_skills=["python"],
+                ),
+                event(
+                    "task_posted",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter, again",
+                    posted_by="steward:api",
+                    required_skills=["rust"],
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        [task] = state["tasks"]
+        self.assertEqual("open", task["state"])
+        self.assertEqual("2026-08-26T12:02:00.000Z", task["updated_at"])
+
+    def test_a_transition_is_held_until_the_event_that_opens_its_row(self):
+        """Rotation can hand the reducer a claim before the post it belongs to.
+
+        Keeping the newest origin and the newest transition is enough to rebuild the
+        row, but they arrive in log order, and a repeat origin is the later of the
+        two. A claim read before its row exists is held, not thrown away — otherwise
+        rotation would turn a claimed job back into an open one.
+        """
+        state = project_village(
+            [
+                event(
+                    "task_claimed",
+                    agent="agent-2",
+                    minutes=1,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    claimant="agent-2",
+                ),
+                event(
+                    "task_posted",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter, again",
+                    posted_by="steward:api",
+                    required_skills=["rust"],
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        [task] = state["tasks"]
+        self.assertEqual("claimed", task["state"])
+        self.assertEqual("agent-2", task["claimant"])
+        self.assertEqual("2026-08-26T12:01:00.000Z", task["updated_at"])
+
+    def test_a_transition_whose_row_never_opens_stays_dropped(self):
+        """Holding is not inventing: with no origin anywhere, there is no job."""
+        state = project_village(
+            [
+                event(
+                    "task_claimed",
+                    agent="agent-2",
+                    minutes=1,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    claimant="agent-2",
+                ),
+                event(
+                    "task_done",
+                    agent="agent-2",
+                    minutes=2,
+                    source="steward",
+                    task_id="t1",
+                    title="Write the letter",
+                    claimant="agent-2",
+                    artifacts=[],
+                ),
+            ],
+            [],
+            NOW + dt.timedelta(minutes=3),
+        )
+        self.assertEqual([], state["tasks"])
+
     def test_a_late_session_report_never_closes_the_board_row(self):
         """The lease sweep owns the task; this fact describes only the late run."""
         state = project_village(

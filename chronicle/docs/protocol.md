@@ -542,8 +542,16 @@ The separate job board is reconstructed only from valid Steward `task_posted`,
 `task_delegated`, `task_claimed`, `task_done`, and `task_failed` events. A row opens on a
 post or on a handoff: a post requires the complete Steward payload, including non-empty
 `posted_by`, a handoff requires both ends and its route, and a failure requires its
-reason. Rotation's board selection keeps at most 24 task identities, keyed by
-`task_id`; duplicates cannot create another card. Capacity is applied after every valid
+reason. The board is keyed by `task_id`, one row per job: a second origin for a row that
+already exists restates it and never opens another card. It supplies the canonical title,
+skills, poster and addressee — it does not say the job is untaken, so it cannot touch the
+state or the claimant. An untaken row's clock is its posted age and the newest origin
+supplies that too; once a transition has moved the row the clock belongs to that
+transition. A transition read before the event that opens its row is held until that event
+arrives, because rotation retains a row's newest origin and its newest transition and a
+restated origin is the later of the two. Held evidence is not an invented job: a transition
+whose row never opens is discarded, as it always was. Rotation's board selection keeps at
+most 24 task identities, also keyed by `task_id`. Capacity is applied after every valid
 event, including each record in a grouped bootstrap/reset response. A later transition can
 reintroduce an identity whose origin was already evicted, but cannot recover that missing
 metadata; only a genuinely re-observed post or handoff can. That 24 bounds what the board
@@ -557,9 +565,11 @@ timestamp is the current state. Equal-millisecond facts use a constant-space tot
 origin (post or handoff), lease expiry, claim, ordinary failure, then done, with stable
 event identity deciding conflicts within one kind. Exact duplicates compare equal. This
 preserves Steward's expiry-then-reclaim hand-off while even 10,000 distinct
-same-millisecond transitions retain only the latest origin and transition. A later origin
-supplies the canonical title, skills, addressee, and posted age even when its claim
-arrived first. Open and claimed jobs remain.
+same-millisecond transitions retain only the latest origin and transition. Those two ends
+are tracked apart: a row's standing is read from its newest transition, not its newest
+event of any kind, so an origin restated after a close neither unfinishes that row nor
+takes capacity from an open one. A later origin supplies the canonical title, skills and
+addressee even when its claim arrived first. Open and claimed jobs remain.
 When a claim or terminal event is retained without the event that opened its row, Chronicle
 renders required skills as unavailable rather than inventing an empty requirement set.
 An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
@@ -919,8 +929,10 @@ present, plus one canonical lineage-bearing record for each active child, and
 skipping any whose latest signal is `session_ended` or older than
 the 12 h drop window — in their original order. Separately, it keeps the canonical post
 and latest transition for the same bounded 24 task IDs the job board selects, using the
-same per-event capacity and constant-space equal-time order. An already-evicted post is not
-reconstructed merely because a transition for that task appears later in the retained input.
+same per-event capacity and constant-space equal-time order, tracking the newest origin and
+the newest transition in separate slots so a restated origin cannot evict the claim beneath
+it. An already-evicted post is not reconstructed merely because a transition for that task
+appears later in the retained input.
 Task-ID retention crosses agent groups: a central `steward:api` post remains paired with
 claim/done/failed/lease-expiry evidence after the claimant session ends.
 Structured approvals are independently retained by lifecycle: at most 40 bounded
