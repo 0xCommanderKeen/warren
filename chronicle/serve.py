@@ -339,11 +339,13 @@ def villager_names(events):
     return names
 
 
-def _fleet_events(event):
+def _fleet_events(event, runtime=None):
     """Read the same bounded event window as the viewer and include this event."""
     events = []
+    config = runtime.config if runtime is not None else None
+    events_path = str(config.events) if config is not None else _events_path()
     try:
-        with open(_events_path(), encoding="utf-8") as stream:
+        with open(events_path, encoding="utf-8") as stream:
             lines = collections.deque(
                 stream, maxlen=retention.POLICY["viewer_line_limit"]
             )
@@ -369,16 +371,19 @@ def _fleet_events(event):
             event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
         except (TypeError, ValueError):
             event_time = 0
-        if item is event or time.time() - event_time <= _setting(
-            "drop_seconds", DROP_SECONDS
-        ):
+        drop_seconds = (
+            config.drop_seconds
+            if config is not None
+            else _setting("drop_seconds", DROP_SECONDS)
+        )
+        if item is event or time.time() - event_time <= drop_seconds:
             visible_agents.add(agent_id)
     return [item for item in events if str(item["agent_id"]) in visible_agents]
 
 
-def villager_name(event):
+def villager_name(event, runtime=None):
     agent_id = str(event.get("agent_id") or "")
-    return villager_names(_fleet_events(event)).get(
+    return villager_names(_fleet_events(event, runtime)).get(
         agent_id, NAMES[js_hash(agent_id) % len(NAMES)]
     )
 
@@ -388,60 +393,82 @@ def receiver_delivery_id(event):
     return notification_persistence.terminal_key(event)
 
 
-def persist_knock(event):
+def persist_knock(event, runtime=None):
     """Durably journal notification work before the ingest acknowledges it."""
-    if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
+    config = runtime.config if runtime is not None else None
+    notify_url = (
+        config.notify_url
+        if config is not None
+        else _setting("notify_url", NOTIFY_URL)
+    )
+    store = runtime.notification_store if runtime is not None else _store()
+    if not notify_url or event.get("type") != "needs_human":
         return True
-    return _store().journal(event)
+    return store.journal(event)
 
 
-def claim_knock(event):
+def claim_knock(event, runtime=None):
     """Claim a knock unless it is in flight or has already been delivered."""
-    if not _setting("notify_url", NOTIFY_URL) or event.get("type") != "needs_human":
+    config = runtime.config if runtime is not None else None
+    notify_url = (
+        config.notify_url
+        if config is not None
+        else _setting("notify_url", NOTIFY_URL)
+    )
+    store = runtime.notification_store if runtime is not None else _store()
+    notified = runtime.notified if runtime is not None else _notified
+    notifying = runtime.notifying if runtime is not None else _notifying
+    notified_lock = runtime.notified_lock if runtime is not None else _notified_lock
+    if not notify_url or event.get("type") != "needs_human":
         return False
     key = notification_persistence.terminal_key(event)
-    with _notified_lock:
-        delivered = _store().load_ledger(LEDGER_NOTIFIED)
-        dropped = _store().load_ledger(LEDGER_NOTIFY_DROPPED)
+    with notified_lock:
+        delivered = store.load_ledger(LEDGER_NOTIFIED)
+        dropped = store.load_ledger(LEDGER_NOTIFY_DROPPED)
         if any(
             candidate in delivered or candidate in dropped
             for candidate in notification_persistence.terminal_keys(event)
         ):
             return False
-        if key in _notified or key in _notifying:
-            if key in _notified:
-                _notified.move_to_end(key)
+        if key in notified or key in notifying:
+            if key in notified:
+                notified.move_to_end(key)
             return False
-        _notifying.add(key)
+        notifying.add(key)
     return True
 
 
-def finish_knock(event, delivered):
+def finish_knock(event, delivered, runtime=None):
     """Release an attempt, remembering only successful deliveries."""
     key = notification_persistence.terminal_key(event)
-    with _notified_lock:
-        _notifying.discard(key)
+    store = runtime.notification_store if runtime is not None else _store()
+    notified = runtime.notified if runtime is not None else _notified
+    notifying = runtime.notifying if runtime is not None else _notifying
+    notified_lock = runtime.notified_lock if runtime is not None else _notified_lock
+    memory = runtime.config.notify_memory if runtime is not None else NOTIFY_MEMORY
+    with notified_lock:
+        notifying.discard(key)
         if delivered:
-            if not _store().commit_terminal(event, LEDGER_NOTIFIED):
+            if not store.commit_terminal(event, LEDGER_NOTIFIED):
                 # Without a durable acknowledgement the event remains eligible
                 # for recovery; never pretend volatile success is final.
                 return False
-            _notified[key] = True
-            _notified.move_to_end(key)
-            while len(_notified) > NOTIFY_MEMORY:
-                _notified.popitem(last=False)
+            notified[key] = True
+            notified.move_to_end(key)
+            while len(notified) > memory:
+                notified.popitem(last=False)
             return True
     return not delivered
 
 
-def notify(event):
+def notify(event, runtime=None):
     """POST one knock and return whether it was delivered. Never raises."""
     try:
         payload = event.get("payload") or {}
         message = payload.get("message", "") if isinstance(payload, dict) else ""
         if not isinstance(message, str):
             message = str(message)
-        name = villager_name(event)
+        name = villager_name(event, runtime)
         project = str(event.get("project") or "unknown")
         structured = structured_approval(event)
         title = (
@@ -458,7 +485,12 @@ def notify(event):
             "Priority": "high",
             "X-Burrow-Delivery-ID": receiver_delivery_id(event),
         }
-        notify_token = _setting("notify_token", NOTIFY_TOKEN)
+        config = runtime.config if runtime is not None else None
+        notify_token = (
+            config.notify_token
+            if config is not None
+            else _setting("notify_token", NOTIFY_TOKEN)
+        )
         if notify_token:
             headers["Authorization"] = "Bearer " + notify_token
         if structured:
@@ -468,13 +500,20 @@ def notify(event):
             body_text = f"{name} · {project}\n{message}"
         body = body_text.encode("utf-8")
         req = urllib.request.Request(
-            _setting("notify_url", NOTIFY_URL),
+            config.notify_url
+            if config is not None
+            else _setting("notify_url", NOTIFY_URL),
             data=body,
             headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(
-            req, timeout=_setting("notify_timeout", NOTIFY_TIMEOUT)
+            req,
+            timeout=(
+                config.notify_timeout
+                if config is not None
+                else _setting("notify_timeout", NOTIFY_TIMEOUT)
+            ),
         ):
             pass
         return True
@@ -482,7 +521,7 @@ def notify(event):
         return False
 
 
-def deliver_knock(event):
+def deliver_knock(event, runtime=None):
     """Attempt under a bounded cross-process claim and commit its outcome.
 
     The stable shard is held across terminal-ledger recheck, external POST, and
@@ -490,150 +529,244 @@ def deliver_knock(event):
     acceptance followed by a process crash can still cause a later retry.
     """
     key = notification_persistence.terminal_key(event)
-    path = _store().delivery_lock_path(key)
+    store = runtime.notification_store if runtime is not None else _store()
+    transport_lock = (
+        runtime.transport_lock if runtime is not None else _transport_lock
+    )
+    counters = (
+        runtime.transport_counters if runtime is not None else _transport_counters
+    )
+    path = store.delivery_lock_path(key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if any(
-            _store().contains(LEDGER_NOTIFIED, candidate)
-            or _store().contains(LEDGER_NOTIFY_DROPPED, candidate)
+            store.contains(LEDGER_NOTIFIED, candidate)
+            or store.contains(LEDGER_NOTIFY_DROPPED, candidate)
             for candidate in notification_persistence.terminal_keys(event)
         ):
-            finish_knock(event, False)
+            finish_knock(event, False, runtime)
             return True
-        delivered = notify(event)
+        delivered = notify(event) if runtime is None else notify(event, runtime)
         if delivered:
-            if not _store().commit_terminal(event, LEDGER_NOTIFIED):
+            if not store.commit_terminal(event, LEDGER_NOTIFIED):
                 delivered = False
-        finish_knock(event, False)
-    with _transport_lock:
+        finish_knock(event, False, runtime)
+    with transport_lock:
         key = "notify_delivered" if delivered else "notify_failed"
-        _transport_counters[key] += 1
+        counters[key] += 1
     return delivered
 
 
-def notify_async(event):
-    ensure_knock_workers()
+def notify_async(event, runtime=None):
+    ensure_knock_workers(runtime)
+    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+    transport_lock = (
+        runtime.transport_lock if runtime is not None else _transport_lock
+    )
+    counters = (
+        runtime.transport_counters if runtime is not None else _transport_counters
+    )
     try:
-        _knock_queue.put_nowait(event)
+        work_queue.put_nowait(event)
         return True
     except queue.Full:
-        finish_knock(event, False)
-        with _transport_lock:
-            _transport_counters["notify_saturated"] += 1
+        finish_knock(event, False, runtime)
+        with transport_lock:
+            counters["notify_saturated"] += 1
         return False
 
 
-def _process_knock(event):
-    if _store().attempts_exhausted(event):
-        if not _store().commit_terminal(event, LEDGER_NOTIFY_DROPPED):
-            finish_knock(event, False)
+def _process_knock(event, runtime=None):
+    store = runtime.notification_store if runtime is not None else _store()
+    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+    transport_lock = (
+        runtime.transport_lock if runtime is not None else _transport_lock
+    )
+    counters = (
+        runtime.transport_counters if runtime is not None else _transport_counters
+    )
+    if store.attempts_exhausted(event):
+        if not store.commit_terminal(event, LEDGER_NOTIFY_DROPPED):
+            finish_knock(event, False, runtime)
             return
-        finish_knock(event, False)
-        _store().clear_attempts(event)
-        _recover_knocks()
+        finish_knock(event, False, runtime)
+        store.clear_attempts(event)
+        _recover_knocks(runtime)
         return
 
-    delivered = deliver_knock(event)
+    delivered = (
+        deliver_knock(event)
+        if runtime is None
+        else deliver_knock(event, runtime)
+    )
     if delivered:
-        _store().clear_attempts(event)
+        store.clear_attempts(event)
     else:
-        attempts = _store().next_attempt(event)
-        durable_attempt = _store().record_attempt(event, attempts)
-        exhausted = _store().attempts_exhausted(event)
-        if not exhausted and durable_attempt and claim_knock(event):
+        attempts = store.next_attempt(event)
+        durable_attempt = store.record_attempt(event, attempts)
+        exhausted = store.attempts_exhausted(event)
+        if not exhausted and durable_attempt and claim_knock(event, runtime):
             try:
-                _knock_queue.put_nowait(event)
-                with _transport_lock:
-                    _transport_counters["notify_retried"] += 1
+                work_queue.put_nowait(event)
+                with transport_lock:
+                    counters["notify_retried"] += 1
             except queue.Full:
-                finish_knock(event, False)
-                with _transport_lock:
-                    _transport_counters["notify_saturated"] += 1
+                finish_knock(event, False, runtime)
+                with transport_lock:
+                    counters["notify_saturated"] += 1
         elif exhausted and durable_attempt:
-            if not _store().commit_terminal(event, LEDGER_NOTIFY_DROPPED):
+            if not store.commit_terminal(event, LEDGER_NOTIFY_DROPPED):
                 return
-            _store().clear_attempts(event)
+            store.clear_attempts(event)
         elif not durable_attempt:
             return
-    _recover_knocks()
+    _recover_knocks(runtime)
 
 
-def _knock_worker():
-    while not _knock_worker_stop.is_set():
+def _knock_worker(runtime=None):
+    worker_stop = (
+        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
+    )
+    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+    while not worker_stop.is_set():
         try:
-            event = _knock_queue.get(timeout=0.1)
+            event = work_queue.get(timeout=0.1)
         except queue.Empty:
             continue
         try:
-            _process_knock(event)
+            _process_knock(event, runtime)
         finally:
-            _knock_queue.task_done()
+            work_queue.task_done()
 
 
-def _recover_knocks():
+def _recover_knocks(runtime=None):
     """Atomically hand off new work and replay immutable generations.
 
     Replay files remain until their keys have durable delivered/drop outcomes.
     Re-reading them after a crash is safe because ``claim_knock`` consults those
     durable ledgers and the in-flight set before queueing.
     """
-    for generation, complete, events in _store().recover():
+    store = runtime.notification_store if runtime is not None else _store()
+    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+    transport_lock = (
+        runtime.transport_lock if runtime is not None else _transport_lock
+    )
+    counters = (
+        runtime.transport_counters if runtime is not None else _transport_counters
+    )
+    for generation, complete, events in store.recover():
         for event in events:
-            if not claim_knock(event):
+            if not claim_knock(event, runtime):
                 continue
             try:
-                _knock_queue.put_nowait(event)
+                work_queue.put_nowait(event)
             except queue.Full:
-                finish_knock(event, False)
-                with _transport_lock:
-                    _transport_counters["notify_saturated"] += 1
+                finish_knock(event, False, runtime)
+                with transport_lock:
+                    counters["notify_saturated"] += 1
                 return
         try:
-            _store().retire_replay_if_terminal(generation, complete, events)
+            store.retire_replay_if_terminal(generation, complete, events)
         except OSError:
             # Retirement failure leaves replay authority for the next recovery.
             pass
 
 
-def ensure_knock_workers():
+def ensure_knock_workers(runtime=None):
     global _knock_workers_started
-    if _knock_workers_started:
+    started = (
+        runtime.knock_workers_started
+        if runtime is not None
+        else _knock_workers_started
+    )
+    workers_lock = (
+        runtime.knock_workers_lock if runtime is not None else _knock_workers_lock
+    )
+    worker_stop = (
+        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
+    )
+    worker_threads = (
+        runtime.knock_worker_threads if runtime is not None else _knock_worker_threads
+    )
+    if started:
         return
-    with _knock_workers_lock:
-        if _knock_workers_started:
+    with workers_lock:
+        started = (
+            runtime.knock_workers_started
+            if runtime is not None
+            else _knock_workers_started
+        )
+        if started:
             return
-        _knock_worker_stop.clear()
-        for index in range(_setting("notify_workers", NOTIFY_WORKERS)):
+        worker_stop.clear()
+        count = (
+            runtime.config.notify_workers
+            if runtime is not None
+            else _setting("notify_workers", NOTIFY_WORKERS)
+        )
+        for index in range(count):
             worker = threading.Thread(
-                target=_knock_worker, name=f"chronicle-knock-{index}", daemon=True
+                target=_knock_worker,
+                args=(runtime,),
+                name=f"chronicle-knock-{index}",
+                daemon=True,
             )
             worker.start()
-            _knock_worker_threads.append(worker)
-        _knock_workers_started = True
-        _recover_knocks()
+            worker_threads.append(worker)
+        if runtime is not None:
+            runtime.knock_workers_started = True
+        else:
+            _knock_workers_started = True
+        _recover_knocks(runtime)
 
 
-def stop_knock_workers():
+def stop_knock_workers(runtime=None):
     """Stop and join transport-owned notification workers at ASGI shutdown."""
     global _knock_workers_started
-    with _knock_workers_lock:
-        if not _knock_workers_started:
+    workers_lock = (
+        runtime.knock_workers_lock if runtime is not None else _knock_workers_lock
+    )
+    worker_stop = (
+        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
+    )
+    worker_threads = (
+        runtime.knock_worker_threads if runtime is not None else _knock_worker_threads
+    )
+    with workers_lock:
+        started = (
+            runtime.knock_workers_started
+            if runtime is not None
+            else _knock_workers_started
+        )
+        if not started:
             return
-        _knock_worker_stop.set()
-        workers = list(_knock_worker_threads)
+        worker_stop.set()
+        workers = list(worker_threads)
     for worker in workers:
         worker.join()
-    with _knock_workers_lock:
-        _knock_worker_threads.clear()
-        _knock_workers_started = False
+    with workers_lock:
+        worker_threads.clear()
+        if runtime is not None:
+            runtime.knock_workers_started = False
+        else:
+            _knock_workers_started = False
 
 
-def transport_status():
+def transport_status(runtime=None):
     """Bounded machine-readable diagnostics for the browser live-status module."""
-    with _transport_lock:
-        counters = dict(_transport_counters)
-    delivered, dropped = _store().terminal_counts()
+    transport_lock = (
+        runtime.transport_lock if runtime is not None else _transport_lock
+    )
+    source_counters = (
+        runtime.transport_counters if runtime is not None else _transport_counters
+    )
+    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+    store = runtime.notification_store if runtime is not None else _store()
+    config = runtime.config if runtime is not None else None
+    with transport_lock:
+        counters = dict(source_counters)
+    delivered, dropped = store.terminal_counts()
     return {
         "ingest": {
             "duplicates": counters["ingest_duplicates"],
@@ -641,10 +774,18 @@ def transport_status():
             "durable": True,
         },
         "notifications": {
-            "configured": bool(_setting("notify_url", NOTIFY_URL)),
-            "queued": _knock_queue.qsize(),
-            "queue_capacity": _setting("notify_queue", NOTIFY_QUEUE),
-            "workers": _setting("notify_workers", NOTIFY_WORKERS),
+            "configured": bool(
+                config.notify_url
+                if config is not None
+                else _setting("notify_url", NOTIFY_URL)
+            ),
+            "queued": work_queue.qsize(),
+            "queue_capacity": work_queue.maxsize,
+            "workers": (
+                config.notify_workers
+                if config is not None
+                else _setting("notify_workers", NOTIFY_WORKERS)
+            ),
             "delivered": delivered,
             "failed": counters["notify_failed"],
             "retried": counters["notify_retried"],
@@ -920,9 +1061,26 @@ class Runtime:
             config.knock_lock_shards,
             ledger_limits=lambda: (config.ledger_records, config.ledger_bytes),
         )
+        self.notified = collections.OrderedDict()
+        self.notifying = set()
+        self.notified_lock = threading.Lock()
+        self.knock_queue = queue.Queue(maxsize=config.notify_queue)
+        self.knock_workers_started = False
+        self.knock_workers_lock = threading.Lock()
+        self.knock_worker_stop = threading.Event()
+        self.knock_worker_threads = []
+        self.transport_lock = threading.Lock()
+        self.transport_counters = {
+            "ingest_duplicates": 0,
+            "notify_delivered": 0,
+            "notify_failed": 0,
+            "notify_retried": 0,
+            "notify_saturated": 0,
+            "notify_dropped": 0,
+        }
         self.boot_id = secrets.token_hex(16)
         self.event_log = event_log.EventLog(
-            config, self.notification_store, _count_ingest_duplicate
+            config, self.notification_store, self.count_ingest_duplicate
         )
         self.state_coordinator = StateCoordinator(
             self.projection_inputs,
@@ -941,6 +1099,10 @@ class Runtime:
     def read_event_records(self, cursor):
         return self.event_log.read_records(self.boot_id, cursor)
 
+    def count_ingest_duplicate(self):
+        with self.transport_lock:
+            self.transport_counters["ingest_duplicates"] += 1
+
 
 def lifespan(config):
     @asynccontextmanager
@@ -953,12 +1115,12 @@ def lifespan(config):
         try:
             await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
             if resolved.notify_url:
-                await anyio.to_thread.run_sync(ensure_knock_workers)
+                await anyio.to_thread.run_sync(ensure_knock_workers, runtime)
             try:
                 yield
             finally:
                 if resolved.notify_url:
-                    await anyio.to_thread.run_sync(stop_knock_workers)
+                    await anyio.to_thread.run_sync(stop_knock_workers, runtime)
         finally:
             _active_runtime.reset(token)
 
@@ -1082,11 +1244,12 @@ async def ingest_event(
             return _error(400, "invalid delivery id")
         event["delivery_id"] = delivery_id
     await anyio.to_thread.run_sync(append_event, event)
-    if not await anyio.to_thread.run_sync(persist_knock, event):
+    runtime = _runtime(request)
+    if not await anyio.to_thread.run_sync(persist_knock, event, runtime):
         return _error(503, "notification queue unavailable")
-    if await anyio.to_thread.run_sync(claim_knock, event):
-        await anyio.to_thread.run_sync(notify_async, event)
-    await anyio.to_thread.run_sync(_runtime(request).state_coordinator.evaluate)
+    if await anyio.to_thread.run_sync(claim_knock, event, runtime):
+        await anyio.to_thread.run_sync(notify_async, event, runtime)
+    await anyio.to_thread.run_sync(runtime.state_coordinator.evaluate)
     return Response(status_code=204)
 
 
@@ -1161,8 +1324,8 @@ async def stream_state(
 
 
 @app.get("/transport/status", response_model=TransportStatus)
-async def get_transport_status():
-    return await anyio.to_thread.run_sync(transport_status)
+async def get_transport_status(request: Request):
+    return await anyio.to_thread.run_sync(transport_status, _runtime(request))
 
 
 @app.get("/villagers", response_model=VillagerList)

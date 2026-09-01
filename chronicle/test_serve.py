@@ -763,8 +763,9 @@ class NotificationTests(unittest.TestCase):
             TestClient(serve.app),
         ):
             pass
-        ensure.assert_called_once_with()
-        stop.assert_called_once_with()
+        ensure.assert_called_once()
+        self.assertIsInstance(ensure.call_args.args[0], serve.Runtime)
+        stop.assert_called_once_with(ensure.call_args.args[0])
 
     def test_knock_is_not_acknowledgeable_when_durable_journal_fails(self):
         event = self.event()
