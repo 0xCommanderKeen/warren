@@ -8,10 +8,8 @@ a knock is still an ordinary event for the *budgets*. Rotation keeps the newest
 resident's own tools, tasks and sessions out of its history early, and an outsider
 would be deciding what an operator can see.
 
-Steward bounds the same storm at the other end by emitting one record per stranger
-per door per catch-up window. These tests are the half that has to hold when that
-one is outrun: by a scanner rotating sender ids, by a daemon that restarted, or by
-a Steward too old to have a limiter at all.
+Steward bounds the same storm at the other end (see `docs/protocol.md`). These tests
+are the half that has to hold when that one is outrun.
 """
 
 import datetime
@@ -79,11 +77,29 @@ class AmbientBudgetTests(unittest.TestCase):
         types = [item["type"] for item in kept]
 
         self.assertEqual(20, types.count("tool_called"), "the resident's own work")
-        self.assertLessEqual(
-            types.count("chat_message_dropped"),
-            retention.KEEP_AMBIENT_PER_AGENT,
-            "an outsider gets a share of the budget, not the whole of it",
+        self.assertLessEqual(len(kept), retention.KEEP_PER_AGENT)
+
+    def test_a_working_resident_squeezes_a_storm_down_to_its_floor(self):
+        """Contested is where the share bites: the fleet first, the outsider its floor."""
+        work = [event("tool_called", index, tool="Read") for index in range(200)]
+        storm = [knock(300 + index, sender=str(index)) for index in range(200)]
+
+        types = [item["type"] for item in rotate(work + storm, 600)]
+
+        self.assertEqual(retention.KEEP_AMBIENT_PER_AGENT, types.count("chat_message_dropped"))
+        self.assertEqual(
+            retention.KEEP_PER_AGENT - retention.KEEP_AMBIENT_PER_AGENT,
+            types.count("tool_called"),
         )
+
+    def test_a_quiet_resident_leaves_the_storm_the_room_it_was_not_using(self):
+        """A floor, not a ceiling: bounding harder than the budget would waste the log."""
+        work = [event("tool_called", index, tool="Read") for index in range(20)]
+        storm = [knock(30 + index, sender=str(index)) for index in range(200)]
+
+        types = [item["type"] for item in rotate(work + storm, 240)]
+
+        self.assertEqual(retention.KEEP_PER_AGENT - 20, types.count("chat_message_dropped"))
 
     def test_the_newest_knocks_are_the_ones_kept(self):
         """Bounded like everything else here: what survives is the recent end of it."""

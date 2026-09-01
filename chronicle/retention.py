@@ -25,18 +25,25 @@ from typed_json import canonical_string, decode_graph, semantic_key
 # The reducer's own sets, imported rather than mirrored: retention and the projection
 # disagreeing about what counts as evidence of life — or about what opens a board row —
 # is precisely the bug this prevents.
-from village_state import AMBIENT_TYPES, TASK_LEDGER_TYPES, TASK_ORIGIN_TYPES
+from village_state import (
+    AMBIENT_TYPES,
+    TASK_LEDGER_TYPES,
+    TASK_ORIGIN_TYPES,
+    ambient_share,
+)
 
 _POLICY_PATH = Path(__file__).with_name("retention-policy.json")
 POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
 
 EVENT_TYPES = set(PROTOCOL_EVENT_TYPES)
 KEEP_PER_AGENT = POLICY["events_per_agent"]
-#: How much of an agent's budget somebody *else* may fill. A knock is an ordinary event
-#: for every bound in this file, and the one event an outsider causes, so without a share
-#: of its own a knock storm ages a resident's own tools, tasks and sessions out of the
-#: village early (warren#278). Small: a knock is worth carrying and worth carrying a few
-#: of, and Steward already folds a storm into one record per stranger per window.
+#: How much of an agent's budget somebody *else* is guaranteed, and all they get when it is
+#: contested. A knock is an ordinary event for every bound in this file, and the one event
+#: an outsider causes, so without a share of its own a knock storm ages a resident's own
+#: tools, tasks and sessions out of the village early (warren#278). The split itself is
+#: :func:`village_state.ambient_share`, imported rather than repeated for the reason
+#: :data:`AMBIENT_TYPES` is: rotation and the reducer disagreeing here would mean discarding
+#: history the snapshot would have shown.
 KEEP_AMBIENT_PER_AGENT = POLICY["ambient_events_per_agent"]
 VIEWER_LINE_LIMIT = POLICY["viewer_line_limit"]
 DROP_MS = POLICY["drop_ms"]
@@ -1316,8 +1323,8 @@ def _projection_keep_indexes(
     ]
     live.sort(key=lambda item: item[1][2], reverse=True)
     candidates = {agent_id for agent_id, _ in live}
-    history = collections.defaultdict(list)
-    ambient_kept = collections.Counter()
+    ordinary_history = collections.defaultdict(list)
+    ambient_history = collections.defaultdict(list)
     lineage = {}
     previous_action = {}
     previous_ordinary_seen = set()
@@ -1333,18 +1340,15 @@ def _projection_keep_indexes(
         if agent_id not in lineage and payload.get("parent_agent_id"):
             lineage[agent_id] = index
         if event["type"] != "heartbeat":
-            # Ambient events are visible history, but on a smaller budget of their own:
-            # they are somebody else's action filed under this villager's door, and
-            # newest-wins alone would let a knock storm spend the whole of an agent's
-            # budget on itself. Counted before the shared cap so the two bounds compose —
-            # a knock consumes an ordinary slot as well as an ambient one.
-            ambient = event["type"] in AMBIENT_TYPES
-            if len(history[agent_id]) < KEEP_PER_AGENT and not (
-                ambient and ambient_kept[agent_id] >= KEEP_AMBIENT_PER_AGENT
-            ):
-                history[agent_id].append(index)
-                if ambient:
-                    ambient_kept[agent_id] += 1
+            # Both halves of the agent's visible history are collected in full here and
+            # divided afterwards. Ambient events are somebody else's action filed under
+            # this villager's door, and newest-wins alone would let a knock storm spend
+            # the whole of an agent's budget on itself.
+            bucket = (
+                ambient_history if event["type"] in AMBIENT_TYPES else ordinary_history
+            )
+            if len(bucket[agent_id]) < KEEP_PER_AGENT:
+                bucket[agent_id].append(index)
             if agent_id not in previous_ordinary_seen:
                 previous_ordinary_seen.add(agent_id)
                 if event["type"] in PROJECTION_ACTION_TYPES:
@@ -1378,6 +1382,17 @@ def _projection_keep_indexes(
         admitted.append(agent_id)
         if live_agents is not None:
             live_agents.add(agent_id)
+    # The agent's visible history, divided: the fleet's own records are served out of
+    # everything but the outsider's floor, and the outsider takes whatever is genuinely
+    # left — the whole budget when nobody knocked, exactly the floor when a storm and a
+    # working resident both want it (warren#278).
+    history = {}
+    for agent_id in admitted:
+        ordinary, ambient = ordinary_history[agent_id], ambient_history[agent_id]
+        take_ordinary, take_ambient = ambient_share(
+            len(ordinary), len(ambient), KEEP_PER_AGENT, KEEP_AMBIENT_PER_AGENT
+        )
+        history[agent_id] = ordinary[:take_ordinary] + ambient[:take_ambient]
     optional = sorted(
         (
             index

@@ -772,27 +772,49 @@ def test_a_closed_window_is_forgotten_so_the_limiter_cannot_grow_for_ever(
 
 def test_a_sweep_reports_the_storm_it_forgets(chat_door: ch.ChatRoute):
     limiter = ch.KnockLimiter(window_s=300.0)
-    limiter.admit(chat_door, "9999", "not an operator", NOW)
-    limiter.admit(chat_door, "9999", "not a private conversation", NOW)
-    limiter.admit(chat_door, "9999", "not a private conversation", NOW)
-    [storm] = limiter.sweep(NOW + timedelta(seconds=300))
+    for _ in range(3):
+        limiter.admit(chat_door, "9999", "not an operator", NOW)
+    [drop] = limiter.sweep(NOW + timedelta(seconds=300))
 
-    assert (storm.sender, storm.suppressed) == ("9999", 1)
-    # The record it becomes is one of the swallowed knocks, so it carries that knock's
-    # reason rather than the one that opened the window.
-    assert storm.reason == "not a private conversation"
+    # Three knocks: the first was recorded, and the record closing the window is the third
+    # standing for the second as well.
+    assert (drop.sender, drop.reason, drop.suppressed) == ("9999", "not an operator", 1)
     assert len(limiter) == 0
+
+
+def test_the_two_silences_are_counted_apart(chat_door: ch.ChatRoute):
+    """Townhall folds knocks by reason, so a group chat's tally is not a stranger's."""
+    limiter = ch.KnockLimiter(window_s=300.0)
+
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW) == 0
+    assert limiter.admit(chat_door, "9999", "not a private conversation", NOW) == 0
+    assert limiter.admit(chat_door, "9999", "not an operator", NOW) is None
 
 
 def test_a_scanner_rotating_senders_cannot_make_the_limiter_the_leak(
     chat_door: ch.ChatRoute,
 ):
-    """The bound on doors is the last one: an outsider must not choose steward's memory."""
+    """The bound on windows is the last one: an outsider must not choose steward's memory."""
     limiter = ch.KnockLimiter(window_s=300.0, doors=2)
     for sender in ("1", "2", "3", "4"):
         limiter.admit(chat_door, sender, "not an operator", NOW)
 
     assert len(limiter) == 2
+
+
+def test_what_the_door_bound_forgets_is_still_reported(chat_door: ch.ChatRoute):
+    """A bound against a flood becoming a silence must not itself make one."""
+    limiter = ch.KnockLimiter(window_s=300.0, doors=1)
+    limiter.admit(chat_door, "9999", "not an operator", NOW)
+    limiter.admit(chat_door, "9999", "not an operator", NOW)
+    # A second stranger arrives and the first is pushed out of the map with its count.
+    limiter.admit(chat_door, "8888", "not an operator", NOW)
+
+    [forgotten] = limiter.sweep(NOW)
+
+    assert (forgotten.sender, forgotten.suppressed) == ("9999", 0)
+    # Handed over once: a swept eviction is not reported again on the next pass.
+    assert limiter.sweep(NOW) == []
 
 
 def test_a_message_older_than_the_catch_up_window_fires_nothing_and_says_nothing(

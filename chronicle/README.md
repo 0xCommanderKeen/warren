@@ -72,11 +72,12 @@ snapshot carries:
 - **`diagnostics`**, **`capacity`** and **`capabilities`** — malformed records, the bounds
   this server actually applied, and which event families this build projects (`ingest`,
   `approvals`, `jobs`, `routines`), so a client can tell an older backend from a feature
-  the fleet is simply not using. `diagnostics` also carries one
-  `chat_message_dropped` record per message that reached a resident's chat route and was
-  deliberately not answered — the door, who knocked, and why they got silence. That is
-  the only place a knock on a sleeping resident shows up, because an outsider's message
-  is never allowed to put its villager back on the map.
+  the fleet is simply not using. `diagnostics` also carries
+  `chat_message_dropped` records — a message reached a resident's chat route and was
+  deliberately not answered — naming the door, who knocked, why they got silence, and how
+  many further knocks that record stands for (`suppressed`; Steward sends one per stranger
+  per door per window). That is the only place a knock on a sleeping resident shows up,
+  because an outsider's message is never allowed to put its villager back on the map.
 
 Every villager also carries a **`mood`**: one deterministic operational reading built from
 retained failures, work density, exact human interactions and unresolved needs — not
@@ -102,6 +103,15 @@ Bounds are published rather than implied: `capacity` reports the retention this 
 applied to villagers, per-villager history, tasks, approvals, journals, routines and
 diagnostics. Full arrays keep the newest records, so a finished job leaves `tasks` because
 newer ones pushed it out, not because a timer retired it.
+
+Two of those bounds are split rather than plain, because an outsider fills part of them.
+`ambient_events_per_villager` and `ambient_diagnostics` are how much of a villager's history
+and of the diagnostics channel a knock at a chat door is *guaranteed* — and all it gets when
+either is contested, so a knock storm cannot age out what a resident actually did or what
+the projection could not fold (warren#278). They are floors, not ceilings: when nothing else
+wants the room, knocks take it, and a full channel is still full. Rotation applies the same
+split to its own per-agent budget, published as `ambient_events_per_agent` in
+[`retention-policy.json`](retention-policy.json).
 
 ## It observes writes; it never performs them
 

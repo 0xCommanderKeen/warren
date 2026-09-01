@@ -835,11 +835,15 @@ class DiagnosticWire(BaseModel):
 class ProjectionCapacity(BaseModel):
     villagers: int
     events_per_villager: int
+    #: How much of a villager's history, and of the diagnostics channel, an outsider's
+    #: knocking is guaranteed — and all it gets when either is contested (warren#278).
+    ambient_events_per_villager: int
     tasks: int
     approvals: int
     journals: int
     routines: int
     diagnostics: int
+    ambient_diagnostics: int
 
 
 class VillageState(BaseModel):

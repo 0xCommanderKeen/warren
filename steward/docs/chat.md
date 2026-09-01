@@ -102,19 +102,22 @@ still finds it.
 
 **A stranger may knock as often as they like; they may not fill the log.** Every message
 that reaches a closed door is dropped, but only the first in a **catch-up window** per
-`(door, sender)` becomes an event — the rest are counted, and the count leaves as
+`(door, sender, reason)` becomes an event — the rest are counted, and the count leaves as
 `payload.suppressed` on the record that closes the window (`KnockLimiter`, warren#278).
 `suppressed` is how many *other* knocks that one record stands for, so the number of knocks
 is `1 + suppressed` and a lone knock reads `0`. This is why the fix is a limiter rather than
 a filter: a flood is more interesting than a single knock, and a bound that turned two
 hundred messages into one ordinary-looking record would hide the thing worth noticing. The
 storm is reported when its window closes even if the sender has stopped — the daemon sweeps
-at the end of every pass, idle ones included — and a scanner rotating sender ids past
-`KNOCK_DOORS_TRACKED` doors inside one pass is named in the daemon's log rather than counted
-in silence.
+at the end of every pass, idle ones included — and a window forced out by
+`KNOCK_DOORS_TRACKED` hands its count to that same sweep rather than losing it.
+
+The reason is in the key because there are exactly two of them and townhall folds knocks by
+reason: counting them together would put a group chat's tally on the line that says "not an
+operator".
 
 Without this, the drop's own channels are what an outsider gets to spend: chronicle keeps
-the newest 200 diagnostics and the newest events per agent, so a few hundred knocks could
+the newest 200 diagnostics and a bounded history per villager, so a few hundred knocks could
 push a resident's real history out of the village and the projection's own complaints off the
 Diagnostics page. Chronicle bounds the other end of the same problem — knocks get a share of
 those channels rather than all of them — and the two halves are complementary: this one keeps
@@ -247,7 +250,7 @@ If nothing comes back:
 
 | symptom | what it means |
 |---|---|
-| no reply at all | one of three silences, and the daemon's log says which: your user id is not in `STEWARD_CHAT_OPERATORS`, you are messaging in a group, or the message is older than the catch-up window. The first two are also a `chat_message_dropped` event — one per sender per door per catch-up window, the repeats counted into `suppressed`. |
+| no reply at all | one of three silences, and the daemon's log says which: your user id is not in `STEWARD_CHAT_OPERATORS`, you are messaging in a group, or the message is older than the catch-up window. The first two are also a `chat_message_dropped` event — one per sender per door per reason per catch-up window, the repeats counted into `suppressed`. |
 | "…is busy right now" | the scheduler or a dispatch has that resident. Send it again. |
 | "…cannot answer right now: …" | a budget pause, or a memory directory the daemon cannot see. `steward budget show` and `steward doctor` say which. |
 | `telegram getUpdates failed` in the log | the token is wrong, or the burrow cannot reach `api.telegram.org`. |

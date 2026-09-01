@@ -120,6 +120,7 @@ export default function DiagnosticsPage({ model }) {
 
   const diagnostics = model.diagnostics;
   const capacity = model.snapshot.capacity?.diagnostics;
+  const knockShare = model.snapshot.capacity?.ambient_diagnostics;
   const groups = groupDiagnostics(diagnostics);
   const brimming = Boolean(capacity) && diagnostics.length >= capacity;
 
@@ -135,9 +136,15 @@ export default function DiagnosticsPage({ model }) {
             <>
               This channel is <strong className="font-normal text-ink">full</strong>: the
               projection keeps the newest {capacity} records and has already dropped whatever came
-              before these. Knocks are capped at a share of it (warren#278), so what has been
-              dropped here is the fleet's own account of itself rather than somebody else's
-              doorbell.
+              before these.
+              {knockShare ? (
+                <>
+                  {" "}
+                  Knocks are guaranteed {knockShare} of those and get no more than {knockShare}{" "}
+                  while anything else wants the room (warren#278), so a storm cannot be what
+                  dropped the rest.
+                </>
+              ) : null}
             </>
           ) : (
             <>

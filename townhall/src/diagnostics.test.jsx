@@ -14,7 +14,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { viewModel } from "./model.js";
-import { KNOCK, UNNAMED, fields, foldKnocks, groupDiagnostics } from "./diagnostics.js";
+import { KNOCK, UNNAMED, fields, foldKnocks, groupDiagnostics, knockCount } from "./diagnostics.js";
 import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
 
 const knock = (overrides = {}) => ({
@@ -142,6 +142,16 @@ describe("grouping diagnostics by kind", () => {
 
     expect(knocks.records).toBe(200);
     expect(knocks.entries).toHaveLength(1);
+  });
+
+  it("counts knocks rather than records, so the rail and the page agree", () => {
+    // The rail reads `knockCount` and the page reads a folded line's `count`; one saying
+    // "1 knock" beside the other saying "200×" would read as a bug in whichever was seen
+    // second.
+    const records = [knock({ suppressed: 197 }), knock(), knock(), { kind: "malformed_event" }];
+
+    expect(knockCount(records)).toBe(200);
+    expect(foldKnocks(records.slice(0, 3))[0].count).toBe(200);
   });
 
   it("keeps a kind chronicle grew after this page was written", () => {

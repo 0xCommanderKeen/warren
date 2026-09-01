@@ -393,19 +393,24 @@ villager's own tools, tasks and sessions would age out of its retained history e
 Neither is data loss — but both are an outsider choosing what the projection shows, which
 is the thing it is otherwise careful about.
 
-So a knock is capped at its own smaller number in both channels: at most
-`ambient_events_per_agent` (8) of a villager's `events_per_agent` (80) retained events, and
-at most `ambient_diagnostics` (40) of the snapshot's 200 diagnostics. Everything else
-divides what is left, and takes the whole of the channel when nobody has knocked. Both caps
-keep the newest records and both preserve append order.
+So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
+(`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+the fleet's own records are served first out of everything but the outsider's floor, and the
+outsider then takes whatever is genuinely left. The floors are `ambient_events_per_agent` (8
+of a villager's 80 retained events), `ambient_events_per_villager` (4 of the 40 rendered on
+its card) and `ambient_diagnostics` (40 of the snapshot's 200). A floor rather than a
+ceiling, deliberately: a knock storm alone still fills a channel nobody else wants, so "the
+newest 200" stays true of a full one. Both halves keep their newest records and append order
+survives the split. `capacity` publishes the two projection floors; rotation's is in
+`retention-policy.json`.
 
 Steward bounds the same storm at the other end: it records one knock per stranger per door
-per catch-up window and counts the rest into `payload.suppressed`, an optional non-negative
-integer saying how many *other* knocks that one record stands for. A record therefore stands
-for `1 + suppressed` knocks, and the count is carried into the diagnostic so a fold that
-shows "one line per sender" can still show a true total. The two halves are complementary,
-and this one is what holds when the limiter is outrun — by a scanner rotating sender ids, by
-a daemon that restarted, or by a Steward too old to have a limiter at all.
+per reason per catch-up window and counts the rest into `payload.suppressed`, an optional
+non-negative integer saying how many *other* knocks that one record stands for. A record
+therefore stands for `1 + suppressed` knocks, and the count is carried into the diagnostic so
+a fold that shows "one line per sender" can still show a true total. The two halves are
+complementary, and this one is what holds when the limiter is outrun — by a scanner rotating
+sender ids, by a daemon that restarted, or by a Steward too old to have a limiter at all.
 
 ### Journal-written observation
 
@@ -455,8 +460,9 @@ agents consume no ordinary witness capacity. If routine identities alone exceed
 the cap, their newest routine append chooses the candidate set. Newest live
 candidates are admitted first
 with their latest state, latest lineage declaration, and heartbeat action support;
-remaining capacity keeps newest visible history, at most 80 events per agent — of
-which at most 8 may be ambient, so a knock storm cannot age a resident's own tools,
+remaining capacity keeps newest visible history, at most 80 events per agent — divided so
+that ambient events are guaranteed 8 of those and get no more than 8 when the agent's own
+records want the rest, which is what stops a knock storm ageing a resident's own tools,
 tasks and sessions out of its history (warren#278). The
 composed projection has at most 4,000 witnesses. At the boundary, an agent whose
 indivisible support does not fit is omitted, then older optional history is

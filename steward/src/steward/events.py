@@ -1335,7 +1335,7 @@ def chat_message_dropped_event(  # noqa: PLR0913 — one keyword per fact worth 
             "address": address,
             "from": truncate_error(sender),
             "reason": truncate_error(reason),
-            "suppressed": max(0, int(suppressed)),
+            "suppressed": suppressed,
         },
     )
 

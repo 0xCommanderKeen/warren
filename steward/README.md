@@ -226,8 +226,8 @@ validation and scrubbed out of any reply. Only the Telegram user ids in
 `STEWARD_CHAT_OPERATORS` are answered, in private chats only — anybody else is dropped
 **without a reply**, because a refusal still tells a scanner the bot is live, and the
 attempt becomes a `chat_message_dropped` event carrying who knocked and never what they
-said — one per sender per door per catch-up window, with the knocks in between counted into
-it, so a scanner cannot spend the village's bounded channels on itself. A busy resident is the API's 409 in sentence form: refused with a reason, never
+said — one per sender per door per catch-up window, with the knocks in between counted
+into it, so a scanner cannot spend the village's bounded channels on itself. A busy resident is the API's 409 in sentence form: refused with a reason, never
 queued. The conversation is a rolling file in the resident's own memory directory, the last
 few turns of which are injected as context *beneath* the charter. A dispatch sweep follows
 every answered message, so a handoff written mid-conversation is delivered before you have

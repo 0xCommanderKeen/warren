@@ -123,9 +123,9 @@ __all__ = [
     "ChatRoute",
     "ChatStatus",
     "ChatTransport",
+    "Drop",
     "KnockLimiter",
     "Message",
-    "Storm",
     "TelegramTransport",
     "Transcript",
     "Turn",
@@ -908,27 +908,25 @@ class ChatOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class Storm:
-    """A window that closed still holding knocks nobody has been told about."""
+class Drop:
+    """One record about knocks at one door, and how many of them it stands for."""
 
     route: ChatRoute
     sender: str
-    #: The reason the *last* swallowed knock was refused. One stranger can manage both of
-    #: them — message a bot directly, then message it in a group — and the record this
-    #: becomes is one of those knocks rather than a summary of all of them.
     reason: str
-    #: How many *other* knocks the record this becomes stands for, beyond itself.
-    suppressed: int
+    #: How many *other* knocks this record stands for, beyond itself. Zero for an ordinary
+    #: knock; the rest of a window's worth on the record that closes it.
+    suppressed: int = 0
 
 
 @dataclass(slots=True)
 class _Window:
-    """One stranger's knocking at one door, from the knock that was recorded."""
+    """One stranger's knocking at one door for one reason, since the knock that was told."""
 
     route: ChatRoute
     sender: str
-    opened_at: datetime
     reason: str
+    opened_at: datetime
     swallowed: int = 0
 
 
@@ -958,13 +956,14 @@ class KnockLimiter:
     """
 
     def __init__(self, window_s: float, doors: int = KNOCK_DOORS_TRACKED) -> None:
-        """Count knocks over ``window_s`` seconds, across at most ``doors`` pairs at once."""
+        """Count knocks over ``window_s`` seconds, across at most ``doors`` windows at once."""
         self.window_s = window_s
         self.doors = doors
-        self._windows: dict[tuple[str, str], _Window] = {}
+        self._windows: dict[tuple[str, str, str], _Window] = {}
+        self._evicted: list[Drop] = []
 
     def __len__(self) -> int:
-        """How many (door, stranger) pairs are being counted right now."""
+        """How many (door, stranger, reason) windows are open right now."""
         return len(self._windows)
 
     def admit(self, route: ChatRoute, sender: str, reason: str, now: datetime) -> int | None:
@@ -973,63 +972,78 @@ class KnockLimiter:
         The number is ``suppressed``: how many knocks the event this admits stands for
         beyond itself. It is zero for an ordinary knock and non-zero only when a window ran
         out without anybody sweeping it, so that reopening it cannot look innocent.
+
+        The key is one field wider than warren#278 asked for — the *reason* joins the door
+        and the sender — because there are exactly two of them (a stranger, and a group
+        chat), one person can manage both, and townhall folds knocks by reason. Counting
+        them together would put a group chat's tally on the line that says "not an
+        operator". Two records per stranger per window instead of one is not a volume this
+        limiter exists to stop.
         """
-        key = (route.key, sender)
+        key = (route.key, sender, reason)
         window = self._windows.get(key)
         if window is not None and not self._closed(window, now):
             window.swallowed += 1
-            window.reason = reason
             return None
         if window is None:
             self._make_room()
-        self._windows[key] = _Window(route=route, sender=sender, opened_at=now, reason=reason)
+        self._windows[key] = _Window(route=route, sender=sender, reason=reason, opened_at=now)
         return 0 if window is None else window.swallowed
 
-    def sweep(self, now: datetime) -> list[Storm]:
+    def sweep(self, now: datetime) -> list[Drop]:
         """Close every window that has run out, and report the ones that swallowed anything.
 
         Called once per pass, which is what keeps two promises at once: a storm becomes
         visible within a window of ending rather than whenever somebody knocks next, and a
-        pair that stopped knocking is forgotten rather than counted for ever.
+        window that stopped is forgotten rather than counted for ever. Windows the door
+        bound forced out come back here too, so no count is ever lost to a log line.
         """
-        storms: list[Storm] = []
+        drops, self._evicted = self._evicted, []
         for key, window in list(self._windows.items()):
             if not self._closed(window, now):
                 continue
             del self._windows[key]
-            if window.swallowed:
-                storms.append(
-                    Storm(
-                        route=window.route,
-                        sender=window.sender,
-                        reason=window.reason,
-                        suppressed=window.swallowed - 1,
-                    )
-                )
-        return storms
+            drops.extend(self._closing(window))
+        return drops
+
+    def _closing(self, window: _Window) -> list[Drop]:
+        """Return what one window that is going away still owes the village."""
+        if not window.swallowed:
+            return []
+        # The record *is* one of the knocks it stands for — the last one — which is why it
+        # carries that window's reason and stands for one fewer than were swallowed.
+        return [
+            Drop(
+                route=window.route,
+                sender=window.sender,
+                reason=window.reason,
+                suppressed=window.swallowed - 1,
+            )
+        ]
 
     def _closed(self, window: _Window, now: datetime) -> bool:
         return (now - window.opened_at).total_seconds() >= self.window_s
 
     def _make_room(self) -> None:
-        """Forget the oldest pair when a pass brings more strangers than the bound allows.
+        """Forget the oldest window when a pass brings more strangers than the bound allows.
 
         Only reachable inside one pass — :meth:`sweep` drops every closed window at the end
         of each one — and only by somebody rotating sender ids, whose every new id is
-        recorded as its own knock anyway. Said out loud rather than dropped silently,
-        because the count that goes with it is what is being lost.
+        recorded as its own knock anyway. What it had swallowed is handed to the next sweep
+        rather than dropped: a bound meant to stop a flood becoming a silence must not be
+        the thing that makes one.
         """
         if len(self._windows) < self.doors:
             return
         oldest = min(self._windows, key=lambda key: self._windows[key].opened_at)
         forgotten = self._windows.pop(oldest)
+        self._evicted.extend(self._closing(forgotten))
         log.warning(
-            "%s: the knock limiter is already counting %d doors, so %s is forgotten along "
-            "with the %d knock(s) it had swallowed; somebody is rotating sender ids",
+            "%s: the knock limiter is already counting %d windows, so %s is forgotten; "
+            "somebody is rotating sender ids",
             oldest[0],
             self.doors,
             forgotten.sender,
-            forgotten.swallowed,
         )
 
 
@@ -1216,16 +1230,16 @@ class ChatBridge:
         ones — a long poll that came back empty is exactly when a window that closed
         mid-storm needs saying.
         """
-        for storm in self.knocks.sweep(now):
+        for drop in self.knocks.sweep(now):
             log.warning(
                 "%s: %s knocked %d more time(s) inside %.0fs and got the same silence; "
                 "recording the storm as one event",
-                storm.route.key,
-                storm.sender,
-                storm.suppressed + 1,
+                drop.route.key,
+                drop.sender,
+                drop.suppressed + 1,
                 self.knocks.window_s,
             )
-            self._record_drop(storm.route, storm.sender, storm.reason, storm.suppressed)
+            self._record_drop(drop)
 
     def _poll_route(self, route: ChatRoute, now: datetime) -> list[ChatOutcome]:
         """Poll one bot and answer everything it hands over, oldest first."""
@@ -1383,7 +1397,9 @@ class ChatBridge:
             message.sender,
             reason,
         )
-        self._record_drop(route, message.sender, reason, suppressed)
+        self._record_drop(
+            Drop(route=route, sender=message.sender, reason=reason, suppressed=suppressed)
+        )
         return self._dropped(route, message, reason)
 
     def _dropped(self, route: ChatRoute, message: Message, reason: str) -> ChatOutcome:
@@ -1396,8 +1412,9 @@ class ChatBridge:
             reason=reason,
         )
 
-    def _record_drop(self, route: ChatRoute, sender: str, reason: str, suppressed: int) -> None:
+    def _record_drop(self, drop: Drop) -> None:
         """Put one knock in the village. Never raises: a village that is down is not news."""
+        route = drop.route
         try:
             self.emitter.emit(
                 ev.chat_message_dropped_event(
@@ -1405,9 +1422,9 @@ class ChatBridge:
                     project=route.resident.project,
                     route=route.route.id,
                     address=str(route.address),
-                    sender=sender,
-                    reason=reason,
-                    suppressed=suppressed,
+                    sender=drop.sender,
+                    reason=drop.reason,
+                    suppressed=drop.suppressed,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — an unreachable village is not a failure here

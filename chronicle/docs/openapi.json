@@ -337,6 +337,14 @@
       },
       "ProjectionCapacity": {
         "properties": {
+          "ambient_diagnostics": {
+            "title": "Ambient Diagnostics",
+            "type": "integer"
+          },
+          "ambient_events_per_villager": {
+            "title": "Ambient Events Per Villager",
+            "type": "integer"
+          },
           "approvals": {
             "title": "Approvals",
             "type": "integer"
@@ -369,11 +377,13 @@
         "required": [
           "villagers",
           "events_per_villager",
+          "ambient_events_per_villager",
           "tasks",
           "approvals",
           "journals",
           "routines",
-          "diagnostics"
+          "diagnostics",
+          "ambient_diagnostics"
         ],
         "title": "ProjectionCapacity",
         "type": "object"

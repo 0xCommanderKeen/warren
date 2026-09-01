@@ -115,13 +115,6 @@ const KIND_ORDER = [
 const kindOf = (record) =>
   typeof record?.kind === "string" && record.kind ? record.kind : UNNAMED;
 
-/** "3 knocks", "1 knock" — the counting both the page and the rail do. */
-export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-
-/** How many of these records are somebody outside the fleet ringing a doorbell. */
-export const knockCount = (records) =>
-  (records || []).filter((record) => kindOf(record) === KNOCK).length;
-
 /**
  * How many knocks one record stands for: itself, plus the ones Steward counted into it.
  *
@@ -134,6 +127,21 @@ const knocksIn = (record) => {
   const suppressed = record?.suppressed;
   return Number.isSafeInteger(suppressed) && suppressed > 0 ? suppressed + 1 : 1;
 };
+
+/** "3 knocks", "1 knock" — the counting both the page and the rail do. */
+export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * How many times somebody outside the fleet rang a doorbell.
+ *
+ * Knocks, not records — the rail and the page have to agree, and since warren#278 one
+ * record can stand for two hundred knocks. A rail reading "1 knock" beside a page reading
+ * "200×" would make the count look like a bug in whichever the operator saw second.
+ */
+export const knockCount = (records) =>
+  (records || [])
+    .filter((record) => kindOf(record) === KNOCK)
+    .reduce((total, record) => total + knocksIn(record), 0);
 
 /**
  * One line per sender, per door, per reason — however many times they knocked.
@@ -156,7 +164,8 @@ export function foldKnocks(records) {
     const key = JSON.stringify(KNOCK_FIELDS.map((field) => named[field] ?? null));
     const seen = lines.get(key);
     if (!seen) {
-      lines.set(key, { key, ...named, count: knocksIn(record), first: record?.ts, last: record?.ts });
+      const count = knocksIn(record);
+      lines.set(key, { key, ...named, count, first: record?.ts, last: record?.ts });
       continue;
     }
     seen.count += knocksIn(record);

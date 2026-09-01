@@ -69,7 +69,7 @@ that a diagnostic names what went wrong without quoting the input that caused it
 knocks from one sender are one line with a count, because a storm is one fact rather than
 two hundred rows — and the count is *knocks*, not records: steward records one knock per
 sender per door per catch-up window and counts the rest into `suppressed`, which the fold
-adds back (warren#278).
+and the rail's own tally both add back (warren#278).
 
 ### Nothing here claims an effect steward has not confirmed
 
