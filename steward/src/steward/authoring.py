@@ -533,6 +533,7 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
     except AuthoringError:
         return
     lock = Path(f"{index}.lock")
+    index_mode = index.stat().st_mode if index.exists() else None
     try:
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
@@ -579,6 +580,8 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
                 )
             if not outcome.ok:
                 return
+        if index_mode is not None:
+            lock.chmod(index_mode)
         lock.replace(index)
     except OSError, AuthoringError, ValueError:
         return
@@ -593,7 +596,7 @@ def _commit_with_isolated_index(
     message: str,
     identity: CommitIdentity,
     git: PipedRun,
-) -> str:
+) -> str | None:
     """Build and publish one exact commit without reading or overwriting shared state."""
     index_dir = _git_path(repo, "index", git).parent
     with tempfile.NamedTemporaryFile(prefix="steward-index-", dir=index_dir) as scratch:
@@ -639,6 +642,8 @@ def _commit_with_isolated_index(
                 parent_entries = _index_entries(repo, relative, git, index=parent_index)
             finally:
                 parent_index.unlink(missing_ok=True)
+        if authored == parent_entries:
+            return None
         commit = git(
             [
                 "git",
@@ -721,30 +726,10 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
             message=message,
             note="nothing to commit: what is on disk was already what is in git",
         )
-    changed = git(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--",
-            *relative,
-        ]
-    )
-    if not changed.ok:
-        raise AuthoringError(
-            f"git could not compare the authored paths: {changed.summary()}",
-            reason="commit_failed",
-        )
-    if not changed.stdout.strip():
-        sha = None
-    else:
-        # This index begins as HEAD and contains only Steward's path changes. The
-        # checkout's shared index is neither staged through nor restored from a stale
-        # snapshot, so concurrent unrelated staging remains byte-for-byte intact.
-        sha = _commit_with_isolated_index(repo, relative, message, identity, git)
+    # This index begins as HEAD and contains only Steward's path changes. It is also the
+    # source of truth for convergence: pre-existing same-path staging in the checkout's
+    # shared index must neither manufacture an empty commit nor be disturbed.
+    sha = _commit_with_isolated_index(repo, relative, message, identity, git)
     if sha is None:
         return CommitReport(
             committed=False,

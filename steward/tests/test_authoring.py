@@ -7,6 +7,7 @@ itself.
 
 import copy
 import re
+import stat
 import threading
 import time
 from pathlib import Path
@@ -241,6 +242,73 @@ def test_a_write_that_changes_nothing_makes_no_second_commit(fleet: ScratchRepo)
     assert fleet.log() == commits
 
 
+def test_unchanged_declaration_ignores_and_preserves_same_target_staging(
+    fleet: ScratchRepo,
+) -> None:
+    target = fleet.residents / "test-agent" / MANIFEST_FILENAME
+    head_bytes = target.read_bytes()
+    target.write_text(
+        edited(declaration_of(fleet), summary="The operator's staged bytes.").manifest_text,
+        encoding="utf-8",
+    )
+    fleet.git("add", str(target.relative_to(fleet.root)))
+    target.write_bytes(head_bytes)
+    index = fleet.root / ".git" / "index"
+    staged_before = index.read_bytes()
+    head = fleet.head()
+
+    result = write(fleet, "test-agent", declaration_of(fleet))
+
+    assert not result.commit.committed
+    assert fleet.head() == head
+    assert index.read_bytes() == staged_before
+    assert (
+        "operator's staged bytes" in fleet.git("show", f":{target.relative_to(fleet.root)}").stdout
+    )
+
+
+def test_unchanged_skill_ignores_and_preserves_same_target_staging(fleet: ScratchRepo) -> None:
+    target = fleet.skills / "daily-summary" / "SKILL.md"
+    original, _ = au.read_skill_document(fleet.skills, "daily-summary")
+    head_bytes = target.read_bytes()
+    target.write_text(
+        au.SkillDocument(
+            name="daily-summary", description="The operator's staged bytes.", body=original.body
+        ).text(),
+        encoding="utf-8",
+    )
+    fleet.git("add", str(target.relative_to(fleet.root)))
+    target.write_bytes(head_bytes)
+    index = fleet.root / ".git" / "index"
+    staged_before = index.read_bytes()
+    head = fleet.head()
+
+    result = au.write_skill(
+        fleet.residents,
+        fleet.skills,
+        original,
+        request_id=REQUEST_ID,
+        principal=PRINCIPAL,
+        created=False,
+    )
+
+    assert not result.commit.committed
+    assert fleet.head() == head
+    assert index.read_bytes() == staged_before
+    assert (
+        "operator's staged bytes" in fleet.git("show", f":{target.relative_to(fleet.root)}").stdout
+    )
+
+
+def test_successful_index_reconciliation_preserves_index_mode(fleet: ScratchRepo) -> None:
+    index = fleet.root / ".git" / "index"
+    index.chmod(0o640)
+
+    write(fleet, "test-agent", edited(declaration_of(fleet), summary="A committed change."))
+
+    assert stat.S_IMODE(index.stat().st_mode) == 0o640
+
+
 def test_the_commit_takes_only_stewards_own_paths(fleet: ScratchRepo) -> None:
     """Somebody's half-finished afternoon must never be swept into steward's commit."""
     (fleet.root / "README.md").write_text("a change nobody asked steward to commit\n")
@@ -329,7 +397,7 @@ def test_the_uncommitted_mode_writes_and_says_so_in_the_response(
     assert data["summary"] == "Written without a net."
 
 
-@pytest.mark.parametrize("failure", ["status", "commit"])
+@pytest.mark.parametrize("failure", ["write-tree", "commit"])
 @pytest.mark.parametrize("kind", ["declaration", "skill"])
 def test_a_git_failure_restores_the_target_and_index_exactly(
     fleet: ScratchRepo, failure: str, kind: str
