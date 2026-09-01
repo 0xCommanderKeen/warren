@@ -513,6 +513,32 @@ def _head_parent(repo: Path, git: PipedRun) -> str | None:
     )
 
 
+def _create_reconciled_index(  # noqa: PLR0913,PLR0917 - one argument per Git state
+    repo: Path,
+    relative: Sequence[str],
+    baseline: Mapping[str, _IndexEntry],
+    authored: Mapping[str, _IndexEntry],
+    parent_entries: Mapping[str, _IndexEntry],
+    git: PipedRun,
+) -> None:
+    """Ask Git to lock and create a missing index with repository permissions."""
+    try:
+        current = _index_entries(repo, relative, git)
+    except AuthoringError:
+        return
+    argv = ["git", "-C", str(repo), "update-index", "--add"]
+    changed = False
+    for path in relative:
+        old = baseline.get(path)
+        new = authored.get(path)
+        if old != parent_entries.get(path) or current.get(path) != old or new is None:
+            continue
+        argv.extend(["--cacheinfo", new.mode, new.oid, path])
+        changed = True
+    if changed:
+        git(argv)
+
+
 def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git state
     repo: Path,
     relative: Sequence[str],
@@ -532,16 +558,20 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
         index = _git_path(repo, "index", git)
     except AuthoringError:
         return
+    if not index.exists():
+        # Let Git create and lock the first index. Besides avoiding a hand-made 0600
+        # index, this applies the repository's umask/core.sharedRepository policy.
+        _create_reconciled_index(repo, relative, baseline, authored, parent_entries, git)
+        return
     lock = Path(f"{index}.lock")
-    index_mode = index.stat().st_mode if index.exists() else None
+    index_mode = index.stat().st_mode
     try:
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
         return
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            if index.exists():
-                stream.write(index.read_bytes())
+            stream.write(index.read_bytes())
         current = _index_entries(repo, relative, git, index=lock)
         for path in relative:
             old = baseline.get(path)
@@ -580,8 +610,7 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
                 )
             if not outcome.ok:
                 return
-        if index_mode is not None:
-            lock.chmod(index_mode)
+        lock.chmod(index_mode)
         lock.replace(index)
     except OSError, AuthoringError, ValueError:
         return

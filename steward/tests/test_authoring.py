@@ -6,6 +6,7 @@ itself.
 """
 
 import copy
+import os
 import re
 import stat
 import threading
@@ -307,6 +308,28 @@ def test_successful_index_reconciliation_preserves_index_mode(fleet: ScratchRepo
     write(fleet, "test-agent", edited(declaration_of(fleet), summary="A committed change."))
 
     assert stat.S_IMODE(index.stat().st_mode) == 0o640
+
+
+def test_unborn_shared_repository_index_uses_git_permissions(
+    tmp_path: Path, write_resident: ResidentWriter, write_skill: SkillWriter
+) -> None:
+    repo = ScratchRepo(root=tmp_path / "shared-checkout")
+    repo.residents.mkdir(parents=True)
+    repo.skills.mkdir(parents=True)
+    repo.git("init", "-b", "main")
+    repo.git("config", "core.sharedRepository", "group")
+    for name in GRANTED:
+        write_skill(name, root=repo.skills)
+    write_resident(valid_manifest(), root=repo.residents)
+
+    previous_umask = os.umask(0o077)
+    try:
+        write(repo, "test-agent", edited(declaration_of(repo), summary="The first commit."))
+    finally:
+        os.umask(previous_umask)
+
+    index = repo.root / ".git" / "index"
+    assert stat.S_IMODE(index.stat().st_mode) == 0o660
 
 
 def test_the_commit_takes_only_stewards_own_paths(fleet: ScratchRepo) -> None:
