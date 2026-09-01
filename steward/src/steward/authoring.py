@@ -36,11 +36,12 @@ control plane from working at all.
 
 import fcntl
 import hashlib
+import os
 import re
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -466,14 +467,134 @@ def commit_message(subject: str, request_id: str, principal: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexEntry:
+    """One stage-zero index entry, retained exactly enough for compare-and-swap."""
+
+    mode: str
+    oid: str
+    path: str
+
+
+def _index_entries(
+    repo: Path, relative: Sequence[str], git: PipedRun, *, index: Path | None = None
+) -> dict[str, _IndexEntry]:
+    """Read stage-zero entries from one index without consulting the worktree."""
+    prefix = ["env", f"GIT_INDEX_FILE={index}"] if index is not None else []
+    outcome = git([*prefix, "git", "-C", str(repo), "ls-files", "--stage", "--", *relative])
+    if not outcome.ok:
+        raise AuthoringError(
+            f"git could not inspect the authored index entries: {outcome.summary()}",
+            reason="commit_failed",
+        )
+    entries: dict[str, _IndexEntry] = {}
+    for line in outcome.stdout.splitlines():
+        metadata, path = line.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage == "0":
+            entries[path] = _IndexEntry(mode, oid, path)
+    return entries
+
+
+def _head_parent(repo: Path, git: PipedRun) -> str | None:
+    """Return HEAD, recognizing only a genuinely unborn symbolic ref as no parent."""
+    head = git(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"])
+    if head.ok and head.stdout.strip():
+        return head.stdout.strip()
+
+    symbolic = git(["git", "-C", str(repo), "symbolic-ref", "--quiet", "HEAD"])
+    if symbolic.ok and symbolic.stdout.strip():
+        ref = symbolic.stdout.strip()
+        exists = git(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref])
+        if exists.exit_status == 1:
+            return None
+    raise AuthoringError(
+        f"git could not resolve the commit parent: {head.summary()}", reason="commit_failed"
+    )
+
+
+def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git state
+    repo: Path,
+    relative: Sequence[str],
+    baseline: Mapping[str, _IndexEntry],
+    authored: Mapping[str, _IndexEntry],
+    parent_entries: Mapping[str, _IndexEntry],
+    git: PipedRun,
+) -> None:
+    """Refresh untouched authored entries under Git's own index lock, best-effort.
+
+    An entry is ours to refresh only when it was unstaged at capture time (its baseline
+    equals the expected parent's entry) and still has exactly that baseline value after
+    the commit. Pre-existing staging and same-path staging performed during authoring are
+    therefore both preserved.
+    """
+    try:
+        index = _git_path(repo, "index", git)
+    except AuthoringError:
+        return
+    lock = Path(f"{index}.lock")
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        return
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            if index.exists():
+                stream.write(index.read_bytes())
+        current = _index_entries(repo, relative, git, index=lock)
+        for path in relative:
+            old = baseline.get(path)
+            if old != parent_entries.get(path) or current.get(path) != old:
+                continue
+            new = authored.get(path)
+            if new is None:
+                outcome = git(
+                    [
+                        "env",
+                        f"GIT_INDEX_FILE={lock}",
+                        "git",
+                        "-C",
+                        str(repo),
+                        "update-index",
+                        "--force-remove",
+                        "--",
+                        path,
+                    ]
+                )
+            else:
+                outcome = git(
+                    [
+                        "env",
+                        f"GIT_INDEX_FILE={lock}",
+                        "git",
+                        "-C",
+                        str(repo),
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        new.mode,
+                        new.oid,
+                        path,
+                    ]
+                )
+            if not outcome.ok:
+                return
+        lock.replace(index)
+    except OSError, AuthoringError, ValueError:
+        return
+    finally:
+        with suppress(OSError):
+            lock.unlink(missing_ok=True)
+
+
 def _commit_with_isolated_index(
     repo: Path,
     relative: Sequence[str],
     message: str,
     identity: CommitIdentity,
     git: PipedRun,
-) -> CommandOutcome:
-    """Build one path-limited commit without reading or writing the checkout's index."""
+) -> str:
+    """Build and publish one exact commit without reading or overwriting shared state."""
     index_dir = _git_path(repo, "index", git).parent
     with tempfile.NamedTemporaryFile(prefix="steward-index-", dir=index_dir) as scratch:
         isolated_index = Path(scratch.name)
@@ -482,10 +603,11 @@ def _commit_with_isolated_index(
         return git(["env", f"GIT_INDEX_FILE={isolated_index}", *argv])
 
     try:
-        head = git(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"])
+        parent = _head_parent(repo, git)
+        baseline = _index_entries(repo, relative, git)
         prepared = isolated(
-            ["git", "-C", str(repo), "read-tree", "HEAD"]
-            if head.ok
+            ["git", "-C", str(repo), "read-tree", parent]
+            if parent is not None
             else ["git", "-C", str(repo), "read-tree", "--empty"]
         )
         if prepared.ok:
@@ -495,21 +617,59 @@ def _commit_with_isolated_index(
                 f"git could not prepare the authored paths: {prepared.summary()}",
                 reason="commit_failed",
             )
-        return isolated(
+        tree = isolated(["git", "-C", str(repo), "write-tree"])
+        if not tree.ok or not tree.stdout.strip():
+            raise AuthoringError(
+                f"git could not write the authored tree: {tree.summary()}", reason="commit_failed"
+            )
+        authored = _index_entries(repo, relative, git, index=isolated_index)
+        parent_entries: dict[str, _IndexEntry] = {}
+        if parent is not None:
+            parent_index = isolated_index.with_name(f"{isolated_index.name}-parent")
+            try:
+                parent_run = lambda argv: git(  # noqa: E731 - tiny environment adapter
+                    ["env", f"GIT_INDEX_FILE={parent_index}", *argv]
+                )
+                loaded = parent_run(["git", "-C", str(repo), "read-tree", parent])
+                if not loaded.ok:
+                    raise AuthoringError(
+                        f"git could not inspect the expected parent: {loaded.summary()}",
+                        reason="commit_failed",
+                    )
+                parent_entries = _index_entries(repo, relative, git, index=parent_index)
+            finally:
+                parent_index.unlink(missing_ok=True)
+        commit = git(
             [
                 "git",
                 "-C",
                 str(repo),
                 *identity.config_args(),
-                "-c",
-                "core.abbrev=40",
-                "commit",
+                "commit-tree",
+                tree.stdout.strip(),
+                *([] if parent is None else ["-p", parent]),
                 "-m",
                 message,
             ]
         )
+        oid = commit.stdout.strip()
+        if not commit.ok or re.fullmatch(r"[0-9a-f]{40,64}", oid) is None:
+            raise AuthoringError(
+                f"git could not create the authored commit: {commit.summary()}",
+                reason="commit_failed",
+            )
+        expected = parent if parent is not None else "0" * len(oid)
+        published = git(["git", "-C", str(repo), "update-ref", "HEAD", oid, expected])
+        if not published.ok:
+            raise AuthoringError(
+                "git HEAD changed while this write was being authored; retry against the new head",
+                reason="commit_failed",
+            )
+        _reconcile_index(repo, relative, baseline, authored, parent_entries, git)
+        return oid
     finally:
-        isolated_index.unlink(missing_ok=True)
+        with suppress(OSError):
+            isolated_index.unlink(missing_ok=True)
 
 
 def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
@@ -584,23 +744,7 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
         # This index begins as HEAD and contains only Steward's path changes. The
         # checkout's shared index is neither staged through nor restored from a stale
         # snapshot, so concurrent unrelated staging remains byte-for-byte intact.
-        committed = _commit_with_isolated_index(repo, relative, message, identity, git)
-        if not committed.ok:
-            raise AuthoringError(
-                f"git could not commit the authored paths: {committed.summary()}",
-                reason="commit_failed",
-            )
-        # The commit command is deliberately the final fallible operation. With a
-        # full-length summary its ordinary output contains the complete object id, so the
-        # response needs no post-commit rev-parse that could turn success into refusal.
-        match = re.search(r"\b([0-9a-f]{40,64})\]", committed.stdout)
-        sha = match.group(1) if match is not None else None
-        if sha is None:  # HEAD advanced; response completion must now be infallible.
-            sha = "committed"
-        # HEAD has advanced, so cleanup is explicitly best-effort success completion: it
-        # may refresh only Steward's entries in the real index, but can never refuse the
-        # already-committed request or roll its worktree back.
-        git(["git", "-C", str(repo), "reset", "--quiet", "HEAD", "--", *relative])
+        sha = _commit_with_isolated_index(repo, relative, message, identity, git)
     if sha is None:
         return CommitReport(
             committed=False,

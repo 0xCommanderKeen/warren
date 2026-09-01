@@ -6,6 +6,7 @@ itself.
 """
 
 import copy
+import re
 import threading
 import time
 from pathlib import Path
@@ -356,7 +357,8 @@ def test_a_git_failure_restores_the_target_and_index_exactly(
     mode_before = target.stat().st_mode
 
     def failing_git(argv: list[str]) -> CommandOutcome:
-        if failure in argv:
+        command = "commit-tree" if failure == "commit" else failure
+        if command in argv:
             return CommandOutcome(tuple(argv), exit_status=1, stderr="injected failure")
         return au.run_argv(argv)
 
@@ -400,7 +402,7 @@ def test_a_failed_write_never_erases_unrelated_staging_added_during_it(
     unrelated.write_bytes(staged_bytes)
 
     def failing_commit(argv: list[str]) -> CommandOutcome:
-        if "commit" in argv:
+        if "commit-tree" in argv:
             fleet.git("add", "README.md")
             return CommandOutcome(tuple(argv), exit_status=1, stderr="injected failure")
         return au.run_argv(argv)
@@ -482,6 +484,165 @@ def test_nothing_fallible_runs_after_the_commit_advances_head(
     assert result.commit.sha == fleet.head()
 
 
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_transient_head_resolution_failure_restores_authored_state(
+    fleet: ScratchRepo, kind: str
+) -> None:
+    """An existing repo with an unreadable HEAD is not an unborn empty repository."""
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    before = target.read_bytes()
+    head = fleet.head()
+
+    def failing_head(argv: list[str]) -> CommandOutcome:
+        if "rev-parse" in argv and "--verify" in argv and "HEAD" in argv:
+            return CommandOutcome(tuple(argv), exit_status=128, stderr="injected transient failure")
+        return au.run_argv(argv)
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                edited(declaration_of(fleet), summary="Must be restored."),
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                git=failing_head,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            au.SkillDocument(
+                name="daily-summary", description="Must be restored.", body="Do it.\n"
+            ),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=failing_head,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "commit_failed"
+    assert target.read_bytes() == before
+    assert fleet.head() == head
+
+
+def test_an_external_head_advance_cannot_be_overwritten_by_the_authored_tree(
+    fleet: ScratchRepo,
+) -> None:
+    """Publishing is a HEAD compare-and-swap, so an outside commit wins intact."""
+    old_head = fleet.head()
+    external = fleet.root / "README.md"
+    advanced = False
+
+    def advancing_git(argv: list[str]) -> CommandOutcome:
+        nonlocal advanced
+        if "update-ref" in argv and not advanced:
+            advanced = True
+            external.write_text("the outside writer's bytes\n", encoding="utf-8")
+            fleet.git("add", "README.md")
+            fleet.git("commit", "-m", "external: advance HEAD")
+        return au.run_argv(argv)
+
+    with pytest.raises(au.AuthoringError) as refused:
+        au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            edited(declaration_of(fleet), summary="Must not replace the external tree."),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=advancing_git,
+        )
+
+    assert refused.value.reason == "commit_failed"
+    assert fleet.head() != old_head
+    assert fleet.git("log", "-1", "--format=%s").stdout.strip() == "external: advance HEAD"
+    assert fleet.git("show", "HEAD:README.md").stdout == "the outside writer's bytes\n"
+    assert yaml.safe_load(declaration_of(fleet).manifest_text)["summary"] != (
+        "Must not replace the external tree."
+    )
+
+
+def test_the_receipt_oid_does_not_depend_on_ref_update_output(fleet: ScratchRepo) -> None:
+    """The machine-readable commit-tree OID is retained when publication prints anything."""
+
+    def noisy_update_ref(argv: list[str]) -> CommandOutcome:
+        outcome = au.run_argv(argv)
+        if "update-ref" in argv and outcome.ok:
+            return CommandOutcome(tuple(argv), exit_status=0, stdout="not a commit summary\n")
+        return outcome
+
+    result = au.write_declaration(
+        fleet.residents,
+        "test-agent",
+        edited(declaration_of(fleet), summary="An exact receipt."),
+        request_id=REQUEST_ID,
+        principal=PRINCIPAL,
+        skills_dir=fleet.skills,
+        git=noisy_update_ref,
+    )
+
+    assert re.fullmatch(r"[0-9a-f]{40,64}", result.commit.sha or "")
+    assert result.commit.sha == fleet.head()
+
+
+@pytest.mark.parametrize("stage_timing", ["pre-existing", "concurrent"])
+def test_success_preserves_same_target_staging(fleet: ScratchRepo, stage_timing: str) -> None:
+    """Steward refreshes only a target index entry nobody else staged."""
+    target = fleet.residents / "test-agent" / MANIFEST_FILENAME
+    staged = edited(declaration_of(fleet), summary="The operator's staged bytes.").manifest_text
+    requested = edited(declaration_of(fleet), summary="Steward's committed bytes.")
+    if stage_timing == "pre-existing":
+        target.write_text(staged, encoding="utf-8")
+        fleet.git("add", str(target.relative_to(fleet.root)))
+        target.write_text(declaration_of(fleet).manifest_text, encoding="utf-8")
+
+    staged_during_publish = False
+
+    def staging_git(argv: list[str]) -> CommandOutcome:
+        nonlocal staged_during_publish
+        outcome = au.run_argv(argv)
+        if (
+            stage_timing == "concurrent"
+            and "update-ref" in argv
+            and outcome.ok
+            and not staged_during_publish
+        ):
+            staged_during_publish = True
+            target.write_text(staged, encoding="utf-8")
+            fleet.git("add", str(target.relative_to(fleet.root)))
+        return outcome
+
+    result = au.write_declaration(
+        fleet.residents,
+        "test-agent",
+        requested,
+        request_id=REQUEST_ID,
+        principal=PRINCIPAL,
+        skills_dir=fleet.skills,
+        git=staging_git,
+    )
+
+    assert result.commit.committed
+    assert (
+        yaml.safe_load(fleet.git("show", f":{target.relative_to(fleet.root)}").stdout)["summary"]
+        == "The operator's staged bytes."
+    )
+    assert (
+        yaml.safe_load(fleet.git("show", f"HEAD:{target.relative_to(fleet.root)}").stdout)[
+            "summary"
+        ]
+        == "Steward's committed bytes."
+    )
+
+
 def test_concurrent_declaration_writers_serialize_revision_through_commit(
     fleet: ScratchRepo,
 ) -> None:
@@ -492,7 +653,7 @@ def test_concurrent_declaration_writers_serialize_revision_through_commit(
     release_commit = threading.Event()
 
     def slow_first_git(argv: list[str]) -> CommandOutcome:
-        if threading.current_thread().name == "first" and "commit" in argv:
+        if threading.current_thread().name == "first" and "commit-tree" in argv:
             entered_commit.set()
             assert release_commit.wait(timeout=5)
         return au.run_argv(argv)
@@ -543,7 +704,7 @@ def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: Scrat
     release_commit = threading.Event()
 
     def slow_first_git(argv: list[str]) -> CommandOutcome:
-        if threading.current_thread().name == "first-skill" and "commit" in argv:
+        if threading.current_thread().name == "first-skill" and "commit-tree" in argv:
             entered_commit.set()
             assert release_commit.wait(timeout=5)
         return au.run_argv(argv)
