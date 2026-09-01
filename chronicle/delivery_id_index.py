@@ -29,32 +29,21 @@ class DeliveryIdIndex:
         try:
             if not self.path.exists():
                 self._repair()
-            with self._read_connection() as database:
-                clean = self._clean(database)
-                if clean:
-                    return (
-                        database.execute(
-                            "SELECT 1 FROM delivery_ids WHERE delivery_id = ?",
-                            (delivery_id,),
-                        ).fetchone()
-                        is not None
-                    )
-            self._repair()
-            return self._contains_after_repair(delivery_id)
+            return self._contains_stable(delivery_id)
         except (OSError, sqlite3.Error, UnicodeError, ValueError):
             self._discard_broken()
             try:
                 self._repair()
-                return self._contains_after_repair(delivery_id)
+                return self._contains_stable(delivery_id)
             except (OSError, sqlite3.Error, UnicodeError, ValueError):
                 self._discard_broken()
                 return None
 
-    def _contains_after_repair(self, delivery_id):
+    def _contains_stable(self, delivery_id):
         """Return membership only from a stable, freshly reconciled generation."""
         for attempt in range(MAX_REBUILD_ATTEMPTS):
+            generation = self._generation()
             with self._read_connection() as database:
-                generation = self._generation()
                 if self._clean(database):
                     found = (
                         database.execute(

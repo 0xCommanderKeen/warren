@@ -253,6 +253,111 @@ class EventLogTests(unittest.TestCase):
                 with patch.object(index, "_generation", side_effect=publish_after_read):
                     self.assertEqual(expected, index.contains(delivery_id))
 
+    def test_clean_stale_false_falls_back_to_canonical_jsonl(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        path = archive / "events-20260101T000000Z.jsonl"
+        path.write_text(json.dumps(self.event("other")) + "\n", encoding="utf-8")
+        self.log = EventLog(
+            dataclasses.replace(
+                Config(), events=self.path, archive_dir=archive, max_log_bytes=0
+            ),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+        self.assertFalse(self.log.delivery_index.contains("published-duplicate"))
+        original_generation = self.log.delivery_index._generation
+        published = False
+
+        def publish_after_generation_read():
+            nonlocal published
+            generation = original_generation()
+            if not published:
+                published = True
+                path.write_text(
+                    json.dumps(self.event("published-duplicate")) + "\n",
+                    encoding="utf-8",
+                )
+                self.log.delivery_index.publish_archives()
+            return generation
+
+        with patch.object(
+            self.log.delivery_index,
+            "_generation",
+            side_effect=publish_after_generation_read,
+        ):
+            self.assertFalse(self.log.append(self.event("published-duplicate")))
+        self.assertEqual(self.duplicates, [True])
+
+    def test_clean_stale_true_retries_before_accepting_valid_delivery(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        path = archive / "events-20260101T000000Z.jsonl"
+        path.write_text(json.dumps(self.event("removed-delivery")) + "\n")
+        self.log = EventLog(
+            dataclasses.replace(
+                Config(), events=self.path, archive_dir=archive, max_log_bytes=0
+            ),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+        self.assertTrue(self.log.delivery_index.contains("removed-delivery"))
+        original_generation = self.log.delivery_index._generation
+        published = False
+
+        def publish_after_generation_read():
+            nonlocal published
+            generation = original_generation()
+            if not published:
+                published = True
+                path.write_text(json.dumps(self.event("replacement")) + "\n")
+                self.log.delivery_index.publish_archives()
+            return generation
+
+        with patch.object(
+            self.log.delivery_index,
+            "_generation",
+            side_effect=publish_after_generation_read,
+        ):
+            self.assertTrue(self.log.append(self.event("removed-delivery")))
+        self.assertEqual(self.duplicates, [])
+
+    def test_continuous_publication_exhaustion_scans_canonical_jsonl(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        duplicate = self.event("canonical-during-publication")
+        (archive / "events-20260101T000000Z.jsonl").write_text(
+            json.dumps(duplicate) + "\n", encoding="utf-8"
+        )
+        self.log = EventLog(
+            dataclasses.replace(
+                Config(), events=self.path, archive_dir=archive, max_log_bytes=0
+            ),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+        self.assertTrue(self.log.delivery_index.contains(duplicate["delivery_id"]))
+        original_generation = self.log.delivery_index._generation
+
+        def continuously_publish():
+            generation = original_generation()
+            self.log.delivery_index.publish_archives()
+            return generation
+
+        with (
+            patch.object(
+                self.log.delivery_index,
+                "_generation",
+                side_effect=continuously_publish,
+            ),
+            patch.object(
+                self.log, "has_delivery_id", wraps=self.log.has_delivery_id
+            ) as canonical_scan,
+        ):
+            self.assertFalse(self.log.append(duplicate))
+        canonical_scan.assert_called_once_with(duplicate["delivery_id"])
+        self.assertEqual(self.duplicates, [True])
+
     def test_recovery_rebuilds_oldest_middle_and_newest_across_generations(self):
         for failure in ("missing", "corrupt", "torn", "crash-gap"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
