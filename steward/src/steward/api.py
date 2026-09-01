@@ -797,17 +797,23 @@ def _deployed_message(report: NurseryReport) -> str:
 
 
 def _provision_message(report: NurseryReport) -> str:
-    """Say what ``POST /residents/{id}/provision`` came to, rehearsals included."""
+    """Say what ``POST /residents/{id}/provision`` came to, rehearsals included.
+
+    Convergence is said as well as the outcome, never instead of it. A second run that sent
+    nothing and *also* cannot schedule is two facts, and picking one of them to print would
+    be the same half-truth :func:`_deployed_message` exists to prevent — so the converged
+    sentence prefixes that one rather than replacing it.
+    """
     if report.dry_run:
         return (
             "nothing was sent, run, or written: this is the plan, and `commands` is the "
             "exact argv a real run would issue"
         )
-    if report.changed or (report.register is not None and not report.register.ok):
+    if report.changed:
         return _deployed_message(report)
     return (
-        "converged: the host already had this bundle, and the container was reconciled "
-        "rather than rebuilt"
+        f"converged: the host already had this bundle, so nothing was sent. "
+        f"{_deployed_message(report)}"
     )
 
 

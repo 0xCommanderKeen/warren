@@ -3247,8 +3247,12 @@ def test_provisioning_the_same_manifest_twice_converges(api: ApiFactory, tmp_pat
     assert response.status_code == 200
     assert response.json()["changed"] is False
     assert response.json()["provision"]["sent"] is False
-    assert "converged" in response.json()["message"]
     assert host.calls[-1][-2:] == ("up", "-d")
+    # Both halves, whatever the schedule check said: "nothing was sent" and the outcome of
+    # the run are two facts, and this machine may or may not have a `claude` to find.
+    message = response.json()["message"]
+    assert message.startswith("converged: the host already had this bundle")
+    assert "the container is up" in message
 
 
 @pytest.mark.usefixtures("village")
