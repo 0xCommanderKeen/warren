@@ -21,12 +21,33 @@ export function createStateTransport({
   onEnvelope = () => {},
   onStatus = () => {},
   onError = () => {},
+  random = Math.random,
+  retryBaseMs = 1_000,
+  retryMaxMs = 30_000,
 }) {
   const backend = trimTrailingSlashes(baseUrl);
   let currentEnvelope = null;
   let stream = null;
   let stopped = false;
+  let retryTimer = null;
+  let consecutiveFailures = 0;
   const retiredNamespaces = new Set();
+
+  function resetRetryDelay() {
+    consecutiveFailures = 0;
+  }
+
+  function scheduleReconnect() {
+    if (stopped || stream || retryTimer) return;
+    const ceiling = Math.min(retryMaxMs, retryBaseMs * (2 ** consecutiveFailures));
+    consecutiveFailures += 1;
+    const jitter = Math.max(0, Math.min(1, random()));
+    const delay = Math.floor((ceiling / 2) + ((ceiling / 2) * jitter));
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      connect();
+    }, delay);
+  }
 
   function reportError(error) {
     onError(error instanceof Error ? error : new Error(String(error)));
@@ -65,9 +86,13 @@ export function createStateTransport({
         `${backend}/state${resumeQuery(currentEnvelope?.snapshot)}`,
         { cache: "no-store" },
       );
-      if (response.status === 204) return;
+      if (response.status === 204) {
+        resetRetryDelay();
+        return;
+      }
       if (response.status !== 200) throw new Error(`State request failed: HTTP ${response.status}`);
       apply(await response.json());
+      resetRetryDelay();
     } catch (error) {
       reportError(error);
       throw error;
@@ -85,7 +110,10 @@ export function createStateTransport({
     const receive = (message) => {
       if (stream !== candidate) return;
       try {
-        if (apply(JSON.parse(message.data))) onStatus("live");
+        if (apply(JSON.parse(message.data))) {
+          resetRetryDelay();
+          onStatus("live");
+        }
       } catch (error) {
         reportError(new Error(`Invalid state stream: ${error.message}`));
       }
@@ -102,7 +130,7 @@ export function createStateTransport({
       } catch {
         // A stream retry can recover even when the catch-up request failed.
       }
-      connect();
+      scheduleReconnect();
     };
   }
 
@@ -118,6 +146,8 @@ export function createStateTransport({
 
   function close() {
     stopped = true;
+    clearTimeout(retryTimer);
+    retryTimer = null;
     stream?.close();
     stream = null;
     onStatus("disconnected");
