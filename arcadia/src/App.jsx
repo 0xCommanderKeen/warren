@@ -101,7 +101,12 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
       await stewardClient.decideApproval(approval.request_id, { decision });
     } catch (writeError) {
       setError(writeError instanceof Error ? writeError.message : "Steward could not record the answer");
-      if (writeError?.ambiguous !== true) setSubmittedRequestId(null);
+      if (writeError?.ambiguous !== true) {
+        setSubmittedRequestId(null);
+        if (writeError?.status === 401 || writeError?.code === "credentials_required") {
+          setCredentialsReady(false);
+        }
+      }
     }
   }
 
