@@ -6,6 +6,8 @@ itself.
 """
 
 import copy
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +25,7 @@ from conftest import (
 from steward import authoring as au
 from steward.manifest import MANIFEST_FILENAME
 from steward.nursery import CommitIdentity
+from steward.runners import CommandOutcome
 
 PRINCIPAL = "the operator holding STEWARD_TOKEN"
 REQUEST_ID = "req-0001"
@@ -323,6 +326,171 @@ def test_the_uncommitted_mode_writes_and_says_so_in_the_response(
     assert "no audit trail" in result.commit.note
     data = yaml.safe_load((residents / "test-agent" / MANIFEST_FILENAME).read_text())
     assert data["summary"] == "Written without a net."
+
+
+@pytest.mark.parametrize("failure", ["add", "commit"])
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_git_failure_restores_the_target_and_index_exactly(
+    fleet: ScratchRepo, failure: str, kind: str
+) -> None:
+    """A refused request must not consume either Git state or a caller's working bytes."""
+    unrelated = fleet.root / "README.md"
+    unrelated.write_text("staged by somebody else\n", encoding="utf-8")
+    fleet.git("add", "README.md")
+    index = fleet.root / ".git" / "index"
+    index_before = index.read_bytes()
+
+    declaration = edited(declaration_of(fleet), summary="The requested declaration.")
+    skill = au.SkillDocument(
+        name="daily-summary",
+        description="The requested skill.",
+        body="Read the day and summarise it.\n",
+    )
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    target_before = target.read_bytes()
+    target.chmod(0o600)
+    mode_before = target.stat().st_mode
+
+    def failing_git(argv: list[str]) -> CommandOutcome:
+        if failure in argv:
+            return CommandOutcome(tuple(argv), exit_status=1, stderr="injected failure")
+        return au.run_argv(argv)
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                declaration,
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                git=failing_git,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            skill,
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=failing_git,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "commit_failed"
+    assert target.read_bytes() == target_before
+    assert target.stat().st_mode == mode_before
+    assert index.read_bytes() == index_before
+
+
+def test_concurrent_declaration_writers_serialize_revision_through_commit(
+    fleet: ScratchRepo,
+) -> None:
+    """Only one request made against one revision may write and commit its bytes."""
+    paths = au.declaration_paths(fleet.residents, "test-agent", "soul.md")
+    revision = au.revision_of(*paths)
+    entered_add = threading.Event()
+    release_add = threading.Event()
+
+    def slow_first_git(argv: list[str]) -> CommandOutcome:
+        if threading.current_thread().name == "first" and "add" in argv:
+            entered_add.set()
+            assert release_add.wait(timeout=5)
+        return au.run_argv(argv)
+
+    outcomes: dict[str, object] = {}
+
+    def writer(name: str, summary: str, git=au.run_argv) -> None:  # type: ignore[no-untyped-def]
+        try:
+            outcomes[name] = au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                edited(declaration_of(fleet), summary=summary),
+                request_id=f"req-{name}",
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                expected_revision=revision,
+                git=git,
+            )
+        except au.AuthoringError as exc:
+            outcomes[name] = exc
+
+    first = threading.Thread(
+        target=writer, args=("first", "First bytes.", slow_first_git), name="first"
+    )
+    second = threading.Thread(target=writer, args=("second", "Second bytes."), name="second")
+    first.start()
+    assert entered_add.wait(timeout=5)
+    second.start()
+    time.sleep(0.2)
+    release_add.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert isinstance(outcomes["first"], au.WriteResult)
+    assert isinstance(outcomes["second"], au.AuthoringError)
+    assert outcomes["second"].reason == "stale_revision"  # type: ignore[union-attr]
+    assert yaml.safe_load(paths[0].read_text())["summary"] == "First bytes."
+    assert "req-first" in fleet.git("log", "-1", "--format=%b").stdout
+
+
+def test_concurrent_skill_writers_serialize_revision_through_commit(fleet: ScratchRepo) -> None:
+    """Skill replacement has the same one-revision/one-commit boundary as declarations."""
+    path = fleet.skills / "daily-summary" / "SKILL.md"
+    revision = au.revision_of(path)
+    entered_add = threading.Event()
+    release_add = threading.Event()
+
+    def slow_first_git(argv: list[str]) -> CommandOutcome:
+        if threading.current_thread().name == "first-skill" and "add" in argv:
+            entered_add.set()
+            assert release_add.wait(timeout=5)
+        return au.run_argv(argv)
+
+    outcomes: dict[str, object] = {}
+
+    def writer(name: str, description: str, git=au.run_argv) -> None:  # type: ignore[no-untyped-def]
+        try:
+            outcomes[name] = au.write_skill(
+                fleet.residents,
+                fleet.skills,
+                au.SkillDocument(name="daily-summary", description=description, body="Do it.\n"),
+                request_id=f"req-{name}",
+                principal=PRINCIPAL,
+                created=False,
+                expected_revision=revision,
+                git=git,
+            )
+        except au.AuthoringError as exc:
+            outcomes[name] = exc
+
+    first = threading.Thread(
+        target=writer, args=("first", "First skill bytes.", slow_first_git), name="first-skill"
+    )
+    second = threading.Thread(target=writer, args=("second", "Second skill bytes."))
+    first.start()
+    assert entered_add.wait(timeout=5)
+    second.start()
+    time.sleep(0.2)
+    release_add.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+
+    assert isinstance(outcomes["first"], au.WriteResult)
+    assert isinstance(outcomes["second"], au.AuthoringError)
+    assert outcomes["second"].reason == "stale_revision"  # type: ignore[union-attr]
+    document, _ = au.read_skill_document(fleet.skills, "daily-summary")
+    assert document.description == "First skill bytes."
+    assert "req-first" in fleet.git("log", "-1", "--format=%b").stdout
 
 
 # --------------------------------------------------------------------------------------

@@ -34,6 +34,7 @@ machine, and applying it to a server would mean a stray editor swapfile could st
 control plane from working at all.
 """
 
+import fcntl
 import hashlib
 import shutil
 import tempfile
@@ -521,6 +522,96 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FileState:
+    """The bytes and mode a transaction must put back after a refusal."""
+
+    path: Path
+    existed: bool
+    contents: bytes = b""
+    mode: int = 0
+
+    @classmethod
+    def capture(cls, path: Path) -> _FileState:
+        return cls(
+            path=path,
+            existed=path.is_file(),
+            contents=path.read_bytes() if path.is_file() else b"",
+            mode=path.stat().st_mode if path.is_file() else 0,
+        )
+
+    def restore(self) -> None:
+        if not self.existed:
+            self.path.unlink(missing_ok=True)
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_bytes(self.contents)
+        self.path.chmod(self.mode)
+
+
+def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
+    """Resolve one per-checkout Git administrative path."""
+    outcome = git(["git", "-C", str(repo), "rev-parse", "--git-path", name])
+    if not outcome.ok or not outcome.stdout.strip():
+        raise AuthoringError(
+            f"git could not locate its {name}: {outcome.summary()}", reason="commit_failed"
+        )
+    path = Path(outcome.stdout.strip())
+    return path if path.is_absolute() else repo / path
+
+
+@contextmanager
+def _authoring_transaction(
+    residents_dir: Path, paths: Sequence[Path], *, git: PipedRun
+) -> Iterator[Path | None]:
+    """Serialize an authoring request and restore its worktree/index on refusal."""
+    repo = repo_toplevel(residents_dir, git=git)
+    lock_path = (
+        _git_path(repo, "steward-authoring.lock", git)
+        if repo is not None
+        else Path(tempfile.gettempdir())
+        / (
+            "steward-authoring-"
+            f"{hashlib.sha256(str(residents_dir.resolve()).encode()).hexdigest()}.lock"
+        )
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        file_states = tuple(_FileState.capture(path) for path in paths)
+        index_state = (
+            _FileState.capture(_git_path(repo, "index", git)) if repo is not None else None
+        )
+        try:
+            yield repo
+        except Exception:
+            for state in file_states:
+                state.restore()
+            if index_state is not None:
+                index_state.restore()
+            for path, state in zip(paths, file_states, strict=True):
+                if not state.existed:
+                    parent = path.parent
+                    while parent != residents_dir.parent and parent.exists():
+                        try:
+                            parent.rmdir()
+                        except OSError:
+                            break
+                        parent = parent.parent
+            raise
+
+
+def _check_revision(expected: str | None, paths: Sequence[Path]) -> None:
+    """Check an optimistic revision while holding the authoring lock."""
+    actual = revision_of(*paths)
+    if expected is not None and expected != actual:
+        raise AuthoringError(
+            f"this edit was made against {expected}, and what is on disk is now {actual}; "
+            "somebody else changed it first — re-read it and reapply your change",
+            reason="stale_revision",
+        )
+
+
 # --------------------------------------------------------------------------------------
 # the write paths themselves
 # --------------------------------------------------------------------------------------
@@ -547,26 +638,29 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     subject: str | None = None,
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
+    expected_revision: str | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one resident's declaration. Refusals write nothing."""
-    result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
-    _write_declaration_into(residents_dir / resident_id, declaration)
     paths = declaration_paths(residents_dir, resident_id, declaration.soul_filename)
-    written = tuple(path for path in paths if path.is_file())
-    commit = commit_write(
-        residents_dir,
-        written,
-        subject if subject is not None else UPDATE_SUBJECT.format(id=resident_id),
-        request_id=request_id,
-        principal=principal,
-        identity=identity,
-        allow_uncommitted=allow_uncommitted,
-        git=git,
-    )
-    return WriteResult(
-        paths=written, revision=revision_of(*written), commit=commit, validation=result
-    )
+    with _authoring_transaction(residents_dir, paths, git=git):
+        _check_revision(expected_revision, paths)
+        result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
+        _write_declaration_into(residents_dir / resident_id, declaration)
+        written = tuple(path for path in paths if path.is_file())
+        commit = commit_write(
+            residents_dir,
+            written,
+            subject if subject is not None else UPDATE_SUBJECT.format(id=resident_id),
+            request_id=request_id,
+            principal=principal,
+            identity=identity,
+            allow_uncommitted=allow_uncommitted,
+            git=git,
+        )
+        return WriteResult(
+            paths=written, revision=revision_of(*written), commit=commit, validation=result
+        )
 
 
 def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
@@ -579,23 +673,33 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
     created: bool,
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
+    expected_revision: str | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one skill. Refusals write nothing."""
-    result = validate_skill(residents_dir, skills_dir, document)
-    directory = skills_dir / document.name
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / SKILL_FILENAME
-    path.write_text(document.text(), encoding="utf-8")
-    subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(name=document.name)
-    commit = commit_write(
-        residents_dir,
-        [path],
-        subject,
-        request_id=request_id,
-        principal=principal,
-        identity=identity,
-        allow_uncommitted=allow_uncommitted,
-        git=git,
-    )
-    return WriteResult(paths=(path,), revision=revision_of(path), commit=commit, validation=result)
+    path = skills_dir / document.name / SKILL_FILENAME
+    with _authoring_transaction(residents_dir, [path], git=git):
+        if created and path.is_file():
+            raise AuthoringError(
+                f"skill {document.name!r} already exists; PUT replaces it", reason="skill_exists"
+            )
+        _check_revision(expected_revision, [path])
+        result = validate_skill(residents_dir, skills_dir, document)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(document.text(), encoding="utf-8")
+        subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(
+            name=document.name
+        )
+        commit = commit_write(
+            residents_dir,
+            [path],
+            subject,
+            request_id=request_id,
+            principal=principal,
+            identity=identity,
+            allow_uncommitted=allow_uncommitted,
+            git=git,
+        )
+        return WriteResult(
+            paths=(path,), revision=revision_of(path), commit=commit, validation=result
+        )

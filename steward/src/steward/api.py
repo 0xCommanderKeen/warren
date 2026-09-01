@@ -1762,6 +1762,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 request_id=request_id,
                 principal=acting_principal(request),
                 skills_dir=settings.skills_dir,
+                expected_revision=body.revision,
                 **write_settings(request),
             )
         except au.AuthoringError as exc:
@@ -1828,7 +1829,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         }
 
     def write_one_skill(
-        document: au.SkillDocument, request: Request, *, created: bool
+        document: au.SkillDocument,
+        request: Request,
+        *,
+        created: bool,
+        expected_revision: str | None = None,
     ) -> dict[str, Any]:
         """Validate, write and commit one skill — the shared half of POST and PUT."""
         root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
@@ -1845,6 +1850,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 request_id=request_id,
                 principal=acting_principal(request),
                 created=created,
+                expected_revision=expected_revision,
                 **write_settings(request),
             )
         except au.AuthoringError as exc:
@@ -1910,6 +1916,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             ),
             request,
             created=False,
+            expected_revision=body.revision,
         )
 
     # -- reload ------------------------------------------------------------------------
