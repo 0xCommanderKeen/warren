@@ -153,8 +153,10 @@ There is one supported setup path for both Claude Code and Codex:
    stores app credentials; those stay in the owning app or secret store.
 4. Run the authoritative test suite with `sh tests/run.sh`.
 5. Deploy the exact tested tree with the tar-over-SSH command below and restart
-   the service. Check `/residents` for public validation diagnostics and open the
-   village at both phone and desktop widths.
+   the service. Check `/residents` for public validation diagnostics — on the
+   arcadia origin that report is `/burrow/residents`, because a bare `/residents`
+   there is steward's own resident listing — and open the village at both phone and
+   desktop widths.
 
 The detailed protocol sections explain event mappings and privacy, but the steps
 above are the canonical install, validation, test, and deployment sequence.
@@ -162,8 +164,10 @@ above are the canonical install, validation, test, and deployment sequence.
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
 on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/burrow/`. Never exposed to the public internet — the event
-log is a map of everything the fleet does.
+`http://dxp2800:8737/burrow/`. That prefix carries `/state`, `/state/stream` and
+`/residents`; `/events` is proxied unprefixed, and the origin's remaining routes are
+steward's. Never exposed to the public internet — the event log is a map of
+everything the fleet does.
 
 **Run every command below from `warren/chronicle/`.** Since the 2026-08-31
 consolidation this service is a directory in the warren monorepo

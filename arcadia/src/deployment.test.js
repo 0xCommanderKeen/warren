@@ -23,10 +23,60 @@ describe("production deployment contract", () => {
 
   it("keeps Chronicle ingest and Steward writes behind the deployed origin", () => {
     expect(nginx).toContain("location = /events");
-    expect(nginx).toContain("location ~ ^/(jobs|approvals|residents|skills|reload|routines|requests)(/|$)");
+    expect(nginx).toContain(
+      "location ~ ^/(jobs|tasks|delegate|approvals|residents|skills|reload|routines|requests)(/|$)",
+    );
     expect(nginx).toContain("host.docker.internal:8738");
     expect(nginx).toContain("host.docker.internal:8802");
     expect(readFileSync("deploy/smoke.sh", "utf8")).toContain("steward-preflight=401");
+  });
+});
+
+/* -- one origin, two services, no path claimed twice (#242) ---------------------------- */
+
+describe("the origin's route table matches the services behind it", () => {
+  /** The alternation inside the one regex `location` that fronts Steward. */
+  const stewardRoutes = () => {
+    const match = nginx.match(/location ~ \^\/\(([^)]*)\)\(\/\|\$\)/);
+    expect(match, "no Steward regex location to read").not.toBeNull();
+    return match[1].split("|").sort();
+  };
+
+  it("proxies every top-level Steward route, delegation and lineage included", () => {
+    // Steward's complete set of top-level paths, read off the `@app` decorators in
+    // `steward/src/steward/api.py`. An unproxied one does not 404: it falls through to the
+    // SPA and answers 200 with index.html, so `GET /tasks/{id}/lineage` and `POST /delegate`
+    // looked alive and served a web page. Townhall cannot ship a delegation or task-lineage
+    // view until the origin carries them, so this list is exhaustive on purpose.
+    expect(stewardRoutes()).toEqual([
+      "approvals",
+      "delegate",
+      "jobs",
+      "reload",
+      "requests",
+      "residents",
+      "routines",
+      "skills",
+      "tasks",
+    ]);
+  });
+
+  it("leaves /residents unambiguously Steward's, and gives Chronicle's report its own path", () => {
+    // Both services answer `GET /residents` — Steward's is the fleet's resident listing,
+    // Chronicle's is the manifest-validation report its runbook checks after a deploy. The
+    // regex hands the bare path to Steward, so Chronicle's answers under the `/burrow/`
+    // prefix that already fronts its state routes. An exact `location` outranks a regex one
+    // in nginx, so the prefixed path cannot be swallowed by the block above.
+    expect(stewardRoutes()).toContain("residents");
+    expect(nginx).toContain("location = /burrow/residents");
+    expect(nginx).toContain("proxy_pass http://host.docker.internal:8738/residents;");
+  });
+
+  it("smoke-tests both gaps against a running origin", () => {
+    const smoke = readFileSync("deploy/smoke.sh", "utf8");
+    expect(smoke).toContain("$origin/burrow/residents");
+    // 401 is Steward answering; the SPA fallback would be a 200 carrying index.html.
+    expect(smoke).toContain("lineage-preflight=401");
   });
 });
 

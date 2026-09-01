@@ -6,6 +6,9 @@ origin=${1:-http://127.0.0.1:8737}
 curl -fsS "$origin/" | grep -q '<div id="root"></div>'
 curl -fsS "$origin/deep/link" | grep -q '<div id="root"></div>'
 curl -fsS "$origin/burrow/state" >/dev/null
+# Chronicle's manifest-validation report, on the prefixed path Steward's `/residents` left
+# free (warren#242). `-f` fails the script on the 200-with-index.html the SPA would answer.
+curl -fsS "$origin/burrow/residents" | grep -q '"residents"'
 
 headers=$(mktemp)
 body=$(mktemp)
@@ -20,5 +23,12 @@ steward_status=$(curl -sS -o /dev/null -w '%{http_code}' \
   --data '{"decision":"deny"}' "$origin/approvals/arcadia-smoke-missing")
 test "$steward_status" -eq 401
 
+# Steward's read routes reach Steward rather than the SPA. Lineage is the check because it
+# was one of the two paths the origin did not proxy: unproxied, this is a 200 carrying
+# index.html; proxied, an unauthenticated caller is refused before the task is looked up.
+lineage_status=$(curl -sS -o /dev/null -w '%{http_code}' "$origin/tasks/arcadia-smoke-missing/lineage")
+test "$lineage_status" -eq 401
+
 printf '%s\n' "steward-preflight=401"
+printf '%s\n' "lineage-preflight=401"
 printf '%s\n' "Arcadia HTTP, deep-link, state, and SSE smoke checks passed."
