@@ -5,8 +5,16 @@ export class UnsupportedSchemaVersionError extends Error {
   }
 }
 
+export class ContractValidationError extends Error {
+  constructor(path, expected) {
+    super(`Expected ${path} to be ${expected}`);
+    this.name = "ContractValidationError";
+    this.path = path;
+  }
+}
+
 function invalid(path, expected) {
-  throw new TypeError(`Expected ${path} to be ${expected}`);
+  throw new ContractValidationError(path, expected);
 }
 
 const string = (value, path) => {
@@ -32,41 +40,59 @@ function object(value, path) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     invalid(path, "an object");
   }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) invalid(path, "a plain object");
 }
 
-const array = (validate) => (value, path) => {
+function descend(value, path, context, visit) {
+  if (context.active.has(value)) invalid(path, "acyclic JSON data");
+  context.active.add(value);
+  try {
+    visit();
+  } finally {
+    context.active.delete(value);
+  }
+}
+
+const array = (validate) => (value, path, context) => {
   if (!Array.isArray(value)) invalid(path, "an array");
-  value.forEach((item, index) => validate(item, `${path}[${index}]`));
+  descend(value, path, context, () => {
+    value.forEach((item, index) => validate(item, `${path}[${index}]`, context));
+  });
 };
 
-const record = (validate) => (value, path) => {
+const record = (validate) => (value, path, context) => {
   object(value, path);
-  Object.entries(value).forEach(([key, item]) => validate(item, `${path}.${key}`));
+  descend(value, path, context, () => {
+    Object.entries(value).forEach(([key, item]) => validate(item, `${path}.${key}`, context));
+  });
 };
 
-function jsonValue(value, path) {
+function jsonValue(value, path, context) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return;
   if (typeof value === "number") return number(value, path);
-  if (Array.isArray(value)) return array(jsonValue)(value, path);
-  if (typeof value === "object") return record(jsonValue)(value, path);
+  if (Array.isArray(value)) return array(jsonValue)(value, path, context);
+  if (typeof value === "object") return record(jsonValue)(value, path, context);
   invalid(path, "a JSON value");
 }
 
 function model(fields, { allowExtra = true, optional = [] } = {}) {
   const optionalFields = new Set(optional);
-  return (value, path) => {
+  return (value, path, context) => {
     object(value, path);
-    for (const [name, validate] of Object.entries(fields)) {
-      if (!Object.hasOwn(value, name)) {
-        if (!optionalFields.has(name)) invalid(`${path}.${name}`, "present");
-        continue;
+    descend(value, path, context, () => {
+      for (const [name, validate] of Object.entries(fields)) {
+        if (!Object.hasOwn(value, name)) {
+          if (!optionalFields.has(name)) invalid(`${path}.${name}`, "present");
+          continue;
+        }
+        validate(value[name], `${path}.${name}`, context);
       }
-      validate(value[name], `${path}.${name}`);
-    }
-    if (!allowExtra) {
-      const unknown = Object.keys(value).find((name) => !(name in fields));
-      if (unknown !== undefined) invalid(`${path}.${unknown}`, "a declared version-1 field");
-    }
+      if (!allowExtra) {
+        const unknown = Object.keys(value).find((name) => !Object.hasOwn(fields, name));
+        if (unknown !== undefined) invalid(`${path}.${unknown}`, "a declared version-1 field");
+      }
+    });
   };
 }
 
@@ -139,12 +165,12 @@ const villageState = model({
 
 export function parseSnapshot(envelope) {
   if (envelope?.kind !== "snapshot" && envelope?.kind !== "reset") {
-    throw new TypeError("Expected a Chronicle snapshot or reset envelope");
+    invalid("envelope.kind", '"snapshot" or "reset"');
   }
   const snapshot = envelope.snapshot;
   if (snapshot?.schema_version !== 1) {
     throw new UnsupportedSchemaVersionError(snapshot?.schema_version);
   }
-  villageState(snapshot, "snapshot");
+  villageState(snapshot, "snapshot", { active: new WeakSet() });
   return snapshot;
 }

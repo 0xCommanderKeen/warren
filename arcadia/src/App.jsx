@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { pendingApprovals } from "./contract/approvals.js";
-import { parseSnapshot, UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
+import {
+  ContractValidationError, parseSnapshot, UnsupportedSchemaVersionError,
+} from "./contract/parseSnapshot.js";
 import { PhaserGame } from "./game/PhaserGame.jsx";
 import { ReadOnlyPanels } from "./panels/ReadOnlyPanels.jsx";
 import { createStateTransport } from "./transport/createStateTransport.js";
@@ -43,7 +45,9 @@ export function LiveApp({
         setTransportError(null);
       },
       onError: (error) => {
-        if (error instanceof UnsupportedSchemaVersionError) setContractError(error);
+        if (error instanceof UnsupportedSchemaVersionError || error instanceof ContractValidationError) {
+          setContractError(error);
+        }
         else setTransportError(error);
       },
     });
@@ -94,11 +98,11 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
 
   if (approvals.length === 0) return null;
 
-  async function decide(approval, decision) {
+  async function decide(approval, body) {
     setError(null);
     setSubmittedRequestId(approval.request_id);
     try {
-      await stewardClient.decideApproval(approval.request_id, { decision });
+      await stewardClient.decideApproval(approval.request_id, body);
     } catch (writeError) {
       setError(writeError instanceof Error ? writeError.message : "Steward could not record the answer");
       if (writeError?.ambiguous !== true) {
@@ -120,6 +124,28 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
 
   function optionLabel(option) {
     return typeof option === "string" ? option : JSON.stringify(option);
+  }
+
+  function decisionBody(option) {
+    if (option === "approve" || option === "deny") return { decision: option };
+    return null;
+  }
+
+  function choose(approval, option) {
+    const body = decisionBody(option);
+    if (body) return decide(approval, body);
+    if (option !== "edit") return;
+    const entered = window.prompt("Edit approval detail as JSON", JSON.stringify(approval.detail));
+    if (entered === null) return;
+    try {
+      const edit = JSON.parse(entered);
+      if (edit === null || typeof edit !== "object" || Array.isArray(edit)) {
+        throw new Error("Steward edits must be JSON objects");
+      }
+      return decide(approval, { decision: "edit", edit });
+    } catch (editError) {
+      setError(editError instanceof Error ? editError.message : "Invalid edit JSON");
+    }
   }
 
   return (
@@ -157,15 +183,16 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
               <p className="mb-2 font-mono text-xs text-[#566158]">{JSON.stringify(approval.detail)}</p>
             ) : null}
             <div className="flex flex-wrap gap-2">
-              {approval.options.map((option) => {
+              {approval.options.map((option, optionIndex) => {
                 const label = optionLabel(option);
+                const actionable = option === "approve" || option === "deny" || option === "edit";
                 return (
                   <button
                     aria-label={`${label[0]?.toUpperCase() || ""}${label.slice(1)} ${approval.message}`}
                     className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.1em] shadow-[2px_2px_0_#2a1817] enabled:cursor-pointer enabled:hover:translate-x-px enabled:hover:translate-y-px enabled:hover:shadow-none disabled:opacity-50"
-                    disabled={!stewardClient || !credentialsReady || submittedRequestId !== null}
-                    key={label}
-                    onClick={() => decide(approval, option)}
+                    disabled={!actionable || !stewardClient || !credentialsReady || submittedRequestId !== null}
+                    key={`${optionIndex}:${label}`}
+                    onClick={() => choose(approval, option)}
                     type="button"
                   >
                     {label}
