@@ -21,7 +21,7 @@
  * where the buttons were.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
 import { Gate } from "../console/Gate.jsx";
 import { confirmDecision, useLedger } from "../console/ledger.jsx";
@@ -47,6 +47,10 @@ function ApprovalCard({ item, onSettled }) {
   const [draft, setDraft] = useState(() => JSON.stringify(item.detail || {}, null, 2));
   const [complaint, setComplaint] = useState(null);
   const [refusal, setRefusal] = useState(null);
+  const [decisionLocked, setDecisionLocked] = useState(false);
+  // State alone is one render late: two click handlers can run before React paints the
+  // disabled controls. The ref is the synchronous first-decision gate; the state renders it.
+  const decisionLock = useRef(false);
 
   const offered = new Set(item.options || []);
   // #154, the live half. steward filtered this list when it was fetched; a page left open
@@ -55,6 +59,9 @@ function ApprovalCard({ item, onSettled }) {
   const withheld = draft.includes(REDACTION);
 
   async function send(decision, edit) {
+    if (decisionLock.current) return;
+    decisionLock.current = true;
+    setDecisionLocked(true);
     setRefusal(null);
     try {
       const answer = await client.decideApproval(
@@ -70,6 +77,14 @@ function ApprovalCard({ item, onSettled }) {
       });
     } catch (caught) {
       setRefusal(caught);
+      // A local refusal means no request left the tab; a 4xx is steward definitively
+      // refusing this request. Network/response/server failures are ambiguous — the
+      // conditional write may already have won — so unlocking those could submit a
+      // contradictory answer while confirmation catches up.
+      if (caught?.status === null || (caught?.status >= 400 && caught?.status < 500)) {
+        decisionLock.current = false;
+        setDecisionLocked(false);
+      }
     }
   }
 
@@ -131,7 +146,12 @@ function ApprovalCard({ item, onSettled }) {
 
       {editing ? (
         <div className="mt-3">
-          <Textarea rows={8} value={draft} onChange={(event) => setDraft(event.target.value)} />
+          <Textarea
+            rows={8}
+            value={draft}
+            disabled={decisionLocked}
+            onChange={(event) => setDraft(event.target.value)}
+          />
           {withheld ? (
             <p className="mb-0 mt-1.5 text-[11px] leading-[1.6] text-wait">
               One value here was withheld as a secret and shows as <code>{REDACTION}</code>. Leave
@@ -156,17 +176,20 @@ function ApprovalCard({ item, onSettled }) {
         ) : (
           <>
             {offered.has("approve") ? (
-              <Button tone="primary" onClick={() => send("approve")}>
+              <Button disabled={decisionLocked} tone="primary" onClick={() => send("approve")}>
                 Approve
               </Button>
             ) : null}
             {offered.has("deny") ? (
-              <Button tone="danger" onClick={() => send("deny")}>
+              <Button disabled={decisionLocked} tone="danger" onClick={() => send("deny")}>
                 Deny
               </Button>
             ) : null}
             {offered.has("edit") ? (
-              <Button onClick={() => (editing ? sendEdit() : setEditing(true))}>
+              <Button
+                disabled={decisionLocked}
+                onClick={() => (editing ? sendEdit() : setEditing(true))}
+              >
                 {editing ? "Send edit" : "Edit…"}
               </Button>
             ) : null}

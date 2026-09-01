@@ -404,6 +404,34 @@ const approvalStubs = (pending = [PENDING], resolved = []) => ({
 });
 
 describe("deciding an approval", () => {
+  it("sends only the first decision while steward is still answering (#294)", async () => {
+    let answer;
+    const delayed = new Promise((resolve) => { answer = resolve; });
+    const fetch = router({
+      ...approvalStubs(),
+      "POST /approvals/ap-1": () => delayed,
+    });
+    mount(<ApprovalsPage />, { fetch });
+
+    const approve = await screen.findByRole("button", { name: /approve/i });
+    const deny = screen.getByRole("button", { name: /^deny$/i });
+    const edit = screen.getByRole("button", { name: /edit/i });
+    fireEvent.click(approve);
+    fireEvent.click(deny);
+    fireEvent.click(edit);
+
+    expect(approve.disabled).toBe(true);
+    expect(deny.disabled).toBe(true);
+    expect(edit.disabled).toBe(true);
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+
+    answer(json(202, {
+      request_id: "req-294",
+      status: "recorded_announcement_pending",
+      message: "recorded; announcement pending",
+    }));
+  });
+
   it("offers only the decisions the request itself offered", async () => {
     mount(<ApprovalsPage />, {
       fetch: router(approvalStubs([{ ...PENDING, options: ["approve"] }])),
@@ -458,6 +486,8 @@ describe("deciding an approval", () => {
     await vi.waitFor(() => expect(screen.getByRole("button", { name: /approve/i })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /approve/i }));
     await vi.waitFor(() => expect(screen.getByText("accepted")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /approve/i }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /^deny$/i }).disabled).toBe(true);
     await vi.advanceTimersByTimeAsync(3000);
     expect(screen.queryByText("confirmed")).toBeNull();
 
@@ -491,8 +521,11 @@ describe("deciding an approval", () => {
       }),
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
+    const approve = await screen.findByRole("button", { name: /approve/i });
+    fireEvent.click(approve);
     expect(await screen.findByText(/409 · approval_expired/)).toBeTruthy();
+    expect(approve.disabled).toBe(false);
+    expect(screen.getByRole("button", { name: /^deny$/i }).disabled).toBe(false);
   });
 });
 
