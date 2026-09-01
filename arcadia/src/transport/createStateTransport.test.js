@@ -27,6 +27,10 @@ class FakeEventSource {
   emit(name, value) {
     this.listeners.get(name)?.({ data: JSON.stringify(value) });
   }
+
+  open() {
+    this.onopen?.();
+  }
 }
 
 beforeEach(() => {
@@ -188,6 +192,184 @@ describe("createStateTransport", () => {
       expect(FakeEventSource.instances).toHaveLength(1);
       await vi.advanceTimersByTimeAsync(1);
       expect(FakeEventSource.instances).toHaveLength(2);
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["zero base", { retryBaseMs: 0 }],
+    ["infinite base", { retryBaseMs: Infinity }],
+    ["NaN cap", { retryMaxMs: Number.NaN }],
+    ["cap below base", { retryBaseMs: 100, retryMaxMs: 99 }],
+  ])("rejects invalid retry configuration: %s", (_label, retryOptions) => {
+    expect(() => createStateTransport({
+      fetch: vi.fn(),
+      EventSource: FakeEventSource,
+      ...retryOptions,
+    })).toThrow(RangeError);
+  });
+
+  it.each([Number.NaN, Infinity, -1, 2])(
+    "normalizes an invalid random sample (%s) to a bounded non-zero delay",
+    async (sample) => {
+      vi.useFakeTimers();
+      try {
+        const fetch = vi.fn()
+          .mockResolvedValueOnce({ status: 204 })
+          .mockRejectedValue(new Error("Chronicle unavailable"));
+        const transport = createStateTransport({
+          fetch,
+          EventSource: FakeEventSource,
+          random: () => sample,
+          retryBaseMs: 1,
+        });
+        await transport.start();
+        await FakeEventSource.instances[0].onerror();
+
+        expect(FakeEventSource.instances).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(FakeEventSource.instances).toHaveLength(2);
+        transport.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("falls back to a bounded non-zero delay when the random source throws", async () => {
+    vi.useFakeTimers();
+    try {
+      const onError = vi.fn();
+      const fetch = vi.fn()
+        .mockResolvedValueOnce({ status: 204 })
+        .mockRejectedValue(new Error("Chronicle unavailable"));
+      const transport = createStateTransport({
+        fetch,
+        EventSource: FakeEventSource,
+        onError,
+        random: () => { throw new Error("entropy unavailable"); },
+        retryBaseMs: 1,
+      });
+      await transport.start();
+      await FakeEventSource.instances[0].onerror();
+
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "entropy unavailable" }),
+      );
+      expect(FakeEventSource.instances).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(FakeEventSource.instances).toHaveLength(2);
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets a quiet opened stream reset the retry budget and ignores a retired stream open", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const openedAt = [];
+      class TimedEventSource extends FakeEventSource {
+        constructor(url) {
+          super(url);
+          openedAt.push(Date.now());
+        }
+      }
+      const fetch = vi.fn()
+        .mockResolvedValueOnce({ status: 204 })
+        .mockRejectedValue(new Error("Chronicle unavailable"));
+      const transport = createStateTransport({
+        fetch,
+        EventSource: TimedEventSource,
+        random: () => 1,
+        retryBaseMs: 100,
+        retryMaxMs: 400,
+      });
+      await transport.start();
+
+      const first = FakeEventSource.instances[0];
+      await first.onerror();
+      await vi.advanceTimersByTimeAsync(100);
+      await FakeEventSource.instances[1].onerror();
+      await vi.advanceTimersByTimeAsync(200);
+      const healthy = FakeEventSource.instances[2];
+      healthy.open();
+      first.open();
+      await healthy.onerror();
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(openedAt).toEqual([0, 100, 300, 400]);
+      transport.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let throwing callbacks stop polling, catch-up, or reconnect scheduling", async () => {
+    vi.useFakeTimers();
+    try {
+      const callbackError = new Error("observer failed");
+      const fetch = vi.fn()
+        .mockResolvedValueOnce({ status: 200, json: async () => envelope(1, "cursor:1") })
+        .mockResolvedValueOnce({ status: 204 });
+      const transport = createStateTransport({
+        fetch,
+        EventSource: FakeEventSource,
+        onEnvelope: () => { throw callbackError; },
+        onStatus: () => { throw callbackError; },
+        onError: () => { throw callbackError; },
+        random: () => 1,
+        retryBaseMs: 100,
+      });
+
+      await expect(transport.start()).resolves.toBeUndefined();
+      expect(transport.snapshot()?.generation).toBe(1);
+      await expect(FakeEventSource.instances[0].onerror()).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(FakeEventSource.instances).toHaveLength(2);
+      expect(() => transport.close()).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps backoff after malformed catch-up but resets it after valid stale state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const openedAt = [];
+      class TimedEventSource extends FakeEventSource {
+        constructor(url) {
+          super(url);
+          openedAt.push(Date.now());
+        }
+      }
+      const fetch = vi.fn()
+        .mockResolvedValueOnce({ status: 200, json: async () => envelope(5, "cursor:5") })
+        .mockRejectedValueOnce(new Error("Chronicle unavailable"))
+        .mockResolvedValueOnce({ status: 200, json: async () => ({ nope: true }) })
+        .mockResolvedValueOnce({ status: 200, json: async () => envelope(5, "cursor:5") })
+        .mockRejectedValue(new Error("Chronicle unavailable"));
+      const transport = createStateTransport({
+        fetch,
+        EventSource: TimedEventSource,
+        random: () => 1,
+        retryBaseMs: 100,
+        retryMaxMs: 400,
+      });
+      await transport.start();
+
+      await FakeEventSource.instances[0].onerror();
+      await vi.advanceTimersByTimeAsync(100);
+      await FakeEventSource.instances[1].onerror();
+      await vi.advanceTimersByTimeAsync(200);
+      await FakeEventSource.instances[2].onerror();
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(openedAt).toEqual([0, 100, 300, 400]);
       transport.close();
     } finally {
       vi.useRealTimers();

@@ -25,6 +25,15 @@ export function createStateTransport({
   retryBaseMs = 1_000,
   retryMaxMs = 30_000,
 }) {
+  if (!Number.isFinite(retryBaseMs) || retryBaseMs <= 0) {
+    throw new RangeError("retryBaseMs must be a finite positive number");
+  }
+  if (!Number.isFinite(retryMaxMs) || retryMaxMs <= 0) {
+    throw new RangeError("retryMaxMs must be a finite positive number");
+  }
+  if (retryMaxMs < retryBaseMs) {
+    throw new RangeError("retryMaxMs must be greater than or equal to retryBaseMs");
+  }
   const backend = trimTrailingSlashes(baseUrl);
   let currentEnvelope = null;
   let stream = null;
@@ -41,8 +50,14 @@ export function createStateTransport({
     if (stopped || stream || retryTimer) return;
     const ceiling = Math.min(retryMaxMs, retryBaseMs * (2 ** consecutiveFailures));
     consecutiveFailures += 1;
-    const jitter = Math.max(0, Math.min(1, random()));
-    const delay = Math.floor((ceiling / 2) + ((ceiling / 2) * jitter));
+    let sample = 0;
+    try {
+      sample = Number(random());
+    } catch (error) {
+      reportError(error);
+    }
+    const jitter = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0;
+    const delay = Math.max(1, Math.floor((ceiling / 2) + ((ceiling / 2) * jitter)));
     retryTimer = setTimeout(() => {
       retryTimer = null;
       connect();
@@ -50,7 +65,19 @@ export function createStateTransport({
   }
 
   function reportError(error) {
-    onError(error instanceof Error ? error : new Error(String(error)));
+    try {
+      onError(error instanceof Error ? error : new Error(String(error)));
+    } catch {
+      // Reporting is best-effort: an observer cannot own the transport lifecycle.
+    }
+  }
+
+  function reportStatus(status) {
+    try {
+      onStatus(status);
+    } catch (error) {
+      reportError(error);
+    }
   }
 
   function apply(envelope) {
@@ -59,7 +86,7 @@ export function createStateTransport({
       nextSnapshot = parseSnapshot(envelope);
     } catch (error) {
       reportError(error);
-      return false;
+      return { valid: false, changed: false };
     }
 
     const currentSnapshot = currentEnvelope?.snapshot;
@@ -68,16 +95,24 @@ export function createStateTransport({
       const nextNamespace = cursorNamespace(nextSnapshot.cursor);
       const changesNamespace = envelope.kind === "reset" && currentNamespace !== nextNamespace;
 
-      if (!changesNamespace && nextSnapshot.generation <= currentSnapshot.generation) return false;
+      if (!changesNamespace && nextSnapshot.generation <= currentSnapshot.generation) {
+        return { valid: true, changed: false };
+      }
       if (changesNamespace) {
-        if (nextNamespace && retiredNamespaces.has(nextNamespace)) return false;
+        if (nextNamespace && retiredNamespaces.has(nextNamespace)) {
+          return { valid: true, changed: false };
+        }
         if (currentNamespace) retiredNamespaces.add(currentNamespace);
       }
     }
 
     currentEnvelope = envelope;
-    onEnvelope(envelope);
-    return true;
+    try {
+      onEnvelope(envelope);
+    } catch (error) {
+      reportError(error);
+    }
+    return { valid: true, changed: true };
   }
 
   async function poll() {
@@ -91,8 +126,8 @@ export function createStateTransport({
         return;
       }
       if (response.status !== 200) throw new Error(`State request failed: HTTP ${response.status}`);
-      apply(await response.json());
-      resetRetryDelay();
+      const result = apply(await response.json());
+      if (result.valid) resetRetryDelay();
     } catch (error) {
       reportError(error);
       throw error;
@@ -105,14 +140,20 @@ export function createStateTransport({
       `${backend}/state/stream${resumeQuery(currentEnvelope?.snapshot)}`,
     );
     stream = candidate;
-    onStatus("reconnecting");
+    reportStatus("reconnecting");
+
+    candidate.onopen = () => {
+      if (stream !== candidate) return;
+      resetRetryDelay();
+      reportStatus("live");
+    };
 
     const receive = (message) => {
       if (stream !== candidate) return;
       try {
-        if (apply(JSON.parse(message.data))) {
+        if (apply(JSON.parse(message.data)).changed) {
           resetRetryDelay();
-          onStatus("live");
+          reportStatus("live");
         }
       } catch (error) {
         reportError(new Error(`Invalid state stream: ${error.message}`));
@@ -124,7 +165,7 @@ export function createStateTransport({
       if (stream !== candidate) return;
       candidate.close();
       stream = null;
-      onStatus("reconnecting");
+      reportStatus("reconnecting");
       try {
         await poll();
       } catch {
@@ -136,7 +177,7 @@ export function createStateTransport({
 
   async function start() {
     stopped = false;
-    onStatus("connecting");
+    reportStatus("connecting");
     try {
       await poll();
     } finally {
@@ -150,7 +191,7 @@ export function createStateTransport({
     retryTimer = null;
     stream?.close();
     stream = null;
-    onStatus("disconnected");
+    reportStatus("disconnected");
   }
 
   return { start, close, snapshot: () => currentEnvelope?.snapshot || null };
