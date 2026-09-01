@@ -22,9 +22,10 @@ from protocol import EVENT_TYPES as PROTOCOL_EVENT_TYPES
 from protocol import validate_event
 from typed_json import canonical_string, decode_graph, semantic_key
 
-# The reducer's own set, imported rather than mirrored: retention and the projection
-# disagreeing about what counts as evidence of life is precisely the bug this prevents.
-from village_state import AMBIENT_TYPES
+# The reducer's own sets, imported rather than mirrored: retention and the projection
+# disagreeing about what counts as evidence of life — or about what opens a board row —
+# is precisely the bug this prevents.
+from village_state import AMBIENT_TYPES, TASK_LEDGER_TYPES, TASK_ORIGIN_TYPES
 
 _POLICY_PATH = Path(__file__).with_name("retention-policy.json")
 POLICY = MappingProxyType(json.loads(_POLICY_PATH.read_text(encoding="utf-8")))
@@ -35,7 +36,15 @@ VIEWER_LINE_LIMIT = POLICY["viewer_line_limit"]
 DROP_MS = POLICY["drop_ms"]
 KEEP_TASKS = POLICY["tasks"]
 KEEP_APPROVALS = POLICY["approvals"]
-TASK_EVENT_TYPES = {"task_posted", "task_claimed", "task_done", "task_failed"}
+#: Board facts that are nobody's visible activity. Steward emits them under the villager
+#: they concern, but they animate no one and keep no one in the village, so they never
+#: spend a witness slot an agent that is really working needs. ``task_delegated`` is
+#: deliberately absent: a handoff is the delegator's own action and reads as a line in its
+#: history (warren#276), so it stays ordinary evidence here while still opening a row in
+#: the ledger — see ``TASK_LEDGER_TYPES`` for the fold it belongs to.
+BOARD_ONLY_TYPES = frozenset(
+    {"task_posted", "task_claimed", "task_done", "task_failed"}
+)
 PROJECTION_ACTION_TYPES = {"task_started", "tool_called", "artifact_produced"}
 MOOD_TERMINAL_TYPES = {
     "tool_failed",
@@ -414,12 +423,24 @@ def _task_event_identity(event):
         payload.get("reason", ""),
         payload.get("parent_task_id", ""),
     )
+    if event["type"] == "task_delegated":
+        # Appended rather than folded into the tuple above: two handoffs of one task
+        # in one millisecond differ only by addressee and door, and every existing
+        # job event must keep the identity it already compares by.
+        values += (
+            payload["from"],
+            payload["to"],
+            payload["route"],
+            payload["depth"],
+        )
     return "\0".join(str(value) for value in values)
 
 
 def _task_tie_rank(event):
     """Constant-space semantic order for Steward's equal-ms transitions."""
-    if event["type"] == "task_posted":
+    if event["type"] in TASK_ORIGIN_TYPES:
+        # A handoff opens the row exactly as a post does, so it ranks with one: a
+        # claim in the same millisecond must still be the newer fact.
         return 0
     if (
         event["type"] == "task_failed"
@@ -446,17 +467,27 @@ def _later_task_event(candidate, current):
 
 def _remember_task_event(task, slot, index, event):
     """Mirror the browser's constant-space timestamp/tie-order fold."""
-    current = task[slot]
+    current = task.get(slot)
     if current is None or _later_task_event(event, current[1]):
         task[slot] = (index, event)
+
+
+def _ledger_events(parsed):
+    """Yield every valid board event with the row identity it belongs to."""
+    for index, event in parsed:
+        if event.get("type") not in TASK_LEDGER_TYPES or validate_event(event):
+            continue
+        yield index, event, event["payload"]["task_id"].strip()
 
 
 def _task_keep_indexes(parsed):
     """Return the bounded cross-agent task projection needed after rotation.
 
-    A task begins under ``steward:api`` and moves to its claimant.  It therefore
-    cannot share villager lifecycle retention: a claimant's ``session_ended``
-    must not erase a done/failed/reopened task or resurrect its older post.
+    A task begins under ``steward:api`` — or, when it was handed to somebody
+    rather than posted, under the villager that handed it over — and moves to its
+    claimant.  It therefore cannot share villager lifecycle retention: a
+    claimant's ``session_ended`` must not erase a done/failed/reopened task or
+    resurrect the older event that opened its row.
     """
 
     def compare(left, right):
@@ -480,16 +511,13 @@ def _task_keep_indexes(parsed):
         return -1 if left_id > right_id else 1
 
     tasks = {}
-    for index, event in parsed:
-        if event.get("type") not in TASK_EVENT_TYPES or validate_event(event):
-            continue
-        task_id = event["payload"]["task_id"].strip()
-        task = tasks.setdefault(task_id, {"posted": None, "latest": None})
-        if event["type"] == "task_posted":
-            _remember_task_event(task, "posted", index, event)
+    for index, event, task_id in _ledger_events(parsed):
+        task = tasks.setdefault(task_id, {"origin": None, "latest": None})
+        if event["type"] in TASK_ORIGIN_TYPES:
+            _remember_task_event(task, "origin", index, event)
         _remember_task_event(task, "latest", index, event)
         if len(tasks) > KEEP_TASKS:
-            # Mirror the browser after every accepted event. A post evicted at
+            # Mirror the browser after every accepted event. An origin evicted at
             # capacity cannot be silently reconstructed merely because its
             # later claim appears in the same transport/reset batch.
             selected_ids = {
@@ -504,9 +532,37 @@ def _task_keep_indexes(parsed):
     keep = set()
     for _, task in selected:
         keep.add(task["latest"][0])
-        if task["posted"] is not None:
-            keep.add(task["posted"][0])
+        if task["origin"] is not None:
+            keep.add(task["origin"][0])
     return keep
+
+
+def _paired_transition_keep_indexes(parsed, keep):
+    """Return the newest transition owed to every already-retained row origin.
+
+    ``_task_keep_indexes`` pairs the two ends of every row it selects, but it is
+    not the only reason a line survives rotation: a ``task_delegated`` is also the
+    delegator's own activity, so the villager, journal and mood selectors retain
+    handoffs on their own terms — a row the ledger dropped at capacity included.
+    An origin retained without its newest transition is worse than a dropped row,
+    because the board then shows claimed or finished work as open and unclaimed.
+
+    This pass needs no budget of its own: it adds at most one line per origin
+    another selector already chose to keep, so it inherits whatever bound that
+    selector applied.
+    """
+    origins = {
+        task_id
+        for index, event, task_id in _ledger_events(parsed)
+        if index in keep and event["type"] in TASK_ORIGIN_TYPES
+    }
+    if not origins:
+        return set()
+    latest = {}
+    for index, event, task_id in _ledger_events(parsed):
+        if task_id in origins:
+            _remember_task_event(latest, task_id, index, event)
+    return {item[0] for item in latest.values()} - keep
 
 
 def _approval_resolution_identity(event, shape=None):
@@ -1206,7 +1262,7 @@ def _projection_keep_indexes(
     preselected = set(preselected or ())
     if len(preselected) > limit:
         raise ValueError("preselected projection witnesses exceed limit")
-    ignored = TASK_EVENT_TYPES | {"needs_human_resolved", "journal_written"}
+    ignored = BOARD_ONLY_TYPES | {"needs_human_resolved", "journal_written"}
     routine_agents = set()
     for _, event in reversed(parsed):
         if event["type"].startswith("routine_"):
@@ -1542,7 +1598,7 @@ def carry_forward(lines, now_ms, policy):
     def projection_ordinary(event):
         event_type = event.get("type", "")
         return (
-            event_type not in TASK_EVENT_TYPES
+            event_type not in BOARD_ONLY_TYPES
             and event_type not in AMBIENT_TYPES
             and event_type != "journal_written"
             and event_type != "needs_human_resolved"
@@ -1728,6 +1784,14 @@ def carry_forward(lines, now_ms, policy):
     )
     authority_overflow = authority_overflow or dependency_state["overflow"]
     keep.extend(mood_keep_indexes)
+    # Last, because every selector above can retain a handoff: it opens a board row *and*
+    # is the delegator's own activity, so villager, journal and mood retention each keep
+    # one on their own terms — including one whose row the ledger evicted at capacity.
+    # An origin retained alone reads as an open, unclaimed job, which is a lie about work
+    # that is claimed or already closed. Pair each with the newest transition on its row.
+    paired_transition_keep = _paired_transition_keep_indexes(full_parsed, set(keep))
+    task_keep |= paired_transition_keep
+    keep.extend(paired_transition_keep)
     kept_indexes = sorted(set(keep))
     full_by_index = dict(full_parsed)
     retained_parsed = [

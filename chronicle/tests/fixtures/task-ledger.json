@@ -1,0 +1,45 @@
+[
+  {
+    "name": "a delegated job survives rotation as the row its receiver closed",
+    "now": "2026-08-26T12:03:00.000Z",
+    "task_witnesses": [0, 2],
+    "board": [
+      {
+        "id": "t2",
+        "title": "Draft the letter",
+        "state": "done",
+        "required_skills": [],
+        "posted_by": "claude-code:life-agent",
+        "assignee": "codex:keeper",
+        "claimant": "codex:keeper",
+        "updated_at": "2026-08-26T12:02:00.000Z"
+      }
+    ],
+    "events": [
+      {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"claude-code:life-agent","project":"life","type":"task_delegated","payload":{"task_id":"t2","title":"Draft the letter","from":"claude-code:life-agent","to":"codex:keeper","route":"inbox","parent_task_id":null,"depth":1}},
+      {"v":0,"ts":"2026-08-26T12:01:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_claimed","payload":{"task_id":"t2","title":"Draft the letter","claimant":"codex:keeper"}},
+      {"v":0,"ts":"2026-08-26T12:02:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_done","payload":{"task_id":"t2","title":"Draft the letter","claimant":"codex:keeper","artifacts":["letter.md"]}}
+    ]
+  },
+  {
+    "name": "a handoff claimed in the same millisecond keeps both ends",
+    "now": "2026-08-26T12:03:00.000Z",
+    "task_witnesses": [0, 1],
+    "board": [
+      {
+        "id": "t3",
+        "title": "Answer the letter",
+        "state": "claimed",
+        "required_skills": [],
+        "posted_by": "claude-code:life-agent",
+        "assignee": "codex:keeper",
+        "claimant": "codex:keeper",
+        "updated_at": "2026-08-26T12:00:00.000Z"
+      }
+    ],
+    "events": [
+      {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"claude-code:life-agent","project":"life","type":"task_delegated","payload":{"task_id":"t3","title":"Answer the letter","from":"claude-code:life-agent","to":"codex:keeper","route":"inbox","parent_task_id":null,"depth":1}},
+      {"v":0,"ts":"2026-08-26T12:00:00.000Z","source":"steward","agent_id":"codex:keeper","project":"life","type":"task_claimed","payload":{"task_id":"t3","title":"Answer the letter","claimant":"codex:keeper"}}
+    ]
+  }
+]
