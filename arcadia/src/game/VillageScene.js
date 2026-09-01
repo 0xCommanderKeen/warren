@@ -14,6 +14,8 @@ export function createVillageScene(snapshot) {
   return class VillageScene extends Phaser.Scene {
     constructor() {
       super("Village");
+      this.snapshot = snapshot;
+      this.snapshotObjects = [];
     }
 
     preload() {
@@ -38,12 +40,33 @@ export function createVillageScene(snapshot) {
       this.cameras.main.setBounds(0, 0, map.widthInPixels, map.heightInPixels);
       this.cameras.main.centerOn(map.widthInPixels / 2, map.heightInPixels / 2);
 
-      for (const villager of buildVillageModel(mapData, snapshot.villagers, snapshot.approvals)) {
+      this.created = true;
+      this.renderSnapshot();
+
+      EventBus.emit("current-scene-ready", this);
+    }
+
+    applySnapshot(next) {
+      this.snapshot = next;
+      if (this.created) this.renderSnapshot();
+    }
+
+    renderSnapshot() {
+      for (const object of this.snapshotObjects) {
+        this.tweens.killTweensOf(object);
+        object.destroy();
+      }
+      this.snapshotObjects = [];
+      this.lodgeCreated = false;
+
+      for (const villager of buildVillageModel(
+        mapData,
+        this.snapshot.villagers,
+        this.snapshot.approvals,
+      )) {
         this.createHome(villager);
         this.createVillager(villager);
       }
-
-      EventBus.emit("current-scene-ready", this);
     }
 
     createDepthSortedLayer(data, name) {
@@ -61,9 +84,10 @@ export function createVillageScene(snapshot) {
       if (isLodge && this.lodgeCreated) return;
       if (isLodge) {
         this.lodgeCreated = true;
-        this.add.text(villager.x, villager.y - 58, "LODGE", {
+        const label = this.add.text(villager.x, villager.y - 58, "LODGE", {
           color: "#253a2b", fontFamily: "monospace", fontSize: "8px",
         }).setOrigin(0.5).setDepth(villager.y - 1);
+        this.snapshotObjects.push(label);
         return;
       }
 
@@ -81,6 +105,7 @@ export function createVillageScene(snapshot) {
         }).setOrigin(0.5),
       ]);
       house.setDepth(y + height / 2);
+      this.snapshotObjects.push(house);
     }
 
     createVillager(villager) {
@@ -98,6 +123,7 @@ export function createVillageScene(snapshot) {
         }).setOrigin(0.5, 0),
       ]);
       body.setDepth(villager.y);
+      this.snapshotObjects.push(body);
 
       if (!villager.moving) return;
       const targets = villager.route.map((point) => ({
