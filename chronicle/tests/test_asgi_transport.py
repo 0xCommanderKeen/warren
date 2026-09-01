@@ -71,12 +71,19 @@ class ASGITransportContractTests(unittest.TestCase):
             webhook_thread.join(3)
 
     def test_notification_transports_are_isolated_per_application_runtime(self):
-        def handler_for(received):
+        first_in_flight = threading.Event()
+        release_first = threading.Event()
+
+        def handler_for(index, received):
             class RecordingWebhook(http.server.BaseHTTPRequestHandler):
                 def do_POST(self):
                     body = self.rfile.read(int(self.headers["Content-Length"]))
                     received.append(body)
-                    self.send_response(200)
+                    if index == 0 and b"held collision" in body:
+                        first_in_flight.set()
+                        release_first.wait(3)
+                    failed_attempt = index == 0 and b"retry isolation" in body
+                    self.send_response(500 if failed_attempt else 200)
                     self.end_headers()
 
                 def log_message(self, *_args):
@@ -87,7 +94,7 @@ class ASGITransportContractTests(unittest.TestCase):
         received = [[], []]
         webhooks = [
             http.server.ThreadingHTTPServer(
-                ("127.0.0.1", 0), handler_for(received[index])
+                ("127.0.0.1", 0), handler_for(index, received[index])
             )
             for index in range(2)
         ]
@@ -98,7 +105,7 @@ class ASGITransportContractTests(unittest.TestCase):
         for thread in threads:
             thread.start()
 
-        event = {
+        collision_event = {
             "v": 0,
             "ts": "2026-08-24T12:00:00.000Z",
             "source": "test",
@@ -106,8 +113,13 @@ class ASGITransportContractTests(unittest.TestCase):
             "project": "chronicle",
             "cwd": "",
             "type": "needs_human",
-            "payload": {"message": "runtime owned"},
+            "payload": {"message": "held collision"},
         }
+        retry_event = dict(
+            collision_event,
+            agent_id="test:runtime-retry-owner",
+            payload={"message": "retry isolation"},
+        )
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 configs = [
@@ -124,10 +136,37 @@ class ASGITransportContractTests(unittest.TestCase):
                 with TestClient(apps[1]) as second:
                     with TestClient(apps[0]) as first:
                         self.assertEqual(
-                            first.post("/events", json=event).status_code, 204
+                            first.post("/events", json=collision_event).status_code, 204
+                        )
+                        self.assertTrue(first_in_flight.wait(3))
+
+                        # The identical terminal key must not collide with the
+                        # first runtime's process-local in-flight claim.
+                        self.assertEqual(
+                            second.post("/events", json=collision_event).status_code,
+                            204,
                         )
                         deadline = time.monotonic() + 3
-                        while len(received[0]) < 1 and time.monotonic() < deadline:
+                        while len(received[1]) < 1 and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(len(received[1]), 1)
+                        release_first.set()
+
+                        # Exhaust one runtime's durable attempt ledger, then
+                        # prove the same terminal identity still delivers in
+                        # the other runtime's independent store.
+                        self.assertEqual(
+                            first.post("/events", json=retry_event).status_code, 204
+                        )
+                        deadline = time.monotonic() + 3
+                        while len(received[0]) < 4 and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(len(received[0]), 4)
+                        self.assertEqual(
+                            second.post("/events", json=retry_event).status_code, 204
+                        )
+                        deadline = time.monotonic() + 3
+                        while len(received[1]) < 2 and time.monotonic() < deadline:
                             time.sleep(0.01)
                         first_status = first.get("/transport/status").json()[
                             "notifications"
@@ -135,12 +174,15 @@ class ASGITransportContractTests(unittest.TestCase):
 
                     # Shutting down the first app must not stop the second app's
                     # independently owned worker.
-                    second_event = dict(event, agent_id="test:second-runtime")
+                    shutdown_event = dict(
+                        collision_event,
+                        agent_id="test:second-runtime-after-shutdown",
+                    )
                     self.assertEqual(
-                        second.post("/events", json=second_event).status_code, 204
+                        second.post("/events", json=shutdown_event).status_code, 204
                     )
                     deadline = time.monotonic() + 3
-                    while len(received[1]) < 1 and time.monotonic() < deadline:
+                    while len(received[1]) < 3 and time.monotonic() < deadline:
                         time.sleep(0.01)
                     second_status = second.get("/transport/status").json()[
                         "notifications"
@@ -148,10 +190,15 @@ class ASGITransportContractTests(unittest.TestCase):
 
                 self.assertEqual(first_status["queue_capacity"], 2)
                 self.assertEqual(second_status["queue_capacity"], 3)
-                self.assertEqual(list(map(len, received)), [1, 1])
+                self.assertEqual(list(map(len, received)), [4, 3])
                 self.assertEqual(first_status["delivered"], 1)
-                self.assertEqual(second_status["delivered"], 1)
+                self.assertEqual(first_status["failed"], 3)
+                self.assertEqual(first_status["retried"], 2)
+                self.assertEqual(first_status["dropped"], 1)
+                self.assertEqual(second_status["delivered"], 3)
+                self.assertEqual(second_status["failed"], 0)
         finally:
+            release_first.set()
             for webhook in webhooks:
                 webhook.shutdown()
                 webhook.server_close()

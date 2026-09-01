@@ -29,7 +29,9 @@ import dataclasses
 import datetime
 import email.header
 import fcntl
+import functools
 import hmac
+import inspect
 import json
 import os
 import queue
@@ -242,6 +244,85 @@ _notification_store = notification_persistence.NotificationPersistence(
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
+class _LegacyNotificationRuntime:
+    """One compatibility boundary for direct callers of the old module API."""
+
+    @property
+    def config(self):
+        return _legacy_config()
+
+    notification_store = _notification_store
+
+    @property
+    def notified(self):
+        return _notified
+
+    @property
+    def notifying(self):
+        return _notifying
+
+    @property
+    def notified_lock(self):
+        return _notified_lock
+
+    @property
+    def knock_queue(self):
+        return _knock_queue
+
+    @property
+    def knock_workers_started(self):
+        return _knock_workers_started
+
+    @knock_workers_started.setter
+    def knock_workers_started(self, value):
+        global _knock_workers_started
+        _knock_workers_started = value
+
+    @property
+    def knock_workers_lock(self):
+        return _knock_workers_lock
+
+    @property
+    def knock_worker_stop(self):
+        return _knock_worker_stop
+
+    @property
+    def knock_worker_threads(self):
+        return _knock_worker_threads
+
+    @property
+    def transport_lock(self):
+        return _transport_lock
+
+    @property
+    def transport_counters(self):
+        return _transport_counters
+
+
+_legacy_notification_runtime = _LegacyNotificationRuntime()
+
+
+def _legacy_notification_call(function):
+    """Adapt omitted Runtime arguments only at the deprecated direct-call edge."""
+    signature = inspect.signature(function)
+
+    @functools.wraps(function)
+    def adapted(*args, **kwargs):
+        bound = signature.bind_partial(*args, **kwargs)
+        if "runtime" not in bound.arguments:
+            kwargs["runtime"] = _legacy_notification_runtime
+        return function(*args, **kwargs)
+
+    return adapted
+
+
+def _notification_dependency(function, *args, runtime):
+    """Keep one-argument legacy test doubles behind the same compatibility edge."""
+    if runtime is _legacy_notification_runtime:
+        return function(*args)
+    return function(*args, runtime)
+
+
 def js_hash(s):
     """Return the stable signed 32-bit identity hash over UTF-16 code units."""
     h = 0
@@ -339,11 +420,12 @@ def villager_names(events):
     return names
 
 
-def _fleet_events(event, runtime=None):
+@_legacy_notification_call
+def _fleet_events(event, runtime):
     """Read the same bounded event window as the viewer and include this event."""
     events = []
-    config = runtime.config if runtime is not None else None
-    events_path = str(config.events) if config is not None else _events_path()
+    config = runtime.config
+    events_path = str(config.events)
     try:
         with open(events_path, encoding="utf-8") as stream:
             lines = collections.deque(
@@ -371,17 +453,14 @@ def _fleet_events(event, runtime=None):
             event_time = datetime.datetime.fromisoformat(timestamp).timestamp()
         except (TypeError, ValueError):
             event_time = 0
-        drop_seconds = (
-            config.drop_seconds
-            if config is not None
-            else _setting("drop_seconds", DROP_SECONDS)
-        )
+        drop_seconds = config.drop_seconds
         if item is event or time.time() - event_time <= drop_seconds:
             visible_agents.add(agent_id)
     return [item for item in events if str(item["agent_id"]) in visible_agents]
 
 
-def villager_name(event, runtime=None):
+@_legacy_notification_call
+def villager_name(event, runtime):
     agent_id = str(event.get("agent_id") or "")
     return villager_names(_fleet_events(event, runtime)).get(
         agent_id, NAMES[js_hash(agent_id) % len(NAMES)]
@@ -393,33 +472,22 @@ def receiver_delivery_id(event):
     return notification_persistence.terminal_key(event)
 
 
-def persist_knock(event, runtime=None):
+@_legacy_notification_call
+def persist_knock(event, runtime):
     """Durably journal notification work before the ingest acknowledges it."""
-    config = runtime.config if runtime is not None else None
-    notify_url = (
-        config.notify_url
-        if config is not None
-        else _setting("notify_url", NOTIFY_URL)
-    )
-    store = runtime.notification_store if runtime is not None else _store()
-    if not notify_url or event.get("type") != "needs_human":
+    if not runtime.config.notify_url or event.get("type") != "needs_human":
         return True
-    return store.journal(event)
+    return runtime.notification_store.journal(event)
 
 
-def claim_knock(event, runtime=None):
+@_legacy_notification_call
+def claim_knock(event, runtime):
     """Claim a knock unless it is in flight or has already been delivered."""
-    config = runtime.config if runtime is not None else None
-    notify_url = (
-        config.notify_url
-        if config is not None
-        else _setting("notify_url", NOTIFY_URL)
-    )
-    store = runtime.notification_store if runtime is not None else _store()
-    notified = runtime.notified if runtime is not None else _notified
-    notifying = runtime.notifying if runtime is not None else _notifying
-    notified_lock = runtime.notified_lock if runtime is not None else _notified_lock
-    if not notify_url or event.get("type") != "needs_human":
+    store = runtime.notification_store
+    notified = runtime.notified
+    notifying = runtime.notifying
+    notified_lock = runtime.notified_lock
+    if not runtime.config.notify_url or event.get("type") != "needs_human":
         return False
     key = notification_persistence.terminal_key(event)
     with notified_lock:
@@ -438,14 +506,15 @@ def claim_knock(event, runtime=None):
     return True
 
 
-def finish_knock(event, delivered, runtime=None):
+@_legacy_notification_call
+def finish_knock(event, delivered, runtime):
     """Release an attempt, remembering only successful deliveries."""
     key = notification_persistence.terminal_key(event)
-    store = runtime.notification_store if runtime is not None else _store()
-    notified = runtime.notified if runtime is not None else _notified
-    notifying = runtime.notifying if runtime is not None else _notifying
-    notified_lock = runtime.notified_lock if runtime is not None else _notified_lock
-    memory = runtime.config.notify_memory if runtime is not None else NOTIFY_MEMORY
+    store = runtime.notification_store
+    notified = runtime.notified
+    notifying = runtime.notifying
+    notified_lock = runtime.notified_lock
+    memory = runtime.config.notify_memory
     with notified_lock:
         notifying.discard(key)
         if delivered:
@@ -461,7 +530,8 @@ def finish_knock(event, delivered, runtime=None):
     return not delivered
 
 
-def notify(event, runtime=None):
+@_legacy_notification_call
+def notify(event, runtime):
     """POST one knock and return whether it was delivered. Never raises."""
     try:
         payload = event.get("payload") or {}
@@ -485,12 +555,8 @@ def notify(event, runtime=None):
             "Priority": "high",
             "X-Burrow-Delivery-ID": receiver_delivery_id(event),
         }
-        config = runtime.config if runtime is not None else None
-        notify_token = (
-            config.notify_token
-            if config is not None
-            else _setting("notify_token", NOTIFY_TOKEN)
-        )
+        config = runtime.config
+        notify_token = config.notify_token
         if notify_token:
             headers["Authorization"] = "Bearer " + notify_token
         if structured:
@@ -500,20 +566,14 @@ def notify(event, runtime=None):
             body_text = f"{name} · {project}\n{message}"
         body = body_text.encode("utf-8")
         req = urllib.request.Request(
-            config.notify_url
-            if config is not None
-            else _setting("notify_url", NOTIFY_URL),
+            config.notify_url,
             data=body,
             headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(
             req,
-            timeout=(
-                config.notify_timeout
-                if config is not None
-                else _setting("notify_timeout", NOTIFY_TIMEOUT)
-            ),
+            timeout=config.notify_timeout,
         ):
             pass
         return True
@@ -521,7 +581,8 @@ def notify(event, runtime=None):
         return False
 
 
-def deliver_knock(event, runtime=None):
+@_legacy_notification_call
+def deliver_knock(event, runtime):
     """Attempt under a bounded cross-process claim and commit its outcome.
 
     The stable shard is held across terminal-ledger recheck, external POST, and
@@ -529,13 +590,9 @@ def deliver_knock(event, runtime=None):
     acceptance followed by a process crash can still cause a later retry.
     """
     key = notification_persistence.terminal_key(event)
-    store = runtime.notification_store if runtime is not None else _store()
-    transport_lock = (
-        runtime.transport_lock if runtime is not None else _transport_lock
-    )
-    counters = (
-        runtime.transport_counters if runtime is not None else _transport_counters
-    )
+    store = runtime.notification_store
+    transport_lock = runtime.transport_lock
+    counters = runtime.transport_counters
     path = store.delivery_lock_path(key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a+") as lock:
@@ -547,7 +604,7 @@ def deliver_knock(event, runtime=None):
         ):
             finish_knock(event, False, runtime)
             return True
-        delivered = notify(event) if runtime is None else notify(event, runtime)
+        delivered = _notification_dependency(notify, event, runtime=runtime)
         if delivered:
             if not store.commit_terminal(event, LEDGER_NOTIFIED):
                 delivered = False
@@ -558,15 +615,12 @@ def deliver_knock(event, runtime=None):
     return delivered
 
 
-def notify_async(event, runtime=None):
+@_legacy_notification_call
+def notify_async(event, runtime):
     ensure_knock_workers(runtime)
-    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
-    transport_lock = (
-        runtime.transport_lock if runtime is not None else _transport_lock
-    )
-    counters = (
-        runtime.transport_counters if runtime is not None else _transport_counters
-    )
+    work_queue = runtime.knock_queue
+    transport_lock = runtime.transport_lock
+    counters = runtime.transport_counters
     try:
         work_queue.put_nowait(event)
         return True
@@ -577,15 +631,12 @@ def notify_async(event, runtime=None):
         return False
 
 
-def _process_knock(event, runtime=None):
-    store = runtime.notification_store if runtime is not None else _store()
-    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
-    transport_lock = (
-        runtime.transport_lock if runtime is not None else _transport_lock
-    )
-    counters = (
-        runtime.transport_counters if runtime is not None else _transport_counters
-    )
+@_legacy_notification_call
+def _process_knock(event, runtime):
+    store = runtime.notification_store
+    work_queue = runtime.knock_queue
+    transport_lock = runtime.transport_lock
+    counters = runtime.transport_counters
     if store.attempts_exhausted(event):
         if not store.commit_terminal(event, LEDGER_NOTIFY_DROPPED):
             finish_knock(event, False, runtime)
@@ -595,11 +646,7 @@ def _process_knock(event, runtime=None):
         _recover_knocks(runtime)
         return
 
-    delivered = (
-        deliver_knock(event)
-        if runtime is None
-        else deliver_knock(event, runtime)
-    )
+    delivered = _notification_dependency(deliver_knock, event, runtime=runtime)
     if delivered:
         store.clear_attempts(event)
     else:
@@ -624,11 +671,10 @@ def _process_knock(event, runtime=None):
     _recover_knocks(runtime)
 
 
-def _knock_worker(runtime=None):
-    worker_stop = (
-        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
-    )
-    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
+@_legacy_notification_call
+def _knock_worker(runtime):
+    worker_stop = runtime.knock_worker_stop
+    work_queue = runtime.knock_queue
     while not worker_stop.is_set():
         try:
             event = work_queue.get(timeout=0.1)
@@ -640,21 +686,18 @@ def _knock_worker(runtime=None):
             work_queue.task_done()
 
 
-def _recover_knocks(runtime=None):
+@_legacy_notification_call
+def _recover_knocks(runtime):
     """Atomically hand off new work and replay immutable generations.
 
     Replay files remain until their keys have durable delivered/drop outcomes.
     Re-reading them after a crash is safe because ``claim_knock`` consults those
     durable ledgers and the in-flight set before queueing.
     """
-    store = runtime.notification_store if runtime is not None else _store()
-    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
-    transport_lock = (
-        runtime.transport_lock if runtime is not None else _transport_lock
-    )
-    counters = (
-        runtime.transport_counters if runtime is not None else _transport_counters
-    )
+    store = runtime.notification_store
+    work_queue = runtime.knock_queue
+    transport_lock = runtime.transport_lock
+    counters = runtime.transport_counters
     for generation, complete, events in store.recover():
         for event in events:
             if not claim_knock(event, runtime):
@@ -673,38 +716,20 @@ def _recover_knocks(runtime=None):
             pass
 
 
-def ensure_knock_workers(runtime=None):
-    global _knock_workers_started
-    started = (
-        runtime.knock_workers_started
-        if runtime is not None
-        else _knock_workers_started
-    )
-    workers_lock = (
-        runtime.knock_workers_lock if runtime is not None else _knock_workers_lock
-    )
-    worker_stop = (
-        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
-    )
-    worker_threads = (
-        runtime.knock_worker_threads if runtime is not None else _knock_worker_threads
-    )
+@_legacy_notification_call
+def ensure_knock_workers(runtime):
+    started = runtime.knock_workers_started
+    workers_lock = runtime.knock_workers_lock
+    worker_stop = runtime.knock_worker_stop
+    worker_threads = runtime.knock_worker_threads
     if started:
         return
     with workers_lock:
-        started = (
-            runtime.knock_workers_started
-            if runtime is not None
-            else _knock_workers_started
-        )
+        started = runtime.knock_workers_started
         if started:
             return
         worker_stop.clear()
-        count = (
-            runtime.config.notify_workers
-            if runtime is not None
-            else _setting("notify_workers", NOTIFY_WORKERS)
-        )
+        count = runtime.config.notify_workers
         for index in range(count):
             worker = threading.Thread(
                 target=_knock_worker,
@@ -714,31 +739,18 @@ def ensure_knock_workers(runtime=None):
             )
             worker.start()
             worker_threads.append(worker)
-        if runtime is not None:
-            runtime.knock_workers_started = True
-        else:
-            _knock_workers_started = True
+        runtime.knock_workers_started = True
         _recover_knocks(runtime)
 
 
-def stop_knock_workers(runtime=None):
+@_legacy_notification_call
+def stop_knock_workers(runtime):
     """Stop and join transport-owned notification workers at ASGI shutdown."""
-    global _knock_workers_started
-    workers_lock = (
-        runtime.knock_workers_lock if runtime is not None else _knock_workers_lock
-    )
-    worker_stop = (
-        runtime.knock_worker_stop if runtime is not None else _knock_worker_stop
-    )
-    worker_threads = (
-        runtime.knock_worker_threads if runtime is not None else _knock_worker_threads
-    )
+    workers_lock = runtime.knock_workers_lock
+    worker_stop = runtime.knock_worker_stop
+    worker_threads = runtime.knock_worker_threads
     with workers_lock:
-        started = (
-            runtime.knock_workers_started
-            if runtime is not None
-            else _knock_workers_started
-        )
+        started = runtime.knock_workers_started
         if not started:
             return
         worker_stop.set()
@@ -747,23 +759,17 @@ def stop_knock_workers(runtime=None):
         worker.join()
     with workers_lock:
         worker_threads.clear()
-        if runtime is not None:
-            runtime.knock_workers_started = False
-        else:
-            _knock_workers_started = False
+        runtime.knock_workers_started = False
 
 
-def transport_status(runtime=None):
+@_legacy_notification_call
+def transport_status(runtime):
     """Bounded machine-readable diagnostics for the browser live-status module."""
-    transport_lock = (
-        runtime.transport_lock if runtime is not None else _transport_lock
-    )
-    source_counters = (
-        runtime.transport_counters if runtime is not None else _transport_counters
-    )
-    work_queue = runtime.knock_queue if runtime is not None else _knock_queue
-    store = runtime.notification_store if runtime is not None else _store()
-    config = runtime.config if runtime is not None else None
+    transport_lock = runtime.transport_lock
+    source_counters = runtime.transport_counters
+    work_queue = runtime.knock_queue
+    store = runtime.notification_store
+    config = runtime.config
     with transport_lock:
         counters = dict(source_counters)
     delivered, dropped = store.terminal_counts()
@@ -774,18 +780,10 @@ def transport_status(runtime=None):
             "durable": True,
         },
         "notifications": {
-            "configured": bool(
-                config.notify_url
-                if config is not None
-                else _setting("notify_url", NOTIFY_URL)
-            ),
+            "configured": bool(config.notify_url),
             "queued": work_queue.qsize(),
             "queue_capacity": work_queue.maxsize,
-            "workers": (
-                config.notify_workers
-                if config is not None
-                else _setting("notify_workers", NOTIFY_WORKERS)
-            ),
+            "workers": config.notify_workers,
             "delivered": delivered,
             "failed": counters["notify_failed"],
             "retried": counters["notify_retried"],
