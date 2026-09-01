@@ -289,6 +289,61 @@ describe("the resident editor", () => {
     expect(sent.soul).toBe(DECLARATION.soul);
   });
 
+  it("keeps both rejected drafts when a stale revision is re-read", async () => {
+    const concurrent = {
+      ...DECLARATION,
+      manifest: { ...DECLARATION.manifest, summary: "The other operator's edit." },
+      text: "version: 0\nsummary: The other operator's edit.\n",
+      soul: "---\nagent_id: life-agent\n---\nThe other operator's soul.\n",
+      revision: "sha256:concurrent",
+    };
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(json(200, DECLARATION))
+      .mockResolvedValueOnce(
+        json(409, {
+          detail: {
+            error: "stale_revision",
+            message: "somebody changed it first — re-read it and reapply your change",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(json(200, concurrent));
+
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
+
+    const rejectedManifest = "version: 0\nsummary: My complete manifest draft.\n";
+    const rejectedSoul = "---\nagent_id: life-agent\n---\nMy complete soul draft.\n";
+    const [manifestEditor, soulEditor] = screen.getAllByRole("textbox");
+    fireEvent.change(manifestEditor, {
+      target: { value: rejectedManifest },
+    });
+    fireEvent.change(soulEditor, {
+      target: { value: rejectedSoul },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
+
+    expect(await screen.findByText(/409 · stale_revision/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /re-read current server files/i }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+
+    expect(manifestEditor.value).toBe(rejectedManifest);
+    expect(soulEditor.value).toBe(rejectedSoul);
+    expect(screen.getByText(/The other operator's edit/)).toBeTruthy();
+    expect(screen.getAllByText(/My complete manifest draft/).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /reapply rejected draft/i }));
+    expect(manifestEditor.value).toBe(rejectedManifest);
+    expect(soulEditor.value).toBe(rejectedSoul);
+    expect(screen.getByText("sha256:concurrent")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /discard rejected draft/i }));
+    expect(manifestEditor.value).toBe(concurrent.text);
+    expect(soulEditor.value).toBe(concurrent.soul);
+    expect(screen.queryByText(/Stale draft recovery/i)).toBeNull();
+  });
+
   it("lists a manifest that did not validate rather than hiding it", async () => {
     const fetch = vi.fn().mockResolvedValue(
       json(200, { residents: [], errors: ["residents/broken/manifest.yaml: duplicate uid"] }),

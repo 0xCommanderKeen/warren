@@ -11,7 +11,7 @@
  * byte, which is how comments are kept. Neither is more validated than the other.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
@@ -276,18 +276,28 @@ function DeclarationEditor({ id }) {
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [reloaded, setReloaded] = useState(null);
+  const [recovery, setRecovery] = useState(null);
+  const [copied, setCopied] = useState(null);
+  const recoveryRef = useRef(null);
 
   // Re-reading after a save must not sweep away the answer the person is still reading —
   // the commit sha is the receipt, and a form that clears it on refresh has told them
   // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
   useEffect(() => {
+    setDraft(null);
     setReceipt(null);
     setRefusal(null);
     setReloaded(null);
+    recoveryRef.current = null;
+    setRecovery(null);
+    setCopied(null);
   }, [id]);
 
   useEffect(() => {
     if (!loaded.data) return;
+    // A stale write makes the editor a two-version workspace. A re-read updates the
+    // server side of that workspace; it must never replace the rejected side.
+    if (recoveryRef.current) return;
     setDraft({
       manifest: loaded.data.manifest,
       text: loaded.data.text,
@@ -323,10 +333,17 @@ function DeclarationEditor({ id }) {
         revision: draft.revision,
       });
       setReceipt(answer);
+      recoveryRef.current = null;
+      setRecovery(null);
       setReloaded(null);
       loaded.refresh();
     } catch (caught) {
       setRefusal(caught);
+      if (caught?.code === "stale_revision") {
+        const rejected = { draft, mode };
+        recoveryRef.current = rejected;
+        setRecovery(rejected);
+      }
     } finally {
       setSaving(false);
     }
@@ -357,6 +374,46 @@ function DeclarationEditor({ id }) {
   if (!draft) return null;
 
   const stale = refusal?.code === "stale_revision";
+  const currentWasReread = Boolean(
+    recovery && loaded.data && loaded.data.revision !== recovery.draft.revision,
+  );
+
+  function reapplyRejected() {
+    if (!recovery || !loaded.data) return;
+    setMode(recovery.mode);
+    setDraft({ ...recovery.draft, revision: loaded.data.revision });
+    setRefusal(null);
+  }
+
+  function discardRejected() {
+    if (!loaded.data) return;
+    setDraft({
+      manifest: loaded.data.manifest,
+      text: loaded.data.text,
+      soul: loaded.data.soul,
+      revision: loaded.data.revision,
+    });
+    recoveryRef.current = null;
+    setRecovery(null);
+    setRefusal(null);
+    setCopied(null);
+  }
+
+  async function copyRejected(document) {
+    const value =
+      document === "soul"
+        ? recovery.draft.soul
+        : recovery.mode === "yaml"
+          ? recovery.draft.text
+          : JSON.stringify(recovery.draft.manifest, null, 2);
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await globalThis.navigator.clipboard.writeText(value);
+      setCopied(document);
+    } catch {
+      setCopied("failed");
+    }
+  }
 
   return (
     <form onSubmit={save}>
@@ -406,12 +463,67 @@ function DeclarationEditor({ id }) {
       ) : null}
       {stale ? (
         <p className="mb-4 text-[12px] leading-[1.7] text-wait">
-          Somebody changed this file after you loaded it. Re-read it and reapply your edit —
-          steward refused rather than letting one of you silently win.{" "}
-          <Button tiny onClick={() => loaded.refresh()}>
-            re-read
-          </Button>
+          Somebody changed this declaration after you loaded it. Your rejected manifest and
+          soul are held below until you discard or successfully reapply them. Steward refused
+          rather than letting one of you silently win.
         </p>
+      ) : null}
+
+      {recovery ? (
+        <Panel title="Stale draft recovery">
+          <p className="mt-0 text-[12px] leading-[1.7] text-wait">
+            {currentWasReread
+              ? "Current server files are shown beside the complete rejected draft. Reapply keeps your text and changes only the revision used by the next write."
+              : "Re-read the current server files to compare them. Refresh cannot alter the rejected draft held here."}
+          </p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {!currentWasReread ? (
+              <Button tiny onClick={() => loaded.refresh()}>re-read current server files</Button>
+            ) : (
+              <Button tiny tone="primary" onClick={reapplyRejected}>reapply rejected draft</Button>
+            )}
+            <Button tiny onClick={() => copyRejected("manifest")}>
+              {copied === "manifest" ? "manifest copied" : "copy rejected manifest"}
+            </Button>
+            <Button tiny onClick={() => copyRejected("soul")}>
+              {copied === "soul" ? "soul copied" : "copy rejected soul"}
+            </Button>
+            {copied === "failed" ? <Note>clipboard unavailable — select the draft below</Note> : null}
+            <Button tiny onClick={discardRejected}>discard rejected draft</Button>
+          </div>
+          {currentWasReread ? (
+            <div className="grid gap-3 lg:grid-cols-2">
+              <div>
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">current manifest</p>
+                {recovery.mode === "yaml" ? (
+                  <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                    {loaded.data.text}
+                  </pre>
+                ) : (
+                  <Verbatim value={loaded.data.manifest} summary="manifest now on the server" />
+                )}
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">current soul</p>
+                <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                  {loaded.data.soul}
+                </pre>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected manifest</p>
+                {recovery.mode === "yaml" ? (
+                  <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                    {recovery.draft.text}
+                  </pre>
+                ) : (
+                  <Verbatim value={recovery.draft.manifest} summary="complete rejected manifest" />
+                )}
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected soul</p>
+                <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                  {recovery.draft.soul}
+                </pre>
+              </div>
+            </div>
+          ) : null}
+        </Panel>
       ) : null}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
