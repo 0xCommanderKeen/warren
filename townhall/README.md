@@ -13,7 +13,7 @@ shell.
 
 | | reads | writes |
 |---|---|---|
-| Chronicle `/state`, `/state/stream` | the fleet page | never |
+| Chronicle `/state`, `/state/stream` | the fleet and diagnostics pages | never |
 | steward | residents, routines, approvals, the board, skills, budgets | declare and edit residents, run a routine, decide an approval, post a job, write skills and caps |
 
 They are kept apart on purpose. The fleet page is unauthenticated and works for anybody who
@@ -50,10 +50,21 @@ which of the two this tab is carrying.
 - **Skills** — the library, and the editor for adding and replacing one.
 - **Budgets** — daily caps per resident, with the spend steward has actually recorded
   against them.
+- **Diagnostics** — the snapshot's bounded `diagnostics` array, grouped by kind: what the
+  projection could not fold cleanly, and every knock at a resident's chat bot that nobody
+  answered. The second page that needs no credential.
 
 A resident's journal text, its inbox and its spend come from steward rather than from
 Chronicle, because the projection carries none of the three: it has journal *metadata* — a
 day, a routine, a path — and no delegation or budget at all.
+
+The diagnostics page has one rule the others do not: **a knock never renders text**. The
+`chat_message_dropped` event carries none by design — a stranger's message is the one string
+in the system written by somebody steward has no relationship with — so the panel folds a
+knock down to named fields (the door, the route, who knocked, why) and there is nowhere for
+text to land even if a record arrived carrying some. Repeated knocks from one sender are one
+line with a count, because nothing rate-limits the event yet (warren#278) and a storm is one
+fact rather than two hundred rows.
 
 ### Nothing here claims an effect steward has not confirmed
 

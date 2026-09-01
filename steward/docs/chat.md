@@ -93,9 +93,12 @@ because the reply would be readable by everyone else in the group.
 Chronicle accepts the type as of warren#276 and treats it as *ambient*: a stranger's knock
 never puts its resident on the village map or makes it look awake, so the drop shows up as
 a `chat_message_dropped` record in the snapshot's `diagnostics` (the door, who knocked, the
-reason) and in that villager's history when it has one for its own reasons. An older
-chronicle 400s the event and it stays in steward's local log (`STEWARD_EVENTS_FALLBACK`),
-where `grep chat_message_dropped ~/.chronicle/events.jsonl` still finds it.
+reason) and in that villager's history when it has one for its own reasons. Townhall's
+**Diagnostics** page draws those records (warren#279) — one line per sender, per door, with
+a count, so a knock storm reads as one fact — which is where an operator sees a knock without
+`curl`. An older chronicle 400s the event and it stays in steward's local log
+(`STEWARD_EVENTS_FALLBACK`), where `grep chat_message_dropped ~/.chronicle/events.jsonl`
+still finds it.
 
 **Messages have a shelf life.** Telegram holds undelivered updates for a day, so a bridge
 that was down all night would otherwise come up and fire a session for every message that
