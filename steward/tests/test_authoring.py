@@ -854,6 +854,112 @@ def test_a_symlink_target_is_refused_without_touching_its_referent(
     assert fleet.head() == head
 
 
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_fifo_target_is_promptly_refused_without_opening_it_for_blocking_read(
+    fleet: ScratchRepo, kind: str
+) -> None:
+    """Special files are rejected before an authoring worker can block or touch a device."""
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    declaration = edited(declaration_of(fleet), summary="Must not wait on the FIFO.")
+    document = au.SkillDocument("daily-summary", "Must not wait on the FIFO.", "No.\n")
+    target.unlink()
+    os.mkfifo(target)
+    head = fleet.head()
+    index = (fleet.root / ".git" / "index").read_bytes()
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return write(fleet, "test-agent", declaration)
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            document,
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "unsafe_target"
+    assert stat.S_ISFIFO(target.lstat().st_mode)
+    assert fleet.head() == head
+    assert (fleet.root / ".git" / "index").read_bytes() == index
+
+
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_pre_staged_identical_request_does_not_own_worktree_after_unrelated_head_advance(
+    fleet: ScratchRepo, kind: str
+) -> None:
+    """A baseline index match is not an external write made during the transaction."""
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    old_worktree = target.read_bytes()
+    declaration = edited(declaration_of(fleet), summary="The pre-staged request bytes.")
+    document = au.SkillDocument("daily-summary", "The pre-staged request bytes.", "Do it.\n")
+    requested = (
+        declaration.manifest_text.encode() if kind == "declaration" else document.text().encode()
+    )
+    target.write_bytes(requested)
+    fleet.git("add", str(target.relative_to(fleet.root)))
+    target.write_bytes(old_worktree)
+    index = (fleet.root / ".git" / "index").read_bytes()
+    old_head = fleet.head()
+    tree = fleet.git("rev-parse", f"{old_head}^{{tree}}").stdout.strip()
+    external_head = fleet.git(
+        "commit-tree", tree, "-p", old_head, "-m", "external: unrelated plumbing advance"
+    ).stdout.strip()
+    advanced = False
+
+    def advancing_git(argv: list[str]) -> CommandOutcome:
+        nonlocal advanced
+        if "update-ref" in argv and not advanced:
+            advanced = True
+            fleet.git("update-ref", "HEAD", external_head, old_head)
+        return au.run_argv(argv)
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                declaration,
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                git=advancing_git,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            document,
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=advancing_git,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "commit_failed"
+    assert fleet.head() == external_head
+    assert (
+        fleet.git("show", f"HEAD:{target.relative_to(fleet.root)}").stdout.encode() == old_worktree
+    )
+    assert target.read_bytes() == old_worktree
+    assert (fleet.root / ".git" / "index").read_bytes() == index
+    assert fleet.git("show", f":{target.relative_to(fleet.root)}").stdout.encode() == requested
+
+
 def test_an_identical_byte_external_commit_owns_the_target_after_cas_refusal(
     fleet: ScratchRepo,
 ) -> None:

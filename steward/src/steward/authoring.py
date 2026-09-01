@@ -670,9 +670,10 @@ def _commit_with_isolated_index(
         published = git(["git", "-C", str(repo), "update-ref", "HEAD", oid, expected])
         if not published.ok:
             # The failed CAS may mean another writer published these exact target entries.
-            # In that case its HEAD (or still-staged index) owns the worktree bytes even
-            # when they happen to equal ours; rollback must not make that published tree
-            # dirty.  An unrelated HEAD advance matches neither and remains ours to undo.
+            # In that case its HEAD owns the worktree bytes even when they happen to equal
+            # ours. The shared index owns matching authored bytes only when its entry
+            # changed during this transaction; identical pre-existing staging is not a
+            # competing write. An unrelated HEAD advance then remains ours to undo.
             winning = _index_entries(repo, relative, git)
             try:
                 winning_head = _head_parent(repo, git)
@@ -689,7 +690,11 @@ def _commit_with_isolated_index(
             preserve = [
                 path
                 for path in relative
-                if authored.get(path) in {winning.get(path), head_entries.get(path)}
+                if authored.get(path) == head_entries.get(path)
+                or (
+                    winning.get(path) != baseline.get(path)
+                    and authored.get(path) == winning.get(path)
+                )
             ]
             raise AuthoringError(
                 "git HEAD changed while this write was being authored; retry against the new head",
@@ -781,7 +786,7 @@ class _FileState:
     @classmethod
     def capture(cls, path: Path) -> _FileState:
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            observed = path.lstat()
         except FileNotFoundError, NotADirectoryError:
             return cls(path=path, existed=False)
         except OSError as error:
@@ -789,9 +794,27 @@ class _FileState:
                 f"refusing to replace non-regular authoring target {path}",
                 reason="unsafe_target",
             ) from error
+        if not stat.S_ISREG(observed.st_mode):
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+        except OSError as error:
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            ) from error
         try:
             metadata = os.fstat(descriptor)
-            if not stat.S_ISREG(metadata.st_mode):
+            if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+                observed.st_dev,
+                observed.st_ino,
+            ):
                 raise AuthoringError(
                     f"refusing to replace non-regular authoring target {path}",
                     reason="unsafe_target",
