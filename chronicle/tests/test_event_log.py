@@ -198,6 +198,29 @@ class EventLogTests(unittest.TestCase):
         self.assertFalse(restarted.contains("rapid-replacement"))
         self.assertTrue(restarted.contains("unpublished-while-stopped"))
 
+    def test_publication_during_rebuild_discards_stale_archive_membership(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        path = archive / "events-20260101T000000Z.jsonl"
+        path.write_text(json.dumps(self.event("removed-during-rebuild")) + "\n")
+        index = DeliveryIdIndex(self.path, archive)
+        original = index._index_file
+        published = False
+
+        def index_then_publish(database, candidate, offset):
+            nonlocal published
+            complete_offset = original(database, candidate, offset)
+            if candidate == path.resolve() and not published:
+                published = True
+                path.write_text(json.dumps(self.event("new-canonical")) + "\n")
+                index.publish_archives()
+            return complete_offset
+
+        with patch.object(index, "_index_file", side_effect=index_then_publish):
+            self.assertTrue(index.contains("new-canonical"))
+        self.assertTrue(published)
+        self.assertFalse(index.contains("removed-during-rebuild"))
+
     def test_recovery_rebuilds_oldest_middle_and_newest_across_generations(self):
         for failure in ("missing", "corrupt", "torn", "crash-gap"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:

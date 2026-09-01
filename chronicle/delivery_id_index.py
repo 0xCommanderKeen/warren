@@ -11,6 +11,7 @@ from pathlib import Path
 
 SCHEMA_VERSION = "2"
 BATCH_SIZE = 512
+MAX_REBUILD_ATTEMPTS = 3
 
 
 class DeliveryIdIndex:
@@ -116,21 +117,33 @@ class DeliveryIdIndex:
                 database.execute("VACUUM")
 
     def _rebuild(self, database):
-        database.execute("DELETE FROM delivery_ids")
-        archives = self._archive_fingerprints()
-        for name in sorted(archives):
-            self._index_file(database, Path(name), 0)
-        live_stat = self._stat(self.events)
-        live_offset = self._index_file(database, self.events, 0) if live_stat else 0
-        self._set(database, "schema", SCHEMA_VERSION)
-        self._set(database, "archives", archives)
-        self._set(database, "archives_generation", self._generation())
-        self._set(
-            database,
-            "live",
-            self._fingerprint(live_stat, live_offset) if live_stat else {},
-        )
-        self._archives_verified = True
+        for _ in range(MAX_REBUILD_ATTEMPTS):
+            generation = self._generation()
+            database.execute("SAVEPOINT delivery_index_rebuild")
+            database.execute("DELETE FROM delivery_ids")
+            archives = self._archive_fingerprints()
+            for name in sorted(archives):
+                self._index_file(database, Path(name), 0)
+            live_stat = self._stat(self.events)
+            live_offset = (
+                self._index_file(database, self.events, 0) if live_stat else 0
+            )
+            if generation != self._generation():
+                database.execute("ROLLBACK TO delivery_index_rebuild")
+                database.execute("RELEASE delivery_index_rebuild")
+                continue
+            self._set(database, "schema", SCHEMA_VERSION)
+            self._set(database, "archives", archives)
+            self._set(database, "archives_generation", generation)
+            self._set(
+                database,
+                "live",
+                self._fingerprint(live_stat, live_offset) if live_stat else {},
+            )
+            database.execute("RELEASE delivery_index_rebuild")
+            self._archives_verified = True
+            return
+        raise ValueError("archive publication prevented a stable index rebuild")
 
     def _archive_fingerprints(self):
         base, ext = os.path.splitext(self.events.name)
