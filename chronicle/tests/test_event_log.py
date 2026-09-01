@@ -221,6 +221,38 @@ class EventLogTests(unittest.TestCase):
         self.assertTrue(published)
         self.assertFalse(index.contains("removed-during-rebuild"))
 
+    def test_publication_after_final_rebuild_read_revalidates_membership(self):
+        for delivery_id, expected in (
+            ("added-before-commit", True),
+            ("removed-before-commit", False),
+        ):
+            with (
+                self.subTest(delivery_id=delivery_id),
+                tempfile.TemporaryDirectory() as root,
+            ):
+                root = Path(root)
+                archive = root / "archive"
+                archive.mkdir()
+                path = archive / "events-20260101T000000Z.jsonl"
+                path.write_text(json.dumps(self.event("removed-before-commit")) + "\n")
+                index = DeliveryIdIndex(root / "events.jsonl", archive)
+                original_generation = index._generation
+                reads = 0
+
+                def publish_after_read():
+                    nonlocal reads
+                    generation = original_generation()
+                    reads += 1
+                    if reads == 2:
+                        path.write_text(
+                            json.dumps(self.event("added-before-commit")) + "\n"
+                        )
+                        index.publish_archives()
+                    return generation
+
+                with patch.object(index, "_generation", side_effect=publish_after_read):
+                    self.assertEqual(expected, index.contains(delivery_id))
+
     def test_recovery_rebuilds_oldest_middle_and_newest_across_generations(self):
         for failure in ("missing", "corrupt", "torn", "crash-gap"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
