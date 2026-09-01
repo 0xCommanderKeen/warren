@@ -177,7 +177,7 @@ takes the other road has to do something no resident's charter describes. Real c
 needs the session to have neither the database nor the residents tree, which is container
 placement's job, not this issue's.
 
-Three of those refusals name the act rather than the rule, because the act is the part
+Four of those refusals name the act rather than the rule, because the act is the part
 worth knowing:
 
 - **`POST /approvals/{request_id}`** — deciding an approval is the human end of the
@@ -185,6 +185,11 @@ worth knowing:
   every guarantee downstream of "a human decided", expiry's deny-by-default included,
   would only be as strong as the session not noticing.
 - **`POST /residents`** — declaring a resident is a human act.
+- **`POST /residents/{id}/provision`** — provisioning is starting a container on a machine
+  over ssh. A session that could do it would be building its own colleagues, or itself
+  again. Named separately from declaring, and matched ahead of it, because the two are
+  different acts and a refusal that called this one "declaring" would be describing
+  something the caller did not try.
 - **`POST /residents/{id}/routines/{routine}/run`** — firing a routine is a human act; a
   session's own work arrives through the board and its inbox.
 
@@ -509,7 +514,7 @@ for the shared rules, including what happens when the tree is not in a checkout 
 {"request_id": "…", "status": "accepted", "message": "…",
  "id": "note-keeper", "manifest_path": "residents/note-keeper/manifest.yaml",
  "soul_path": "residents/note-keeper/soul.md",
- "changed": true,
+ "changed": true, "act": "raise",
  "declare": {"written": true, "commit": null, "note": "declared and validated"},
  "provision": {"target": {"host": "dxp2800", "user": "Miha",
                           "path": "~/docker/steward-note-keeper",
@@ -531,10 +536,91 @@ Posting the **same body twice** is `201` and converged: `declare.written` is `fa
 Posting a **different** declaration under a name that already exists is `409
 resident_not_declared`, naming the fields that disagree — the skeleton is a starting
 point somebody then edits, and a request must not be able to overwrite a soul from a form.
+The refusal names the door that does work:
+[`POST /residents/{id}/provision`](#post-residentsidprovision) builds the declaration as it
+stands, which is how a resident carrying a field no body can express gets built at all.
 
 `409 resident_retired` when the id belongs to a retired resident: un-retiring is a
 person's decision, written into the manifest and committed, not something an HTTP call
 does on the way past.
+
+### `POST /residents/{id}/provision`
+
+**Human callers only** — the master token or an operator credential. A session credential is refused here; see
+[Three kinds of caller](#three-kinds-of-caller).
+
+```json
+{"dry_run": false}
+```
+
+The body is optional and holds one field, because **the manifest is the request**. Everything
+`POST /residents` takes in a body, this reads off `residents/<id>/manifest.yaml`.
+
+That is the whole point of the door (warren#270). `POST /residents` assembles a declaration
+from what a caller says and refuses to converge it onto a manifest somebody has since
+edited — rightly, since a form must not be able to overwrite a soul. But no body can express
+a `route`, an `app_grant`, a skill's `note` or a `runner.placement`, so a resident carrying
+one of those could never match, and had no way onto the nursery path at all. This endpoint
+skips declare entirely: the declaration is already there, and provision and register run
+against it exactly as it stands.
+
+Runs the same `steward.nursery.provision_resident` pipeline `steward provision` runs — one
+implementation, verified by a test that injects the pipeline into the route.
+
+**`200`, not `202`.** The container is up and the schedule has been checked by the time this
+answers, so there is nothing left to acknowledge later — see
+[The contract](#the-contract-acknowledgement-not-effect) for why the difference matters.
+
+**`dry_run: true`** returns the whole plan — the bundle, the compose fragment, the exact
+argv a real run would issue, and the next fire of every routine — and reaches no host at
+all: nothing is sent, nothing is run, nothing is written. It is the rehearsal a control
+panel offers before the button that does it for real.
+
+**This endpoint commits nothing, and that is not the reservation `POST /residents` used to
+make.** It writes nothing into the checkout, so there is no declaration for the write path
+to record. The declaration being provisioned was committed by whoever wrote it — and when
+it was *not*, that comes back in `warnings` naming the files, because a container built
+from bytes in no commit is a container nobody can turn back into a diff, and refusing over
+a commit this endpoint cannot make would leave the caller nowhere to go.
+
+`200` with the same report `POST /residents` returns. Both carry `act`, which says which
+door the run came through — `"raise"` there, `"provision"` here — so a reader of the report
+never has to infer it from which fields happen to be filled in:
+
+```json
+{"request_id": "…", "message": "…",
+ "resident": "life-agent", "act": "provision", "changed": true, "dry_run": false,
+ "declare": {"written": false, "commit": null,
+             "note": "already declared; provisioned from the manifest itself"},
+ "provision": {"target": {"host": "dxp2800", "container": "steward-life-agent", "…": "…"},
+               "files": ["docker-compose.yaml", ".env", "manifest.yaml", "soul.md"],
+               "compose_changed": true, "env_keys": ["CHRONICLE_TOKEN", "CHRONICLE_URL"],
+               "sent": true},
+ "register": {"ok": true, "problems": [], "next_fires": []},
+ "warnings": []}
+```
+
+Provisioning the **same manifest twice** is `200` and converged: the bundle already on the
+host is compared file by file and not re-sent, `sent` and `changed` are `false`, and
+`docker compose up -d` is issued anyway — reconciling a container that is *down* is what a
+second run is for.
+
+**There is no HTTP counterpart to `steward retire`, and this change did not add one.**
+warren#270 asked whether retire's counterpart should be symmetric, and the answer it took
+is about the *argument*, not the surface: provisioning now takes an id and reads the
+declared manifest, exactly as `steward retire <id>` does. Retiring over HTTP is a separate
+decision — it stops a container and scrubs a village token — and nothing has asked for it,
+so it stays a CLI act rather than being added on the strength of a symmetry argument.
+
+The refusals:
+
+| status | `error` | when |
+|---|---|---|
+| `404` | `unknown_resident` | no `residents/<id>/` in the tree; the message names the id you probably meant |
+| `409` | `resident_retired` | the manifest says retired — coming back is a person's decision written into the file and committed, not something an HTTP call does on the way past |
+| `409` | `declaration_invalid` | the declaration on disk does not validate, so steward will not deploy from it; the message names the fields that failed. Its own name, not the `422 manifest_invalid` of the write paths: that one means *the bytes you sent* would not validate, and no bytes were sent here |
+| `409` | `provision_failed` | the host answered and refused — a bundle that would not land, a `docker compose up` that failed. The declaration is untouched, so fixing the host and re-running picks up where it stopped |
+| `409` | `provision_refused` | there was nobody to ask: the host did not answer, or steward's own environment has no `CHRONICLE_URL` to give the container. The message says which |
 
 ### Secrets and the nursery
 
@@ -544,10 +630,10 @@ They are never in the compose file (which carries `${CHRONICLE_TOKEN-}`, a refer
 in a manifest, never in a soul, and never in git — the repo's own credential scanners are
 run over everything the nursery writes into the checkout, as a test.
 
-`POST /residents` with `deploy: true` and no `CHRONICLE_URL` in steward's environment is
-refused: a container with nowhere to emit is a resident that would never appear in the
-village, and finding that out three days later from an empty house is worse than finding
-it out now.
+`POST /residents` with `deploy: true` and `POST /residents/{id}/provision` are both refused
+with no `CHRONICLE_URL` in steward's environment: a container with nowhere to emit is a
+resident that would never appear in the village, and finding that out three days later from
+an empty house is worse than finding it out now.
 
 ### `GET /residents` · `GET /residents/{id}`
 

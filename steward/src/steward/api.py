@@ -59,7 +59,7 @@ from steward.approvals import WithheldValueError, redact_decision, restore_withh
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
-from steward.deploy import Transport
+from steward.deploy import Transport, TransportError
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
     DETAIL_MAX_CHARS,
@@ -77,6 +77,7 @@ from steward.nursery import (
     NewResident,
     NurseryError,
     NurseryReport,
+    provision_resident,
     raise_resident,
 )
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
@@ -118,6 +119,7 @@ __all__ = [
     "ApiError",
     "ManualRuns",
     "NurseryPipeline",
+    "ProvisionPipeline",
     "ResidentPost",
     "create_app",
     "run_server",
@@ -127,6 +129,11 @@ __all__ = [
 #: ``steward new-resident`` run *the same* pipeline rather than two that agree by
 #: convention — hand it a recorder and assert on what the route asked for.
 type NurseryPipeline = Callable[..., NurseryReport]
+
+#: How the API reaches the *other* nursery door — provision from a declared manifest.
+#: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
+#: ``steward provision`` run one pipeline rather than two that happen to agree.
+type ProvisionPipeline = Callable[..., NurseryReport]
 
 log = logging.getLogger("steward.api")
 
@@ -366,6 +373,20 @@ class ResidentPost(NewResident):
     deploy: bool = Field(
         default=False,
         description="Provision the container and check the schedule, not just declare.",
+    )
+
+
+class ProvisionPost(_Body):
+    """Whether to build the declared resident, or only rehearse building it.
+
+    There is nothing else to say: the manifest is the request. Everything ``new-resident``
+    takes in flags this endpoint reads off ``residents/<id>/manifest.yaml``, which is the
+    whole point of the door (warren#270).
+    """
+
+    dry_run: bool = Field(
+        default=False,
+        description="Print the plan and reach no host. Nothing is sent, run, or written.",
     )
 
 
@@ -744,6 +765,52 @@ def _refuse(status: int, error: str, message: str) -> NoReturn:
     raise HTTPException(status_code=status, detail={"error": error, "message": message})
 
 
+#: How a refused provision is answered. A reason the nursery named maps to the status that
+#: reason means; anything it did not name is the host having answered and said no, which is
+#: not something the caller can fix by sending different bytes — the same reasoning
+#: :data:`WRITE_STATUS` applies to a tree with no git behind it.
+PROVISION_STATUS: Mapping[str, int] = {
+    "unknown_resident": 404,
+    "resident_retired": 409,
+    "declaration_invalid": 409,
+}
+PROVISION_FAILED = "provision_failed"
+PROVISION_REFUSED = "provision_refused"
+
+
+def _deployed_message(report: NurseryReport) -> str:
+    """Say what a finished provision came to — **both** halves of it.
+
+    The container going up and the schedule check passing are two facts, and a report that
+    said only the first would be a control panel's one unforgivable sin. Shared by both
+    doors onto the nursery so they cannot come to describe the same outcome differently.
+    """
+    if report.register is not None and not report.register.ok:
+        return (
+            "the container is up, but the schedule check did not pass — see "
+            "register.problems; nothing fires until those are fixed"
+        )
+    return (
+        "the container is up and the schedule was checked; the resident appears in the "
+        "village when it emits its own first event, and never before"
+    )
+
+
+def _provision_message(report: NurseryReport) -> str:
+    """Say what ``POST /residents/{id}/provision`` came to, rehearsals included."""
+    if report.dry_run:
+        return (
+            "nothing was sent, run, or written: this is the plan, and `commands` is the "
+            "exact argv a real run would issue"
+        )
+    if report.changed or (report.register is not None and not report.register.ok):
+        return _deployed_message(report)
+    return (
+        "converged: the host already had this bundle, and the container was reconciled "
+        "rather than rebuilt"
+    )
+
+
 def _refuse_reload(errors: Sequence[str]) -> NoReturn:
     """Refuse to swap in a tree that does not validate, and say which part does not."""
     raise HTTPException(
@@ -856,6 +923,13 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "firing a routine is a human act; a session's own work arrives through the "
             "board and its inbox"
+        ),
+    ),
+    (
+        "/provision",
+        (
+            "provisioning is starting a container on a machine over ssh; a session that "
+            "could do it would be building its own colleagues, or itself again"
         ),
     ),
     (
@@ -1147,6 +1221,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     emitter: ev.Emitter | None = None,
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
+    provisioner: ProvisionPipeline = provision_resident,
     transport: Transport | None = None,
     approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -1441,21 +1516,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             refuse_write(exc)
         uncommitted = commit.note
-        if not body.deploy:
-            deployed = "nothing is deployed and no routine is scheduled: this is a file for review"
-        elif report.register is not None and not report.register.ok:
-            # The container went up; the check that follows it did not pass. Saying only
-            # the first half would be a control panel's one unforgivable sin, so say both and
-            # let `register.problems` carry the detail.
-            deployed = (
-                "the container is up, but the schedule check did not pass — see "
-                "register.problems; nothing fires until those are fixed"
-            )
-        else:
-            deployed = (
-                "the container is up and the schedule was checked; the resident appears in "
-                "the village when it emits its own first event, and never before"
-            )
+        deployed = (
+            _deployed_message(report)
+            if body.deploy
+            else "nothing is deployed and no routine is scheduled: this is a file for review"
+        )
         return {
             "request_id": request_id,
             "status": "accepted",
@@ -1541,6 +1606,64 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         """
         operator = operator_of(request)
         return operator.name if operator is not None else ACTED_BY_API
+
+    @app.post("/residents/{resident_id}/provision")
+    def provision_declared_resident(
+        resident_id: str, request: Request, body: ProvisionPost | None = None
+    ) -> dict[str, Any]:
+        """Build a resident from the manifest already in the tree, and check its schedule.
+
+        The other door onto the nursery (warren#270). ``POST /residents`` assembles a
+        declaration from a request body and refuses to converge it onto a manifest somebody
+        has since edited — which left every resident carrying a route, an app grant or a
+        ``runner.placement`` with no way onto the nursery path at all, because no body can
+        express those fields. This one reads ``residents/<id>/manifest.yaml`` as the source
+        of truth and runs provision and register against it.
+
+        **200, not 202.** The container is up and the schedule has been checked by the time
+        this answers — there is nothing left to acknowledge later, and saying `accepted`
+        about work that already finished would be the one dishonesty the request log exists
+        to prevent.
+
+        Nothing is written into the checkout, so unlike every other write here there is no
+        commit: the declaration being provisioned was committed by whoever wrote it, and a
+        declaration whose bytes are in no commit comes back in ``warnings`` rather than as a
+        refusal this endpoint has no way to resolve.
+        """
+        asked = body or ProvisionPost()
+        try:
+            report = provisioner(
+                resident_id,
+                residents_dir=residents_dir,
+                skills_dir=settings.skills_dir,
+                transport=transport,
+                dry_run=asked.dry_run,
+            )
+        except NurseryError as exc:
+            # Keyed on the nursery's own ``reason``, never on the prose or on a second look
+            # at the filesystem: "there is no such resident" and "its declaration does not
+            # validate" are different answers and only the pipeline that looked knows which.
+            # An unnamed one is the host having answered and refused — a bundle that would
+            # not land, a `docker compose up` that failed — and it says that rather than
+            # borrowing a name for something it is not.
+            reason = exc.reason or PROVISION_FAILED
+            _refuse(PROVISION_STATUS.get(reason, 409), reason, str(exc))
+        except TransportError as exc:
+            # Both halves of "there was nobody to ask": a host that did not answer, and a
+            # steward with no village address to give the container. One refusal, because
+            # the exception's own message already says which, and a traceback would say
+            # neither (steward #90).
+            _refuse(409, PROVISION_REFUSED, str(exc))
+        request_id = accept(
+            request,
+            "rehearsed" if asked.dry_run else "provisioned",
+            {"resident": report.resident_id},
+        )
+        return {
+            "request_id": request_id,
+            "message": _provision_message(report),
+            **report.to_dict(),
+        }
 
     @app.get("/residents/{resident_id}/declaration")
     def get_declaration(resident_id: str) -> dict[str, Any]:

@@ -39,7 +39,8 @@ A manifest that declares no ``deploy`` block still deploys, to the place everyth
 in this fleet is: host ``dxp2800``, user ``Miha``, compose directory
 ``~/docker/steward-<id>``, image ``steward-resident:latest``. Those are defaults, not
 assumptions — every one of them is a field a manifest can override, and
-``steward new-resident --dry-run`` prints the resolved values before anything moves.
+``steward new-resident --dry-run`` (or ``steward provision <id> --dry-run``, for a manifest
+somebody wrote by hand) prints the resolved values before anything moves.
 
 The image is this repo's own: ``docker/resident/Dockerfile``, built by ``make image``,
 carrying the ``claude`` CLI and a vendored copy of chronicle's hook emitter. Steward does not

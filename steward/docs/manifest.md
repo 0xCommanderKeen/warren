@@ -1203,7 +1203,9 @@ It drops out of the village the honest way: it stops emitting, and chronicle's e
 projection rules do the rest. Steward forges no `session_ended` on its behalf.
 
 Bringing one back is a person's decision written down: set `retired: false`, commit, and
-run `steward new-resident` again to put the container up.
+run `steward provision <id>` to put the container up — the counterpart to `retire`, which
+reads the same declared manifest and needs no flags to describe a resident that already
+exists.
 
 ### What retirement removes from the host, and what it leaves
 
@@ -1234,8 +1236,9 @@ Removing the file is the narrow lever. The broad one is **rotating `CHRONICLE_TO
 and it is the right lever whenever a retirement was a response to something rather than a
 tidy-up: steward writes one token into every resident's `.env` from its own environment, so
 a copy that leaked from one host is a copy that works for all of them. Rotation is a burrow-
-side change plus a re-provision of every live resident (`steward new-resident` again, which
-rewrites each `.env`); steward has no command for it, and retiring one resident does not do it.
+side change plus a re-provision of every live resident (`steward provision <id>` for each,
+which rewrites that resident's `.env`); steward has no command for the fleet-wide sweep, and
+retiring one resident does not do it.
 
 ## The watchdog
 

@@ -8,6 +8,7 @@ promises: not that a request returned 202, but that the matching protocol event 
 
 import asyncio
 import copy
+import dataclasses
 import datetime as dt
 import json
 import logging
@@ -62,7 +63,7 @@ from steward.input_bounds import (
 )
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
-from steward.nursery import raise_resident
+from steward.nursery import RegisterStage, provision_resident, raise_resident
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
@@ -144,6 +145,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         db_path: Path | None = None,
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
+        provisioner: Any = provision_resident,  # noqa: ANN401 — the other door's seam
         git: bool = True,
         transport: LocalTransport | None = None,
         emitter: ev.Emitter | None = None,
@@ -176,6 +178,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             ),
             runner_factory=lambda spec, placement: MockRunner(spec, placement, behavior=behavior),
             nursery=nursery,
+            provisioner=provisioner,
             transport=transport,
             approval_expiry_interval_s=approval_expiry_interval_s,
             now=now,
@@ -3030,6 +3033,243 @@ def test_a_deploy_leaks_no_secret_into_the_response(
         "CHRONICLE_TOKEN",
         "CHRONICLE_URL",
     ]
+
+
+# --------------------------------------------------------------------------------------
+# POST /residents/{id}/provision — the declared manifest, built as it stands
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_builds_the_declared_manifest(api: ApiFactory, tmp_path: Path) -> None:
+    """`test-agent` carries routes and app grants, so no `POST /residents` body can reach it."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["act"] == "provision"
+    assert body["declare"]["written"] is False
+    assert body["provision"]["sent"] is True
+    assert (host.root / "docker" / "steward-test-agent" / "docker-compose.yaml").is_file()
+    shipped = host.read("~/docker/steward-test-agent/manifest.yaml") or ""
+    assert "app_grants" in shipped
+
+
+@pytest.mark.usefixtures("village")
+def test_the_provision_route_runs_the_pipeline_the_command_runs(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """Verified by injection, not by convention — the same seam `POST /residents` has."""
+    seen: list[dict[str, Any]] = []
+
+    def recorder(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a recorder takes anything
+        seen.append({"resident_id": resident_id, **kwargs})
+        return provision_resident(resident_id, **kwargs)
+
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(provisioner=recorder, transport=host)
+
+    harness.client.post("/residents/test-agent/provision")
+
+    assert len(seen) == 1
+    assert seen[0]["resident_id"] == "test-agent"
+    assert seen[0]["transport"] is host
+    assert seen[0]["dry_run"] is False
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_commits_nothing_because_it_writes_nothing(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """No declaration is written here, so there is nothing for the write path to commit."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    def commits() -> str:
+        return subprocess.run(  # noqa: S603
+            ["git", "-C", str(tmp_path), "log", "--format=%s"],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+
+    before = commits()
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert "commit" not in response.json()
+    assert commits() == before
+
+
+@pytest.mark.usefixtures("village")
+def test_a_provision_dry_run_reaches_no_host_at_all(api: ApiFactory, tmp_path: Path) -> None:
+    """A rehearsal a control panel can press before the button that does it for real."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+
+    response = harness.client.post("/residents/test-agent/provision", json={"dry_run": True})
+
+    assert response.status_code == 200
+    assert response.json()["dry_run"] is True
+    assert response.json()["changed"] is False
+    assert not host.touched
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_an_unknown_resident_is_a_404(api: ApiFactory, tmp_path: Path) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents/nobody-here/provision")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["error"] == "unknown_resident"
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_a_declaration_that_stopped_validating_is_refused(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """A manifest edited into invalidity is a 409 naming the field, not a deploy.
+
+    Its own name, not `manifest_invalid`: that one is `422` and means *the bytes you sent*
+    would not validate, and no bytes were sent here — the declaration on disk is the thing
+    that is broken, and a caller cannot fix it by sending different ones.
+    """
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+    path = harness.residents_dir / "test-agent" / "manifest.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("#a68a4f", "not-a-colour"), encoding="utf-8"
+    )
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "declaration_invalid"
+    assert "accent" in response.json()["detail"]["message"]
+    assert not host.touched
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_a_retired_resident_is_refused(api: ApiFactory, tmp_path: Path) -> None:
+    """Coming back is a person's decision written into the manifest, not an HTTP call."""
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["retired"] = True
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(manifest=manifest, transport=host)
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_retired"
+    assert not host.touched
+
+
+@pytest.mark.usefixtures("village")
+def test_a_host_that_answers_and_refuses_is_named_as_the_host(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """A host that said no is not a broken declaration, and must not borrow its name."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas", fail_on="up"))
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "provision_failed"
+    assert "docker compose up failed" in response.json()["detail"]["message"]
+
+
+def test_provisioning_with_nowhere_to_emit_is_a_refusal_not_a_traceback(
+    api: ApiFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
+    monkeypatch.delenv("BURROW_URL", raising=False)
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "provision_refused"
+    assert "CHRONICLE_URL" in response.json()["detail"]["message"]
+
+
+def test_a_provision_leaks_no_secret_into_the_response(
+    api: ApiFactory, tmp_path: Path, village: str
+) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert village not in response.text
+    assert "CHRONICLE_TOKEN" in response.json()["provision"]["env_keys"]
+
+
+@pytest.mark.usefixtures("village")
+def test_a_provision_is_recorded_as_a_request_somebody_made(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    logged = harness.store.requests()
+    assert [record.outcome for record in logged] == ["provisioned"]
+    assert response.json()["request_id"] == logged[0].request_id
+
+
+@pytest.mark.usefixtures("village")
+def test_a_session_may_not_provision_a_container(api: ApiFactory, tmp_path: Path) -> None:
+    """Naming the act, not the neighbourhood: this is not declaring, it is building."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+    credential = open_session_run(harness)
+
+    response = harness.client.post(
+        "/residents/test-agent/provision", headers=as_session(credential)
+    )
+
+    assert response.status_code == 403
+    assert "starting a container on a machine" in response.json()["detail"]["message"]
+    assert not host.touched
+
+
+@pytest.mark.usefixtures("village")
+def test_provisioning_the_same_manifest_twice_converges(api: ApiFactory, tmp_path: Path) -> None:
+    """The bundle on the host is compared, not re-sent — and the container is reconciled."""
+    host = LocalTransport(root=tmp_path / "nas")
+    harness = api(transport=host)
+    harness.client.post("/residents/test-agent/provision")
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 200
+    assert response.json()["changed"] is False
+    assert response.json()["provision"]["sent"] is False
+    assert "converged" in response.json()["message"]
+    assert host.calls[-1][-2:] == ("up", "-d")
+
+
+@pytest.mark.usefixtures("village")
+def test_a_container_that_went_up_with_a_failing_check_says_both_halves(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """Saying only "the container is up" would be a control panel's one unforgivable sin."""
+
+    def unschedulable(resident_id: str, **kwargs: Any) -> Any:  # noqa: ANN401 — a stub answers anything
+        report = provision_resident(resident_id, **kwargs)
+        return dataclasses.replace(
+            report, register=RegisterStage(problems=("claude is not on PATH",))
+        )
+
+    harness = api(provisioner=unschedulable, transport=LocalTransport(root=tmp_path / "nas"))
+
+    response = harness.client.post("/residents/test-agent/provision")
+
+    assert response.status_code == 200
+    assert response.json()["register"]["ok"] is False
+    assert "the schedule check did not pass" in response.json()["message"]
 
 
 def test_a_retired_resident_is_listed_and_refuses_a_run_now(api: ApiFactory) -> None:
