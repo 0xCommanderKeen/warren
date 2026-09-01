@@ -48,12 +48,29 @@ export function StewardProvider({ children, storage, fetch: fetchImpl }) {
     [baseUrl, credential, fetchImpl],
   );
   const [status, setStatus] = useState(() => credential.status());
+  const [declarationRecoveries, setDeclarationRecoveries] = useState(() => new Map());
 
   useEffect(() => credential.subscribe(setStatus), [credential]);
 
+  const setDeclarationRecovery = useCallback((resident, recovery) => {
+    setDeclarationRecoveries((previous) => {
+      const next = new Map(previous);
+      if (recovery) next.set(resident, recovery);
+      else next.delete(resident);
+      return next;
+    });
+  }, []);
   const value = useMemo(
-    () => ({ client, credential, status, baseUrl, locked: status === "unknown" }),
-    [client, credential, status, baseUrl],
+    () => ({
+      client,
+      credential,
+      status,
+      baseUrl,
+      locked: status === "unknown",
+      declarationRecoveries,
+      setDeclarationRecovery,
+    }),
+    [client, credential, status, baseUrl, declarationRecoveries, setDeclarationRecovery],
   );
   return <StewardContext.Provider value={value}>{children}</StewardContext.Provider>;
 }
@@ -66,14 +83,14 @@ export function StewardProvider({ children, storage, fetch: fetchImpl }) {
  */
 export function useStewardQuery(load, deps = []) {
   const { locked } = useSteward();
-  const [state, setState] = useState({ data: null, error: null, loading: !locked });
+  const [state, setState] = useState({ data: null, error: null, loading: !locked, generation: 0 });
   const [nonce, setNonce] = useState(0);
   const loadRef = useRef(load);
   loadRef.current = load;
 
   useEffect(() => {
     if (locked) {
-      setState({ data: null, error: null, loading: false });
+      setState({ data: null, error: null, loading: false, generation: 0 });
       return undefined;
     }
     const controller = new AbortController();
@@ -82,10 +99,17 @@ export function useStewardQuery(load, deps = []) {
     Promise.resolve()
       .then(() => loadRef.current(controller.signal))
       .then(
-        (data) => live && setState({ data, error: null, loading: false }),
+        (data) => live && setState((previous) => ({
+          data,
+          error: null,
+          loading: false,
+          generation: previous.generation + 1,
+        })),
         (error) => {
           if (!live || controller.signal.aborted) return;
-          setState({ data: null, error, loading: false });
+          // A failed refresh does not make the last successful answer current, but keeping
+          // it visible lets callers offer another refresh without adopting it as fresh data.
+          setState((previous) => ({ ...previous, error, loading: false }));
         },
       );
     return () => {

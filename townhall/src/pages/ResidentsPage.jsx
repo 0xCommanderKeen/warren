@@ -267,8 +267,9 @@ function ManifestFields({ draft, edit, diagnostics }) {
 }
 
 function DeclarationEditor({ id }) {
-  const { client } = useSteward();
+  const { client, declarationRecoveries, setDeclarationRecovery } = useSteward();
   const loaded = useStewardQuery((signal) => client.readDeclaration(id, { signal }), [id]);
+  const recovery = declarationRecoveries.get(id) || null;
 
   const [mode, setMode] = useState("fields");
   const [draft, setDraft] = useState(null);
@@ -276,35 +277,39 @@ function DeclarationEditor({ id }) {
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [reloaded, setReloaded] = useState(null);
-  const [recovery, setRecovery] = useState(null);
   const [copied, setCopied] = useState(null);
-  const recoveryRef = useRef(null);
+  const saveGeneration = useRef(0);
 
   // Re-reading after a save must not sweep away the answer the person is still reading —
   // the commit sha is the receipt, and a form that clears it on refresh has told them
   // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
   useEffect(() => {
-    setDraft(null);
+    saveGeneration.current += 1;
+    setDraft(recovery?.draft || null);
+    if (recovery) setMode(recovery.mode);
     setReceipt(null);
     setRefusal(null);
     setReloaded(null);
-    recoveryRef.current = null;
-    setRecovery(null);
     setCopied(null);
+    return () => {
+      saveGeneration.current += 1;
+    };
+    // Recovery belongs to the resident and intentionally survives route unmounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
     if (!loaded.data) return;
     // A stale write makes the editor a two-version workspace. A re-read updates the
     // server side of that workspace; it must never replace the rejected side.
-    if (recoveryRef.current) return;
+    if (recovery) return;
     setDraft({
       manifest: loaded.data.manifest,
       text: loaded.data.text,
       soul: loaded.data.soul,
       revision: loaded.data.revision,
     });
-  }, [loaded.data]);
+  }, [loaded.data, recovery]);
 
   const diagnostics = refusal?.diagnostics || [];
   const warnings = useMemo(() => (receipt ? normalizeDiagnostics(receipt.warnings) : []), [receipt]);
@@ -321,6 +326,7 @@ function DeclarationEditor({ id }) {
 
   async function save(event) {
     event.preventDefault();
+    const generation = ++saveGeneration.current;
     setSaving(true);
     setRefusal(null);
     setReceipt(null);
@@ -332,20 +338,19 @@ function DeclarationEditor({ id }) {
         soul: draft.soul,
         revision: draft.revision,
       });
+      if (generation !== saveGeneration.current) return;
       setReceipt(answer);
-      recoveryRef.current = null;
-      setRecovery(null);
+      setDeclarationRecovery(id, null);
       setReloaded(null);
       loaded.refresh();
     } catch (caught) {
+      if (generation !== saveGeneration.current) return;
       setRefusal(caught);
       if (caught?.code === "stale_revision") {
-        const rejected = { draft, mode };
-        recoveryRef.current = rejected;
-        setRecovery(rejected);
+        setDeclarationRecovery(id, { draft, mode, readGeneration: loaded.generation });
       }
     } finally {
-      setSaving(false);
+      if (generation === saveGeneration.current) setSaving(false);
     }
   }
 
@@ -369,19 +374,18 @@ function DeclarationEditor({ id }) {
     }
   }
 
-  if (loaded.loading && !draft) return <Loading>reading the declaration…</Loading>;
-  if (loaded.error) return <Problem error={loaded.error} />;
+  if (loaded.loading && !loaded.data) return <Loading>reading the declaration…</Loading>;
+  if (loaded.error && !loaded.data) return <Problem error={loaded.error} />;
   if (!draft) return null;
 
   const stale = refusal?.code === "stale_revision";
-  const currentWasReread = Boolean(
-    recovery && loaded.data && loaded.data.revision !== recovery.draft.revision,
-  );
+  const currentWasReread = Boolean(recovery && loaded.data && loaded.generation > recovery.readGeneration);
 
   function reapplyRejected() {
     if (!recovery || !loaded.data) return;
-    setMode(recovery.mode);
-    setDraft({ ...recovery.draft, revision: loaded.data.revision });
+    // The editor remains a working copy after the refusal. Preserve anything the operator
+    // changed while comparing; only advance the optimistic-concurrency token.
+    setDraft((previous) => ({ ...(previous || recovery.draft), revision: loaded.data.revision }));
     setRefusal(null);
   }
 
@@ -393,8 +397,7 @@ function DeclarationEditor({ id }) {
       soul: loaded.data.soul,
       revision: loaded.data.revision,
     });
-    recoveryRef.current = null;
-    setRecovery(null);
+    setDeclarationRecovery(id, null);
     setRefusal(null);
     setCopied(null);
   }
@@ -417,6 +420,7 @@ function DeclarationEditor({ id }) {
 
   return (
     <form onSubmit={save}>
+      {loaded.error ? <Problem error={loaded.error} /> : null}
       {receipt ? (
         <Receipt
           title="declaration written"
@@ -473,7 +477,7 @@ function DeclarationEditor({ id }) {
         <Panel title="Stale draft recovery">
           <p className="mt-0 text-[12px] leading-[1.7] text-wait">
             {currentWasReread
-              ? "Current server files are shown beside the complete rejected draft. Reapply keeps your text and changes only the revision used by the next write."
+              ? "Current server files are shown beside the complete rejected draft. Reapply keeps the editor as it is, including newer edits, and changes only the revision used by the next write."
               : "Re-read the current server files to compare them. Refresh cannot alter the rejected draft held here."}
           </p>
           <div className="mb-3 flex flex-wrap gap-2">
@@ -489,7 +493,7 @@ function DeclarationEditor({ id }) {
               {copied === "soul" ? "soul copied" : "copy rejected soul"}
             </Button>
             {copied === "failed" ? <Note>clipboard unavailable — select the draft below</Note> : null}
-            <Button tiny onClick={discardRejected}>discard rejected draft</Button>
+            {currentWasReread ? <Button tiny onClick={discardRejected}>discard rejected draft</Button> : null}
           </div>
           {currentWasReread ? (
             <div className="grid gap-3 lg:grid-cols-2">
@@ -645,7 +649,7 @@ export default function ResidentsPage({ page, params }) {
       {locked ? (
         <Gate what={GATES[page] || "This page"} />
       ) : page === "residentDeclaration" ? (
-        <DeclarationEditor id={params.id} />
+        <DeclarationEditor key={params.id} id={params.id} />
       ) : page === "residentNew" ? (
         <ResidentNew />
       ) : page === "resident" ? (
