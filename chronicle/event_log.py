@@ -174,6 +174,7 @@ class EventLog:
                 archived.flush()
                 os.fsync(archived.fileno())
             durable.fsync_parent(archive)
+            self.delivery_index.publish_archives()
             live.seek(0)
             live.write(data)
             live.truncate()

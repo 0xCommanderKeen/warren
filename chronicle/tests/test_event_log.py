@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -7,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from config import Config
+from delivery_id_index import BATCH_SIZE, DeliveryIdIndex
 from event_log import EventCursor, EventLog
 
 
@@ -164,6 +166,110 @@ class EventLogTests(unittest.TestCase):
         self.store.keys.clear()
         self.assertFalse(self.log.append(first))
         self.assertEqual(self.duplicates, [True])
+
+    def test_published_in_place_edit_and_rapid_replacement_reconcile(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        path = archive / "events-20260101T000000Z.jsonl"
+        removed = self.event("removed-by-edit")
+        path.write_text(json.dumps(removed) + "\n", encoding="utf-8")
+        index = DeliveryIdIndex(self.path, archive)
+        self.assertTrue(index.contains("removed-by-edit"))
+
+        added = self.event("added-in-place")
+        with path.open("r+", encoding="utf-8") as stream:
+            stream.seek(0)
+            stream.write(json.dumps(added) + "\n")
+            stream.truncate()
+        index.publish_archives()
+        self.assertFalse(index.contains("removed-by-edit"))
+        self.assertTrue(index.contains("added-in-place"))
+
+        replacement = self.event("rapid-replacement")
+        path.unlink()
+        path.write_text(json.dumps(replacement) + "\n", encoding="utf-8")
+        index.publish_archives()
+        self.assertFalse(index.contains("added-in-place"))
+        self.assertTrue(index.contains("rapid-replacement"))
+
+        stopped_edit = self.event("unpublished-while-stopped")
+        path.write_text(json.dumps(stopped_edit) + "\n", encoding="utf-8")
+        restarted = DeliveryIdIndex(self.path, archive)
+        self.assertFalse(restarted.contains("rapid-replacement"))
+        self.assertTrue(restarted.contains("unpublished-while-stopped"))
+
+    def test_recovery_rebuilds_oldest_middle_and_newest_across_generations(self):
+        for failure in ("missing", "corrupt", "torn", "crash-gap"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as root:
+                root = Path(root)
+                archive = root / "archive"
+                archive.mkdir()
+                events = root / "events.jsonl"
+                identities = ["oldest", "middle", "newest"]
+                for generation, identity in enumerate(identities[:2]):
+                    (archive / f"events-20260101T00000{generation}Z.jsonl").write_text(
+                        json.dumps(self.event(identity)) + "\n", encoding="utf-8"
+                    )
+                live_identity = (
+                    "live-before-gap" if failure == "crash-gap" else "newest"
+                )
+                events.write_text(
+                    json.dumps(self.event(live_identity)) + "\n", encoding="utf-8"
+                )
+                index = DeliveryIdIndex(events, archive)
+                self.assertTrue(index.contains("oldest"))
+                index_path = Path(str(events) + ".delivery-index.sqlite3")
+                if failure == "missing":
+                    index_path.unlink()
+                elif failure == "corrupt":
+                    index_path.write_bytes(b"not sqlite")
+                elif failure == "torn":
+                    index_path.write_bytes(index_path.read_bytes()[:64])
+                else:
+                    with events.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(self.event("newest")) + "\n")
+                        stream.flush()
+                for identity in identities:
+                    self.assertTrue(index.contains(identity))
+
+    def test_clean_membership_is_read_only_during_writer_contention(self):
+        index = DeliveryIdIndex(self.path, Path(self.temporary.name) / "archive")
+        self.path.write_text(json.dumps(self.event("known")) + "\n", encoding="utf-8")
+        self.assertTrue(index.contains("known"))
+        writer = sqlite3.connect(index.path)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("BEGIN IMMEDIATE")
+        try:
+            with patch.object(index, "_write_connection", side_effect=AssertionError):
+                self.assertTrue(index.contains("known"))
+                self.assertFalse(index.contains("unknown"))
+        finally:
+            writer.rollback()
+            writer.close()
+
+    def test_large_rebuild_inserts_bounded_batches(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        count = BATCH_SIZE * 3 + 17
+        (archive / "events-20260101T000000Z.jsonl").write_text(
+            "".join(
+                json.dumps(self.event(f"large-{number}")) + "\n"
+                for number in range(count)
+            ),
+            encoding="utf-8",
+        )
+        index = DeliveryIdIndex(self.path, archive)
+        sizes = []
+        original = index._insert_rows
+
+        def measured(database, rows):
+            sizes.append(len(rows))
+            return original(database, rows)
+
+        with patch.object(index, "_insert_rows", side_effect=measured):
+            self.assertTrue(index.contains(f"large-{count - 1}"))
+        self.assertGreater(len(sizes), 3)
+        self.assertLessEqual(max(sizes), BATCH_SIZE)
 
     def test_concurrent_logs_append_one_copy_of_same_delivery(self):
         other_store = MemoryDeliveryStore()

@@ -362,6 +362,22 @@ reconciliation from the retained live log and plain-JSONL archives. Those JSONL 
 remain the sole dedupe authority. This is exactly-once replay within retained event
 authority, not a global-forever guarantee.
 
+This use reconciles the parked storage decision in warren#223: warren#290 made exact
+retained-history membership an ingestion feature with a bounded-cost requirement, which
+is the decision's trigger for a local, stdlib SQLite index. It does not move event history
+into a database or add a service dependency; ingest safely scans JSONL if derived state is
+unavailable. The index uses space proportional to the distinct delivery IDs in the live
+log plus every retained archive. Removing archives removes their authority only after the
+archive change is published; Chronicle rotation publishes an atomic, opaque generation in
+`events.jsonl.archives-generation`, and operators that edit, replace, or remove archives
+must publish a new generation with `DeliveryIdIndex.publish_archives()` after fsyncing the
+canonical files. The next lookup streams JSONL in bounded batches, rebuilds the exact set,
+and vacuums the database so removed archive generations release storage. The generation
+token avoids timestamp collisions while allowing clean membership reads to remain
+read-only and avoid enumerating archives. A process also content-hashes the archive set
+once at startup, so an unpublished change made while Chronicle was stopped still repairs
+on restart; publication is required for reconciliation during a running process.
+
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
 ## Driving a client without a fleet
