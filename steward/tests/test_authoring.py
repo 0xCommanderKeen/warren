@@ -748,6 +748,147 @@ def test_an_external_same_target_commit_survives_refusal(fleet: ScratchRepo) -> 
     assert target.read_text(encoding="utf-8") == competitor
 
 
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_writer_in_the_old_replace_capture_gap_survives_rollback(
+    fleet: ScratchRepo, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Authored state is the installed intent, never bytes recaptured after replacement."""
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    competitor = (
+        edited(declaration_of(fleet), summary="The gap writer won.").manifest_text
+        if kind == "declaration"
+        else "---\nname: daily-summary\ndescription: The gap writer won.\n---\n\nOutside.\n"
+    )
+    real_replace = Path.replace
+    raced = False
+
+    def racing_replace(source: Path, destination: Path) -> Path:
+        nonlocal raced
+        result = real_replace(source, destination)
+        if destination == target and "steward-write" in source.name and not raced:
+            raced = True
+            target.write_text(competitor, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(Path, "replace", racing_replace)
+
+    def failing_head(argv: list[str]) -> CommandOutcome:
+        if "rev-parse" in argv and "--verify" in argv and "HEAD" in argv:
+            return CommandOutcome(tuple(argv), exit_status=128, stderr="injected failure")
+        return au.run_argv(argv)
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                edited(declaration_of(fleet), summary="Steward's losing bytes."),
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+                git=failing_head,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            au.SkillDocument("daily-summary", "Steward's losing bytes.", "Do it.\n"),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+            git=failing_head,
+        )
+
+    with pytest.raises(au.AuthoringError):
+        attempt()
+
+    assert raced
+    assert target.read_text(encoding="utf-8") == competitor
+
+
+@pytest.mark.parametrize("kind", ["declaration", "skill"])
+def test_a_symlink_target_is_refused_without_touching_its_referent(
+    fleet: ScratchRepo, kind: str
+) -> None:
+    """Neither declaration nor skill authoring follows a link presented as its target."""
+    target = (
+        fleet.residents / "test-agent" / MANIFEST_FILENAME
+        if kind == "declaration"
+        else fleet.skills / "daily-summary" / "SKILL.md"
+    )
+    requested = edited(declaration_of(fleet), summary="Must not follow the link.")
+    referent = fleet.root / f"outside-{kind}.txt"
+    referent.write_text("outside bytes stay put\n", encoding="utf-8")
+    target.unlink()
+    target.symlink_to(referent)
+    head = fleet.head()
+
+    def attempt() -> au.WriteResult:
+        if kind == "declaration":
+            return au.write_declaration(
+                fleet.residents,
+                "test-agent",
+                requested,
+                request_id=REQUEST_ID,
+                principal=PRINCIPAL,
+                skills_dir=fleet.skills,
+            )
+        return au.write_skill(
+            fleet.residents,
+            fleet.skills,
+            au.SkillDocument("daily-summary", "Must not follow the link.", "No.\n"),
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            created=False,
+        )
+
+    with pytest.raises(au.AuthoringError) as refused:
+        attempt()
+
+    assert refused.value.reason == "unsafe_target"
+    assert target.is_symlink()
+    assert referent.read_text(encoding="utf-8") == "outside bytes stay put\n"
+    assert fleet.head() == head
+
+
+def test_an_identical_byte_external_commit_owns_the_target_after_cas_refusal(
+    fleet: ScratchRepo,
+) -> None:
+    """Winning HEAD ownership, not byte difference, decides failed-publication rollback."""
+    target = fleet.residents / "test-agent" / MANIFEST_FILENAME
+    intended = edited(declaration_of(fleet), summary="Both writers chose these bytes.")
+    advanced = False
+
+    def advancing_git(argv: list[str]) -> CommandOutcome:
+        nonlocal advanced
+        if "update-ref" in argv and not advanced:
+            advanced = True
+            fleet.git("add", str(target.relative_to(fleet.root)))
+            fleet.git("commit", "-m", "external: publish the identical target")
+        return au.run_argv(argv)
+
+    with pytest.raises(au.AuthoringError) as refused:
+        au.write_declaration(
+            fleet.residents,
+            "test-agent",
+            intended,
+            request_id=REQUEST_ID,
+            principal=PRINCIPAL,
+            skills_dir=fleet.skills,
+            git=advancing_git,
+        )
+
+    assert refused.value.reason == "commit_failed"
+    assert fleet.git("log", "-1", "--format=%s").stdout.strip() == (
+        "external: publish the identical target"
+    )
+    assert target.read_text(encoding="utf-8") == intended.manifest_text
+    assert fleet.git("status", "--porcelain").stdout.strip() == ""
+
+
 def test_the_receipt_oid_does_not_depend_on_ref_update_output(fleet: ScratchRepo) -> None:
     """The machine-readable commit-tree OID is retained when publication prints anything."""
 

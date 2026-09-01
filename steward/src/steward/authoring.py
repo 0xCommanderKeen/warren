@@ -122,11 +122,13 @@ class AuthoringError(Exception):
         diagnostics: Sequence[Diagnostic] = (),
         *,
         reason: str = "write_refused",
+        preserve_paths: Sequence[str] = (),
     ) -> None:
         """Record the complaint, its structured diagnostics, and its reason code."""
         super().__init__(message)
         self.diagnostics = tuple(diagnostics)
         self.reason = reason
+        self.preserve_paths = frozenset(preserve_paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -667,9 +669,32 @@ def _commit_with_isolated_index(
         expected = parent if parent is not None else "0" * len(oid)
         published = git(["git", "-C", str(repo), "update-ref", "HEAD", oid, expected])
         if not published.ok:
+            # The failed CAS may mean another writer published these exact target entries.
+            # In that case its HEAD (or still-staged index) owns the worktree bytes even
+            # when they happen to equal ours; rollback must not make that published tree
+            # dirty.  An unrelated HEAD advance matches neither and remains ours to undo.
+            winning = _index_entries(repo, relative, git)
+            try:
+                winning_head = _head_parent(repo, git)
+                loaded = parent_run(
+                    ["git", "-C", str(repo), "read-tree", winning_head]
+                    if winning_head is not None
+                    else ["git", "-C", str(repo), "read-tree", "--empty"]
+                )
+                head_entries = (
+                    _index_entries(repo, relative, git, index=parent_index) if loaded.ok else {}
+                )
+            except AuthoringError:
+                head_entries = {}
+            preserve = [
+                path
+                for path in relative
+                if authored.get(path) in {winning.get(path), head_entries.get(path)}
+            ]
             raise AuthoringError(
                 "git HEAD changed while this write was being authored; retry against the new head",
                 reason="commit_failed",
+                preserve_paths=preserve,
             )
         _reconcile_index(repo, relative, baseline, authored, parent_entries, parent_index, git)
         return oid
@@ -757,15 +782,20 @@ class _FileState:
     def capture(cls, path: Path) -> _FileState:
         try:
             descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        except OSError:
-            # A symlink (or any other non-regular target) is not a file state Steward may
-            # compare or restore through.  Treat it as absent for capture; ``matches``
-            # below still distinguishes it from a genuinely absent path.
+        except FileNotFoundError, NotADirectoryError:
             return cls(path=path, existed=False)
+        except OSError as error:
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            ) from error
         try:
             metadata = os.fstat(descriptor)
             if not stat.S_ISREG(metadata.st_mode):
-                return cls(path=path, existed=False)
+                raise AuthoringError(
+                    f"refusing to replace non-regular authoring target {path}",
+                    reason="unsafe_target",
+                )
             with os.fdopen(descriptor, "rb", closefd=False) as source:
                 contents = source.read()
             return cls(path=path, existed=True, contents=contents, mode=metadata.st_mode)
@@ -807,16 +837,38 @@ class _AuthoringFiles:
     before: tuple[_FileState, ...]
     authored: tuple[_FileState, ...] | None = None
 
-    def mark_authored(self) -> None:
-        self.authored = tuple(_FileState.capture(state.path) for state in self.before)
+    def replace(self, contents: Mapping[Path, bytes]) -> None:
+        """Atomically install intended bytes and record that state without re-reading it."""
+        authored = list(self.before)
+        self.authored = tuple(authored)
+        for index, old in enumerate(self.before):
+            data = contents.get(old.path)
+            if data is None:
+                continue
+            old.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{old.path.name}.steward-write-", dir=old.path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as target:
+                    target.write(data)
+                if old.existed:
+                    temporary.chmod(old.mode)
+                mode = temporary.stat().st_mode
+                temporary.replace(old.path)
+                authored[index] = _FileState(path=old.path, existed=True, contents=data, mode=mode)
+                self.authored = tuple(authored)
+            finally:
+                temporary.unlink(missing_ok=True)
 
-    def rollback(self) -> None:
+    def rollback(self, preserve: frozenset[Path] = frozenset()) -> None:
         # An outside writer that replaced the same path after Steward's write owns it.  Only
         # put the old bytes back while the exact bytes and mode Steward authored remain.
         if self.authored is None:
             return
         for old, authored in zip(self.before, self.authored, strict=True):
-            if authored.matches():
+            if old.path not in preserve and authored.matches():
                 old.restore()
 
 
@@ -852,8 +904,13 @@ def _authoring_transaction(
         files = _AuthoringFiles(tuple(_FileState.capture(path) for path in paths))
         try:
             yield files
-        except Exception:
-            files.rollback()
+        except Exception as error:
+            preserve = (
+                frozenset(repo / path for path in getattr(error, "preserve_paths", ()))
+                if repo is not None
+                else frozenset()
+            )
+            files.rollback(preserve)
             for path, state in zip(paths, files.before, strict=True):
                 if not state.existed:
                     parent = path.parent
@@ -911,8 +968,10 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     with _authoring_transaction(residents_dir, paths, git=git) as files:
         _check_revision(expected_revision, paths)
         result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
-        _write_declaration_into(residents_dir / resident_id, declaration)
-        files.mark_authored()
+        intended = {paths[0]: declaration.manifest_text.encode()}
+        if declaration.soul_text is not None:
+            intended[paths[1]] = declaration.soul_text.encode()
+        files.replace(intended)
         written = tuple(path for path in paths if path.is_file())
         revision = revision_of(*written)
         commit = commit_write(
@@ -950,9 +1009,7 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
             )
         _check_revision(expected_revision, [path])
         result = validate_skill(residents_dir, skills_dir, document)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(document.text(), encoding="utf-8")
-        files.mark_authored()
+        files.replace({path: document.text().encode()})
         revision = revision_of(path)
         subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(
             name=document.name
