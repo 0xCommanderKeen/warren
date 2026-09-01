@@ -48,6 +48,7 @@ from steward.operator_auth import OPERATOR_CREDENTIAL_PATTERN
 from steward.session_auth import SESSION_CREDENTIAL_PATTERN
 
 __all__ = [
+    "CHAT_ROUTE_KIND",
     "CLOSE_OF_DAY",
     "DEFAULT_BOARD_LEASE_S",
     "DEFAULT_BOARD_TIMEOUT_S",
@@ -242,6 +243,15 @@ JOB_BOARD_ROUTE_KIND = "job-board"
 #: it. The route's ``id`` is what a delegating session names in its block.
 DELEGATION_ROUTE_KIND = "delegation"
 
+#: The route kind an operator's message arrives through (warren#108). The third kind
+#: steward *delivers* into rather than merely describes, and the only one where the thing
+#: arriving is a person rather than the fleet: the bridge maps the route's ``address``
+#: reference to a bot token held in steward's own environment, fires a session with the
+#: message, and sends the answer back. The address stays a reference — ``telegram:pip`` —
+#: for the reason every reference field in this file is one: a manifest is git, and a bot
+#: token in git is a bot anybody who clones the repo can speak as.
+CHAT_ROUTE_KIND = "chat"
+
 #: One transport name, as a manifest spells it. A closed set for the reason
 #: :data:`PermissionMode` is one: a typo in a transport name would otherwise be a manifest
 #: that reads as wired up and taps nobody, discovered on the night an approval knock does
@@ -427,6 +437,13 @@ SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "an inline GitHub token"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "an inline GitHub token"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "an inline Slack token"),
+    # A BotFather token: the bot's numeric id, a colon, and thirty-odd characters of
+    # secret. Both halves of the rule apply to it (warren#108). A chat route's ``address``
+    # is a *reference* to a bot and the token lives in steward's environment, so one
+    # written into a manifest is a credential in git — and a resident that stumbles across
+    # its own bot's token must not be able to echo it back into the chat, which is the one
+    # place a reply is guaranteed to be read by whoever is watching that conversation.
+    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}"), "an inline Telegram bot token"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "an inline AWS access key id"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "an inline Google API key"),
     (
@@ -902,6 +919,18 @@ class Route(_Model):
         still wiring up takes no letters.
         """
         return self.kind == DELEGATION_ROUTE_KIND and self.status == "active"
+
+    @property
+    def accepts_chat(self) -> bool:
+        """True when the chat bridge may carry an operator's messages into this route.
+
+        The same two halves :attr:`accepts_delegation` requires, and for the same reason
+        (warren#108): the kind says this channel is a conversation, and ``active`` says the
+        operator has actually been to BotFather and put the token in steward's environment.
+        A ``pending`` chat route is a declaration that the bot is not wired up yet — which
+        is the state a manifest ships in, because the token cannot ship with it.
+        """
+        return self.kind == CHAT_ROUTE_KIND and self.status == "active"
 
 
 class Notifications(_Model):

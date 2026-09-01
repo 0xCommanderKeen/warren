@@ -201,7 +201,7 @@ routes:
     note: Optional.
 ```
 
-Two kinds are more than description, because steward itself delivers through them:
+Three kinds are more than description, because steward itself delivers through them:
 
 - **`job-board`** — required, and `active`, before `board: {claim: true}` is allowed. See
   [`board`](#board--job-board-participation).
@@ -210,6 +210,14 @@ Two kinds are more than description, because steward itself delivers through the
   no other, and the delegating session names the route by its `id`. A resident may declare
   several — `inbox` and `research` are different doors. See
   [`delegation`](#delegation--handing-work-to-another-resident).
+- **`chat`** — the door a *person* arrives through (warren#108). An `active` chat route
+  makes the resident reachable from a phone: `steward chat run` long-polls the bot the
+  `address` names, and every message from a named operator fires an ordinary session whose
+  reply goes back into the conversation. The address stays a **reference** —
+  `telegram:pip` — and the bot's token lives in steward's environment as
+  `STEWARD_CHAT_TOKEN_PIP`; a token written here is refused by validation, because a
+  manifest is git. A route ships `pending` for exactly that reason: it cannot carry the
+  secret that would make it real. See [docs/chat.md](chat.md).
 
 Every kind here is **inbound**: a way work reaches this resident. The other direction —
 steward tapping a person about this resident, one-way, with nothing listening for a reply —

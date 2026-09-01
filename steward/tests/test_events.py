@@ -90,6 +90,7 @@ def test_the_added_types_are_the_additive_set() -> None:
         "needs_human",
         "needs_human_resolved",
         "resident_restarted",
+        "chat_message_dropped",
     )
 
 

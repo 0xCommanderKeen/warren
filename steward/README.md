@@ -213,6 +213,37 @@ $ steward notify list                 # transport, kinds, and the URL to subscri
 $ steward notify test life-agent      # one harmless tap, and whether it landed
 ```
 
+**Chat** (#108). `routes: {kind: chat}` used to be a description; now it is a doorway.
+`steward chat run` long-polls one Telegram bot per resident, and every message from a
+named operator fires **one ordinary session** — same admission, same budget, same runner
+seam, same `routine_started`/`routine_finished` bracket, under the trigger `chat` — whose
+final message is redacted, bounded, and sent back into the conversation. Text in, text out.
+
+The route's `address` is a reference (`telegram:pip`) and the bot's token lives in
+steward's environment as `STEWARD_CHAT_TOKEN_PIP`, so a manifest can be read, reviewed and
+pasted anywhere without that being a disclosure; a token written into one is refused by
+validation and scrubbed out of any reply. Only the Telegram user ids in
+`STEWARD_CHAT_OPERATORS` are answered, in private chats only — anybody else is dropped
+**without a reply**, because a refusal still tells a scanner the bot is live, and the
+attempt becomes a `chat_message_dropped` event carrying who knocked and never what they
+said. A busy resident is the API's 409 in sentence form: refused with a reason, never
+queued. The conversation is a rolling file in the resident's own memory directory, the last
+few turns of which are injected as context *beneath* the charter. A dispatch sweep follows
+every answered message, so a handoff written mid-conversation is delivered before you have
+read the reply.
+
+It is a separate process sharing the scheduler's state directory — which is exactly what
+the cross-process session claim (warren#111) is for — and long polling means every
+connection is outbound, so nothing on the internet gets a way into the burrow. Notifications
+(warren#114) stay the other channel: one-way, nothing listens, no session fires. This bridge
+only ever speaks when spoken to. The setup runbook — BotFather, the variables, the compose
+service — is [docs/chat.md](docs/chat.md).
+
+```console
+$ steward chat list                   # who is reachable, and which variable each bot reads
+$ steward chat run --residents residents   # the daemon; nothing arrives unless this is up
+```
+
 **Delegation** (#7). A resident can hand work to a neighbour, and steward is the only
 arbiter: both manifests have to agree — `delegation: {send: true}` on the sender, an active
 route of kind `delegation` on the receiver — and steward enforces what no manifest can see,
@@ -377,6 +408,12 @@ the NAS); the watchdog says it in red, because that process *is* the supervisor.
 `STEWARD_BURROW` names this burrow when the machine's hostname is not what manifests call
 it — though what `docker info` says about itself is consulted first, and settles it alone
 when it matches.
+
+`steward chat run` is the third daemon, and it sits under the same rule for a narrower
+reason: it supervises nothing and needs no docker of its own, but it *fires sessions*, so a
+chat route on a container-placed resident puts it exactly where the other two are. It also
+shares their state directory and their one `steward.db`, which is what makes a message
+arriving mid-routine find the resident busy instead of opening a second session.
 
 `DOCKER_HOST` is inherited by every docker call steward makes (measured, unlike a
 session's environment), so docker's own remote-endpoint support applies to supervision. It
@@ -659,6 +696,10 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
 | `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |
 | `STEWARD_NOTIFY_NAMESPACE` | notifications | Folded into every derived topic. Empty by default; set it on a second installation reading the same `residents/` tree, so a developer's test knock does not buzz the operator's real phone. |
+| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated Telegram user ids steward answers. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
+| `STEWARD_CHAT_TOKEN_<REF>` | chat bridge | The bot token for a chat route whose `address` is `<transport>:<ref>` — `telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`, with non-alphanumerics folded to `_`. One bot per resident, and never in a manifest: a token written into one is refused by validation. |
+| `STEWARD_CHAT_API_URL` | chat bridge | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real service. |
+| `STEWARD_CHAT_POLL_TIMEOUT_S` | chat bridge | How long one `getUpdates` may wait for a message (default 25s). The socket timeout is this plus ten seconds, because the server holds the connection for the whole poll by design. |
 | `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. Read as `BURROW_URL` too, so an environment written before warren#216 still configures steward; the new spelling wins. |
 | `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. `BURROW_TOKEN` is read the same way, and loses the same way. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |

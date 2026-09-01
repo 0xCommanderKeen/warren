@@ -22,7 +22,12 @@ from steward import journal
 from steward.deploy import memory_host_dir, placement_for
 from steward.manifest import ManifestError, Resident, ResidentManifest, Routine
 from steward.manifest import Runner as RunnerSpec
-from steward.prompt import assemble_delegated_prompt, assemble_routine_prompt, assemble_task_prompt
+from steward.prompt import (
+    assemble_chat_prompt,
+    assemble_delegated_prompt,
+    assemble_routine_prompt,
+    assemble_task_prompt,
+)
 from steward.runners import (
     Outcome,
     Placement,
@@ -32,6 +37,7 @@ from steward.runners import (
     build_runner,
     skills_home,
 )
+from steward.runs import RUN_CHAT, RUN_DELEGATED, RUN_ROUTINE, RUN_TASK, TRIGGER_CHAT
 from steward.session_auth import SESSION_TOKEN_ENV
 from steward.skills import (
     Skill,
@@ -44,7 +50,9 @@ from steward.skills import (
 )
 
 __all__ = [
+    "DEFAULT_CHAT_TIMEOUT_S",
     "Admission",
+    "ChatWake",
     "DelegatedWake",
     "LegacySessionHooks",
     "Refusal",
@@ -271,7 +279,7 @@ class RoutineWake:
     @property
     def kind(self) -> str:
         """Name the ledger kind for a routine."""
-        return "routine"
+        return RUN_ROUTINE
 
     @property
     def ref(self) -> str:
@@ -307,6 +315,95 @@ class RoutineWake:
         return elapsed_s
 
 
+#: How long a chat session gets before steward kills it, when no budget says otherwise.
+#: Short by the standards of this codebase — the shipped routines are given 600 and 900
+#: seconds — because the whole difference of this channel is that a person is sitting
+#: there waiting for the answer. A resident's ``budgets.max_run_seconds`` still caps it
+#: like any other session; nothing here can widen a declared bound.
+DEFAULT_CHAT_TIMEOUT_S = 300
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ChatWake:
+    """One message from the operator, and everything the lifecycle needs to answer it.
+
+    A wake-up like the other three (warren#108), and the one that is not declared anywhere:
+    a routine is in the manifest, a task is on the board, a letter is in the inbox, and a
+    chat message simply arrived. What it carries beyond the message is the *window* — the
+    last few turns of this conversation, read from the resident's own memory directory by
+    :class:`steward.chat.Transcript` — because a headless session that woke up amnesiac
+    would otherwise ask the operator to repeat themselves on every single turn.
+    """
+
+    conversation: str
+    route: str
+    message: str
+    transcript: str = ""
+    run_id: str
+    timeout_s: int = DEFAULT_CHAT_TIMEOUT_S
+    #: This session's own scoped API credential, minted per message like a routine's is
+    #: per fire: two turns of one conversation are two sessions, and the second must not be
+    #: able to present the first's (steward #41).
+    session_credential: str = ""
+
+    @property
+    def kind(self) -> str:
+        """Name the ledger kind for a chat session."""
+        return RUN_CHAT
+
+    @property
+    def trigger(self) -> str:
+        """Name what started it. There is only ever one answer, and it is not a schedule."""
+        return TRIGGER_CHAT
+
+    @property
+    def ref(self) -> str:
+        """Name the conversation this session is a turn of."""
+        return self.conversation
+
+    @property
+    def harvest_parent_task_id(self) -> None:
+        """A chat session has no parent task."""
+        return None
+
+    def origin_for(self, resident: Resident) -> str:
+        """Attribute a chat session to the person who asked for it.
+
+        ``human:chat`` rather than ``resident:<id>``, in the vocabulary
+        :func:`steward.delegation.origin_for` already documents: a routine is a resident
+        acting on its own initiative and this is a person at the door, so the spend rolls up
+        to the person. The channel names the door, the way ``human:api`` does; *which*
+        operator typed it is deliberately not in the ledger, which is a record of what steward
+        spent rather than of who said what.
+        """
+        del resident
+        return "human:chat"
+
+    def environment(self, resident: Resident) -> Mapping[str, str]:
+        """Build the environment facts a chat session inherits.
+
+        Conspicuously absent: the bot token. The bridge holds it, the session never needs
+        it, and a session that had it could speak as the resident in a conversation steward
+        never brokered — which is the one thing a chat bridge must not make possible.
+        """
+        return {
+            "CHRONICLE_AGENT_ID": resident.agent_id,
+            "CHRONICLE_PROJECT": resident.project,
+            # Both spellings: a session may be picked up by an emitter older than the
+            # warren#216 rename, and an unrecognised identity files its events under a
+            # different villager rather than failing.
+            "BURROW_AGENT_ID": resident.agent_id,
+            "BURROW_PROJECT": resident.project,
+            "STEWARD_CHAT_ROUTE": self.route,
+            "STEWARD_RUN_ID": self.run_id,
+            **session_credential_env(self.session_credential),
+        }
+
+    def pre_run_failure_duration(self, elapsed_s: float) -> float:
+        """Report what a chat session that failed before its runner actually took."""
+        return elapsed_s
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _BoardWake:
     """Facts and behaviour common to board notices and delegated letters."""
@@ -326,6 +423,11 @@ class _BoardWake:
     #: This attempt's own scoped API credential. Per attempt, not per task: two claims of
     #: one task are two sessions, and the second must not be able to present the first's.
     session_credential: str = ""
+
+    @property
+    def trigger(self) -> str:
+        """Name what started it: nothing did. A task is claimed rather than triggered."""
+        return ""
 
     @property
     def ref(self) -> str:
@@ -380,7 +482,7 @@ class TaskWake(_BoardWake):
     @property
     def kind(self) -> str:
         """Name the ledger kind for a board task."""
-        return "task"
+        return RUN_TASK
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -393,10 +495,10 @@ class DelegatedWake(_BoardWake):
     @property
     def kind(self) -> str:
         """Name the ledger kind for a delegated letter."""
-        return "delegated"
+        return RUN_DELEGATED
 
 
-type Wake = DelegatedWake | RoutineWake | TaskWake
+type Wake = ChatWake | DelegatedWake | RoutineWake | TaskWake
 
 
 @dataclass(frozen=True, slots=True)
@@ -777,6 +879,17 @@ class ResidentSessions:
         journal_entry: str | None,
         decisions: str | None,
     ) -> str:
+        if isinstance(wake, ChatWake):
+            return assemble_chat_prompt(
+                resident.manifest,
+                wake.message,
+                route=wake.route,
+                transcript=wake.transcript,
+                soul_text=resident.soul.body,
+                journal_entry=journal_entry,
+                skills=skills,
+                decisions=decisions,
+            )
         if isinstance(wake, DelegatedWake):
             return assemble_delegated_prompt(
                 resident.manifest,
@@ -866,7 +979,7 @@ class ResidentSessions:
                 result=result,
                 kind=wake.kind,
                 run_id=wake.run_id,
-                trigger=wake.trigger if isinstance(wake, RoutineWake) else "",
+                trigger=wake.trigger,
                 ref=wake.ref,
                 origin=wake.origin_for(resident),
                 now=completed_at,

@@ -60,6 +60,7 @@ from steward.budgets import BudgetGuard
 from steward.manifest import Resident, active_residents, validate_path
 from steward.run_lifecycle import RUN_LEASE_GRACE_S, RunTransitions
 from steward.runners import CommandRun, run_argv
+from steward.runs import ROUTINE_BRACKETED
 from steward.scheduler import SchedulerState, default_state_path, next_fire_after
 from steward.store import (
     RUN_ROUTINE,
@@ -413,10 +414,16 @@ class _LogScan:
     closed_runs: dict[str, set[str]]
 
     def answers(self, run: StaleRun) -> bool:
-        """Say whether the log holds a closing event for *this session*."""
+        """Say whether the log holds a closing event for *this session*.
+
+        Which pair to look for is decided by :data:`steward.runs.ROUTINE_BRACKETED` rather
+        than by ``kind == routine``: a chat session is bracketed by the same
+        ``routine_started``/``routine_finished`` pair a fire is (warren#108), so looking for
+        a ``task_done`` would find nothing and bury a session that answered perfectly well.
+        """
         expected = (
             {ev.ROUTINE_FINISHED, ev.ROUTINE_FAILED}
-            if run.kind == RUN_ROUTINE
+            if run.kind in ROUTINE_BRACKETED
             else {ev.TASK_DONE, ev.TASK_FAILED}
         )
         return bool(self.closed_runs.get(run.run_id, set()) & expected)
@@ -1121,7 +1128,10 @@ class Watchdog:
             # A task death belongs to the lease sweep. If that sweep has not produced a
             # run-specific terminal fact, leave the run pending; a generic routine death
             # would be the wrong protocol and finalizing it without a sink would lose it.
-            if run.registered and run.kind != RUN_ROUTINE:
+            # A chat session has no lease and nobody else watching, so it is mourned here
+            # exactly as a routine fire is (warren#108) — otherwise a chat daemon killed
+            # mid-answer would leave a row open in ``open_runs`` for ever.
+            if run.registered and run.kind not in ROUTINE_BRACKETED:
                 continue
             terminal = ev.routine_failed_event(
                 agent_id=run.agent_id,
@@ -1157,7 +1167,7 @@ class Watchdog:
                 run.routine,
                 run.age_s(now),
             )
-            if run.kind == RUN_ROUTINE:
+            if run.kind in ROUTINE_BRACKETED:
                 if run.registered:
                     self.runs.publish_pending(self.emitter, now=now)
                 else:
