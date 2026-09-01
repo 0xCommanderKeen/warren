@@ -16,8 +16,10 @@ import { Link, NavigationProvider, useNavigation } from "./navigation.jsx";
 import { StewardProvider, useSteward } from "./steward/context.jsx";
 import { Button, Label, PageHead } from "./console/ui.jsx";
 import { viewModel } from "./model.js";
+import { knockCount, plural } from "./diagnostics.js";
 import { createStateTransport } from "./transport.js";
 import { LedgerProvider } from "./console/ledger.jsx";
+import DiagnosticsPage from "./pages/DiagnosticsPage.jsx";
 import FleetPage from "./pages/FleetPage.jsx";
 import SkillsPage from "./pages/SkillsPage.jsx";
 import ResidentsPage from "./pages/ResidentsPage.jsx";
@@ -96,6 +98,29 @@ const CREDENTIAL_NOTE = {
   other: ["not an operator credential: likely the master token, which names nobody and cannot be revoked without a restart"],
 };
 
+/**
+ * What the snapshot is complaining about, in the rail rather than only on its own page.
+ *
+ * A knock at a resident's chat bot is the one thing in the village an *outsider* causes, and
+ * the reason warren#276 records it at all is for a person to notice. A page nobody has a
+ * reason to open would not be noticing — so the count lives where the connection state does,
+ * and says "knocks" out loud when there are any.
+ */
+function Complaints({ snapshot }) {
+  const diagnostics = snapshot?.diagnostics || [];
+  if (!diagnostics.length) return null;
+  const knocks = knockCount(diagnostics);
+  return (
+    <Link
+      to={routeTo.diagnostics()}
+      className="mt-1 block text-[10px] text-dim no-underline hover:text-ink"
+    >
+      {plural(diagnostics.length, "diagnostic")}
+      {knocks ? ` · ${plural(knocks, "knock")}` : ""}
+    </Link>
+  );
+}
+
 function Rail({ snapshot, chronicle }) {
   const { page } = useNavigation();
   const { credential, status } = useSteward();
@@ -144,8 +169,11 @@ function Rail({ snapshot, chronicle }) {
         <LinkState tone={CHRONICLE_TONE[chronicle] || "idle"} title={snapshot?.cursor || undefined}>
           {chronicle}
         </LinkState>
-        <div className="mb-4 text-[10px] text-faint">
-          {snapshot ? `schema v${snapshot.schema_version} · gen ${snapshot.generation}` : "no snapshot yet"}
+        <div className="mb-4">
+          <div className="text-[10px] text-faint">
+            {snapshot ? `schema v${snapshot.schema_version} · gen ${snapshot.generation}` : "no snapshot yet"}
+          </div>
+          <Complaints snapshot={snapshot} />
         </div>
 
         <Label>steward</Label>
@@ -178,7 +206,7 @@ const TITLES = {
   fleet: "Fleet", agent: "Record", residents: "Residents", resident: "Resident",
   residentNew: "New resident", residentDeclaration: "Declaration", routines: "Routines",
   approvals: "Approvals", board: "Job board", skills: "Skills", skill: "Skill",
-  skillNew: "New skill", budgets: "Budgets",
+  skillNew: "New skill", budgets: "Budgets", diagnostics: "Diagnostics",
 };
 
 function NotFound() {
@@ -217,6 +245,8 @@ function Page({ model, page, params }) {
       return <BoardPage />;
     case "budgets":
       return <BudgetsPage params={params} />;
+    case "diagnostics":
+      return <DiagnosticsPage model={model} />;
     default:
       return <NotFound />;
   }

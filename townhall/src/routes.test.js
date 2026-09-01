@@ -41,6 +41,7 @@ describe("base-prefix routing", () => {
       routeTo.residentDeclaration("life-agent"), routeTo.skills(),
       routeTo.skill("read-inbox"), routeTo.skillNew(), routeTo.routines(),
       routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("life-agent"),
+      routeTo.diagnostics(),
     ];
     for (const route of routes) expect(stripBase(withBase(route, base), base)).toBe(route);
   });
@@ -65,6 +66,7 @@ describe("route matching", () => {
     expect(matchRoute("/skills/read-inbox")).toEqual({ page: "skill", params: { name: "read-inbox" } });
     expect(matchRoute("/budgets")).toEqual({ page: "budgets", params: {} });
     expect(matchRoute("/budgets/life-agent")).toEqual({ page: "budgets", params: { id: "life-agent" } });
+    expect(matchRoute("/diagnostics")).toEqual({ page: "diagnostics", params: {} });
   });
 
   it("decodes a percent-encoded name back to the name steward knows", () => {
@@ -83,6 +85,7 @@ describe("route matching", () => {
     }
     expect(NAV.map((entry) => entry.label)).toEqual([
       "Fleet", "Residents", "Routines", "Approvals", "Board", "Skills", "Budgets",
+      "Diagnostics",
     ]);
   });
 

@@ -68,6 +68,7 @@ export function viewModel(snapshot) {
     artifacts: snapshot.artifacts || [],
     journals: snapshot.journals || [],
     routines: snapshot.routines || [],
+    diagnostics: snapshot.diagnostics || [],
     events: eventFeed(people),
     active: people.filter((person) => ACTIVE_STATES.has(person.state)).length,
   };
