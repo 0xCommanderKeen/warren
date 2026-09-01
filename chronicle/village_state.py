@@ -376,27 +376,56 @@ def _mood(agent_id, indexed_history, approvals):
     }
 
 
-def _opened_row(event):
-    """The row Steward's two doors open onto, told apart by which one it came through.
+def _row_origin(event):
+    """Where a job came from, as its post or its handoff states it.
 
     A posted job names the skills it needs and nobody in particular; a handed-over one
     names a resident and no skills, because an addressee is the stronger requirement.
     The identifiers here are the village's own: Steward's store keys a handoff by
     *resident* id, while the event carries the agent id, which is what a later claim
     can be compared against.
+
+    These four fields are the only ones an origin owns. A second origin for a row that
+    already exists restates them — it does not say the job is untaken, so it cannot
+    reach ``state``, ``claimant`` or the clock (warren#282).
     """
     payload = event["payload"]
     handed_over = event["type"] == "task_delegated"
     return {
-        "id": payload["task_id"],
         "title": payload["title"],
-        "state": "open",
         "required_skills": [] if handed_over else list(payload["required_skills"]),
         "posted_by": payload["from"] if handed_over else payload["posted_by"],
         "assignee": payload["to"] if handed_over else None,
+    }
+
+
+def _opened_row(event):
+    """The row Steward's two doors open onto, open and untaken until something moves it."""
+    origin = _row_origin(event)
+    return {
+        "id": event["payload"]["task_id"],
+        "title": origin["title"],
+        "state": "open",
+        "required_skills": origin["required_skills"],
+        "posted_by": origin["posted_by"],
+        "assignee": origin["assignee"],
         "claimant": None,
         "updated_at": event["ts"],
     }
+
+
+def _move_row(record, event):
+    """Apply one transition to the row it belongs to: who holds it and where it stands."""
+    payload = event["payload"]
+    record["claimant"] = payload["claimant"]
+    record["state"] = {
+        "task_claimed": "claimed",
+        "task_done": "done",
+        "task_failed": (
+            "open" if payload.get("reason") == "lease_expired" else "failed"
+        ),
+    }[event["type"]]
+    record["updated_at"] = event["ts"]
 
 
 def _approval_shape(event):
@@ -458,7 +487,7 @@ def project_village(
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
-    tasks, task_by_id = [], {}
+    tasks, task_by_id, held_transitions, moved_rows = [], {}, {}, set()
     journals, journal_by_key = [], {}
     routines, routine_by_run = [], {}
     artifacts = []
@@ -477,19 +506,34 @@ def project_village(
             task_id = payload["task_id"]
             record = task_by_id.get(task_id)
             if kind in TASK_ORIGIN_TYPES:
-                record = _opened_row(event)
-                task_by_id[task_id] = record
-                tasks.append(record)
-            elif record:
-                record["claimant"] = payload["claimant"]
-                record["state"] = {
-                    "task_claimed": "claimed",
-                    "task_done": "done",
-                    "task_failed": (
-                        "open" if payload.get("reason") == "lease_expired" else "failed"
-                    ),
-                }[kind]
-                record["updated_at"] = event["ts"]
+                if record is None:
+                    record = _opened_row(event)
+                    task_by_id[task_id] = record
+                    tasks.append(record)
+                    held = held_transitions.pop(task_id, None)
+                    if held is not None:
+                        _move_row(record, held)
+                        moved_rows.add(task_id)
+                else:
+                    record.update(_row_origin(event))
+                    if task_id not in moved_rows:
+                        # Nothing has taken this job, so its clock is still its posted
+                        # age, and the newest origin is where that age comes from. Once
+                        # a transition owns the clock the row keeps it: a replayed post
+                        # is not news about work already under way.
+                        record["updated_at"] = event["ts"]
+            elif record is not None:
+                _move_row(record, event)
+                moved_rows.add(task_id)
+            else:
+                # The row is not open yet, and this is not the event that opens one.
+                # Rotation keeps a row's newest origin and its newest transition, so a
+                # replayed post lands *after* the claim it did not undo; reading the
+                # claim here in log order would drop it and put the job back on the
+                # open board. Hold it instead. Only the newest matters: every
+                # transition overwrites all three fields it owns. Nothing is invented —
+                # a held transition whose row never opens is discarded with the rest.
+                held_transitions[task_id] = event
         shape = _approval_shape(event)
         if shape:
             previous = approval_by_id.get(shape["request_id"])
