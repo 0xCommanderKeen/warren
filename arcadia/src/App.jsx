@@ -118,6 +118,10 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
     setCredentialsReady(true);
   }
 
+  function optionLabel(option) {
+    return typeof option === "string" ? option : JSON.stringify(option);
+  }
+
   return (
     <section
       aria-busy={submittedRequestId !== null}
@@ -153,18 +157,21 @@ function ApprovalKnocks({ snapshot, stewardClient }) {
               <p className="mb-2 font-mono text-xs text-[#566158]">{JSON.stringify(approval.detail)}</p>
             ) : null}
             <div className="flex flex-wrap gap-2">
-              {approval.options.map((option) => (
-                <button
-                  aria-label={`${option[0].toUpperCase()}${option.slice(1)} ${approval.message}`}
-                  className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.1em] shadow-[2px_2px_0_#2a1817] enabled:cursor-pointer enabled:hover:translate-x-px enabled:hover:translate-y-px enabled:hover:shadow-none disabled:opacity-50"
-                  disabled={!stewardClient || !credentialsReady || submittedRequestId !== null}
-                  key={option}
-                  onClick={() => decide(approval, option)}
-                  type="button"
-                >
-                  {option}
-                </button>
-              ))}
+              {approval.options.map((option) => {
+                const label = optionLabel(option);
+                return (
+                  <button
+                    aria-label={`${label[0]?.toUpperCase() || ""}${label.slice(1)} ${approval.message}`}
+                    className="border border-[#2a1817] bg-[#eee5d1] px-3 py-1.5 font-mono text-xs uppercase tracking-[0.1em] shadow-[2px_2px_0_#2a1817] enabled:cursor-pointer enabled:hover:translate-x-px enabled:hover:translate-y-px enabled:hover:shadow-none disabled:opacity-50"
+                    disabled={!stewardClient || !credentialsReady || submittedRequestId !== null}
+                    key={label}
+                    onClick={() => decide(approval, option)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
           </article>
         );

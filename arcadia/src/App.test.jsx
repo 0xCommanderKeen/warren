@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.js";
-import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 import { createStewardClient } from "./steward/StewardClient.js";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
@@ -106,6 +105,7 @@ describe("Arcadia", () => {
     envelope.snapshot.journals = [];
     envelope.snapshot.villagers[0].history = [
       {
+        ...fixture.snapshot.villagers[0].history[0],
         type: "task_done",
         payload: { title: "History must remain invisible", artifact: "ghost.md" },
       },
@@ -165,6 +165,27 @@ describe("Arcadia", () => {
     );
     expect(screen.queryByText("Future Villager")).not.toBeInTheDocument();
     expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
+  });
+
+  it("visibly rejects malformed nested state before rendering it", () => {
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.tasks[0].required_skills = null;
+
+    render(<App envelope={envelope} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Contract mismatch");
+    expect(screen.getByRole("alert")).toHaveTextContent("snapshot.tasks");
+  });
+
+  it("safely renders JSON-valued approval options allowed by Chronicle's contract", () => {
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.approvals[0].options = [{ decision: "approve" }];
+
+    render(<App envelope={envelope} />);
+
+    expect(screen.getByRole("button", {
+      name: '{"decision":"approve"} Deploy?',
+    })).toBeInTheDocument();
   });
 
   it("offers each valid Chronicle snapshot to the Steward confirmation boundary", () => {
@@ -278,7 +299,31 @@ describe("Arcadia", () => {
       decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
     };
 
-    render(<App envelope={multiplePendingFixture} stewardClient={stewardClient} />);
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.generation = 8;
+    envelope.snapshot.villagers.unshift({
+      ...structuredClone(fixture.snapshot.villagers[0]),
+      id: "claude:ada",
+      name: "Ada",
+      residency: "visitor",
+      home: null,
+      base: "lodge",
+      resident_file: null,
+      state: "knocking",
+      project: "arcadia",
+      cwd: "/work/arcadia",
+      pending_approval_ids: ["approval-b"],
+    });
+    envelope.snapshot.approvals.unshift({
+      ...structuredClone(fixture.snapshot.approvals[0]),
+      request_id: "approval-b",
+      agent_id: "claude:ada",
+      project: "arcadia",
+      message: "Publish?",
+      action: "publish",
+    });
+
+    render(<App envelope={envelope} stewardClient={stewardClient} />);
 
     const knocks = screen.getByRole("region", { name: "Approval knocks" });
     expect(within(knocks).getAllByRole("article").map((item) => item.textContent)).toEqual([
