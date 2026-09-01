@@ -195,7 +195,7 @@ deploy is pushed from a machine that has the repo checked out.
   with `CHRONICLE_HOST=0.0.0.0`,
   `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_TOKEN=<shared secret>`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
@@ -354,9 +354,13 @@ identity, stable append order and an explicit conservative overflow state; it is
 every ordinary projection and cannot create presence. Exact future invalidation over
 unrestricted request IDs is impossible in fixed space, so overflow resolves to an uncertain
 mood instead of a guess. The delivery-ID acceleration ledger is separately bounded to 1,024
-records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults); retained
-live/archive events remain the dedupe authority after ledger eviction. This is exactly-once
-replay within retained event authority, not a global-forever guarantee.
+records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults). On a ledger
+miss, a local SQLite side index provides exact membership without reparsing retained
+history. It is derived state, stored beside the live log as
+`events.jsonl.delivery-index.sqlite3`: deleting or corrupting it causes a rebuild or
+reconciliation from the retained live log and plain-JSONL archives. Those JSONL files
+remain the sole dedupe authority. This is exactly-once replay within retained event
+authority, not a global-forever guarantee.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 

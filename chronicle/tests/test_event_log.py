@@ -1,8 +1,10 @@
 import dataclasses
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from config import Config
 from event_log import EventCursor, EventLog
@@ -49,6 +51,144 @@ class EventLogTests(unittest.TestCase):
             [json.loads(line) for line in self.path.read_text().splitlines()], [event]
         )
         self.assertEqual(self.store.keys, {"durable-delivery-0001"})
+
+    def test_unique_append_lookup_cost_does_not_grow_with_retained_rows(self):
+        retained = [self.event(f"retained-{index:04d}") for index in range(200)]
+        self.path.write_text(
+            "".join(json.dumps(event) + "\n" for event in retained),
+            encoding="utf-8",
+        )
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        for generation in range(4):
+            (archive / f"events-20260101T00000{generation}Z.jsonl").write_text(
+                "".join(
+                    json.dumps(self.event(f"archive-{generation}-{index}")) + "\n"
+                    for index in range(50)
+                ),
+                encoding="utf-8",
+            )
+
+        # The first lookup may rebuild derived state from canonical JSONL.
+        self.assertTrue(self.log.append(self.event("new-after-rebuild")))
+        with (
+            patch("delivery_id_index.json.loads", wraps=json.loads) as loads,
+            patch("delivery_id_index.glob.glob", wraps=__import__("glob").glob) as glob,
+        ):
+            self.assertTrue(self.log.append(self.event("new-steady-state")))
+
+        row_parses = [
+            call for call in loads.call_args_list if isinstance(call.args[0], bytes)
+        ]
+        self.assertEqual(row_parses, [])
+        self.assertEqual(glob.call_count, 0)
+
+    def test_duplicate_is_rejected_across_multiple_legacy_archives(self):
+        archive = Path(self.temporary.name) / "archive"
+        archive.mkdir()
+        for generation in range(3):
+            events = [self.event(f"archive-{generation}-{index}") for index in range(4)]
+            (archive / f"events-20260101T00000{generation}Z.jsonl").write_text(
+                "".join(json.dumps(event) + "\n" for event in events),
+                encoding="utf-8",
+            )
+        self.log = EventLog(
+            dataclasses.replace(
+                Config(), events=self.path, archive_dir=archive, max_log_bytes=0
+            ),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+
+        self.assertFalse(self.log.append(self.event("archive-1-2")))
+        self.assertEqual(self.duplicates, [True])
+        self.assertTrue(Path(str(self.path) + ".delivery-index.sqlite3").is_file())
+
+    def test_missing_index_rebuilds_from_jsonl_and_rejects_duplicate(self):
+        event = self.event("survives-index-loss")
+        self.assertTrue(self.log.append(event))
+        index = Path(str(self.path) + ".delivery-index.sqlite3")
+        index.unlink()
+        self.store.keys.clear()
+
+        restarted = EventLog(
+            dataclasses.replace(Config(), events=self.path, max_log_bytes=0),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+        self.assertFalse(restarted.append(event))
+        self.assertEqual(self.duplicates, [True])
+
+    def test_crash_between_jsonl_fsync_and_index_commit_is_reconciled(self):
+        self.assertTrue(self.log.append(self.event("indexed-before-crash")))
+        crashed = self.event("jsonl-only-after-crash")
+        with self.path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(crashed) + "\n")
+            stream.flush()
+
+        self.store.keys.clear()
+        self.assertFalse(self.log.append(crashed))
+        self.assertEqual(self.duplicates, [True])
+
+    def test_corrupt_index_falls_back_to_jsonl_then_rebuilds(self):
+        event = self.event("canonical-despite-corrupt-index")
+        self.assertTrue(self.log.append(event))
+        index = Path(str(self.path) + ".delivery-index.sqlite3")
+        index.write_bytes(b"torn sqlite publication")
+        self.store.keys.clear()
+
+        self.assertFalse(self.log.append(event))
+        self.store.keys.clear()
+        self.assertTrue(self.log.append(self.event("rebuild-after-corruption")))
+
+    def test_rotation_keeps_archived_delivery_authoritative(self):
+        archive = Path(self.temporary.name) / "archive"
+        self.log = EventLog(
+            dataclasses.replace(
+                Config(), events=self.path, archive_dir=archive, max_log_bytes=0
+            ),
+            self.store,
+            lambda: self.duplicates.append(True),
+        )
+        first = self.event("before-rotation", agent_id="resident")
+        self.assertTrue(self.log.append(first))
+        for index in range(120):
+            self.assertTrue(
+                self.log.append(
+                    self.event(f"rotation-fill-{index}", agent_id="resident")
+                )
+            )
+
+        archived = self.log.rotate()
+        self.assertIsNotNone(archived)
+        self.store.keys.clear()
+        self.assertFalse(self.log.append(first))
+        self.assertEqual(self.duplicates, [True])
+
+    def test_concurrent_logs_append_one_copy_of_same_delivery(self):
+        other_store = MemoryDeliveryStore()
+        other = EventLog(
+            dataclasses.replace(Config(), events=self.path, max_log_bytes=0),
+            other_store,
+        )
+        barrier = threading.Barrier(2)
+        results = []
+
+        def append(log):
+            barrier.wait()
+            results.append(log.append(self.event("concurrent-delivery")))
+
+        threads = [
+            threading.Thread(target=append, args=(log,)) for log in (self.log, other)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(sorted(results), [False, True])
+        records = [json.loads(line) for line in self.path.read_text().splitlines()]
+        self.assertEqual(records, [self.event("concurrent-delivery")])
 
     def test_cursor_reads_only_complete_new_records_and_resets_after_restart(self):
         first = self.event("first-delivery-0001")
