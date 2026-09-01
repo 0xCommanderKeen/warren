@@ -1745,9 +1745,8 @@ def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per optio
                 ),
                 claims=claims,
                 state_path=state,
+                catchup_s=catchup_seconds,
             )
-            bridge.catchup_s = catchup_seconds
-            bridge.require_ready()
             outcomes = bridge.run(max_polls=max_polls)
         except ch.ChatError as exc:
             click.secho(str(exc), fg="red", err=True)
@@ -1767,21 +1766,15 @@ def _report_chat(outcome: ch.ChatOutcome) -> None:
     this needs is that a message arrived, who it was for, and how it ended.
     """
     label = f"{outcome.resident_id}/{outcome.route}"
-    colours = {
-        ch.ANSWERED: "green",
-        ch.FAILED: "red",
-        ch.DROPPED: "yellow",
-        ch.BUSY: "yellow",
-        ch.REFUSED: "yellow",
-        ch.STALE: "yellow",
-        ch.UNREACHABLE: "red",
-    }
+    loud = (ch.ChatStatus.FAILED, ch.ChatStatus.UNREACHABLE)
+    if outcome.status is ch.ChatStatus.ANSWERED:
+        colour = "green"
+    elif outcome.status in loud:
+        colour = "red"
+    else:
+        colour = "yellow"
     reason = f": {redact_secrets(outcome.reason)}" if outcome.reason else ""
-    click.secho(
-        f"{outcome.status} {label}{reason}",
-        fg=colours.get(outcome.status, "white"),
-        err=outcome.status in (ch.FAILED, ch.UNREACHABLE),
-    )
+    click.secho(f"{outcome.status} {label}{reason}", fg=colour, err=outcome.status in loud)
 
 
 # --------------------------------------------------------------------------------------

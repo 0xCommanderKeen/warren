@@ -24,9 +24,15 @@ which variable to set without consulting anything else.
 Telegram user ids. A message from anybody else is dropped with **no reply at all** — an
 answer, even a refusal, tells a scanner that the bot is live and that something is behind
 it — and recorded as a :data:`steward.events.CHAT_MESSAGE_DROPPED` event, so the operator
-can see in the village that somebody found their resident. A message in a group chat is
-dropped the same way even when an operator sent it: the reply would be readable by everyone
-else in that group, and a resident's answers are not a broadcast.
+can find out that somebody knocked. A message in a group chat is dropped the same way even
+when an operator sent it: the reply would be readable by everyone else in that group, and a
+resident's answers are not a broadcast.
+
+    Chronicle does not accept that event type yet — its own ``EVENT_TYPES`` gate refuses
+    anything outside its set, as it already does for ``task_delegated`` and
+    ``resident_restarted`` — so today the drop reaches steward's local event log and not the
+    village. One line in ``chronicle/protocol.py`` closes that, and it is deliberately not
+    made here (``docs/chat.md``).
 
 **A busy resident says so.** The bridge takes the same cross-process claim every other
 firing process takes (:mod:`steward.claims`, warren#111). A refused claim means the
@@ -62,7 +68,8 @@ import urllib.request
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -104,6 +111,7 @@ __all__ = [
     "OPERATORS_ENV",
     "POLL_TIMEOUT_ENV",
     "REPLY_MAX_CHARS",
+    "SEND_TIMEOUT_S",
     "TOKEN_ENV_PREFIX",
     "TRANSCRIPT_KEEP_TURNS",
     "TRANSCRIPT_WINDOW_TURNS",
@@ -113,6 +121,7 @@ __all__ = [
     "ChatOutcome",
     "ChatReport",
     "ChatRoute",
+    "ChatStatus",
     "ChatTransport",
     "Message",
     "TelegramTransport",
@@ -122,6 +131,7 @@ __all__ = [
     "chat_routes",
     "describe_chat",
     "operators_from_env",
+    "poll_timeout_from_env",
     "resolve_chat_dir",
     "token_env_name",
     "tokens_from_env",
@@ -166,6 +176,13 @@ DEFAULT_POLL_TIMEOUT_S = 25.0
 #: server holds the connection for the whole poll timeout by design, so a socket timeout at
 #: or below it would turn every idle minute into a stream of invented failures.
 HTTP_TIMEOUT_MARGIN_S = 10.0
+
+#: How long sending one reply may take. Five times the two seconds a notification tap gets
+#: (:data:`steward.notify.NTFY_TIMEOUT_S`), because the two are paid for by different
+#: people: a tap runs inside a durable transition and may not cost a run, while this runs
+#: in a daemon whose entire job is this message, after a session that already took minutes.
+#: Bounded all the same — a hung socket must not stop the daemon answering the next message.
+SEND_TIMEOUT_S = 10.0
 
 #: How long a bridge waits after a pass in which some bot could not be reached, so an API
 #: that is down costs one request every few seconds rather than a spin.
@@ -329,8 +346,23 @@ class ChatRoute:
 
     @property
     def key(self) -> str:
-        """The stable name for this doorway: ``<resident id>/<route id>``."""
+        """The stable name for this doorway: ``<resident id>/<route id>``, for a log line."""
         return f"{self.resident.id}/{self.route.id}"
+
+    @property
+    def route_id(self) -> str:
+        """Name the route a message came through."""
+        return self.route.id
+
+    @property
+    def name(self) -> str:
+        """What to call this resident *to its operator*: the soul's name, not the id.
+
+        The same judgement :func:`steward.notify.tap_for` makes about a knock on a phone —
+        "Pip is busy right now" is a sentence and ``pip/chat: busy`` is a log line, and this
+        text is read by a person in a chat window.
+        """
+        return self.resident.manifest.soul.name
 
 
 def _declared_chat_routes(residents: Sequence[Resident]) -> Iterator[tuple[Resident, Route]]:
@@ -576,14 +608,14 @@ class Transcript:
         """Return the last few turns: what the next session is opened with."""
         return self.turns()[-turns:] if turns > 0 else []
 
-    def render(self, turns: int = TRANSCRIPT_WINDOW_TURNS) -> str:
+    def render(self) -> str:
         """Render the window as the text injected into a prompt, oldest first.
 
         Bounded here as well as at injection, and from the *newest* end: a window cut from
         the front by the prompt's cap would drop the turn the operator just referred to and
         keep the one from an hour ago, which is the wrong half to lose.
         """
-        rendered = [turn.render() for turn in self.window(turns)]
+        rendered = [turn.render() for turn in self.window()]
         text = "\n".join(rendered)
         while len(text) > TRANSCRIPT_MAX_CHARS and rendered:
             rendered.pop(0)
@@ -685,7 +717,7 @@ class TelegramTransport:
 
     base_url: str = DEFAULT_API_URL
     poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S
-    send_timeout_s: float = 10.0
+    send_timeout_s: float = SEND_TIMEOUT_S
 
     @property
     def name(self) -> str:
@@ -816,19 +848,30 @@ def _message_from(update: object) -> Message | None:
 # what one message came to
 # --------------------------------------------------------------------------------------
 
-#: A message a session answered, whatever the session concluded.
-ANSWERED = "answered"
-FAILED = "failed"
-#: A message from somebody steward does not answer. No reply was sent.
-DROPPED = "dropped"
-#: The resident is running something else right now, so the operator was told so.
-BUSY = "busy"
-#: The resident may not run at all — paused, or with nowhere to run.
-REFUSED = "refused"
-#: The message arrived while nothing was listening and is too old to answer honestly.
-STALE = "stale"
-#: A bot steward could not reach at all this pass. Not about a message; about a doorway.
-UNREACHABLE = "unreachable"
+
+class ChatStatus(StrEnum):
+    """What became of one message. Nothing here is a guess.
+
+    A closed vocabulary rather than seven loose strings, for the reason
+    :class:`steward.runners.Outcome` is one: three places read these — the outcome's own
+    ``ran``, the CLI's colours, and every test — and a typo in any of them would be a branch
+    that silently never fires.
+    """
+
+    #: A session answered it, whatever the session concluded.
+    ANSWERED = "answered"
+    #: A session ran and did not finish on its own terms. The operator was told which.
+    FAILED = "failed"
+    #: From somebody steward does not answer. **No reply was sent**, deliberately.
+    DROPPED = "dropped"
+    #: The resident is running something else right now, so the operator was told so.
+    BUSY = "busy"
+    #: The resident may not run at all — paused, or with nowhere to run.
+    REFUSED = "refused"
+    #: It arrived while nothing was listening and is too old to answer honestly.
+    STALE = "stale"
+    #: A bot steward could not reach at all this pass. Not about a message; about a doorway.
+    UNREACHABLE = "unreachable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -837,7 +880,7 @@ class ChatOutcome:
 
     resident_id: str
     route: str
-    status: str
+    status: ChatStatus
     conversation: str = ""
     run_id: str = ""
     reason: str | None = None
@@ -847,7 +890,7 @@ class ChatOutcome:
     @property
     def ran(self) -> bool:
         """True when a session actually opened for this message."""
-        return self.status in (ANSWERED, FAILED)
+        return self.status in (ChatStatus.ANSWERED, ChatStatus.FAILED)
 
 
 # --------------------------------------------------------------------------------------
@@ -921,6 +964,7 @@ class ChatBridge:
         claims: ResidentClaims | None = None,
         transport: ChatTransport | None = None,
         state_path: Path | None = None,
+        catchup_s: float = DEFAULT_CATCHUP_S,
     ) -> ChatBridge:
         """Build a bridge over the reachable chat routes of a residents tree.
 
@@ -948,6 +992,7 @@ class ChatBridge:
             hooks=hooks,
             claims=claims,
             state_path=state_path,
+            catchup_s=catchup_s,
         )
 
     # -- startup ---------------------------------------------------------------------
@@ -1023,13 +1068,22 @@ class ChatBridge:
         token = self.token_for(route)
         if token is None:  # pragma: no cover — deliverable() already filtered these out
             return []
-        messages = self.transport.poll(token, self._offsets.get(route.key, 0))
+        try:
+            messages = self.transport.poll(token, self._offsets.get(route.key, 0))
+        except Exception as exc:  # noqa: BLE001 — the protocol says it does not; belt and braces
+            # :class:`ChatTransport` promises never to raise, and the shipped one keeps that
+            # promise. This is here because ``poll_once`` promises the same thing to a daemon
+            # loop, and that promise must not rest on every future transport author
+            # remembering — the position :meth:`steward.notify.Notifier.send` takes for
+            # exactly the same reason.
+            log.warning("%s: chat transport raised while polling: %s", route.key, exc)
+            messages = None
         if messages is None:
             return [
                 ChatOutcome(
                     resident_id=route.resident.id,
-                    route=route.route.id,
-                    status=UNREACHABLE,
+                    route=route.route_id,
+                    status=ChatStatus.UNREACHABLE,
                     reason=f"could not reach {route.address}",
                 )
             ]
@@ -1047,9 +1101,9 @@ class ChatBridge:
                 outcomes.append(
                     ChatOutcome(
                         resident_id=route.resident.id,
-                        route=route.route.id,
+                        route=route.route_id,
                         conversation=message.conversation,
-                        status=FAILED,
+                        status=ChatStatus.FAILED,
                         reason=f"{type(exc).__name__}: {exc}",
                     )
                 )
@@ -1086,27 +1140,60 @@ class ChatBridge:
         if not message.private:
             return self._drop(route, message, "not a private conversation")
         if message.age_s(now) > self.catchup_s:
-            log.info(
-                "%s: a message from %.0fs ago is older than the %.0fs catch-up window",
+            # The scheduler's judgement about a missed occurrence, applied to a missed
+            # message: dropped, logged, and **not** answered. Telegram holds undelivered
+            # updates for a day, so a bridge that was down all night comes up holding every
+            # message that arrived while nobody was listening — and firing a session for
+            # each would spend real money answering questions the operator gave up on and
+            # has since answered themselves. Silence rather than a line, because the same
+            # restart hands over *many* of these at once, and a bot that says "I was not
+            # running" twenty times in a row is worse than one that says nothing: it is the
+            # unprompted outbound storm this bridge exists not to be. Sending it again is
+            # the operator's move, and it is one message.
+            log.warning(
+                "%s: dropped a message from %.0fs ago without replying — older than the "
+                "%.0fs catch-up window; steward does not back-fill",
                 route.key,
                 message.age_s(now),
                 self.catchup_s,
             )
-            reply = (
-                f"{route.resident.manifest.soul.name} was not running when this arrived "
-                f"{_ago(message.age_s(now))}, so it went unanswered. Send it again if it "
-                f"still matters."
-            )
-            self._reply(route, message.conversation, reply)
             return ChatOutcome(
                 resident_id=route.resident.id,
-                route=route.route.id,
+                route=route.route_id,
                 conversation=message.conversation,
-                status=STALE,
+                status=ChatStatus.STALE,
                 reason="older than the catch-up window",
-                reply=reply,
             )
         return None
+
+    def _refuse(
+        self,
+        route: ChatRoute,
+        message: Message,
+        status: ChatStatus,
+        *,
+        reason: str,
+        reply: str,
+    ) -> ChatOutcome:
+        """Tell the operator why nothing is going to happen, and report the same thing.
+
+        The one shape every *spoken* "not this time" takes — busy, paused, a budget steward
+        could not read. Gathered here because they are one act said three ways, and a fourth
+        reason should be a call rather than another copy of five lines.
+
+        Deliberately not every refusal: a stranger, a group chat and a message older than the
+        catch-up window are answered with **silence**, and each has its own path for its own
+        reason. Being able to see, here, that everything reaching this method does reply is
+        the point of keeping them apart.
+        """
+        return ChatOutcome(
+            resident_id=route.resident.id,
+            route=route.route_id,
+            conversation=message.conversation,
+            status=status,
+            reason=reason,
+            reply=self._reply(route, message.conversation, reply),
+        )
 
     def _drop(self, route: ChatRoute, message: Message, reason: str) -> ChatOutcome:
         """Say nothing back, and say so in the village. Never raises."""
@@ -1131,9 +1218,9 @@ class ChatBridge:
             log.warning("%s: could not record a dropped message: %s", route.key, exc)
         return ChatOutcome(
             resident_id=route.resident.id,
-            route=route.route.id,
+            route=route.route_id,
             conversation=message.conversation,
-            status=DROPPED,
+            status=ChatStatus.DROPPED,
             reason=reason,
         )
 
@@ -1153,18 +1240,13 @@ class ChatBridge:
                 # was now, and a queue of chat sessions would answer questions the operator
                 # stopped caring about an hour ago.
                 log.info("%s: %s", route.key, claim.reason)
-                reply = (
-                    f"{resident.manifest.soul.name} is busy right now — {claim.reason}. "
-                    f"Send that again in a minute."
-                )
-                self._reply(route, message.conversation, reply)
-                return ChatOutcome(
-                    resident_id=resident.id,
-                    route=route.route.id,
-                    conversation=message.conversation,
-                    status=BUSY,
+                return self._refuse(
+                    route,
+                    message,
+                    ChatStatus.BUSY,
                     reason=claim.reason,
-                    reply=reply,
+                    reply=f"{route.name} is busy right now — {claim.reason}. "
+                    f"Send that again in a minute.",
                 )
             return self._answer_held(route, message, run_id, now)
 
@@ -1179,15 +1261,12 @@ class ChatBridge:
             # the village hears nothing — plus the one thing a fire has no one to do it for:
             # the person who asked is told why, because they are standing at the door.
             log.warning("%s: %s", route.key, admission.reason)
-            reply = f"{resident.manifest.soul.name} cannot answer right now: {admission.reason}"
-            self._reply(route, message.conversation, reply)
-            return ChatOutcome(
-                resident_id=resident.id,
-                route=route.route.id,
-                conversation=message.conversation,
-                status=REFUSED,
+            return self._refuse(
+                route,
+                message,
+                ChatStatus.REFUSED,
                 reason=admission.reason,
-                reply=reply,
+                reply=f"{route.name} cannot answer right now: {admission.reason}",
             )
         transcript = Transcript(resident.manifest, message.conversation)
         try:
@@ -1212,15 +1291,12 @@ class ChatBridge:
         except Exception as exc:  # noqa: BLE001 — an unreadable budget refuses safely
             reason = f"budget unreadable: {type(exc).__name__}: {exc}"
             log.warning("%s: could not resolve the run timeout: %s", route.key, exc)
-            reply = f"{resident.manifest.soul.name} cannot answer right now: {reason}"
-            self._reply(route, message.conversation, reply)
-            return ChatOutcome(
-                resident_id=resident.id,
-                route=route.route.id,
-                conversation=message.conversation,
-                status=REFUSED,
+            return self._refuse(
+                route,
+                message,
+                ChatStatus.REFUSED,
                 reason=reason,
-                reply=reply,
+                reply=f"{route.name} cannot answer right now: {reason}",
             )
         # Written down before the session runs, so what the operator said survives a run that
         # dies — and so the next turn's window holds this message whatever happened to it.
@@ -1228,7 +1304,7 @@ class ChatBridge:
         context = ev.RunContext(
             agent_id=resident.agent_id,
             project=resident.project,
-            routine=route.route.id,
+            routine=route.route_id,
             run_id=run_id,
             cwd=str(admission.workdir),
         )
@@ -1240,7 +1316,7 @@ class ChatBridge:
         watched = self._open_run(route, run_id, message, timeout_s, now, owner_token, credential)
         wake = ChatWake(
             conversation=message.conversation,
-            route=route.route.id,
+            route=route.route_id,
             message=message.text,
             transcript=window,
             run_id=run_id,
@@ -1271,14 +1347,13 @@ class ChatBridge:
                     run_id, terminal, owner_token=owner_token, now=session.completed_at or now
                 )
                 self.run_transitions.publish_pending(self.emitter, now=session.completed_at or now)
-        reply = self._reply_text(resident.manifest, result)
+        reply = self._reply(route, message.conversation, self._answer_text(route, result))
         transcript.append(resident.id, reply, now=session.completed_at or now)
-        self._reply(route, message.conversation, reply)
         return ChatOutcome(
             resident_id=resident.id,
-            route=route.route.id,
+            route=route.route_id,
             conversation=message.conversation,
-            status=ANSWERED if result.ok else FAILED,
+            status=ChatStatus.ANSWERED if result.ok else ChatStatus.FAILED,
             run_id=run_id,
             reason=None if result.ok else f"{result.outcome}: {result.summary()}",
             reply=reply,
@@ -1292,36 +1367,49 @@ class ChatBridge:
             log.warning("%s: could not read the transcript: %s", transcript.manifest.id, exc)
             return ""
 
-    def _reply_text(self, manifest: ResidentManifest, result: RunResult) -> str:
+    def _answer_text(self, route: ChatRoute, result: RunResult) -> str:
         """Turn what the session produced into the sentence the operator reads.
-
-        Redacted, then bounded — never the reverse (steward #65). It matters more here than
-        anywhere else in steward: this string is *delivered to a phone*, so a secret cut in
-        half by a length cap would be a live prefix sitting in somebody's chat history.
 
         A failed session answers with :meth:`steward.runners.RunResult.summary`, which is
         steward's own words and deliberately not the child's stdout: a session that crashed
         while printing a key must not have that key forwarded to the conversation as its
-        "answer".
+        "answer". A session that finished and said nothing is reported as exactly that,
+        rather than answered with something steward made up on its behalf.
+
+        Scrubbing and bounding are **not** done here. They are :meth:`_reply`'s, once, for
+        every outbound string — see there.
         """
         if not result.ok:
-            return _bounded(f"{manifest.soul.name} could not answer: {result.summary()}")
-        text = (result.output or "").strip()
-        if not text:
-            return _bounded(f"{manifest.soul.name} finished without saying anything.")
-        return _bounded(text)
+            return f"{route.name} could not answer: {result.summary()}"
+        return (result.output or "").strip() or f"{route.name} finished without saying anything."
 
-    def _reply(self, route: ChatRoute, conversation: str, text: str) -> bool:
-        """Send one reply, and never let the sending of it fail the answering."""
+    def _reply(self, route: ChatRoute, conversation: str, text: str) -> str:
+        """Send one reply and return what was actually sent. Never raises.
+
+        **The one egress**, and the one place redaction happens — redact, *then* bound
+        (steward #65), never the reverse. It is here rather than at each caller for the
+        reason :func:`steward.notify.tap_for` gives for doing it in one place: a refusal
+        added tomorrow cannot forget the rule, and cannot get the order backwards. That
+        matters more on this path than anywhere else in steward, because these strings are
+        delivered to a phone — and it is not only the *session's* answer that needs it. An
+        admission refusal carries whatever a broken budget read threw, which is steward's
+        own diagnostic and is exactly the kind of sentence a connection string ends up in.
+
+        Returns the sent text rather than whether it landed, because that is what a caller
+        does with it: writes it into the transcript, and reports it. Whether it *arrived* is
+        the transport's business and a log line — a reply the operator did not get is not a
+        session that failed, and there is nobody to tell about it anyway.
+        """
+        sent = _bounded(text)
         token = self.token_for(route)
         if token is None:  # pragma: no cover — nothing reaches here without a token
-            return False
+            return sent
         try:
-            sent = self.transport.send(token, conversation, text)
+            delivered = self.transport.send(token, conversation, sent)
         except Exception as exc:  # noqa: BLE001 — a transport that raises is still just a failure
             log.warning("%s: chat transport raised while replying: %s", route.key, exc)
-            return False
-        if not sent:
+            return sent
+        if not delivered:
             log.warning("%s: the reply did not reach the conversation", route.key)
         return sent
 
@@ -1388,6 +1476,12 @@ class ChatBridge:
         Telegram hands each update to whichever ``getUpdates`` asked first and refuses the
         second with a conflict, so a second daemon would answer half the operator's messages
         and drop the rest on the floor.
+
+        Every message is said out loud as it happens rather than only in the returned list,
+        because the returned list is the *bounded* run's aggregate and an unbounded daemon
+        never reaches it: a run that only reported at exit would run for weeks saying nothing.
+        That is also why nothing accumulates unless the loop is bounded — a list holding one
+        record per message answered since Tuesday is a leak, not a report.
         """
         self.require_ready()
         outcomes: list[ChatOutcome] = []
@@ -1396,8 +1490,17 @@ class ChatBridge:
             while max_polls is None or polls < max_polls:
                 polls += 1
                 pass_outcomes = self.poll_once()
-                outcomes.extend(pass_outcomes)
-                if any(outcome.status == UNREACHABLE for outcome in pass_outcomes):
+                for outcome in pass_outcomes:
+                    log.info(
+                        "%s/%s: %s%s",
+                        outcome.resident_id,
+                        outcome.route,
+                        outcome.status,
+                        f" — {redact_secrets(outcome.reason)}" if outcome.reason else "",
+                    )
+                if max_polls is not None:
+                    outcomes.extend(pass_outcomes)
+                if any(outcome.status is ChatStatus.UNREACHABLE for outcome in pass_outcomes):
                     sleep(UNREACHABLE_SLEEP_S)
                 elif not pass_outcomes:
                     sleep(self.idle_sleep_s)
@@ -1443,15 +1546,3 @@ def _bounded(text: str) -> str:
     if len(scrubbed) <= REPLY_MAX_CHARS:
         return scrubbed
     return scrubbed[: REPLY_MAX_CHARS - 1].rstrip() + "…"
-
-
-def _ago(seconds: float) -> str:
-    """Render an age the way a person would say it, for a line in a chat."""
-    delta = timedelta(seconds=round(seconds))
-    if delta < timedelta(minutes=1):
-        return f"{delta.seconds}s ago"
-    if delta < timedelta(hours=1):
-        return f"{delta.seconds // 60}m ago"
-    if delta < timedelta(days=1):
-        return f"{delta.seconds // 3600}h ago"
-    return f"{delta.days}d ago"

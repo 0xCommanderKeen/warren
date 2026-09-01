@@ -464,7 +464,7 @@ def test_an_operators_message_is_answered_in_the_conversation(make_bridge: Bridg
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.ANSWERED
+    assert outcome.status == ch.ChatStatus.ANSWERED
     assert transport.sent == [(FAKE_BOT_TOKEN, CONVERSATION, "I am alive.")]
 
 
@@ -530,7 +530,7 @@ def test_a_failed_session_answers_in_stewards_words_and_never_the_childs(
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.FAILED
+    assert outcome.status == ch.ChatStatus.FAILED
     assert "exit status 1" in transport.sent[0][2]
     assert "traceback" not in transport.sent[0][2]
 
@@ -626,7 +626,7 @@ def test_a_stranger_gets_no_reply_and_a_line_in_the_village(
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.DROPPED
+    assert outcome.status == ch.ChatStatus.DROPPED
     assert transport.sent == []
     assert types(sink) == [ev.CHAT_MESSAGE_DROPPED]
     assert sink.events[0].payload["from"] == "9999"
@@ -650,23 +650,26 @@ def test_a_group_chat_is_never_answered_even_when_an_operator_speaks(
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.DROPPED
+    assert outcome.status == ch.ChatStatus.DROPPED
     assert transport.sent == []
     assert sink.events[0].payload["reason"] == "not a private conversation"
 
 
-def test_a_message_older_than_the_catch_up_window_is_told_so_and_fires_nothing(
+def test_a_message_older_than_the_catch_up_window_fires_nothing_and_says_nothing(
     make_bridge: BridgeMaker,
 ):
+    """A restart holds a night of undelivered messages; answering them all is a storm."""
     runner = ScriptedRunner()
-    transport = FakeTransport([[message(at=NOW - timedelta(hours=3))]])
+    transport = FakeTransport(
+        [[message(at=NOW - timedelta(hours=3), update_id=n) for n in range(1, 6)]]
+    )
     bridge = make_bridge(transport=transport, runner=runner)
 
-    [outcome] = bridge.poll_once()
+    outcomes = bridge.poll_once()
 
-    assert outcome.status == ch.STALE
+    assert [outcome.status for outcome in outcomes] == [ch.ChatStatus.STALE] * 5
     assert runner.requests == []
-    assert "was not running when this arrived" in transport.sent[0][2]
+    assert transport.sent == []
 
 
 def test_a_paused_resident_refuses_a_message_the_way_it_refuses_a_fire(
@@ -686,7 +689,7 @@ def test_a_paused_resident_refuses_a_message_the_way_it_refuses_a_fire(
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.REFUSED
+    assert outcome.status == ch.ChatStatus.REFUSED
     assert runner.requests == []
     assert "cannot answer right now" in transport.sent[0][2]
     assert types(sink) == []
@@ -702,7 +705,7 @@ def test_a_busy_resident_is_told_to_ask_again_rather_than_queued(
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.BUSY
+    assert outcome.status == ch.ChatStatus.BUSY
     assert runner.requests == []
     assert "is busy right now" in transport.sent[0][2]
     assert "one session per resident" in transport.sent[0][2]
@@ -735,7 +738,7 @@ def test_a_message_steward_cannot_answer_does_not_wedge_the_conversation(
     monkeypatch.setattr(bridge, "_answer", explode)
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.FAILED
+    assert outcome.status == ch.ChatStatus.FAILED
     assert bridge.poll_once() == []
     assert [offset for _token, offset in transport.polls] == [0, 8]
 
@@ -745,7 +748,7 @@ def test_a_bot_steward_cannot_reach_is_reported_rather_than_ignored(make_bridge:
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.UNREACHABLE
+    assert outcome.status == ch.ChatStatus.UNREACHABLE
     assert not outcome.ran
 
 
@@ -835,7 +838,7 @@ def test_a_bounded_run_polls_and_stops(make_bridge: BridgeMaker):
 
     outcomes = bridge.run(max_polls=2, sleep=lambda _seconds: None)
 
-    assert [outcome.status for outcome in outcomes] == [ch.ANSWERED]
+    assert [outcome.status for outcome in outcomes] == [ch.ChatStatus.ANSWERED]
     assert len(transport.polls) == 2
 
 
@@ -1221,7 +1224,68 @@ def test_a_reply_the_transport_refused_is_reported_and_never_raised(make_bridge:
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.ANSWERED
+    assert outcome.status == ch.ChatStatus.ANSWERED
+
+
+def test_a_transport_that_raises_while_polling_is_a_bot_that_is_down(make_bridge: BridgeMaker):
+    class Exploding(FakeTransport):
+        def poll(self, token: str, offset: int) -> list[ch.Message] | None:
+            del token, offset
+            raise RuntimeError("the socket went away")
+
+    bridge = make_bridge(transport=Exploding())
+
+    [outcome] = bridge.poll_once()
+
+    assert outcome.status == ch.ChatStatus.UNREACHABLE
+
+
+def test_every_reply_is_scrubbed_including_the_ones_steward_writes_itself(
+    make_bridge: BridgeMaker,
+):
+    """A refusal carries whatever a broken budget read threw, which is where secrets hide."""
+
+    class LeakyGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return f"budget unreadable: OperationalError: postgres://u:{FAKE_BOT_TOKEN}@db"
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    transport = FakeTransport([[message()]])
+    bridge = make_bridge(transport=transport, guard=LeakyGuard())
+
+    [outcome] = bridge.poll_once()
+
+    assert outcome.status == ch.ChatStatus.REFUSED
+    assert FAKE_BOT_TOKEN not in transport.sent[0][2]
+    assert FAKE_BOT_TOKEN not in outcome.reply
+
+
+def test_a_long_refusal_is_cut_like_any_other_reply(make_bridge: BridgeMaker):
+    class WordyGuard:
+        def allow(self, manifest: ResidentManifest, now: datetime | None = None) -> str | None:
+            del manifest, now
+            return "w" * 20_000
+
+        def timeout_for(self, manifest: ResidentManifest, declared_s: int) -> int:
+            del manifest
+            return declared_s
+
+        def record(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+    transport = FakeTransport([[message()]])
+    bridge = make_bridge(transport=transport, guard=WordyGuard())
+
+    bridge.poll_once()
+
+    assert len(transport.sent[0][2]) <= ch.REPLY_MAX_CHARS
 
 
 def test_a_transport_that_raises_while_replying_is_swallowed(make_bridge: BridgeMaker):
@@ -1234,7 +1298,7 @@ def test_a_transport_that_raises_while_replying_is_swallowed(make_bridge: Bridge
 
     [outcome] = bridge.poll_once()
 
-    assert outcome.status == ch.ANSWERED
+    assert outcome.status == ch.ChatStatus.ANSWERED
 
 
 def test_a_run_waits_before_asking_an_unreachable_bot_again(make_bridge: BridgeMaker):
@@ -1266,14 +1330,6 @@ def test_a_chat_api_that_is_not_http_reaches_nothing():
     transport = ch.TelegramTransport(base_url="file:///etc", poll_timeout_s=0)
 
     assert transport.poll(FAKE_BOT_TOKEN, 0) is None
-
-
-@pytest.mark.parametrize(
-    ("seconds", "rendered"),
-    [(30, "30s ago"), (600, "10m ago"), (7200, "2h ago"), (172_800, "2d ago")],
-)
-def test_an_age_reads_the_way_a_person_would_say_it(seconds: int, rendered: str):
-    assert ch._ago(seconds) == rendered
 
 
 def test_chat_run_refuses_loudly_when_no_bot_is_wired_up(

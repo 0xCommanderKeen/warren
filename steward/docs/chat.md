@@ -90,11 +90,23 @@ string in this system written by somebody steward has no relationship with, and 
 renders what it is given. A group chat is dropped the same way even when an operator speaks,
 because the reply would be readable by everyone else in the group.
 
+> **Known gap.** `chat_message_dropped` is a type steward emits and chronicle does not yet
+> accept: its `EVENT_TYPES` gate refuses anything outside its own set, so today the drop
+> lands in steward's local event log (`STEWARD_EVENTS_FALLBACK`) and not in the village.
+> It is in company — `task_delegated`, `task_session_finished` and `resident_restarted`
+> are missing there too — and the fix is one line in `chronicle/protocol.py`, deliberately
+> not made here. Until then, `grep chat_message_dropped ~/.chronicle/events.jsonl` is how
+> you see who knocked.
+
 **Messages have a shelf life.** Telegram holds undelivered updates for a day, so a bridge
 that was down all night would otherwise come up and fire a session for every message that
-arrived while nobody was listening. Anything older than the catch-up window (300s, the
-scheduler's number and the scheduler's reason) is answered with one line saying it went
-unanswered, and no session runs. `--catchup-seconds` moves it.
+arrived while nobody was listening — real money, spent answering questions the operator
+gave up on and has since answered themselves. Anything older than the catch-up window
+(300s, the scheduler's number and the scheduler's reason) is dropped with a log line, and
+**not** replied to: the same restart hands over many of them at once, and a bot that says
+"I was not running" twenty times in a row is the unprompted outbound storm this bridge
+exists not to be. Sending it again is the operator's move, and it is one message.
+`--catchup-seconds` moves the window.
 
 ## Operator setup
 
@@ -213,10 +225,9 @@ If nothing comes back:
 
 | symptom | what it means |
 |---|---|
-| no reply at all | your user id is not in `STEWARD_CHAT_OPERATORS`, or you are messaging in a group. Both are silent by design; the daemon's log and a `chat_message_dropped` event in the village say which. |
+| no reply at all | one of three silences, and the daemon's log says which: your user id is not in `STEWARD_CHAT_OPERATORS`, you are messaging in a group, or the message is older than the catch-up window. The first two are also a `chat_message_dropped` event. |
 | "…is busy right now" | the scheduler or a dispatch has that resident. Send it again. |
 | "…cannot answer right now: …" | a budget pause, or a memory directory the daemon cannot see. `steward budget show` and `steward doctor` say which. |
-| "…was not running when this arrived" | the message predates the daemon by more than the catch-up window. |
 | `telegram getUpdates failed` in the log | the token is wrong, or the burrow cannot reach `api.telegram.org`. |
 
 ## Environment
