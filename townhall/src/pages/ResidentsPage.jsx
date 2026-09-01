@@ -272,12 +272,13 @@ function DeclarationEditor({ id }) {
   const recovery = declarationRecoveries.get(id) || null;
 
   const [mode, setMode] = useState("fields");
-  const [draft, setDraft] = useState(null);
+  const [draft, setDraft] = useState(() => recovery?.draft || null);
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [reloaded, setReloaded] = useState(null);
   const [copied, setCopied] = useState(null);
+  const [recoveryReadRequest, setRecoveryReadRequest] = useState(null);
   const saveGeneration = useRef(0);
 
   // Re-reading after a save must not sweep away the answer the person is still reading —
@@ -291,6 +292,7 @@ function DeclarationEditor({ id }) {
     setRefusal(null);
     setReloaded(null);
     setCopied(null);
+    setRecoveryReadRequest(null);
     return () => {
       saveGeneration.current += 1;
     };
@@ -347,7 +349,7 @@ function DeclarationEditor({ id }) {
       if (generation !== saveGeneration.current) return;
       setRefusal(caught);
       if (caught?.code === "stale_revision") {
-        setDeclarationRecovery(id, { draft, mode, readGeneration: loaded.generation });
+        setDeclarationRecovery(id, { draft, mode });
       }
     } finally {
       if (generation === saveGeneration.current) setSaving(false);
@@ -374,12 +376,21 @@ function DeclarationEditor({ id }) {
     }
   }
 
-  if (loaded.loading && !loaded.data) return <Loading>reading the declaration…</Loading>;
-  if (loaded.error && !loaded.data) return <Problem error={loaded.error} />;
+  if (loaded.loading && !loaded.data && !recovery) return <Loading>reading the declaration…</Loading>;
+  if (loaded.error && !loaded.data && !recovery) return <Problem error={loaded.error} />;
   if (!draft) return null;
 
   const stale = refusal?.code === "stale_revision";
-  const currentWasReread = Boolean(recovery && loaded.data && loaded.generation > recovery.readGeneration);
+  const currentWasReread = Boolean(
+    recovery &&
+      loaded.data &&
+      recoveryReadRequest !== null &&
+      loaded.successfulRequestId === recoveryReadRequest,
+  );
+
+  function rereadCurrent() {
+    setRecoveryReadRequest(loaded.refresh());
+  }
 
   function reapplyRejected() {
     if (!recovery || !loaded.data) return;
@@ -482,7 +493,7 @@ function DeclarationEditor({ id }) {
           </p>
           <div className="mb-3 flex flex-wrap gap-2">
             {!currentWasReread ? (
-              <Button tiny onClick={() => loaded.refresh()}>re-read current server files</Button>
+              <Button tiny onClick={rereadCurrent}>re-read current server files</Button>
             ) : (
               <Button tiny tone="primary" onClick={reapplyRejected}>reapply rejected draft</Button>
             )}
@@ -495,8 +506,8 @@ function DeclarationEditor({ id }) {
             {copied === "failed" ? <Note>clipboard unavailable — select the draft below</Note> : null}
             {currentWasReread ? <Button tiny onClick={discardRejected}>discard rejected draft</Button> : null}
           </div>
-          {currentWasReread ? (
-            <div className="grid gap-3 lg:grid-cols-2">
+          <div className={`grid gap-3 ${currentWasReread ? "lg:grid-cols-2" : ""}`}>
+            {currentWasReread ? (
               <div>
                 <p className="text-[10px] uppercase tracking-[.16em] text-faint">current manifest</p>
                 {recovery.mode === "yaml" ? (
@@ -511,22 +522,22 @@ function DeclarationEditor({ id }) {
                   {loaded.data.soul}
                 </pre>
               </div>
-              <div>
-                <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected manifest</p>
-                {recovery.mode === "yaml" ? (
-                  <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
-                    {recovery.draft.text}
-                  </pre>
-                ) : (
-                  <Verbatim value={recovery.draft.manifest} summary="complete rejected manifest" />
-                )}
-                <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected soul</p>
+            ) : null}
+            <div>
+              <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected manifest</p>
+              {recovery.mode === "yaml" ? (
                 <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
-                  {recovery.draft.soul}
+                  {recovery.draft.text}
                 </pre>
-              </div>
+              ) : (
+                <Verbatim value={recovery.draft.manifest} summary="complete rejected manifest" />
+              )}
+              <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected soul</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                {recovery.draft.soul}
+              </pre>
             </div>
-          ) : null}
+          </div>
         </Panel>
       ) : null}
 
@@ -558,7 +569,7 @@ function DeclarationEditor({ id }) {
         </Panel>
       )}
 
-      <Panel title={`${loaded.data.soul_file} — the soul document`}>
+      <Panel title={`${loaded.data?.soul_file || "soul.md"} — the soul document`}>
         <p className="mt-0 mb-3 text-[12px] leading-[1.7] text-dim">
           The manifest and the soul move together because <code>agent_id</code> is in both and
           validation insists they agree. Omitting the soul would leave it untouched; this form
@@ -575,10 +586,17 @@ function DeclarationEditor({ id }) {
       <Panel title="What steward is being sent">
         <Facts
           pairs={[
-            ["files", loaded.data.paths?.join(" · ")],
+            ["files", loaded.data?.paths?.join(" · ") || "current files unavailable"],
             ["revision", <code className="text-dim">{draft.revision}</code>],
             ["spelling", mode === "yaml" ? "text — byte for byte" : "manifest — re-serialised"],
-            ["state", dirty ? "edited, not sent" : "identical to what is on disk"],
+            [
+              "state",
+              !loaded.data
+                ? "current files unavailable"
+                : dirty
+                  ? "edited, not sent"
+                  : "identical to what is on disk",
+            ],
           ]}
         />
         {mode === "fields" ? <Verbatim value={draft.manifest} summary="the manifest this form would send" /> : null}

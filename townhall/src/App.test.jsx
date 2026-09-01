@@ -440,7 +440,7 @@ describe("the resident editor", () => {
     expect(screen.getByText("sha256:current")).toBeTruthy();
   });
 
-  it("keeps rejected drafts across routes and isolates residents", async () => {
+  it("one explicit read unlocks recovery after several earlier reads and a remount", async () => {
     const hob = {
       ...DECLARATION,
       id: "hob",
@@ -449,8 +449,19 @@ describe("the resident editor", () => {
       revision: "sha256:hob",
     };
     let lifeReads = 0;
+    let writes = 0;
     const fetch = vi.fn().mockImplementation((url, init) => {
       if (init?.method === "PUT") {
+        writes += 1;
+        if (writes === 1) {
+          return Promise.resolve(json(200, {
+            status: "written",
+            message: "declaration written",
+            commit: COMMIT,
+            paths: [],
+            warnings: [],
+          }));
+        }
         return Promise.resolve(json(409, { detail: { error: "stale_revision", message: "changed" } }));
       }
       if (String(url).includes("/hob/")) return Promise.resolve(json(200, hob));
@@ -459,6 +470,12 @@ describe("the resident editor", () => {
     });
     const view = residentHarness(fetch);
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
+
+    // A successful write refreshes the query, so the conflict below happens after more
+    // than one successful read in this hook lifetime.
+    fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
+    await waitFor(() => expect(lifeReads).toBe(2));
+
     const rejected = "version: 0\nsummary: retained across routes\n";
     fireEvent.change(screen.getByDisplayValue(/version: 0/), { target: { value: rejected } });
     fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
@@ -473,6 +490,50 @@ describe("the resident editor", () => {
     view.show("life-agent");
     expect(await screen.findByText(/Stale draft recovery/i)).toBeTruthy();
     expect(screen.getAllByRole("textbox").some((editor) => editor.value === rejected)).toBe(true);
+    await waitFor(() => expect(lifeReads).toBe(3));
+    expect(screen.queryByRole("button", { name: /reapply rejected draft/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /re-read current server files/i }));
+    expect(await screen.findByRole("button", { name: /reapply rejected draft/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /discard rejected draft/i })).toBeTruthy();
+    expect(lifeReads).toBe(4);
+  });
+
+  it("shows retained recovery when the return read fails, then unlocks after retry", async () => {
+    const rejectedManifest = "version: 0\nsummary: visible through failure\n";
+    const rejectedSoul = "---\nagent_id: life-agent\n---\nA soul that must remain visible.\n";
+    let reads = 0;
+    const fetch = vi.fn().mockImplementation((_url, init) => {
+      if (init?.method === "PUT") {
+        return Promise.resolve(json(409, { detail: { error: "stale_revision", message: "changed" } }));
+      }
+      reads += 1;
+      if (reads === 2) {
+        return Promise.resolve(json(503, { detail: { error: "unavailable", message: "try again" } }));
+      }
+      return Promise.resolve(json(200, { ...DECLARATION, revision: `sha256:read-${reads}` }));
+    });
+    const view = residentHarness(fetch);
+    fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
+    const [manifestEditor, soulEditor] = screen.getAllByRole("textbox");
+    fireEvent.change(manifestEditor, { target: { value: rejectedManifest } });
+    fireEvent.change(soulEditor, { target: { value: rejectedSoul } });
+    fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
+    expect(await screen.findByText(/Stale draft recovery/i)).toBeTruthy();
+
+    view.show(null);
+    view.show("life-agent");
+    expect(await screen.findByText(/503 · unavailable/i)).toBeTruthy();
+    expect(screen.getAllByText(/visible through failure/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/A soul that must remain visible/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /copy rejected manifest/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /copy rejected soul/i })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /discard rejected draft/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /reapply rejected draft/i })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /re-read current server files/i }));
+    expect(await screen.findByRole("button", { name: /reapply rejected draft/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /discard rejected draft/i })).toBeTruthy();
   });
 
   it("lists a manifest that did not validate rather than hiding it", async () => {

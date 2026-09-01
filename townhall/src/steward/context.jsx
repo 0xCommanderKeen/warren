@@ -83,14 +83,20 @@ export function StewardProvider({ children, storage, fetch: fetchImpl }) {
  */
 export function useStewardQuery(load, deps = []) {
   const { locked } = useSteward();
-  const [state, setState] = useState({ data: null, error: null, loading: !locked, generation: 0 });
+  const [state, setState] = useState({
+    data: null,
+    error: null,
+    loading: !locked,
+    successfulRequestId: null,
+  });
   const [nonce, setNonce] = useState(0);
+  const nextRequestId = useRef(0);
   const loadRef = useRef(load);
   loadRef.current = load;
 
   useEffect(() => {
     if (locked) {
-      setState({ data: null, error: null, loading: false, generation: 0 });
+      setState({ data: null, error: null, loading: false, successfulRequestId: null });
       return undefined;
     }
     const controller = new AbortController();
@@ -103,7 +109,7 @@ export function useStewardQuery(load, deps = []) {
           data,
           error: null,
           loading: false,
-          generation: previous.generation + 1,
+          successfulRequestId: nonce,
         })),
         (error) => {
           if (!live || controller.signal.aborted) return;
@@ -119,6 +125,10 @@ export function useStewardQuery(load, deps = []) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locked, nonce, ...deps]);
 
-  const refresh = useCallback(() => setNonce((value) => value + 1), []);
+  const refresh = useCallback(() => {
+    const requestId = ++nextRequestId.current;
+    setNonce(requestId);
+    return requestId;
+  }, []);
   return { ...state, refresh };
 }
