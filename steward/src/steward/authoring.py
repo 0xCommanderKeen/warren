@@ -513,38 +513,13 @@ def _head_parent(repo: Path, git: PipedRun) -> str | None:
     )
 
 
-def _create_reconciled_index(  # noqa: PLR0913,PLR0917 - one argument per Git state
-    repo: Path,
-    relative: Sequence[str],
-    baseline: Mapping[str, _IndexEntry],
-    authored: Mapping[str, _IndexEntry],
-    parent_entries: Mapping[str, _IndexEntry],
-    git: PipedRun,
-) -> None:
-    """Ask Git to lock and create a missing index with repository permissions."""
-    try:
-        current = _index_entries(repo, relative, git)
-    except AuthoringError:
-        return
-    argv = ["git", "-C", str(repo), "update-index", "--add"]
-    changed = False
-    for path in relative:
-        old = baseline.get(path)
-        new = authored.get(path)
-        if old != parent_entries.get(path) or current.get(path) != old or new is None:
-            continue
-        argv.extend(["--cacheinfo", new.mode, new.oid, path])
-        changed = True
-    if changed:
-        git(argv)
-
-
 def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git state
     repo: Path,
     relative: Sequence[str],
     baseline: Mapping[str, _IndexEntry],
     authored: Mapping[str, _IndexEntry],
     parent_entries: Mapping[str, _IndexEntry],
+    parent_index: Path,
     git: PipedRun,
 ) -> None:
     """Refresh untouched authored entries under Git's own index lock, best-effort.
@@ -558,20 +533,17 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
         index = _git_path(repo, "index", git)
     except AuthoringError:
         return
-    if not index.exists():
-        # Let Git create and lock the first index. Besides avoiding a hand-made 0600
-        # index, this applies the repository's umask/core.sharedRepository policy.
-        _create_reconciled_index(repo, relative, baseline, authored, parent_entries, git)
-        return
     lock = Path(f"{index}.lock")
-    index_mode = index.stat().st_mode
     try:
         descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except OSError:
         return
     try:
         with os.fdopen(descriptor, "wb") as stream:
-            stream.write(index.read_bytes())
+            # Git created the parent index in this repository, so it supplies the
+            # correct umask/core.sharedRepository mode for a genuinely first index.
+            source = index if index.exists() else parent_index
+            stream.write(source.read_bytes())
         current = _index_entries(repo, relative, git, index=lock)
         for path in relative:
             old = baseline.get(path)
@@ -610,7 +582,7 @@ def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git s
                 )
             if not outcome.ok:
                 return
-        lock.chmod(index_mode)
+        lock.chmod(source.stat().st_mode)
         lock.replace(index)
     except OSError, AuthoringError, ValueError:
         return
@@ -630,6 +602,7 @@ def _commit_with_isolated_index(
     index_dir = _git_path(repo, "index", git).parent
     with tempfile.NamedTemporaryFile(prefix="steward-index-", dir=index_dir) as scratch:
         isolated_index = Path(scratch.name)
+    parent_index = isolated_index.with_name(f"{isolated_index.name}-parent")
 
     def isolated(argv: list[str]) -> CommandOutcome:
         return git(["env", f"GIT_INDEX_FILE={isolated_index}", *argv])
@@ -655,22 +628,20 @@ def _commit_with_isolated_index(
                 f"git could not write the authored tree: {tree.summary()}", reason="commit_failed"
             )
         authored = _index_entries(repo, relative, git, index=isolated_index)
-        parent_entries: dict[str, _IndexEntry] = {}
-        if parent is not None:
-            parent_index = isolated_index.with_name(f"{isolated_index.name}-parent")
-            try:
-                parent_run = lambda argv: git(  # noqa: E731 - tiny environment adapter
-                    ["env", f"GIT_INDEX_FILE={parent_index}", *argv]
-                )
-                loaded = parent_run(["git", "-C", str(repo), "read-tree", parent])
-                if not loaded.ok:
-                    raise AuthoringError(
-                        f"git could not inspect the expected parent: {loaded.summary()}",
-                        reason="commit_failed",
-                    )
-                parent_entries = _index_entries(repo, relative, git, index=parent_index)
-            finally:
-                parent_index.unlink(missing_ok=True)
+        parent_run = lambda argv: git(  # noqa: E731 - tiny environment adapter
+            ["env", f"GIT_INDEX_FILE={parent_index}", *argv]
+        )
+        loaded = parent_run(
+            ["git", "-C", str(repo), "read-tree", parent]
+            if parent is not None
+            else ["git", "-C", str(repo), "read-tree", "--empty"]
+        )
+        if not loaded.ok:
+            raise AuthoringError(
+                f"git could not inspect the expected parent: {loaded.summary()}",
+                reason="commit_failed",
+            )
+        parent_entries = _index_entries(repo, relative, git, index=parent_index)
         if authored == parent_entries:
             return None
         commit = git(
@@ -699,11 +670,12 @@ def _commit_with_isolated_index(
                 "git HEAD changed while this write was being authored; retry against the new head",
                 reason="commit_failed",
             )
-        _reconcile_index(repo, relative, baseline, authored, parent_entries, git)
+        _reconcile_index(repo, relative, baseline, authored, parent_entries, parent_index, git)
         return oid
     finally:
         with suppress(OSError):
             isolated_index.unlink(missing_ok=True)
+            parent_index.unlink(missing_ok=True)
 
 
 def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records

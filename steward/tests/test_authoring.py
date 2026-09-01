@@ -332,6 +332,59 @@ def test_unborn_shared_repository_index_uses_git_permissions(
     assert stat.S_IMODE(index.stat().st_mode) == 0o660
 
 
+def test_unborn_index_creator_wins_before_reconciliation_lock(
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+    write_skill: SkillWriter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first-index creator at the old compare/publish gap keeps its target bytes."""
+    repo = ScratchRepo(root=tmp_path / "unborn-race")
+    repo.residents.mkdir(parents=True)
+    repo.skills.mkdir(parents=True)
+    repo.git("init", "-b", "main")
+    for name in GRANTED:
+        write_skill(name, root=repo.skills)
+    write_resident(valid_manifest(), root=repo.residents)
+    target = repo.residents / "test-agent" / MANIFEST_FILENAME
+    requested = edited(declaration_of(repo), summary="Steward's committed bytes.")
+    staged = edited(declaration_of(repo), summary="The operator's staged bytes.").manifest_text
+    index_lock = repo.root / ".git" / "index.lock"
+    real_open = au.os.open
+    raced = False
+
+    def create_index_then_open(
+        path: os.PathLike[str] | str,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal raced
+        if Path(path) == index_lock and not raced:
+            raced = True
+            worktree = target.read_text(encoding="utf-8")
+            target.write_text(staged, encoding="utf-8")
+            repo.git("add", str(target.relative_to(repo.root)))
+            target.write_text(worktree, encoding="utf-8")
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(au.os, "open", create_index_then_open)
+
+    result = write(repo, "test-agent", requested)
+
+    assert raced
+    assert result.commit.committed
+    assert (
+        yaml.safe_load(repo.git("show", f":{target.relative_to(repo.root)}").stdout)["summary"]
+        == "The operator's staged bytes."
+    )
+    assert (
+        yaml.safe_load(repo.git("show", f"HEAD:{target.relative_to(repo.root)}").stdout)["summary"]
+        == "Steward's committed bytes."
+    )
+
+
 def test_the_commit_takes_only_stewards_own_paths(fleet: ScratchRepo) -> None:
     """Somebody's half-finished afternoon must never be swept into steward's commit."""
     (fleet.root / "README.md").write_text("a change nobody asked steward to commit\n")
