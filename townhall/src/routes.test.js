@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NAV, matchRoute, navFor, normalizeBase, routeTo, stripBase, withBase } from "./routes.js";
+import { NAV, matchPath, matchRoute, navFor, normalizeBase, routeTo, stripBase, withBase } from "./routes.js";
 
 describe("base-prefix routing", () => {
   it("reduces every spelling of a Vite base to one form", () => {
@@ -43,7 +43,20 @@ describe("base-prefix routing", () => {
       routeTo.approvals(), routeTo.board(), routeTo.budgets(), routeTo.budgets("life-agent"),
       routeTo.diagnostics(),
     ];
-    for (const route of routes) expect(stripBase(withBase(route, base), base)).toBe(route);
+    for (const route of routes) {
+      const path = withBase(route, base);
+      expect(stripBase(path, base)).toBe(route);
+      expect(matchPath(path, base)).toEqual({ route, ...matchRoute(route) });
+    }
+  });
+
+  it("matches unknown paths only when they are inside this build's mount", () => {
+    expect(matchPath("/observatory/nope", "/observatory/")).toEqual({
+      route: "/nope", page: "unknown", params: {},
+    });
+    expect(matchPath("/burrow/state", "/observatory/")).toEqual({
+      route: null, page: "unknown", params: {},
+    });
   });
 });
 

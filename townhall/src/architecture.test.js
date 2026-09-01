@@ -83,7 +83,7 @@ describe("the console shell", () => {
     // The bug arcadia/docs/deployment.md named: under /observatory/ a deep link matched
     // nothing, because the router treated the mount prefix as part of the route.
     const navigation = read("./navigation.jsx");
-    expect(navigation).toContain("stripBase");
+    expect(navigation).toContain("matchPath");
     expect(read("./App.jsx")).toContain("import.meta.env.BASE_URL");
 
     for (const page of PAGES) {

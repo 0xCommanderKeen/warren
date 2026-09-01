@@ -282,9 +282,9 @@ function Shell() {
   );
 }
 
-export default function App() {
+export default function App({ base = import.meta.env.BASE_URL }) {
   return (
-    <NavigationProvider base={import.meta.env.BASE_URL}>
+    <NavigationProvider base={base}>
       <StewardProvider>
         {/* The pending ledger outlives any one page on purpose: an action asked for on the
             Routines page is still unconfirmed while you read the Board, and a receipt that

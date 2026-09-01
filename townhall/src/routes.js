@@ -90,6 +90,14 @@ export function matchRoute(route) {
   return { page: "unknown", params: {} };
 }
 
+/** Match an address-bar pathname against the mount this build owns. */
+export function matchPath(pathname, base) {
+  const route = stripBase(pathname, base);
+  return route === null
+    ? { route: null, page: "unknown", params: {} }
+    : { route, ...matchRoute(route) };
+}
+
 /** Route builders, so no page hand-writes a path and forgets to encode a name. */
 export const routeTo = {
   fleet: () => "/",

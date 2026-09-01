@@ -6,20 +6,6 @@ export function agentUuid(id) {
   return separator < 0 ? value : value.slice(separator + 1);
 }
 
-export function agentUrl(id) {
-  return `/agents/${encodeURIComponent(agentUuid(id))}`;
-}
-
-export function routeAgent(pathname) {
-  const match = String(pathname || "").match(/^\/agents\/([^/]+)\/?$/);
-  if (!match) return null;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return null;
-  }
-}
-
 export function eventFeed(villagers) {
   return villagers
     .flatMap((villager) =>
