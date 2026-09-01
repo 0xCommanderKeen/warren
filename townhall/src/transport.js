@@ -22,8 +22,11 @@ export function createStateTransport(options) {
   let status = "disconnected";
   let stream = null;
   let polling = null;
+  let pollController = null;
+  let closed = false;
   const retiredNamespaces = new Set();
   const setStatus = (next) => {
+    if (closed) return;
     if (status !== next) {
       status = next;
       options.onStatus?.(next);
@@ -34,6 +37,7 @@ export function createStateTransport(options) {
     return parts.length === 6 && parts[0] === "v1" ? parts.slice(0, 5).join(":") : null;
   };
   const apply = (envelope) => {
+    if (closed) return false;
     if (!envelope || !["snapshot", "reset"].includes(envelope.kind)) return false;
     const error = validateSnapshot(envelope.snapshot);
     if (error) {
@@ -56,49 +60,64 @@ export function createStateTransport(options) {
     return true;
   };
   const poll = async () => {
+    if (closed) return;
     if (polling) return polling;
     polling = (async () => {
       const query = current ? `?generation=${current.generation}&cursor=${encodeURIComponent(current.cursor)}` : "";
+      const controller = typeof AbortController === "undefined" ? null : new AbortController();
+      pollController = controller;
       try {
-        const response = await options.fetch(`${baseUrl}/state${query}`, { cache: "no-store" });
+        const request = { cache: "no-store" };
+        if (controller) request.signal = controller.signal;
+        const response = await options.fetch(`${baseUrl}/state${query}`, request);
+        if (closed) return;
         if (response.status === 204) return setStatus(stream ? "live" : "polling");
         if (response.status !== 200) throw new Error(`state HTTP ${response.status}`);
-        apply(await response.json());
+        const envelope = await response.json();
+        if (closed) return;
+        apply(envelope);
         setStatus(stream ? "live" : "polling");
       } catch (error) {
+        if (closed || error?.name === "AbortError") return;
         setStatus("disconnected");
         options.warn?.(String(error));
+      } finally {
+        if (pollController === controller) pollController = null;
       }
     })();
     try { await polling; } finally { polling = null; }
   };
   const connect = () => {
-    if (!options.EventSource || stream) return;
+    if (closed || !options.EventSource || stream) return;
     const query = current ? `?generation=${current.generation}&cursor=${encodeURIComponent(current.cursor)}` : "";
     const candidate = new options.EventSource(`${baseUrl}/state/stream${query}`);
     stream = candidate;
     setStatus("reconnecting");
     candidate.addEventListener("snapshot", (message) => {
-      if (stream !== candidate) return;
+      if (closed || stream !== candidate) return;
       try {
         if (apply(JSON.parse(message.data))) setStatus("live");
       } catch (error) {
-        options.warn?.(`invalid state stream: ${error}`);
+        if (!closed) options.warn?.(`invalid state stream: ${error}`);
       }
     });
     candidate.onerror = async () => {
-      if (stream !== candidate) return;
+      if (closed || stream !== candidate) return;
       candidate.close();
       stream = null;
       setStatus("reconnecting");
       await poll();
-      if (!stream) connect();
+      if (!closed && !stream) connect();
     };
   };
   const close = () => {
+    if (closed) return;
+    closed = true;
+    pollController?.abort();
+    pollController = null;
     stream?.close();
     stream = null;
-    setStatus("disconnected");
+    status = "disconnected";
   };
   options.onStatus?.(status);
   return { apply, close, connect, poll, snapshot: () => current };
