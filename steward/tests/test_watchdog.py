@@ -56,6 +56,7 @@ def test_scheduler_and_watchdog_build_the_same_burrow_partition(
     elsewhere = watched_manifest(
         id="second-agent",
         uid=SECOND_RESIDENT_UID,
+        home=1,
         agent_id="claude-code:second-agent",
         deploy={"host": "workstation", "container": "steward-second-agent"},
     )

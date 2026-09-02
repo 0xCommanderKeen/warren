@@ -35,6 +35,10 @@ class DeploymentBundleTest(unittest.TestCase):
             staged.mkdir()
             subprocess.run(["tar", "-cf", archive, *inputs], cwd=ROOT, check=True)
             subprocess.run(["tar", "-xf", archive, "-C", staged], check=True)
+            self.assertTrue(
+                (staged / "villagers").is_dir(),
+                "an empty resident fleet still ships its manifest directory",
+            )
 
             # Burrow ships no browser client. Nothing a browser would load may
             # ride along to the NAS, or the deployed origin keeps answering with

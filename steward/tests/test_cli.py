@@ -562,6 +562,7 @@ def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
     assert result.exit_code == 0, result.output
     assert f"life-agent: journal {on_operator_burrow}/journal" in result.output
     assert "closed by close-of-day" in result.output
+    assert "burrow-builder" not in result.output
 
 
 def test_doctor_warns_when_the_journal_location_is_not_writable(
@@ -3695,7 +3696,7 @@ def test_retire_stops_the_container_and_commits_the_decision(
 
     assert result.exit_code == 0, result.output
     assert "note-keeper is retired" in result.output
-    assert "no event was emitted on its behalf" in result.output
+    assert "resident_retired was emitted under the resident's identity" in result.output
     assert scratch_repo.log()[0] == "chore(residents): retire note-keeper"
     assert nas.calls[-2][-2:] == ("down", "--remove-orphans")
     # …and the token goes with it, once the container that was reading it is gone (#157).

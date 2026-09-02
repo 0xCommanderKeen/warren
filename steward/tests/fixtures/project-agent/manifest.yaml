@@ -1,6 +1,7 @@
 version: 0
 uid: 6770e0e3-a015-4b3d-b193-966e924b19b1
 id: project-agent
+home: 2
 project: chronicle
 summary: A project-scoped resident used only by tests.
 soul:

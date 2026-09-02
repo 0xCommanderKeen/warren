@@ -374,7 +374,7 @@ def make_bridge(
 
 
 def types(sink: ev.NullEmitter) -> list[str]:
-    return [event.type for event in sink.events]
+    return [event.type for event in sink.events if event.type != ev.RESIDENT_DECLARED]
 
 
 # --------------------------------------------------------------------------------------

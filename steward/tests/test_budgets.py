@@ -724,7 +724,11 @@ def test_a_run_killed_by_the_cap_is_a_routine_failed_and_is_still_ledgered(
     )
     engine.fire(engine.scheduled[0], now=NOON)
 
-    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FAILED]
+    assert [e.type for e in sink.events] == [
+        ev.ROUTINE_STARTED,
+        ev.RESIDENT_DECLARED,
+        ev.ROUTINE_FAILED,
+    ]
     entries = store.ledger(resident.id)
     assert len(entries) == 1
     assert entries[0].duration_s == pytest.approx(60.0)
@@ -883,7 +887,11 @@ def test_a_broken_ledger_does_not_fail_the_routine(
     )
     report = engine.fire(engine.scheduled[0], now=NOON)
     assert report.fired
-    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]
+    assert [e.type for e in sink.events] == [
+        ev.ROUTINE_STARTED,
+        ev.RESIDENT_DECLARED,
+        ev.ROUTINE_FINISHED,
+    ]
 
 
 def board_manifest(**budgets: object) -> dict[str, Any]:
