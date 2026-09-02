@@ -1219,26 +1219,75 @@ def deliver(event, deadline=None):
     for worker in workers:
         worker.join(max(0, post_deadline - time.monotonic()))
 
-    delivered_keys, primary_failed = set(), False
+    # A worker can receive the HTTP response just before ``post_deadline`` yet
+    # publish its result just after it because the process was descheduled. Keep
+    # harvesting successes during the reserved acknowledgement tail and retire
+    # them durably as soon as they become visible. A single snapshot here loses
+    # accepted deliveries precisely when the host is busiest.
+    acknowledged_keys = set()
+    update_attempted = False
+
+    def observed_keys():
+        observed = set()
+        for target_url, _ in primary:
+            target_key = _target_id(target_url)
+            with result_lock:
+                replayed, _, _ = results.get(
+                    target_url, ([], False, target_key)
+                )
+            observed.update(replayed)
+        return observed
+
+    def acknowledge_observed():
+        nonlocal update_attempted
+        pending_ack = observed_keys() - acknowledged_keys
+        if not pending_ack:
+            return
+        update_attempted = True
+        _, updated = _update_outbox(pending_ack, [])
+        if updated:
+            acknowledged_keys.update(pending_ack)
+
+    while True:
+        acknowledge_observed()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # One last snapshot closes the publish-before-deadline race. The
+            # outer hook process remains the hard bound if this durable write
+            # itself stalls below Python.
+            acknowledge_observed()
+            break
+        if not any(worker.is_alive() for worker in workers):
+            # A worker can publish and exit between the first snapshot and the
+            # liveness check. Once it is dead, this snapshot is authoritative.
+            acknowledge_observed()
+            break
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(min(0.005, remaining))
+                break
+    if not update_attempted:
+        _, updated = _update_outbox(set(), [])
+        update_attempted = updated
+
+    primary_failed = False
     failed_targets = []
     for url, _ in primary:
         target_key = _target_id(url)
         with result_lock:
             replayed, current_ok, _ = results.get(url, ([], False, target_key))
-        delivered_keys.update(replayed)
         if not current_ok:
             primary_failed = True
             failed_targets.append(target_key)
     if deferred_primary:
         primary_failed = True
-    # Acknowledgement owns the reserved tail of the hook budget. Diagnostics
-    # are deliberately after it: their lock or fsync may stall, but a host
-    # timeout must never erase progress already accepted by the server.
-    _, updated = _update_outbox(delivered_keys, [])
-    if not updated:
+    # Diagnostics are deliberately after acknowledgement: their lock or fsync
+    # may stall, but a host timeout must never erase accepted progress.
+    unacknowledged_keys = observed_keys() - acknowledged_keys
+    if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
-        _diagnose_outbox(_read_durable_outbox_snapshot(), delivered_keys)
+        _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:
