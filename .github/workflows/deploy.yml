@@ -1,0 +1,217 @@
+name: deploy
+
+# Every merge to main is a deploy — of the services the merge touched, in the order the
+# deploy script wants them, each only after its own check has passed on this same
+# checkout. The runner joins the tailnet as an ephemeral node and runs deploy/deploy.sh
+# exactly as a laptop would; deploy/README.md is the runbook, including the one-time
+# setup only a person can do. Nothing runs until the repo variable DEPLOY_ENABLED is
+# `true`, so this file can merge before that setup is done.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      services:
+        description: "Space-separated subset of: chronicle arcadia townhall steward — or all"
+        default: all
+        required: true
+
+permissions:
+  contents: read
+
+# One deploy at a time, queued rather than cancelled: a rollout that stops halfway is the
+# one state deploy.sh cannot reason about.
+concurrency:
+  group: deploy-to-nas
+  cancel-in-progress: false
+
+env:
+  # The NAS by its tailnet address — MagicDNS is not something an ephemeral node should
+  # have to rely on, and the address is what the ACL names.
+  NAS: Miha@100.96.246.43
+  ORIGIN: http://100.96.246.43:8737
+  STEWARD_URL: http://100.96.246.43:8802
+
+jobs:
+  changes:
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      chronicle: ${{ steps.pick.outputs.chronicle }}
+      arcadia: ${{ steps.pick.outputs.arcadia }}
+      townhall: ${{ steps.pick.outputs.townhall }}
+      steward: ${{ steps.pick.outputs.steward }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same path filters the CI workflows use, plus the deploy toolkit itself: a
+      # change to the script or a compose file is a change to what the burrow runs.
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'push'
+        with:
+          filters: |
+            chronicle:
+              - 'chronicle/**'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/deploy.yml'
+              - '.github/actions/**'
+            arcadia:
+              - 'arcadia/**'
+              - 'chronicle/tests/fixtures/state-contract/**'
+              - 'steward/src/steward/api.py'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/deploy.yml'
+              - '.github/actions/**'
+            townhall:
+              - 'townhall/**'
+              - 'chronicle/tests/fixtures/state-contract/**'
+              - 'steward/src/steward/api.py'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/deploy.yml'
+              - '.github/actions/**'
+            steward:
+              - 'steward/**'
+              - 'chronicle/hooks/**'
+              - 'deploy/**'
+              - '!deploy/README.md'
+              - '.github/workflows/deploy.yml'
+              - '.github/actions/**'
+
+      - id: pick
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REQUESTED: ${{ github.event.inputs.services }}
+          F_CHRONICLE: ${{ steps.filter.outputs.chronicle }}
+          F_ARCADIA: ${{ steps.filter.outputs.arcadia }}
+          F_TOWNHALL: ${{ steps.filter.outputs.townhall }}
+          F_STEWARD: ${{ steps.filter.outputs.steward }}
+        run: |
+          for service in chronicle arcadia townhall steward; do
+            if [ "$EVENT" = workflow_dispatch ]; then
+              case " $REQUESTED " in
+                *" all "*|*" $service "*) picked=true ;;
+                *) picked=false ;;
+              esac
+            else
+              case "$service" in
+                chronicle) picked="$F_CHRONICLE" ;;
+                arcadia)   picked="$F_ARCADIA" ;;
+                townhall)  picked="$F_TOWNHALL" ;;
+                steward)   picked="$F_STEWARD" ;;
+              esac
+            fi
+            echo "$service=${picked:-false}" | tee -a "$GITHUB_OUTPUT"
+          done
+
+  # The order below is deploy.sh's `all` order, expressed as `needs`. A job whose
+  # predecessor was skipped still runs; one whose predecessor failed does not — the
+  # clients validate chronicle's contract, and townhall's routes are steward's.
+
+  chronicle:
+    needs: changes
+    if: needs.changes.outputs.chronicle == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+        working-directory: chronicle
+      - uses: ./.github/actions/nas
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          ssh-key: ${{ secrets.NAS_SSH_KEY }}
+          known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
+          nas: ${{ env.NAS }}
+      - run: deploy/deploy.sh chronicle
+
+  arcadia:
+    needs: [changes, chronicle]
+    if: >-
+      always()
+      && needs.changes.outputs.arcadia == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+          package_json_file: arcadia/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: arcadia/pnpm-lock.yaml
+      - uses: ./.github/actions/nas
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          ssh-key: ${{ secrets.NAS_SSH_KEY }}
+          known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
+          nas: ${{ env.NAS }}
+      - run: deploy/deploy.sh arcadia
+
+  townhall:
+    needs: [changes, chronicle, arcadia]
+    if: >-
+      always()
+      && needs.changes.outputs.townhall == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.22.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.22.0"
+          cache: pnpm
+          cache-dependency-path: townhall/pnpm-lock.yaml
+      - uses: ./.github/actions/nas
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          ssh-key: ${{ secrets.NAS_SSH_KEY }}
+          known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
+          nas: ${{ env.NAS }}
+      - run: deploy/deploy.sh townhall
+
+  steward:
+    needs: [changes, chronicle, arcadia, townhall]
+    if: >-
+      always()
+      && needs.changes.outputs.steward == 'true'
+      && !contains(needs.*.result, 'failure')
+      && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-groups --locked
+        working-directory: steward
+      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/nas
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          ssh-key: ${{ secrets.NAS_SSH_KEY }}
+          known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
+          nas: ${{ env.NAS }}
+      # make check, the image build, the ship, the swap — all inside the script.
+      - run: deploy/deploy.sh steward

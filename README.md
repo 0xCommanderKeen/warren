@@ -74,9 +74,14 @@ now both print a topology report naming any container the process cannot reach.
 [`steward/docs/topology.md`](steward/docs/topology.md) has the rule, what it costs to break
 it, and how far `DOCKER_HOST` actually goes.
 
-Run each runbook from its own service directory (`warren/chronicle/`, `warren/arcadia/`, …).
-The tar recipes pack paths relative to the working directory, so the directory you stand in
-is part of the command.
+**`deploy/deploy.sh <service>` runs those runbooks for you** — from a laptop, or from
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on every merge to `main` —
+converging each deploy directory rather than accreting into it, and leaving a
+`DEPLOYED-<service>` marker the NAS can be asked about with `deploy/status.sh`.
+[`deploy/README.md`](deploy/README.md) is the runbook for the script and the pipeline.
+Running a recipe by hand still works: do it from its own service directory
+(`warren/chronicle/`, `warren/arcadia/`, …) — the tar recipes pack paths relative to the
+working directory, so the directory you stand in is part of the command.
 
 The directory names on the NAS still say `burrow` and the mount still says `/observatory/`;
 they are paths, not identifiers. warren#216 renamed the identifiers and deliberately left

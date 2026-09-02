@@ -256,7 +256,9 @@ deploy_steward() {
     # arcadia's origin already makes of the same route.
     wait_for "$STEWARD_URL/residents" 401
     log "steward: doctor"
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api steward doctor residents' 2>&1 | head -40 || true
+    # In the watchdog's container, against the tree the daemons actually run: that is the
+    # process with the docker socket, so its topology line is the true one.
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /sched/residents' 2>&1 | head -40 || true
     stamp steward steward
     log "steward: $SHORT is live"
 }
