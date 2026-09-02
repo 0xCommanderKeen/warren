@@ -424,4 +424,27 @@ describe("createStateTransport", () => {
       expect.objectContaining({ message: "Unsupported village schema version: 2" }),
     );
   });
+
+  it("rejects a malformed nested snapshot without replacing the last good snapshot", async () => {
+    const onEnvelope = vi.fn();
+    const onError = vi.fn();
+    const transport = createStateTransport({
+      fetch: vi.fn().mockResolvedValue({ status: 204 }),
+      EventSource: FakeEventSource,
+      onEnvelope,
+      onError,
+    });
+    await transport.start();
+    const stream = FakeEventSource.instances[0];
+    stream.emit("snapshot", envelope(1, "cursor:1"));
+    stream.emit("snapshot", envelope(2, "cursor:2", {
+      tasks: [{ ...fixture.snapshot.tasks[0], required_skills: null }],
+    }));
+
+    expect(onEnvelope).toHaveBeenCalledTimes(1);
+    expect(transport.snapshot()).toMatchObject({ generation: 1 });
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/snapshot\.tasks/) }),
+    );
+  });
 });

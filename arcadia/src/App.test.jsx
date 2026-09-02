@@ -4,14 +4,35 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.js";
-import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
 import { createStewardClient } from "./steward/StewardClient.js";
+import { createStateTransport } from "./transport/createStateTransport.js";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
   PhaserGame: () => <div data-testid="village-canvas" />,
 }));
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+class FakeEventSource {
+  static instances = [];
+
+  constructor() {
+    this.listeners = new Map();
+    this.close = vi.fn();
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(name, listener) {
+    this.listeners.set(name, listener);
+  }
+
+  emit(name, envelope) {
+    this.listeners.get(name)?.({ data: JSON.stringify(envelope) });
+  }
+}
 
 describe("Arcadia", () => {
   it("starts the live Chronicle transport and renders its snapshots", async () => {
@@ -78,6 +99,46 @@ describe("Arcadia", () => {
     );
   });
 
+  it("turns an initially malformed live snapshot into the safe mismatch screen", async () => {
+    let transport;
+    const malformed = structuredClone(fixture);
+    malformed.snapshot.tasks[0].required_skills = null;
+    const fetch = vi.fn().mockResolvedValue({ status: 200, json: async () => malformed });
+    const transportFactory = (options) => {
+      transport = createStateTransport({ ...options, fetch, EventSource: FakeEventSource });
+      return transport;
+    };
+    render(<LiveApp transportFactory={transportFactory} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Contract mismatch");
+    expect(screen.getByRole("alert")).toHaveTextContent("snapshot.tasks[0].required_skills");
+    expect(screen.queryByText("Chronicle is unavailable")).not.toBeInTheDocument();
+    expect(transport.snapshot()).toBeNull();
+  });
+
+  it("shows a streamed contract mismatch after good state until a valid update arrives", async () => {
+    let transport;
+    const fetch = vi.fn().mockResolvedValue({ status: 200, json: async () => fixture });
+    const transportFactory = (options) => {
+      transport = createStateTransport({ ...options, fetch, EventSource: FakeEventSource });
+      return transport;
+    };
+    render(<LiveApp transportFactory={transportFactory} />);
+    await screen.findByRole("heading", { name: "Arcadia" });
+
+    const malformed = structuredClone(fixture);
+    malformed.snapshot.generation += 1;
+    malformed.snapshot.tasks[0].required_skills = null;
+    FakeEventSource.instances.at(-1).emit("snapshot", malformed);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Contract mismatch");
+    expect(transport.snapshot()).toBe(fixture.snapshot);
+
+    const recovered = structuredClone(fixture);
+    recovered.snapshot.generation += 2;
+    FakeEventSource.instances.at(-1).emit("snapshot", recovered);
+    expect(await screen.findByRole("heading", { name: "Arcadia" })).toBeVisible();
+  });
+
   it("renders every read-only panel directly from the contract fixture", () => {
     render(<App envelope={fixture} />);
 
@@ -106,6 +167,7 @@ describe("Arcadia", () => {
     envelope.snapshot.journals = [];
     envelope.snapshot.villagers[0].history = [
       {
+        ...fixture.snapshot.villagers[0].history[0],
         type: "task_done",
         payload: { title: "History must remain invisible", artifact: "ghost.md" },
       },
@@ -165,6 +227,70 @@ describe("Arcadia", () => {
     );
     expect(screen.queryByText("Future Villager")).not.toBeInTheDocument();
     expect(screen.queryByTestId("village-canvas")).not.toBeInTheDocument();
+  });
+
+  it("visibly rejects malformed nested state before rendering it", () => {
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.tasks[0].required_skills = null;
+
+    render(<App envelope={envelope} />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Contract mismatch");
+    expect(screen.getByRole("alert")).toHaveTextContent("snapshot.tasks");
+  });
+
+  it("safely renders JSON-valued approval options allowed by Chronicle's contract", () => {
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.approvals[0].options = [{ decision: "approve" }];
+
+    render(<App envelope={envelope} />);
+
+    expect(screen.getByRole("button", {
+      name: '{"decision":"approve"} Deploy?',
+    })).toBeDisabled();
+  });
+
+  it("only sends exact Steward decisions and preserves edit semantics", () => {
+    const stewardClient = { confirm: vi.fn(), decideApproval: vi.fn() };
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.approvals[0].options = [
+      "approve", "edit", "Approve", null, { decision: "deny" }, { decision: "deny" },
+    ];
+
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue('{"target":"staging"}');
+    render(<App envelope={envelope} stewardClient={stewardClient} />);
+
+    expect(screen.getAllByRole("button", { name: "Approve Deploy?" })[0]).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Edit Deploy?" })).toBeEnabled();
+    expect(screen.getByText("Approve").closest("button")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Null Deploy?" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: '{"decision":"deny"} Deploy?' })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: '{"decision":"deny"} Deploy?' })[0]).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Deploy?" }));
+    expect(prompt).toHaveBeenCalledWith(
+      "Edit approval detail as JSON",
+      JSON.stringify(envelope.snapshot.approvals[0].detail),
+    );
+    expect(stewardClient.decideApproval).toHaveBeenCalledWith("approval-1", {
+      decision: "edit",
+      edit: { target: "staging" },
+    });
+  });
+
+  it("does not write an invalid Steward edit", async () => {
+    const stewardClient = { confirm: vi.fn(), decideApproval: vi.fn() };
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.approvals[0].options = ["edit"];
+    vi.spyOn(window, "prompt").mockReturnValue("[]");
+    render(<App envelope={envelope} stewardClient={stewardClient} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit Deploy?" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Steward edits must be JSON objects",
+    );
+    expect(stewardClient.decideApproval).not.toHaveBeenCalled();
   });
 
   it("offers each valid Chronicle snapshot to the Steward confirmation boundary", () => {
@@ -278,7 +404,31 @@ describe("Arcadia", () => {
       decideApproval: vi.fn().mockResolvedValue({ state: "awaiting_confirmation" }),
     };
 
-    render(<App envelope={multiplePendingFixture} stewardClient={stewardClient} />);
+    const envelope = structuredClone(fixture);
+    envelope.snapshot.generation = 8;
+    envelope.snapshot.villagers.unshift({
+      ...structuredClone(fixture.snapshot.villagers[0]),
+      id: "claude:ada",
+      name: "Ada",
+      residency: "visitor",
+      home: null,
+      base: "lodge",
+      resident_file: null,
+      state: "knocking",
+      project: "arcadia",
+      cwd: "/work/arcadia",
+      pending_approval_ids: ["approval-b"],
+    });
+    envelope.snapshot.approvals.unshift({
+      ...structuredClone(fixture.snapshot.approvals[0]),
+      request_id: "approval-b",
+      agent_id: "claude:ada",
+      project: "arcadia",
+      message: "Publish?",
+      action: "publish",
+    });
+
+    render(<App envelope={envelope} stewardClient={stewardClient} />);
 
     const knocks = screen.getByRole("region", { name: "Approval knocks" });
     expect(within(knocks).getAllByRole("article").map((item) => item.textContent)).toEqual([
