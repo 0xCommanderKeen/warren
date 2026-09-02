@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:227cf69c00dcf9c6c6c728932b3c3e448079d102d92fc2bd578d7ecdb703c141
+#   hooks/emit.py     sha256:f371b3d6fb3178597667a45df32677dd98c7e9041e2d621a4ea508a4ca23205b
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -1386,17 +1386,18 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                 return 0, False
 
 
-def _diagnose(kind, **details):
+def _diagnose(kind, *, diagnostics=None, **details):
     """Persist counters and a bounded, payload-free recent diagnostic list."""
+    diagnostics = DIAGNOSTICS if diagnostics is None else diagnostics
     with _DIAGNOSTIC_LOCK:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(DIAGNOSTICS)), exist_ok=True)
-            with open(durable.lock_path(DIAGNOSTICS), "a+") as lock:
+            os.makedirs(os.path.dirname(os.path.abspath(diagnostics)), exist_ok=True)
+            with open(durable.lock_path(diagnostics), "a+") as lock:
                 # Helper-side persistence may wait: the parent enforces the
                 # aggregate one-second budget and kills a stalled helper.
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 try:
-                    with open(DIAGNOSTICS, encoding="utf-8") as stream:
+                    with open(diagnostics, encoding="utf-8") as stream:
                         report = json.load(stream)
                     if not isinstance(report, dict):
                         raise ValueError("diagnostic root")
@@ -1460,11 +1461,14 @@ def _diagnose(kind, **details):
                 else:
                     report.setdefault("recent", []).append(dict(kind=kind, **details))
                 report["recent"] = report["recent"][-DIAGNOSTIC_HISTORY:]
-                pending = durable.stage_json(DIAGNOSTICS, report, ensure_ascii=False)
-                durable.publish_staged(((pending, DIAGNOSTICS),))
+                pending = durable.stage_json(diagnostics, report, ensure_ascii=False)
+                durable.publish_staged(((pending, diagnostics),))
                 return True
         except (OSError, ValueError, TypeError):
             return False
+
+
+_DEFAULT_DIAGNOSE = _diagnose
 
 
 def _diagnose_outbox(records, acknowledged):
@@ -1660,6 +1664,8 @@ def deliver(event, deadline=None):
     transport_breaker = BREAKER
     transport_log_dir = LOG_DIR
     transport_opener = urllib.request.urlopen
+    diagnostic = _diagnose
+    diagnostic_path = DIAGNOSTICS
 
     def post(url, posted_event, token, delivery_id):
         if transport is not _DEFAULT_POST_EVENT:
@@ -1674,6 +1680,11 @@ def deliver(event, deadline=None):
             log_dir=transport_log_dir,
             opener=transport_opener,
         )
+
+    def diagnose(kind, **details):
+        if diagnostic is not _DEFAULT_DIAGNOSE:
+            return diagnostic(kind, **details)
+        return diagnostic(kind, diagnostics=diagnostic_path, **details)
 
     if not configured_primary:
         _append_local(event)
@@ -1767,6 +1778,7 @@ def deliver(event, deadline=None):
                     len(delivered_keys) == len(queued),
                     target_key,
                 )
+            diagnose("retry", target=target_key)
         with result_lock:
             results[url] = (
                 list(delivered_keys),
@@ -1856,8 +1868,6 @@ def deliver(event, deadline=None):
     if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
-        for record_key in acknowledged_keys:
-            _diagnose("retry", target=record_key.target)
         _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
