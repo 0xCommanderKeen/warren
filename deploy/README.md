@@ -78,8 +78,14 @@ Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>
    ```
 
 2. **Settings → OAuth clients → Generate OAuth client.** Description `warren deploy
-   (GitHub Actions)`; scope **Auth Keys: Write**; tag `tag:ci`. Copy the client id and
-   the secret — the secret is shown once.
+   (GitHub Actions)`; scope **Auth Keys: Write**; under it, tag `tag:ci`. Copy the client
+   id and the secret — the secret is shown once.
+
+   The tag picker only lists tags the *saved* policy's `tagOwners` already declares, so
+   step 1 has to be saved before this dialog is opened. A client generated without the
+   tag cannot be given one afterwards — it answers `403: calling actor does not have
+   enough permissions` when the workflow asks for a `tag:ci` key. Delete it and generate
+   a new one.
 3. **GitHub → warren → Settings → Secrets and variables → Actions.** Add the two
    secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET`, then set the variable
    `DEPLOY_ENABLED` to `true`. From a terminal that is the same thing:

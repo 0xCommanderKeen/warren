@@ -19,17 +19,39 @@ inputs:
   nas:
     description: user@host the deploy script will ssh to.
     required: true
+  nas-address:
+    description: The NAS's tailnet IP, for the reachability check.
+    required: true
 
 runs:
   using: composite
   steps:
     # An ephemeral node: it exists for this job and is removed from the tailnet when the
     # runner goes away. The tag is what the ACL grants access to (deploy/README.md).
-    - uses: tailscale/github-action@v3
+    # `ping` makes the action verify it can reach the NAS before handing back.
+    - uses: tailscale/github-action@v4
       with:
         oauth-client-id: ${{ inputs.oauth-client-id }}
         oauth-secret: ${{ inputs.oauth-secret }}
         tags: tag:ci
+        ping: ${{ inputs.nas-address }}
+
+    # The first run of this action saw `tailscale up` fail five times with a 403 (the
+    # OAuth client had no tag) and the step still report success, so the ssh that
+    # followed timed out on a runner that was never on the tailnet. Say so here instead:
+    # a runner with no tailnet address is not one that can deploy anything.
+    - shell: bash
+      env:
+        NAS_ADDRESS: ${{ inputs.nas-address }}
+      run: |
+        addr="$(sudo tailscale ip -4 2>/dev/null || true)"
+        if [ -z "$addr" ]; then
+          echo "::error::this runner never joined the tailnet — check the OAuth client carries tag:ci and the policy's tagOwners grants it (deploy/README.md)"
+          sudo tailscale status || true
+          exit 1
+        fi
+        echo "on the tailnet as $addr"
+        sudo tailscale ping -c 3 --timeout 10s "$NAS_ADDRESS"
 
     # Secrets reach the shell through the environment, never through template
     # interpolation into the script text.
