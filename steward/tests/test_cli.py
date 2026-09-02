@@ -430,14 +430,15 @@ def test_doctor_names_the_brain_and_the_next_fire(
 
 
 @pytest.mark.usefixtures("empty_path")
-def test_doctor_fails_loudly_when_the_binary_is_missing(
+def test_doctor_fails_loudly_when_the_container_runtime_is_missing(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
-    assert "not on PATH" in result.output
+    assert "docker could not answer for container 'steward-life-agent'" in result.output
+    assert "docker could not answer for container 'steward-pip'" in result.output
 
 
 #: A `claude --help` that knows how to bound a session, and one too old to.
