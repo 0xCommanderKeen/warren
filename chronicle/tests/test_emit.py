@@ -798,6 +798,46 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         self.assertTrue(delivered)
         self.assertLess(len(self.outbox()), before)
 
+    def test_ack_reserve_harvests_a_response_published_after_the_post_window(self):
+        """Scheduler delay after HTTP acceptance may consume part of the ack tail."""
+        delivered = []
+        with delayed_target(0.08, delivered) as target:
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "post_event", return_value=False),
+            ):
+                for second in range(3):
+                    emit.deliver(
+                        dict(self.EVENT, ts="2026-08-24T12:00:0%d.000Z" % second)
+                    )
+            before = self.outbox()
+            real_post = emit.post_event
+
+            def scheduled_after_response(*args, **kwargs):
+                accepted = real_post(*args, **kwargs)
+                time.sleep(0.24)
+                return accepted
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "HOOK_BUDGET", 0.45),
+                mock.patch.object(emit, "ACK_RESERVE", 0.15),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.2),
+                mock.patch.object(emit, "post_event", side_effect=scheduled_after_response),
+            ):
+                emit.deliver(dict(self.EVENT, ts="2026-08-24T12:00:03.000Z"))
+
+        self.assertTrue(delivered)
+        remaining = self.outbox()
+        self.assertLessEqual(len(remaining), len(before))
+        self.assertTrue(
+            set(delivered).isdisjoint(record["delivery_id"] for record in remaining)
+        )
+
     def test_a_slow_retry_diagnostic_cannot_turn_an_accepted_event_into_fallback(self):
         """Acceptance is transport state before best-effort diagnostic fsync (#333)."""
         with (
