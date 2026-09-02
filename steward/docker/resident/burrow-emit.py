@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:3929ef4ef5d08daefe3e838fb8fb9e2b3406007e71f5d20b62ef4371585acdf5
+#   hooks/emit.py     sha256:51c867df2eba6867466f95a441e4d080f0092064eeb5d87d57787a8a8d2a77e3
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -1724,7 +1724,11 @@ def deliver(event, deadline=None):
             estimated_rtt = max(elapsed * 1.25, 0.001)
             delivered_keys.append(_record_key(record))
             with result_lock:
-                results[url] = (list(delivered_keys), False, target_key)
+                results[url] = (
+                    list(delivered_keys),
+                    len(delivered_keys) == len(queued),
+                    target_key,
+                )
             _diagnose("retry", target=target_key)
         with result_lock:
             results[url] = (

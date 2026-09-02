@@ -1192,7 +1192,11 @@ def deliver(event, deadline=None):
             estimated_rtt = max(elapsed * 1.25, 0.001)
             delivered_keys.append(_record_key(record))
             with result_lock:
-                results[url] = (list(delivered_keys), False, target_key)
+                results[url] = (
+                    list(delivered_keys),
+                    len(delivered_keys) == len(queued),
+                    target_key,
+                )
             _diagnose("retry", target=target_key)
         with result_lock:
             results[url] = (
