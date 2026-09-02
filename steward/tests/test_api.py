@@ -32,6 +32,8 @@ from conftest import (
     ClaimHolderSpawner,
     ResidentWriter,
     SkillWriter,
+    bare_origin,
+    branch_head,
     valid_manifest,
 )
 from steward import authoring as au
@@ -3781,35 +3783,9 @@ def test_an_edited_declaration_is_written_validated_and_committed(
 BURROW_PUSH = au.PushTarget(remote="origin", branch="burrow/residents")
 
 
-def bare_origin(tmp_path: Path) -> Path:
-    """Give the harness's checkout an ``origin``: a bare repository beside it.
-
-    Beside, not inside: the harness's checkout is ``tmp_path`` itself, and a remote created
-    under it would be an untracked directory in the worktree retirement refuses over.
-    """
-    remote = tmp_path.parent / f"{tmp_path.name}-origin.git"
-    subprocess.run(  # noqa: S603
-        ["git", "init", "--bare", "-b", "main", str(remote)],  # noqa: S607
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(  # noqa: S603
-        ["git", "-C", str(tmp_path), "remote", "add", "origin", str(remote)],  # noqa: S607
-        check=True,
-        capture_output=True,
-    )
-    return remote
-
-
-def branch_head(remote: Path, branch: str) -> str | None:
-    """Return what the remote's branch points at, or ``None`` when it has no such branch."""
-    out = subprocess.run(  # noqa: S603
-        ["git", "-C", str(remote), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return out.stdout.strip() or None
+def harness_origin(tmp_path: Path) -> Path:
+    """Give the harness's checkout — ``tmp_path`` itself — an ``origin`` beside it."""
+    return bare_origin(tmp_path, tmp_path.parent / f"{tmp_path.name}-origin.git")
 
 
 def test_an_accepted_write_is_pushed_to_the_burrow_branch(
@@ -3817,7 +3793,7 @@ def test_an_accepted_write_is_pushed_to_the_burrow_branch(
 ) -> None:
     """The commit is the record; the push keeps it off a burrow with no backup (warren#351)."""
     harness = writable(push=BURROW_PUSH)
-    remote = bare_origin(tmp_path)
+    remote = harness_origin(tmp_path)
     body = declaration(harness)
     body["manifest"]["summary"] = "Pushed as well as committed."
 
@@ -3880,7 +3856,7 @@ def test_a_declared_resident_is_pushed_like_any_other_write(
 ) -> None:
     """``POST /residents`` commits through authoring, so its commit is pushed the same way."""
     harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
-    remote = bare_origin(tmp_path)
+    remote = harness_origin(tmp_path)
 
     response = harness.client.post("/residents", json=NEW_RESIDENT)
 
@@ -3896,7 +3872,7 @@ def test_a_retirement_is_pushed_after_its_commit(api: ApiFactory, tmp_path: Path
     """The nursery commits the mark; the API then pushes it, and the response says so."""
     harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
     commit_tree(tmp_path)
-    remote = bare_origin(tmp_path)
+    remote = harness_origin(tmp_path)
 
     response = harness.client.post("/residents/test-agent/retire")
 
@@ -3918,7 +3894,7 @@ def test_a_retirement_with_nothing_to_push_carries_no_push(api: ApiFactory, tmp_
     """A dry run commits nothing, so there is nothing to push and ``push`` says so with null."""
     harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
     commit_tree(tmp_path)
-    bare_origin(tmp_path)
+    harness_origin(tmp_path)
 
     response = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
 

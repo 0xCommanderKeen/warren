@@ -848,8 +848,10 @@ def push_commit(repo: Path, target: PushTarget, *, git: PipedRun = run_argv) -> 
     history somebody else put on the branch is refused rather than overwritten, and the
     refusal comes back as ``pushed: false`` with git's reason. The write this follows is
     already durable — a burrow that cannot reach its remote says "committed, not pushed"
-    and carries on; the next push, from the next write or the next deploy, carries every
-    commit the branch is missing, because a push is of the branch and not of one commit.
+    and carries on; the next push — from the next write that commits, or the next deploy —
+    carries every commit the branch is missing, because a push is of the branch and not of
+    one commit. A save that converged without a commit does not push: it did not go to disk,
+    so it does not go to the network either.
     """
     outcome = git(
         [
@@ -870,7 +872,7 @@ def push_commit(repo: Path, target: PushTarget, *, git: PipedRun = run_argv) -> 
         target=target,
         note=(
             f"NOT pushed to {target.spec} ({outcome.summary()}); the commit is on this "
-            f"burrow alone until the next write or deploy pushes it"
+            f"burrow alone until the next commit or deploy pushes it"
         ),
     )
 

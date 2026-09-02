@@ -382,6 +382,36 @@ class ScratchRepo:
         return self.git("rev-parse", "HEAD").stdout.strip()
 
 
+def bare_origin(checkout: Path, at: Path) -> Path:
+    """Give a checkout an ``origin`` it can push to: a bare repository created at ``at``.
+
+    Not inside the checkout — a remote created under it is an untracked directory in the
+    worktree the nursery's dirty check refuses over.
+    """
+    subprocess.run(  # noqa: S603 — argv list, shell=False, a temp directory
+        ["git", "init", "--bare", "-b", "main", str(at)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(checkout), "remote", "add", "origin", str(at)],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    return at
+
+
+def branch_head(remote: Path, branch: str) -> str | None:
+    """Return what the remote's branch points at, or ``None`` when it has no such branch."""
+    out = subprocess.run(  # noqa: S603
+        ["git", "-C", str(remote), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return out.stdout.strip() or None
+
+
 @pytest.fixture
 def scratch_repo(tmp_path: Path) -> ScratchRepo:
     """Build a real git repo in a temp directory, with one commit already in it.

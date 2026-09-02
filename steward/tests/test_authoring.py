@@ -9,7 +9,6 @@ import copy
 import os
 import re
 import stat
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -24,6 +23,8 @@ from conftest import (
     ResidentWriter,
     ScratchRepo,
     SkillWriter,
+    bare_origin,
+    branch_head,
     valid_manifest,
 )
 from steward import authoring as au
@@ -1412,25 +1413,7 @@ PUSH = au.PushTarget(remote="origin", branch=BURROW_BRANCH)
 
 def with_remote(repo: ScratchRepo, tmp_path: Path) -> Path:
     """Give the scratch checkout an ``origin`` it can push to: a bare repo beside it."""
-    remote = tmp_path / "origin.git"
-    subprocess.run(  # noqa: S603
-        ["git", "init", "--bare", "-b", "main", str(remote)],  # noqa: S607
-        check=True,
-        capture_output=True,
-    )
-    repo.git("remote", "add", "origin", str(remote))
-    return remote
-
-
-def remote_head(remote: Path, branch: str) -> str | None:
-    """Return what the remote's branch points at, or ``None`` when it has no such branch."""
-    out = subprocess.run(  # noqa: S603
-        ["git", "-C", str(remote), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],  # noqa: S607
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return out.stdout.strip() or None
+    return bare_origin(repo.root, tmp_path / "origin.git")
 
 
 def pushed_write(repo: ScratchRepo, declaration: au.Declaration) -> au.WriteResult:
@@ -1456,7 +1439,7 @@ def test_an_accepted_edit_is_pushed_to_the_burrow_branch(
 
     assert result.commit.committed
     assert result.commit.pushed is True
-    assert remote_head(remote, BURROW_BRANCH) == result.commit.sha == fleet.head()
+    assert branch_head(remote, BURROW_BRANCH) == result.commit.sha == fleet.head()
     assert "pushed to origin burrow/residents" in result.commit.note
     assert result.commit.to_dict()["pushed"] is True
 
@@ -1489,7 +1472,7 @@ def test_a_push_is_never_forced(fleet: ScratchRepo, tmp_path: Path) -> None:
 
     assert result.commit.committed
     assert result.commit.pushed is False
-    assert remote_head(remote, BURROW_BRANCH) == elsewhere
+    assert branch_head(remote, BURROW_BRANCH) == elsewhere
 
 
 def test_nothing_is_pushed_when_nothing_was_committed(fleet: ScratchRepo, tmp_path: Path) -> None:
@@ -1500,7 +1483,7 @@ def test_nothing_is_pushed_when_nothing_was_committed(fleet: ScratchRepo, tmp_pa
 
     assert not result.commit.committed
     assert result.commit.pushed is None
-    assert remote_head(remote, BURROW_BRANCH) is None
+    assert branch_head(remote, BURROW_BRANCH) is None
 
 
 def test_a_write_with_no_push_configured_reports_no_push(fleet: ScratchRepo) -> None:

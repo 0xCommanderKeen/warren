@@ -62,12 +62,16 @@ What that makes true:
   in the repository is the *seed* a new burrow is cloned from, and stops being a place
   charters are edited. There is no two-way sync, on purpose: that is where the conflict
   story lives. A change merged to `main` under `steward/residents/` or `steward/skills/`
-  does **not** reach a burrow that already has a checkout — edit it through the API, or
-  commit in the checkout itself (`docker exec steward-api git -C /checkout …`).
+  does **not** reach a burrow that already has a checkout — apply it through the API
+  (`PUT /residents/{id}/declaration`, `PUT /skills/{name}`; townhall's editors), which
+  validates the whole tree before it writes. Committing in the checkout by hand
+  (`docker exec steward-api git -C /checkout …`) skips that gate and is break-glass:
+  run `steward validate /checkout/steward/residents` in the container first.
 - **Every commit the API makes is pushed to `burrow/residents`**, best effort. The save
   is durable on disk before the push starts, so a burrow that cannot reach GitHub
   answers `"committed, not pushed"` (`commit.pushed: false`) and carries on; the next
-  write or the next deploy pushes whatever the branch is missing. Never `main`: nothing
+  write that commits, or the next deploy, pushes whatever the branch is missing (a save
+  that changed nothing pushes nothing). Never `main`: nothing
   lands there without a pull request, and a push to any other branch deploys nothing,
   so a charter edit cannot loop into a rollout of the fleet it edited.
 - **`deploy.sh` makes the checkout once and never resets it.** On every steward deploy

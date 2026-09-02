@@ -1673,8 +1673,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             for path in (report.declare.manifest_path, report.declare.soul_path)
             if path.is_file()
         ]
-        how = write_settings(request)
-        push = how.pop("push")
+        knobs = write_settings(request)
+        push = knobs.pop("push")  # commit_write takes no push; it is recorded after
         try:
             commit = au.commit_write(
                 residents_dir,
@@ -1682,13 +1682,13 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 au.DECLARE_SUBJECT.format(id=body.id),
                 request_id=request_id,
                 principal=acting_principal(request),
-                **how,
+                **knobs,
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             refuse_write(exc)
         commit = au.record_push(commit, au.repo_toplevel(residents_dir), push)
-        uncommitted = commit.note
+        recorded = commit.note
         deployed = (
             _deployed_message(report)
             if body.deploy
@@ -1697,7 +1697,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "request_id": request_id,
             "status": "accepted",
-            "message": f"{deployed}. {uncommitted}",
+            "message": f"{deployed}. {recorded}",
             # The four keys this endpoint has always returned, kept at the top level so
             # the deploy flag is additive for anything already reading the response.
             "id": body.id,
@@ -1930,7 +1930,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         message = _retire_message(report)
         return {
             "request_id": request_id,
-            "message": message if push is None else f"{message}. {push.note}",
+            "message": message if push is None else f"{message.rstrip('.')}. {push.note}",
             **report.to_dict(),
             "push": push.to_dict() if push is not None else None,
         }

@@ -46,6 +46,9 @@ STEWARD_URL="${STEWARD_URL:-http://dxp2800:8802}"
 # STEWARD_PUSH_BRANCH; the two must agree or the deploy's push and the API's push diverge.
 CHECKOUT_URL="${CHECKOUT_URL:-git@github.com:0xCommanderKeen/warren.git}"
 CHECKOUT_BRANCH="${CHECKOUT_BRANCH:-burrow/residents}"
+case "$CHECKOUT_URL$CHECKOUT_BRANCH" in
+    *[\'\"\ ]*) printf 'deploy: CHECKOUT_URL and CHECKOUT_BRANCH may not contain quotes or spaces\n' >&2; exit 1 ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=15"
 
@@ -241,6 +244,7 @@ deploy_townhall() {
 # mounted here, so this is the one way anything on the burrow talks to the repository. The
 # script must not contain single quotes: it travels through two shells as one word.
 checkout_sh() {
+    case "$2" in *\'*) die "checkout_sh: the script must not contain a single quote: $2" ;; esac
     $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout -v ~/docker/steward/residents-key:/run/steward/residents-key:ro steward-cp:$1 sh -c '$2'"
 }
 
@@ -254,7 +258,8 @@ ensure_checkout() {
     if $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/.git'; then
         # Dirty means a write landed on disk and its commit did not — the one state this
         # script must not paper over with a reset, because the bytes are somebody's edit.
-        dirty="$(checkout_sh "$1" "git -C /checkout status --porcelain")"
+        dirty="$(checkout_sh "$1" "git -C /checkout status --porcelain")" \
+            || die "could not read the residents checkout on $NAS (is steward-cp:$1 on the burrow?)"
         if [ -n "$dirty" ]; then
             printf '%s\n' "$dirty" >&2
             die "the residents checkout on $NAS has uncommitted changes and this script will not reset them; look with: ssh $NAS docker exec steward-api git -C /checkout status"
@@ -285,6 +290,11 @@ ensure_checkout() {
         $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/steward/residents' \
             || die "the checkout on $NAS came up without steward/residents"
     fi
+    # What the checkout holds going into this deploy. The smoke after `up` insists it is
+    # still in the history — the issue's own acceptance line: a redeploy does not lose a
+    # declaration written the day before.
+    CHECKOUT_HEAD="$(checkout_sh "$1" "git -C /checkout rev-parse HEAD")"
+    [ -n "$CHECKOUT_HEAD" ] || die "could not read the residents checkout's HEAD on $NAS"
 }
 
 # ------------------------------------------------------------------------------ steward
@@ -322,6 +332,12 @@ deploy_steward() {
     # two facts behind warren#351's three defects, checked on the running containers.
     branch="$($SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api git -C /checkout rev-parse --abbrev-ref HEAD' 2>/dev/null | tr -d '\r')"
     [ "$branch" = "$CHECKOUT_BRANCH" ] || die "steward-api does not see the residents checkout on $CHECKOUT_BRANCH (saw: ${branch:-nothing})"
+    # Nothing written before this deploy is gone: the HEAD read before anything was stopped
+    # is still an ancestor of (or is) the HEAD the new API serves. An ancestor rather than
+    # an equality, because the old API may legitimately have committed a save between the
+    # two reads — what must never be true is that history went backwards.
+    $SSH "$NAS" "cd ~/docker/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
+        || die "the residents checkout no longer contains $CHECKOUT_HEAD, which it held before this deploy: a declaration written earlier may be gone — stop and look before deploying again"
     $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T scheduler test -f /sched/residents/pip/manifest.yaml' >/dev/null 2>&1 \
         || die "the scheduler's tree does not reach pip's manifest in the checkout"
     log "steward: doctor"

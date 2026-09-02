@@ -27,7 +27,7 @@ done
 if docker ps --format "{{.Names}}" | grep -qx steward-api; then
     branch="$(docker exec steward-api git -C /checkout rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
     head="$(docker exec steward-api git -C /checkout rev-parse --short HEAD 2>/dev/null || echo "?")"
-    unpushed="$(docker exec steward-api git -C /checkout rev-list --count origin/burrow/residents..HEAD 2>/dev/null || echo "?")"
+    unpushed="$(docker exec steward-api git -C /checkout rev-list --count "origin/$branch..HEAD" 2>/dev/null || echo "?")"
     dirty="$(docker exec steward-api git -C /checkout status --porcelain 2>/dev/null | wc -l | tr -d " ")"
     printf "%-10s %s @ %s, %s unpushed, %s dirty\n" "checkout" "$branch" "$head" "$unpushed" "$dirty"
 fi

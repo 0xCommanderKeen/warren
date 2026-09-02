@@ -57,9 +57,8 @@ x-steward: &steward
     TZ: Europe/Ljubljana
   extra_hosts:
     - "dockerhost:host-gateway"
-  volumes:
-    - ./data:/data
-    - ./claude-config:/root/.claude
+  # No volumes here: a YAML merge is shallow and a list does not merge, so every service
+  # states its own mounts in full below — which is also where the read/write split lives.
 
 services:
   api:
