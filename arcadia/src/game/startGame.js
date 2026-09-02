@@ -2,7 +2,9 @@ import Phaser from "phaser";
 import { createVillageScene } from "./VillageScene.js";
 
 export function startGame(parent, snapshot) {
-  return new Phaser.Game({
+  const Scene = createVillageScene(snapshot);
+  const scene = new Scene();
+  const game = new Phaser.Game({
     type: Phaser.AUTO,
     parent,
     width: 640,
@@ -13,6 +15,14 @@ export function startGame(parent, snapshot) {
       autoCenter: Phaser.Scale.CENTER_BOTH,
     },
     pixelArt: true,
-    scene: [createVillageScene(snapshot)],
+    scene: [scene],
   });
+  return {
+    applySnapshot(next) {
+      scene.applySnapshot(next);
+    },
+    destroy(removeCanvas) {
+      game.destroy(removeCanvas);
+    },
+  };
 }
