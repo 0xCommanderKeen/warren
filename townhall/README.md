@@ -42,7 +42,14 @@ which of the two this tab is carrying.
 - **Residents** — the fleet steward could validate; one resident's whole record (soul,
   charter, effective skills, routines, budget, journal, inbox); the nursery form that
   declares a new one; and the declaration editor, which writes manifest fields or the YAML
-  byte for byte with the soul document beside it.
+  byte for byte with the soul document beside it. The editor's **Skills** panel grants and
+  revokes against the library and writes a per-grant note, so a live resident's capabilities
+  change without anybody opening the YAML (warren#331); a grant the library does not have is
+  drawn where it is, with steward's refusal on it, rather than quietly left out. The record
+  carries the **lifecycle** panel: *Provision* builds the container from the declared
+  manifest as it stands, *Retire* marks it retired in git, stops the container and removes
+  the `.env` holding its village token. Both show steward's own plan — the exact argv, from
+  a `dry_run` — before the button that does it for real exists on the screen.
 - **Routines** — every routine every valid resident declares, with steward's own scheduler
   heartbeat and a run-now button.
 - **Approvals** — pending and decided, with approve / deny / edit.
@@ -84,6 +91,14 @@ The editing endpoints are different and say so: `PUT /residents/{id}/declaration
 writes and commits *before* it answers, so its answer already is the outcome and there is
 nothing honest left to poll for. Those render the commit steward reported making, or the
 refusal and its per-field diagnostics.
+
+So do the two lifecycle endpoints: `POST /residents/{id}/provision` and
+`POST /residents/{id}/retire` answer `200` with the container already up, or already down
+and its credential already removed. What the panel shows before either is not a confirmation
+dialog — it is steward's *own* answer to the same call with `dry_run: true`, so what an
+operator confirms is the argv that will run rather than this repo's description of it. The
+retirement plan names what is deliberately **left** on the host as well: `claude/`, which
+holds any login steward never wrote and a re-provision does not restore.
 
 ## Develop
 
