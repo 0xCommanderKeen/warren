@@ -44,9 +44,34 @@ from steward.store import Store
 CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"'
 
 
+OPERATOR_BURROW_DOCKER = (
+    'case "$1" in '
+    "info) printf 'dxp2800\\t27.3.1\\n' ;; "
+    "inspect) case \"$4\" in steward-life-agent|steward-pip) printf 'true\\n' ;; "
+    "*) exit 1 ;; esac ;; "
+    f'exec) case "$2" in steward-life-agent|steward-pip) {CURRENT_CLAUDE} ;; '
+    "*) exit 1 ;; esac ;; "
+    "*) exit 1 ;; esac"
+)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def on_operator_burrow(
+    monkeypatch: pytest.MonkeyPatch, stub_bin: StubWriter, tmp_path: Path
+) -> Path:
+    """Run shipped-tree diagnostics where the two proposed containers are provisioned."""
+    stub_bin("docker", OPERATOR_BURROW_DOCKER)
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    hob_memory = tmp_path / "docker" / "steward-life-agent" / "memory"
+    hob_memory.mkdir(parents=True)
+    (tmp_path / "docker" / "steward-pip" / "memory").mkdir(parents=True)
+    return hob_memory
 
 
 def test_events_flush_reports_delivery_and_exits_cleanly(
@@ -385,6 +410,7 @@ def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
     assert "no resident manifests found" in result.output
 
 
+@pytest.mark.usefixtures("on_operator_burrow")
 def test_doctor_names_the_brain_and_the_next_fire(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -393,19 +419,26 @@ def test_doctor_names_the_brain_and_the_next_fire(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: runner claude (claude-opus-5) — ready" in result.output
+    assert (
+        "life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready"
+        in result.output
+    )
+    assert "pip: runner claude (claude-haiku-4-5-20251001) in container steward-pip — ready" in (
+        result.output
+    )
     assert "life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana" in result.output
 
 
 @pytest.mark.usefixtures("empty_path")
-def test_doctor_fails_loudly_when_the_binary_is_missing(
+def test_doctor_fails_loudly_when_the_container_runtime_is_missing(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
-    assert "not on PATH" in result.output
+    assert "docker could not answer for container 'steward-life-agent'" in result.output
+    assert "docker could not answer for container 'steward-pip'" in result.output
 
 
 #: A `claude --help` that knows how to bound a session, and one too old to.
@@ -516,16 +549,19 @@ def test_doctor_says_so_when_nothing_is_scheduled(
 
 
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
-    runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_operator_burrow: Path,
 ) -> None:
     stub_bin("claude", CURRENT_CLAUDE)
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: journal /data/residents/life-agent/memory/journal" in result.output
+    assert f"life-agent: journal {on_operator_burrow}/journal" in result.output
     assert "closed by close-of-day" in result.output
-    assert "burrow-builder" not in result.output
 
 
 def test_doctor_warns_when_the_journal_location_is_not_writable(
