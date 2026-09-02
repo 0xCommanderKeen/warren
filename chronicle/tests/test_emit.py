@@ -864,7 +864,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
     def test_deferred_primary_worker_keeps_its_calls_transport_and_diagnostics(self):
         deferred, deferred_thread = self.deferred_threads()
 
-        this_call = mock.Mock(return_value=False)
+        this_call = mock.Mock(return_value=True)
         with (
             mock.patch.dict(
                 os.environ,
@@ -874,6 +874,8 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.object(emit.threading, "Thread", deferred_thread),
         ):
             emit.deliver(self.EVENT, deadline=time.monotonic() + 1)
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            retries_before_worker = json.load(stream).get("retries", 0)
 
         next_call = mock.Mock(return_value=True)
         next_diagnostics = os.path.join(self.tmp.name, "next-diagnostics.json")
@@ -887,6 +889,10 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         this_call.assert_called_once()
         next_call.assert_not_called()
         self.assertFalse(os.path.exists(next_diagnostics))
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            self.assertEqual(
+                json.load(stream)["retries"], retries_before_worker + 1
+            )
 
     def assert_deferred_real_transport_keeps_settings(self, *, primary):
         deferred, deferred_thread = self.deferred_threads()
