@@ -46,7 +46,8 @@ contain. Data — chronicle's `/data`, steward's `data/` — is never written by
 
 [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) runs on every push to
 `main`, works out which services the push touched (the same path filters the CI
-workflows use, plus `deploy/**`), and runs `deploy/deploy.sh` for them in order. Each job
+workflows use, plus `deploy/deploy.sh`; a change to the workflow itself deploys nothing —
+prove one with a dispatch), and runs `deploy/deploy.sh` for them in order. Each job
 first runs that service's own check — the same command CI runs — so a deploy is never
 greener than the suite. The runner reaches the NAS by joining the tailnet as an
 ephemeral node tagged `tag:ci`, then ssh with a key that only the tailnet may present.

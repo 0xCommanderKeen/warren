@@ -45,8 +45,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The same path filters the CI workflows use, plus the deploy toolkit itself: a
-      # change to the script or a compose file is a change to what the burrow runs.
+      # The same path filters the CI workflows use, plus the deploy script itself: a
+      # change to the script or to a service's compose file is a change to what the
+      # burrow runs. A change to this workflow or the nas action is NOT — it changes how
+      # the runner gets there, and is proven with a workflow_dispatch, not by rolling out
+      # four services that did not change. (The first version listed `deploy/**` with a
+      # `!deploy/README.md` exclusion; paths-filter's default quantifier ignores negations,
+      # and a docs-only merge redeployed everything.)
       - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'push'
@@ -54,33 +59,21 @@ jobs:
           filters: |
             chronicle:
               - 'chronicle/**'
-              - 'deploy/**'
-              - '!deploy/README.md'
-              - '.github/workflows/deploy.yml'
-              - '.github/actions/**'
+              - 'deploy/deploy.sh'
             arcadia:
               - 'arcadia/**'
               - 'chronicle/tests/fixtures/state-contract/**'
               - 'steward/src/steward/api.py'
-              - 'deploy/**'
-              - '!deploy/README.md'
-              - '.github/workflows/deploy.yml'
-              - '.github/actions/**'
+              - 'deploy/deploy.sh'
             townhall:
               - 'townhall/**'
               - 'chronicle/tests/fixtures/state-contract/**'
               - 'steward/src/steward/api.py'
-              - 'deploy/**'
-              - '!deploy/README.md'
-              - '.github/workflows/deploy.yml'
-              - '.github/actions/**'
+              - 'deploy/deploy.sh'
             steward:
               - 'steward/**'
               - 'chronicle/hooks/**'
-              - 'deploy/**'
-              - '!deploy/README.md'
-              - '.github/workflows/deploy.yml'
-              - '.github/actions/**'
+              - 'deploy/deploy.sh'
 
       - id: pick
         shell: bash
