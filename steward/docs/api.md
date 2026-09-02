@@ -187,7 +187,7 @@ takes the other road has to do something no resident's charter describes. Real c
 needs the session to have neither the database nor the residents tree, which is container
 placement's job, not this issue's.
 
-Four of those refusals name the act rather than the rule, because the act is the part
+Five of those refusals name the act rather than the rule, because the act is the part
 worth knowing:
 
 - **`POST /approvals/{request_id}`** — deciding an approval is the human end of the
@@ -200,6 +200,10 @@ worth knowing:
   again. Named separately from declaring, and matched ahead of it, because the two are
   different acts and a refusal that called this one "declaring" would be describing
   something the caller did not try.
+- **`POST /residents/{id}/retire`** — retiring is ending a resident: a mark in git, a
+  container stopped, a village token removed. A session that could do it would be deciding
+  which of its colleagues carries on, or dismissing itself. Matched ahead of declaring for
+  the same reason provisioning is.
 - **`POST /residents/{id}/routines/{routine}/run`** — firing a routine is a human act; a
   session's own work arrives through the board and its inbox.
 
@@ -623,12 +627,11 @@ host is compared file by file and not re-sent, `sent` and `changed` are `false`,
 `docker compose up -d` is issued anyway — reconciling a container that is *down* is what a
 second run is for.
 
-**There is no HTTP counterpart to `steward retire`, and this change did not add one.**
-warren#270 asked whether retire's counterpart should be symmetric, and the answer it took
-is about the *argument*, not the surface: provisioning now takes an id and reads the
-declared manifest, exactly as `steward retire <id>` does. Retiring over HTTP is a separate
-decision — it stops a container and scrubs a village token — and nothing has asked for it,
-so it stays a CLI act rather than being added on the strength of a symmetry argument.
+The HTTP counterpart to `steward retire` is
+[`POST /residents/{id}/retire`](#post-residentsidretire), added by warren#331. warren#270
+left it out deliberately — retiring stops a container and scrubs a village token, and
+nothing had asked for it — and what asked for it was the console: a page that could show a
+`retired` badge and had no way to make one true.
 
 The refusals:
 
@@ -639,6 +642,103 @@ The refusals:
 | `409` | `declaration_invalid` | the declaration on disk does not validate, so steward will not deploy from it; the message names the fields that failed. Its own name, not the `422 manifest_invalid` of the write paths: that one means *the bytes you sent* would not validate, and no bytes were sent here |
 | `409` | `provision_failed` | the host answered and refused — a bundle that would not land, a `docker compose up` that failed. The declaration is untouched, so fixing the host and re-running picks up where it stopped |
 | `409` | `provision_refused` | there was nobody to ask: the host did not answer, or steward's own environment has no `CHRONICLE_URL` to give the container. The message says which |
+
+
+### `POST /residents/{id}/retire`
+
+**Human callers only** — the master token or an operator credential. A session credential is
+refused here; see [Three kinds of caller](#three-kinds-of-caller).
+
+```json
+{"dry_run": false}
+```
+
+The mirror of the provision door, with the same one-field body and for the same reason: the
+manifest is the request.
+
+**Retirement is not a manifest edit**, which is the whole argument for this route existing.
+Writing `retired: true` through `PUT /residents/{id}/declaration` marks the resident and
+leaves its container running on the host with a live `BURROW_TOKEN` in the `.env` beside it
+— the half that matters most left undone. This runs the whole act, in the one order that is
+safe:
+
+1. `retired: true` into `residents/<id>/manifest.yaml`, read straight back through the
+   ordinary validator;
+2. commit it;
+3. `docker compose down --remove-orphans`;
+4. `rm -f` the `.env` and the compose file.
+
+**Marked before stopped**, always. `retired: true` is what takes the resident out of the
+scheduler, the board, delegation, run-now — and out of the watchdog, which would otherwise
+notice the container go away and dutifully restart it. And **the `.env` is removed after the
+stop**, because `docker compose down` reads it: `BURROW_URL` is interpolated as
+`${BURROW_URL:?…}`, so scrubbing first makes the stop fail on a missing variable.
+
+What is deliberately **left**: `residents/<id>/` and its history — retirement is a lifecycle
+state, not a deletion — the resident's memory directory on the host, and `claude/`, which is
+bind-mounted to `/root/.claude` and holds whatever a `docker exec … claude` login wrote.
+Steward never wrote that directory's contents and a re-provision does not restore them, so
+removing it would make the documented way back silently require a re-login. Every report
+says so rather than leaving it to be discovered.
+
+Runs the same `steward.nursery.retire_resident` pipeline `steward retire` runs — one
+implementation, verified by a test that injects the pipeline into the route.
+
+**`200`, not `202`.** The container is down and the credential is gone by the time this
+answers.
+
+**`dry_run: true`** returns the plan — what would be marked and the exact argv a real run
+would issue — and marks nothing, commits nothing and reaches no host.
+
+**This one commits through the nursery**, unlike `POST /residents`, which asks the pipeline
+not to and commits afterwards through `steward.authoring`. The reason is the order above:
+retirement's commit belongs *between* the mark and the stop, and the only code inside that
+sequence is the pipeline. What comes with the nursery's commit is the nursery's
+dirty-worktree refusal, named rather than hidden — a server that committed a retirement into
+a checkout somebody was half-way through would be a server nobody can revert one decision
+in. The commit is authored by the operator whose credential made the request, exactly as
+every other write here is.
+
+```json
+{"request_id": "…", "message": "…",
+ "resident": "life-agent", "manifest_path": "residents/life-agent/manifest.yaml",
+ "marked": true, "stopped": true, "scrubbed": true,
+ "commands": ["ssh Miha@dxp2800 docker compose … down --remove-orphans",
+              "ssh Miha@dxp2800 rm -f ~/docker/steward-life-agent/.env …"],
+ "commit": "9f2c…", "dry_run": false, "note": "retired"}
+```
+
+`marked` is `false` when the manifest already said retired, `stopped` is `false` when there
+was nothing on the host to stop, and `scrubbed` is `false` when there was no `.env` to
+remove — "the token is gone" and "this run took it away" are different sentences, and only
+the second is what `scrubbed` reports. A **local-placed** resident that ships inside the
+burrow's own image has no container of its own, so a retirement of one marks and commits and
+`note` says there was nothing at that path to stop; it stops running on the burrow's next
+deploy.
+
+The way **back** is `retired: false`, committed, and then
+[`POST /residents/{id}/provision`](#post-residentsidprovision) — two steps, because
+un-retiring is a person's decision written into a file rather than a button that undoes one.
+
+The refusals:
+
+| status | `error` | when |
+|---|---|---|
+| `404` | `unknown_resident` | no such resident, by id or by uid |
+| `409` | `resident_invalid` | the id names a directory whose manifest does not validate; `steward validate` says which field |
+| `409` | `resident_retired` | it is already retired, so there is nothing here to end. The message names the way back. Reconciling a *half-finished* retirement — marked, container still up — is `steward retire <id>` at a terminal, which is deliberately not what this route does |
+| `409` | `declaration_invalid` | the declaration on disk stopped validating between this route reading it and the pipeline loading it. Nothing was marked |
+| `409` | `worktree_refused` | the checkout holding the residents tree has uncommitted changes, or is not a checkout at all; the message says which. Nothing was marked and nothing was stopped |
+| `409` | `commit_failed` | git refused the stage or the commit. **The mark is on disk and in no commit**, so the resident has already stopped taking work — every path reads `retired` off the file, not out of git — with no history of the decision. The host was not reached. Commit that file to finish, or set `retired: false` to undo it |
+| `409` | `retire_failed` | the host answered and refused — a `docker compose down` that failed, credentials that could not be removed. **The mark is committed by then**, and the message says so: re-run `steward retire <id>` once the host answers |
+| `409` | `retire_refused` | there was nobody to ask |
+
+Everything down to and including `worktree_refused` changed nothing at all; `commit_failed`
+and the two below it stopped part-way. The request log says which: the first three are
+settled before the request is even logged, a refusal that left the tree exactly as it found
+it is recorded as `refused: <reason>`, and one that stopped after the mark or after the
+commit is `stopped part-way: <reason>` — because a row reading "refused" over a request that
+left a commit in git is the one row an audit trail cannot recover from.
 
 ### Secrets and the nursery
 

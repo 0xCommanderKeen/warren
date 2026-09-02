@@ -1182,7 +1182,15 @@ retired: true
 
 Defaults to `false`. `steward retire <id>` sets it, commits it, and then stops the
 container — in that order, so the watchdog is not still trying to restart something
-steward is deliberately taking down.
+steward is deliberately taking down. `POST /residents/{id}/retire`
+([docs/api.md](api.md#post-residentsidretire)) is the same pipeline through the same door
+townhall's Retire button presses.
+
+**Editing this field is not the same act.** Writing `retired: true` through
+`PUT /residents/{id}/declaration` marks the resident and stops there: the container keeps
+running and its `.env` keeps holding a live village token, which is the half that matters
+most. The write surface can honestly take it *off* — that is the first step of the way back
+below — but putting it on is what the retire command and the retire route are for.
 
 Retirement is **not deletion**. The manifest and the soul stay in this repo and in its
 history, `steward validate` still reads them, `GET /residents` still lists the resident
