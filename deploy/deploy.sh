@@ -338,8 +338,11 @@ deploy_steward() {
     # two reads — what must never be true is that history went backwards.
     $SSH "$NAS" "cd ~/docker/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
         || die "the residents checkout no longer contains $CHECKOUT_HEAD, which it held before this deploy: a declaration written earlier may be gone — stop and look before deploying again"
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T scheduler test -f /checkout/steward/residents/pip/manifest.yaml' >/dev/null 2>&1 \
-        || die "the scheduler's read-only mount of the checkout does not reach pip's manifest"
+    # Through a one-off container rather than `exec` into the scheduler: the daemons' health
+    # is doctor's question below, and a scheduler refusing to start over a missing resident
+    # container (its own, correct, refusal) must not read as "the checkout is not mounted".
+    $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -f /checkout/steward/residents/pip/manifest.yaml" >/dev/null 2>&1 \
+        || die "the residents checkout on $NAS does not hold pip's manifest where the daemons read it"
     log "steward: doctor"
     # In the watchdog's container, against the tree the daemons actually run: that is the
     # process with the docker socket, so its topology line is the true one.
