@@ -6,11 +6,13 @@ the projection over /state and /state/stream. It serves no browser client of its
 own; UIs are separate repositories consuming the versioned state contract (see
 docs/ui-clients.md).
 
-    python3 serve.py [port]     # default 8737
+    python3 serve.py [port]                          # default 8737
+    uvicorn serve:app --host 127.0.0.1 --port 8737   # the same app under uvicorn's flags
 
-Env (each also accepted under its pre-rename BURROW_* spelling for one release;
-the CHRONICLE_* spelling wins wherever both are set):
-    CHRONICLE_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container)
+Env, read by both entry points (each also accepted under its pre-rename BURROW_*
+spelling for one release; the CHRONICLE_* spelling wins wherever both are set):
+    CHRONICLE_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container;
+                            under uvicorn its --host/--port bind instead)
     CHRONICLE_EVENTS        event log path (default ~/.chronicle/events.jsonl)
     CHRONICLE_VILLAGERS     resident-manifest directory (default: villagers/ next to this file)
     CHRONICLE_ARCHIVE       rotated log directory (default <events dir>/archive)
@@ -62,28 +64,33 @@ from typed_json import thaw_json
 from protocol import validate_event
 from config import Config
 
-# Deprecated default-value aliases remain for direct function callers during the
-# notification-store extraction. Runtime HTTP traffic uses ``Runtime.config``.
-_DEFAULT_CONFIG = Config()
-PORT = _DEFAULT_CONFIG.port
-HOST = _DEFAULT_CONFIG.host
+# The module-level ``app`` — what ``uvicorn serve:app`` serves — takes its settings
+# from the environment at import, exactly as ``python serve.py`` does at ``__main__``.
+# It used to be built from ``Config()`` defaults, and the NAS ran it that way for six
+# days with every setting silently ignored: the log went into the container layer,
+# knocks stopped, the token never applied (warren#313). The aliases below are seeded
+# from it for direct function callers and the tests that still monkeypatch them
+# during the notification-store extraction; runtime HTTP traffic uses ``Runtime.config``.
+_ENVIRONMENT_CONFIG = Config.from_env(os.environ)
+PORT = _ENVIRONMENT_CONFIG.port
+HOST = _ENVIRONMENT_CONFIG.host
 ROOT = os.path.dirname(os.path.abspath(__file__))
-EVENTS = str(_DEFAULT_CONFIG.events)
+EVENTS = str(_ENVIRONMENT_CONFIG.events)
 
 MAX_EVENT_BYTES = 64 * 1024
-VILLAGERS_DIR = str(_DEFAULT_CONFIG.villagers_dir)
-TOKEN = _DEFAULT_CONFIG.token
-ARCHIVE_DIR = ""
-MAX_LOG_BYTES = _DEFAULT_CONFIG.max_log_bytes
+VILLAGERS_DIR = str(_ENVIRONMENT_CONFIG.villagers_dir)
+TOKEN = _ENVIRONMENT_CONFIG.token
+ARCHIVE_DIR = str(_ENVIRONMENT_CONFIG.archive_dir or "")
+MAX_LOG_BYTES = _ENVIRONMENT_CONFIG.max_log_bytes
 
-NOTIFY_URL = _DEFAULT_CONFIG.notify_url
-NOTIFY_TOKEN = _DEFAULT_CONFIG.notify_token
-NOTIFY_TIMEOUT = _DEFAULT_CONFIG.notify_timeout
+NOTIFY_URL = _ENVIRONMENT_CONFIG.notify_url
+NOTIFY_TOKEN = _ENVIRONMENT_CONFIG.notify_token
+NOTIFY_TIMEOUT = _ENVIRONMENT_CONFIG.notify_timeout
 NOTIFY_MEMORY = 512  # how many knocks we remember, to not knock twice
 NOTIFY_WORKERS = 2
 NOTIFY_QUEUE = 64
-KNOCK_RECORDS = _DEFAULT_CONFIG.knock_records
-KNOCK_BYTES = _DEFAULT_CONFIG.knock_bytes
+KNOCK_RECORDS = _ENVIRONMENT_CONFIG.knock_records
+KNOCK_BYTES = _ENVIRONMENT_CONFIG.knock_bytes
 LEDGER_RECORDS = KNOCK_RECORDS
 LEDGER_BYTES = KNOCK_BYTES
 KNOCK_LOCK_SHARDS = 32
@@ -115,9 +122,10 @@ def _store():
 
 
 def _legacy_config():
-    """Compatibility adapter for direct callers pending notification-store #72."""
+    """The module-level app's settings: the environment, under any alias a caller
+    overrode. Compatibility adapter pending notification-store #72."""
     return dataclasses.replace(
-        _DEFAULT_CONFIG,
+        _ENVIRONMENT_CONFIG,
         host=HOST,
         port=PORT,
         events=os.path.abspath(EVENTS),
@@ -1034,7 +1042,7 @@ app = FastAPI(
     version=PROJECT_VERSION,
     lifespan=lifespan(_legacy_config),
 )
-app.state.config = _DEFAULT_CONFIG
+app.state.config = _ENVIRONMENT_CONFIG
 
 
 def _openapi():

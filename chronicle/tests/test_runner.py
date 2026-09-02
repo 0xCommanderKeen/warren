@@ -60,7 +60,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
             for test in python_tests:
                 test.write_text(
                     "import os, sys\n"
-                    "with open(os.environ['BURROW_RUNNER_LOG'], 'a') as log:\n"
+                    "with open(os.environ['RUNNER_LOG'], 'a') as log:\n"
                     "    log.write(os.path.basename(__file__).replace('\\n', '<NL>') + '\\n')\n"
                     "    log.write('python=' + sys.executable + '\\n')\n"
                 )
@@ -73,7 +73,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
             ]
             for test in javascript_tests:
                 test.write_text(
-                    "require('fs').appendFileSync(process.env.BURROW_RUNNER_LOG, "
+                    "require('fs').appendFileSync(process.env.RUNNER_LOG, "
                     f"'{test.name}\\n');\n"
                 )
             (repo / "test_untracked.py").write_text(
@@ -108,7 +108,9 @@ class RunnerDiscoveryTest(unittest.TestCase):
             uv.chmod(0o755)
             log = repo / "executed.log"
             env = {
-                "BURROW_RUNNER_LOG": str(log),
+                # Not CHRONICLE_/BURROW_-prefixed: the runner strips Chronicle's
+                # own settings from every child's environment (warren#313).
+                "RUNNER_LOG": str(log),
                 "LOCKED_PYTHON": sys.executable,
                 "PATH": str(bin_directory) + os.pathsep + os.environ["PATH"],
                 # A caller cannot redirect children away from uv's interpreter.

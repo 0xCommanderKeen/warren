@@ -3,7 +3,6 @@ import dataclasses
 import os
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -12,6 +11,26 @@ from fastapi.testclient import TestClient
 
 import serve
 from config import Config
+from tests.http_test_support import wait_until
+
+
+def settled_notification_status(client, expected):
+    """Read ``/transport/status`` once its notification counters show ``expected``.
+
+    The webhook has answered before the worker commits the outcome, so a status
+    read taken straight after the webhook's receipt can run ahead of the
+    counters (warren#315). The last reading is returned either way, so a real
+    mismatch still fails on the named counter.
+    """
+    status = None
+
+    def settled():
+        nonlocal status
+        status = client.get("/transport/status").json()["notifications"]
+        return all(status[key] == value for key, value in expected.items())
+
+    wait_until(settled)
+    return status
 
 
 class ASGITransportContractTests(unittest.TestCase):
@@ -83,12 +102,7 @@ class ASGITransportContractTests(unittest.TestCase):
                     self.assertEqual(
                         second.post("/events", json=event).status_code, 204
                     )
-                    deadline = time.monotonic() + 3
-                    while (
-                        any(not items for items in received)
-                        and time.monotonic() < deadline
-                    ):
-                        time.sleep(0.01)
+                    wait_until(lambda: all(received))
 
                 self.assertEqual(
                     received[0],
@@ -222,6 +236,10 @@ class ASGITransportContractTests(unittest.TestCase):
             agent_id="test:runtime-retry-owner",
             payload={"message": "retry isolation"},
         )
+        # One delivered, three failed attempts at the retry event (two retries,
+        # then dropped) in the first runtime; every knock delivered in the second.
+        first_expected = {"delivered": 1, "failed": 3, "retried": 2, "dropped": 1}
+        second_expected = {"delivered": 3, "failed": 0}
         try:
             with tempfile.TemporaryDirectory() as temporary:
                 configs = [
@@ -248,9 +266,7 @@ class ASGITransportContractTests(unittest.TestCase):
                             second.post("/events", json=collision_event).status_code,
                             204,
                         )
-                        deadline = time.monotonic() + 3
-                        while len(received[1]) < 1 and time.monotonic() < deadline:
-                            time.sleep(0.01)
+                        wait_until(lambda: len(received[1]) >= 1)
                         self.assertEqual(len(received[1]), 1)
                         release_first.set()
 
@@ -260,19 +276,15 @@ class ASGITransportContractTests(unittest.TestCase):
                         self.assertEqual(
                             first.post("/events", json=retry_event).status_code, 204
                         )
-                        deadline = time.monotonic() + 3
-                        while len(received[0]) < 4 and time.monotonic() < deadline:
-                            time.sleep(0.01)
+                        wait_until(lambda: len(received[0]) >= 4)
                         self.assertEqual(len(received[0]), 4)
                         self.assertEqual(
                             second.post("/events", json=retry_event).status_code, 204
                         )
-                        deadline = time.monotonic() + 3
-                        while len(received[1]) < 2 and time.monotonic() < deadline:
-                            time.sleep(0.01)
-                        first_status = first.get("/transport/status").json()[
-                            "notifications"
-                        ]
+                        wait_until(lambda: len(received[1]) >= 2)
+                        first_status = settled_notification_status(
+                            first, first_expected
+                        )
 
                     # Shutting down the first app must not stop the second app's
                     # independently owned worker.
@@ -283,22 +295,21 @@ class ASGITransportContractTests(unittest.TestCase):
                     self.assertEqual(
                         second.post("/events", json=shutdown_event).status_code, 204
                     )
-                    deadline = time.monotonic() + 3
-                    while len(received[1]) < 3 and time.monotonic() < deadline:
-                        time.sleep(0.01)
-                    second_status = second.get("/transport/status").json()[
-                        "notifications"
-                    ]
+                    wait_until(lambda: len(received[1]) >= 3)
+                    second_status = settled_notification_status(
+                        second, second_expected
+                    )
 
                 self.assertEqual(first_status["queue_capacity"], 2)
                 self.assertEqual(second_status["queue_capacity"], 3)
                 self.assertEqual(list(map(len, received)), [4, 3])
-                self.assertEqual(first_status["delivered"], 1)
-                self.assertEqual(first_status["failed"], 3)
-                self.assertEqual(first_status["retried"], 2)
-                self.assertEqual(first_status["dropped"], 1)
-                self.assertEqual(second_status["delivered"], 3)
-                self.assertEqual(second_status["failed"], 0)
+                self.assertEqual(
+                    {key: first_status[key] for key in first_expected}, first_expected
+                )
+                self.assertEqual(
+                    {key: second_status[key] for key in second_expected},
+                    second_expected,
+                )
         finally:
             release_first.set()
             for webhook in webhooks:
