@@ -1,6 +1,6 @@
 """The residents actually shipped in this repo must always validate."""
 
-from conftest import REPO_ROOT, RESIDENTS_DIR
+from conftest import PROJECT_AGENT_FIXTURE, REPO_ROOT, RESIDENTS_DIR
 from steward import journal
 from steward import manifest as m
 from steward.skills import default_skills, effective_names, load_library, missing_skills
@@ -11,9 +11,9 @@ def test_the_residents_tree_validates() -> None:
     assert result.ok, "\n".join(d.render() for d in result.diagnostics)
     assert {resident.id for resident in result.residents} == {
         "life-agent",
-        "burrow-builder",
         "pip",
     }
+    assert "burrow-builder" not in {resident.id for resident in result.residents}
     assert len({resident.manifest.uid for resident in result.residents}) == len(result.residents)
 
 
@@ -43,15 +43,15 @@ def test_hob_is_the_life_agent() -> None:
     )
 
 
-def test_maren_is_project_scoped() -> None:
-    maren = m.load_manifest(RESIDENTS_DIR / "burrow-builder" / "manifest.yaml")
-    assert maren.manifest.agent_id is None
-    assert maren.manifest.project == "chronicle"
-    assert maren.manifest.soul.name == "Maren"
-    assert maren.manifest.soul.char == "Hunter"
-    assert maren.manifest.soul.accent == "#4f7d5b"
-    assert maren.manifest.soul.role == "village builder"
-    assert isinstance(maren.manifest.charter.escalation, str)
+def test_a_project_scoped_fixture_has_no_agent_identity() -> None:
+    resident = m.load_manifest(PROJECT_AGENT_FIXTURE)
+    assert resident.manifest.agent_id is None
+    assert resident.manifest.project == "chronicle"
+    assert resident.manifest.soul.name == "Project Agent"
+    assert resident.manifest.soul.char == "Hunter"
+    assert resident.manifest.soul.accent == "#4f7d5b"
+    assert resident.manifest.soul.role == "test project worker"
+    assert isinstance(resident.manifest.charter.escalation, str)
 
 
 def test_hob_closes_his_own_day_and_nobody_elses_routine_does() -> None:
@@ -85,6 +85,17 @@ def test_every_shipped_resident_declares_a_daily_cost_cap() -> None:
         )
 
 
+def test_the_operator_placed_residents_use_the_one_container_shape() -> None:
+    """Issue #40/#332: the two operator proposals have the same declared shape."""
+    residents = {resident.id: resident for resident in m.validate_tree(RESIDENTS_DIR).residents}
+
+    for resident_id in ("life-agent", "pip"):
+        manifest = residents[resident_id].manifest
+        assert manifest.runner.placement == "container"
+        assert manifest.deploy.host == "dxp2800"
+        assert manifest.deploy.container is not None
+
+
 def test_shipped_souls_have_voices_within_the_cap() -> None:
     for resident in m.validate_tree(RESIDENTS_DIR).residents:
         assert resident.soul.voice, f"{resident.id} has no ## Voice section"
@@ -114,15 +125,14 @@ def test_no_shipped_manifest_re_grants_a_default_skill() -> None:
         assert repeated == set(), f"{resident.id} re-grants {sorted(repeated)}"
 
 
-def test_maren_may_hand_work_to_hob_and_hob_declares_a_door() -> None:
-    """The shipped pilot: both halves of a handoff, written down in two manifests."""
-    residents = {r.id: r for r in m.validate_tree(RESIDENTS_DIR).residents}
-    maren = residents["burrow-builder"]
-    hob = residents["life-agent"]
+def test_project_fixture_may_hand_work_to_hob_and_hob_declares_a_door() -> None:
+    """The handoff fixture and shipped receiver both declare their half."""
+    sender = m.load_manifest(PROJECT_AGENT_FIXTURE)
+    hob = m.load_manifest(RESIDENTS_DIR / "life-agent" / "manifest.yaml")
 
-    assert maren.manifest.delegation.send is True
-    assert maren.manifest.delegation.may_send_to("life-agent") is True
-    assert maren.manifest.delegation.may_send_to("some-other-agent") is False
+    assert sender.manifest.delegation.send is True
+    assert sender.manifest.delegation.may_send_to("life-agent") is True
+    assert sender.manifest.delegation.may_send_to("some-other-agent") is False
     assert hob.delegation_routes == ("handoff",)
     assert hob.manifest.delegation.send is False, "Hob receives; he escalates to a person"
-    assert maren.delegation_routes == (), "nothing is handed back to Maren yet"
+    assert sender.delegation_routes == (), "nothing is handed back to the sender"

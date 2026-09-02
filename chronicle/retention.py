@@ -1734,6 +1734,23 @@ def carry_forward(lines, now_ms, policy):
         if event["type"] == "session_ended"
     )
     projection_live_agents = set()
+    # Identity is folded outside visible history. Keep its latest declaration/retirement
+    # per agent independently of the ordinary per-villager tail, just like task authority.
+    active_declaration = {}
+    latest_identity = {}
+    for index, event in full_parsed:
+        if event["type"] == "resident_declared":
+            active_declaration[event["agent_id"]] = (index, event)
+            latest_identity[event["agent_id"]] = index
+        elif event["type"] == "resident_retired":
+            active = active_declaration.get(event["agent_id"])
+            if active is not None and all(
+                event["payload"][field] == active[1]["payload"][field]
+                for field in ("resident_id", "uid")
+            ):
+                active_declaration.pop(event["agent_id"], None)
+                latest_identity[event["agent_id"]] = index
+    protected_journal_indexes.update(latest_identity.values())
     raw_tail_start = max(0, len(lines) - VIEWER_LINE_LIMIT)
     # Without routine authority before the transport tail, every ordinary
     # villager fact is already carried by that tail. Avoid several complete-log

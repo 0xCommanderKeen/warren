@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import RESIDENTS_DIR, ResidentWriter, valid_manifest
+from conftest import PROJECT_AGENT_FIXTURE, ResidentWriter, valid_manifest
 from steward import journal as j
 from steward import manifest as m
 
@@ -58,9 +58,9 @@ def test_the_default_journal_directory_is_a_subdirectory_of_memory(resident) -> 
 
 
 def test_a_memory_path_with_a_tilde_is_expanded() -> None:
-    maren = m.load_manifest(RESIDENTS_DIR / "burrow-builder" / "manifest.yaml")
-    assert "~" not in str(j.resolve_journal_dir(maren.manifest))
-    assert j.resolve_journal_dir(maren.manifest).is_relative_to(Path.home())
+    resident = m.load_manifest(PROJECT_AGENT_FIXTURE)
+    assert "~" not in str(j.resolve_journal_dir(resident.manifest))
+    assert j.resolve_journal_dir(resident.manifest).is_relative_to(Path.home())
 
 
 # --------------------------------------------------------------- loud, not silent

@@ -1,7 +1,7 @@
 # Delegation (v0)
 
 A resident working alone in a headless session sooner or later reaches work that is not
-its own. Maren wants background reading before she touches the protocol; Hob wants
+its own. A project agent wants background reading before touching the protocol; a receiver wants
 something written up by whoever actually does that. Neither can call the other — they are
 separate processes, woken on separate schedules, and neither is listening. So it asks
 steward to **deliver a letter**, and steward decides whether the letter may be delivered
@@ -147,11 +147,11 @@ catch-all actions covering every refusal alike, so the knock is exempt from the
 For a session with shell access that wants the handoff registered before its turn ends.
 
 ```console
-$ steward delegate burrow-builder \
+$ steward delegate sender-resident \
     --to life-agent --route handoff \
     --title "Check what the errand list actually contains" \
     --detail "I need the real shape of an errand before I render one."
-burrow-builder → life-agent via handoff: Check what the errand list actually contains
+sender-resident → life-agent via handoff: Check what the errand list actually contains
 b81f…-…-…                       # the task_id, on stdout
 ```
 
@@ -202,14 +202,14 @@ The origin is inherited at every hop; the chain itself is walked through `parent
 $ steward inbox life-agent
 life-agent: routes accepting delegated work: handoff
 open     b81f…  Check what the errand list actually contains
-         from burrow-builder via handoff (depth 1, origin task:2c9a…)
+         from sender-resident via handoff (depth 1, origin task:2c9a…)
 
 $ steward task lineage b81f…
 origin task:2c9a…
 2c9a…  Rewrite the projection rules
   posted by api — claimed
   b81f…  Check what the errand list actually contains
-    burrow-builder → life-agent — done (ok)
+    sender-resident → life-agent — done (ok)
 ```
 
 `--format json` for the same thing machine-readably, and `GET /residents/{id}/inbox` /
@@ -221,7 +221,7 @@ Which is why `steward doctor` prints a line per resident about the post as well:
 ```console
 $ steward doctor
 life-agent: inbox 2 open via handoff
-burrow-builder: inbox — takes no letters
+sender-resident: inbox — takes no letters
 some-agent: inbox — 3 open letter(s) behind a closed route: handoff (disabled); nothing will pick them up
 ```
 
@@ -274,7 +274,7 @@ needs the token.
 
 ```console
 $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
-    -d '{"from": "burrow-builder", "to": "life-agent", "route": "handoff",
+    -d '{"from": "sender-resident", "to": "life-agent", "route": "handoff",
          "title": "Check the errand list"}' \
     http://127.0.0.1:8801/delegate
 ```

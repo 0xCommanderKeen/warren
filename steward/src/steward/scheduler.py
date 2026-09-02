@@ -110,6 +110,7 @@ from steward.skills import (
     library_for,
     missing_skills,
 )
+from steward.topology import residents_on_this_burrow
 
 __all__ = [
     "DEFAULT_CATCHUP_S",
@@ -614,6 +615,7 @@ class TreeSource:
 
     residents_dir: Path
     skills_dir: Path | None = None
+    env: dict[str, str] | None = None
 
     def load(self) -> TreeSnapshot:
         """Re-read the tree. Raises :class:`SchedulerError` if it does not validate.
@@ -624,9 +626,20 @@ class TreeSource:
         board the first time anything reloaded.
         """
         result = validate_path(self.residents_dir, self.skills_dir)
+        if not result.ok:
+            raise SchedulerError(
+                "cannot schedule from an invalid residents tree:\n"
+                + "\n".join(d.render() for d in result.errors)
+            )
+        residents = residents_on_this_burrow(result.residents, self.env)
         return TreeSnapshot(
-            scheduled=load_scheduled(self.residents_dir, self.skills_dir),
-            residents=tuple(active_residents(result.residents)),
+            scheduled=[
+                ScheduledRoutine(resident=resident, routine=routine)
+                for resident in residents
+                for routine in resident.manifest.routines
+                if routine.enabled
+            ],
+            residents=residents,
             library=library_for(self.residents_dir, self.skills_dir),
         )
 
@@ -734,6 +747,7 @@ class Scheduler:
             guard=guard,
             hooks=hooks,
             clock=self.clock,
+            emitter=self.emitter,
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()

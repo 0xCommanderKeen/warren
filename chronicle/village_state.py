@@ -8,53 +8,20 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-import hashlib
 from collections import defaultdict
 
+from identity import fallback_identity
 from protocol import validate_event
 
 
 SCHEMA_VERSION = 1
-NAMES = (
-    "Bramble",
-    "Poppy",
-    "Wren",
-    "Sorrel",
-    "Fern",
-    "Alder",
-    "Maple",
-    "Rowan",
-    "Thistle",
-    "Clover",
-    "Hazel",
-    "Juniper",
-    "Moss",
-    "Reed",
-    "Tansy",
-    "Willow",
-)
-CHARS = (
-    "Villager",
-    "Villager2",
-    "Villager3",
-    "Villager4",
-    "Villager5",
-    "Woman",
-    "Boy",
-    "OldMan",
-    "Princess",
-    "Hunter",
-    "Noble",
-    "Monk",
-)
-ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
 #: Events filed under a villager that are somebody *else's* action, recorded against the
 #: door they knocked on. They ride along in that villager's history and are never
 #: evidence it is alive, present, or doing anything: they cannot create a villager, keep
 #: one in the village, decide its state, refresh its clock, or age its mood. A stranger
 #: messaging a resident's chat bot at three in the morning must not make the village show
 #: that resident at work.
-AMBIENT_TYPES = frozenset({"chat_message_dropped"})
+AMBIENT_TYPES = frozenset({"chat_message_dropped", "resident_declared", "resident_retired"})
 #: How Steward opens a row on the board. It has two doors and one table: a job posted to
 #: the open board, and a job handed to one named resident. Both write the same open,
 #: unclaimed record in Steward's own store, so both open a row here — the delegated one
@@ -108,17 +75,6 @@ def _instant(value):
 
 def _wire_time(value):
     return _instant(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _identity(agent_id):
-    number = int.from_bytes(
-        hashlib.sha256(agent_id.encode("utf-8")).digest()[:8], "big"
-    )
-    return (
-        NAMES[number % len(NAMES)],
-        CHARS[number % len(CHARS)],
-        ACCENTS[number % len(ACCENTS)],
-    )
 
 
 def ambient_share(ordinary, ambient, capacity, floor):
@@ -486,8 +442,21 @@ def project_village(
         valid.append((ordinal, event))
 
     by_agent = defaultdict(list)
+    declaration_by_agent = {}
+    retired_agents = set()
     for ordinal, event in valid:
         by_agent[event["agent_id"]].append((ordinal, event))
+        if event["type"] == "resident_declared":
+            declaration_by_agent[event["agent_id"]] = event
+            retired_agents.discard(event["agent_id"])
+        elif event["type"] == "resident_retired":
+            declared = declaration_by_agent.get(event["agent_id"])
+            if declared is not None and all(
+                event["payload"][field] == declared["payload"][field]
+                for field in ("resident_id", "uid")
+            ):
+                declaration_by_agent.pop(event["agent_id"], None)
+                retired_agents.add(event["agent_id"])
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
@@ -670,10 +639,17 @@ def project_village(
         # clock, what it did other than beat decides the line shown, and everything but
         # the beats — a knock at its door included — is the history worth keeping.
         evidence = [item for item in history if item[1]["type"] not in AMBIENT_TYPES]
-        if not evidence:
+        declaration = declaration_by_agent.get(agent_id)
+        if not evidence and declaration is None:
             continue
-        last = evidence[-1][1]
-        visible_history = [item for item in history if item[1]["type"] != "heartbeat"]
+        if agent_id in retired_agents:
+            continue
+        last = evidence[-1][1] if evidence else declaration
+        visible_history = [
+            item
+            for item in history
+            if item[1]["type"] not in {"heartbeat", "resident_declared", "resident_retired"}
+        ]
         acted = [item for item in evidence if item[1]["type"] != "heartbeat"]
         visible_last = acted[-1][1] if acted else last
         age = (now - _instant(last["ts"])).total_seconds()
@@ -688,14 +664,21 @@ def project_village(
         )
         if manifest is None and not has_parent_lineage:
             manifest = projects.get(last["project"])
-        generated_name, generated_char, generated_accent = _identity(agent_id)
+        generated_name, generated_char, generated_accent = fallback_identity(agent_id)
+        if declaration is not None:
+            declared = declaration["payload"]
+            manifest = {
+                "home": declared["home"],
+                "file": None,
+                "meta": {key: declared[key] for key in ("name", "char", "accent", "role", "summary")},
+            }
         meta = (manifest or {}).get("meta") or (manifest or {}).get("soul") or {}
         state = (
             "knocking"
             if pending or last["type"] == "needs_human"
             else (
                 "resting"
-                if last["type"] in {"idle", "routine_finished", "needs_human_resolved"}
+                if last["type"] in {"idle", "routine_finished", "needs_human_resolved", "resident_declared"}
                 else "failed"
                 if last["type"] in {"tool_failed", "routine_failed", "task_failed"}
                 else "stale"
@@ -715,7 +698,7 @@ def project_village(
                 lambda item: item[1]["type"] in AMBIENT_TYPES,
             )
         ]
-        mood = _mood(agent_id, evidence, approvals)
+        mood = _mood(agent_id, evidence or history, approvals)
         resident = manifest is not None
         villagers.append(
             {

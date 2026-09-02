@@ -1,0 +1,42 @@
+version: 0
+uid: 6770e0e3-a015-4b3d-b193-966e924b19b1
+id: project-agent
+home: 2
+project: chronicle
+summary: A project-scoped resident used only by tests.
+soul:
+  name: Project Agent
+  char: Hunter
+  accent: "#4f7d5b"
+  role: test project worker
+  file: soul.md
+charter:
+  mission: Exercise project-scoped resident behavior without shipping a resident.
+  duties:
+    - Exercise the project-scoped manifest path.
+  rules:
+    - Never touch production state.
+  escalation: Raise needs_human before anything irreversible.
+skills: []
+memory:
+  kind: directory
+  path: ~/.steward/memory/project-agent
+  journal: journal
+  journal_keep: 30
+routes:
+  - id: interactive
+    kind: cli
+    address: claude-code:interactive
+    status: active
+app_grants: []
+tools: unrestricted
+runner:
+  kind: claude
+  model: claude-opus-5
+budgets:
+  daily_cost_usd: 5.0
+delegation:
+  send: true
+  to:
+    - life-agent
+routines: []

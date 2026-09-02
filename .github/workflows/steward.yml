@@ -154,6 +154,8 @@ jobs:
           docker run --rm --network village-net \
             -e CHRONICLE_URL=http://village:8737 \
             -e BURROW_URL=http://village:8737 \
+            -e SMOKE_AGENT_ID=steward:pip \
+            -e CHRONICLE_PROJECT=pip \
             steward-resident:latest steward-smoke
 
       # The other entrypoint path: a resident that already has a settings.json keeps it, and

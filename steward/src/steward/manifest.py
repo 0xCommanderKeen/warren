@@ -116,6 +116,8 @@ NO_MANIFESTS_PROBLEM = "no resident manifests found"
 
 DEFAULT_SOUL_FILENAME = "soul.md"
 SCHEMA_VERSION = 0
+VILLAGE_HOME_MIN = 0
+VILLAGE_HOME_MAX = 7
 VOICE_MAX_CHARS = 1200
 VOICE_HEADING = "## Voice"
 
@@ -1399,6 +1401,11 @@ class ResidentManifest(_Model):
     version: Literal[0] = Field(default=SCHEMA_VERSION, description="Manifest schema version.")
     uid: UUID4 = Field(description="Durable random identity, minted once and never renamed.")
     id: str = Field(pattern=SLUG_PATTERN, description="Directory name under residents/.")
+    home: int = Field(
+        ge=VILLAGE_HOME_MIN,
+        le=VILLAGE_HOME_MAX,
+        description="Stable Chronicle village plot, from 0 through 7.",
+    )
     agent_id: str | None = Field(
         default=None,
         pattern=AGENT_ID_PATTERN,
@@ -1762,7 +1769,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "delegation": "delegation: {send: true, to: [life-agent]}",
     "delegation.send": "send: true  (omit the block entirely to never delegate)",
     "delegation.to": "to: [life-agent]  (resident ids; omit it to allow any receiver)",
-    "delegation.note": "note: Maren hands household errands to Hob.",
+    "delegation.note": "note: Project work may be handed to a household agent.",
     "board": "board: {claim: true, max_claims_per_wake: 1, lease_s: 1800, timeout_s: 900}",
     "board.claim": "claim: true  (omit the block entirely to never claim)",
     "board.max_claims_per_wake": "max_claims_per_wake: 1",
@@ -2558,6 +2565,29 @@ def _check_unique_uids(residents: Sequence[Resident]) -> list[Diagnostic]:
     return diagnostics
 
 
+def _check_unique_homes(residents: Sequence[Resident]) -> list[Diagnostic]:
+    """Reject two residents claiming the same stable village plot."""
+    by_home: dict[int, list[Resident]] = {}
+    for resident in residents:
+        by_home.setdefault(resident.manifest.home, []).append(resident)
+    diagnostics: list[Diagnostic] = []
+    for home, group in by_home.items():
+        if len(group) <= 1:
+            continue
+        ids = sorted(resident.id for resident in group)
+        for resident in group:
+            others = [resident_id for resident_id in ids if resident_id != resident.id]
+            diagnostics.append(
+                Diagnostic(
+                    file=resident.path,
+                    field_path="home",
+                    problem=f"home {home} also belongs to {others}; a plot has one resident",
+                    example="home: 0",
+                )
+            )
+    return diagnostics
+
+
 def _check_directory_name(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
     directory = source.parent.name
     if directory and manifest.id != directory:
@@ -2795,6 +2825,9 @@ def validate_tree(
 
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_unique_uids(result.residents)))
+    )
+    result = result.merged_with(
+        ValidationResult(diagnostics=tuple(_check_unique_homes(result.residents)))
     )
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_shared_journal_dirs(result.residents)))

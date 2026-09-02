@@ -56,6 +56,7 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 
 import notification_persistence
 import event_log
+from identity import fallback_identity
 import residents as resident_manifests
 import retention
 from state_coordinator import StateCoordinator
@@ -149,6 +150,8 @@ def _legacy_config():
 
 
 VIEWER_EVENT_TYPES = {
+    "resident_declared",
+    "resident_retired",
     "task_started",
     "tool_called",
     "tool_failed",
@@ -202,25 +205,6 @@ def read_residents(villagers_dir=None):
 # accepts a POST works. It happens on a daemon thread and swallows every
 # error: a knock we fail to forward must never slow down or fail the ingest.
 
-NAMES = [
-    "Bramble",
-    "Poppy",
-    "Wren",
-    "Sorrel",
-    "Fern",
-    "Alder",
-    "Maple",
-    "Rowan",
-    "Thistle",
-    "Clover",
-    "Hazel",
-    "Juniper",
-    "Moss",
-    "Reed",
-    "Tansy",
-    "Willow",
-]
-
 _transport_lock = threading.Lock()
 _transport_counters = {
     "ingest_duplicates": 0,
@@ -245,23 +229,11 @@ _notification_store = notification_persistence.NotificationPersistence(
 _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
-def js_hash(s):
-    """Return the stable signed 32-bit identity hash over UTF-16 code units."""
-    h = 0
-    encoded = s.encode("utf-16-be", errors="surrogatepass")
-    for index in range(0, len(encoded), 2):
-        code_unit = int.from_bytes(encoded[index : index + 2], "big")
-        h = (h * 31 + code_unit) & 0xFFFFFFFF
-    if h >= 0x80000000:
-        h -= 0x100000000
-    return abs(h)
-
-
 def villager_names(events, villagers_dir=None):
     """Resolve stable names for a fleet.
 
-    Souls and fallback names are unique within the fleet, so resolving an event in
-    isolation can disagree with the name on screen.
+    Resident manifests and legacy project souls are assigned once within the fleet;
+    fallback names come from the projection's shared identity algorithm.
     """
     latest = {}
     parent_by_agent = {}
@@ -295,16 +267,32 @@ def villager_names(events, villagers_dir=None):
         if meta.get("project"):
             index_soul(soul_by_project, meta["project"], soul)
 
+    # Steward declarations are the primary identity source. A retirement removes the
+    # declaration; a later launch may declare the resident again after an explicit revival.
+    declared = {}
+    for event in events:
+        if not isinstance(event, dict) or not event.get("agent_id"):
+            continue
+        if event.get("type") == "resident_declared":
+            declared[str(event["agent_id"])] = {"meta": dict(event.get("payload") or {})}
+        elif event.get("type") == "resident_retired":
+            active = declared.get(str(event["agent_id"]))
+            payload = event.get("payload") or {}
+            meta = (active or {}).get("meta") or {}
+            if active is not None and all(
+                payload.get(field) == meta.get(field) for field in ("resident_id", "uid")
+            ):
+                declared.pop(str(event["agent_id"]), None)
+
     names = {}
     used_souls = set()
-    taken_names = set()
     assigned = {}
     # Exact identities are reserved first, independently of lexical event order.
     for agent_id in sorted(latest):
         if latest[agent_id].get("type") == "session_ended":
             continue
-        soul = soul_by_agent.get(agent_id)
-        soul_key = soul and soul.get("file")
+        soul = declared.get(agent_id) or soul_by_agent.get(agent_id)
+        soul_key = soul and (soul.get("file") or f"declared:{agent_id}")
         if soul and soul_key not in used_souls:
             assigned[agent_id] = soul
             used_souls.add(soul_key)
@@ -326,18 +314,9 @@ def villager_names(events, villagers_dir=None):
         project = str(event.get("project") or "unknown")
         soul = assigned.get(agent_id)
 
-        h = js_hash(agent_id)
-        offset = 0
-        while (
-            taken_names
-            and NAMES[(h + offset) % len(NAMES)] in taken_names
-            and offset < len(NAMES)
-        ):
-            offset += 1
-        name = NAMES[(h + offset) % len(NAMES)]
+        name = fallback_identity(agent_id).name
         if soul and (soul.get("meta") or {}).get("name"):
             name = soul["meta"]["name"]
-        taken_names.add(name)
         names[agent_id] = name
     return names
 
@@ -384,7 +363,7 @@ def villager_name(event, runtime):
     agent_id = str(event.get("agent_id") or "")
     return villager_names(
         _fleet_events(event, runtime), runtime.config.villagers_dir
-    ).get(agent_id, NAMES[js_hash(agent_id) % len(NAMES)])
+    ).get(agent_id, fallback_identity(agent_id).name)
 
 
 def receiver_delivery_id(event):
