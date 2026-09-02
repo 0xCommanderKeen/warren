@@ -2653,8 +2653,8 @@ def _report_retire(report: RetireReport) -> None:
         click.secho("nothing was stopped, marked, or committed", fg="bright_black")
         return
     click.secho(
-        "no event was emitted on its behalf: a retired resident leaves the village by "
-        "going quiet, which is the only honest way to leave it",
+        "resident_retired was emitted under the resident's identity, so Chronicle can remove "
+        "it and free its plot without a forged session_ended",
         fg="bright_black",
     )
     click.secho(f"{report.resident_id} is retired", fg="green")
@@ -2692,9 +2692,8 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
 
     Retirement is a lifecycle state, not a deletion. The manifest and the soul stay in
     this repo and in its history, `steward validate` still reads them, and the resident
-    simply stops: no routines, no board claims, no letters, no run-now. It drops out of
-    the village the honest way — it stops emitting — and steward forges nothing on its
-    behalf on the way out.
+    simply stops: no routines, no board claims, no letters, no run-now. Steward emits the
+    resident_retired lifecycle fact so Chronicle drops its identity and frees its plot.
 
     `--no-deploy` marks and commits the manifest but reaches no host — the counterpart to
     `new-resident`'s `--no-deploy`, for a resident whose host is already gone or was never

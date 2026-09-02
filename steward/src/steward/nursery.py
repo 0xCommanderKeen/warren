@@ -74,6 +74,7 @@ from uuid import uuid4
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from steward import events as ev
 from steward.deploy import (
     BUNDLE_NAMES,
     CHRONICLE_URL_ENV,
@@ -95,6 +96,8 @@ from steward.deploy import (
 from steward.manifest import (
     DEFAULT_JOURNAL_DIR,
     MANIFEST_FILENAME,
+    VILLAGE_HOME_MAX,
+    VILLAGE_HOME_MIN,
     AppGrant,
     Charter,
     Diagnostic,
@@ -113,6 +116,7 @@ from steward.manifest import (
     closest_match,
     load_manifest,
     validate_manifest,
+    validate_path,
 )
 from steward.runners import CommandOutcome, PipedRun, run_argv
 from steward.scheduler import (
@@ -280,12 +284,26 @@ def _soul_document(spec: NewResident, agent_id: str | None) -> str:
     return f"---\n{header}\n---\n{body}\n\n## Voice\n\n{voice}\n"
 
 
-def _manifest_model(spec: NewResident) -> ResidentManifest:
+def _next_home(residents_dir: Path) -> int:
+    """Return the lowest plot not claimed by a valid resident declaration."""
+    used = {resident.manifest.home for resident in validate_path(residents_dir).residents}
+    try:
+        return next(
+            home for home in range(VILLAGE_HOME_MIN, VILLAGE_HOME_MAX + 1) if home not in used
+        )
+    except StopIteration as exc:
+        raise NurseryError(
+            "cannot declare a resident: all village homes 0 through 7 are claimed"
+        ) from exc
+
+
+def _manifest_model(spec: NewResident, *, home: int) -> ResidentManifest:
     """Bind the request into a manifest model, so an invalid one never reaches disk."""
     try:
         return ResidentManifest(
             uid=uuid4(),
             id=spec.id,
+            home=home,
             agent_id=spec.resolved_agent_id(),
             project=spec.project,
             summary=spec.summary,
@@ -318,7 +336,7 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
     if directory.exists():
         raise NurseryError(f"resident {spec.id!r} already exists at {directory}")
 
-    manifest = _manifest_model(spec)
+    manifest = _manifest_model(spec, home=_next_home(root))
     payload = manifest.model_dump(mode="json", exclude_none=True)
     # An ordinary resident declares no `deploy` block at all — docs/manifest.md says so, and
     # the dxp2800 defaults (image, `command: [sleep, infinity]`) fill it in. The bare model
@@ -784,7 +802,7 @@ def _pending_resident(spec: NewResident, residents_dir: Path) -> Resident:
     yet, and rendering it from anything other than the real manifest model would make the
     plan a drawing of the plan.
     """
-    manifest = _manifest_model(spec)
+    manifest = _manifest_model(spec, home=_next_home(residents_dir))
     directory = residents_dir / spec.id
     return Resident(
         path=directory / MANIFEST_FILENAME,
@@ -965,10 +983,9 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
     """
     directory = residents_dir / spec.id
     manifest_path = directory / MANIFEST_FILENAME
-    wanted = _manifest_model(spec)
-
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
+        wanted = _manifest_model(spec, home=existing.manifest.home)
         _refuse_retired_resident(existing)
         differences = _spec_differences(wanted, existing.manifest)
         if differences:
@@ -1395,6 +1412,7 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     deploy: bool = True,
     allow_dirty: bool = False,
     dry_run: bool = False,
+    emitter: ev.Emitter | None = None,
     git: PipedRun = run_argv,
 ) -> RetireReport:
     """Retire a resident: mark it retired in git, then stop and remove its container.
@@ -1410,10 +1428,9 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     was never steward's to stop). The container, if there is one, is left exactly as it is;
     the resident stops taking work the moment the mark is committed either way.
 
-    Nothing is emitted. A retired resident leaves the village the honest way: it stops
-    emitting, and burrow's existing projection rules do the rest. Forging a
-    ``session_ended`` on its behalf would be steward putting words in a dead resident's
-    mouth, which is precisely the thing the village exists not to do.
+    Once the durable mark and requested host cleanup succeed, Steward emits
+    ``resident_retired`` under the resident's own event identity. Chronicle can then drop
+    its folded declaration and free the plot immediately; no ``session_ended`` is forged.
     """
     root = Path(residents_dir)
     checkout = Path(repo) if repo is not None else root.parent
@@ -1467,6 +1484,10 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
         if commit
         else None
     )
+
+    # The durable declaration is authoritative before host reconciliation. If the host is
+    # unreachable, the resident is still retired and Chronicle must free its plot now.
+    (emitter or ev.EventEmitter.from_env()).emit(ev.resident_retired_event(resident=resident))
 
     scrubbed = False
     if deploy:

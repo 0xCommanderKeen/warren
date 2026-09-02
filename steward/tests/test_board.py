@@ -107,7 +107,7 @@ def make_dispatcher(
 
 
 def types(sink: ev.NullEmitter) -> list[str]:
-    return [event.type for event in sink.events]
+    return [event.type for event in sink.events if event.type != ev.RESIDENT_DECLARED]
 
 
 # ------------------------------------------------------------------------ opting in
@@ -145,7 +145,7 @@ def test_a_board_enabled_resident_claims_and_finishes_without_a_human(
     assert report.task.task_id == posted.task_id
     assert store.jobs("done")[0].outcome == "ok"
     assert types(sink) == ["task_claimed", "task_done"]
-    claimed, done = sink.events
+    claimed, _, done = sink.events
     assert ev.validate_event(claimed.to_dict()) == ()
     assert claimed.agent_id == "claude-code:test-agent", "burrow walks the claimant"
     assert claimed.payload == {
@@ -168,7 +168,7 @@ def test_a_failed_run_marks_the_task_failed_with_a_reason(
     assert failed.reason is not None
     assert "it broke" in failed.reason
     assert types(sink) == ["task_claimed", "task_failed"]
-    assert "it broke" in sink.events[1].payload["reason"]
+    assert "it broke" in sink.events[-1].payload["reason"]
 
 
 def test_a_runner_that_cannot_be_built_is_a_failed_task_not_a_crash(

@@ -295,6 +295,23 @@ def villager_names(events, villagers_dir=None):
         if meta.get("project"):
             index_soul(soul_by_project, meta["project"], soul)
 
+    # Steward declarations are the primary identity source. A retirement removes the
+    # declaration; a later launch may declare the resident again after an explicit revival.
+    declared = {}
+    for event in events:
+        if not isinstance(event, dict) or not event.get("agent_id"):
+            continue
+        if event.get("type") == "resident_declared":
+            declared[str(event["agent_id"])] = {"meta": dict(event.get("payload") or {})}
+        elif event.get("type") == "resident_retired":
+            active = declared.get(str(event["agent_id"]))
+            payload = event.get("payload") or {}
+            meta = (active or {}).get("meta") or {}
+            if active is not None and all(
+                payload.get(field) == meta.get(field) for field in ("resident_id", "uid")
+            ):
+                declared.pop(str(event["agent_id"]), None)
+
     names = {}
     used_souls = set()
     taken_names = set()
@@ -303,8 +320,8 @@ def villager_names(events, villagers_dir=None):
     for agent_id in sorted(latest):
         if latest[agent_id].get("type") == "session_ended":
             continue
-        soul = soul_by_agent.get(agent_id)
-        soul_key = soul and soul.get("file")
+        soul = declared.get(agent_id) or soul_by_agent.get(agent_id)
+        soul_key = soul and (soul.get("file") or f"declared:{agent_id}")
         if soul and soul_key not in used_souls:
             assigned[agent_id] = soul
             used_souls.add(soul_key)

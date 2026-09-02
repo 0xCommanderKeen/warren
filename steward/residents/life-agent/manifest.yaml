@@ -1,6 +1,7 @@
 version: 0
 uid: e4af805e-cfa0-49e1-9782-93f7ae051102
 id: life-agent
+home: 1
 agent_id: claude-code:life-agent
 summary: The household spirit — daily summaries, inbox and calendar, errands.
 

@@ -1102,6 +1102,7 @@ class ChatBridge:
             hooks=self.hooks,
             residents=[route.resident for route in self.routes],
             clock=self.clock,
+            emitter=self.emitter,
         )
         self.run_transitions = RunTransitions(self.store)
 

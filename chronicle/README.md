@@ -415,11 +415,13 @@ exercised without a real agent running anywhere.
 
 ## Residents and visitors
 
-Residents get persistent identity and a reserved home from versioned **resident
-manifests** under [`villagers/`](villagers). Every other projected identity is a
-Visitor based at the shared lodge. Editing a resident is: edit the JSON file → run
-the tests → commit → deploy. Point `CHRONICLE_VILLAGERS` at another directory to
-override it (handy for a local scratch village).
+Steward residents get persistent identity and a reserved home from Steward's
+`resident_declared` events. Steward re-emits the display-safe declaration at every launch;
+Chronicle keeps the latest one, and `resident_retired` removes it and frees the plot.
+
+Versioned manifests under [`villagers/`](villagers) remain for identities Steward does not
+own (a laptop or one-off tool) and as a legacy fallback. They are not a second copy of a
+Steward resident. Point `CHRONICLE_VILLAGERS` at another directory to override that fallback.
 
 The [resident-manifest v1 guide](docs/resident-manifest.md) documents the validated
 schema for identity, soul, skills, durable memory, routes, app grants, and the stable

@@ -219,6 +219,18 @@ class ProtocolContractTest(unittest.TestCase):
             validate_event(event), "resident lifecycle events require source steward"
         )
 
+    def test_resident_identity_is_strict_and_steward_authoritative(self):
+        declared = {
+            "v": 0, "ts": "2026-08-25T10:05:00.000Z", "source": "steward",
+            "agent_id": "steward:pip", "project": "pip", "type": "resident_declared",
+            "payload": {"name": "Pip", "char": "Monk", "accent": "#123456",
+                        "role": "helper", "summary": None, "resident_id": "pip",
+                        "uid": "0198-uid", "home": 0},
+        }
+        self.assertIsNone(validate_event(declared))
+        declared["source"] = "claude-code"
+        self.assertEqual(validate_event(declared), "resident lifecycle events require source steward")
+
 
 if __name__ == "__main__":
     unittest.main()
