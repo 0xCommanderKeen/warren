@@ -404,6 +404,34 @@ const approvalStubs = (pending = [PENDING], resolved = []) => ({
 });
 
 describe("deciding an approval", () => {
+  it("sends only the first decision while steward is still answering (#294)", async () => {
+    let answer;
+    const delayed = new Promise((resolve) => { answer = resolve; });
+    const fetch = router({
+      ...approvalStubs(),
+      "POST /approvals/ap-1": () => delayed,
+    });
+    mount(<ApprovalsPage />, { fetch });
+
+    const approve = await screen.findByRole("button", { name: /approve/i });
+    const deny = screen.getByRole("button", { name: /^deny$/i });
+    const edit = screen.getByRole("button", { name: /edit/i });
+    fireEvent.click(approve);
+    fireEvent.click(deny);
+    fireEvent.click(edit);
+
+    expect(approve.disabled).toBe(true);
+    expect(deny.disabled).toBe(true);
+    expect(edit.disabled).toBe(true);
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+
+    answer(json(202, {
+      request_id: "req-294",
+      status: "recorded_announcement_pending",
+      message: "recorded; announcement pending",
+    }));
+  });
+
   it("offers only the decisions the request itself offered", async () => {
     mount(<ApprovalsPage />, {
       fetch: router(approvalStubs([{ ...PENDING, options: ["approve"] }])),
@@ -458,6 +486,8 @@ describe("deciding an approval", () => {
     await vi.waitFor(() => expect(screen.getByRole("button", { name: /approve/i })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /approve/i }));
     await vi.waitFor(() => expect(screen.getByText("accepted")).toBeTruthy());
+    expect(screen.getByRole("button", { name: /approve/i }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /^deny$/i }).disabled).toBe(true);
     await vi.advanceTimersByTimeAsync(3000);
     expect(screen.queryByText("confirmed")).toBeNull();
 
@@ -481,18 +511,58 @@ describe("deciding an approval", () => {
     expect(await screen.findByText("Miha")).toBeTruthy();
   });
 
-  it("renders steward's refusal rather than pretending the click worked", async () => {
+  it.each([
+    [404, { detail: { error: "unknown_approval", message: "no such approval" } }],
+    [422, { detail: { error: "invalid_body", message: "choose a decision" } }],
+    [409, { detail: { error: "approval_expired", message: "it expired and denies by default" } }],
+  ])("reopens after a trusted definite %s refusal", async (status, body) => {
     mount(<ApprovalsPage />, {
       fetch: router({
         ...approvalStubs(),
-        "POST /approvals/ap-1": json(409, {
-          detail: { error: "approval_expired", message: "it expired and denies by default" },
+        "POST /approvals/ap-1": json(status, body),
+      }),
+    });
+
+    const approve = await screen.findByRole("button", { name: /approve/i });
+    fireEvent.click(approve);
+    expect(await screen.findByText(new RegExp(`${status} ·`))).toBeTruthy();
+    expect(approve.disabled).toBe(false);
+    expect(screen.getByRole("button", { name: /^deny$/i }).disabled).toBe(false);
+  });
+
+  it("returns to the credential retry path after a definite 401 refusal", async () => {
+    mount(<ApprovalsPage />, {
+      fetch: router({
+        ...approvalStubs(),
+        "POST /approvals/ap-1": json(401, {
+          detail: { error: "unauthorized", message: "use another credential" },
         }),
       }),
     });
 
     fireEvent.click(await screen.findByRole("button", { name: /approve/i }));
-    expect(await screen.findByText(/409 · approval_expired/)).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: /unlock the write path/i })).toBeTruthy();
+  });
+
+  it.each([
+    [408, { detail: { error: "request_timeout", message: "the proxy timed out" } }],
+    [409, { detail: { error: "approval_expired", message: "generated", proxy: true } }],
+    [409, { detail: { error: "approval_decision_not_offered", message: "not offered" } }],
+  ])("stays locked after an ambiguous %s response", async (status, body) => {
+    const fetch = router({
+      ...approvalStubs(),
+      "POST /approvals/ap-1": json(status, body),
+    });
+    mount(<ApprovalsPage />, { fetch });
+
+    const approve = await screen.findByRole("button", { name: /approve/i });
+    const deny = screen.getByRole("button", { name: /^deny$/i });
+    fireEvent.click(approve);
+    expect(await screen.findByText(new RegExp(`${status} ·`))).toBeTruthy();
+    expect(approve.disabled).toBe(true);
+    expect(deny.disabled).toBe(true);
+    fireEvent.click(deny);
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 });
 

@@ -25,6 +25,25 @@ export class StewardError extends Error {
   }
 }
 
+const DEFINITE_APPROVAL_STATUSES = new Set([401, 404, 422]);
+const LOCAL_APPROVAL_REFUSALS = new Set(["credential_required", "cross_origin_base"]);
+
+/** Whether an approval decision is known not to have reached Steward's transition. */
+export function isDefiniteApprovalRefusal(error) {
+  if (LOCAL_APPROVAL_REFUSALS.has(error?.code) && error?.status === null) return true;
+  if (DEFINITE_APPROVAL_STATUSES.has(error?.status)) return true;
+  if (error?.status !== 409) return false;
+
+  const envelope = error.raw;
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return false;
+  if (Object.keys(envelope).length !== 1 || !("detail" in envelope)) return false;
+  const detail = envelope.detail;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return false;
+  return Object.keys(detail).length === 2
+    && detail.error === "approval_expired"
+    && typeof detail.message === "string";
+}
+
 /**
  * Structured validation diagnostics, normalised.
  *
