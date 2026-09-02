@@ -50,9 +50,24 @@ Two transports; the event shape is the contract, not the pipe:
   The server's delivery-ID acceleration ledger is independently capped at 1,024
   records/5 MiB and uses one same-size atomic replacement (10 MiB physical
   crash-copy ceiling at defaults). Eviction does not weaken replay deduplication:
-  the retained live log and archives remain canonical and are scanned on a ledger
-  miss. Exactly-once ingest therefore applies only while that event/archive
-  authority is retained, not globally forever.
+  a ledger miss consults a local SQLite delivery-ID index. The index reconciles an
+  unindexed live suffix, notices the collision-safe archive publication generation,
+  and is discarded and rebuilt
+  after missing, incompatible, or corrupt state. It is acceleration only; retained
+  live and archive JSONL remain canonical and can reproduce it completely. Normal
+  unique ingest performs an indexed membership lookup rather than parsing retained
+  rows. Exactly-once ingest therefore applies only while that event/archive authority
+  is retained, not globally forever.
+  This is the history-query trigger anticipated by the flat-file decision in warren#223,
+  not a replacement authority: warren#290 requires exact retained-history membership at
+  bounded lookup cost. Index storage is proportional to distinct IDs in retained JSONL;
+  archive retention therefore governs both the dedupe window and its derived storage.
+  Rebuild streams bounded batches and vacuums removed generations. Chronicle publishes a
+  fresh atomic `events.jsonl.archives-generation` token after rotation; any other archive
+  editor must publish one after its canonical mutation so in-place edits and rapid
+  replacements cannot alias through filesystem timestamps. Chronicle additionally hashes
+  the archive set once on process startup to catch unpublished changes made while stopped;
+  clean subsequent membership reads neither enumerate archives nor write metadata.
 - **Mirrors**: the same event is POSTed to every `CHRONICLE_MIRROR` target as well
   (default `http://127.0.0.1:8737`, i.e. a local dev server). A mirror never
   acknowledges or drains a primary's outbox. Mirrors carry

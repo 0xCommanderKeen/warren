@@ -195,7 +195,7 @@ deploy is pushed from a machine that has the repo checked out.
   with `CHRONICLE_HOST=0.0.0.0`,
   `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_TOKEN=<shared secret>`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
@@ -354,9 +354,29 @@ identity, stable append order and an explicit conservative overflow state; it is
 every ordinary projection and cannot create presence. Exact future invalidation over
 unrestricted request IDs is impossible in fixed space, so overflow resolves to an uncertain
 mood instead of a guess. The delivery-ID acceleration ledger is separately bounded to 1,024
-records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults); retained
-live/archive events remain the dedupe authority after ledger eviction. This is exactly-once
-replay within retained event authority, not a global-forever guarantee.
+records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults). On a ledger
+miss, a local SQLite side index provides exact membership without reparsing retained
+history. It is derived state, stored beside the live log as
+`events.jsonl.delivery-index.sqlite3`: deleting or corrupting it causes a rebuild or
+reconciliation from the retained live log and plain-JSONL archives. Those JSONL files
+remain the sole dedupe authority. This is exactly-once replay within retained event
+authority, not a global-forever guarantee.
+
+This use reconciles the parked storage decision in warren#223: warren#290 made exact
+retained-history membership an ingestion feature with a bounded-cost requirement, which
+is the decision's trigger for a local, stdlib SQLite index. It does not move event history
+into a database or add a service dependency; ingest safely scans JSONL if derived state is
+unavailable. The index uses space proportional to the distinct delivery IDs in the live
+log plus every retained archive. Removing archives removes their authority only after the
+archive change is published; Chronicle rotation publishes an atomic, opaque generation in
+`events.jsonl.archives-generation`, and operators that edit, replace, or remove archives
+must publish a new generation with `DeliveryIdIndex.publish_archives()` after fsyncing the
+canonical files. The next lookup streams JSONL in bounded batches, rebuilds the exact set,
+and vacuums the database so removed archive generations release storage. The generation
+token avoids timestamp collisions while allowing clean membership reads to remain
+read-only and avoid enumerating archives. A process also content-hashes the archive set
+once at startup, so an unpublished change made while Chronicle was stopped still repairs
+on restart; publication is required for reconciliation during a running process.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 

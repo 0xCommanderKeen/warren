@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import retention
+from delivery_id_index import DeliveryIdIndex
 from hooks import durable
 
 
@@ -117,6 +118,7 @@ class EventLog:
         self.config = config
         self.path = Path(config.events)
         self.delivery_store = delivery_store
+        self.delivery_index = DeliveryIdIndex(self.path, self.archive_dir())
         self.on_duplicate = on_duplicate
         self.lock = threading.Lock()
         self._rotate_floor = 0
@@ -172,6 +174,7 @@ class EventLog:
                 archived.flush()
                 os.fsync(archived.fileno())
             durable.fsync_parent(archive)
+            self.delivery_index.publish_archives()
             live.seek(0)
             live.write(data)
             live.truncate()
@@ -215,7 +218,13 @@ class EventLog:
                 if delivery_id and delivery_id in remembered:
                     self.on_duplicate()
                     return False
-                if delivery_id and self.has_delivery_id(delivery_id):
+                indexed = (
+                    self.delivery_index.contains(delivery_id) if delivery_id else False
+                )
+                if delivery_id and (
+                    indexed is True
+                    or (indexed is None and self.has_delivery_id(delivery_id))
+                ):
                     try:
                         self.delivery_store.remember("delivery-ids", delivery_id)
                     except OSError:
@@ -228,6 +237,7 @@ class EventLog:
                     os.fsync(stream.fileno())
                 durable.fsync_parent(str(path))
                 if delivery_id:
+                    self.delivery_index.remember(delivery_id)
                     self.delivery_store.remember("delivery-ids", delivery_id)
                 self._maybe_rotate_locked()
                 return True
