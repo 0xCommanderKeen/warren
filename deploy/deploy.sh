@@ -251,7 +251,7 @@ deploy_steward() {
     # arcadia's origin already makes of the same route.
     wait_for "$STEWARD_URL/residents" 401
     log "steward: doctor"
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api steward doctor --residents residents' 2>/dev/null || true
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api steward doctor residents' 2>&1 | head -40 || true
     stamp steward steward
     log "steward: $SHORT is live"
 }
