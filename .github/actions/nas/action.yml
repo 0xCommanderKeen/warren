@@ -62,7 +62,10 @@ runs:
           exit 1
         fi
         echo "on the tailnet as $addr"
-        sudo tailscale ping -c 3 --timeout 10s "$NAS_ADDRESS"
+        # Reachability was already proven by the action's own `ping` input above. A second
+        # `tailscale ping` here is a trap: it exits non-zero when it gives up without a
+        # *direct* path, and a runner in Azure reaching a NAS behind a home router goes via
+        # DERP — which is a perfectly good path, as the first successful run showed.
 
     # Secrets reach the shell through the environment, never through template
     # interpolation into the script text.
