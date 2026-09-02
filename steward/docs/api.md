@@ -14,9 +14,12 @@ $ steward serve --allow-open                       # local dev, no token, said o
 This page is the prose contract. The machine-readable copy of the same routes is
 `docs/openapi.json`, exported offline with `make openapi-write` — steward serves no schema
 of its own, because every route here is a write path and nothing is answered
-unauthenticated, `docs_url` and `openapi_url` included. Townhall's console reads that file
-in-tree and fails its own suite when its hand-written client drifts from it (warren#321);
-`tests/test_openapi_contract.py` fails when the file drifts from the routes.
+unauthenticated, `docs_url` and `openapi_url` included. It says what this page says about
+the credential too: a bearer scheme on every operation and the `401` every route can
+answer, so a client generated from it presents the token rather than meeting a blanket
+refusal. Townhall's console reads that file in-tree and fails its own suite when its
+hand-written client drifts from it (warren#321); `tests/test_openapi_contract.py` fails
+when the file drifts from the routes.
 
 ## The contract: acknowledgement, not effect
 

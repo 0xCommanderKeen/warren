@@ -48,6 +48,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -1385,7 +1386,23 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(_auth_dependency(token, session_principal, operator_principal))],
+        # Two dependencies, and only the second one decides anything. `HTTPBearer` is
+        # declared with `auto_error=False`, so it accepts and refuses nothing at all: it
+        # exists to put `securitySchemes` and a per-operation `security` into the exported
+        # document (warren#321), which is the machine-readable half of docs/api.md and
+        # would otherwise describe a completely unauthenticated API. A client generated
+        # from a document without it sends no Authorization header and gets a blanket 401.
+        dependencies=[
+            Depends(HTTPBearer(auto_error=False)),
+            Depends(_auth_dependency(token, session_principal, operator_principal)),
+        ],
+        # Declared once here rather than on twenty-five routes: every route in this API is
+        # token-gated, so every route answers this.
+        responses={
+            401: {
+                "description": "No credential was presented, or steward refused the one that was."
+            }
+        },
         lifespan=lifespan,
     )
     app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)

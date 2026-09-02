@@ -23,13 +23,16 @@ from pathlib import Path
 import pytest
 
 from conftest import REPO_ROOT
-from steward.openapi import OPENAPI_ARTIFACT, openapi_document, openapi_json
+from steward.openapi import OPENAPI_ARTIFACT, export_app, openapi_document, openapi_json
 
 DOCUMENT_FILE = REPO_ROOT / OPENAPI_ARTIFACT
 
 #: What answers a failure here. Named in the message, because a drift test whose failure
 #: does not say how to fix it just gets the artifact deleted.
 REGENERATE = "make openapi-write"
+
+#: The doors this API keeps shut. A route at any of these is the schema being served.
+SCHEMA_PATHS = frozenset({"/openapi.json", "/docs", "/redoc"})
 
 
 def test_the_committed_document_exists() -> None:
@@ -56,12 +59,19 @@ def test_the_export_is_deterministic() -> None:
 
 
 def test_the_export_does_not_open_the_unauthenticated_door() -> None:
-    """Exporting is offline: it renders the document, it does not start serving one."""
-    document = openapi_document()
+    """Exporting is offline: it renders the document, it does not start serving one.
 
-    assert document["info"]["title"] == "steward"
-    assert "/openapi.json" not in document["paths"]
-    assert "/docs" not in document["paths"]
+    Asserted against the app rather than against the document it produces. FastAPI
+    registers ``/docs`` and ``/openapi.json`` with ``include_in_schema=False``, so they
+    are absent from ``paths`` whether or not they are being served — a test that looked
+    for them there would stay green through exactly the regression it names.
+    """
+    with export_app() as app:
+        assert app.openapi_url is None
+        assert app.docs_url is None
+        assert app.redoc_url is None
+        assert not [route for route in app.routes if getattr(route, "path", "") in SCHEMA_PATHS]
+        assert app.openapi()["info"]["title"] == "steward"
 
 
 def test_the_export_writes_nothing_where_it_is_run(
@@ -154,6 +164,27 @@ def test_the_document_records_that_responses_are_untyped() -> None:
         "townhall/src/steward/contract.test.js to validate its fixtures against it, then "
         f"record the newly typed route here — {sorted(typed)}"
     )
+
+
+def test_the_document_says_what_the_prose_says_about_the_credential() -> None:
+    """Every route is bearer-gated and can answer 401, and the document has to say so.
+
+    Declaring the scheme is all it is: `HTTPBearer(auto_error=False)` refuses nothing, so
+    the request path is unchanged and the gate is still `_auth_dependency` — which is what
+    `tests/test_api.py`'s auth suite goes on proving, unchanged by this. Without it a
+    generated client would send no `Authorization` header and meet a blanket 401 — a
+    machine-readable contract that contradicts `docs/api.md` on its first line.
+    """
+    document = openapi_document()
+
+    assert document["components"]["securitySchemes"] == {
+        "HTTPBearer": {"type": "http", "scheme": "bearer"}
+    }
+    for path, operations in document["paths"].items():
+        for method, operation in operations.items():
+            where = f"{method.upper()} {path}"
+            assert operation.get("security") == [{"HTTPBearer": []}], where
+            assert "401" in operation["responses"], where
 
 
 def test_the_committed_document_is_the_shape_townhall_reads() -> None:

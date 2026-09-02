@@ -520,7 +520,15 @@
           "skills": {
             "description": "Granted capabilities.",
             "items": {
-              "$ref": "#/components/schemas/SkillGrant"
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SkillGrant"
+                },
+                {
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "type": "string"
+                }
+              ]
             },
             "title": "Skills",
             "type": "array"
@@ -915,6 +923,12 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -959,6 +973,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -970,6 +987,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Approvals"
       }
     },
@@ -1001,6 +1023,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1012,6 +1037,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Approval"
       },
       "post": {
@@ -1051,6 +1081,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1062,6 +1095,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Decide Approval"
       }
     },
@@ -1092,6 +1130,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1103,6 +1144,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Delegate"
       }
     },
@@ -1141,6 +1187,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1152,6 +1201,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Jobs"
       },
       "post": {
@@ -1180,6 +1234,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1191,6 +1248,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Post Job"
       }
     },
@@ -1210,8 +1272,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Reload Fleet"
       }
     },
@@ -1244,6 +1314,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1255,6 +1328,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Requests"
       }
     },
@@ -1286,6 +1364,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1297,6 +1378,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Request"
       }
     },
@@ -1316,8 +1402,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Residents"
       },
       "post": {
@@ -1346,6 +1440,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1357,6 +1454,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Create Resident"
       }
     },
@@ -1388,6 +1490,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1399,6 +1504,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Resident"
       }
     },
@@ -1430,6 +1540,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1441,6 +1554,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Resident Budget"
       }
     },
@@ -1472,6 +1590,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1483,6 +1604,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Declaration"
       },
       "put": {
@@ -1522,6 +1648,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1533,6 +1662,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Put Declaration"
       }
     },
@@ -1580,6 +1714,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1591,6 +1728,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Inbox"
       }
     },
@@ -1632,6 +1774,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1643,6 +1788,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Resident Journal"
       }
     },
@@ -1691,6 +1841,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1702,6 +1855,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Provision Declared Resident"
       }
     },
@@ -1742,6 +1900,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1753,6 +1914,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Run Routine"
       }
     },
@@ -1772,8 +1938,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Routines"
       }
     },
@@ -1793,8 +1967,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "List Skills"
       },
       "post": {
@@ -1823,6 +2005,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1834,6 +2019,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Create Skill"
       }
     },
@@ -1865,6 +2055,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1876,6 +2069,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Skill"
       },
       "put": {
@@ -1915,6 +2113,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1926,6 +2127,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Update Skill"
       }
     },
@@ -1957,6 +2163,9 @@
             },
             "description": "Successful Response"
           },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -1968,6 +2177,11 @@
             "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Lineage"
       }
     }

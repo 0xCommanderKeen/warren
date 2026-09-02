@@ -23,7 +23,7 @@
  * says to come back here and validate these fixtures against the shape that just appeared.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import Ajv2020 from "ajv/dist/2020.js";
 import { describe, expect, it, vi } from "vitest";
 import { createStewardClient } from "./client.js";
@@ -35,6 +35,7 @@ import { complaints, declarationBody } from "../pages/ResidentNew.jsx";
 // into an asset URL — `http://localhost/@fs/…` for a path outside this project — and
 // `readFileSync` cannot open that. `architecture.test.js` reads Steward's api.py the same way.
 const ARTIFACT = "../../../steward/docs/openapi.json";
+const CONSOLE_TREE = "../";
 const openapi = JSON.parse(readFileSync(new URL(ARTIFACT, import.meta.url), "utf8"));
 
 const held = () => {
@@ -65,7 +66,9 @@ const PLACEHOLDERS = ["first-id", "second-id"];
 async function requestsTheClientMakes() {
   const seen = [];
   const fetch = vi.fn(async (url, init) => {
-    seen.push({ method: init.method, path: String(url).split("?")[0] });
+    const [path, search] = String(url).split("?");
+    const query = search ? [...new URLSearchParams(search).keys()] : [];
+    seen.push({ method: init.method, path, query });
     return { status: 200, ok: true, text: async () => "{}" };
   });
   const client = createStewardClient({ credential: held(), fetch });
@@ -105,6 +108,18 @@ const operations = () =>
  * showing it. Each of these is a door another client uses — a resident, the CLI, or a
  * human with curl — not one the write surface is missing.
  */
+/**
+ * Query parameters a *page* adds, on top of what `client.js` sends on its own.
+ *
+ * `client.js` takes an options bag through to `fetch`, so a page can filter a read the
+ * client itself knows nothing about. Those are listed here rather than derived, and the
+ * count is checked against the tree below so the list cannot quietly go short.
+ */
+const PAGE_QUERIES = [
+  // ResidentDetail asks for the last eight journal entries, not the whole file.
+  ["GET", "/residents/{resident_id}/journal", ["limit"]],
+];
+
 const UNCALLED = [
   // The approvals page reads the whole list and decides from it; one approval on its own
   // is what a resident polling its own request asks for.
@@ -133,6 +148,48 @@ describe("the client speaks the routes Steward declares", () => {
         Object.keys(openapi.paths[template]),
         `${template} carries no ${method}`,
       ).toContain(method.toLowerCase());
+    }
+  });
+
+  it("has a page-query list that has not gone short", () => {
+    // PAGE_QUERIES is hand-kept, so it is worth nothing unless something notices a page
+    // growing a filter that nobody added to it. Every `query: {` in the console tree is one
+    // entry here; `client.js` is excluded because it is the module that defines the option.
+    // Through a variable, for the same Vite reason `ARTIFACT` is read that way.
+    const sources = readdirSync(new URL(CONSOLE_TREE, import.meta.url), {
+      recursive: true, withFileTypes: true,
+    })
+      .filter((entry) => entry.isFile() && /\.jsx?$/.test(entry.name))
+      .map((entry) => `${entry.parentPath}/${entry.name}`)
+      .filter((path) => !/steward\/(client|contract\.test)\.js$/.test(path));
+
+    const found = sources.flatMap((path) => [...readFileSync(path, "utf8").matchAll(/\bquery:\s*\{/g)]);
+    expect(found).toHaveLength(PAGE_QUERIES.length);
+  });
+
+  it("sends only query parameters Steward declares", async () => {
+    // The half a path check cannot see. Rename `limit` to `count` in Steward and every
+    // assertion above still passes, while the journal quietly shows the whole file: the
+    // origin drops an unknown parameter, so the console asks for a filter and is answered
+    // as though it had asked for nothing.
+    const asked = [
+      ...(await requestsTheClientMakes()).map(({ method, path, query }) => [
+        method, templateFor(path), query,
+      ]),
+      ...PAGE_QUERIES,
+    ];
+    expect(
+      asked.some(([, , query]) => query.length),
+      "no query parameter reached the recorder — the reader has gone stale",
+    ).toBe(true);
+
+    for (const [method, template, names] of asked) {
+      const declared = (openapi.paths[template][method.toLowerCase()].parameters || [])
+        .filter((parameter) => parameter.in === "query")
+        .map((parameter) => parameter.name);
+      for (const name of names) {
+        expect(declared, `${method} ${template} declares no ?${name}`).toContain(name);
+      }
     }
   });
 
@@ -178,7 +235,15 @@ const DRAFT = {
   soul_body: "A small resident with a large satchel.",
   voice: "Brisk.",
   deploy: false,
+  // A granted skill, because the form sends skills as bare *names* and this is the one
+  // field where the console's spelling and Steward's model most easily part company: the
+  // document said `skills` had to be a list of objects while the API happily took names,
+  // and a draft without this key was a test that stepped around its own subject (warren#321).
+  skills: ["daily-summary", "write-journal"],
 };
+
+/** The skills every resident already holds, which the form subtracts before sending. */
+const DEFAULT_SKILLS = new Set(["write-journal"]);
 
 describe("the bodies the console sends are bodies Steward accepts", () => {
   // Every one of these models is `additionalProperties: false`, so this bites in both
@@ -189,7 +254,13 @@ describe("the bodies the console sends are bodies Steward accepts", () => {
     // draft the form calls complete must be a body Steward's model accepts, or the console
     // spends a round trip to be told something it already knew.
     expect(complaints(DRAFT)).toEqual([]);
-    expect(refusals("ResidentPost", declarationBody(DRAFT, new Set()))).toEqual([]);
+
+    const body = declarationBody(DRAFT, DEFAULT_SKILLS);
+    expect(body.skills, "the form sends granted skills as bare names").toEqual(["daily-summary"]);
+    expect(refusals("ResidentPost", body)).toEqual([]);
+
+    // And the shape the form omits the field entirely for: every skill already a default.
+    expect(refusals("ResidentPost", declarationBody(DRAFT, new Set(DRAFT.skills)))).toEqual([]);
   });
 
   it("writes a declaration as YAML or as data, with the soul and the revision", () => {
