@@ -575,9 +575,10 @@ $ steward retire note-keeper
 The manifest is marked `retired: true` and committed **first**, then the container is
 stopped and removed — because the watchdog would otherwise notice the container go away
 and dutifully put it back. A retired resident fires no routines, claims nothing off the
-board, receives no letters, and answers `409 resident_retired` to run-now; it leaves the
-village by going quiet, and steward forges no `session_ended` on its behalf. The soul and
-the manifest stay in git.
+board, receives no letters, and answers `409 resident_retired` to run-now. After the mark is
+committed, steward emits the authoritative `resident_retired` lifecycle fact under the
+resident's declared identity; it never forges a `session_ended` on the resident's behalf.
+The soul and the manifest stay in git.
 
 `steward retire --no-deploy` marks and commits the manifest but reaches no host — the
 counterpart to `new-resident --no-deploy`, for a resident whose host is already gone or was
@@ -595,6 +596,11 @@ each, two front doors each, verified by injecting the pipeline into the route ra
 a convention somebody has to keep. The route takes the whole act or refuses: the
 break-glass flags above stay at the terminal, because each of them leaves the retirement
 half done in a way only the person who typed it can see.
+
+The HTTP route is confirmation-bound: Townhall rehearses first, then sends the returned
+manifest revision with the real request. A missing revision or bytes changed since rehearsal
+are named refusals. The checkout lock covers that check, target-manifest dirt inspection,
+mark and commit, and is released before Chronicle or host I/O.
 
 ## Residents
 

@@ -66,6 +66,7 @@ const RETIRE_PLAN = {
   commit: null,
   dry_run: true,
   note: "a dry run stops nothing and commits nothing",
+  revision: "sha256:rehearsed-manifest",
 };
 
 const RETIRE_DONE = {
@@ -174,7 +175,10 @@ describe("retiring a resident from its record", () => {
     fireEvent.click(await screen.findByRole("button", { name: /retire hob for real/i }));
 
     await waitFor(() => expect(posted(fetch, RETIRE)).toHaveLength(2));
-    expect(JSON.parse(posted(fetch, RETIRE)[1][1].body).dry_run).toBe(false);
+    expect(JSON.parse(posted(fetch, RETIRE)[1][1].body)).toEqual({
+      dry_run: false,
+      revision: RETIRE_PLAN.revision,
+    });
     expect(await screen.findByText(/that decision is committed/)).toBeTruthy();
     // And the confirm is gone: what it confirmed has happened.
     expect(screen.queryByRole("button", { name: /retire hob for real/i })).toBeNull();

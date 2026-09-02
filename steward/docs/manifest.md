@@ -1193,6 +1193,11 @@ steward is deliberately taking down. `POST /residents/{id}/retire`
 ([docs/api.md](api.md#post-residentsidretire)) is the same pipeline through the same door
 townhall's Retire button presses.
 
+The HTTP door requires a successful rehearsal revision before execution. Under one
+checkout-scoped authoring lock it verifies that revision, refuses uncommitted changes to this
+manifest (while tolerating unrelated dirty paths), marks and commits, then releases the lock.
+Only then does steward emit `resident_retired`, stop the container, and remove credentials.
+
 **Editing this field is not the same act.** Writing `retired: true` through
 `PUT /residents/{id}/declaration` marks the resident and stops there: the container keeps
 running and its `.env` keeps holding a live village token, which is the half that matters
