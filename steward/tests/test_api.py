@@ -334,7 +334,11 @@ def test_run_now_lands_routine_started_with_trigger_manual(api: ApiFactory) -> N
     assert started[0]["payload"]["trigger"] == "manual"
     assert started[0]["payload"]["routine"] == "daily-summary"
     assert started[0]["agent_id"] == "claude-code:test-agent"
-    assert [e["type"] for e in harness.events()] == ["routine_started", "routine_finished"]
+    assert [e["type"] for e in harness.events()] == [
+        "routine_started",
+        "resident_declared",
+        "routine_finished",
+    ]
     assert ev.validate_event(started[0]) == ()
 
 
@@ -363,7 +367,11 @@ def test_a_failed_run_is_logged_as_failed_and_emitted_as_failed(api: ApiFactory)
     logged = harness.store.request(request_id)
     assert logged is not None
     assert logged.outcome == "failed"
-    assert [e["type"] for e in harness.events()] == ["routine_started", "routine_failed"]
+    assert [e["type"] for e in harness.events()] == [
+        "routine_started",
+        "resident_declared",
+        "routine_failed",
+    ]
 
 
 def test_run_now_against_an_unknown_resident_is_404(api: ApiFactory) -> None:

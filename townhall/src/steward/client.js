@@ -25,6 +25,23 @@ export class StewardError extends Error {
   }
 }
 
+/** Adapt Steward's resident read model once, at its client boundary, for fleet joins. */
+export function residentToManifestView(item) {
+  return {
+    id: item.id,
+    uid: item.uid,
+    agent_id: item.agent_id,
+    home: item.home,
+    meta: { ...item.soul, summary: item.summary },
+    capabilities: {
+      skills: item.skills || [],
+      memory: item.memory,
+      routes: item.routes || [],
+      app_grants: item.app_grants || [],
+    },
+  };
+}
+
 const DEFINITE_APPROVAL_STATUSES = new Set([401, 404, 422]);
 const LOCAL_APPROVAL_REFUSALS = new Set(["credential_required", "cross_origin_base"]);
 

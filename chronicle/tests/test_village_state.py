@@ -35,6 +35,32 @@ RESIDENT = {
 
 
 class VillageProjectionTests(unittest.TestCase):
+    def test_declaration_is_identity_not_activity_and_latest_wins_until_retired(self):
+        first = event(
+            "resident_declared", source="steward", name="Pip", char="Monk",
+            accent="#123456", role="helper", summary=None, resident_id="pip",
+            uid="0198-uid", home=0,
+        )
+        renamed = event(
+            "resident_declared", minutes=1, source="steward", name="Juniper", char="Hunter",
+            accent="#654321", role="helper", summary="renamed", resident_id="pip",
+            uid="0198-uid", home=0,
+        )
+        state = project_village([first, renamed], [], NOW + dt.timedelta(minutes=1))
+        [villager] = state["villagers"]
+        self.assertEqual(("Juniper", "Hunter", "#654321"), (villager["name"], villager["char"], villager["accent"]))
+        self.assertEqual(("resident", 0, "resting", []), (villager["residency"], villager["home"], villager["state"], villager["history"]))
+        retired = event("resident_retired", minutes=2, source="steward", resident_id="pip", uid="0198-uid")
+        self.assertEqual([], project_village([first, renamed, retired], [], NOW + dt.timedelta(minutes=2))["villagers"])
+
+        stale = event(
+            "resident_retired", minutes=2, source="steward", resident_id="old-pip", uid="old-uid"
+        )
+        [still_present] = project_village(
+            [first, renamed, stale], [], NOW + dt.timedelta(minutes=2)
+        )["villagers"]
+        self.assertEqual("Juniper", still_present["name"])
+
     def test_invalid_protocol_events_never_enter_the_snapshot(self):
         fixtures = json.loads(
             (

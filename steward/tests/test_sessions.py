@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import ResidentWriter, valid_manifest
+from steward import events as ev
 from steward import sessions as sessions_module
 from steward.manifest import Resident, ResidentManifest, load_manifest
 from steward.runners import Outcome, Placement, Runner, RunRequest, RunResult
@@ -142,6 +143,42 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
         }
     ]
     assert guard.timeout_calls == 1
+
+
+def test_every_real_session_declares_only_the_residents_display_identity(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    data = valid_manifest()
+    data["summary"] = "Keeps the tests honest."
+    data["runner"] = {"kind": "mock"}
+    resident = load_manifest(write_resident(data))
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK, duration_s=1))
+    sink = ev.NullEmitter()
+    sessions = ResidentSessions(
+        workdir=tmp_path,
+        runner_factory=lambda _spec, _placement: runner,
+        emitter=sink,
+        clock=lambda: NOW,
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+
+    sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-identity"))
+
+    [declared] = sink.events
+    assert declared.type == "resident_declared"
+    assert declared.agent_id == "claude-code:test-agent"
+    assert declared.source == "steward"
+    assert declared.payload == {
+        "name": "Testy",
+        "char": "Monk",
+        "accent": "#a68a4f",
+        "role": "test bot",
+        "summary": "Keeps the tests honest.",
+        "resident_id": "test-agent",
+        "uid": "7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9",
+        "home": 0,
+    }
 
 
 def test_completion_uses_one_actual_clock_read_not_runner_duration(
@@ -317,9 +354,11 @@ def test_provisioning_refuses_a_declared_directory_recreated_at_the_same_path(
     data["memory"] = {"kind": "directory", "path": str(memory), "journal": "journal"}
     data["runner"] = {"kind": "claude"}
     resident = load_manifest(write_resident(data))
+    sink = ev.NullEmitter()
     sessions = ResidentSessions(
         workdir=tmp_path / "fallback",
         library=SkillLibrary(path=tmp_path / "configured-skills"),
+        emitter=sink,
     )
     admission = sessions.admit(resident, now=NOW)
     assert isinstance(admission, Admission)
@@ -330,6 +369,8 @@ def test_provisioning_refuses_a_declared_directory_recreated_at_the_same_path(
 
     assert isinstance(refusal, Refusal)
     assert "filesystem identity changed" in refusal.reason
+    sessions.run(admission, RoutineWake(resident.manifest.routines[0], "rejected-run"))
+    assert sink.events == [], "a preflight refusal is not a session launch"
 
 
 def test_materialization_stays_bound_when_workdir_is_replaced_after_revalidation(
