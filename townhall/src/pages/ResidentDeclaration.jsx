@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
+import { useStewardWrite } from "../steward/useStewardWrite.js";
 import { describeCommit, diagnosticsFor, normalizeDiagnostics } from "../steward/client.js";
 import {
   changed, getIn, linesToList, listToLines, scalarValue, setIn,
@@ -154,28 +155,34 @@ export default function ResidentDeclaration({ id }) {
 
   const [mode, setMode] = useState("fields");
   const [draft, setDraft] = useState(() => recovery?.draft || null);
-  const [saving, setSaving] = useState(false);
-  const [refusal, setRefusal] = useState(null);
-  const [receipt, setReceipt] = useState(null);
   const [reloaded, setReloaded] = useState(null);
   const [copied, setCopied] = useState(null);
   const [recoveryReadRequest, setRecoveryReadRequest] = useState(null);
-  const saveGeneration = useRef(0);
+  const {
+    saving, refusal, receipt, save: write, reset: resetWrite,
+    clearRefusal, clearReceipt,
+  } = useStewardWrite(
+    ({ draft: rejected, mode: spelling }) =>
+      client.writeDeclaration(id, {
+        ...(spelling === "yaml" ? { text: rejected.text } : { manifest: rejected.manifest }),
+        soul: rejected.soul,
+        revision: rejected.revision,
+      }),
+    {
+      identity: id,
+      onStale: (_caught, rejected) => setDeclarationRecovery(id, rejected),
+    },
+  );
   // Re-reading after a save must not sweep away the answer the person is still reading —
   // the commit sha is the receipt, and a form that clears it on refresh has told them
   // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
   useEffect(() => {
-    saveGeneration.current += 1;
     setDraft(recovery?.draft || null);
     if (recovery) setMode(recovery.mode);
-    setReceipt(null);
-    setRefusal(null);
+    resetWrite();
     setReloaded(null);
     setCopied(null);
     setRecoveryReadRequest(null);
-    return () => {
-      saveGeneration.current += 1;
-    };
     // Recovery belongs to the resident and intentionally survives route unmounts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -206,32 +213,13 @@ export default function ResidentDeclaration({ id }) {
 
   async function save(event) {
     event.preventDefault();
-    const generation = ++saveGeneration.current;
-    setSaving(true);
-    setRefusal(null);
-    setReceipt(null);
-    try {
-      // Exactly one of `manifest` or `text` — giving both is a 422, and rightly so: they
-      // are two spellings of one file and steward will not guess which one you meant.
-      const answer = await client.writeDeclaration(id, {
-        ...(mode === "yaml" ? { text: draft.text } : { manifest: draft.manifest }),
-        soul: draft.soul,
-        revision: draft.revision,
-      });
-      if (generation !== saveGeneration.current) return;
-      setReceipt(answer);
-      setDeclarationRecovery(id, null);
-      setReloaded(null);
-      loaded.refresh();
-    } catch (caught) {
-      if (generation !== saveGeneration.current) return;
-      setRefusal(caught);
-      if (caught?.code === "stale_revision") {
-        setDeclarationRecovery(id, { draft, mode });
-      }
-    } finally {
-      if (generation === saveGeneration.current) setSaving(false);
-    }
+    // Exactly one of `manifest` or `text` — giving both is a 422, and rightly so: they
+    // are two spellings of one file and steward will not guess which one you meant.
+    const answer = await write({ draft, mode });
+    if (!answer) return;
+    setDeclarationRecovery(id, null);
+    setReloaded(null);
+    loaded.refresh();
   }
 
   /**
@@ -272,7 +260,7 @@ export default function ResidentDeclaration({ id }) {
     // The editor remains a working copy after the refusal. Preserve anything the operator
     // changed while comparing; only advance the optimistic-concurrency token.
     setDraft((previous) => ({ ...(previous || recovery.draft), revision: loaded.data.revision }));
-    setRefusal(null);
+    clearRefusal();
   }
 
   function discardRejected() {
@@ -284,7 +272,7 @@ export default function ResidentDeclaration({ id }) {
       revision: loaded.data.revision,
     });
     setDeclarationRecovery(id, null);
-    setRefusal(null);
+    clearRefusal();
     setCopied(null);
   }
   async function copyRejected(document) {
@@ -310,7 +298,7 @@ export default function ResidentDeclaration({ id }) {
           title="declaration written"
           status={receipt.status}
           commit={describeCommit(receipt.commit)}
-          onDismiss={() => setReceipt(null)}
+          onDismiss={clearReceipt}
         >
           {receipt.message}
           {receipt.paths?.length ? (
