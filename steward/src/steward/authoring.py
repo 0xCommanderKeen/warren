@@ -34,11 +34,15 @@ machine, and applying it to a server would mean a stray editor swapfile could st
 control plane from working at all.
 """
 
+import fcntl
 import hashlib
+import os
+import re
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -52,8 +56,8 @@ from steward.manifest import (
     ValidationResult,
     validate_tree,
 )
-from steward.nursery import DECLARE_SUBJECT, CommitIdentity, NurseryError, commit_paths
-from steward.runners import PipedRun, run_argv
+from steward.nursery import DECLARE_SUBJECT, CommitIdentity
+from steward.runners import CommandOutcome, PipedRun, run_argv
 from steward.skills import (
     SKILL_FILENAME,
     Skill,
@@ -118,11 +122,13 @@ class AuthoringError(Exception):
         diagnostics: Sequence[Diagnostic] = (),
         *,
         reason: str = "write_refused",
+        preserve_paths: Sequence[str] = (),
     ) -> None:
         """Record the complaint, its structured diagnostics, and its reason code."""
         super().__init__(message)
         self.diagnostics = tuple(diagnostics)
         self.reason = reason
+        self.preserve_paths = frozenset(preserve_paths)
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,6 +470,245 @@ def commit_message(subject: str, request_id: str, principal: str) -> str:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexEntry:
+    """One stage-zero index entry, retained exactly enough for compare-and-swap."""
+
+    mode: str
+    oid: str
+    path: str
+
+
+def _index_entries(
+    repo: Path, relative: Sequence[str], git: PipedRun, *, index: Path | None = None
+) -> dict[str, _IndexEntry]:
+    """Read stage-zero entries from one index without consulting the worktree."""
+    prefix = ["env", f"GIT_INDEX_FILE={index}"] if index is not None else []
+    outcome = git([*prefix, "git", "-C", str(repo), "ls-files", "--stage", "--", *relative])
+    if not outcome.ok:
+        raise AuthoringError(
+            f"git could not inspect the authored index entries: {outcome.summary()}",
+            reason="commit_failed",
+        )
+    entries: dict[str, _IndexEntry] = {}
+    for line in outcome.stdout.splitlines():
+        metadata, path = line.split("\t", 1)
+        mode, oid, stage = metadata.split()
+        if stage == "0":
+            entries[path] = _IndexEntry(mode, oid, path)
+    return entries
+
+
+def _head_parent(repo: Path, git: PipedRun) -> str | None:
+    """Return HEAD, recognizing only a genuinely unborn symbolic ref as no parent."""
+    head = git(["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"])
+    if head.ok and head.stdout.strip():
+        return head.stdout.strip()
+
+    symbolic = git(["git", "-C", str(repo), "symbolic-ref", "--quiet", "HEAD"])
+    if symbolic.ok and symbolic.stdout.strip():
+        ref = symbolic.stdout.strip()
+        exists = git(["git", "-C", str(repo), "show-ref", "--verify", "--quiet", ref])
+        if exists.exit_status == 1:
+            return None
+    raise AuthoringError(
+        f"git could not resolve the commit parent: {head.summary()}", reason="commit_failed"
+    )
+
+
+def _reconcile_index(  # noqa: PLR0913,PLR0917 - one argument per compared Git state
+    repo: Path,
+    relative: Sequence[str],
+    baseline: Mapping[str, _IndexEntry],
+    authored: Mapping[str, _IndexEntry],
+    parent_entries: Mapping[str, _IndexEntry],
+    parent_index: Path,
+    git: PipedRun,
+) -> None:
+    """Refresh untouched authored entries under Git's own index lock, best-effort.
+
+    An entry is ours to refresh only when it was unstaged at capture time (its baseline
+    equals the expected parent's entry) and still has exactly that baseline value after
+    the commit. Pre-existing staging and same-path staging performed during authoring are
+    therefore both preserved.
+    """
+    try:
+        index = _git_path(repo, "index", git)
+    except AuthoringError:
+        return
+    lock = Path(f"{index}.lock")
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError:
+        return
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            # Git created the parent index in this repository, so it supplies the
+            # correct umask/core.sharedRepository mode for a genuinely first index.
+            source = index if index.exists() else parent_index
+            stream.write(source.read_bytes())
+        current = _index_entries(repo, relative, git, index=lock)
+        for path in relative:
+            old = baseline.get(path)
+            if old != parent_entries.get(path) or current.get(path) != old:
+                continue
+            new = authored.get(path)
+            if new is None:
+                outcome = git(
+                    [
+                        "env",
+                        f"GIT_INDEX_FILE={lock}",
+                        "git",
+                        "-C",
+                        str(repo),
+                        "update-index",
+                        "--force-remove",
+                        "--",
+                        path,
+                    ]
+                )
+            else:
+                outcome = git(
+                    [
+                        "env",
+                        f"GIT_INDEX_FILE={lock}",
+                        "git",
+                        "-C",
+                        str(repo),
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        new.mode,
+                        new.oid,
+                        path,
+                    ]
+                )
+            if not outcome.ok:
+                return
+        lock.chmod(source.stat().st_mode)
+        lock.replace(index)
+    except OSError, AuthoringError, ValueError:
+        return
+    finally:
+        with suppress(OSError):
+            lock.unlink(missing_ok=True)
+
+
+def _commit_with_isolated_index(
+    repo: Path,
+    relative: Sequence[str],
+    message: str,
+    identity: CommitIdentity,
+    git: PipedRun,
+) -> str | None:
+    """Build and publish one exact commit without reading or overwriting shared state."""
+    index_dir = _git_path(repo, "index", git).parent
+    with tempfile.NamedTemporaryFile(prefix="steward-index-", dir=index_dir) as scratch:
+        isolated_index = Path(scratch.name)
+    parent_index = isolated_index.with_name(f"{isolated_index.name}-parent")
+
+    def isolated(argv: list[str]) -> CommandOutcome:
+        return git(["env", f"GIT_INDEX_FILE={isolated_index}", *argv])
+
+    try:
+        parent = _head_parent(repo, git)
+        baseline = _index_entries(repo, relative, git)
+        prepared = isolated(
+            ["git", "-C", str(repo), "read-tree", parent]
+            if parent is not None
+            else ["git", "-C", str(repo), "read-tree", "--empty"]
+        )
+        if prepared.ok:
+            prepared = isolated(["git", "-C", str(repo), "add", "--", *relative])
+        if not prepared.ok:
+            raise AuthoringError(
+                f"git could not prepare the authored paths: {prepared.summary()}",
+                reason="commit_failed",
+            )
+        tree = isolated(["git", "-C", str(repo), "write-tree"])
+        if not tree.ok or not tree.stdout.strip():
+            raise AuthoringError(
+                f"git could not write the authored tree: {tree.summary()}", reason="commit_failed"
+            )
+        authored = _index_entries(repo, relative, git, index=isolated_index)
+        parent_run = lambda argv: git(  # noqa: E731 - tiny environment adapter
+            ["env", f"GIT_INDEX_FILE={parent_index}", *argv]
+        )
+        loaded = parent_run(
+            ["git", "-C", str(repo), "read-tree", parent]
+            if parent is not None
+            else ["git", "-C", str(repo), "read-tree", "--empty"]
+        )
+        if not loaded.ok:
+            raise AuthoringError(
+                f"git could not inspect the expected parent: {loaded.summary()}",
+                reason="commit_failed",
+            )
+        parent_entries = _index_entries(repo, relative, git, index=parent_index)
+        if authored == parent_entries:
+            return None
+        commit = git(
+            [
+                "git",
+                "-C",
+                str(repo),
+                *identity.config_args(),
+                "commit-tree",
+                tree.stdout.strip(),
+                *([] if parent is None else ["-p", parent]),
+                "-m",
+                message,
+            ]
+        )
+        oid = commit.stdout.strip()
+        if not commit.ok or re.fullmatch(r"[0-9a-f]{40,64}", oid) is None:
+            raise AuthoringError(
+                f"git could not create the authored commit: {commit.summary()}",
+                reason="commit_failed",
+            )
+        expected = parent if parent is not None else "0" * len(oid)
+        published = git(["git", "-C", str(repo), "update-ref", "HEAD", oid, expected])
+        if not published.ok:
+            # The failed CAS may mean another writer published these exact target entries.
+            # In that case its HEAD owns the worktree bytes even when they happen to equal
+            # ours. The shared index owns matching authored bytes only when its entry
+            # changed during this transaction; identical pre-existing staging is not a
+            # competing write. An unrelated HEAD advance then remains ours to undo.
+            winning = _index_entries(repo, relative, git)
+            try:
+                winning_head = _head_parent(repo, git)
+                loaded = parent_run(
+                    ["git", "-C", str(repo), "read-tree", winning_head]
+                    if winning_head is not None
+                    else ["git", "-C", str(repo), "read-tree", "--empty"]
+                )
+                head_entries = (
+                    _index_entries(repo, relative, git, index=parent_index) if loaded.ok else {}
+                )
+            except AuthoringError:
+                head_entries = {}
+            preserve = [
+                path
+                for path in relative
+                if authored.get(path) == head_entries.get(path)
+                or (
+                    winning.get(path) != baseline.get(path)
+                    and authored.get(path) == winning.get(path)
+                )
+            ]
+            raise AuthoringError(
+                "git HEAD changed while this write was being authored; retry against the new head",
+                reason="commit_failed",
+                preserve_paths=preserve,
+            )
+        _reconcile_index(repo, relative, baseline, authored, parent_entries, parent_index, git)
+        return oid
+    finally:
+        with suppress(OSError):
+            isolated_index.unlink(missing_ok=True)
+            parent_index.unlink(missing_ok=True)
+
+
 def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
     residents_dir: Path,
     paths: Sequence[Path],
@@ -505,10 +750,18 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
             ),
         )
     message = commit_message(subject, request_id, principal)
-    try:
-        sha = commit_paths(repo, list(paths), message, identity=identity, git=git)
-    except NurseryError as exc:
-        raise AuthoringError(str(exc), reason="commit_failed") from exc
+    relative = [str(path.resolve().relative_to(repo.resolve())) for path in paths]
+    if not relative:
+        return CommitReport(
+            committed=False,
+            sha=None,
+            message=message,
+            note="nothing to commit: what is on disk was already what is in git",
+        )
+    # This index begins as HEAD and contains only Steward's path changes. It is also the
+    # source of truth for convergence: pre-existing same-path staging in the checkout's
+    # shared index must neither manufacture an empty commit nor be disturbed.
+    sha = _commit_with_isolated_index(repo, relative, message, identity, git)
     if sha is None:
         return CommitReport(
             committed=False,
@@ -519,6 +772,237 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
     return CommitReport(
         committed=True, sha=sha, message=message, note=f"committed as {sha[:12]} by {principal}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _FileState:
+    """The bytes and mode a transaction must put back after a refusal."""
+
+    path: Path
+    existed: bool
+    contents: bytes = b""
+    mode: int = 0
+
+    @classmethod
+    def capture(cls, path: Path) -> _FileState:
+        try:
+            observed = path.lstat()
+        except FileNotFoundError, NotADirectoryError:
+            return cls(path=path, existed=False)
+        except OSError as error:
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            ) from error
+        if not stat.S_ISREG(observed.st_mode):
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            )
+        except OSError as error:
+            raise AuthoringError(
+                f"refusing to replace non-regular authoring target {path}",
+                reason="unsafe_target",
+            ) from error
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or (metadata.st_dev, metadata.st_ino) != (
+                observed.st_dev,
+                observed.st_ino,
+            ):
+                raise AuthoringError(
+                    f"refusing to replace non-regular authoring target {path}",
+                    reason="unsafe_target",
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                contents = source.read()
+            return cls(path=path, existed=True, contents=contents, mode=metadata.st_mode)
+        finally:
+            os.close(descriptor)
+
+    def matches(self) -> bool:
+        """Whether the path is still exactly this regular-file state, without following links."""
+        if not self.existed:
+            try:
+                self.path.lstat()
+            except FileNotFoundError, NotADirectoryError:
+                return True
+            except OSError:
+                return False
+            return False
+        try:
+            return self == self.capture(self.path)
+        except AuthoringError, OSError:
+            # Comparison is deliberately fail-closed.  A concurrent writer may replace
+            # Steward's regular file with a link, FIFO, device, or another inode while it
+            # is being captured.  That state belongs to the writer, and must not prevent
+            # rollback from considering the transaction's other paths.
+            return False
+
+    def restore(self) -> None:
+        if not self.existed:
+            self.path.unlink(missing_ok=True)
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.steward-restore-", dir=self.path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as target:
+                target.write(self.contents)
+            temporary.chmod(self.mode)
+            temporary.replace(self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+@dataclass(slots=True)
+class _AuthoringFiles:
+    """The before and Steward-authored states needed for compare-and-restore rollback."""
+
+    before: tuple[_FileState, ...]
+    authored: tuple[_FileState, ...] | None = None
+
+    def replace(self, contents: Mapping[Path, bytes]) -> None:
+        """Atomically install intended bytes and record that state without re-reading it."""
+        authored = list(self.before)
+        self.authored = tuple(authored)
+        for index, old in enumerate(self.before):
+            data = contents.get(old.path)
+            if data is None:
+                continue
+            old.path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{old.path.name}.steward-write-", dir=old.path.parent
+            )
+            temporary = Path(temporary_name)
+            try:
+                with os.fdopen(descriptor, "wb") as target:
+                    target.write(data)
+                if old.existed:
+                    temporary.chmod(old.mode)
+                mode = temporary.stat().st_mode
+                temporary.replace(old.path)
+                authored[index] = _FileState(path=old.path, existed=True, contents=data, mode=mode)
+                self.authored = tuple(authored)
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    def rollback(self, preserve: frozenset[Path] = frozenset()) -> None:
+        # An outside writer that replaced the same path after Steward's write owns it.  Only
+        # put the old bytes back while the exact bytes and mode Steward authored remain.
+        if self.authored is None:
+            return
+        for old, authored in zip(self.before, self.authored, strict=True):
+            if old.path not in preserve and authored.matches():
+                try:
+                    old.restore()
+                except OSError:
+                    # Recovery is best-effort per target.  One path becoming unwritable
+                    # must neither hide the refusal that caused rollback nor strand later
+                    # targets in Steward's transient state.
+                    continue
+
+
+def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
+    """Resolve one per-checkout Git administrative path."""
+    outcome = git(["git", "-C", str(repo), "rev-parse", "--git-path", name])
+    if not outcome.ok or not outcome.stdout.strip():
+        raise AuthoringError(
+            f"git could not locate its {name}: {outcome.summary()}", reason="commit_failed"
+        )
+    path = Path(outcome.stdout.strip())
+    return path if path.is_absolute() else repo / path
+
+
+@contextmanager
+def _authoring_lock(residents_dir: Path, *, git: PipedRun) -> Iterator[Path | None]:
+    """Hold the checkout-scoped authoring lock across every mutation preflight and write."""
+    repo = repo_toplevel(residents_dir, git=git)
+    lock_path = (
+        _git_path(repo, "steward-authoring.lock", git)
+        if repo is not None
+        else Path(tempfile.gettempdir())
+        / (
+            "steward-authoring-"
+            f"{hashlib.sha256(str(residents_dir.resolve()).encode()).hexdigest()}.lock"
+        )
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        yield repo
+
+
+@contextmanager
+def _authoring_files(
+    residents_dir: Path, paths: Sequence[Path], *, repo: Path | None
+) -> Iterator[_AuthoringFiles]:
+    """Capture targets and restore them on refusal; caller already holds authoring lock."""
+    files = _AuthoringFiles(tuple(_FileState.capture(path) for path in paths))
+    try:
+        yield files
+    except Exception as error:
+        preserve = (
+            frozenset(repo / path for path in getattr(error, "preserve_paths", ()))
+            if repo is not None
+            else frozenset()
+        )
+        files.rollback(preserve)
+        for path, state in zip(paths, files.before, strict=True):
+            if state.existed:
+                continue
+            parent = path.parent
+            while parent != residents_dir.parent:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        raise
+
+
+def _existing_declaration(
+    residents_dir: Path, resident_id: str, skills_dir: Path | None
+) -> tuple[str, str]:
+    """Resolve an editable resident by id or uid while the checkout lock is held."""
+    named_directory = residents_dir / resident_id
+    if named_directory.is_dir():
+        # Preserve the write seam's stronger target-safety refusal even when replacing the
+        # manifest with a special file also makes the resident disappear from validation.
+        _FileState.capture(named_directory / MANIFEST_FILENAME)
+    result = validate_tree(residents_dir, skills_dir)
+    resident = next((item for item in result.residents if item.id == resident_id), None)
+    if resident is None:
+        resident = next((item for item in result.residents if item.uid == resident_id), None)
+    if resident is not None:
+        return resident.id, resident.manifest.soul.file
+    if (residents_dir / resident_id).is_dir():
+        raise AuthoringError(
+            f"resident {resident_id!r} exists but its manifest does not validate; "
+            "run `steward validate` for the field-by-field diagnostics",
+            reason="resident_invalid",
+        )
+    raise AuthoringError(
+        f"no resident {resident_id!r} in {residents_dir}", reason="unknown_resident"
+    )
+
+
+def _check_revision(expected: str | None, paths: Sequence[Path]) -> None:
+    """Check an optimistic revision while holding the authoring lock."""
+    actual = revision_of(*paths)
+    if expected is not None and expected != actual:
+        raise AuthoringError(
+            f"this edit was made against {expected}, and what is on disk is now {actual}; "
+            "somebody else changed it first — re-read it and reapply your change",
+            reason="stale_revision",
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -547,26 +1031,40 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     subject: str | None = None,
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
+    expected_revision: str | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one resident's declaration. Refusals write nothing."""
-    result = validate_declaration(residents_dir, resident_id, declaration, skills_dir)
-    _write_declaration_into(residents_dir / resident_id, declaration)
-    paths = declaration_paths(residents_dir, resident_id, declaration.soul_filename)
-    written = tuple(path for path in paths if path.is_file())
-    commit = commit_write(
-        residents_dir,
-        written,
-        subject if subject is not None else UPDATE_SUBJECT.format(id=resident_id),
-        request_id=request_id,
-        principal=principal,
-        identity=identity,
-        allow_uncommitted=allow_uncommitted,
-        git=git,
-    )
-    return WriteResult(
-        paths=written, revision=revision_of(*written), commit=commit, validation=result
-    )
+    with _authoring_lock(residents_dir, git=git) as repo:
+        resolved_id, soul_filename = _existing_declaration(residents_dir, resident_id, skills_dir)
+        if declaration.soul_filename != soul_filename:
+            raise AuthoringError(
+                f"this declaration renames the soul from {soul_filename!r} to "
+                f"{declaration.soul_filename!r}; steward will not leave the old file orphaned "
+                "in the tree, so rename it in the checkout and commit that yourself",
+                reason="soul_file_changed",
+            )
+        paths = declaration_paths(residents_dir, resolved_id, soul_filename)
+        with _authoring_files(residents_dir, paths, repo=repo) as files:
+            _check_revision(expected_revision, paths)
+            result = validate_declaration(residents_dir, resolved_id, declaration, skills_dir)
+            intended = {paths[0]: declaration.manifest_text.encode()}
+            if declaration.soul_text is not None:
+                intended[paths[1]] = declaration.soul_text.encode()
+            files.replace(intended)
+            written = tuple(path for path in paths if path.is_file())
+            revision = revision_of(*written)
+            commit = commit_write(
+                residents_dir,
+                written,
+                subject if subject is not None else UPDATE_SUBJECT.format(id=resolved_id),
+                request_id=request_id,
+                principal=principal,
+                identity=identity,
+                allow_uncommitted=allow_uncommitted,
+                git=git,
+            )
+            return WriteResult(paths=written, revision=revision, commit=commit, validation=result)
 
 
 def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
@@ -579,23 +1077,38 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
     created: bool,
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
+    expected_revision: str | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one skill. Refusals write nothing."""
-    result = validate_skill(residents_dir, skills_dir, document)
-    directory = skills_dir / document.name
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / SKILL_FILENAME
-    path.write_text(document.text(), encoding="utf-8")
-    subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(name=document.name)
-    commit = commit_write(
-        residents_dir,
-        [path],
-        subject,
-        request_id=request_id,
-        principal=principal,
-        identity=identity,
-        allow_uncommitted=allow_uncommitted,
-        git=git,
-    )
-    return WriteResult(paths=(path,), revision=revision_of(path), commit=commit, validation=result)
+    path = skills_dir / document.name / SKILL_FILENAME
+    with (
+        _authoring_lock(residents_dir, git=git) as repo,
+        _authoring_files(residents_dir, [path], repo=repo) as files,
+    ):
+        if created and path.is_file():
+            raise AuthoringError(
+                f"skill {document.name!r} already exists; PUT replaces it", reason="skill_exists"
+            )
+        if not created and not path.is_file():
+            raise AuthoringError(
+                f"no skill {document.name!r}; POST /skills adds one", reason="unknown_skill"
+            )
+        _check_revision(expected_revision, [path])
+        result = validate_skill(residents_dir, skills_dir, document)
+        files.replace({path: document.text().encode()})
+        revision = revision_of(path)
+        subject = (SKILL_CREATE_SUBJECT if created else SKILL_UPDATE_SUBJECT).format(
+            name=document.name
+        )
+        commit = commit_write(
+            residents_dir,
+            [path],
+            subject,
+            request_id=request_id,
+            principal=principal,
+            identity=identity,
+            allow_uncommitted=allow_uncommitted,
+            git=git,
+        )
+        return WriteResult(paths=(path,), revision=revision, commit=commit, validation=result)
