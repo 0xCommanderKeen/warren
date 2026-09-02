@@ -65,9 +65,13 @@ half is the repo secret `NAS_SSH_KEY`; the NAS's host key is the repo variable
 Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>):
 
 1. **Access controls → edit the policy file.** Give the tag an owner and let it reach
-   the NAS on ssh and the two health-check ports:
+   the NAS on ssh and the two health-check ports. A `dst` cannot be a MagicDNS name —
+   only an IP, a tag, a group, or an alias declared in `hosts` — so declare one:
 
    ```jsonc
+   "hosts": {
+     "dxp2800": "100.96.246.43",
+   },
    "tagOwners": {
      "tag:ci": ["autogroup:admin"],
    },
@@ -76,6 +80,8 @@ Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>
      {"action": "accept", "src": ["tag:ci"], "dst": ["dxp2800:22,8737,8802"]},
    ],
    ```
+
+   (Or write `"100.96.246.43:22,8737,8802"` directly — the address the workflow uses.)
 
 2. **Settings → OAuth clients → Generate OAuth client.** Description `warren deploy
    (GitHub Actions)`; scope **Auth Keys: Write**; tag `tag:ci`. Copy the client id and
