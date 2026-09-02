@@ -65,6 +65,7 @@ from steward.operator_auth import OperatorPrincipal
 from steward.routes import approvals as approval_routes
 from steward.routes import board as board_routes
 from steward.routes import delegation as delegation_routes
+from steward.routes import deps as route_deps
 from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import residents as resident_routes
@@ -149,45 +150,16 @@ RESIDENTS_ENV = "STEWARD_RESIDENTS"
 COMMIT_IDENTITY_ENV = "STEWARD_COMMIT_IDENTITY"
 ALLOW_UNCOMMITTED_ENV = "STEWARD_ALLOW_UNCOMMITTED_WRITES"
 
-#: How the write API describes the caller in a commit. Not a name, because there is not one
-#: to know: the human token is a shared secret, so what steward can say truthfully is which
-#: door the change came through. The request id in the same commit is what makes it
-#: traceable to a moment and a path in the request log.
-API_PRINCIPAL = "a holder of STEWARD_TOKEN, over the steward API"
-
-#: How a refused write is answered. A manifest that does not validate is the caller's
-#: mistake and unprocessable; a residents tree with no git behind it is the *server's*
-#: configuration and not something the caller can fix by sending different bytes.
-WRITE_STATUS: Mapping[str, int] = {
-    "manifest_invalid": 422,
-    "skill_invalid": 422,
-    "unknown_skill": 404,
-    "unknown_resident": 404,
-    "resident_invalid": 409,
-    "soul_file_changed": 409,
-    "skill_exists": 409,
-    "not_a_git_checkout": 409,
-    "commit_failed": 409,
-}
-
-#: How many rows ``GET /requests`` will hand back at most, and how many it hands back
-#: when nobody asks. A control panel polls this to confirm what a 202 only accepted.
-REQUESTS_DEFAULT_LIMIT = 50
-REQUESTS_MAX_LIMIT = 500
-
-#: What steward records as the actor when the caller has no name: the master token, which
-#: is a shared secret, or open mode, where there is no credential at all. A *named*
-#: operator (warren#225) replaces this with their own name — see ``acted_by`` — because a
-#: board and an approval ledger whose every row says ``api`` cannot answer "who did this".
-ACTED_BY_API = "api"
+API_PRINCIPAL = route_deps.API_PRINCIPAL
+WRITE_STATUS = route_deps.WRITE_STATUS
+REQUESTS_DEFAULT_LIMIT = request_routes.REQUESTS_DEFAULT_LIMIT
+REQUESTS_MAX_LIMIT = request_routes.REQUESTS_MAX_LIMIT
+ACTED_BY_API = route_deps.ACTED_BY_API
 POSTED_BY = ACTED_BY_API
 DECIDED_BY = ACTED_BY_API
-
-#: What ``GET /approvals?status=`` accepts. ``pending`` is the default, so a panel that
-#: never passed the parameter sees exactly what it always saw.
-APPROVAL_STATUS_PENDING = "pending"
-APPROVAL_STATUS_ALL = "all"
-APPROVAL_STATUSES = (APPROVAL_STATUS_PENDING, "resolved", APPROVAL_STATUS_ALL)
+APPROVAL_STATUS_PENDING = approval_routes.APPROVAL_STATUS_PENDING
+APPROVAL_STATUS_ALL = approval_routes.APPROVAL_STATUS_ALL
+APPROVAL_STATUSES = approval_routes.APPROVAL_STATUSES
 
 NO_TOKEN_MESSAGE = (
     f"{TOKEN_ENV} is unset or blank, and every endpoint of this API is a write path "
