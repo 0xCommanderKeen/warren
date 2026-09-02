@@ -15,6 +15,16 @@ RUN_DELEGATED = "delegated"
 RUN_CHAT = "chat"
 RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED, RUN_CHAT)
 
+
+class AlreadyRunningError(Exception):
+    """Raised when a resident is asked to run while one of its sessions is going."""
+
+    def __init__(self, reason: str) -> None:
+        """Carry the sentence this refusal is served with."""
+        super().__init__(reason)
+        self.reason = reason
+
+
 TRIGGER_SCHEDULE = "schedule"
 TRIGGER_MANUAL = "manual"
 #: What started a chat session: a message, and there is only ever the one answer. Carried

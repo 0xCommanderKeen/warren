@@ -9,6 +9,7 @@ from fastapi import APIRouter, Request
 from steward.budgets import PAUSED_ERROR
 from steward.manifest import Resident, retired_complaint, validate_path
 from steward.routes.deps import Deps, _refuse
+from steward.runs import AlreadyRunningError
 from steward.scheduler import (
     TRIGGER_MANUAL,
     ScheduledRoutine,
@@ -19,15 +20,6 @@ from steward.scheduler import (
 from steward.store import LedgerEntry, RequestRecord
 
 ALREADY_RUNNING_ERROR = "already_running"
-
-
-class AlreadyRunningError(Exception):
-    """Raised when a resident is asked to run while one of its sessions is going."""
-
-    def __init__(self, reason: str) -> None:
-        """Carry the sentence this refusal is served with."""
-        super().__init__(reason)
-        self.reason = reason
 
 
 def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str, Any]]:

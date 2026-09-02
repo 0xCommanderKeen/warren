@@ -87,9 +87,10 @@ from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import routines as routine_routes
 from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
-from steward.routes.routines import AlreadyRunningError, last_run_view, latest_run_requests
+from steward.routes.routines import last_run_view, latest_run_requests
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
+from steward.runs import AlreadyRunningError
 from steward.scheduler import (
     TRIGGER_MANUAL,
     FireReport,
@@ -109,7 +110,6 @@ from steward.store import (
     ApprovalRecord,
     Store,
     default_db_path,
-    new_id,
 )
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
@@ -1365,18 +1365,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     app.include_router(routine_routes.router(deps))
     app.include_router(delegation_routes.router(deps))
 
-    def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
-        """Log an accepted mutating request and return the id it is traceable by."""
-        request_id = new_id()
-        db.log_request(
-            request_id=request_id,
-            method=request.method,
-            path=request.url.path,
-            outcome=outcome,
-            detail=detail,
-        )
-        return request_id
-
     # -- residents -------------------------------------------------------------------
 
     @app.get("/residents")
@@ -1483,7 +1471,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"the same body again once that is fixed and it will pick up where it "
                 f"stopped rather than collide",
             )
-        request_id = accept(
+        request_id = deps.accept(
             request, "deployed" if body.deploy else "declared", {"resident": body.id}
         )
         written = [
@@ -1627,7 +1615,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             # the exception's own message already says which, and a traceback would say
             # neither (steward #90).
             _refuse(409, PROVISION_REFUSED, str(exc))
-        request_id = accept(
+        request_id = deps.accept(
             request,
             "rehearsed" if asked.dry_run else "provisioned",
             {"resident": report.resident_id},
@@ -1705,7 +1693,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 f"retirement left half done — marked, but the container still up — is "
                 f"`steward retire {resident.id}` at a terminal.",
             )
-        request_id = accept(
+        request_id = deps.accept(
             request,
             "rehearsed" if asked.dry_run else "retired",
             {"resident": resident.id},
@@ -1786,7 +1774,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             else yaml.safe_dump(body.manifest, sort_keys=False, allow_unicode=True)
         )
         declaration = au.Declaration(manifest_text=manifest_text, soul_text=body.soul)
-        request_id = accept(request, "written", {"resident": resident_id})
+        request_id = deps.accept(request, "written", {"resident": resident_id})
         try:
             written = au.write_declaration(
                 residents_dir,
@@ -1874,7 +1862,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             # No library yet. The default location beside the tree is where one belongs,
             # and it is created only once the write has actually been accepted.
             root = Path(residents_dir).resolve().parent / "skills"
-        request_id = accept(request, "written", {"skill": document.name})
+        request_id = deps.accept(request, "written", {"skill": document.name})
         try:
             written = au.write_skill(
                 residents_dir,
