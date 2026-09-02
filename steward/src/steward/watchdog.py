@@ -970,7 +970,7 @@ class Watchdog:
 
         The question a give-up receipt implicitly claims an answer to. Giving up means
         having tried, and of the shipped residents only ``life-agent`` declares a
-        ``deploy.container``; ``pip`` and ``burrow-builder`` have nothing that could ever
+        ``deploy.container``; local test residents have nothing that could ever
         have tried (steward #130).
         """
         return any(_owns(supervisor, resident) for supervisor in self.supervisors)

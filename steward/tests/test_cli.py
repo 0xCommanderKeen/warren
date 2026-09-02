@@ -134,7 +134,7 @@ def test_validate_defaults_to_the_residents_tree(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["validate"])
     assert result.exit_code == 0, result.output
-    assert "3 valid resident(s)" in result.output
+    assert "2 valid resident(s)" in result.output
 
 
 def test_validate_accepts_explicit_paths(runner: CliRunner, write_resident: ResidentWriter) -> None:
@@ -525,8 +525,7 @@ def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
     assert result.exit_code == 0, result.output
     assert "life-agent: journal /data/residents/life-agent/memory/journal" in result.output
     assert "closed by close-of-day" in result.output
-    assert "burrow-builder: journal" in result.output
-    assert "no routine closes the day" in result.output
+    assert "burrow-builder" not in result.output
 
 
 def test_doctor_warns_when_the_journal_location_is_not_writable(
@@ -1386,7 +1385,7 @@ def test_skills_lists_the_shipped_library_and_every_resident(
     assert "life-agent: daily-summary, escalate, research, write-journal, read-inbox" in (
         result.output
     )
-    assert "burrow-builder: daily-summary, escalate, research, write-journal" in result.output
+    assert "burrow-builder" not in result.output
     # Named as a copy the CLI does not discover: since steward #206 a claude session is
     # launched with `--setting-sources ""`, and `.claude/skills` is discovered through the
     # project setting source. The prompt is the delivery path; printing two working

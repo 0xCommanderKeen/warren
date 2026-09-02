@@ -261,7 +261,7 @@ nothing — and a refused block still knocks at a human's door. The grammar, the
 and the lineage model are in [docs/delegation.md](docs/delegation.md).
 
 ```console
-$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward delegate sender-resident --to life-agent --route handoff --title "…"
 $ steward inbox life-agent            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
@@ -601,7 +601,6 @@ half done in a way only the person who typed it can see.
 ```
 residents/
   life-agent/       manifest.yaml + soul.md   Hob, the household spirit
-  burrow-builder/   manifest.yaml + soul.md   Maren, who builds the village
   pip/              manifest.yaml + soul.md   Pip, the pipeline canary
 skills/
   <name>/SKILL.md                             the shared library both draw on

@@ -124,12 +124,12 @@ class AmbientBudgetTests(unittest.TestCase):
 
     def test_the_budget_is_per_agent_so_one_door_cannot_starve_another(self):
         loud = [knock(index, sender=str(index), agent="claude-code:pip") for index in range(200)]
-        quiet = [knock(1, agent="claude-code:maren")]
+        quiet = [knock(1, agent="claude-code:quiet")]
 
         kept = rotate(
             [
                 event("tool_called", 0, agent="claude-code:pip", tool="Read"),
-                event("tool_called", 0, agent="claude-code:maren", tool="Read"),
+                event("tool_called", 0, agent="claude-code:quiet", tool="Read"),
                 *loud,
                 *quiet,
             ],
@@ -138,7 +138,7 @@ class AmbientBudgetTests(unittest.TestCase):
         knocks = [item for item in kept if item["type"] == "chat_message_dropped"]
 
         self.assertEqual(
-            1, len([item for item in knocks if item["agent_id"] == "claude-code:maren"])
+            1, len([item for item in knocks if item["agent_id"] == "claude-code:quiet"])
         )
 
     def test_what_rotation_kept_is_what_the_projection_reads(self):

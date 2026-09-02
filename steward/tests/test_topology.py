@@ -44,7 +44,7 @@ def supervised_resident(write_resident: ResidentWriter, **deploy: object) -> Res
 
 
 def local_resident(write_resident: ResidentWriter) -> Resident:
-    """Write a resident with no deploy block at all — the pip/burrow-builder shape."""
+    """Write a resident with no deploy block at all — the local test shape."""
     return load_manifest(write_resident(valid_manifest()))
 
 

@@ -6,6 +6,8 @@ import unittest
 
 import residents
 
+PROJECT_AGENT_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project-agent.resident.json"
+
 
 def valid_manifest(**overrides):
     manifest = {
@@ -553,7 +555,10 @@ class ResidentManifestTest(unittest.TestCase):
         self.assertEqual(report["diagnostics"], [])
         self.assertEqual(
             {resident["file"] for resident in report["residents"]},
-            {"chronicle.resident.json", "life.resident.json"},
+            {"life.resident.json"},
+        )
+        self.assertNotIn(
+            "Maren", {resident["meta"]["name"] for resident in report["residents"]}
         )
 
     def test_every_project_match_names_a_service_that_exists(self):
@@ -561,8 +566,8 @@ class ResidentManifestTest(unittest.TestCase):
 
         A project label defaults to the basename of the session's working directory, so a
         project-matched card only ever matches while a service directory by that name
-        exists. When ``burrow/`` became ``chronicle/`` this card went on naming ``burrow``
-        and Maren simply stopped appearing — no error, no diagnostic, just a resident who
+        exists. When a service directory is renamed, a stale card simply stops appearing —
+        no error, no diagnostic, just a resident who
         was never home. Nothing in the manifest schema could catch it, because the
         manifest was still perfectly valid; only the tree it refers to had moved.
         """
@@ -571,7 +576,10 @@ class ResidentManifestTest(unittest.TestCase):
             child.name for child in chronicle.parent.iterdir() if child.is_dir()
         }
         matched = 0
-        for path in sorted((chronicle / "villagers").glob("*.resident.json")):
+        for path in (
+            PROJECT_AGENT_FIXTURE,
+            *sorted((chronicle / "villagers").glob("*.resident.json")),
+        ):
             project = json.loads(path.read_text(encoding="utf-8"))["match"].get("project")
             if project is None:
                 continue  # agent_id-matched cards do not depend on the tree
@@ -593,7 +601,10 @@ class ResidentManifestTest(unittest.TestCase):
         """
         chronicle = pathlib.Path(__file__).resolve().parents[1]
         checked = 0
-        for path in sorted((chronicle / "villagers").glob("*.resident.json")):
+        for path in (
+            PROJECT_AGENT_FIXTURE,
+            *sorted((chronicle / "villagers").glob("*.resident.json")),
+        ):
             card = json.loads(path.read_text(encoding="utf-8"))
             refs = [skill.get("status_ref") for skill in card.get("skills", [])]
             refs += [card.get("memory", {}).get("ref")]
