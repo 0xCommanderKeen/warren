@@ -4,12 +4,22 @@ description: >-
   deploy key. Everything deploy/deploy.sh needs to reach the burrow, and nothing else.
 
 inputs:
+  # Two ways onto the tailnet; either is enough. An OAuth client mints tagged, ephemeral
+  # keys and never expires but needs `tag:ci` in the policy's tagOwners; a plain auth key
+  # (Keys → Generate auth key: reusable, ephemeral) joins as the person who made it,
+  # needs no tag, and expires within 90 days. When both are set the auth key wins.
+  authkey:
+    description: Tailscale auth key (repo secret TS_AUTHKEY). Optional.
+    required: false
+    default: ""
   oauth-client-id:
-    description: Tailscale OAuth client id (repo secret TS_OAUTH_CLIENT_ID).
-    required: true
+    description: Tailscale OAuth client id (repo secret TS_OAUTH_CLIENT_ID). Optional.
+    required: false
+    default: ""
   oauth-secret:
-    description: Tailscale OAuth client secret (repo secret TS_OAUTH_SECRET).
-    required: true
+    description: Tailscale OAuth client secret (repo secret TS_OAUTH_SECRET). Optional.
+    required: false
+    default: ""
   ssh-key:
     description: The private half of the warren-deploy key (repo secret NAS_SSH_KEY).
     required: true
@@ -31,9 +41,10 @@ runs:
     # `ping` makes the action verify it can reach the NAS before handing back.
     - uses: tailscale/github-action@v4
       with:
-        oauth-client-id: ${{ inputs.oauth-client-id }}
-        oauth-secret: ${{ inputs.oauth-secret }}
-        tags: tag:ci
+        authkey: ${{ inputs.authkey }}
+        oauth-client-id: ${{ inputs.authkey == '' && inputs.oauth-client-id || '' }}
+        oauth-secret: ${{ inputs.authkey == '' && inputs.oauth-secret || '' }}
+        tags: ${{ inputs.authkey == '' && 'tag:ci' || '' }}
         ping: ${{ inputs.nas-address }}
 
     # The first run of this action saw `tailscale up` fail five times with a 403 (the
@@ -46,7 +57,7 @@ runs:
       run: |
         addr="$(sudo tailscale ip -4 2>/dev/null || true)"
         if [ -z "$addr" ]; then
-          echo "::error::this runner never joined the tailnet — check the OAuth client carries tag:ci and the policy's tagOwners grants it (deploy/README.md)"
+          echo "::error::this runner never joined the tailnet — with an OAuth client, check it carries tag:ci and the policy's tagOwners grants it; with an auth key, check it is reusable and not expired (deploy/README.md)"
           sudo tailscale status || true
           exit 1
         fi

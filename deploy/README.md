@@ -86,13 +86,20 @@ Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>
    tag cannot be given one afterwards — it answers `403: calling actor does not have
    enough permissions` when the workflow asks for a `tag:ci` key. Delete it and generate
    a new one.
-3. **GitHub → warren → Settings → Secrets and variables → Actions.** Add the two
-   secrets `TS_OAUTH_CLIENT_ID` and `TS_OAUTH_SECRET`, then set the variable
+   **Or, without tags at all:** **Settings → Keys → Generate auth key** — Reusable ✓,
+   Ephemeral ✓, no tags, expiry up to 90 days. The runner then joins the tailnet as *you*,
+   which the existing policy already lets reach the NAS. Simpler, but it expires: put a
+   reminder where you will see it, because the first symptom of an expired key is a
+   merge that silently stays undeployed. Store it as the secret `TS_AUTHKEY`; when it is
+   set, the OAuth pair is ignored and steps 1–2 are unnecessary.
+
+3. **GitHub → warren → Settings → Secrets and variables → Actions.** Add the secrets —
+   `TS_OAUTH_CLIENT_ID` + `TS_OAUTH_SECRET`, or `TS_AUTHKEY` — then set the variable
    `DEPLOY_ENABLED` to `true`. From a terminal that is the same thing:
 
    ```sh
-   gh secret set TS_OAUTH_CLIENT_ID -R 0xCommanderKeen/warren
-   gh secret set TS_OAUTH_SECRET -R 0xCommanderKeen/warren
+   gh secret set TS_OAUTH_CLIENT_ID -R 0xCommanderKeen/warren   # or:
+   gh secret set TS_OAUTH_SECRET -R 0xCommanderKeen/warren      #   gh secret set TS_AUTHKEY -R 0xCommanderKeen/warren
    gh variable set DEPLOY_ENABLED -R 0xCommanderKeen/warren --body true
    ```
 
