@@ -755,6 +755,7 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     return {
         "id": manifest.id,
         "uid": str(manifest.uid),
+        "home": manifest.home,
         "agent_id": manifest.agent_id,
         "project": manifest.project,
         "summary": manifest.summary,

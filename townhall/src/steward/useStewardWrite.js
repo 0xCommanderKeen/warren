@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /**
  * The shared lifecycle for a write to Steward.
@@ -11,21 +11,16 @@ export function useStewardWrite(write, { onStale, identity } = {}) {
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const generation = useRef(0);
-  const identityRef = useRef(identity);
   const writeRef = useRef(write);
   const onStaleRef = useRef(onStale);
 
-  if (identityRef.current !== identity) {
-    identityRef.current = identity;
+  useLayoutEffect(() => {
     generation.current += 1;
-  }
+    setSaving(false);
+  }, [identity]);
 
   writeRef.current = write;
   onStaleRef.current = onStale;
-
-  useEffect(() => {
-    setSaving(false);
-  }, [identity]);
 
   useEffect(
     () => () => {

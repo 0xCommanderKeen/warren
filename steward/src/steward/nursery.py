@@ -288,7 +288,7 @@ def _soul_document(spec: NewResident, agent_id: str | None) -> str:
 
 
 def _next_home(residents_dir: Path) -> int:
-    """Return the lowest village home not claimed by a valid resident."""
+    """Return the lowest plot not claimed by a valid resident declaration."""
     used = {resident.manifest.home for resident in validate_path(residents_dir).residents}
     try:
         return next(
@@ -296,8 +296,7 @@ def _next_home(residents_dir: Path) -> int:
         )
     except StopIteration as exc:
         raise NurseryError(
-            f"cannot declare a resident: all village homes {VILLAGE_HOME_MIN} through "
-            f"{VILLAGE_HOME_MAX} are claimed"
+            "cannot declare a resident: all village homes 0 through 7 are claimed"
         ) from exc
 
 
@@ -1030,7 +1029,6 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
     """
     directory = residents_dir / spec.id
     manifest_path = directory / MANIFEST_FILENAME
-
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
         wanted = _manifest_model(spec, home=existing.manifest.home)
@@ -1494,7 +1492,6 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; collaborators 
     root = Path(residents_dir)
     checkout = Path(repo) if repo is not None else root.parent
     manifest_path = _declared_manifest(root, resident_id)
-
     if dry_run:
         resident = _load_or_refuse(manifest_path, skills_dir, reason="declaration_invalid")
         target = target_for(resident.manifest)
@@ -1529,8 +1526,6 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; collaborators 
                 "the resident declaration changed after rehearsal; rehearse the current plan",
                 reason="stale_retirement_plan",
             )
-        # The target and its argv are derived from those same locked bytes. Deriving them
-        # before the lock would let revision B pass while the host cleanup still used A.
         target = target_for(resident.manifest)
         conveyance = transport if transport is not None else transport_for(target)
         down = compose_argv(target, "down", "--remove-orphans")
