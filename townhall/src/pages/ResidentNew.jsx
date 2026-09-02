@@ -23,6 +23,7 @@ import { useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
+import { useStewardWrite } from "../steward/useStewardWrite.js";
 import { describeCommit, diagnosticsFor } from "../steward/client.js";
 import { confirmDeclared, useLedger } from "../console/ledger.jsx";
 import {
@@ -253,9 +254,11 @@ export default function ResidentNew() {
 
   const [draft, setDraft] = useState({ ...BLANK, skills: [] });
   const [local, setLocal] = useState([]);
-  const [refusal, setRefusal] = useState(null);
-  const [answer, setAnswer] = useState(null);
-  const [sending, setSending] = useState(false);
+  const {
+    saving, refusal, receipt: answer, save: write, reset: resetWrite, clearReceipt,
+  } = useStewardWrite(
+    (body) => client.createResident(body),
+  );
 
   const skills = library.data?.skills || [];
   const defaults = new Set(skills.filter((skill) => skill.default).map((skill) => skill.name));
@@ -287,36 +290,28 @@ export default function ResidentNew() {
 
   async function declare(event) {
     event.preventDefault();
-    setRefusal(null);
-    setAnswer(null);
+    resetWrite();
     const found = complaints(draft);
     setLocal(found);
     if (found.length) return;
 
-    setSending(true);
     const body = declarationBody(draft, defaults);
-    try {
-      const reply = await client.createResident(body);
-      setAnswer(reply);
-      raise({
-        what: `${body.deploy ? "raise" : "declare"} ${reply.id}`,
-        requestId: reply.request_id,
-        why: reply.message,
-        confirm: confirmDeclared(client, reply),
-      });
-      setDraft({ ...BLANK, skills: [] });
-    } catch (caught) {
-      setRefusal(caught);
-    } finally {
-      setSending(false);
-    }
+    const reply = await write(body);
+    if (!reply) return;
+    raise({
+      what: `${body.deploy ? "raise" : "declare"} ${reply.id}`,
+      requestId: reply.request_id,
+      why: reply.message,
+      confirm: confirmDeclared(client, reply),
+    });
+    setDraft({ ...BLANK, skills: [] });
   }
 
   if (library.loading && !library.data) return <Loading>reading the skills library…</Loading>;
 
   return (
     <form onSubmit={declare}>
-      {answer ? <Declared answer={answer} onDismiss={() => setAnswer(null)} /> : null}
+      {answer ? <Declared answer={answer} onDismiss={clearReceipt} /> : null}
       {refusal ? <Problem error={refusal} /> : null}
       {local.length ? (
         <Problem
@@ -461,8 +456,8 @@ export default function ResidentNew() {
 
       <Rule />
       <Actions>
-        <Button tone="primary" type="submit" disabled={sending}>
-          {sending ? "asking steward…" : "Declare resident"}
+        <Button tone="primary" type="submit" disabled={saving}>
+          {saving ? "asking steward…" : "Declare resident"}
         </Button>
         <Link to={routeTo.residents()} className={buttonClass("ghost")}>
           Back to residents
