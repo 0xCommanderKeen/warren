@@ -31,4 +31,6 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --frozen
-      - run: uv run sh tests/run.sh
+      # run.sh itself must select the locked interpreter; wrapping it in uv here
+      # would hide the clean-shell developer path this workflow is meant to prove.
+      - run: sh tests/run.sh

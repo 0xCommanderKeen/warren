@@ -148,7 +148,7 @@ There is one supported setup path for both Claude Code and Codex:
    [protocol guide](docs/protocol.md#runner-setup). Both runners invoke the same
    installed bundle; Codex adds `--runner codex`.
 3. Add or edit `villagers/*.resident.json`, then validate every manifest with
-   `python3 -m unittest tests.test_residents`. App-grant references and status
+   `uv run --frozen python -m unittest tests.test_residents`. App-grant references and status
    references describe public configuration/health locations only. Chronicle never
    stores app credentials; those stay in the owning app or secret store.
 4. Run the authoritative test suite with `sh tests/run.sh`.
@@ -430,7 +430,7 @@ with status labels. The convention, for humans and agents alike:
 Remove the status label when the issue closes.
 
 Tests are plain scripts throughout the repository. For example, the root-level
-server test can be run directly with `python3 test_serve.py`.
+server test can be run directly with `uv run --frozen python test_serve.py`.
 
 ### Tests
 
@@ -447,7 +447,7 @@ publishes complete snapshots. That is the whole reduction: no second reducer in 
 no browser tests here, no build step:
 
 ```sh
-python3 -m unittest tests.test_village_state tests.test_state_coordinator
+uv run --frozen python -m unittest tests.test_village_state tests.test_state_coordinator
 sh tests/ui-contract.sh
 ```
 

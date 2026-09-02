@@ -36,7 +36,7 @@ Each service is self-contained — work inside its directory:
 
 ```sh
 cd steward   && make check                # uv: ruff + ty + pytest + validate
-cd chronicle && uv run sh tests/run.sh    # full suite
+cd chronicle && sh tests/run.sh           # full suite (selects locked uv environment)
 cd townhall  && pnpm test && pnpm build
 cd arcadia   && pnpm test && pnpm build
 ```

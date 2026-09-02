@@ -39,7 +39,9 @@ def main(argv):
         print(f"== {path}", flush=True)
         if argv == ["--list"]:
             continue
-        command = [os.environ.get("PYTHON", "python3"), path]
+        # run.sh entered through uv, so reuse this exact locked interpreter for
+        # every child instead of resolving an unrelated python from PATH.
+        command = [sys.executable, path]
         subprocess.run(command, cwd=ROOT, check=True)
 
     if not argv:
