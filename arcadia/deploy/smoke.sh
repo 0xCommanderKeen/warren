@@ -5,6 +5,20 @@ origin=${1:-http://127.0.0.1:8737}
 
 curl -fsS "$origin/" | grep -q '<div id="root"></div>'
 curl -fsS "$origin/deep/link" | grep -q '<div id="root"></div>'
+
+# The module script each index.html loads must come back as JavaScript. A 200 is not
+# enough: served as text/plain the browser refuses the module and the page is blank,
+# which no check on index.html can see (2026-09-02).
+for page in "" "observatory/"; do
+  module=$(curl -fsS "$origin/$page" | sed -n 's/.*<script[^>]*type="module"[^>]*src="\([^"]*\)".*/\1/p' | head -n 1)
+  test -n "$module"
+  case "$module" in /*) module_url="$origin$module" ;; *) module_url="$origin/$page$module" ;; esac
+  curl -fsSI "$module_url" | grep -qi '^content-type: .*javascript' || {
+    printf '%s\n' "module $module_url is not served as JavaScript"
+    exit 1
+  }
+done
+printf '%s\n' "module-type=javascript"
 curl -fsS "$origin/burrow/state" >/dev/null
 # Chronicle's manifest-validation report, on the prefixed path Steward's `/residents` left
 # free (warren#242). The `grep` is the real check, not `-f`: an unproxied path is not a 404
