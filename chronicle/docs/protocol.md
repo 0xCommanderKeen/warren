@@ -109,6 +109,18 @@ payload-free diagnostics serialize cross-process updates, keep exact counters,
 and retain only the 20 newest records in
 `~/.chronicle/transport-diagnostics.json`.
 
+Primary replay is bounded by time rather than a fixed record count. A worker reserves the
+last 100 ms of the one-second hook for acknowledgement, measures each successful round trip,
+and only begins another POST when the measured cost plus a safety margin fits before that
+reserve. Delivered IDs are shared with the parent after every POST, and the parent durably
+acknowledges the completed prefix before writing diagnostics. The diagnostics file's
+payload-free `outbox` object reports queue depth and capacity, oldest-record time and age,
+hooks since an acknowledgement, last acknowledgement time, and `healthy` or `stuck` status.
+Ten hooks without an acknowledgement mark a full outbox, or one whose oldest record is at
+least 24 hours old, as stuck and add a bounded `stuck_outbox` diagnostic.
+The installed `chronicle-emit --status` command renders this report as one payload-free
+operator line. It is an explicit inspection mode only and never changes ordinary hook output.
+
 Primary requests carry a random `X-Burrow-Delivery-ID`. A retry retains that ID;
 the server records accepted IDs in a fsynced sidecar ledger and returns 204
 without appending a duplicate. The ledger survives restart and live-log rotation.

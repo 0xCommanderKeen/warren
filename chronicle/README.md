@@ -276,7 +276,12 @@ village's `CHRONICLE_TOKEN` is deliberately never sent to a mirror.
 
 A mirror success never acknowledges the shared village. Primary failures remain in
 `~/.chronicle/primary-outbox.jsonl` until a later hook replays them. Delivery attempts
-to independent targets run concurrently and rotate fairly through a durable queue.
+to independent targets run concurrently and rotate fairly through a durable queue. Replay
+is time-sized: each worker measures its target's round-trip time, starts another POST only
+when that observation says it fits, and reserves the final 100 ms of the hook for a durable
+acknowledgement. Every completed POST is published to the acknowledging thread immediately,
+so a deadline-cut batch still shrinks the outbox instead of replaying its successful prefix
+on the next hook.
 The complete transport path runs in a killable helper under a documented one-second
 host-hook budget; stalled persistence, diagnostics, or fallback cannot hold up the
 hosting agent. A helper killed before its first durable commit can still lose that
@@ -285,7 +290,14 @@ One stable outbox transaction lock orders main and journal authorities by a
 pre-lock enqueue ID and enforces their aggregate caps. Lock contention and capped
 targets are durably deferred and diagnosed. Serialized bounded payload-free
 counters and recent failures are inspectable in
-`~/.chronicle/transport-diagnostics.json`.
+`~/.chronicle/transport-diagnostics.json`. Its payload-free `outbox` object reports
+`status`, `records`, `capacity`, `oldest_queued_at`, `oldest_age_seconds`,
+`hooks_without_ack`, and `last_ack_at`. Ten hooks without an acknowledgement name the
+outbox `stuck` when it is full or its oldest record is at least one day old; the transition
+also adds one `stuck_outbox` entry to the bounded recent history. This local report remains
+available when the emitter is too dark for a central status page to observe truthfully.
+Run `chronicle-emit --status` (or the installed legacy `burrow-emit --status`) to render
+that health as one operator-facing line; ordinary hook invocations remain silent.
 Local-log rotation contention uses the same crash-safe pattern: a stable-lock
 deferred journal, atomic handoff, and idempotent replay IDs. Active plus replay
 deferred authority retains the newest 1,024 records within 5 MiB; capacity drops
