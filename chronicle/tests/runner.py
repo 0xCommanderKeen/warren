@@ -10,6 +10,20 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def without_chronicle_settings(environ):
+    """A copy of ``environ`` with every Chronicle setting, either spelling, gone.
+
+    The module-level app reads CHRONICLE_*/BURROW_* at import (warren#313), so a
+    token or notify URL in the developer's shell would reach every test that
+    serves it. The suite proves the code, not the shell.
+    """
+    return {
+        key: value
+        for key, value in environ.items()
+        if not key.startswith(("CHRONICLE_", "BURROW_"))
+    }
+
+
 def discover_tests():
     output = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, check=True, capture_output=True
@@ -35,6 +49,7 @@ def main(argv):
         return 2
 
     tests = discover_tests()
+    env = without_chronicle_settings(os.environ)
     for _, path in tests:
         print(f"== {path}", flush=True)
         if argv == ["--list"]:
@@ -42,7 +57,7 @@ def main(argv):
         # run.sh entered through uv, so reuse this exact locked interpreter for
         # every child instead of resolving an unrelated python from PATH.
         command = [sys.executable, path]
-        subprocess.run(command, cwd=ROOT, check=True)
+        subprocess.run(command, cwd=ROOT, env=env, check=True)
 
     if not argv:
         print("all green")

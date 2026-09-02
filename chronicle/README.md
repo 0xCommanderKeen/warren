@@ -194,8 +194,11 @@ deploy is pushed from a machine that has the repo checked out.
   `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
   `CHRONICLE_HOST=0.0.0.0`, `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_ARCHIVE`,
   `CHRONICLE_VILLAGERS` and `CHRONICLE_TOKEN=<shared secret>` from the environment.
-  `uvicorn serve:app` does **not**: the module-level app is built from defaults and
-  ignores every setting (warren#313). The compose file is
+  `uvicorn serve:app` reads the same settings at import (only the bind address is
+  uvicorn's own `--host`/`--port`); it did not until warren#313, and the NAS ran it
+  for six days with every setting silently ignored. `tests/test_deployment_bundle.py`
+  boots the shipped tree that way and asserts the token gates ingest and the log lands
+  at `CHRONICLE_EVENTS`. The compose file is
   [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
