@@ -19,7 +19,7 @@
 # What the scheduler runs is deliberately narrower than what the API can see. The image
 # carries every declared resident (residents/), and the API serves them all read-only, but
 # the scheduler and watchdog are pointed at a tree holding Pip alone. Hob (life-agent) and
-# Maren (burrow-builder) declare containers this compose file does not manage: bringing
+# Project-scoped or externally placed residents may declare containers this file does not manage: bringing
 # them under steward's supervision is the pilot (warren#29), a decision made in a manifest
 # and a PR, not in a deploy.
 

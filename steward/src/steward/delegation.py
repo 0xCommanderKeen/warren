@@ -1,8 +1,8 @@
 """Delegation: a resident hands work to a neighbour, and steward is the only arbiter.
 
 A resident working alone in a headless session sooner or later reaches work that is not
-its own — Maren wants background reading before she touches the protocol, Hob wants an
-errand written up by somebody who does that for a living. It cannot call the other
+its own — a project agent wants background reading before touching the protocol, while a
+receiver wants an errand written up by somebody who does that for a living. It cannot call the other
 resident: they are separate processes, woken on separate schedules, and neither is
 listening. So it asks steward to **deliver a letter**, and steward decides whether the
 letter may be delivered at all.

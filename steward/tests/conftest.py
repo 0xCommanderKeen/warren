@@ -17,6 +17,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RESIDENTS_DIR = REPO_ROOT / "residents"
+PROJECT_AGENT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "project-agent" / "manifest.yaml"
 VALID_RESIDENT_UID = "7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9"
 SECOND_RESIDENT_UID = "3a78217a-df03-4f3b-a46a-4c75b4ad929f"
 

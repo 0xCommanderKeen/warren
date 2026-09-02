@@ -752,7 +752,7 @@ nothing. Delivery is pull-based: the receiver drains its inbox on its own next w
 ahead of the open board, and works the item as an ordinary session.
 
 ```console
-$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward delegate sender-resident --to life-agent --route handoff --title "…"
 $ steward inbox life-agent                 # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>           # the whole chain, root first
 ```

@@ -367,7 +367,7 @@ It is also the one write path a session credential reaches, and it behaves diffe
 one: see [Three kinds of caller](#three-kinds-of-caller).
 
 ```json
-{"from": "burrow-builder", "to": "life-agent", "route": "handoff",
+{"from": "sender-resident", "to": "life-agent", "route": "handoff",
  "title": "Check the errand list", "detail": "…", "parent_task_id": "…"}
 ```
 
@@ -805,7 +805,7 @@ The skills library, and who holds each skill.
   "skills": [
     {"name": "research", "description": "Answer a question from real sources…",
      "default": true, "path": "skills/research/SKILL.md", "body_chars": 2391,
-     "holders": ["life-agent", "burrow-builder"]}
+     "holders": ["life-agent", "sender-resident"]}
   ],
   "errors": []
 }
