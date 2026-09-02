@@ -1665,7 +1665,7 @@ class Resident:
 RETIRED_REASON = (
     "resident {id!r} is retired: its manifest declares retired: true, so it takes no "
     "routines, no board tasks, no letters, and no run-now. Set retired: false and commit "
-    "to bring it back, and run `steward new-resident` to put its container back up."
+    "to bring it back, and run `steward provision {id}` to put its container back up."
 )
 
 
