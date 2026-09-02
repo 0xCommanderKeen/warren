@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
-import { agentUrl, eventFeed, routeAgent, viewModel } from "./model.js";
+import { eventFeed, viewModel } from "./model.js";
 
 const snapshot = fixture.snapshot;
 
@@ -28,8 +28,6 @@ describe("Observatory presentation model", () => {
     const model = viewModel(changed);
     expect(model.people.find((person) => person.id === "claude:keeper").hasPage).toBe(true);
     expect(model.people.find((person) => person.id === "codex:visitor").hasPage).toBe(false);
-    expect(agentUrl("codex:550e8400-e29b-41d4-a716-446655440000")).toBe("/agents/550e8400-e29b-41d4-a716-446655440000");
-    expect(routeAgent("/agents/550e8400-e29b-41d4-a716-446655440000")).toBe("550e8400-e29b-41d4-a716-446655440000");
   });
 
   it("forms one newest-first retained activity feed", () => {

@@ -7,7 +7,7 @@
  */
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { matchRoute, stripBase, withBase } from "./routes.js";
+import { matchPath, withBase } from "./routes.js";
 
 const NavigationContext = createContext(null);
 
@@ -39,10 +39,7 @@ export function NavigationProvider({ base, children }) {
   );
 
   const value = useMemo(() => {
-    // A path outside the mount cannot be one of our routes; treat it as the root rather
-    // than matching a page out of somebody else's URL.
-    const route = stripBase(pathname, base) ?? "/";
-    return { base, route, href, navigate, ...matchRoute(route) };
+    return { base, href, navigate, ...matchPath(pathname, base) };
   }, [pathname, base, href, navigate]);
 
   return <NavigationContext.Provider value={value}>{children}</NavigationContext.Provider>;
