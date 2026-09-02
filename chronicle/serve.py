@@ -232,8 +232,8 @@ _delivery_id_pattern = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 def villager_names(events, villagers_dir=None):
     """Resolve stable names for a fleet.
 
-    Souls and fallback names are unique within the fleet, so resolving an event in
-    isolation can disagree with the name on screen.
+    Resident manifests and legacy project souls are assigned once within the fleet;
+    fallback names come from the projection's shared identity algorithm.
     """
     latest = {}
     parent_by_agent = {}

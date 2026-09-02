@@ -74,12 +74,17 @@ from steward.input_bounds import (
 from steward.journal import journal_complaint, read_entries
 from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
 from steward.nursery import (
+    CLAUDE_LOGIN_REMAINS,
+    COMMIT_FAILED,
+    WORKTREE_REFUSED,
     CommitIdentity,
     NewResident,
     NurseryError,
     NurseryReport,
+    RetireReport,
     provision_resident,
     raise_resident,
+    retire_resident,
 )
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
@@ -122,6 +127,7 @@ __all__ = [
     "NurseryPipeline",
     "ProvisionPipeline",
     "ResidentPost",
+    "RetirePipeline",
     "create_app",
     "run_server",
 ]
@@ -135,6 +141,11 @@ type NurseryPipeline = Callable[..., NurseryReport]
 #: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
 #: ``steward provision`` run one pipeline rather than two that happen to agree.
 type ProvisionPipeline = Callable[..., NurseryReport]
+
+#: And how it reaches the door back out again. Same seam, same reason: retirement is a
+#: mark, a commit, a ``docker compose down`` and two removals in one order, and a route
+#: with its own copy of that order would be a second place for it to be wrong.
+type RetirePipeline = Callable[..., RetireReport]
 
 log = logging.getLogger("steward.api")
 
@@ -392,6 +403,27 @@ class ProvisionPost(_Body):
     dry_run: bool = Field(
         default=False,
         description="Print the plan and reach no host. Nothing is sent, run, or written.",
+    )
+
+
+class RetirePost(_Body):
+    """Whether to retire the declared resident, or only rehearse retiring it.
+
+    The mirror of :class:`ProvisionPost`, and for the same reason there is nothing else on
+    it: retirement takes an id and reads the declared manifest, so the request *is* the
+    resident. The knobs ``steward retire`` offers beyond this one — ``--no-commit``,
+    ``--no-deploy``, ``--allow-dirty`` — are break-glass for a host that is already gone or
+    a checkout somebody is mid-way through, and each of them leaves the retirement half
+    done in a way only the person at the terminal can see. A control panel gets the whole
+    act or a refusal naming what stopped it.
+    """
+
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Report the plan and touch nothing: no mark, no commit, no host. `commands` is "
+            "the exact argv a real run would issue."
+        ),
     )
 
 
@@ -783,6 +815,33 @@ PROVISION_STATUS: Mapping[str, int] = {
 PROVISION_FAILED = "provision_failed"
 PROVISION_REFUSED = "provision_refused"
 
+#: How a refused retirement is answered. ``unknown_resident``, ``resident_invalid`` and
+#: ``resident_retired`` are settled by the route itself before the pipeline is called — see
+#: :func:`_find_resident` and the retired check in the route — so what is left here is what
+#: the pipeline can still name once it is running: a checkout it will not commit into, a
+#: commit git refused, and the races the pre-checks cannot close.
+RETIRE_STATUS: Mapping[str, int] = {
+    "unknown_resident": 404,
+    "resident_retired": 409,
+    "declaration_invalid": 409,
+    WORKTREE_REFUSED: 409,
+    COMMIT_FAILED: 409,
+}
+
+#: What an unnamed retirement failure is: the host answered and said no, or stopped
+#: answering part-way. Never borrowed for anything the caller could fix by sending
+#: different bytes — there are no bytes here to send.
+RETIRE_FAILED = "retire_failed"
+RETIRE_REFUSED = "retire_refused"
+
+#: The retirement refusals that changed nothing at all. Everything else stopped *part-way*
+#: — a manifest marked and not committed, or marked and committed with the container still
+#: up — and the request log has to be able to tell those apart. A row reading "refused" over
+#: a request that left a commit in git is the one row an audit cannot recover from.
+RETIRE_UNTOUCHED: frozenset[str] = frozenset(
+    {"unknown_resident", "declaration_invalid", WORKTREE_REFUSED}
+)
+
 
 def _deployed_message(report: NurseryReport) -> str:
     """Say what a finished provision came to — **both** halves of it.
@@ -821,6 +880,41 @@ def _provision_message(report: NurseryReport) -> str:
         f"converged: the host already had this bundle, so nothing was sent. "
         f"{_deployed_message(report)}"
     )
+
+
+def _retire_message(report: RetireReport) -> str:
+    """Say what ``POST /residents/{id}/retire`` came to — all three halves of it.
+
+    A retirement is a decision, a container and a credential, and a message that named only
+    the first would let a control panel report "retired" over a resident whose ``.env`` is
+    still on the NAS holding a live village token. So the mark, the host, and the login
+    steward deliberately did *not* remove are all said, in that order, every time.
+    """
+    if report.dry_run:
+        return (
+            "nothing was marked, committed, stopped, or removed: this is the plan, and "
+            "`commands` is the exact argv a real run would issue"
+        )
+    if not report.marked:
+        mark = "the manifest already said retired"
+    elif report.commit:
+        mark = "the manifest now says retired and that decision is committed"
+    else:
+        mark = (
+            "the manifest now says retired, but nothing committed it — there is no history "
+            "of this decision"
+        )
+    # ``note`` is steward's own sentence about the host, and it says something specific
+    # exactly when there was nothing to stop — "nothing at ~/docker/… to stop", "deploy
+    # skipped". When the stop succeeded it is the word "retired", which is the outcome
+    # already said above, so that case is the one this spells out rather than repeats.
+    if not report.stopped:
+        host = report.note
+    elif report.scrubbed:
+        host = "the container is down and the .env holding BURROW_TOKEN is gone"
+    else:
+        host = "the container is down; there was no .env here to remove"
+    return f"{mark}; {host}. {CLAUDE_LOGIN_REMAINS}"
 
 
 def _refuse_reload(errors: Sequence[str]) -> NoReturn:
@@ -942,6 +1036,14 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "provisioning is starting a container on a machine over ssh; a session that "
             "could do it would be building its own colleagues, or itself again"
+        ),
+    ),
+    (
+        "/retire",
+        (
+            "retiring is ending a resident: a mark in git, a container stopped and a village "
+            "token removed; a session that could do it would be deciding which of its "
+            "colleagues carries on, or dismissing itself"
         ),
     ),
     (
@@ -1234,6 +1336,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
     provisioner: ProvisionPipeline = provision_resident,
+    retirer: RetirePipeline = retire_resident,
     transport: Transport | None = None,
     approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -1694,6 +1797,104 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "request_id": request_id,
             "message": _provision_message(report),
+            **report.to_dict(),
+        }
+
+    def record_refusal(request_id: str, reason: str) -> None:
+        """Correct a retirement's logged outcome, saying how far it actually got.
+
+        ``refused`` only where the refusal changed nothing. A retirement that stopped after
+        the mark left the resident already out of the scheduler, the board and the watchdog,
+        and one that stopped after the commit left that in git — logging either as "refused"
+        would tell whoever reads the audit trail the opposite of what happened.
+        """
+        landed = reason not in RETIRE_UNTOUCHED
+        db.set_request_outcome(
+            request_id,
+            f"{'stopped part-way' if landed else 'refused'}: {reason}",
+            {"reason": reason, "changed_something": landed},
+        )
+
+    @app.post("/residents/{resident_id}/retire")
+    def retire_declared_resident(
+        resident_id: str, request: Request, body: RetirePost | None = None
+    ) -> dict[str, Any]:
+        """End a resident: mark it retired in git, stop its container, remove its token.
+
+        The counterpart of ``POST /residents/{id}/provision`` (warren#331), and the reason
+        it had to exist: retirement is not a manifest edit. Writing ``retired: true``
+        through ``PUT …/declaration`` marks the resident and leaves its container running
+        with a live village token on the host — the half that matters most left undone —
+        so a control panel that could only edit declarations could show a retired badge it
+        had no way to make true.
+
+        **The order is the safety argument, and it is the nursery's, not this route's.**
+        ``retired: true`` is what takes the resident out of the scheduler, the board,
+        delegation and the watchdog; stopping the container first would leave a window in
+        which the watchdog notices it die and dutifully puts it back. So: mark, commit,
+        ``docker compose down``, then remove the ``.env`` and the compose file — in that
+        order, by one pipeline ``steward retire`` also calls.
+
+        **This one commits through the nursery**, unlike ``POST /residents``, which asks the
+        pipeline not to and commits afterwards through :mod:`steward.authoring`. The reason
+        is the order above: retirement's commit belongs *between* the mark and the stop, and
+        the only code inside that sequence is the pipeline. What comes with the nursery's
+        commit is the nursery's dirty-worktree refusal, which is named rather than hidden —
+        a server that committed a retirement into a checkout somebody was half-way through
+        would be a server nobody can revert one decision in.
+
+        **200, not 202**, for the reason provision answers 200: by the time this returns the
+        container is down and the credential is gone. There is nothing left to acknowledge.
+        """
+        asked = body or RetirePost()
+        # Resolved the way every other `/residents/{id}` route resolves — so a uid names a
+        # resident here too, and an id that exists with a manifest that does not validate is
+        # `resident_invalid` rather than a 404 sending somebody to look for a missing
+        # directory. It is also where the retired check belongs: `retire_resident` itself
+        # deliberately reconciles a half-finished retirement when you run it again, which is
+        # break-glass at a terminal and not a button. A control panel offers Provision to a
+        # retired resident, and this refusal is what says so to anything that does not.
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = _find_resident(result, resident_id, residents_dir)
+        if resident.retired:
+            _refuse(
+                409,
+                "resident_retired",
+                f"resident {resident.id!r} is already retired, so there is nothing here to "
+                f"end. The way back is the other direction: set retired: false in "
+                f"{resident.path}, commit that decision, and POST "
+                f"/residents/{resident.id}/provision to put its container up again. A "
+                f"retirement left half done — marked, but the container still up — is "
+                f"`steward retire {resident.id}` at a terminal.",
+            )
+        request_id = accept(
+            request,
+            "rehearsed" if asked.dry_run else "retired",
+            {"resident": resident.id},
+        )
+        try:
+            report = retirer(
+                resident.id,
+                residents_dir=residents_dir,
+                skills_dir=settings.skills_dir,
+                transport=transport,
+                dry_run=asked.dry_run,
+                identity=write_settings(request)["identity"],
+            )
+        except NurseryError as exc:
+            # Keyed on the nursery's own `reason` exactly as provision is. An unnamed one is
+            # the host: a `docker compose down` that failed, a machine that stopped
+            # answering between the stop and the removal. Those say so rather than borrowing
+            # a name that would send an operator to look at the declaration.
+            reason = exc.reason or RETIRE_FAILED
+            record_refusal(request_id, reason)
+            _refuse(RETIRE_STATUS.get(reason, 409), reason, str(exc))
+        except TransportError as exc:
+            record_refusal(request_id, RETIRE_REFUSED)
+            _refuse(409, RETIRE_REFUSED, str(exc))
+        return {
+            "request_id": request_id,
+            "message": _retire_message(report),
             **report.to_dict(),
         }
 
