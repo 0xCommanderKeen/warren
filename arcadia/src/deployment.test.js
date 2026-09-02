@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const nginx = readFileSync("deploy/nginx.conf", "utf8");
@@ -55,9 +55,15 @@ describe("production deployment contract", () => {
  * be invisible here, so add it to the file or to this reader.
  */
 const stewardApiRoutes = () => {
-  const api = readFileSync("../steward/src/steward/api.py", "utf8");
+  const api = [
+    readFileSync("../steward/src/steward/api.py", "utf8"),
+    ...readdirSync("../steward/src/steward/routes")
+      .filter((name) => name.endsWith(".py"))
+      .map((name) => readFileSync(`../steward/src/steward/routes/${name}`, "utf8")),
+  ].join("\n");
   const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
-  expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+  declared.push(...api.matchAll(/@routes\.(?:get|post|put|patch|delete)\("(\/[^\"]*)"/g));
+  expect(declared.length, "no API routes found — the reader has gone stale").toBeGreaterThan(0);
   return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
 };
 
