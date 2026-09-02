@@ -798,6 +798,67 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         self.assertTrue(delivered)
         self.assertLess(len(self.outbox()), before)
 
+    def test_a_slow_retry_diagnostic_cannot_turn_an_accepted_event_into_fallback(self):
+        """Acceptance is transport state before best-effort diagnostic fsync (#333)."""
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.5),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.05),
+            mock.patch.object(emit, "post_event", return_value=True),
+            mock.patch.object(
+                emit,
+                "_diagnose",
+                side_effect=lambda kind, **_kwargs: (
+                    time.sleep(0.5) if kind == "retry" else None
+                ),
+            ),
+        ):
+            emit.deliver(self.EVENT)
+
+        self.assertEqual(self.outbox(), [])
+        self.assertFalse(
+            os.path.exists(emit.LOG), "an accepted event must not be duplicated locally"
+        )
+
+    def test_slow_retry_diagnostic_keeps_unattempted_records_durable(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "post_event", return_value=False),
+        ):
+            emit.deliver(dict(self.EVENT, ts="older"))
+        older_id = self.outbox()[0]["delivery_id"]
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.5),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.05),
+            mock.patch.object(emit, "post_event", return_value=True),
+            mock.patch.object(
+                emit,
+                "_diagnose",
+                side_effect=lambda kind, **_kwargs: (
+                    time.sleep(0.5) if kind == "retry" else None
+                ),
+            ),
+        ):
+            emit.deliver(dict(self.EVENT, ts="current"))
+
+        remaining = self.outbox()
+        self.assertEqual(len(remaining), 1)
+        self.assertNotEqual(remaining[0]["delivery_id"], older_id)
+        self.assertEqual(remaining[0]["event"]["ts"], "current")
+
     def test_capped_outbox_without_acknowledgements_is_named_stuck(self):
         with (
             mock.patch.object(emit, "OUTBOX_RECORDS", 2),
