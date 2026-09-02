@@ -49,27 +49,23 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import Field, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import authoring as au
-from steward import delegation as dg
 from steward import events as ev
-from steward import manifest as m
 from steward.board import Dispatcher
-from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
+from steward.budgets import BudgetGuard, BudgetStatus
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
 from steward.deploy import Transport, TransportError
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
-    DETAIL_MAX_CHARS,
     EDIT_MAX_DEPTH,
     IDENTIFIER_MAX_CHARS,
-    TITLE_MAX_CHARS,
     validate_json_container_depth,
 )
 from steward.journal import journal_complaint, read_entries
-from steward.manifest import Resident, ValidationResult, retired_complaint, validate_path
+from steward.manifest import Resident, ValidationResult, validate_path
 from steward.nursery import (
     CLAUDE_LOGIN_REMAINS,
     COMMIT_FAILED,
@@ -86,8 +82,12 @@ from steward.nursery import (
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.routes import approvals as approval_routes
 from steward.routes import board as board_routes
+from steward.routes import delegation as delegation_routes
+from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
+from steward.routes import routines as routine_routes
 from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
+from steward.routes.routines import AlreadyRunningError, last_run_view, latest_run_requests
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.scheduler import (
@@ -97,7 +97,6 @@ from steward.scheduler import (
     Scheduler,
     SchedulerState,
     default_state_path,
-    scheduler_liveness,
 )
 from steward.session_auth import (
     SESSION_TOKEN_ENV,
@@ -107,11 +106,7 @@ from steward.session_auth import (
 from steward.sessions import RunnerFactory
 from steward.skills import SkillLibrary, effective_skills, library_for
 from steward.store import (
-    JOB_STATUSES,
-    STATUS_OPEN,
     ApprovalRecord,
-    LedgerEntry,
-    RequestRecord,
     Store,
     default_db_path,
     new_id,
@@ -130,6 +125,8 @@ __all__ = [
     "ResidentPost",
     "RetirePipeline",
     "create_app",
+    "last_run_view",
+    "latest_run_requests",
     "run_server",
 ]
 
@@ -299,40 +296,6 @@ def _flag(raw: str | None) -> bool:
     return (raw or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def latest_run_requests(records: Sequence[RequestRecord]) -> dict[str, dict[str, Any]]:
-    """Index the request log by routine key, keeping the newest entry for each.
-
-    This is how the routine ledger answers "and what became of the last run somebody
-    asked for" without inventing a second ledger: the request log already records the
-    outcome a manual fire came to, and the routine key is in its detail.
-    """
-    latest: dict[str, dict[str, Any]] = {}
-    for record in records:  # oldest first, so the newest request is the last write
-        key = record.detail.get("routine")
-        if isinstance(key, str):
-            latest[key] = record.to_dict()
-    return latest
-
-
-def last_run_view(entry: LedgerEntry | None) -> dict[str, Any] | None:
-    """Return the small "what actually ran" block a routine row carries, or ``None``.
-
-    Deliberately five fields rather than the whole ledger entry: a routine ledger answers
-    *did this fire, how was it started, and how did it go*, and the money is
-    ``GET /residents/{id}/budget``'s question. ``None`` means no run of this routine has
-    ever finished — which is a real answer and not the same as one that failed.
-    """
-    if entry is None:
-        return None
-    return {
-        "run_id": entry.run_id,
-        "trigger": entry.trigger,
-        "outcome": entry.outcome,
-        "recorded_at": entry.recorded_at,
-        "duration_s": round(entry.duration_s, 3),
-    }
-
-
 def resolve_token(token: str | None, *, allow_open: bool) -> str | None:
     """Return the token to require, or ``None`` in open mode. Raises otherwise.
 
@@ -473,82 +436,6 @@ class SkillPost(SkillBody):
         max_length=IDENTIFIER_MAX_CHARS,
         description="The skill's slug; it becomes the directory name.",
     )
-
-
-class HandoffPost(_Body):
-    """Work handed to one named resident, through a route that resident declares."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, populate_by_name=True)
-
-    to: str = Field(
-        min_length=1,
-        max_length=IDENTIFIER_MAX_CHARS,
-        description="The resident id receiving the work.",
-    )
-    route: str = Field(
-        min_length=1,
-        max_length=IDENTIFIER_MAX_CHARS,
-        description="A delegation route that resident declares.",
-    )
-    title: str = Field(
-        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
-    )
-    detail: str = Field(
-        default="",
-        max_length=DETAIL_MAX_CHARS,
-        description="Everything the receiver needs to know.",
-    )
-    sender: str | None = Field(
-        default=None,
-        alias="from",
-        max_length=IDENTIFIER_MAX_CHARS,
-        description="The resident handing the work over. Omit it when a person is.",
-    )
-    parent_task_id: str | None = Field(
-        default=None,
-        max_length=IDENTIFIER_MAX_CHARS,
-        description="The task this work descends from, for lineage and attribution.",
-    )
-
-
-#: What a refusal costs over HTTP. A recipient steward has never heard of is a 404 like
-#: any other unknown resident, and a retired one is a 404 too — from the sender's side there
-#: is nobody at that address any more, even though the reason code now says which (steward
-#: #W21). Everything else is a conflict between the request and what the two manifests
-#: actually declare, which is a 409 and not a malformed request.
-DELEGATION_STATUS: Mapping[str, int] = {
-    dg.UNKNOWN_RECIPIENT: 404,
-    dg.RETIRED_RECIPIENT: 404,
-    dg.UNKNOWN_PARENT: 404,
-}
-DELEGATION_REFUSED_STATUS = 409
-
-
-# --------------------------------------------------------------------------------------
-# run-now
-# --------------------------------------------------------------------------------------
-
-
-#: The error code a run-now is refused with when the resident is already busy — whether
-#: this process is running it or another one is (warren#111). One code, because from the
-#: caller's side it is one fact: ask again when the session that is going has finished.
-ALREADY_RUNNING_ERROR = "already_running"
-
-
-class AlreadyRunningError(Exception):
-    """Raised when a resident is asked to run while a session of its own is still going.
-
-    ``reason`` is the sentence the refusal is served with, because the two ways this can
-    happen are worth telling apart: this process already has that routine in flight, or
-    another process — the scheduler daemon, a dispatch, a chat daemon — is running the
-    resident right now (warren#111). Same 409 and the same code either way; a caller that
-    only needs to know when to ask again reads either sentence the same way.
-    """
-
-    def __init__(self, reason: str) -> None:
-        """Carry the sentence this refusal is served with."""
-        super().__init__(reason)
-        self.reason = reason
 
 
 @dataclass(slots=True)
@@ -862,29 +749,6 @@ def _retire_message(report: RetireReport) -> str:
     else:
         host = "the container is down; there was no .env here to remove"
     return f"{mark}; {host}. {CLAUDE_LOGIN_REMAINS}"
-
-
-def _refuse_reload(errors: Sequence[str]) -> NoReturn:
-    """Refuse to swap in a tree that does not validate, and say which part does not."""
-    raise HTTPException(
-        status_code=409,
-        detail={
-            "error": "tree_invalid",
-            "message": (
-                "the residents tree does not validate, so nothing was reloaded and this "
-                "process is still running the last declarations that did; run "
-                "`steward validate` for the field-by-field diagnostics"
-            ),
-            "errors": list(errors),
-        },
-    )
-
-
-def _refuse_if_retired(resident: Resident) -> None:
-    """Refuse to give work to a retired resident, with the reason every path shares."""
-    complaint = retired_complaint(resident)
-    if complaint is not None:
-        _refuse(409, "resident_retired", complaint)
 
 
 def _find_resident(  # noqa: RET503 — every fallthrough raises through the shared refusal seam
@@ -1497,6 +1361,9 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     app.include_router(request_routes.router(deps))
     app.include_router(board_routes.router(deps))
     app.include_router(approval_routes.router(deps))
+    app.include_router(reload_routes.router(deps))
+    app.include_router(routine_routes.router(deps))
+    app.include_router(delegation_routes.router(deps))
 
     def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return the id it is traceable by."""
@@ -2073,321 +1940,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             created=False,
             expected_revision=body.revision,
         )
-
-    # -- reload ------------------------------------------------------------------------
-
-    @app.post("/reload")
-    def reload_fleet(request: Request) -> dict[str, Any]:
-        """Re-read the residents tree and the skills library into this process.
-
-        **This process**, and the distinction is the whole of the endpoint's honesty. The
-        scheduler daemon is a *different process* — usually on the same burrow, started by
-        ``steward serve`` — and no HTTP call can reach into it. It does not need one: it
-        watches the trees itself and reloads on its next wake-up (:class:`TreeSource`),
-        which is within a minute. What this endpoint fixes is the API's own long-lived
-        collaborators, the run-now scheduler and the board dispatcher, which were assembled
-        at startup and would otherwise fire a routine against the manifest that was on disk
-        when the server booted.
-
-        Read views need no reload at all — they re-read the tree on every request.
-        """
-        current = library_for(residents_dir, settings.skills_dir)
-        result = validate_path(residents_dir, settings.skills_dir)
-        errors = [diagnostic.render() for diagnostic in result.errors]
-        if errors:
-            # The same judgement the daemon makes (:meth:`Scheduler.reload_if_changed`): a
-            # tree that stopped validating does not stop the fleet. Swapping in what did
-            # parse would quietly retire every resident whose manifest is mid-edit, so the
-            # previous snapshot stands and the reason is returned rather than swallowed.
-            _refuse_reload(errors)
-        active = tuple(m.active_residents(result.residents))
-        runs.scheduler.set_library(current)
-        runs.scheduler.scheduled = [
-            ScheduledRoutine(resident=resident, routine=routine)
-            for resident in active
-            for routine in resident.manifest.routines
-            if routine.enabled
-        ]
-        hooks.refresh(active, current)
-        app.state.library = current
-        request_id = accept(request, "reloaded", {"residents": len(active)})
-        return {
-            "request_id": request_id,
-            "status": "reloaded",
-            "residents": len(active),
-            "routines": len(runs.scheduler.scheduled),
-            "skills": [skill.name for skill in current],
-            "errors": errors,
-            "message": (
-                "this API process re-read the tree; the scheduler daemon is a separate "
-                "process and picks the same change up on its own next wake-up"
-            ),
-        }
-
-    # -- routines --------------------------------------------------------------------
-
-    @app.get("/routines")
-    def list_routines() -> dict[str, Any]:
-        """Every routine of every valid resident: the fleet-wide standing-work ledger.
-
-        Assembled from three things steward already knows and nothing it does not. The
-        schedule and the switch come from the manifest. ``next_fire`` is computed from the
-        cron expression in the routine's own zone, and is ``null`` for a disabled routine
-        because a routine that is off has no next occurrence to promise.
-
-        A **retired** resident's routines are listed — they are still declared, and a
-        ledger that hid them could not answer what used to run here — and carry
-        ``retired: true`` with ``next_fire: null`` for the same reason a disabled routine
-        does: :func:`steward.scheduler.load_scheduled` leaves retired residents out, so
-        there is no next occurrence to promise. Run-now refuses them with ``409
-        resident_retired``, which is what townhall reads to grey the button out.
-
-        ``anchor`` is the scheduler's own state file, read fresh on every request because
-        the daemon is a different process — and it is called an anchor rather than a last
-        run because that is what it is: the moment the next occurrence is computed from,
-        which is the last fire *or* the moment steward first saw the routine. Calling it
-        "last run" would let a routine that has never fired look like one that has.
-
-        ``scheduler`` is the one thing here that *is* a heartbeat: when a scheduler process
-        last woke up against that state file, how stale that may get before it stops
-        meaning anything is up, and the verdict. ``alive: null`` — never ticked — is its
-        own answer, distinct from a daemon that died. A ledger is still a declaration; this
-        is what says whether the declarations have anything to fire them.
-
-        ``last_run`` and ``last_request`` are two different facts and both are here
-        (warren#104). ``last_request`` is the *API request log*: a run somebody asked for
-        over HTTP. A scheduled fire is not an HTTP request, so it never appears there — and
-        a panel that showed only that one concluded a perfectly healthy resident "only runs
-        when I trigger it manually", which was false. ``last_run`` is the run ledger, which
-        every finished session writes to whatever started it, so it carries the trigger
-        (``schedule`` or ``manual``) and the outcome. Keeping both is the point: a request
-        that was accepted and never ran is exactly the case where they disagree, and that
-        disagreement is the diagnosis.
-        """
-        result = validate_path(residents_dir, settings.skills_dir)
-        state = SchedulerState.load(default_state_path())
-        now = datetime.now(UTC)
-        latest = latest_run_requests(db.requests())
-        runs_by_key = db.latest_routine_runs()
-        routines = []
-        for resident in result.residents:
-            for routine in resident.manifest.routines:
-                item = ScheduledRoutine(resident=resident, routine=routine)
-                anchor = state.anchor(item.key)
-                routines.append(
-                    {
-                        "key": item.key,
-                        "resident": resident.id,
-                        "resident_name": resident.manifest.soul.name,
-                        "accent": resident.manifest.soul.accent,
-                        "routine": routine.id,
-                        "schedule": routine.schedule,
-                        "schedule_tz": routine.schedule_tz,
-                        "enabled": routine.enabled,
-                        "retired": resident.retired,
-                        "requires": list(routine.requires),
-                        "timeout_s": routine.timeout_s,
-                        "journal": routine.journal,
-                        "anchor": anchor.isoformat() if anchor is not None else None,
-                        "next_fire": item.next_fire_after(now).isoformat()
-                        if routine.enabled and not resident.retired
-                        else None,
-                        "last_request": latest.get(item.key),
-                        "last_run": last_run_view(runs_by_key.get(item.key)),
-                    }
-                )
-        return {
-            "routines": routines,
-            "state_path": str(default_state_path()),
-            "scheduler": scheduler_liveness(state, now),
-            "errors": [diagnostic.render() for diagnostic in result.errors],
-        }
-
-    # -- run now ---------------------------------------------------------------------
-
-    @app.post("/residents/{resident_id}/routines/{routine_id}/run", status_code=202)
-    def run_routine(resident_id: str, routine_id: str, request: Request) -> dict[str, Any]:
-        """Ask for one run of one routine, right now, and acknowledge only that."""
-        result = validate_path(residents_dir, settings.skills_dir)
-        resident = _find_resident(result, resident_id, residents_dir)
-        _refuse_if_retired(resident)
-        routine = next((r for r in resident.manifest.routines if r.id == routine_id), None)
-        if routine is None:
-            known = ", ".join(r.id for r in resident.manifest.routines) or "none"
-            _refuse(
-                404,
-                "unknown_routine",
-                f"resident {resident_id!r} declares no routine {routine_id!r} "
-                f"(declared routines: {known})",
-            )
-        if not routine.enabled:
-            _refuse(
-                409,
-                "routine_disabled",
-                f"routine {routine_id!r} is disabled in {resident.path}; enable it in the "
-                f"manifest rather than firing something the declaration says is off",
-            )
-        refusal = guard.allow(resident.manifest)
-        if refusal is not None:
-            # Refused before anything is written, like every other refusal here. A human
-            # asking for a run now is not a way around a budget the same human set — the
-            # message names the number and how to lift it.
-            _refuse(409, PAUSED_ERROR, refusal)
-        item = ScheduledRoutine(resident=resident, routine=routine)
-        request_id = accept(request, "queued", {"routine": item.key})
-        try:
-            runs.submit(item, request_id)
-        except AlreadyRunningError as exc:
-            # Two overlaps, one refusal: this process already has that routine in flight, or
-            # another process is running the resident and said so in the shared claim
-            # (warren#111). The scheduler daemon's in-process lock was invisible here until
-            # that claim became durable, which is the whole of the issue. Recorded in the
-            # request log either way, so a run somebody asked for and did not get is a fact
-            # rather than a silence.
-            db.set_request_outcome(request_id, "refused: already running")
-            _refuse(409, ALREADY_RUNNING_ERROR, exc.reason)
-        return {
-            "request_id": request_id,
-            "status": "accepted",
-            "resident": resident_id,
-            "routine": routine_id,
-            "trigger": TRIGGER_MANUAL,
-            "message": (
-                "queued one run; it has happened when routine_started and then "
-                "routine_finished or routine_failed appear in burrow's log"
-            ),
-        }
-
-    # -- delegation ------------------------------------------------------------------
-
-    @app.get("/residents/{resident_id}/inbox")
-    def get_inbox(resident_id: str, status: str | None = None) -> dict[str, Any]:
-        """List the work delegated to this resident. Pending by default.
-
-        Pending means *open*: handed over and not yet picked up. ``?status=`` narrows to
-        any board status, and ``all`` is everything ever addressed to this resident, which
-        is the audit view — who sent it, through which route, and what became of it.
-
-        ``routes`` names every declared delegation route *with its status*, not only the
-        ones open today, and ``pending`` is the open count whatever ``?status=`` asked
-        for: a caller has to be able to see letters stacked behind a route somebody shut
-        (#46), which a list of accepting routes alone cannot show.
-        """
-        wanted = status or STATUS_OPEN
-        if wanted not in (*JOB_STATUSES, APPROVAL_STATUS_ALL):
-            _refuse(
-                422,
-                "unknown_status",
-                f"status {status!r} is not an inbox status; use one of: "
-                f"{', '.join(JOB_STATUSES)}, all",
-            )
-        result = validate_path(residents_dir, settings.skills_dir)
-        resident = _find_resident(result, resident_id, residents_dir)
-        items = db.inbox(resident.id, None if wanted == APPROVAL_STATUS_ALL else wanted)
-        return {
-            "resident": resident.id,
-            "status": wanted,
-            "routes": [
-                {"id": route.id, "status": route.status, "accepts": route.accepts_delegation}
-                for route in resident.inbound_routes
-            ],
-            "pending": db.inbox_count(resident.id),
-            "inbox": [item.to_dict() for item in items],
-        }
-
-    @app.post("/delegate", status_code=202)
-    def delegate(body: HandoffPost, request: Request) -> dict[str, Any]:
-        """Hand work to one resident, if both manifests and the guardrails agree.
-
-        The human path into steward #7; a session uses the ``<delegate>`` block or
-        ``steward delegate``, neither of which needs this token. ``from`` names the
-        resident handing the work over and its manifest is checked exactly as it would be
-        for a block — a person must not be able to make a resident do what its own
-        declaration forbids. Omitting ``from`` means the person is the sender, and then
-        the receiver's route is the whole of the agreement.
-
-        **A session credential is the sender**, and the body cannot say otherwise
-        (steward #41). This route used to read the sender from the request body with
-        nothing binding the caller to the resident it named, so a session holding the API
-        token could sign as any resident — or omit ``from`` and be read as "a person
-        asked" — which skips the sender-charter half of the agreement by design. With the
-        sender derived from the credential, both halves of #7's both-manifests-must-agree
-        rule hold for a session too.
-
-        The *chain* needs nothing further here, and that is worth saying out loud so nobody
-        adds it: ``Delegator._resolve_parent`` already refuses to trust a supplied
-        ``parent_task_id`` once it knows who the sender is (steward #67). It derives the
-        parent from the tasks that sender is actually holding, and honours a supplied id
-        only when it is one of them. Binding the sender is therefore the whole fix — a
-        second derivation here would only turn a swept task row into a 404 where #67
-        correctly falls back to the chain the sender is really in.
-        """
-        principal = session_of(request)
-        if principal is not None:
-            if body.sender is not None and body.sender != principal.resident_id:
-                _refuse(
-                    403,
-                    "sender_not_the_caller",
-                    f"this credential belongs to {principal.resident_id!r}, which cannot "
-                    f"hand work over as {body.sender!r}; omit `from` and steward fills it in",
-                )
-            sender_id: str | None = principal.resident_id
-        else:
-            sender_id = body.sender
-        result = validate_path(residents_dir, settings.skills_dir)
-        sender = _find_resident(result, sender_id, residents_dir) if sender_id is not None else None
-        delegator = dg.Delegator(residents=result.residents, store=db, emitter=sink)
-        handoff = dg.Handoff(
-            raw="POST /delegate",
-            to=body.to,
-            route=body.route,
-            title=body.title,
-            detail=body.detail,
-        )
-        try:
-            task = delegator.delegate(
-                sender=sender, handoff=handoff, parent_task_id=body.parent_task_id
-            )
-        except dg.DelegationError as exc:
-            # Refused: nothing was written and nothing was emitted. The reason is the
-            # error code, so a session or a panel can key on it without reading prose.
-            _refuse(
-                DELEGATION_STATUS.get(exc.reason, DELEGATION_REFUSED_STATUS), exc.reason, str(exc)
-            )
-        request_id = accept(request, "delegated", {"task_id": task.task_id, "to": task.assignee})
-        return {
-            "request_id": request_id,
-            "task_id": task.task_id,
-            "status": "accepted",
-            "to": task.assignee,
-            "route": task.route,
-            "depth": task.depth,
-            "parent_task_id": task.parent_task_id,
-            "origin": task.origin,
-            "message": (
-                "delivered into the receiver's inbox; it is worked on that resident's own "
-                "next wake-up, and task_claimed in burrow's log is the only proof of that"
-            ),
-        }
-
-    @app.get("/tasks/{task_id}/lineage")
-    def get_lineage(task_id: str) -> dict[str, Any]:
-        """Return the whole chain this task belongs to, root first. The audit query.
-
-        ``chain`` is the root and everything delegated out of it, depth-first, so the
-        answer does not depend on which member of the chain was named (steward #202).
-        ``origin`` and ``depth`` still describe the task that was asked about.
-        """
-        chain = db.lineage(task_id)
-        if not chain:
-            _refuse(404, "unknown_task", f"no task {task_id!r}")
-        asked = next((item for item in chain if item.task_id == task_id), chain[0])
-        return {
-            "task_id": task_id,
-            "origin": asked.origin,
-            "depth": asked.depth,
-            "chain": [item.to_dict() for item in chain],
-        }
 
     return app
 
