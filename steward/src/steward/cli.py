@@ -72,6 +72,7 @@ from steward.nursery import (
     raise_resident,
     retire_resident,
 )
+from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.prompt import assemble_preamble
 from steward.runners import Placement, check_cli_support, check_runner, skills_home
@@ -358,6 +359,31 @@ def schema(output: Path | None) -> None:
     request that makes it. Regenerate it with `make schema-write`.
     """
     text = manifest_schema_json()
+    if output is None:
+        click.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+
+
+@main.command()
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the document here instead of stdout. `make openapi-write` points it at "
+    f"{OPENAPI_ARTIFACT}, the copy this repo commits.",
+)
+def openapi(output: Path | None) -> None:
+    """Print the OpenAPI document for this API (townhall's console reads the committed copy).
+
+    The API serves no schema of its own — every route is a write path, so nothing here is
+    unauthenticated, `docs_url` included. This is the offline export that takes its place:
+    the document is committed, townhall's contract test reads it in-tree, and
+    `tests/test_openapi_contract.py` fails when it drifts from the routes. Regenerate it
+    with `make openapi-write`.
+    """
+    text = openapi_json()
     if output is None:
         click.echo(text, nl=False)
         return
