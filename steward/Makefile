@@ -61,7 +61,12 @@ CHRONICLE ?= $(if $(BURROW),$(BURROW),../chronicle)
 #: change that would break its reader has to show up as a diff here.
 SCHEMA ?= schema/resident-manifest-v0.json
 
-.PHONY: dev lint format test check validate schema schema-write build clean image image-ship image-cp image-cp-ship vendor-emitter
+#: The committed OpenAPI document. Steward serves no schema — every route is a write path
+#: — so townhall reads this file in-tree instead, and the townhall workflow lists it among
+#: the paths that run that suite.
+OPENAPI ?= docs/openapi.json
+
+.PHONY: dev lint format test check validate schema schema-write openapi openapi-write build clean image image-ship image-cp image-cp-ship vendor-emitter
 
 dev:
 	$(UV) sync --all-groups
@@ -92,6 +97,15 @@ schema:
 # and the diff it produces is the review burrow's reader needs.
 schema-write:
 	$(UV) run steward schema --output $(SCHEMA)
+
+openapi:
+	$(UV) run steward openapi
+
+# Rewrite the committed OpenAPI document. tests/test_openapi_contract.py fails when it
+# drifts from the routes, so this is the command that answers that failure — and the diff
+# it produces is the review townhall's hand-written client needs (warren#321).
+openapi-write:
+	$(UV) run steward openapi --output $(OPENAPI)
 
 build:
 	$(UV) build

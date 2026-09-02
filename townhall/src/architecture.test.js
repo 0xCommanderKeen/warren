@@ -29,6 +29,16 @@ describe("frontend foundation", () => {
     expect(seam).toContain("../../../chronicle/tests/fixtures/state-contract/complete-v1.json");
     expect(existsSync(new URL("./fixtures/complete-v1.json", import.meta.url))).toBe(false);
   });
+
+  it("reads Steward's OpenAPI document in-tree rather than vendoring a copy", () => {
+    // warren#321, and the same rule as Chronicle's fixture above: Steward commits the
+    // document `make openapi-write` exports, and this tree reads that file three
+    // directories away. A copy here would be a contract that goes stale in silence.
+    const seam = read("./steward/contract.test.js");
+
+    expect(seam).toContain("../../../steward/docs/openapi.json");
+    expect(existsSync(new URL("./steward/openapi.json", import.meta.url))).toBe(false);
+  });
 });
 
 describe("the console shell", () => {

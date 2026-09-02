@@ -321,10 +321,33 @@ def test_schema_output_writes_exactly_what_stdout_prints(runner: CliRunner, tmp_
     assert printed.output.endswith("}\n")
 
 
+def test_openapi_command_emits_the_document_the_api_serves_to_nobody(runner: CliRunner) -> None:
+    """The offline export that stands in for the schema route steward refuses to serve."""
+    result = runner.invoke(main, ["openapi"])
+    assert result.exit_code == 0
+    document = json.loads(result.output)
+    assert document["info"]["title"] == "steward"
+    assert "/residents" in document["paths"]
+
+
+def test_openapi_output_writes_exactly_what_stdout_prints(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`make openapi-write` regenerates the committed artifact through this flag."""
+    target = tmp_path / "nested" / "openapi.json"
+    printed = runner.invoke(main, ["openapi"])
+    written = runner.invoke(main, ["openapi", "--output", str(target)])
+
+    assert written.exit_code == 0, written.output
+    assert not written.output, "--output writes the file; it does not also print it"
+    assert target.read_text(encoding="utf-8") == printed.output
+    assert printed.output.endswith("}\n")
+
+
 def test_help_lists_the_commands(runner: CliRunner) -> None:
     result = runner.invoke(main, ["--help"])
     assert result.exit_code == 0
-    for command in ("validate", "schema", "doctor", "scheduler", "show"):
+    for command in ("validate", "schema", "openapi", "doctor", "scheduler", "show"):
         assert command in result.output
 
 

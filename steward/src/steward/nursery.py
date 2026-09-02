@@ -105,6 +105,7 @@ from steward.manifest import (
     Route,
     Runner,
     SkillGrant,
+    SkillGrantInput,
     SoulDocument,
     SoulIdentity,
     ToolGrant,
@@ -193,7 +194,13 @@ class NewResident(BaseModel):
     agent_id: str | None = Field(default=None, description="Burrow identity; derived if absent.")
     project: str | None = Field(default=None, description="Project label, for a scoped soul.")
     summary: str | None = Field(default=None, description="One line burrow can display.")
-    skills: list[SkillGrant] = Field(default_factory=list, description="Granted capabilities.")
+    # ``SkillGrantInput``, not ``SkillGrant``, for the same reason ``Resident.skills``
+    # uses it: the bare-string spelling (`"daily-summary"`) is half of this field's
+    # public grammar, and only the annotated input type puts it in the JSON Schema.
+    # With the plain model the exported document said this had to be an object while
+    # the API happily took a list of names — and townhall's nursery form sends names
+    # (warren#321).
+    skills: list[SkillGrantInput] = Field(default_factory=list, description="Granted capabilities.")
     memory: Memory | None = Field(default=None, description="Memory location; derived if absent.")
     routes: list[Route] = Field(default_factory=list, description="Declared inbound channels.")
     app_grants: list[AppGrant] = Field(default_factory=list, description="Declared app access.")

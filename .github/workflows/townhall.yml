@@ -11,12 +11,16 @@ on:
       # And its dev proxy is checked against Steward's own route decorators, so a
       # route added there must run this suite too (warren#242).
       - "steward/src/steward/api.py"
+      # The shape half of the same seam: the client is checked against Steward's
+      # committed OpenAPI document, read in-tree (warren#321).
+      - "steward/docs/openapi.json"
       - ".github/workflows/townhall.yml"
   pull_request:
     paths:
       - "townhall/**"
       - "chronicle/tests/fixtures/state-contract/**"
       - "steward/src/steward/api.py"
+      - "steward/docs/openapi.json"
       - ".github/workflows/townhall.yml"
 
 concurrency:
