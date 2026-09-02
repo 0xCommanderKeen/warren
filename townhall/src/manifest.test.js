@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  BUDGET_FIELDS, changed, getIn, linesToList, listToLines, numberValue, scalarValue, setIn,
+  BUDGET_FIELDS, changed, getIn, grantEntries, grantRows, linesToList, listToLines,
+  numberValue, scalarValue, setIn,
 } from "./manifest.js";
 
 const manifest = () => ({
@@ -102,5 +103,73 @@ describe("noticing an edit", () => {
     const before = manifest();
     expect(changed(before, manifest())).toBe(false);
     expect(changed(before, setIn(before, "soul.role", "note bot"))).toBe(true);
+  });
+});
+
+/* -- skill grants -------------------------------------------------------------------- */
+
+/** Both spellings steward accepts, side by side, plus a key no form here knows about. */
+const granted = {
+  ...manifest(),
+  skills: ["journal", { id: "write-journal", note: "end of run" }, { id: "vendored", source: "local" }],
+};
+
+describe("editing a resident's grants", () => {
+  it("round-trips an untouched block byte for byte, bare names and all", () => {
+    // The one that matters. A picker that normalised `journal` into `{id: journal}` would
+    // rewrite `skills:` for every resident whose author preferred bare names, the moment
+    // somebody opened the page to fix a typo in the charter and pressed save.
+    const rows = grantRows(granted);
+
+    expect(grantEntries(rows)).toEqual(granted.skills);
+    expect(JSON.stringify(grantEntries(rows))).toBe(JSON.stringify(granted.skills));
+  });
+
+  it("reads a note off either spelling and leaves the entry alone", () => {
+    expect(grantRows(granted).map((row) => [row.id, row.note])).toEqual([
+      ["journal", ""],
+      ["write-journal", "end of run"],
+      ["vendored", ""],
+    ]);
+  });
+
+  it("keeps a bare name bare until it is given a note", () => {
+    const rows = grantRows(granted);
+
+    expect(grantEntries([{ ...rows[0], note: "  " }])).toEqual(["journal"]);
+    expect(grantEntries([{ ...rows[0], note: "because Hob writes one" }])).toEqual([
+      { id: "journal", note: "because Hob writes one" },
+    ]);
+  });
+
+  it("keeps everything else on a grant when only the note changes", () => {
+    // `source: local` is steward's, not this form's, and a picker that dropped it would
+    // silently repoint the grant at the library.
+    const rows = grantRows(granted);
+
+    expect(grantEntries([{ ...rows[2], note: "vendored on purpose" }])).toEqual([
+      { id: "vendored", source: "local", note: "vendored on purpose" },
+    ]);
+    expect(grantEntries([{ ...rows[1], note: "" }])).toEqual([{ id: "write-journal" }]);
+  });
+
+  it("adds a newly ticked skill as a bare name, at the end", () => {
+    const rows = grantRows(granted);
+
+    expect(grantEntries([...rows, { id: "read-inbox", note: "", entry: undefined }])).toEqual([
+      ...granted.skills, "read-inbox",
+    ]);
+  });
+
+  it("deletes the key rather than writing an empty list when the last grant goes", () => {
+    // An absent `skills` and `skills: []` say the same thing, and only one of them is a
+    // line somebody has to read and wonder about.
+    expect(grantEntries([])).toBeUndefined();
+    expect(setIn(granted, "skills", grantEntries([]))).not.toHaveProperty("skills");
+  });
+
+  it("says a manifest with no grants at all has no rows", () => {
+    expect(grantRows(manifest())).toEqual([]);
+    expect(grantRows(undefined)).toEqual([]);
   });
 });

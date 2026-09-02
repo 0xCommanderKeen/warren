@@ -174,6 +174,7 @@ function CapsForm({ id, declaration, onWritten }) {
         soul: declaration.soul,
         revision: declaration.revision,
       }),
+    { identity: id },
   );
 
   // Sync the draft to whatever is now on disk, but keep the receipt: re-reading after a

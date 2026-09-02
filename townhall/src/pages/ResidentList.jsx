@@ -20,7 +20,6 @@ function nextFireOf(resident, routines) {
   const mine = (routines || []).filter((row) => row.resident === resident.id);
   return soonest(mine, (row) => row.next_fire)?.next_fire ?? null;
 }
-
 /* -- the list ------------------------------------------------------------------------ */
 
 export default function ResidentList() {
