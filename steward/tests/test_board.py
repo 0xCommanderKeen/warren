@@ -987,7 +987,7 @@ def test_a_delegated_claim_and_close_carry_the_parent_task_id(
     store.delegate_job(
         title="Check the errand list",
         assignee=resident.id,
-        delegated_by="burrow-builder",
+        delegated_by="sender-agent",
         route="handoff",
         parent_task_id="root-task-42",
         origin="task:root-task-42",
@@ -1278,7 +1278,7 @@ def test_a_dry_run_plans_delegated_letters_and_skips_a_paused_resident(
     store.delegate_job(
         title="A letter",
         assignee=resident.id,
-        delegated_by="burrow-builder",
+        delegated_by="sender-agent",
         route="handoff",
         parent_task_id="root",
     )

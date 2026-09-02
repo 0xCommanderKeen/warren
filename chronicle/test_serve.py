@@ -4,6 +4,7 @@ import glob
 import json
 import multiprocessing
 import os
+import pathlib
 import queue
 import sys
 import tempfile
@@ -13,6 +14,9 @@ from unittest import mock
 
 import approval_protocol
 import notification_persistence as knocks
+
+PROJECT_AGENT_FIXTURE = pathlib.Path(__file__).parent / "tests" / "fixtures" / "project-agent.resident.json"
+PROJECT_AGENT = json.loads(PROJECT_AGENT_FIXTURE.read_text(encoding="utf-8"))
 
 with mock.patch.object(sys, "argv", ["serve.py"]):
     import serve
@@ -453,15 +457,23 @@ class NotificationTests(unittest.TestCase):
         )
 
     def test_project_soul_is_consumed_once_across_the_fleet(self):
-        self.write_soul("burrow.md", project="burrow", name="Maren")
-        first = self.event(agent_id="a")
-        second = self.event(agent_id="q", ts="2026-08-24T12:00:01Z")
+        self.write_soul(
+            "project.md",
+            project=PROJECT_AGENT["match"]["project"],
+            name=PROJECT_AGENT["soul"]["name"],
+        )
+        first = self.event(agent_id="a", project=PROJECT_AGENT["match"]["project"])
+        second = self.event(
+            agent_id="q",
+            project=PROJECT_AGENT["match"]["project"],
+            ts="2026-08-24T12:00:01Z",
+        )
         self.write_events(first, second)
 
         # Keep the fixture fleet inside the viewer's visibility window regardless
         # of the wall-clock date on the machine running the suite.
         with mock.patch.object(serve.time, "time", return_value=1787574600):
-            self.assertEqual("Maren", self.villager_name(first))
+            self.assertEqual(PROJECT_AGENT["soul"]["name"], self.villager_name(first))
             self.assertEqual("Poppy", self.villager_name(second))
 
     def test_fallback_names_probe_hash_collisions_across_the_fleet(self):
@@ -479,15 +491,18 @@ class NotificationTests(unittest.TestCase):
 
     def test_exact_soul_is_not_reused_by_another_agent(self):
         self.write_soul(
-            "resident.md", agent_id="resident", project="burrow", name="Maren"
+            "resident.md",
+            agent_id="resident",
+            project=PROJECT_AGENT["match"]["project"],
+            name=PROJECT_AGENT["soul"]["name"],
         )
         ephemeral = self.event(agent_id="ephemeral")
         resident = self.event(agent_id="resident", ts="2026-08-24T12:00:01Z")
         self.write_events(ephemeral, resident)
 
         names = serve.villager_names([ephemeral, resident])
-        self.assertNotEqual("Maren", names["ephemeral"])
-        self.assertEqual("Maren", names["resident"])
+        self.assertNotEqual(PROJECT_AGENT["soul"]["name"], names["ephemeral"])
+        self.assertEqual(PROJECT_AGENT["soul"]["name"], names["resident"])
 
     def test_resident_manifest_name_wins_over_legacy_soul_for_same_agent(self):
         self.write_resident("resident.resident.json", {"agent_id": "shared"})
@@ -523,23 +538,32 @@ class NotificationTests(unittest.TestCase):
         self.assertNotIn('"password": "', rendered)
 
     def test_child_lineage_survives_later_events_for_notification_names(self):
-        self.write_soul("burrow.md", project="burrow", name="Maren")
-        parent = self.event(agent_id="z-parent")
-        child_start = self.event(agent_id="a-child", ts="2026-08-24T11:59:58Z")
+        self.write_soul(
+            "project.md",
+            project=PROJECT_AGENT["match"]["project"],
+            name=PROJECT_AGENT["soul"]["name"],
+        )
+        project = PROJECT_AGENT["match"]["project"]
+        parent = self.event(agent_id="z-parent", project=project)
+        child_start = self.event(
+            agent_id="a-child", project=project, ts="2026-08-24T11:59:58Z"
+        )
         child_start["type"] = "task_started"
         child_start["payload"] = {
             "parent_agent_id": "z-parent",
             "agent_type": "reviewer",
         }
-        child_tool = self.event(agent_id="a-child", ts="2026-08-24T11:59:59Z")
+        child_tool = self.event(
+            agent_id="a-child", project=project, ts="2026-08-24T11:59:59Z"
+        )
         child_tool["type"] = "tool_called"
         child_tool["payload"] = {"tool": "Read"}
-        child_knock = self.event(agent_id="a-child")
+        child_knock = self.event(agent_id="a-child", project=project)
         self.write_events(child_start, child_tool, parent)
 
         names = serve.villager_names([child_start, child_tool, parent, child_knock])
-        self.assertEqual("Maren", names["z-parent"])
-        self.assertNotEqual("Maren", names["a-child"])
+        self.assertEqual(PROJECT_AGENT["soul"]["name"], names["z-parent"])
+        self.assertNotEqual(PROJECT_AGENT["soul"]["name"], names["a-child"])
         self.assertEqual(names["a-child"], self.villager_name(child_knock))
 
     def test_unicode_title_is_ascii_safe_for_http(self):

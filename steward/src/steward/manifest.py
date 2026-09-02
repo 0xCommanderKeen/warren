@@ -1762,7 +1762,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "delegation": "delegation: {send: true, to: [life-agent]}",
     "delegation.send": "send: true  (omit the block entirely to never delegate)",
     "delegation.to": "to: [life-agent]  (resident ids; omit it to allow any receiver)",
-    "delegation.note": "note: Maren hands household errands to Hob.",
+    "delegation.note": "note: Project work may be handed to a household agent.",
     "board": "board: {claim: true, max_claims_per_wake: 1, lease_s: 1800, timeout_s: 900}",
     "board.claim": "claim: true  (omit the block entirely to never claim)",
     "board.max_claims_per_wake": "max_claims_per_wake: 1",
