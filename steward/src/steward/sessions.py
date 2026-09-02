@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from steward import events as ev
 from steward import journal
 from steward.deploy import memory_host_dir, placement_for
 from steward.manifest import ManifestError, Resident, ResidentManifest, Routine
@@ -566,6 +567,7 @@ class ResidentSessions:
         residents: Sequence[Resident] = (),
         clock: Callable[[], datetime] | None = None,
         on_completed: Callable[[datetime], None] | None = None,
+        emitter: ev.Emitter | None = None,
     ) -> None:
         """Assemble the lifecycle over its stable collaborators."""
         self.workdir = Path(workdir) if workdir is not None else Path.cwd()
@@ -576,6 +578,7 @@ class ResidentSessions:
         self.residents = tuple(residents)
         self.clock = clock or (lambda: datetime.now(UTC))
         self.on_completed = on_completed
+        self.emitter = emitter or ev.NullEmitter()
 
     def admit(
         self, resident: Resident, *, now: datetime, rehearsal: bool = False
@@ -735,6 +738,9 @@ class ResidentSessions:
                 decisions=decisions,
             )
             runner = self.runner_factory(resident.manifest.runner, placement_for(resident.manifest))
+            # This is a launch fact, not an admission attempt. Publish only after every
+            # pre-run safety boundary succeeded and immediately before the runner starts.
+            self.emitter.emit(ev.resident_declared_event(resident=resident))
             result = runner.run(
                 RunRequest(
                     prompt=prompt,

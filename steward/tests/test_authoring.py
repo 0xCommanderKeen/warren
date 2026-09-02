@@ -130,6 +130,7 @@ def add_second_resident(repo: ScratchRepo, write_resident: ResidentWriter) -> di
     second["id"] = "second-agent"
     second["agent_id"] = "claude-code:second-agent"
     second["uid"] = SECOND_RESIDENT_UID
+    second["home"] = 1
     write_resident(
         second,
         directory="second-agent",

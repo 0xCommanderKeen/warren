@@ -83,6 +83,14 @@ def test_the_nursery_mints_a_random_uid_into_the_manifest(tmp_path: Path) -> Non
     assert created.resident.manifest.uid == uid
 
 
+def test_the_nursery_mints_the_lowest_free_village_home(tmp_path: Path) -> None:
+    first = declare_resident(spec(id="first", agent_id="claude-code:first"), tmp_path)
+    second = declare_resident(spec(id="second", agent_id="claude-code:second"), tmp_path)
+
+    assert first.resident.manifest.home == 0
+    assert second.resident.manifest.home == 1
+
+
 def test_the_declaration_deploys_nothing_and_schedules_nothing(tmp_path: Path) -> None:
     created = declare_resident(spec(), tmp_path)
     manifest = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
@@ -1461,16 +1469,20 @@ def test_a_retire_dry_run_plans_the_mark_before_the_stop(
     assert mark < stop
 
 
-def test_retirement_emits_nothing_on_the_residents_behalf(
+def test_retirement_emits_the_authoritative_terminal_identity_event(
     scratch_repo: ScratchRepo, host: LocalTransport, isolated_events: Path
 ) -> None:
-    """It leaves the village by going quiet. A forged session_ended would be a lie."""
+    """It leaves through steward's own lifecycle fact, never a forged session_ended."""
     raise_into(scratch_repo, host)
     retire_resident(
         "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
     )
 
-    assert not isolated_events.exists()
+    [record] = [json.loads(line) for line in isolated_events.read_text().splitlines()]
+    assert record["type"] == "resident_retired"
+    assert record["source"] == "steward"
+    assert record["agent_id"] == "claude-code:note-keeper"
+    assert record["payload"]["resident_id"] == "note-keeper"
 
 
 # ------------------------------------------------------ what retirement excludes

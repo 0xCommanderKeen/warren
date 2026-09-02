@@ -42,6 +42,7 @@ def valid_manifest() -> dict[str, Any]:
         "version": 0,
         "uid": VALID_RESIDENT_UID,
         "id": "test-agent",
+        "home": 0,
         "agent_id": "claude-code:test-agent",
         "summary": "A resident that exists only inside a test.",
         "soul": {
