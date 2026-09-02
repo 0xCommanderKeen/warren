@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:f58d6e5d1b6bfa6bae41eed6e17795b15b4f1f909b786899484ece3f4ad6566d
+#   hooks/emit.py     sha256:227cf69c00dcf9c6c6c728932b3c3e448079d102d92fc2bd578d7ecdb703c141
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -961,10 +961,11 @@ def is_loopback(url):
     return host in LOOPBACK_HOSTS
 
 
-def breaker_path(url):
+def breaker_path(url, base=None):
     """One breaker per target: a village that is down must not silence the dev
     server running next to it (that pair is exactly the off-tailnet case)."""
-    return BREAKER + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+    base = BREAKER if base is None else base
+    return base + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
 
 
 def targets():
@@ -989,8 +990,21 @@ def targets():
     return out
 
 
-def post_event(url, event, token="", delivery_id=""):
-    breaker = breaker_path(url)
+def post_event(
+    url,
+    event,
+    token="",
+    delivery_id="",
+    *,
+    timeout=None,
+    breaker_base=None,
+    log_dir=None,
+    opener=None,
+):
+    breaker = breaker_path(url, breaker_base)
+    timeout = POST_TIMEOUT if timeout is None else timeout
+    log_dir = LOG_DIR if log_dir is None else log_dir
+    opener = urllib.request.urlopen if opener is None else opener
     window = LOOPBACK_BREAKER_SECONDS if is_loopback(url) else BREAKER_SECONDS
     try:
         if os.path.exists(breaker) and time.time() - os.path.getmtime(breaker) < window:
@@ -1009,17 +1023,20 @@ def post_event(url, event, token="", delivery_id=""):
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=POST_TIMEOUT):
+        with opener(req, timeout=timeout):
             pass
         return True
     except Exception:
         try:
-            os.makedirs(LOG_DIR, exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True)
             with open(breaker, "w") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
         return False
+
+
+_DEFAULT_POST_EVENT = post_event
 
 
 def _target_groups(pending=()):
@@ -1638,6 +1655,26 @@ def deliver(event, deadline=None):
     configured_primary = initial_primary + later_primary
     configured_mirrors = initial_mirrors + later_mirrors
     local_written = False
+    transport = post_event
+    transport_timeout = POST_TIMEOUT
+    transport_breaker = BREAKER
+    transport_log_dir = LOG_DIR
+    transport_opener = urllib.request.urlopen
+
+    def post(url, posted_event, token, delivery_id):
+        if transport is not _DEFAULT_POST_EVENT:
+            return transport(url, posted_event, token, delivery_id)
+        return transport(
+            url,
+            posted_event,
+            token,
+            delivery_id,
+            timeout=transport_timeout,
+            breaker_base=transport_breaker,
+            log_dir=transport_log_dir,
+            opener=transport_opener,
+        )
+
     if not configured_primary:
         _append_local(event)
         local_written = True
@@ -1647,7 +1684,7 @@ def deliver(event, deadline=None):
         result_lock = threading.Lock()
 
         def mirror_worker(url, token):
-            delivered = post_event(url, event, token, "")
+            delivered = post(url, event, token, "")
             with result_lock:
                 results.append(delivered)
 
@@ -1694,6 +1731,7 @@ def deliver(event, deadline=None):
     primary, mirrors, deferred_primary, deferred_mirrors = _target_groups(pending)
     results = {}
     result_lock = threading.Lock()
+    initial_rtt = transport_timeout
 
     # Reserve the selected turn before network work. Fairness therefore
     # survives success (which removes queue records), failure, and restart.
@@ -1706,12 +1744,12 @@ def deliver(event, deadline=None):
         target_key = _target_id(url)
         queued = [record for record in pending if record.get("target") == target_key]
         delivered_keys = []
-        estimated_rtt = POST_TIMEOUT
+        estimated_rtt = initial_rtt
         for record in queued:
             if time.monotonic() + estimated_rtt > post_deadline:
                 return
             started = time.monotonic()
-            if not post_event(
+            if not post(
                 url,
                 record.get("event") or {},
                 token,
@@ -1729,7 +1767,6 @@ def deliver(event, deadline=None):
                     len(delivered_keys) == len(queued),
                     target_key,
                 )
-            _diagnose("retry", target=target_key)
         with result_lock:
             results[url] = (
                 list(delivered_keys),
@@ -1744,7 +1781,7 @@ def deliver(event, deadline=None):
         workers.append(worker)
     for url, token in mirrors:
         worker = threading.Thread(
-            target=post_event, args=(url, event, token, ""), daemon=True
+            target=post, args=(url, event, token, ""), daemon=True
         )
         worker.start()
         workers.append(worker)
@@ -1819,6 +1856,8 @@ def deliver(event, deadline=None):
     if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
+        for record_key in acknowledged_keys:
+            _diagnose("retry", target=record_key.target)
         _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
