@@ -201,7 +201,7 @@ deploy is pushed from a machine that has the repo checked out.
   at `CHRONICLE_EVENTS`. The compose file is
   [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py identity.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh

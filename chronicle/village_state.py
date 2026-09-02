@@ -8,46 +8,13 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
-import hashlib
 from collections import defaultdict
 
+from identity import fallback_identity
 from protocol import validate_event
 
 
 SCHEMA_VERSION = 1
-NAMES = (
-    "Bramble",
-    "Poppy",
-    "Wren",
-    "Sorrel",
-    "Fern",
-    "Alder",
-    "Maple",
-    "Rowan",
-    "Thistle",
-    "Clover",
-    "Hazel",
-    "Juniper",
-    "Moss",
-    "Reed",
-    "Tansy",
-    "Willow",
-)
-CHARS = (
-    "Villager",
-    "Villager2",
-    "Villager3",
-    "Villager4",
-    "Villager5",
-    "Woman",
-    "Boy",
-    "OldMan",
-    "Princess",
-    "Hunter",
-    "Noble",
-    "Monk",
-)
-ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
 #: Events filed under a villager that are somebody *else's* action, recorded against the
 #: door they knocked on. They ride along in that villager's history and are never
 #: evidence it is alive, present, or doing anything: they cannot create a villager, keep
@@ -108,17 +75,6 @@ def _instant(value):
 
 def _wire_time(value):
     return _instant(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _identity(agent_id):
-    number = int.from_bytes(
-        hashlib.sha256(agent_id.encode("utf-8")).digest()[:8], "big"
-    )
-    return (
-        NAMES[number % len(NAMES)],
-        CHARS[number % len(CHARS)],
-        ACCENTS[number % len(ACCENTS)],
-    )
 
 
 def ambient_share(ordinary, ambient, capacity, floor):
@@ -708,7 +664,7 @@ def project_village(
         )
         if manifest is None and not has_parent_lineage:
             manifest = projects.get(last["project"])
-        generated_name, generated_char, generated_accent = _identity(agent_id)
+        generated_name, generated_char, generated_accent = fallback_identity(agent_id)
         if declaration is not None:
             declared = declaration["payload"]
             manifest = {
