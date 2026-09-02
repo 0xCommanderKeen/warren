@@ -3377,9 +3377,7 @@ def test_retiring_a_resident_with_no_container_marks_and_commits_and_says_so(
     harness = api(transport=host)
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
@@ -3405,9 +3403,7 @@ def test_retiring_a_container_removes_the_token_only_after_the_container_is_down
     commit_tree(tmp_path)
     host.calls.clear()
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
@@ -3484,12 +3480,8 @@ def test_the_retire_route_runs_the_pipeline_the_command_runs(
     harness = api(retirer=recorder, transport=host)
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
-    harness.client.post(
-        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
-    )
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
     assert [call["dry_run"] for call in seen] == [True, False]
     assert all(call["resident_id"] == "test-agent" for call in seen)
@@ -3522,9 +3514,7 @@ def test_retiring_into_a_dirty_worktree_is_refused_by_name(api: ApiFactory, tmp_
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
@@ -3541,9 +3531,7 @@ def test_retirement_ignores_unrelated_dirt_but_binds_the_target_revision(
 ) -> None:
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
     commit_tree(tmp_path)
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     (tmp_path / "unrelated.txt").write_text("somebody else's work", encoding="utf-8")
 
     response = harness.client.post(
@@ -3561,9 +3549,7 @@ def test_retirement_requires_and_binds_a_rehearsed_revision(
     commit_tree(tmp_path)
 
     missing = harness.client.post("/residents/test-agent/retire")
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     manifest = harness.residents_dir / "test-agent" / "manifest.yaml"
     manifest.write_text(manifest.read_text() + "\n# changed\n", encoding="utf-8")
     stale = harness.client.post(
@@ -3583,9 +3569,7 @@ def test_a_host_that_refuses_the_stop_is_named_as_the_host(api: ApiFactory, tmp_
     harness.client.post("/residents/test-agent/provision")
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
@@ -3633,9 +3617,7 @@ def test_a_retirement_is_recorded_as_a_request_somebody_made(
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
@@ -3655,12 +3637,8 @@ def test_a_refused_retirement_says_so_in_the_request_log(api: ApiFactory, tmp_pa
     """
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
-    harness.client.post(
-        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
-    )
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
     logged = harness.store.requests()
     assert [record.outcome for record in logged] == [
@@ -3684,12 +3662,8 @@ def test_a_retirement_that_stopped_part_way_is_not_logged_as_refused(
     harness.client.post("/residents/test-agent/provision")
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
-    harness.client.post(
-        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
-    )
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
     outcomes = [record.outcome for record in harness.store.requests()]
     assert outcomes[-1] == "stopped part-way: retire_failed"
@@ -3718,9 +3692,7 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
     harness = api(retirer=unable_to_commit, transport=host)
     commit_tree(tmp_path)
 
-    rehearsal = harness.client.post(
-        "/residents/test-agent/retire", json={"dry_run": True}
-    ).json()
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
     response = harness.client.post(
         "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
     )
