@@ -1,4 +1,6 @@
 import glob
+import dataclasses
+import functools
 import http.client
 import json
 import multiprocessing
@@ -18,7 +20,9 @@ def _race_knock(events, observed, event, gate):
     serve.EVENTS = events
     serve.NOTIFY_URL = "process-safe-test"
 
-    def observable(_event):
+    runtime = serve.Runtime(serve._legacy_config())
+
+    def observable(_event, _runtime):
         with open(observed, "a", encoding="utf-8") as stream:
             serve.fcntl.flock(stream, serve.fcntl.LOCK_EX)
             stream.write("notify\n")
@@ -28,7 +32,7 @@ def _race_knock(events, observed, event, gate):
 
     serve.notify = observable
     gate.wait()
-    serve.deliver_knock(event)
+    serve.deliver_knock(event, runtime)
 
 
 def _terminalize_knock(events, event, kind, gate):
@@ -43,11 +47,34 @@ class EventsEndpointTest(unittest.TestCase):
         self.events = os.path.join(self.tmp.name, "events.jsonl")
         self.previous_events = serve.EVENTS
         serve.EVENTS = self.events
+        self.runtime = None
+        self.reset_notification_runtime(notify_url="unavailable")
         self.running_server = RunningServer(serve)
         self.server = self.running_server.server
 
+    def reset_notification_runtime(self, **changes):
+        if self.runtime is not None:
+            serve.stop_knock_workers(self.runtime)
+        config = dataclasses.replace(serve._legacy_config(), **changes)
+        self.runtime = serve.Runtime(config)
+        for name in (
+            "claim_knock",
+            "deliver_knock",
+            "finish_knock",
+            "persist_knock",
+            "transport_status",
+            "_process_knock",
+            "_recover_knocks",
+        ):
+            setattr(
+                self,
+                name,
+                functools.partial(getattr(serve, name), runtime=self.runtime),
+            )
+
     def tearDown(self):
         self.running_server.stop()
+        serve.stop_knock_workers(self.runtime)
         serve.EVENTS = self.previous_events
         self.tmp.cleanup()
 
@@ -149,6 +176,9 @@ class EventsEndpointTest(unittest.TestCase):
             self.assertEqual(stream.read().splitlines(), ["notify"])
 
     def test_knock_authority_is_bounded_and_capacity_drops_survive_restart(self):
+        self.reset_notification_runtime(
+            notify_url="unavailable", knock_records=2, knock_bytes=100000
+        )
         events = [
             self.valid_event(
                 type="needs_human",
@@ -163,7 +193,7 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "KNOCK_BYTES", 100000),
         ):
             for event in events:
-                self.assertTrue(serve.persist_knock(event))
+                self.assertTrue(self.persist_knock(event))
             path = self.events + ".knocks"
             authority = [path] + list(glob.glob(path + ".replay.*"))
             records = 0
@@ -171,7 +201,7 @@ class EventsEndpointTest(unittest.TestCase):
                 with open(candidate, encoding="utf-8") as stream:
                     records += sum(1 for line in stream if line.strip())
             self.assertLessEqual(records, 2)
-            self.assertFalse(serve.claim_knock(events[0]))
+            self.assertFalse(self.claim_knock(events[0]))
 
     def test_legacy_multiline_oversize_key_is_terminal_across_restart(self):
         event = self.valid_event(
@@ -184,7 +214,7 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
             mock.patch.object(serve, "LEDGER_BYTES", 128),
         ):
-            self.assertTrue(serve.persist_knock(event))
+            self.assertTrue(self.persist_knock(event))
             key = knocks.terminal_key(event)
             serve._store().remember("notify-dropped", key)
             with open(self.events + ".notify-dropped", "rb") as stream:
@@ -192,7 +222,7 @@ class EventsEndpointTest(unittest.TestCase):
             self.assertNotIn(b"\x00", ledger)
             self.assertEqual(len(ledger.splitlines()), 1)
             self.assertTrue(ledger.decode("ascii").strip().startswith("burrow-sha256-"))
-            self.assertFalse(serve.claim_knock(event))
+            self.assertFalse(self.claim_knock(event))
 
     def test_ledger_paths_reject_unknown_domain_kinds(self):
         with self.assertRaisesRegex(ValueError, "invalid durable ledger kind"):
@@ -201,6 +231,12 @@ class EventsEndpointTest(unittest.TestCase):
             serve._store().notification_lock_path(serve.KNOCK_LOCK_SHARDS)
 
     def test_terminal_commit_failure_preserves_knock_capacity_victim(self):
+        self.reset_notification_runtime(
+            notify_url="unavailable",
+            knock_records=1,
+            knock_bytes=100000,
+            ledger_bytes=1,
+        )
         first = self.valid_event(
             type="needs_human", delivery_id=None, payload={"message": "first"}
         )
@@ -216,8 +252,8 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "KNOCK_BYTES", 100000),
             mock.patch.object(serve, "LEDGER_BYTES", 1),
         ):
-            self.assertTrue(serve.persist_knock(first))
-            self.assertFalse(serve.persist_knock(second))
+            self.assertTrue(self.persist_knock(first))
+            self.assertFalse(self.persist_knock(second))
             with open(self.events + ".knocks", encoding="utf-8") as stream:
                 retained = json.loads(next(stream))["event"]
             self.assertEqual(knocks.knock_key(retained), knocks.knock_key(first))
@@ -255,12 +291,12 @@ class EventsEndpointTest(unittest.TestCase):
             with open(candidate, encoding="utf-8") as stream:
                 self.assertEqual(json.loads(next(stream))["event"], event)
 
-        serve._notifying.clear()
+        self.runtime.notifying.clear()
         with mock.patch.object(serve, "NOTIFY_URL", "unavailable"):
-            self.assertFalse(serve.claim_knock(older))
+            self.assertFalse(self.claim_knock(older))
             for _, event in authority:
-                self.assertTrue(serve.claim_knock(event))
-                serve.finish_knock(event, False)
+                self.assertTrue(self.claim_knock(event))
+                self.finish_knock(event, False)
 
     def test_compaction_does_not_retain_a_terminal_event_after_ledger_eviction(self):
         path = self.events + ".knocks"
@@ -293,9 +329,9 @@ class EventsEndpointTest(unittest.TestCase):
         self.assertIn(knocks.terminal_key(older), terminal)
         self.assertIn(knocks.terminal_key(victims[0]), terminal)
 
-        serve._notifying.clear()
+        self.runtime.notifying.clear()
         with mock.patch.object(serve, "NOTIFY_URL", "unavailable"):
-            self.assertFalse(serve.claim_knock(older))
+            self.assertFalse(self.claim_knock(older))
 
     def test_failed_capacity_compaction_cannot_resurrect_terminal_source(self):
         path = self.events + ".knocks"
@@ -430,23 +466,29 @@ class EventsEndpointTest(unittest.TestCase):
             mock.patch.object(serve, "KNOCK_BYTES", 100000),
             mock.patch.object(serve, "LEDGER_BYTES", 100000),
         ):
-            self.assertTrue(serve.persist_knock(events[0]))
-            self.assertTrue(serve.persist_knock(events[1]))
-            self.assertTrue(serve._store().commit_terminal(events[0], "notified"))
-            self.assertTrue(serve._store().commit_terminal(events[2], "notified"))
-            self.assertTrue(serve._store().commit_terminal(events[1], "notified"))
-        serve._notifying.clear()
-        self.assertFalse(serve.claim_knock(events[0]))
-        self.assertFalse(serve.claim_knock(events[1]))
+            self.assertTrue(self.persist_knock(events[0]))
+            self.assertTrue(self.persist_knock(events[1]))
+            self.assertTrue(
+                self.runtime.notification_store.commit_terminal(events[0], "notified")
+            )
+            self.assertTrue(
+                self.runtime.notification_store.commit_terminal(events[2], "notified")
+            )
+            self.assertTrue(
+                self.runtime.notification_store.commit_terminal(events[1], "notified")
+            )
+        self.runtime.notifying.clear()
+        self.assertFalse(self.claim_knock(events[0]))
+        self.assertFalse(self.claim_knock(events[1]))
         self.assertNotIn(
             knocks.knock_key(events[0]),
-            serve._store().read_journal_keys(self.events + ".knocks"),
+            self.runtime.notification_store.read_journal_keys(self.events + ".knocks"),
         )
 
     def test_terminal_commit_crash_copy_converges_without_losing_suppression(self):
         event = self.valid_event(type="needs_human", delivery_id="crash-terminal")
         with mock.patch.object(serve, "NOTIFY_URL", "unavailable"):
-            self.assertTrue(serve.persist_knock(event))
+            self.assertTrue(self.persist_knock(event))
             real_publish = serve._notification_store.publish_compaction
             publications = []
 
@@ -462,9 +504,9 @@ class EventsEndpointTest(unittest.TestCase):
                 side_effect=crash_after_ledger,
             ):
                 self.assertTrue(serve._store().commit_terminal(event, "notify-dropped"))
-            self.assertFalse(serve.claim_knock(event))
-            serve._notifying.clear()
-            serve._recover_knocks()
+            self.assertFalse(self.claim_knock(event))
+            self.runtime.notifying.clear()
+            self._recover_knocks()
         self.assertNotIn(
             knocks.knock_key(event),
             serve._store().read_journal_keys(self.events + ".knocks"),
@@ -472,7 +514,7 @@ class EventsEndpointTest(unittest.TestCase):
 
     def test_concurrent_terminal_commits_are_counted_once_from_durable_ledgers(self):
         event = self.valid_event(type="needs_human", delivery_id="raced-terminal")
-        self.assertTrue(serve.persist_knock(event))
+        self.assertTrue(self.persist_knock(event))
         context = multiprocessing.get_context("fork")
         gate = context.Barrier(2)
         processes = [
@@ -487,7 +529,7 @@ class EventsEndpointTest(unittest.TestCase):
         for process in processes:
             process.join(10)
             self.assertEqual(process.exitcode, 0)
-        self.assertEqual(serve.transport_status()["notifications"]["dropped"], 1)
+        self.assertEqual(self.transport_status()["notifications"]["dropped"], 1)
 
     def test_terminal_status_survives_process_counter_reset(self):
         delivered = self.valid_event(type="needs_human", delivery_id="status-delivered")
@@ -497,7 +539,7 @@ class EventsEndpointTest(unittest.TestCase):
         with mock.patch.dict(
             serve._transport_counters, {"notify_delivered": 0, "notify_dropped": 0}
         ):
-            status = serve.transport_status()["notifications"]
+            status = self.transport_status()["notifications"]
         self.assertEqual(status["delivered"], 1)
         self.assertEqual(status["dropped"], 1)
 
@@ -554,8 +596,8 @@ class EventsEndpointTest(unittest.TestCase):
         event = self.valid_event(type="needs_human", delivery_id="terminal-recovery")
         work = queue.Queue(maxsize=8)
         posts = []
-        dropped_before = serve._transport_counters["notify_dropped"]
-        real_remember = serve._notification_store.remember
+        dropped_before = self.runtime.transport_counters["notify_dropped"]
+        real_remember = self.runtime.notification_store.remember
 
         def fail_drop(kind, key):
             if kind == "notify-dropped":
@@ -564,91 +606,97 @@ class EventsEndpointTest(unittest.TestCase):
 
         with (
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
-            mock.patch.object(serve, "_knock_queue", work),
+            mock.patch.object(self.runtime, "knock_queue", work),
             mock.patch.object(serve, "_recover_knocks"),
             mock.patch.object(
-                serve, "notify", side_effect=lambda _event: posts.append(1) or False
+                serve,
+                "notify",
+                side_effect=lambda _event, _runtime: posts.append(1) or False,
             ),
             mock.patch.object(
-                serve._notification_store, "remember", side_effect=fail_drop
+                self.runtime.notification_store, "remember", side_effect=fail_drop
             ),
         ):
-            self.assertTrue(serve.persist_knock(event))
-            self.assertTrue(serve.claim_knock(event))
-            serve._process_knock(event)
-            serve._process_knock(work.get_nowait())
-            serve._process_knock(work.get_nowait())
+            self.assertTrue(self.persist_knock(event))
+            self.assertTrue(self.claim_knock(event))
+            self._process_knock(event)
+            self._process_knock(work.get_nowait())
+            self._process_knock(work.get_nowait())
             self.assertEqual(len(posts), 3)
             self.assertEqual(
-                serve._transport_counters["notify_dropped"], dropped_before
+                self.runtime.transport_counters["notify_dropped"], dropped_before
             )
 
         # Simulate two fresh processes by recovering the durable attempts each time.
         for _ in range(2):
-            serve._store().clear_attempts(event)
-            serve._notifying.clear()
+            self.runtime.notification_store.clear_attempts(event)
+            self.runtime.notifying.clear()
             with (
                 mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
-                mock.patch.object(serve, "_knock_queue", work),
+                mock.patch.object(self.runtime, "knock_queue", work),
                 mock.patch.object(
-                    serve, "_recover_knocks", wraps=serve._recover_knocks
+                    serve, "_recover_knocks", wraps=self._recover_knocks
                 ) as recover,
                 mock.patch.object(
-                    serve, "notify", side_effect=lambda _event: posts.append(1) or False
+                    serve,
+                    "notify",
+                    side_effect=lambda _event, _runtime: posts.append(1) or False,
                 ),
                 mock.patch.object(
-                    serve._notification_store, "remember", side_effect=fail_drop
+                    self.runtime.notification_store, "remember", side_effect=fail_drop
                 ),
             ):
                 recover()
-                serve._process_knock(work.get_nowait())
+                self._process_knock(work.get_nowait())
             self.assertEqual(len(posts), 3)
             self.assertEqual(
-                serve._transport_counters["notify_dropped"], dropped_before
+                self.runtime.transport_counters["notify_dropped"], dropped_before
             )
 
-        serve._store().clear_attempts(event)
-        serve._notifying.clear()
+        self.runtime.notification_store.clear_attempts(event)
+        self.runtime.notifying.clear()
         with (
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
-            mock.patch.object(serve, "_knock_queue", work),
+            mock.patch.object(self.runtime, "knock_queue", work),
             mock.patch.object(
-                serve, "notify", side_effect=lambda _event: posts.append(1) or False
+                serve,
+                "notify",
+                side_effect=lambda _event, _runtime: posts.append(1) or False,
             ),
         ):
-            serve._recover_knocks()
-            serve._process_knock(work.get_nowait())
-            serve._recover_knocks()
+            self._recover_knocks()
+            self._process_knock(work.get_nowait())
+            self._recover_knocks()
         self.assertEqual(len(posts), 3)
-        self.assertEqual(serve.transport_status()["notifications"]["dropped"], 1)
+        self.assertEqual(self.transport_status()["notifications"]["dropped"], 1)
         self.assertFalse(glob.glob(self.events + ".knocks.replay.*"))
 
     def test_retry_queue_saturation_is_reported_and_work_remains_durable(self):
         event = self.valid_event(type="needs_human", delivery_id="retry-saturated")
         work = queue.Queue(maxsize=1)
         work.put_nowait(object())
-        saturated_before = serve._transport_counters["notify_saturated"]
+        saturated_before = self.runtime.transport_counters["notify_saturated"]
 
-        def failed_delivery(failed_event):
-            serve.finish_knock(failed_event, False)
+        def failed_delivery(failed_event, _runtime):
+            self.finish_knock(failed_event, False)
             return False
 
         with (
             mock.patch.object(serve, "NOTIFY_URL", "unavailable"),
-            mock.patch.object(serve, "_knock_queue", work),
+            mock.patch.object(self.runtime, "knock_queue", work),
             mock.patch.object(serve, "deliver_knock", side_effect=failed_delivery),
             mock.patch.object(serve, "_recover_knocks"),
         ):
-            self.assertTrue(serve.persist_knock(event))
-            self.assertTrue(serve.claim_knock(event))
-            serve._process_knock(event)
+            self.assertTrue(self.persist_knock(event))
+            self.assertTrue(self.claim_knock(event))
+            self._process_knock(event)
         self.assertEqual(
-            serve._transport_counters["notify_saturated"], saturated_before + 1
+            self.runtime.transport_counters["notify_saturated"], saturated_before + 1
         )
-        self.assertNotIn(knocks.terminal_key(event), serve._notifying)
+        self.assertNotIn(knocks.terminal_key(event), self.runtime.notifying)
         self.assertIn(
             knocks.knock_key(event),
-            serve._store().read_journal_keys(self.events + ".knocks"),
+            self.runtime.notification_store.read_journal_keys(self.events + ".knocks"),
         )
 
     def test_ingest_rejects_the_shared_protocol_contract_without_appending(self):
