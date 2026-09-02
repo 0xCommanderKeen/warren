@@ -359,7 +359,7 @@ def test_hex_digest_where_a_reference_is_expected_is_rejected(
 def test_ordinary_paths_and_urls_survive_the_blob_check() -> None:
     for reference in (
         "/data/residents/life-agent/memory",
-        "~/.steward/memory/burrow-builder",
+        "~/.steward/memory/project-agent",
         "https://github.com/0xCommanderKeen/burrow/issues",
         "op://Private/Gmail",
         "steward:scheduler",
@@ -1439,7 +1439,7 @@ def test_a_permitted_sender_may_send_to_anybody_unless_it_names_a_list(
 
     narrow = m.load_manifest(write_resident(delegating({"send": True, "to": ["life-agent"]})))
     assert narrow.manifest.delegation.may_send_to("life-agent") is True
-    assert narrow.manifest.delegation.may_send_to("burrow-builder") is False
+    assert narrow.manifest.delegation.may_send_to("other-agent") is False
 
 
 def test_an_allowlist_with_the_switch_off_is_refused(write_resident: ResidentWriter) -> None:

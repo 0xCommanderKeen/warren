@@ -57,7 +57,7 @@ function ManifestFields({ draft, edit, diagnostics }) {
     <>
       <Panel title="Identity">
         <div className="grid gap-x-4 [grid-template-columns:repeat(auto-fit,minmax(190px,1fr))]">
-          {text("soul.name", "name", "What Chronicle calls it. Hob, Quill, Maren.")}
+          {text("soul.name", "name", "What Chronicle calls it. For example, Hob or Quill.")}
           {text("soul.char", "char", "The village sprite key.")}
         </div>
         <div className="grid gap-x-4 [grid-template-columns:repeat(auto-fit,minmax(190px,1fr))]">

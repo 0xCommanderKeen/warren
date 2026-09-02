@@ -44,9 +44,34 @@ from steward.store import Store
 CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"'
 
 
+OPERATOR_BURROW_DOCKER = (
+    'case "$1" in '
+    "info) printf 'dxp2800\\t27.3.1\\n' ;; "
+    "inspect) case \"$4\" in steward-life-agent|steward-pip) printf 'true\\n' ;; "
+    "*) exit 1 ;; esac ;; "
+    f'exec) case "$2" in steward-life-agent|steward-pip) {CURRENT_CLAUDE} ;; '
+    "*) exit 1 ;; esac ;; "
+    "*) exit 1 ;; esac"
+)
+
+
 @pytest.fixture
 def runner() -> CliRunner:
     return CliRunner()
+
+
+@pytest.fixture
+def on_operator_burrow(
+    monkeypatch: pytest.MonkeyPatch, stub_bin: StubWriter, tmp_path: Path
+) -> Path:
+    """Run shipped-tree diagnostics where the two proposed containers are provisioned."""
+    stub_bin("docker", OPERATOR_BURROW_DOCKER)
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    hob_memory = tmp_path / "docker" / "steward-life-agent" / "memory"
+    hob_memory.mkdir(parents=True)
+    (tmp_path / "docker" / "steward-pip" / "memory").mkdir(parents=True)
+    return hob_memory
 
 
 def test_events_flush_reports_delivery_and_exits_cleanly(
@@ -134,7 +159,7 @@ def test_validate_defaults_to_the_residents_tree(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["validate"])
     assert result.exit_code == 0, result.output
-    assert "3 valid resident(s)" in result.output
+    assert "2 valid resident(s)" in result.output
 
 
 def test_validate_accepts_explicit_paths(runner: CliRunner, write_resident: ResidentWriter) -> None:
@@ -385,6 +410,7 @@ def test_doctor_on_a_named_empty_tree_warns_but_does_not_fail(
     assert "no resident manifests found" in result.output
 
 
+@pytest.mark.usefixtures("on_operator_burrow")
 def test_doctor_names_the_brain_and_the_next_fire(
     runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -393,19 +419,26 @@ def test_doctor_names_the_brain_and_the_next_fire(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: runner claude (claude-opus-5) — ready" in result.output
+    assert (
+        "life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready"
+        in result.output
+    )
+    assert "pip: runner claude (claude-haiku-4-5-20251001) in container steward-pip — ready" in (
+        result.output
+    )
     assert "life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana" in result.output
 
 
 @pytest.mark.usefixtures("empty_path")
-def test_doctor_fails_loudly_when_the_binary_is_missing(
+def test_doctor_fails_loudly_when_the_container_runtime_is_missing(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
-    assert "not on PATH" in result.output
+    assert "docker could not answer for container 'steward-life-agent'" in result.output
+    assert "docker could not answer for container 'steward-pip'" in result.output
 
 
 #: A `claude --help` that knows how to bound a session, and one too old to.
@@ -516,17 +549,19 @@ def test_doctor_says_so_when_nothing_is_scheduled(
 
 
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
-    runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    on_operator_burrow: Path,
 ) -> None:
     stub_bin("claude", CURRENT_CLAUDE)
     monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert "life-agent: journal /data/residents/life-agent/memory/journal" in result.output
+    assert f"life-agent: journal {on_operator_burrow}/journal" in result.output
     assert "closed by close-of-day" in result.output
-    assert "burrow-builder: journal" in result.output
-    assert "no routine closes the day" in result.output
 
 
 def test_doctor_warns_when_the_journal_location_is_not_writable(
@@ -1386,7 +1421,7 @@ def test_skills_lists_the_shipped_library_and_every_resident(
     assert "life-agent: daily-summary, escalate, research, write-journal, read-inbox" in (
         result.output
     )
-    assert "burrow-builder: daily-summary, escalate, research, write-journal" in result.output
+    assert "burrow-builder" not in result.output
     # Named as a copy the CLI does not discover: since steward #206 a claude session is
     # launched with `--setting-sources ""`, and `.claude/skills` is discovered through the
     # project setting source. The prompt is the delivery path; printing two working
@@ -2432,6 +2467,7 @@ def test_doctor_names_the_burrow_that_supervises_a_container(
     result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
 
     assert result.exit_code == 0, result.output
+    assert "burrow dxp2800 fires: test-agent" in result.output
     assert "docker at dxp2800's own docker answers as dxp2800 27.3.1" in result.output
     assert "container steward-test-agent on dxp2800 — supervised from here" in result.output
 
@@ -2480,18 +2516,14 @@ def test_doctor_says_when_docker_itself_did_not_answer(
     assert "nothing is supervising test-agent" in result.output
 
 
-def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
+def test_the_watchdog_does_not_supervise_another_burrows_containers(
     runner: CliRunner,
     write_resident: ResidentWriter,
     stub_bin: StubWriter,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The #59 gap where it matters: this process *is* the supervisor, and it cannot see.
-
-    It still makes the pass — burying stale runs, sweeping leases, checking budgets need
-    no docker at all — so the exit code is unchanged and only the report grows a line.
-    """
+    """The deploy.host partition keeps another burrow out of every watchdog pass."""
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2502,22 +2534,44 @@ def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
     )
 
     assert result.exit_code == 0, result.output
-    assert "container steward-test-agent runs on dxp2800" in result.output
-    assert "Run steward's daemons on dxp2800" in result.output
+    assert "nothing here needs docker" in result.output
+    assert "steward-test-agent" not in result.output
 
 
-def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
+def test_the_watchdog_refuses_an_absent_local_container_once_per_pass(
     runner: CliRunner,
     write_resident: ResidentWriter,
     stub_bin: StubWriter,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """`--format json` keeps stdout parseable, and still says the gap out loud on stderr.
+    stub_bin(
+        "docker",
+        'case "$1" in info) printf "dxp2800\\t27.3.1\\n" ;; '
+        'inspect) echo "No such container: steward-test-agent" >&2; exit 1 ;; esac',
+    )
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
 
-    An unattended consumer is the last caller who should be told nothing (#59), so the
-    complaint goes where it cannot corrupt the document rather than nowhere.
-    """
+    result = runner.invoke(
+        main,
+        ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+
+    refusal = "test-agent: refused: declared container 'steward-test-agent' is absent"
+    assert result.exit_code == 0, result.output
+    assert result.output.count(refusal) == 1
+    assert "unsupervised" not in result.output
+
+
+def test_the_watchdog_json_report_excludes_another_burrows_residents(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The machine report contains only the residents this daemon is responsible for."""
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2531,9 +2585,9 @@ def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
     )  # fmt: skip
 
     assert result.exit_code == 0, result.output
-    assert "the watchdog cannot see it" in result.output
-    document = result.output[result.output.index("{") :]
-    assert json.loads(document)["interventions"] == 0
+    document = json.loads(result.output)
+    assert document["interventions"] == 0
+    assert document["health"] == []
     assert "topology: docker at" not in result.output, "a green line would corrupt the JSON"
 
 

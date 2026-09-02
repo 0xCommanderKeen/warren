@@ -547,8 +547,8 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
 ```console
 $ steward doctor
-life-agent: runner claude (claude-opus-5) — ready
-life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready
+life-agent: journal /home/Miha/docker/steward-life-agent/memory/journal — writable, closed by close-of-day
 life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
@@ -752,7 +752,7 @@ nothing. Delivery is pull-based: the receiver drains its inbox on its own next w
 ahead of the open board, and works the item as an ordinary session.
 
 ```console
-$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward delegate sender-resident --to life-agent --route handoff --title "…"
 $ steward inbox life-agent                 # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>           # the whole chain, root first
 ```

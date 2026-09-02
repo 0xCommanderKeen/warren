@@ -26,7 +26,7 @@ import pytest
 import yaml
 
 from conftest import REPO_ROOT, ResidentWriter, valid_manifest
-from steward.deploy import DEFAULT_IMAGE, render_compose, target_for
+from steward.deploy import DEFAULT_IMAGE, memory_mount, render_compose, target_for
 from steward.manifest import load_manifest
 
 IMAGE_DIR = REPO_ROOT / "docker" / "resident"
@@ -46,6 +46,8 @@ BUNDLE_BUILD = REPO_ROOT.parent / "chronicle" / "hooks" / "build.py"
 #: This service's CI, at the repository root: path-filtered per service, which is why the
 #: filter itself is something this suite has an opinion about.
 WORKFLOW = REPO_ROOT.parent / ".github" / "workflows" / "steward.yml"
+CONTROL_PLANE_DOCKERFILE = REPO_ROOT / "docker" / "control-plane" / "Dockerfile"
+DEPLOY_COMPOSE = REPO_ROOT / "deploy" / "compose.yaml"
 
 #: Every hook the Mac's ~/.claude/settings.json wires the emitter into, which is the whole
 #: set burrow's protocol has a mapping for. A resident missing any of them is a villager
@@ -283,6 +285,41 @@ def test_the_smoke_test_only_ever_posts_a_heartbeat_under_a_probe_identity() -> 
         assert forged not in text
 
 
+def test_the_canary_image_boots_pips_heartbeat_end_to_end_in_ci() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "SMOKE_AGENT_ID=steward:pip" in workflow
+    assert "CHRONICLE_PROJECT=pip" in workflow
+
+
+def test_the_control_plane_carries_no_local_brain_or_login() -> None:
+    dockerfile = CONTROL_PLANE_DOCKERFILE.read_text(encoding="utf-8")
+    instructions = "\n".join(
+        line for line in dockerfile.lower().splitlines() if not line.lstrip().startswith("#")
+    )
+    compose = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
+
+    assert "claude-code" not in instructions
+    assert "npm install" not in instructions
+    assert "/usr/local/bin/node" not in instructions
+    assert all(
+        "claude-config" not in str(volume)
+        for service in compose["services"].values()
+        for volume in service.get("volumes", [])
+    )
+
+
+def test_both_daemons_read_the_same_resident_neutral_tree() -> None:
+    document = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
+    commands = [document["services"][name]["command"] for name in ("scheduler", "watchdog")]
+
+    assert all(command[-2:] == ["--residents", "/app/residents"] for command in commands)
+    shipped_ids = {path.parent.name for path in (REPO_ROOT / "residents").glob("*/manifest.yaml")}
+    assert not any(
+        resident_id in " ".join(command) for resident_id in shipped_ids for command in commands
+    )
+
+
 # ----------------------------------------------------------------------------- Dockerfile
 
 
@@ -399,28 +436,65 @@ def test_the_local_dev_mirror_is_off_inside_a_container() -> None:
     assert 'CHRONICLE_MIRROR=""' in text
 
 
-# ------------------------------------------------------------------- life-agent, as it is
+# --------------------------------------------------------------- life-agent, as it deploys
 
 
-def test_life_agent_declares_where_it_actually_runs() -> None:
-    """Steward #52: Hob's container is hand-deployed and named life-agent. Say so.
+def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
+    """Steward #40: Hob's deploy block is the nursery layout, not the hand-built container.
 
-    Without `deploy.container` the watchdog calls Hob *unsupervised*, which was a fact
-    about steward rather than about the world. These values were read off the running
-    container, not chosen.
+    Until this cut over it said `life-agent` / `~/docker/life-agent` / `node:22`, read off
+    the container Hob had been running in since before steward existed (#52). These values
+    are the other kind of true: they are what the nursery resolves for this resident, and
+    the only address a container-placed resident can have. Merging the manifest is the
+    operator's half of the cutover; `steward provision life-agent` puts the reviewed bundle
+    on the NAS.
     """
     hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
     deploy = hob.manifest.deploy
 
-    assert deploy.container == "life-agent", "not steward-life-agent: nobody renamed it"
+    assert deploy.container == "steward-life-agent"
     assert deploy.host == "dxp2800"
     assert deploy.user == "Miha"
-    assert deploy.path == "~/docker/life-agent"
-    assert deploy.image == "node:22", (
-        "Hob still runs the hand-rolled node:22 container that installs claude at every "
-        "cold start; moving him onto steward-resident is a migration with a cutover"
+    assert deploy.path == "~/docker/steward-life-agent"
+    assert deploy.image == DEFAULT_IMAGE, (
+        "Hob runs the image this repo builds and ships, so his container has a brain "
+        "before a session opens instead of installing one on every cold start"
     )
     assert not deploy.command, (
-        "Hob's real command is a 40-line bash bootstrap in a compose file steward does "
-        "not own, so the manifest declares nothing about it rather than something tidier"
+        "the default is the truth now: a resident's container is a place for sessions to "
+        "happen, and `sleep infinity` under docker's init is exactly that"
+    )
+
+
+def test_life_agent_runs_its_sessions_inside_that_container() -> None:
+    """The deploy block is an address; `placement` is what makes steward use it (#58, #40).
+
+    Explicit, never inferred: a resident may declare a container for the watchdog to
+    supervise while its sessions still run on the control plane, which is what every
+    resident deployed before #58 does. Hob no longer does — which is also what puts the
+    two sides of his memory mount on different machines.
+    """
+    hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+
+    assert hob.manifest.runner.placement == "container"
+    assert hob.manifest.runner.container_placed is True
+    host_side, container_side = memory_mount(hob.manifest)
+    assert host_side == "~/docker/steward-life-agent/memory"
+    assert container_side == "/data/residents/life-agent/memory"
+
+
+def test_pip_renders_the_nursery_container_and_memory_mount() -> None:
+    """Issue #40/#332: Pip is the second explicit operator placement proposal."""
+    pip = load_manifest(REPO_ROOT / "residents" / "pip" / "manifest.yaml")
+    target = target_for(pip.manifest)
+    service = yaml.safe_load(render_compose(pip, target))["services"]["pip"]
+
+    assert target.container == "steward-pip"
+    assert target.path == "~/docker/steward-pip"
+    assert service["container_name"] == "steward-pip"
+    assert service["image"] == DEFAULT_IMAGE
+    assert service["command"] == ["sleep", "infinity"]
+    assert memory_mount(pip.manifest) == (
+        "~/docker/steward-pip/memory",
+        "/data/residents/pip/memory",
     )

@@ -329,7 +329,7 @@ export default function ResidentNew() {
           {field("id", "id", "Directory under residents/. Lowercase letters, digits and hyphens.", {
             placeholder: "note-keeper",
           })}
-          {field("name", "name", "What the village calls it. Hob, Quill, Maren.", {
+          {field("name", "name", "What the village calls it. For example, Hob or Quill.", {
             placeholder: "Quill",
           })}
         </div>

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -97,7 +98,7 @@ from steward.store import (
     Store,
     default_db_path,
 )
-from steward.topology import Survey, survey
+from steward.topology import Survey, residents_on_this_burrow, survey, this_burrow
 from steward.transitions.approval import ApprovalTransitions
 from steward.watchdog import DEFAULT_INTERVAL_S, Watchdog, WatchdogPass
 
@@ -554,7 +555,7 @@ def doctor(residents: Path | None, db: Path | None) -> None:
     library = library_for(residents_root(residents))
     with _open_store(db) as store:
         guard = BudgetGuard(store)
-        for resident in result.residents:
+        for resident in _doctor_residents(result.residents):
             if resident.retired:
                 # Still valid, still in git, still readable — and doing nothing. Saying
                 # "ready" about it would be the one line of this report that is untrue.
@@ -582,7 +583,12 @@ def doctor(residents: Path | None, db: Path | None) -> None:
         problems += _report_watchdog(store.last_watchdog_pass())
     problems += _report_scheduler(SchedulerState.load(default_state_path()))
 
-    scheduled = _load_or_exit(residents)
+    source = TreeSource(residents_dir=Path(residents), env=dict(os.environ))
+    try:
+        snapshot = source.load()
+    except SchedulerError as exc:
+        raise click.ClickException(str(exc)) from exc
+    scheduled = snapshot.scheduled
     if scheduled:
         engine = Scheduler(
             scheduled,
@@ -599,6 +605,12 @@ def doctor(residents: Path | None, db: Path | None) -> None:
         click.echo("  no enabled routines")
 
     sys.exit(EXIT_OK if problems == 0 else EXIT_INVALID)
+
+
+def _doctor_residents(residents: Sequence[Resident]) -> tuple[Resident, ...]:
+    """Keep retired declarations visible, but operationally check only this partition."""
+    assigned = residents_on_this_burrow(residents)
+    return tuple(resident for resident in residents if resident.retired or resident in assigned)
 
 
 def _probe_writable(directory: Path) -> str | None:
@@ -784,6 +796,14 @@ def _report_topology(residents: Sequence[Resident]) -> int:
     docker gets "no such container", reports the resident as unsupervised, and never
     restarts anything.
     """
+    assigned = residents_on_this_burrow(residents)
+    assigned_ids = ", ".join(resident.id for resident in assigned) or "none"
+    click.secho(f"burrow {this_burrow()} fires: {assigned_ids}", fg="green")
+    elsewhere = ", ".join(
+        resident.id for resident in residents if not resident.retired and resident not in assigned
+    )
+    if elsewhere:
+        click.secho(f"other burrows fire: {elsewhere}", fg="bright_black")
     _print_topology(survey(residents), alarm="yellow")
     return 0
 
@@ -1082,7 +1102,12 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
     *,
     dry_run: bool,
 ) -> Iterator[Scheduler]:
-    scheduled = _load_or_exit(residents)
+    source = TreeSource(residents_dir=Path(residents), env=dict(os.environ))
+    try:
+        snapshot = source.load()
+    except SchedulerError as exc:
+        raise click.ClickException(str(exc)) from exc
+    scheduled = snapshot.scheduled
     # A rehearsal touches no database: it must not claim a task, deliver a decision, deny
     # one by expiry, or spend a budget. With no hooks and no guard the scheduler simply
     # fires routines, as it did before the board, approvals, and budgets existed.
@@ -1101,6 +1126,7 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
             hooks = Dispatcher.from_path(
                 residents, registry, workdir=workdir, guard=guard, claims=claims
             )
+            hooks.refresh(snapshot.residents, snapshot.library)
         yield Scheduler(
             scheduled,
             state=SchedulerState.load(state if state is not None else default_state_path()),
@@ -1115,7 +1141,7 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
             # What makes `steward serve` notice a manifest that changed under it. A
             # rehearsal is given no source: `--dry-run` reports on the tree as it was read,
             # and a reload halfway through would make the report describe two of them.
-            source=None if dry_run else TreeSource(residents_dir=Path(residents)),
+            source=None if dry_run else source,
         )
     finally:
         # This store is owned by the CLI assembly above. Scheduler also accepts injected
@@ -2122,7 +2148,12 @@ def _report_pass(report: WatchdogPass) -> None:
     _report_interventions(report)
     for health in report.health:
         if not health.known:
-            click.secho(f"{health.resident_id}: unsupervised — {health.detail}", fg="bright_black")
+            if health.detail.startswith("refused:"):
+                click.secho(f"{health.resident_id}: {health.detail}", fg="yellow")
+            else:
+                click.secho(
+                    f"{health.resident_id}: unsupervised — {health.detail}", fg="bright_black"
+                )
         elif health.alive:
             click.secho(f"{health.resident_id}: ok", fg="green")
     if not report:
@@ -2142,7 +2173,11 @@ def watchdog_tick(residents: Path, db: Path | None, output_format: str) -> None:
     """Make one pass: probe, sweep deadlines, bury stale runs, check budgets. Then exit."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
-        dog = Watchdog.from_path(residents, store)
+        dog = Watchdog.from_path(
+            residents,
+            store,
+            env=os.environ,
+        )
         # Before the pass, not after: a reader who sees "unsupervised" for every resident
         # deserves to have already been told the docker being asked is the wrong one. The
         # JSON caller still gets the complaints — on stderr, where they cannot corrupt the
@@ -2177,7 +2212,11 @@ def watchdog_run(residents: Path, db: Path | None, interval: float, max_passes: 
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _open_store(db) as store:
-        dog = Watchdog.from_path(residents, store)
+        dog = Watchdog.from_path(
+            residents,
+            store,
+            env=os.environ,
+        )
         # Once, at startup, before the daemon settles into its loop: which containers this
         # process can actually reach is a property of where it is running, not of a pass.
         _print_topology(dog.topology(), alarm="red")
