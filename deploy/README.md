@@ -57,12 +57,17 @@ the steps below are done. `workflow_dispatch` runs it by hand for any subset of 
 ### One-time setup — the parts only a person can do
 
 Done already (2026-09-02, from the laptop): a deploy key `warren-deploy` generated and
-installed in the NAS's `~/.ssh/authorized_keys` with `restrict,from="100.64.0.0/10"` — it
-can only be presented from a tailnet address, and gets no pty, no forwarding. Its private
-half is the repo secret `NAS_SSH_KEY`; the NAS's host key is the repo variable
-`NAS_KNOWN_HOSTS`. Neither is anywhere else.
+installed in the NAS's `~/.ssh/authorized_keys` with
+`restrict,from="127.0.0.1,100.64.0.0/10"` — no pty, no forwarding, and only from the
+tailnet range or loopback. Loopback is not a loophole: the NAS's tailscale runs as a
+container in userspace-networking mode, which proxies every inbound tailnet connection
+to `127.0.0.1:22`, so sshd sees *all* tailnet clients as loopback (a `from=` with only the
+100.64/10 range rejected the runner with `Permission denied`). LAN and WAN sources are
+still excluded. The key's private half is the repo secret `NAS_SSH_KEY`; the NAS's host
+key is the repo variable `NAS_KNOWN_HOSTS`. Neither is anywhere else.
 
-Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>):
+Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>; the
+menu names below are the new console's — Policies, Definitions, Trust credentials, Keys):
 
 1. **Access controls → edit the policy file.** Give the tag an owner and let it reach
    the NAS on ssh and the two health-check ports:
@@ -77,9 +82,10 @@ Still to do, in the Tailscale admin console (<https://login.tailscale.com/admin>
    ],
    ```
 
-2. **Settings → OAuth clients → Generate OAuth client.** Description `warren deploy
+2. **Settings → Trust credentials → Generate OAuth client.** Description `warren deploy
    (GitHub Actions)`; scope **Auth Keys: Write**; under it, tag `tag:ci`. Copy the client
-   id and the secret — the secret is shown once.
+   id and the secret — the secret is shown once. The tag has to be *defined* first —
+   **Access controls → Definitions → Tags** — not merely mentioned by a rule.
 
    The tag picker only lists tags the *saved* policy's `tagOwners` already declares, so
    step 1 has to be saved before this dialog is opened. A client generated without the
