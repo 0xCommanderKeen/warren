@@ -21,6 +21,16 @@ describe("production deployment contract", () => {
     expect(nginx).toContain("rewrite ^ /burrow/state/stream last");
   });
 
+  it("serves the bundle with real MIME types, and the smoke test proves it", () => {
+    // Without the include, nginx knows html/gif/jpeg and nothing else: every module
+    // script goes out as text/plain, the browser refuses it, and both SPAs render a blank
+    // page while every curl-based check stays green (2026-09-02, found by Miha).
+    expect(nginx).toContain("include /etc/nginx/mime.types;");
+    expect(nginx).toContain("default_type application/octet-stream;");
+    const smoke = readFileSync("deploy/smoke.sh", "utf8");
+    expect(smoke).toContain("module-type=javascript");
+  });
+
   it("keeps Chronicle ingest and Steward's API behind the deployed origin", () => {
     expect(nginx).toContain("location = /events");
     expect(nginx).toContain("host.docker.internal:8738");
