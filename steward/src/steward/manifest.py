@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from functools import cache
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, get_args
 
 import yaml
 from croniter import CroniterBadDateError, croniter
@@ -48,6 +48,7 @@ from steward.operator_auth import OPERATOR_CREDENTIAL_PATTERN
 from steward.session_auth import SESSION_CREDENTIAL_PATTERN
 
 __all__ = [
+    "CHAT_ROUTE_KIND",
     "CLOSE_OF_DAY",
     "DEFAULT_BOARD_LEASE_S",
     "DEFAULT_BOARD_TIMEOUT_S",
@@ -56,6 +57,8 @@ __all__ = [
     "DELEGATION_ROUTE_KIND",
     "JOB_BOARD_ROUTE_KIND",
     "MANIFEST_FILENAME",
+    "NOTIFICATION_KINDS",
+    "NOTIFICATION_TRANSPORTS",
     "SCHEMA_VERSION",
     "SECRET_REDACTION",
     "UNRESTRICTED_TOOLS",
@@ -70,6 +73,7 @@ __all__ = [
     "Escalation",
     "ManifestError",
     "Memory",
+    "Notifications",
     "PermissionMode",
     "Resident",
     "ResidentManifest",
@@ -239,6 +243,41 @@ JOB_BOARD_ROUTE_KIND = "job-board"
 #: it. The route's ``id`` is what a delegating session names in its block.
 DELEGATION_ROUTE_KIND = "delegation"
 
+#: The route kind an operator's message arrives through (warren#108). The third kind
+#: steward *delivers* into rather than merely describes, and the only one where the thing
+#: arriving is a person rather than the fleet: the bridge maps the route's ``address``
+#: reference to a bot token held in steward's own environment, fires a session with the
+#: message, and sends the answer back. The address stays a reference — ``telegram:pip`` —
+#: for the reason every reference field in this file is one: a manifest is git, and a bot
+#: token in git is a bot anybody who clones the repo can speak as.
+CHAT_ROUTE_KIND = "chat"
+
+#: One transport name, as a manifest spells it. A closed set for the reason
+#: :data:`PermissionMode` is one: a typo in a transport name would otherwise be a manifest
+#: that reads as wired up and taps nobody, discovered on the night an approval knock does
+#: not arrive. Telegram belongs here when it exists — as a second transport of *this*
+#: declaration, not as an outbound growth of the chat bridge (warren#108).
+NotificationTransport = Literal["ntfy"]
+
+#: One fact a tap may be sent about, spelled as the chronicle event type it follows rather
+#: than as a second vocabulary — so an ``on:`` list reads against ``docs/transitions.md``
+#: directly. This module cannot import :mod:`steward.events` (that module imports *this*
+#: one, for redaction), so the strings are repeated here and :mod:`steward.notify` refuses
+#: to import if the two ever disagree.
+NotificationKind = Literal["needs_human", "task_done"]
+
+#: The same two vocabularies as tuples, for the diagnostics and the checks that have to
+#: *name* the members. Derived rather than written twice: a hand-kept copy of a ``Literal``
+#: is a copy that goes stale the first time somebody adds a transport.
+NOTIFICATION_TRANSPORTS: tuple[NotificationTransport, ...] = get_args(NotificationTransport)
+NOTIFICATION_KINDS: tuple[NotificationKind, ...] = get_args(NotificationKind)
+
+#: The one kind whose enforceability depends on the rest of the manifest — a resident that
+#: claims no board work and takes no letters closes no tasks. Named rather than spelled as a
+#: string literal inside :func:`_check_notifications_are_deliverable`, so the check cannot
+#: quietly stop matching a kind somebody renamed.
+NOTIFY_TASK_DONE: NotificationKind = "task_done"
+
 #: How long a claim is good for before the task returns to the board (30 minutes).
 DEFAULT_BOARD_LEASE_S = 30 * 60
 
@@ -398,6 +437,13 @@ SECRET_VALUE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "an inline GitHub token"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "an inline GitHub token"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}"), "an inline Slack token"),
+    # A BotFather token: the bot's numeric id, a colon, and thirty-odd characters of
+    # secret. Both halves of the rule apply to it (warren#108). A chat route's ``address``
+    # is a *reference* to a bot and the token lives in steward's environment, so one
+    # written into a manifest is a credential in git — and a resident that stumbles across
+    # its own bot's token must not be able to echo it back into the chat, which is the one
+    # place a reply is guaranteed to be read by whoever is watching that conversation.
+    (re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}"), "an inline Telegram bot token"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "an inline AWS access key id"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "an inline Google API key"),
     (
@@ -874,6 +920,111 @@ class Route(_Model):
         """
         return self.kind == DELEGATION_ROUTE_KIND and self.status == "active"
 
+    @property
+    def accepts_chat(self) -> bool:
+        """True when the chat bridge may carry an operator's messages into this route.
+
+        The same two halves :attr:`accepts_delegation` requires, and for the same reason
+        (warren#108): the kind says this channel is a conversation, and ``active`` says the
+        operator has actually been to BotFather and put the token in steward's environment.
+        A ``pending`` chat route is a declaration that the bot is not wired up yet — which
+        is the state a manifest ships in, because the token cannot ship with it.
+        """
+        return self.kind == CHAT_ROUTE_KIND and self.status == "active"
+
+
+class Notifications(_Model):
+    """Where this resident's outbound taps go — the one-way twin of :class:`Route`.
+
+    ``routes`` answers *how work reaches this resident*: every kind in it is a doorway
+    something arrives through, and two of them are doorways steward itself delivers into.
+    This block answers the opposite question, and the opposite direction is exactly why it
+    is a dimension of its own rather than a ninth route kind. A **notification** is steward
+    tapping a *person* on the shoulder about a resident — a ``needs_human`` at 2am, a task
+    that finished — and nothing listens for a reply: no session fires, no answer comes back,
+    and the tap is not a channel anything can arrive through. Chat (warren#108) stays what
+    it is, a two-way conversation where an operator speaks and a session answers; the two
+    would be one type only if "a message went somewhere" were the whole of what a channel
+    means, and it is not.
+
+    Silence is not consent, exactly as it is for :class:`Board` and :class:`Delegation`: a
+    manifest with no ``notifications`` block taps nobody, however loudly its resident knocks.
+
+    Declaring a ``transport`` is the whole opt-in, and there is deliberately **no address
+    field**. An ntfy topic is derived from the resident's ``uid``
+    (:func:`steward.notify.ntfy_topic`), so it is unguessable in ntfy's public namespace, it
+    cannot be typed wrong, and it cannot drift from the resident it belongs to. Nothing
+    secret is declared here either, for the reason nothing secret is declared anywhere in a
+    manifest: the ntfy server and its optional token are read from steward's own environment,
+    and what a manifest says is *that* this resident taps — never how to authenticate as one.
+    """
+
+    transport: NotificationTransport | None = Field(
+        default=None,
+        description="Which transport carries the taps. Absent means this resident taps nobody.",
+    )
+    on: tuple[NotificationKind, ...] = Field(
+        default=("needs_human",),
+        description="Which facts are tapped. Defaults to the knock a human has to answer.",
+    )
+    status: Literal["active", "pending", "disabled"] = Field(
+        default="active",
+        description="Only 'active' sends; 'pending' and 'disabled' are declared and silent.",
+    )
+    note: str | None = Field(
+        default=None,
+        description="Who this taps, in words — 'Miha's phone'. A label, never an address.",
+    )
+
+    @property
+    def enabled(self) -> bool:
+        """True when steward should actually send this resident's taps.
+
+        Both halves are required and neither is inferred, like
+        :attr:`Route.accepts_delegation`: a transport says taps have somewhere to go, and
+        ``active`` says the operator has actually subscribed. A topic nobody is listening to
+        is a knock into an empty room, and a manifest that is still being wired up should be
+        able to say so.
+        """
+        return self.transport is not None and self.status == "active"
+
+    @field_validator("transport", mode="before")
+    @classmethod
+    def _transport_is_one_steward_has(cls, value: object) -> object:
+        """Refuse a transport name steward has no way to deliver through.
+
+        The ``Literal`` alone would refuse it too, with ``input should be 'ntfy'``. This
+        exists for the message: it names the whole known set and offers the closest match,
+        which is the diagnostic style every other named-vocabulary field in this file gets.
+        """
+        if not isinstance(value, str):
+            return value
+        name = value.strip()
+        if name in NOTIFICATION_TRANSPORTS:
+            return name
+        known = ", ".join(NOTIFICATION_TRANSPORTS)
+        suggestion = closest_match(name, NOTIFICATION_TRANSPORTS)
+        hint = f"; did you mean {suggestion!r}?" if suggestion else ""
+        raise ValueError(
+            f"{name!r} is not a transport steward can deliver a notification through "
+            f"(known: {known}){hint}"
+        )
+
+    @model_validator(mode="after")
+    def _a_declared_transport_taps_something(self) -> Self:
+        """Refuse a declaration that cannot ever send: a transport with nothing to send."""
+        if self.transport is None:
+            return self
+        if not self.on:
+            raise ValueError(
+                "a declared transport with an empty 'on' taps nobody about anything; "
+                f"name the facts to tap ({', '.join(NOTIFICATION_KINDS)}) or drop the block"
+            )
+        repeated = sorted({kind for kind in self.on if self.on.count(kind) > 1})
+        if repeated:
+            raise ValueError(f"duplicate notification kind(s) {repeated}; name each one once")
+        return self
+
 
 class AppGrant(_Model):
     """A declared grant to use an external application. Identifier and status only."""
@@ -1296,6 +1447,10 @@ class ResidentManifest(_Model):
         default_factory=Delegation,
         description="Handing work to other residents. Absent means this one never does.",
     )
+    notifications: Notifications = Field(
+        default_factory=Notifications,
+        description="Outbound taps to a human. Absent means steward taps nobody about this one.",
+    )
     deploy: Deploy = Field(
         default_factory=Deploy,
         description="Where this resident runs, for the watchdog. Absent means unsupervised.",
@@ -1574,6 +1729,11 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.kind": "kind: email  (delegation makes the route deliverable)",
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
+    "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
+    "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
+    "notifications.on": "on: [needs_human, task_done]",
+    "notifications.status": "status: active  (active | pending | disabled)",
+    "notifications.note": "note: Miha's phone  (a label, never an address)",
     "app_grants": "app_grants: [{id: gmail, name: Gmail, status: granted}]",
     "app_grants.id": "id: gmail",
     "app_grants.name": "name: Gmail",
@@ -1916,6 +2076,49 @@ def _check_board_route(manifest: ResidentManifest, source: Path) -> list[Diagnos
                 f"village would render"
             ),
             example=example,
+        )
+    ]
+
+
+def _check_notifications_are_deliverable(
+    manifest: ResidentManifest, source: Path
+) -> list[Diagnostic]:
+    """Warn about a declared tap for a fact this resident has no way to produce.
+
+    :func:`_check_budget_is_enforceable`'s question, asked of the other capability that
+    fires on its own: a manifest that declares one thing and can only do another is a
+    document disagreeing with itself, and validation is the one moment somebody is reading
+    both halves. Here it is ``on: [task_done]`` on a resident that neither claims from the
+    board nor keeps an open ``delegation`` route — there is no path by which a task of its
+    ever closes, so that tap can never fire.
+
+    A **warning**, and the difference from the budget case is the whole argument. An
+    unenforceable daily cap reads green while real money leaves, so it is refused. A tap
+    that never fires spends nothing and loses nothing: the declaration is not wrong, only
+    aspirational, and granting the resident ``board: {claim: true}`` tomorrow makes it true
+    without touching this line. What it does risk is an operator reading the silence as a
+    broken transport and going looking for a bug in ntfy — which is exactly the sentence a
+    warning is for.
+    """
+    notifications = manifest.notifications
+    if notifications.transport is None or NOTIFY_TASK_DONE not in notifications.on:
+        return []
+    if manifest.board.claim or any(route.accepts_delegation for route in manifest.routes):
+        return []
+    return [
+        Diagnostic(
+            file=source,
+            field_path="notifications.on",
+            problem=(
+                "'task_done' is declared but this resident closes no tasks: board.claim is "
+                "false and no active 'delegation' route is declared, so nothing will ever "
+                "tap under this kind"
+            ),
+            example=(
+                "on: [needs_human]  (the knock this resident can actually raise), or "
+                "board: {claim: true}  (give it work it can finish)"
+            ),
+            severity=Severity.WARNING,
         )
     ]
 
@@ -2522,6 +2725,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     )
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
+    diagnostics.extend(_check_notifications_are_deliverable(manifest, source))
     diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))

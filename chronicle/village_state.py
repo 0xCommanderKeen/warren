@@ -48,6 +48,31 @@ CHARS = (
     "Monk",
 )
 ACCENTS = ("#7d5ba6", "#4f7d5b", "#a65b5b", "#5b7da6", "#a68a4f", "#5ba69b")
+#: Events filed under a villager that are somebody *else's* action, recorded against the
+#: door they knocked on. They ride along in that villager's history and are never
+#: evidence it is alive, present, or doing anything: they cannot create a villager, keep
+#: one in the village, decide its state, refresh its clock, or age its mood. A stranger
+#: messaging a resident's chat bot at three in the morning must not make the village show
+#: that resident at work.
+AMBIENT_TYPES = frozenset({"chat_message_dropped"})
+#: How Steward opens a row on the board. It has two doors and one table: a job posted to
+#: the open board, and a job handed to one named resident. Both write the same open,
+#: unclaimed record in Steward's own store, so both open a row here — the delegated one
+#: carrying an addressee and no required skills, because nobody else may pick it up.
+TASK_ORIGIN_TYPES = frozenset({"task_posted", "task_delegated"})
+#: Everything the ``tasks`` ledger folds. A transition for a task whose origin this log
+#: never saw is dropped rather than inventing the job it belongs to.
+TASK_LEDGER_TYPES = TASK_ORIGIN_TYPES | {"task_claimed", "task_done", "task_failed"}
+
+
+def reopened_by_lease(payload):
+    """Whether this ``task_failed`` is Steward's sweep reopening a job, not a defeat.
+
+    Exported for the same reason the type sets above are: retention and the projection
+    disagreeing about whether a row is closed is precisely the bug that costs the board
+    its honesty. Read forgivingly — a padded reason is still the sweep's word.
+    """
+    return payload.get("reason", "").strip() == "lease_expired"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -62,6 +87,15 @@ class ProjectionPolicy:
     journals: int = 200
     routines: int = 200
     diagnostics: int = 200
+    #: How much of ``diagnostics`` an outsider is *guaranteed*, and all they get when the
+    #: channel is contested. A knock is the one diagnostic somebody outside the fleet
+    #: causes, so without a share of its own a knock storm decides what an operator can
+    #: see — the malformed events and approval collisions this channel exists for would
+    #: age out behind it (warren#278).
+    ambient_diagnostics: int = 40
+    #: The same share of one villager's rendered history. A stranger knocking all night
+    #: must not push off the card what the resident actually did.
+    ambient_events_per_villager: int = 4
 
 
 def _instant(value):
@@ -85,6 +119,41 @@ def _identity(agent_id):
         CHARS[number % len(CHARS)],
         ACCENTS[number % len(ACCENTS)],
     )
+
+
+def ambient_share(ordinary, ambient, capacity, floor):
+    """Split one bounded channel between the fleet's own records and an outsider's.
+
+    Every collection here is bounded by dropping the oldest, which is right when the fleet
+    is what fills them. Ambient events are the exception: they are the records an outsider
+    causes, and newest-wins alone hands a knock storm the power to age out the evidence the
+    channel exists for. So the fleet is served first, out of everything but the outsider's
+    `floor` — and then the outsider takes whatever is genuinely left, which is the whole
+    channel when nobody else wants it and exactly `floor` when everybody does.
+
+    A floor rather than a ceiling, deliberately: capping ambient outright would leave a
+    channel of two hundred holding ninety records with room to spare, and "the newest 200"
+    would stop being true of a full one.
+
+    Returns how many of each to keep, newest first; the caller decides what to do with the
+    numbers. Shared rather than copied — and imported by `retention`, the way `AMBIENT_TYPES`
+    is — because rotation and the reducer disagreeing about this would mean rotation
+    discarding history the snapshot would have shown (warren#278).
+    """
+    kept_ordinary = min(ordinary, capacity - min(ambient, min(floor, capacity)))
+    return kept_ordinary, min(ambient, capacity - kept_ordinary)
+
+
+def _ambient_tail(records, capacity, floor, is_ambient):
+    """Keep the newest of a channel under :func:`ambient_share`, in append order."""
+    ambient = [index for index, record in enumerate(records) if is_ambient(record)]
+    ordinary = [index for index in range(len(records)) if index not in set(ambient)]
+    take_ordinary, take_ambient = ambient_share(
+        len(ordinary), len(ambient), capacity, floor
+    )
+    kept = set(ordinary[len(ordinary) - take_ordinary :])
+    kept.update(ambient[len(ambient) - take_ambient :])
+    return [record for index, record in enumerate(records) if index in kept]
 
 
 def _resident_indexes(manifests):
@@ -133,6 +202,17 @@ def _description(event):
         return "went home"
     if kind in {"idle", "routine_finished"}:
         return "finished, resting"
+    if kind == "task_delegated":
+        return (
+            f"handed “{payload.get('title', '…')}” to {payload.get('to', 'somebody')}"
+        )
+    if kind == "task_session_finished":
+        return f"reported back on “{payload.get('title', '…')}” after losing the claim"
+    if kind == "resident_restarted":
+        return (
+            f"was restarted (attempt {payload.get('attempt', '?')}): "
+            f"{payload.get('reason', 'no reason given')}"
+        )
     return kind.replace("_", " ")
 
 
@@ -306,6 +386,52 @@ def _mood(agent_id, indexed_history, approvals):
     }
 
 
+def _row_origin(event):
+    """Where a job came from, as its post or its handoff states it.
+
+    A posted job names the skills it needs and nobody in particular; a handed-over one
+    names a resident and no skills, because an addressee is the stronger requirement.
+    The identifiers here are the village's own: Steward's store keys a handoff by
+    *resident* id, while the event carries the agent id, which is what a later claim
+    can be compared against.
+
+    These four fields are the only ones an origin owns. A second origin for a row that
+    already exists restates them — it does not say the job is untaken, so it cannot
+    reach ``state``, ``claimant`` or the clock (warren#282).
+    """
+    payload = event["payload"]
+    handed_over = event["type"] == "task_delegated"
+    return {
+        "title": payload["title"],
+        "required_skills": [] if handed_over else list(payload["required_skills"]),
+        "posted_by": payload["from"] if handed_over else payload["posted_by"],
+        "assignee": payload["to"] if handed_over else None,
+    }
+
+
+def _opened_row(event):
+    """The row Steward's two doors open onto: untaken until something moves it."""
+    return {
+        "id": event["payload"]["task_id"],
+        **_row_origin(event),
+        "state": "open",
+        "claimant": None,
+        "updated_at": event["ts"],
+    }
+
+
+def _move_row(record, event):
+    """Apply one transition to the row it belongs to: who holds it and where it stands."""
+    payload = event["payload"]
+    record["claimant"] = payload["claimant"]
+    record["state"] = {
+        "task_claimed": "claimed",
+        "task_done": "done",
+        "task_failed": "open" if reopened_by_lease(payload) else "failed",
+    }[event["type"]]
+    record["updated_at"] = event["ts"]
+
+
 def _approval_shape(event):
     payload = event["payload"]
     request_id = payload.get("request_id")
@@ -365,7 +491,7 @@ def project_village(
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
-    tasks, task_by_id = [], {}
+    tasks, task_by_id, task_transitions = [], {}, {}
     journals, journal_by_key = [], {}
     routines, routine_by_run = [], {}
     artifacts = []
@@ -380,31 +506,36 @@ def project_village(
                     "ts": event["ts"],
                 }
             )
-        if kind in {"task_posted", "task_claimed", "task_done", "task_failed"}:
+        if kind in TASK_LEDGER_TYPES:
             task_id = payload["task_id"]
             record = task_by_id.get(task_id)
-            if kind == "task_posted":
-                record = {
-                    "id": task_id,
-                    "title": payload["title"],
-                    "state": "open",
-                    "required_skills": list(payload["required_skills"]),
-                    "posted_by": payload["posted_by"],
-                    "claimant": None,
-                    "updated_at": event["ts"],
-                }
-                task_by_id[task_id] = record
-                tasks.append(record)
-            elif record:
-                record["claimant"] = payload["claimant"]
-                record["state"] = {
-                    "task_claimed": "claimed",
-                    "task_done": "done",
-                    "task_failed": (
-                        "open" if payload.get("reason") == "lease_expired" else "failed"
-                    ),
-                }[kind]
-                record["updated_at"] = event["ts"]
+            if kind in TASK_ORIGIN_TYPES:
+                if record is None:
+                    record = _opened_row(event)
+                    task_by_id[task_id] = record
+                    tasks.append(record)
+                    held = task_transitions.get(task_id)
+                    if held is not None:
+                        _move_row(record, held)
+                else:
+                    record.update(_row_origin(event))
+                    if task_id not in task_transitions:
+                        # Nothing has taken this job, so its clock is still its posted
+                        # age, and the newest origin is where that age comes from. Once
+                        # a transition owns the clock the row keeps it: a replayed post
+                        # is not news about work already under way.
+                        record["updated_at"] = event["ts"]
+            else:
+                # The newest transition, whether or not the row it belongs to is open
+                # yet. Rotation keeps a row's newest origin and its newest transition,
+                # so a restated origin lands *after* the claim it did not undo; reading
+                # that claim in log order and dropping it would put the job back on the
+                # open board. Only the newest is worth holding: every transition
+                # overwrites all three fields it owns. Nothing is invented — one whose
+                # row never opens is discarded with the rest of the unclaimed evidence.
+                task_transitions[task_id] = event
+                if record is not None:
+                    _move_row(record, event)
         shape = _approval_shape(event)
         if shape:
             previous = approval_by_id.get(shape["request_id"])
@@ -449,6 +580,30 @@ def project_village(
                         "request_id": payload["request_id"],
                     }
                 )
+        if kind == "chat_message_dropped":
+            # A knock nobody answered is only visible if the village says so, and the
+            # villager's own history is not enough: a resident may have no villager at
+            # all when a stranger finds its bot. Named fields only — the record itself
+            # is carried into that villager's history exactly as it arrived, which is
+            # why Steward keeps what the stranger said out of it.
+            #
+            # `suppressed` is how many other knocks this one record stands for: Steward
+            # records one per stranger per door per window and counts the rest into it
+            # (warren#278), so the number of knocks is one more than this. Absent from a
+            # Steward older than the limiter, which emitted every knock and counted none.
+            diagnostics.append(
+                {
+                    "kind": kind,
+                    "agent_id": event["agent_id"],
+                    "project": event["project"],
+                    "route": payload["route"],
+                    "address": payload["address"],
+                    "from": payload["from"],
+                    "reason": payload["reason"],
+                    "suppressed": payload.get("suppressed", 0),
+                    "ts": event["ts"],
+                }
+            )
         if kind == "journal_written":
             key = (payload["day"], event["agent_id"])
             if key not in journal_by_key:
@@ -511,9 +666,16 @@ def project_village(
             pending_by_agent[approval["agent_id"]].append(approval)
     for agent_id in sorted(by_agent):
         history = by_agent[agent_id]
-        last = history[-1][1]
+        # Three readings of one log: what this villager *did* decides its state and its
+        # clock, what it did other than beat decides the line shown, and everything but
+        # the beats — a knock at its door included — is the history worth keeping.
+        evidence = [item for item in history if item[1]["type"] not in AMBIENT_TYPES]
+        if not evidence:
+            continue
+        last = evidence[-1][1]
         visible_history = [item for item in history if item[1]["type"] != "heartbeat"]
-        visible_last = visible_history[-1][1] if visible_history else last
+        acted = [item for item in evidence if item[1]["type"] != "heartbeat"]
+        visible_last = acted[-1][1] if acted else last
         age = (now - _instant(last["ts"])).total_seconds()
         pending = pending_by_agent[agent_id]
         if not pending and (
@@ -541,8 +703,19 @@ def project_village(
                 else "working"
             )
         )
-        recent = [item for _, item in visible_history[-policy.events_per_villager :]]
-        mood = _mood(agent_id, history, approvals)
+        # The same rule the diagnostics channel gets, and for the same reason: a knock is
+        # in this villager's history without being anything the villager did, so a storm
+        # must not be able to push what it *did* do off the end of its own card.
+        recent = [
+            item
+            for _, item in _ambient_tail(
+                visible_history,
+                policy.events_per_villager,
+                policy.ambient_events_per_villager,
+                lambda item: item[1]["type"] in AMBIENT_TYPES,
+            )
+        ]
+        mood = _mood(agent_id, evidence, approvals)
         resident = manifest is not None
         villagers.append(
             {
@@ -592,15 +765,22 @@ def project_village(
         "approvals": approvals[-policy.approvals :],
         "journals": journals[-policy.journals :],
         "routines": routines[-policy.routines :],
-        "diagnostics": diagnostics[-policy.diagnostics :],
+        "diagnostics": _ambient_tail(
+            diagnostics,
+            policy.diagnostics,
+            policy.ambient_diagnostics,
+            lambda record: record.get("kind") in AMBIENT_TYPES,
+        ),
         "capacity": {
             "villagers": policy.villagers,
             "events_per_villager": policy.events_per_villager,
+            "ambient_events_per_villager": policy.ambient_events_per_villager,
             "tasks": policy.tasks,
             "approvals": policy.approvals,
             "journals": policy.journals,
             "routines": policy.routines,
             "diagnostics": policy.diagnostics,
+            "ambient_diagnostics": policy.ambient_diagnostics,
         },
         "capabilities": dict(capabilities or {}),
     }

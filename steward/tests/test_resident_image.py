@@ -3,7 +3,7 @@
 ``docker/resident/`` is the image a provisioned resident runs (steward #51). CI *does* now
 build it — the `image` job in ``.github/workflows/steward.yml`` builds it, runs the
 entrypoint and runs ``smoke.sh`` against a stub village (steward #158) — but a build says
-nothing about *drift*: the vendored emitter falling behind burrow's, a hook quietly
+nothing about *drift*: the vendored emitter falling behind chronicle's, a hook quietly
 disappearing out of ``settings.json``, the compose default naming an image nobody builds,
 the two copies of the ``CLAUDE_VERSION`` pin walking apart. Those are all readable off the
 files, and reading them costs a millisecond where a build costs minutes. So they are
@@ -11,13 +11,15 @@ asserted off the files here, and the build job proves the layers actually run.
 
 The one thing neither can say is that a container made from this image reaches the *real*
 village. ``docker/resident/smoke.sh`` says that, from inside the container, against a real
-burrow — run by a human (or by the pilot) there.
+chronicle — run by a human (or by the pilot) there.
 """
 
+import ast
 import hashlib
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,14 +32,20 @@ from steward.manifest import load_manifest
 IMAGE_DIR = REPO_ROOT / "docker" / "resident"
 DOCKERFILE = IMAGE_DIR / "Dockerfile"
 EMITTER = IMAGE_DIR / "burrow-emit.py"
-CHECKSUM = IMAGE_DIR / "burrow-emit.sha256"
 SETTINGS = IMAGE_DIR / "settings.json"
 SMOKE = IMAGE_DIR / "smoke.sh"
 ENTRYPOINT = IMAGE_DIR / "entrypoint.sh"
 MAKEFILE = REPO_ROOT / "Makefile"
 
-#: The line the vendoring header ends with. Everything after it is burrow's file, verbatim.
-MARKER = "# --- upstream copy begins below; every byte after this line is burrow's, verbatim ---\n"
+#: Chronicle, in the same monorepo since 2026-08-31 — so the emitter's source is always
+#: right there and the drift check can *build* rather than trust a number somebody wrote
+#: down. ``make vendor-emitter CHRONICLE=…`` still exists for a checkout elsewhere; this
+#: test does not, because in this repository the sibling is not optional.
+BUNDLE_BUILD = REPO_ROOT.parent / "chronicle" / "hooks" / "build.py"
+
+#: This service's CI, at the repository root: path-filtered per service, which is why the
+#: filter itself is something this suite has an opinion about.
+WORKFLOW = REPO_ROOT.parent / ".github" / "workflows" / "steward.yml"
 
 #: Every hook the Mac's ~/.claude/settings.json wires the emitter into, which is the whole
 #: set burrow's protocol has a mapping for. A resident missing any of them is a villager
@@ -84,65 +92,109 @@ def test_the_claude_config_volume_is_where_the_emitter_lands(
 # ------------------------------------------------------------------- the vendored emitter
 
 
-def recorded() -> dict[str, str]:
-    """Read docker/resident/burrow-emit.sha256 — what `make vendor-emitter` wrote down."""
-    values = {}
-    for line in CHECKSUM.read_text(encoding="utf-8").splitlines():
-        if line.startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        values[key.strip()] = value.strip()
-    return values
+def test_the_vendored_emitter_is_the_bundle_chronicle_builds_today(tmp_path: Path) -> None:
+    """Build chronicle's emitter bundle at HEAD and compare. Not a number, the bytes.
 
+    What used to stand here re-hashed the copy against a checksum ``make vendor-emitter``
+    had written down beside it. That can only ever catch somebody editing the *copy*: a
+    pinned hash stays green forever while the source sails away, which is exactly what
+    happened (warren#234). Comparing against a live build cannot go stale, because there
+    is nothing recorded to go stale.
 
-def test_the_vendored_emitter_is_chronicles_file_byte_for_byte() -> None:
-    """The copy in this repo must hash to exactly what was vendored from burrow.
-
-    This is the whole safety argument for vendoring rather than submoduling: the copy is
-    allowed to be a copy precisely because a test says it is *the same* copy. An emitter
-    that drifted would put a resident on a protocol version the village does not read, and
-    would do it silently — a villager that simply never appears.
+    An emitter that drifted would put a resident on a protocol version the village does not
+    read, and would do it silently — a villager that simply never appears.
     """
-    raw = EMITTER.read_text(encoding="utf-8")
-    assert MARKER in raw, f"{EMITTER} has no vendoring marker; re-run `make vendor-emitter`"
-
-    header, _, upstream = raw.partition(MARKER)
-    digest = hashlib.sha256(upstream.encode("utf-8")).hexdigest()
-    expected = recorded()
-
-    assert re.fullmatch(r"[0-9a-f]{40}", expected.get("commit", "")), (
-        f"{CHECKSUM} must record the full upstream commit"
+    assert BUNDLE_BUILD.is_file(), (
+        f"{BUNDLE_BUILD} is missing. chronicle is a sibling directory in this monorepo, "
+        f"and the resident image's emitter is built from it."
     )
-    assert digest == expected["sha256"], (
-        f"{EMITTER} no longer matches the emitter recorded in {CHECKSUM.name}.\n"
-        f"  recorded: {expected['sha256']} (burrow commit {expected['commit']})\n"
-        f"  on disk:  {digest}\n"
-        f"Do not hand-edit the vendored copy. Change chronicle/hooks/emit.py, commit it, "
-        f"then run:  make vendor-emitter   (in warren/steward/)"
+    built = tmp_path / "burrow-emit.py"
+
+    result = subprocess.run(  # noqa: S603 — a fixed argv, no shell, no template
+        [sys.executable, str(BUNDLE_BUILD), "--output", str(built)],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert expected["commit"] in header, "the header must name the commit the bytes came from"
-    assert "DO NOT EDIT HERE" in header
+
+    assert result.returncode == 0, f"chronicle's bundle build failed:\n{result.stderr}"
+    # Compared as digests rather than as two 70KB strings: the answer is yes or no, and a
+    # failure should say what to run, not print a two-thousand-line diff nobody reads.
+    on_disk = hashlib.sha256(EMITTER.read_bytes()).hexdigest()
+    rebuilt = hashlib.sha256(built.read_bytes()).hexdigest()
+
+    assert on_disk == rebuilt, (
+        f"{EMITTER} is not what chronicle/hooks builds today.\n"
+        f"  vendored: {on_disk}\n"
+        f"  rebuilt:  {rebuilt}\n"
+        f"Do not hand-edit the vendored copy — it is a generated artifact. Change "
+        f"chronicle/hooks/emit.py or chronicle/hooks/durable.py, commit it, then run:  "
+        f"make vendor-emitter   (in warren/steward/)"
+    )
+
+
+def test_ci_runs_this_suite_when_the_emitters_source_changes() -> None:
+    """The comparison above is only a guard if CI runs it on the PR that breaks it.
+
+    The root workflows are path-filtered per service, so a chronicle-only change would not
+    have run steward's suite at all — the drift would have waited for whoever next ran
+    `make vendor-emitter`, which is exactly how the copy went stale in the first place.
+    """
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    # `on:` is YAML 1.1's boolean true, and pyyaml reads it as one.
+    triggers = workflow.get("on", workflow.get(True))
+
+    for event in ("push", "pull_request"):
+        assert "chronicle/hooks/**" in triggers[event]["paths"], (
+            f"steward.yml does not run on {event} for chronicle/hooks/**, so an emitter "
+            f"change would not run the test that says the vendored copy is stale"
+        )
+
+
+def imported_modules(source: str) -> set[str]:
+    """Every top-level module a source imports, wherever in the file the import sits."""
+    found = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.add(node.module.split(".")[0])
+    return found
+
+
+def embedded_module(source: str) -> str:
+    """Read the durable-outbox source the bundle carries, statically, off the artifact.
+
+    It lives in a string literal, so an import walk over the file cannot see what it
+    imports — and what the artifact *executes* is both halves.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and "_DURABLE_SOURCE" in [t.id for t in node.targets if isinstance(t, ast.Name)]
+        ):
+            return str(node.value.value)
+    raise AssertionError(f"{EMITTER} carries no embedded module; the bundle format changed")
 
 
 def test_the_vendored_emitter_still_needs_only_the_standard_library() -> None:
-    """One file, no pip: it is why the image installs python3 and nothing else for this."""
-    upstream = EMITTER.read_text(encoding="utf-8").partition(MARKER)[2]
-    imported = {
-        line.removeprefix("import ").strip()
-        for line in upstream.splitlines()
-        if line.startswith("import ")
-    }
+    """No pip: it is why the image installs python3 and nothing else for this.
 
-    assert imported <= {
-        "datetime",
-        "fcntl",
-        "hashlib",
-        "json",
-        "os",
-        "sys",
-        "time",
-        "urllib.request",
-    }, f"the emitter grew a dependency ({imported}); the image installs no pip"
+    Both halves of the artifact, because both halves run. Chronicle's suite owns the
+    authoritative version of this check — it is the side that can break the constraint —
+    and this is the image's own stake in it: what ``apt-get install python3`` has to be
+    enough for. What it cannot say is that the *image's* python is new enough to run the
+    file; the `image` job says that, by running it inside the container, where a
+    SyntaxError is an exit status ``smoke.sh`` fails on.
+    """
+    artifact = EMITTER.read_text(encoding="utf-8")
+    imported = imported_modules(artifact) | imported_modules(embedded_module(artifact))
+
+    assert imported <= sys.stdlib_module_names, (
+        f"the emitter grew a dependency ({sorted(imported - sys.stdlib_module_names)}); "
+        f"the image installs no pip"
+    )
 
 
 # ------------------------------------------------------------------------ settings.json

@@ -11,7 +11,7 @@
  * byte, which is how comments are kept. Neither is more validated than the other.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
@@ -267,34 +267,51 @@ function ManifestFields({ draft, edit, diagnostics }) {
 }
 
 function DeclarationEditor({ id }) {
-  const { client } = useSteward();
+  const { client, declarationRecoveries, setDeclarationRecovery } = useSteward();
   const loaded = useStewardQuery((signal) => client.readDeclaration(id, { signal }), [id]);
+  const recovery = declarationRecoveries.get(id) || null;
 
   const [mode, setMode] = useState("fields");
-  const [draft, setDraft] = useState(null);
+  const [draft, setDraft] = useState(() => recovery?.draft || null);
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const [reloaded, setReloaded] = useState(null);
+  const [copied, setCopied] = useState(null);
+  const [recoveryReadRequest, setRecoveryReadRequest] = useState(null);
+  const saveGeneration = useRef(0);
 
   // Re-reading after a save must not sweep away the answer the person is still reading —
   // the commit sha is the receipt, and a form that clears it on refresh has told them
   // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
   useEffect(() => {
+    saveGeneration.current += 1;
+    setDraft(recovery?.draft || null);
+    if (recovery) setMode(recovery.mode);
     setReceipt(null);
     setRefusal(null);
     setReloaded(null);
+    setCopied(null);
+    setRecoveryReadRequest(null);
+    return () => {
+      saveGeneration.current += 1;
+    };
+    // Recovery belongs to the resident and intentionally survives route unmounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   useEffect(() => {
     if (!loaded.data) return;
+    // A stale write makes the editor a two-version workspace. A re-read updates the
+    // server side of that workspace; it must never replace the rejected side.
+    if (recovery) return;
     setDraft({
       manifest: loaded.data.manifest,
       text: loaded.data.text,
       soul: loaded.data.soul,
       revision: loaded.data.revision,
     });
-  }, [loaded.data]);
+  }, [loaded.data, recovery]);
 
   const diagnostics = refusal?.diagnostics || [];
   const warnings = useMemo(() => (receipt ? normalizeDiagnostics(receipt.warnings) : []), [receipt]);
@@ -311,6 +328,7 @@ function DeclarationEditor({ id }) {
 
   async function save(event) {
     event.preventDefault();
+    const generation = ++saveGeneration.current;
     setSaving(true);
     setRefusal(null);
     setReceipt(null);
@@ -322,13 +340,19 @@ function DeclarationEditor({ id }) {
         soul: draft.soul,
         revision: draft.revision,
       });
+      if (generation !== saveGeneration.current) return;
       setReceipt(answer);
+      setDeclarationRecovery(id, null);
       setReloaded(null);
       loaded.refresh();
     } catch (caught) {
+      if (generation !== saveGeneration.current) return;
       setRefusal(caught);
+      if (caught?.code === "stale_revision") {
+        setDeclarationRecovery(id, { draft, mode });
+      }
     } finally {
-      setSaving(false);
+      if (generation === saveGeneration.current) setSaving(false);
     }
   }
 
@@ -352,14 +376,62 @@ function DeclarationEditor({ id }) {
     }
   }
 
-  if (loaded.loading && !draft) return <Loading>reading the declaration…</Loading>;
-  if (loaded.error) return <Problem error={loaded.error} />;
+  if (loaded.loading && !loaded.data && !recovery) return <Loading>reading the declaration…</Loading>;
+  if (loaded.error && !loaded.data && !recovery) return <Problem error={loaded.error} />;
   if (!draft) return null;
 
   const stale = refusal?.code === "stale_revision";
+  const currentWasReread = Boolean(
+    recovery &&
+      loaded.data &&
+      recoveryReadRequest !== null &&
+      loaded.successfulRequestId === recoveryReadRequest,
+  );
+
+  function rereadCurrent() {
+    setRecoveryReadRequest(loaded.refresh());
+  }
+
+  function reapplyRejected() {
+    if (!recovery || !loaded.data) return;
+    // The editor remains a working copy after the refusal. Preserve anything the operator
+    // changed while comparing; only advance the optimistic-concurrency token.
+    setDraft((previous) => ({ ...(previous || recovery.draft), revision: loaded.data.revision }));
+    setRefusal(null);
+  }
+
+  function discardRejected() {
+    if (!loaded.data) return;
+    setDraft({
+      manifest: loaded.data.manifest,
+      text: loaded.data.text,
+      soul: loaded.data.soul,
+      revision: loaded.data.revision,
+    });
+    setDeclarationRecovery(id, null);
+    setRefusal(null);
+    setCopied(null);
+  }
+
+  async function copyRejected(document) {
+    const value =
+      document === "soul"
+        ? recovery.draft.soul
+        : recovery.mode === "yaml"
+          ? recovery.draft.text
+          : JSON.stringify(recovery.draft.manifest, null, 2);
+    try {
+      if (!globalThis.navigator?.clipboard?.writeText) throw new Error("clipboard unavailable");
+      await globalThis.navigator.clipboard.writeText(value);
+      setCopied(document);
+    } catch {
+      setCopied("failed");
+    }
+  }
 
   return (
     <form onSubmit={save}>
+      {loaded.error ? <Problem error={loaded.error} /> : null}
       {receipt ? (
         <Receipt
           title="declaration written"
@@ -406,12 +478,67 @@ function DeclarationEditor({ id }) {
       ) : null}
       {stale ? (
         <p className="mb-4 text-[12px] leading-[1.7] text-wait">
-          Somebody changed this file after you loaded it. Re-read it and reapply your edit —
-          steward refused rather than letting one of you silently win.{" "}
-          <Button tiny onClick={() => loaded.refresh()}>
-            re-read
-          </Button>
+          Somebody changed this declaration after you loaded it. Your rejected manifest and
+          soul are held below until you discard or successfully reapply them. Steward refused
+          rather than letting one of you silently win.
         </p>
+      ) : null}
+
+      {recovery ? (
+        <Panel title="Stale draft recovery">
+          <p className="mt-0 text-[12px] leading-[1.7] text-wait">
+            {currentWasReread
+              ? "Current server files are shown beside the complete rejected draft. Reapply keeps the editor as it is, including newer edits, and changes only the revision used by the next write."
+              : "Re-read the current server files to compare them. Refresh cannot alter the rejected draft held here."}
+          </p>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {!currentWasReread ? (
+              <Button tiny onClick={rereadCurrent}>re-read current server files</Button>
+            ) : (
+              <Button tiny tone="primary" onClick={reapplyRejected}>reapply rejected draft</Button>
+            )}
+            <Button tiny onClick={() => copyRejected("manifest")}>
+              {copied === "manifest" ? "manifest copied" : "copy rejected manifest"}
+            </Button>
+            <Button tiny onClick={() => copyRejected("soul")}>
+              {copied === "soul" ? "soul copied" : "copy rejected soul"}
+            </Button>
+            {copied === "failed" ? <Note>clipboard unavailable — select the draft below</Note> : null}
+            {currentWasReread ? <Button tiny onClick={discardRejected}>discard rejected draft</Button> : null}
+          </div>
+          <div className={`grid gap-3 ${currentWasReread ? "lg:grid-cols-2" : ""}`}>
+            {currentWasReread ? (
+              <div>
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">current manifest</p>
+                {recovery.mode === "yaml" ? (
+                  <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                    {loaded.data.text}
+                  </pre>
+                ) : (
+                  <Verbatim value={loaded.data.manifest} summary="manifest now on the server" />
+                )}
+                <p className="text-[10px] uppercase tracking-[.16em] text-faint">current soul</p>
+                <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                  {loaded.data.soul}
+                </pre>
+              </div>
+            ) : null}
+            <div>
+              <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected manifest</p>
+              {recovery.mode === "yaml" ? (
+                <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                  {recovery.draft.text}
+                </pre>
+              ) : (
+                <Verbatim value={recovery.draft.manifest} summary="complete rejected manifest" />
+              )}
+              <p className="text-[10px] uppercase tracking-[.16em] text-faint">rejected soul</p>
+              <pre className="overflow-x-auto whitespace-pre-wrap border border-rule-2 bg-void p-[11px] text-[11px] text-dim">
+                {recovery.draft.soul}
+              </pre>
+            </div>
+          </div>
+        </Panel>
       ) : null}
 
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -442,7 +569,7 @@ function DeclarationEditor({ id }) {
         </Panel>
       )}
 
-      <Panel title={`${loaded.data.soul_file} — the soul document`}>
+      <Panel title={`${loaded.data?.soul_file || "soul.md"} — the soul document`}>
         <p className="mt-0 mb-3 text-[12px] leading-[1.7] text-dim">
           The manifest and the soul move together because <code>agent_id</code> is in both and
           validation insists they agree. Omitting the soul would leave it untouched; this form
@@ -459,10 +586,17 @@ function DeclarationEditor({ id }) {
       <Panel title="What steward is being sent">
         <Facts
           pairs={[
-            ["files", loaded.data.paths?.join(" · ")],
+            ["files", loaded.data?.paths?.join(" · ") || "current files unavailable"],
             ["revision", <code className="text-dim">{draft.revision}</code>],
             ["spelling", mode === "yaml" ? "text — byte for byte" : "manifest — re-serialised"],
-            ["state", dirty ? "edited, not sent" : "identical to what is on disk"],
+            [
+              "state",
+              !loaded.data
+                ? "current files unavailable"
+                : dirty
+                  ? "edited, not sent"
+                  : "identical to what is on disk",
+            ],
           ]}
         />
         {mode === "fields" ? <Verbatim value={draft.manifest} summary="the manifest this form would send" /> : null}
@@ -533,7 +667,7 @@ export default function ResidentsPage({ page, params }) {
       {locked ? (
         <Gate what={GATES[page] || "This page"} />
       ) : page === "residentDeclaration" ? (
-        <DeclarationEditor id={params.id} />
+        <DeclarationEditor key={params.id} id={params.id} />
       ) : page === "residentNew" ? (
         <ResidentNew />
       ) : page === "resident" ? (

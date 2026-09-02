@@ -48,6 +48,7 @@ import yaml
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -59,7 +60,7 @@ from steward.approvals import WithheldValueError, redact_decision, restore_withh
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
-from steward.deploy import Transport
+from steward.deploy import Transport, TransportError
 from steward.input_bounds import (
     APPROVAL_BODY_MAX_BYTES,
     DETAIL_MAX_CHARS,
@@ -77,6 +78,7 @@ from steward.nursery import (
     NewResident,
     NurseryError,
     NurseryReport,
+    provision_resident,
     raise_resident,
 )
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
@@ -118,6 +120,7 @@ __all__ = [
     "ApiError",
     "ManualRuns",
     "NurseryPipeline",
+    "ProvisionPipeline",
     "ResidentPost",
     "create_app",
     "run_server",
@@ -127,6 +130,11 @@ __all__ = [
 #: ``steward new-resident`` run *the same* pipeline rather than two that agree by
 #: convention — hand it a recorder and assert on what the route asked for.
 type NurseryPipeline = Callable[..., NurseryReport]
+
+#: How the API reaches the *other* nursery door — provision from a declared manifest.
+#: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
+#: ``steward provision`` run one pipeline rather than two that happen to agree.
+type ProvisionPipeline = Callable[..., NurseryReport]
 
 log = logging.getLogger("steward.api")
 
@@ -157,6 +165,10 @@ WRITE_STATUS: Mapping[str, int] = {
     "manifest_invalid": 422,
     "skill_invalid": 422,
     "unknown_skill": 404,
+    "unknown_resident": 404,
+    "resident_invalid": 409,
+    "soul_file_changed": 409,
+    "skill_exists": 409,
     "not_a_git_checkout": 409,
     "commit_failed": 409,
 }
@@ -366,6 +378,20 @@ class ResidentPost(NewResident):
     deploy: bool = Field(
         default=False,
         description="Provision the container and check the schedule, not just declare.",
+    )
+
+
+class ProvisionPost(_Body):
+    """Whether to build the declared resident, or only rehearse building it.
+
+    There is nothing else to say: the manifest is the request. Everything ``new-resident``
+    takes in flags this endpoint reads off ``residents/<id>/manifest.yaml``, which is the
+    whole point of the door (warren#270).
+    """
+
+    dry_run: bool = Field(
+        default=False,
+        description="Print the plan and reach no host. Nothing is sent, run, or written.",
     )
 
 
@@ -720,6 +746,11 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
         "board": manifest.board.model_dump(mode="json"),
         # And whether it may hand work to anybody else, and to whom.
         "delegation": manifest.delegation.model_dump(mode="json"),
+        # Whether steward taps a human about this resident, and about what (warren#114).
+        # The *declaration* only: the derived ntfy topic is deliberately not here and not
+        # anywhere else a browser can reach, because on ntfy the topic is the capability —
+        # `steward notify list`, at a terminal, is the one place it is printed.
+        "notifications": manifest.notifications.model_dump(mode="json"),
         "routines": [
             {
                 "id": routine.id,
@@ -737,6 +768,58 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
 def _refuse(status: int, error: str, message: str) -> NoReturn:
     """Fail a request immediately, with a reason a UI can key on and a human can read."""
     raise HTTPException(status_code=status, detail={"error": error, "message": message})
+
+
+#: How a refused provision is answered. A reason the nursery named maps to the status that
+#: reason means; anything it did not name is the host having answered and said no, which is
+#: not something the caller can fix by sending different bytes — the same reasoning
+#: :data:`WRITE_STATUS` applies to a tree with no git behind it.
+PROVISION_STATUS: Mapping[str, int] = {
+    "unknown_resident": 404,
+    "resident_retired": 409,
+    "declaration_invalid": 409,
+}
+PROVISION_FAILED = "provision_failed"
+PROVISION_REFUSED = "provision_refused"
+
+
+def _deployed_message(report: NurseryReport) -> str:
+    """Say what a finished provision came to — **both** halves of it.
+
+    The container going up and the schedule check passing are two facts, and a report that
+    said only the first would be a control panel's one unforgivable sin. Shared by both
+    doors onto the nursery so they cannot come to describe the same outcome differently.
+    """
+    if report.register is not None and not report.register.ok:
+        return (
+            "the container is up, but the schedule check did not pass — see "
+            "register.problems; nothing fires until those are fixed"
+        )
+    return (
+        "the container is up and the schedule was checked; the resident appears in the "
+        "village when it emits its own first event, and never before"
+    )
+
+
+def _provision_message(report: NurseryReport) -> str:
+    """Say what ``POST /residents/{id}/provision`` came to, rehearsals included.
+
+    Convergence is said as well as the outcome, never instead of it. A second run that sent
+    nothing and *also* cannot schedule is two facts, and picking one of them to print would
+    be the same half-truth :func:`_deployed_message` exists to prevent — so the converged
+    sentence prefixes that one rather than replacing it.
+    """
+    if report.dry_run:
+        return (
+            "nothing was sent, run, or written: this is the plan, and `commands` is the "
+            "exact argv a real run would issue"
+        )
+    if report.changed:
+        return _deployed_message(report)
+    return (
+        f"converged: the host already had this bundle, so nothing was sent. "
+        f"{_deployed_message(report)}"
+    )
 
 
 def _refuse_reload(errors: Sequence[str]) -> NoReturn:
@@ -851,6 +934,13 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         (
             "firing a routine is a human act; a session's own work arrives through the "
             "board and its inbox"
+        ),
+    ),
+    (
+        "/provision",
+        (
+            "provisioning is starting a container on a machine over ssh; a session that "
+            "could do it would be building its own colleagues, or itself again"
         ),
     ),
     (
@@ -1142,6 +1232,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     emitter: ev.Emitter | None = None,
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
+    provisioner: ProvisionPipeline = provision_resident,
     transport: Transport | None = None,
     approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -1295,7 +1386,23 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
-        dependencies=[Depends(_auth_dependency(token, session_principal, operator_principal))],
+        # Two dependencies, and only the second one decides anything. `HTTPBearer` is
+        # declared with `auto_error=False`, so it accepts and refuses nothing at all: it
+        # exists to put `securitySchemes` and a per-operation `security` into the exported
+        # document (warren#321), which is the machine-readable half of docs/api.md and
+        # would otherwise describe a completely unauthenticated API. A client generated
+        # from a document without it sends no Authorization header and gets a blanket 401.
+        dependencies=[
+            Depends(HTTPBearer(auto_error=False)),
+            Depends(_auth_dependency(token, session_principal, operator_principal)),
+        ],
+        # Declared once here rather than on twenty-five routes: every route in this API is
+        # token-gated, so every route answers this.
+        responses={
+            401: {
+                "description": "No credential was presented, or steward refused the one that was."
+            }
+        },
         lifespan=lifespan,
     )
     app.add_middleware(_ApprovalBodyDepthMiddleware, token=token)
@@ -1415,6 +1522,25 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         except NurseryError as exc:
             status = 409 if (residents_dir / body.id).exists() else 400
             _refuse(status, exc.reason or "resident_not_declared", str(exc))
+        except TransportError as exc:
+            # `deploy: true` and there was nobody to ask — in practice a steward whose own
+            # environment has no `CHRONICLE_URL` to give the container, since `emitter_env`
+            # refuses before a transport is reached and every later one is already wrapped
+            # as a `NurseryError`. This was an unhandled 500: a control panel got a
+            # traceback where it needed a sentence (warren#270).
+            #
+            # The declare stage has already written its two files by now and nothing has
+            # committed them, so the refusal says what the next move is. That is a promise
+            # the pipeline actually keeps — declaring is idempotent, so the same body
+            # converges on the skeleton rather than colliding with it — and a test holds it
+            # to that rather than taking the sentence's word for it.
+            _refuse(
+                409,
+                PROVISION_REFUSED,
+                f"{exc}; nothing was deployed and this request committed nothing — post "
+                f"the same body again once that is fixed and it will pick up where it "
+                f"stopped rather than collide",
+            )
         request_id = accept(
             request, "deployed" if body.deploy else "declared", {"resident": body.id}
         )
@@ -1436,21 +1562,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             refuse_write(exc)
         uncommitted = commit.note
-        if not body.deploy:
-            deployed = "nothing is deployed and no routine is scheduled: this is a file for review"
-        elif report.register is not None and not report.register.ok:
-            # The container went up; the check that follows it did not pass. Saying only
-            # the first half would be a control panel's one unforgivable sin, so say both and
-            # let `register.problems` carry the detail.
-            deployed = (
-                "the container is up, but the schedule check did not pass — see "
-                "register.problems; nothing fires until those are fixed"
-            )
-        else:
-            deployed = (
-                "the container is up and the schedule was checked; the resident appears in "
-                "the village when it emits its own first event, and never before"
-            )
+        deployed = (
+            _deployed_message(report)
+            if body.deploy
+            else "nothing is deployed and no routine is scheduled: this is a file for review"
+        )
         return {
             "request_id": request_id,
             "status": "accepted",
@@ -1484,21 +1600,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 "diagnostics": [au.diagnostic_as_dict(d) for d in exc.diagnostics],
             },
         )
-
-    def check_revision(offered: str | None, actual: str) -> None:
-        """Refuse an edit made against a version that is no longer what is on disk.
-
-        Optional, and deliberately so: a caller that omits ``revision`` is saying it means
-        to overwrite whatever is there, which is what a script wants. A UI sends the
-        revision it loaded, and gets told rather than silently winning.
-        """
-        if offered is not None and offered != actual:
-            _refuse(
-                409,
-                "stale_revision",
-                f"this edit was made against {offered}, and what is on disk is now {actual}; "
-                f"somebody else changed it first — re-read it and reapply your change",
-            )
 
     def write_settings(request: Request) -> dict[str, Any]:
         """Return the two knobs every write shares, and who git records as the author.
@@ -1536,6 +1637,64 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         """
         operator = operator_of(request)
         return operator.name if operator is not None else ACTED_BY_API
+
+    @app.post("/residents/{resident_id}/provision")
+    def provision_declared_resident(
+        resident_id: str, request: Request, body: ProvisionPost | None = None
+    ) -> dict[str, Any]:
+        """Build a resident from the manifest already in the tree, and check its schedule.
+
+        The other door onto the nursery (warren#270). ``POST /residents`` assembles a
+        declaration from a request body and refuses to converge it onto a manifest somebody
+        has since edited — which left every resident carrying a route, an app grant or a
+        ``runner.placement`` with no way onto the nursery path at all, because no body can
+        express those fields. This one reads ``residents/<id>/manifest.yaml`` as the source
+        of truth and runs provision and register against it.
+
+        **200, not 202.** The container is up and the schedule has been checked by the time
+        this answers — there is nothing left to acknowledge later, and saying `accepted`
+        about work that already finished would be the one dishonesty the request log exists
+        to prevent.
+
+        Nothing is written into the checkout, so unlike every other write here there is no
+        commit: the declaration being provisioned was committed by whoever wrote it, and a
+        declaration whose bytes are in no commit comes back in ``warnings`` rather than as a
+        refusal this endpoint has no way to resolve.
+        """
+        asked = body or ProvisionPost()
+        try:
+            report = provisioner(
+                resident_id,
+                residents_dir=residents_dir,
+                skills_dir=settings.skills_dir,
+                transport=transport,
+                dry_run=asked.dry_run,
+            )
+        except NurseryError as exc:
+            # Keyed on the nursery's own ``reason``, never on the prose or on a second look
+            # at the filesystem: "there is no such resident" and "its declaration does not
+            # validate" are different answers and only the pipeline that looked knows which.
+            # An unnamed one is the host having answered and refused — a bundle that would
+            # not land, a `docker compose up` that failed — and it says that rather than
+            # borrowing a name for something it is not.
+            reason = exc.reason or PROVISION_FAILED
+            _refuse(PROVISION_STATUS.get(reason, 409), reason, str(exc))
+        except TransportError as exc:
+            # Both halves of "there was nobody to ask": a host that did not answer, and a
+            # steward with no village address to give the container. One refusal, because
+            # the exception's own message already says which, and a traceback would say
+            # neither (steward #90).
+            _refuse(409, PROVISION_REFUSED, str(exc))
+        request_id = accept(
+            request,
+            "rehearsed" if asked.dry_run else "provisioned",
+            {"resident": report.resident_id},
+        )
+        return {
+            "request_id": request_id,
+            "message": _provision_message(report),
+            **report.to_dict(),
+        }
 
     @app.get("/residents/{resident_id}/declaration")
     def get_declaration(resident_id: str) -> dict[str, Any]:
@@ -1581,34 +1740,22 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         including the checks that only exist across residents. A refusal has written
         nothing, committed nothing, and left the resident exactly as it was.
         """
-        result = validate_path(residents_dir, settings.skills_dir)
-        resident = _find_resident(result, resident_id, residents_dir)
-        soul_file = resident.manifest.soul.file
-        current = au.declaration_paths(residents_dir, resident.id, soul_file)
-        check_revision(body.revision, au.revision_of(*current))
         manifest_text = (
             body.text
             if body.text is not None
             else yaml.safe_dump(body.manifest, sort_keys=False, allow_unicode=True)
         )
         declaration = au.Declaration(manifest_text=manifest_text, soul_text=body.soul)
-        if declaration.soul_filename != soul_file:
-            _refuse(
-                409,
-                "soul_file_changed",
-                f"this declaration renames the soul from {soul_file!r} to "
-                f"{declaration.soul_filename!r}; steward will not leave the old file orphaned "
-                f"in the tree, so rename it in the checkout and commit that yourself",
-            )
-        request_id = accept(request, "written", {"resident": resident.id})
+        request_id = accept(request, "written", {"resident": resident_id})
         try:
             written = au.write_declaration(
                 residents_dir,
-                resident.id,
+                resident_id,
                 declaration,
                 request_id=request_id,
                 principal=acting_principal(request),
                 skills_dir=settings.skills_dir,
+                expected_revision=body.revision,
                 **write_settings(request),
             )
         except au.AuthoringError as exc:
@@ -1617,7 +1764,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         return {
             "request_id": request_id,
             "status": "accepted",
-            "id": resident.id,
+            "id": written.paths[0].parent.name,
             "revision": written.revision,
             "paths": [str(p) for p in written.paths],
             "commit": written.commit.to_dict(),
@@ -1675,7 +1822,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         }
 
     def write_one_skill(
-        document: au.SkillDocument, request: Request, *, created: bool
+        document: au.SkillDocument,
+        request: Request,
+        *,
+        created: bool,
+        expected_revision: str | None = None,
     ) -> dict[str, Any]:
         """Validate, write and commit one skill — the shared half of POST and PUT."""
         root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
@@ -1692,6 +1843,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 request_id=request_id,
                 principal=acting_principal(request),
                 created=created,
+                expected_revision=expected_revision,
                 **write_settings(request),
             )
         except au.AuthoringError as exc:
@@ -1723,13 +1875,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         by every resident in the fleet without any manifest granting it, so this one flag
         changes what every session is given.
         """
-        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
-        if root is not None and (root / body.name / "SKILL.md").is_file():
-            _refuse(
-                409,
-                "skill_exists",
-                f"skill {body.name!r} already exists; PUT /skills/{body.name} replaces it",
-            )
         return write_one_skill(
             au.SkillDocument(
                 name=body.name,
@@ -1747,16 +1892,13 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
 
         **Human callers only**, like every write here.
         """
-        root = au.resolve_skills_dir(residents_dir, settings.skills_dir)
-        if root is None or not (root / name / "SKILL.md").is_file():
-            _refuse(404, "unknown_skill", f"no skill {name!r}; POST /skills adds one")
-        check_revision(body.revision, au.revision_of(root / name / "SKILL.md"))
         return write_one_skill(
             au.SkillDocument(
                 name=name, description=body.description, body=body.body, default=body.defaults
             ),
             request,
             created=False,
+            expected_revision=body.revision,
         )
 
     # -- reload ------------------------------------------------------------------------

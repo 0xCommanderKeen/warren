@@ -3,6 +3,7 @@
 python3 -m unittest discover tests     (run from the repo root)
 """
 
+import fcntl
 import glob
 import hashlib
 import importlib.util
@@ -16,6 +17,8 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +76,32 @@ def _defer_events(log, diagnostics, events, gate):
     gate.wait()
     for event in events:
         emit._defer_local(event)
+
+
+@contextmanager
+def delayed_target(delay, received=None):
+    """A real HTTP boundary whose accepted delivery IDs are observable."""
+
+    class Target(BaseHTTPRequestHandler):
+        def do_POST(self):
+            time.sleep(delay)
+            if received is not None:
+                received.append(self.headers["X-Burrow-Delivery-ID"])
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        yield "http://127.0.0.1:%d" % server.server_port
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 class ToEventTest(unittest.TestCase):
@@ -740,6 +769,163 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         with open(emit.OUTBOX, encoding="utf-8") as stream:
             return [json.loads(line) for line in stream if line.strip()]
 
+    def test_slow_link_acknowledges_every_post_completed_before_the_deadline(self):
+        delivered = []
+        with delayed_target(0.08, delivered) as target:
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "HOOK_BUDGET", 0.35),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.2),
+                mock.patch.object(emit, "post_event", return_value=False),
+            ):
+                for second in range(3):
+                    emit.deliver(
+                        dict(self.EVENT, ts="2026-08-24T12:00:0%d.000Z" % second)
+                    )
+            before = len(self.outbox())
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "HOOK_BUDGET", 0.35),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.2),
+            ):
+                emit.deliver(dict(self.EVENT, ts="2026-08-24T12:00:03.000Z"))
+
+        self.assertTrue(delivered)
+        self.assertLess(len(self.outbox()), before)
+
+    def test_capped_outbox_without_acknowledgements_is_named_stuck(self):
+        with (
+            mock.patch.object(emit, "OUTBOX_RECORDS", 2),
+            mock.patch.object(emit, "STUCK_OUTBOX_HOOKS", 2),
+            mock.patch.object(emit, "post_event", return_value=False),
+        ):
+            for second in range(2):
+                emit.deliver(
+                    dict(self.EVENT, ts="2026-08-24T12:00:0%d.000Z" % second)
+                )
+
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            outbox = json.load(stream)["outbox"]
+        self.assertEqual(outbox["status"], "stuck")
+        self.assertEqual(outbox["records"], 2)
+        self.assertEqual(outbox["capacity"], 2)
+        self.assertEqual(outbox["hooks_without_ack"], 2)
+        self.assertGreaterEqual(outbox["oldest_age_seconds"], 0)
+        self.assertTrue(outbox["oldest_queued_at"].endswith("Z"))
+
+    def test_status_command_names_the_stuck_outbox_for_an_operator(self):
+        report = {
+            "outbox": {
+                "status": "stuck",
+                "records": 1024,
+                "capacity": 1024,
+                "oldest_queued_at": "2026-09-01T11:38:00.000Z",
+                "oldest_age_seconds": 90000,
+                "hooks_without_ack": 10,
+                "last_ack_at": None,
+            }
+        }
+        with open(emit.DIAGNOSTICS, "w", encoding="utf-8") as stream:
+            json.dump(report, stream)
+        output = io.StringIO()
+
+        with mock.patch.object(sys, "stdout", output):
+            emit.print_emitter_status()
+
+        self.assertEqual(
+            output.getvalue(),
+            "chronicle emitter outbox: stuck; 1024/1024 queued; oldest "
+            "2026-09-01T11:38:00.000Z (90000s); 10 hooks without ack; last ack never\n",
+        )
+
+    def test_acknowledgement_precedes_stalled_transport_diagnostics(self):
+        with mock.patch.object(emit, "post_event", return_value=False):
+            emit.deliver(self.EVENT)
+        queued_id = self.outbox()[0]["delivery_id"]
+
+        with open(emit.DIAGNOSTICS + ".lock", "a+") as diagnostic_lock:
+            fcntl.flock(diagnostic_lock, fcntl.LOCK_EX)
+            with (
+                mock.patch.object(emit, "HOOK_BUDGET", 0.2),
+                mock.patch.object(emit, "ACK_RESERVE", 0.1),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.01),
+                mock.patch.object(emit, "post_event", return_value=True),
+            ):
+                worker = threading.Thread(
+                    target=emit.deliver,
+                    args=(dict(self.EVENT, ts="2026-08-24T12:00:01.000Z"),),
+                )
+                worker.start()
+                time.sleep(0.25)
+                self.assertNotIn(
+                    queued_id, [record["delivery_id"] for record in self.outbox()]
+                )
+                fcntl.flock(diagnostic_lock, fcntl.LOCK_UN)
+                worker.join(1)
+                self.assertFalse(worker.is_alive())
+
+    def test_replay_batch_is_sized_by_available_time_instead_of_sixteen_records(self):
+        with delayed_target(0.01) as target:
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "post_event", return_value=False),
+            ):
+                for second in range(30):
+                    emit.deliver(dict(self.EVENT, ts="seed-%02d" % second))
+            before = len(self.outbox())
+
+            with mock.patch.dict(
+                os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+            ):
+                emit.deliver(dict(self.EVENT, ts="current"))
+
+        self.assertLess(len(self.outbox()), before - 15)
+
+    def test_delayed_link_drains_a_capacity_outbox_without_reposting_acked_ids(self):
+        received = []
+        with delayed_target(0.08, received) as target:
+            target_key = emit._target_id(target)
+            records = emit._stamp_enqueue_order(
+                [
+                    {
+                        "target": target_key,
+                        "delivery_id": "queued-%04d" % index,
+                        "event": dict(self.EVENT, ts="seed-%04d" % index),
+                    }
+                    for index in range(emit.OUTBOX_RECORDS)
+                ]
+            )
+            self.assertTrue(emit._update_outbox(set(), records)[1])
+
+            previous = len(self.outbox())
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "HOOK_BUDGET", 1.0),
+                mock.patch.object(emit, "ACK_RESERVE", 0.1),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.75),
+            ):
+                for index in range(400):
+                    emit.deliver(dict(self.EVENT, ts="hook-%04d" % index))
+                    remaining = len(self.outbox())
+                    self.assertLess(remaining, previous)
+                    previous = remaining
+                    if not remaining:
+                        break
+
+        self.assertEqual(previous, 0)
+        self.assertEqual(len(received), len(set(received)))
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            self.assertEqual(json.load(stream)["outbox"]["records"], 0)
+
     def test_mirror_success_does_not_ack_primary_and_later_hook_replays_oldest_first(
         self,
     ):
@@ -1328,6 +1514,51 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             finally:
                 sys.stdin = original_stdin
         self.assertLess(time.monotonic() - started, 0.35)
+
+    def test_real_hook_boundary_acks_before_its_outer_work_deadline(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://delayed", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "post_event", return_value=False),
+        ):
+            emit.deliver(self.EVENT)
+        queued_id = self.outbox()[0]["delivery_id"]
+        original_stdin = sys.stdin
+
+        def delayed_post(*_args, **_kwargs):
+            time.sleep(0.08)
+            return True
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://delayed", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.5),
+            mock.patch.object(emit, "HOOK_REAP_BUDGET", 0.05),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.1),
+            mock.patch.object(emit, "post_event", new=delayed_post),
+        ):
+            sys.stdin = io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "Stop",
+                        "session_id": "outer-budget",
+                        "cwd": "/private",
+                    }
+                )
+            )
+            try:
+                emit.run_hook_bounded("claude")
+            finally:
+                sys.stdin = original_stdin
+
+        self.assertNotIn(
+            queued_id, [record["delivery_id"] for record in self.outbox()]
+        )
 
     def test_timeout_polls_reap_through_same_deadline_without_blocking(self):
         waits = []

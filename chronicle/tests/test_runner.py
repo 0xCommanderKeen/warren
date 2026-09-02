@@ -45,7 +45,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
         self.assertEqual(listed, expected)
         self.assertEqual([path for path in listed if path.endswith(".js")], [])
 
-    def test_normal_run_executes_each_tracked_test_once(self):
+    def test_clean_shell_uses_uvs_locked_python_for_every_test(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = pathlib.Path(directory)
             (repo / "tests").mkdir()
@@ -59,9 +59,10 @@ class RunnerDiscoveryTest(unittest.TestCase):
             python_tests[1].parent.mkdir()
             for test in python_tests:
                 test.write_text(
-                    "import os\n"
-                    "with open(os.environ['BURROW_RUNNER_LOG'], 'a') as log:\n"
+                    "import os, sys\n"
+                    "with open(os.environ['RUNNER_LOG'], 'a') as log:\n"
                     "    log.write(os.path.basename(__file__).replace('\\n', '<NL>') + '\\n')\n"
+                    "    log.write('python=' + sys.executable + '\\n')\n"
                 )
             # Burrow runs no JavaScript. A tracked .js test is discovered by
             # nothing and executed by nothing, rather than quietly requiring a
@@ -72,7 +73,7 @@ class RunnerDiscoveryTest(unittest.TestCase):
             ]
             for test in javascript_tests:
                 test.write_text(
-                    "require('fs').appendFileSync(process.env.BURROW_RUNNER_LOG, "
+                    "require('fs').appendFileSync(process.env.RUNNER_LOG, "
                     f"'{test.name}\\n');\n"
                 )
             (repo / "test_untracked.py").write_text(
@@ -94,8 +95,27 @@ class RunnerDiscoveryTest(unittest.TestCase):
                 cwd=repo,
                 check=True,
             )
+            bin_directory = repo / "bin"
+            bin_directory.mkdir()
+            uv = bin_directory / "uv"
+            uv.write_text(
+                "#!/bin/sh\n"
+                "test \"$1\" = run && test \"$2\" = --frozen && "
+                "test \"$3\" = python || exit 97\n"
+                "shift 3\n"
+                "exec \"$LOCKED_PYTHON\" \"$@\"\n"
+            )
+            uv.chmod(0o755)
             log = repo / "executed.log"
-            env = dict(os.environ, BURROW_RUNNER_LOG=str(log), PYTHON=sys.executable)
+            env = {
+                # Not CHRONICLE_/BURROW_-prefixed: the runner strips Chronicle's
+                # own settings from every child's environment (warren#313).
+                "RUNNER_LOG": str(log),
+                "LOCKED_PYTHON": sys.executable,
+                "PATH": str(bin_directory) + os.pathsep + os.environ["PATH"],
+                # A caller cannot redirect children away from uv's interpreter.
+                "PYTHON": "/not/the/locked/python",
+            }
             result = subprocess.run(
                 ["sh", "tests/run.sh"],
                 cwd=repo,
@@ -106,8 +126,20 @@ class RunnerDiscoveryTest(unittest.TestCase):
             )
 
             self.assertEqual(
-                sorted(log.read_text().splitlines()),
+                sorted(
+                    line
+                    for line in log.read_text().splitlines()
+                    if not line.startswith("python=")
+                ),
                 ["test_alpha.py", "test_odd<NL>name.py"],
+            )
+            self.assertEqual(
+                [
+                    line
+                    for line in log.read_text().splitlines()
+                    if line.startswith("python=")
+                ],
+                [f"python={sys.executable}", f"python={sys.executable}"],
             )
             self.assertEqual(result.stdout.splitlines()[-1], "all green")
 

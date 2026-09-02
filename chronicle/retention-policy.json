@@ -1,6 +1,7 @@
 {
   "viewer_line_limit": 4000,
   "events_per_agent": 80,
+  "ambient_events_per_agent": 8,
   "drop_ms": 43200000,
   "tasks": 24,
   "approvals": 40,

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run every chronicle test. No framework, no deps, one language: python3.
+# Run every Chronicle test with the interpreter and dependencies locked by uv.
 #
 #     sh tests/run.sh
 #     sh tests/run.sh --list
@@ -7,6 +7,4 @@ set -e
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 export PYTHONPATH="$root:${PYTHONPATH:-}"
-PYTHON=${PYTHON:-python3}
-export PYTHON
-exec "$PYTHON" tests/runner.py "$@"
+exec uv run --frozen python tests/runner.py "$@"

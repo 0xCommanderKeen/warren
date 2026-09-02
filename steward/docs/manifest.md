@@ -38,6 +38,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `routines` | no | Standing scheduled work, fired by the scheduler. Defaults to `[]`. |
 | `board` | no | Job board participation. Absent means this resident never claims. |
 | `delegation` | no | Handing work to other residents. Absent means this one never does. |
+| `notifications` | no | Outbound taps to a human. Absent means steward taps nobody about this one. |
 | `budgets` | no | Daily spend caps and the per-run time cap. Absent means unlimited. |
 | `deploy` | no | Where this resident runs: the nursery deploys there, the watchdog probes it. |
 | `retired` | no | Lifecycle state. `true` stops the resident; the files stay in git. |
@@ -200,7 +201,7 @@ routes:
     note: Optional.
 ```
 
-Two kinds are more than description, because steward itself delivers through them:
+Three kinds are more than description, because steward itself delivers through them:
 
 - **`job-board`** — required, and `active`, before `board: {claim: true}` is allowed. See
   [`board`](#board--job-board-participation).
@@ -209,6 +210,21 @@ Two kinds are more than description, because steward itself delivers through the
   no other, and the delegating session names the route by its `id`. A resident may declare
   several — `inbox` and `research` are different doors. See
   [`delegation`](#delegation--handing-work-to-another-resident).
+- **`chat`** — the door a *person* arrives through (warren#108). An `active` chat route
+  makes the resident reachable from a phone: `steward chat run` long-polls the bot the
+  `address` names, and every message from a named operator fires an ordinary session whose
+  reply goes back into the conversation. The address stays a **reference** —
+  `telegram:pip` — and the bot's token lives in steward's environment as
+  `STEWARD_CHAT_TOKEN_PIP`; a token written here is refused by validation, because a
+  manifest is git. A route ships `pending` for exactly that reason: it cannot carry the
+  secret that would make it real. See [docs/chat.md](chat.md).
+
+Every kind here is **inbound**: a way work reaches this resident. The other direction —
+steward tapping a person about this resident, one-way, with nothing listening for a reply —
+is [`notifications`](#notifications--where-this-residents-outbound-taps-go), a dimension of
+its own. Chat is a *route*, because a conversation is two-way and fires a session; a
+notification is not, and putting them in one vocabulary would make `kind` mean two opposite
+things.
 
 ## `app_grants` — declared app access
 
@@ -628,11 +644,15 @@ down:
 ```console
 $ steward scheduler run                    # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick                   # fire anything due now, then exit (external cron)
-$ steward scheduler tick --dry-run         # print what would fire, and the whole prompt
+$ steward scheduler tick --dry-run         # print what is due right now, and the whole prompt
 ```
 
 `--dry-run` emits nothing, writes no state, and cannot reach a real brain whatever the
-manifest says. A rehearsal is not work.
+manifest says. A rehearsal is not work. It rehearses *this* tick, so it reports the
+routines that are due at this moment and `nothing due` when none is — a routine that is
+not due is not part of the tick being rehearsed. To read one that is not, `steward show
+<resident>` prints everything above the task section, and the task section is this
+routine's own `prompt`; `steward doctor` says when each routine next fires.
 
 Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
@@ -739,6 +759,112 @@ $ steward task lineage <task_id>           # the whole chain, root first
 
 The grammar a session writes, the guardrails, and the lineage model are in
 [docs/delegation.md](delegation.md).
+
+## `notifications` — where this resident's outbound taps go
+
+```yaml
+notifications:
+  transport: ntfy            # the only transport today; absent means this resident taps nobody
+  on: [needs_human]          # needs_human | task_done
+  status: active             # active | pending | disabled
+  note: Miha's phone         # a label, never an address
+```
+
+**A notification is not a route, and not a chat.** `routes` answers *how work reaches this
+resident*: every kind in it is a doorway something arrives through, and two of them
+(`job-board`, `delegation`) are doorways steward itself delivers into. This block answers
+the opposite question, in the opposite direction. Steward taps a **person** on the shoulder
+*about* a resident — a `needs_human` at 2am, a board task that finished — and nothing
+listens for a reply: no session fires, no answer comes back, and nothing can arrive through
+it. Chat (warren#108) stays what it is, a two-way conversation where an operator speaks and
+a session answers. The two would be one type only if "a message went somewhere" were the
+whole of what a channel means, and it is not — which is why this is its own top-level
+dimension beside `board`, `delegation` and `budgets` rather than a ninth route kind.
+
+**Silence is not consent**, exactly as it is for `board.claim` and `delegation.send`: a
+manifest with no `notifications` block taps nobody, however loudly its resident knocks.
+Declaring a `transport` is the whole opt-in.
+
+**There is no address field, and that is deliberate.** An ntfy topic is *derived* from the
+resident's [`uid`](#top-level):
+
+```
+topic = "steward-" + base32(sha256("steward/notify/ntfy/v1|<namespace>|<uid>"))[:32]
+```
+
+A topic on ntfy **is** the capability — anyone who knows the string can subscribe to it and
+publish into it — so it has to be a value that can live in a public namespace. The `uid` is
+already unguessable, so `steward-<uid>` would be just as hard to *guess*; the reason for the
+hash is the other direction. The uid was minted to be an **identifier**, and identifiers get
+shown: it is in git, in the JSON schema, in `GET /residents`, in townhall's markup, in a
+screenshot, in a paste. None of those places was designed while asking "and does this also
+grant read and write on the operator's phone?", and if the topic were the uid, every one of
+them would silently be doing that. Hashing lets the uid keep being the printable identifier
+it was minted as, and it runs the other way too: a topic that leaks says nothing about which
+resident it belongs to. It is **not** a boundary against somebody holding this repo — they
+have the uid and this formula — and it is not meant to be; the property bought is narrower
+and cheap: *disclosing the uid never incidentally discloses the topic.*
+
+Because the topic is derived, it is written down nowhere. Read it off the one command that
+knows how, and treat the output like a password:
+
+```console
+$ steward notify list                 # every resident: transport, kinds, and the URL to subscribe to
+$ steward notify test life-agent      # send one harmless tap and say whether it landed
+```
+
+**No secrets, here or anywhere.** The ntfy server and its optional token are steward's own
+environment — `STEWARD_NTFY_URL` (default `https://ntfy.sh`), `STEWARD_NTFY_TOKEN`,
+`STEWARD_NTFY_TIMEOUT_S`, and `STEWARD_NOTIFY_NAMESPACE`, which keeps two installations
+reading the same `residents/` tree (a laptop checkout and the NAS) off each other's phones.
+A manifest declares *that* a resident taps, never how to authenticate as one.
+
+**What is tapped.** `on` names chronicle event types, so it reads against
+[docs/transitions.md](transitions.md) directly:
+
+| kind | when | where it is sent from |
+|---|---|---|
+| `needs_human` | a session raised an escalation, **or** steward knocked about the resident — a budget pause, a watchdog give-up, a refused handoff | `ApprovalTransitions._raise` |
+| `task_done` | a claimed board task or a delegated letter closed successfully | `Dispatcher._finish` |
+
+A knock the repeat-deny guard answered on arrival taps nobody — that is the whole point of
+the guard, and it holds for the phone as well as for the village. A `task_failed`, a lost
+lease, and every routine bracket are deliberately not tappable: a notification is for the
+thing you would want to be woken for.
+
+**Failure is a courtesy failing, never work failing.** The result of a tap is discarded and
+every error is swallowed: an unreachable ntfy is a `WARNING` in steward's log and nothing
+else. The POST itself is *synchronous*, bounded by a two second timeout and a sixty second
+circuit breaker — not moved onto a thread, because a one-shot CLI exits the moment its work
+is done and a daemon thread killed at exit would drop the knock silently, which is the exact
+failure this exists to prevent. Every tap the breaker swallows is logged too, so "what did I
+miss while ntfy was down" is answerable. It is deliberately not an *event*: an event about
+steward's own plumbing would render in the village as though a villager did something, and an
+event about a failed notification is a fact that could itself be notified about.
+
+**Chronicle also forwards knocks, and the two do not know about each other.** Chronicle's
+`CHRONICLE_NOTIFY_URL` pushes every `needs_human` it *ingests* to one fleet-wide webhook;
+this pushes the ones steward *raises* to one topic per resident. Configure both and one knock
+buzzes twice. Pick one: the chronicle forwarder if you want a single stream and no manifest
+changes, this if you want per-resident topics you can mute individually and taps for
+`task_done` as well.
+
+**What validation refuses**, in the [`_check_budget_is_enforceable`](#budgets--what-a-day-may-cost)
+spirit — a declaration steward cannot honour is worse than none, because somebody read it:
+
+- **an unknown transport** — an error, naming the transports that exist and the closest
+  match. A manifest that reads as wired up and delivers through nothing would be discovered
+  on the night an approval knock does not arrive.
+- **a transport with an empty `on`** — an error. A tap for nothing is a declaration that can
+  never send.
+- **a repeated kind** — an error; name each one once.
+- **`task_done` on a resident that closes no tasks** (`board.claim` false and no *active*
+  `delegation` route) — a **warning**, not an error. Nothing is spent and nothing is unsafe;
+  the declaration is merely aspirational, and granting the resident board work tomorrow makes
+  it true. What it risks is an operator reading the silence as a broken transport.
+
+`steward validate` refuses to store a credential-shaped value anywhere in a manifest, and
+this block has no field one would fit in.
 
 ## `budgets` — what a day may cost
 
@@ -887,13 +1013,20 @@ resident cannot work without:
   arg so a rebuild never silently changes which brain a resident has;
 - **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
   the whole install;
-- a **vendored copy of chronicle's `hooks/emit.py`**, with the commit it came from written in
-  its header and its checksum recorded in `docker/resident/burrow-emit.sha256`. Refresh it
-  with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle` by default,
-  and `CHRONICLE=/path/to/chronicle` overrides that for a checkout elsewhere);
-  `tests/test_resident_image.py` fails
-  when the copy drifts, and CI runs that test in the same job that lints and types the
-  package — one job earlier than the `image` job that actually builds this;
+- a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
+  (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
+  vendored is the single self-contained file `chronicle/hooks/build.py` flattens them into,
+  because a docker build context is one directory and there is no pip in this image.
+  Refresh it with `make vendor-emitter` (run in `warren/steward/`; it reads `../chronicle`
+  by default, and `CHRONICLE=/path/to/chronicle` overrides that for a checkout elsewhere).
+  `tests/test_resident_image.py` **rebuilds that bundle from `../chronicle` at HEAD and
+  compares it byte for byte**, so drift is a failed test rather than a discovery; CI runs
+  it in the same job that lints and types the package — one job earlier than the `image`
+  job that actually builds this — and `.github/workflows/steward.yml` is path-filtered on
+  `chronicle/hooks/**` as well as `steward/**`, so an emitter change turns *this* service
+  red in the PR that made it. (It used to be a checksum recorded beside the copy. A pinned
+  hash catches somebody editing the copy and can never catch the copy going stale: it
+  stayed green while the source moved 1,200 lines away — warren#234.);
 - a **`settings.json` template** wiring that emitter into `UserPromptSubmit`, `PreToolUse`,
   `PostToolUse`, `Notification`, `Stop` and `SessionEnd` — the same six hooks the Mac
   config uses, reading `CHRONICLE_URL` / `CHRONICLE_TOKEN` from the container's environment
@@ -951,6 +1084,84 @@ keeps them in the process running `steward scheduler run`, via `subprocess.Popen
 compose file runs the container under docker's own init (`init: true`), so the processes
 a killed session leaves behind are reaped rather than accumulating as zombies.
 
+### The durable outbox
+
+The emitter vendored since warren#234 is chronicle's current client, and it does not lose
+events when the village is away: an undelivered event is journaled, replayed oldest-first
+by a later hook once the village answers again, and a torn tail is quarantined rather than
+replayed. That is what an unattended container needs — the emitter it replaced appended to
+a local file that nothing ever read again.
+
+**Where that queue lives, and what happens to it.** Everything the emitter persists is
+under `$HOME` in the container — `/root`, since the image runs as root:
+
+| path | what it is |
+| --- | --- |
+| `/root/.chronicle/events.jsonl` | the offline fallback log |
+| `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`, `.lock`) | deferred events waiting to be replayed |
+| `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`, `.lock`) | the durable outbox and its delivery schedule |
+| `/root/.chronicle/transport-diagnostics.json`, `.post-failed-<target>` | the last failures, and the per-target circuit breaker |
+
+`/root/.chronicle` on a container that has never had a `/root/.burrow`; on one that has,
+the emitter keeps using the old directory rather than stranding events nobody would replay.
+
+**It is not on a volume.** The compose fragment steward renders mounts exactly two paths —
+`./memory:<memory.path>` and `./claude:/root/.claude` — and neither is this one. So the
+queue is in the container's writable layer:
+
+- `docker compose restart`, or a container that crashes and is restarted — **kept**;
+- `docker compose down && up`, `docker compose up` after an image change, `docker rm` —
+  **gone**, along with anything the village had not taken yet.
+
+Whether that matters is an operator call, and there are three answers, none of which
+steward picks for you:
+
+1. **Accept it.** The window is only "events produced while the village was unreachable,
+   lost if the container is recreated before it returns". Chronicle is on the same NAS as
+   the residents; that window is usually empty.
+2. **Mount it** — add `./chronicle:/root/.chronicle` to the volumes in `render_compose`.
+   One line, applies to every resident, and takes a re-provision (a new compose file means
+   recreated containers) to take effect.
+3. **Reuse the claude volume** — nothing today lets the state directory move without moving
+   `$HOME`, which would move claude's own config with it. Teaching the emitter a
+   `CHRONICLE_STATE_DIR` setting is chronicle's change to make, not steward's.
+
+`steward-smoke` prints the path when it sees a fallback, and the entrypoint prints it at
+every start, so the queue is never something you have to go looking for.
+
+### Rolling out a re-vendored emitter
+
+**Order: chronicle first, then images.** A resident's emitter is chronicle's own client,
+so the deployed server should be at least as new as the client that will be talking to it.
+What is actually on the wire, read off `chronicle/hooks/emit.py`:
+
+- the request **body** is a plain protocol-v0 event — no new fields, and chronicle's own
+  contract says "unknown extension fields remain allowed" ([protocol](../../chronicle/docs/protocol.md#strict-v0-validation-contract));
+- the delivery identity travels as the **header** `X-Burrow-Delivery-ID`. A server that
+  predates it ignores it, which costs only server-side dedupe: a replayed event it already
+  has is accepted twice rather than recognised;
+- one **event type** is new relative to the emitter that was frozen in the image:
+  `tool_failed`. A chronicle old enough not to know it answers 400, and the emitter keeps
+  the event in its local log — nothing is lost, but those events stay invisible until the
+  server is updated.
+
+So: confirm the deployed chronicle's version, deploy chronicle if it is behind, then
+`make image`, `make image-ship`, and re-provision. Re-verify at rollout time rather than
+trusting this paragraph — it describes the code, not the box.
+
+**A `docker compose down && up` discards the durable outbox** (see above), and rolling out
+a new image is exactly that. Roll out while the village is up, when the queue is empty.
+
+**Who is actually running which emitter.** `steward-resident` containers get the vendored
+copy from the image, replaced by the entrypoint at every start — so they converge on the
+next `make image-ship` + re-provision, with no per-container step. **life-agent does not**:
+it predates steward provisioning, runs `node:22` rather than this image (its manifest says
+so, and a test holds it to saying so), and carries its own emitter installed into its
+claude-config volume at `/root/.claude/burrow/`. It converges when somebody re-runs
+chronicle's `scripts/install-emitter.sh` against that volume, or when it is migrated onto
+`steward-resident` — a cutover, not a rebuild. Nothing in this repository will do either on
+its own.
+
 **Why the fields are so narrowly patterned.** `host`, `user`, `path` and `image` all end
 up on an `ssh` command line, and `ssh` hands its arguments to a shell on the far side. A
 value carrying a space, a quote, a `;` or a `$(…)` would be a manifest that runs arbitrary
@@ -992,7 +1203,9 @@ It drops out of the village the honest way: it stops emitting, and chronicle's e
 projection rules do the rest. Steward forges no `session_ended` on its behalf.
 
 Bringing one back is a person's decision written down: set `retired: false`, commit, and
-run `steward new-resident` again to put the container up.
+run `steward provision <id>` to put the container up — the counterpart to `retire`, which
+reads the same declared manifest and needs no flags to describe a resident that already
+exists.
 
 ### What retirement removes from the host, and what it leaves
 
@@ -1023,8 +1236,9 @@ Removing the file is the narrow lever. The broad one is **rotating `CHRONICLE_TO
 and it is the right lever whenever a retirement was a response to something rather than a
 tidy-up: steward writes one token into every resident's `.env` from its own environment, so
 a copy that leaked from one host is a copy that works for all of them. Rotation is a burrow-
-side change plus a re-provision of every live resident (`steward new-resident` again, which
-rewrites each `.env`); steward has no command for it, and retiring one resident does not do it.
+side change plus a re-provision of every live resident (`steward provision <id>` for each,
+which rewrites that resident's `.env`); steward has no command for the fleet-wide sweep, and
+retiring one resident does not do it.
 
 ## The watchdog
 

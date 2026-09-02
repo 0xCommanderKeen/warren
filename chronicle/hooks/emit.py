@@ -111,8 +111,8 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 POST_TIMEOUT = 0.75
 HOOK_BUDGET = 1.0
 HOOK_REAP_BUDGET = 0.05
+ACK_RESERVE = 0.1
 MAX_TARGETS = 8
-REPLAY_BATCH = 16
 OUTBOX_RECORDS = 1024
 OUTBOX_BYTES = 5 * 1024 * 1024
 SCHEDULE_RECORDS = 1024
@@ -125,6 +125,8 @@ DEFERRED_BYTES = 5 * 1024 * 1024
 DEFERRED_TORN_FILES = 8
 DEFERRED_TORN_BYTES = 256 * 1024
 DIAGNOSTIC_HISTORY = 20
+STUCK_OUTBOX_HOOKS = 10
+STUCK_OUTBOX_AGE_SECONDS = 24 * 60 * 60
 _OUTBOX_LOCK = threading.Lock()
 _DIAGNOSTIC_LOCK = threading.Lock()
 # Persisted inside spool records on disk. Deliberately NOT renamed: a record
@@ -598,6 +600,15 @@ def _enqueue_sort_key(record):
     )
 
 
+def _enqueue_time(record):
+    """UTC timestamp encoded by a modern enqueue order, or None for legacy records."""
+    order = record.get("enqueue_order")
+    try:
+        return int(str(order).split(":", 1)[0]) / 1_000_000_000
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _stamp_enqueue_order(records):
     stamped = []
     for record in records:
@@ -864,13 +875,70 @@ def _diagnose(kind, **details):
                     .isoformat(timespec="milliseconds")
                     .replace("+00:00", "Z")
                 )
-                report.setdefault("recent", []).append(dict(kind=kind, **details))
+                if kind == "outbox":
+                    previous = report.get("outbox")
+                    previous = previous if isinstance(previous, dict) else {}
+                    acknowledged = int(details.pop("acknowledged", 0))
+                    hooks_without_ack = (
+                        0
+                        if acknowledged
+                        else int(previous.get("hooks_without_ack", 0)) + 1
+                    )
+                    details["hooks_without_ack"] = hooks_without_ack
+                    details["last_ack_at"] = (
+                        report["updated_at"]
+                        if acknowledged
+                        else previous.get("last_ack_at")
+                    )
+                    details["status"] = (
+                        "stuck"
+                        if (
+                            details.get("records", 0) >= details.get("capacity", 1)
+                            or details.get("oldest_age_seconds", 0)
+                            >= STUCK_OUTBOX_AGE_SECONDS
+                        )
+                        and hooks_without_ack >= STUCK_OUTBOX_HOOKS
+                        else "healthy"
+                    )
+                    report["outbox"] = details
+                    if details["status"] == "stuck" and previous.get("status") != "stuck":
+                        report.setdefault("recent", []).append(
+                            {
+                                "kind": "stuck_outbox",
+                                "reason": "old or full without acknowledgements",
+                            }
+                        )
+                else:
+                    report.setdefault("recent", []).append(dict(kind=kind, **details))
                 report["recent"] = report["recent"][-DIAGNOSTIC_HISTORY:]
                 pending = durable.stage_json(DIAGNOSTICS, report, ensure_ascii=False)
                 durable.publish_staged(((pending, DIAGNOSTICS),))
                 return True
         except (OSError, ValueError, TypeError):
             return False
+
+
+def _diagnose_outbox(records, acknowledged):
+    """Publish bounded queue health without exposing event payloads."""
+    oldest_at = None
+    oldest_age = 0
+    if records:
+        created = _enqueue_time(records[0])
+        if created is not None:
+            oldest_age = max(0, int(time.time() - created))
+            oldest_at = (
+                datetime.datetime.fromtimestamp(created, datetime.timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+    _diagnose(
+        "outbox",
+        records=len(records),
+        capacity=OUTBOX_RECORDS,
+        oldest_queued_at=oldest_at,
+        oldest_age_seconds=oldest_age,
+        acknowledged=len(acknowledged),
+    )
 
 
 def _deferred_record(line):
@@ -1023,7 +1091,7 @@ def _append_local(event):
         os.fsync(f.fileno())
 
 
-def deliver(event):
+def deliver(event, deadline=None):
     """Deliver one redacted event under one bounded hook budget.
 
     Primary queues replay oldest-first; mirrors see only the current event and
@@ -1031,7 +1099,8 @@ def deliver(event):
     worker each, capped by ``MAX_TARGETS``.
     """
     event = redact_event(event)
-    deadline = time.monotonic() + HOOK_BUDGET
+    deadline = deadline if deadline is not None else time.monotonic() + HOOK_BUDGET
+    post_deadline = deadline - min(ACK_RESERVE, HOOK_BUDGET)
     current_id = uuid.uuid4().hex
     initial_primary, initial_mirrors, later_primary, later_mirrors = _target_groups()
     configured_primary = initial_primary + later_primary
@@ -1092,6 +1161,7 @@ def deliver(event):
     pending = _read_durable_outbox_snapshot()
     primary, mirrors, deferred_primary, deferred_mirrors = _target_groups(pending)
     results = {}
+    result_lock = threading.Lock()
 
     # Reserve the selected turn before network work. Fairness therefore
     # survives success (which removes queue records), failure, and restart.
@@ -1104,18 +1174,32 @@ def deliver(event):
         target_key = _target_id(url)
         queued = [record for record in pending if record.get("target") == target_key]
         delivered_keys = []
-        for record in queued[:REPLAY_BATCH]:
+        estimated_rtt = POST_TIMEOUT
+        for record in queued:
+            if time.monotonic() + estimated_rtt > post_deadline:
+                return
+            started = time.monotonic()
             if not post_event(
                 url,
                 record.get("event") or {},
                 token,
                 str(record.get("delivery_id") or ""),
             ):
-                results[url] = (delivered_keys, False, target_key)
+                with result_lock:
+                    results[url] = (list(delivered_keys), False, target_key)
                 return
+            elapsed = time.monotonic() - started
+            estimated_rtt = max(elapsed * 1.25, 0.001)
             delivered_keys.append(_record_key(record))
+            with result_lock:
+                results[url] = (list(delivered_keys), False, target_key)
             _diagnose("retry", target=target_key)
-        results[url] = (delivered_keys, len(delivered_keys) == len(queued), target_key)
+        with result_lock:
+            results[url] = (
+                list(delivered_keys),
+                len(delivered_keys) == len(queued),
+                target_key,
+            )
 
     workers = []
     for url, token in primary:
@@ -1129,30 +1213,36 @@ def deliver(event):
         worker.start()
         workers.append(worker)
     for worker in workers:
-        worker.join(max(0, deadline - time.monotonic()))
+        worker.join(max(0, post_deadline - time.monotonic()))
 
     delivered_keys, primary_failed = set(), False
+    failed_targets = []
     for url, _ in primary:
         target_key = _target_id(url)
-        replayed, current_ok, _ = results.get(url, ([], False, target_key))
+        with result_lock:
+            replayed, current_ok, _ = results.get(url, ([], False, target_key))
         delivered_keys.update(replayed)
         if not current_ok:
             primary_failed = True
-            _diagnose("failure", target=target_key)
+            failed_targets.append(target_key)
     if deferred_primary:
         primary_failed = True
+    # Acknowledgement owns the reserved tail of the hook budget. Diagnostics
+    # are deliberately after it: their lock or fsync may stall, but a host
+    # timeout must never erase progress already accepted by the server.
+    _, updated = _update_outbox(delivered_keys, [])
+    if not updated:
+        _diagnose("failure", reason="outbox lock contention")
+    else:
+        _diagnose_outbox(_read_durable_outbox_snapshot(), delivered_keys)
+    for target_key in failed_targets:
+        _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:
         _diagnose(
             "failure",
             reason="target limit",
             count=len(deferred_primary) + len(deferred_mirrors),
         )
-    if time.monotonic() < deadline:
-        _, updated = _update_outbox(delivered_keys, [])
-        if not updated:
-            _diagnose("failure", reason="outbox lock contention")
-    else:
-        _diagnose("failure", reason="hook budget deferred outbox acknowledgement")
     if primary_failed and not local_written and time.monotonic() < deadline:
         _append_local(event)
 
@@ -1195,7 +1285,7 @@ def redact_event(event):
     return out
 
 
-def main(runner="claude"):
+def main(runner="claude", deadline=None):
     hook = json.loads(sys.stdin.read())
     specs = adapt_hook(runner, hook)
     if not specs:
@@ -1218,19 +1308,21 @@ def main(runner="claude"):
             # parent rests between backing sessions.
             if agent_id == resident_parent:
                 etype, payload = "idle", {}
-        deliver(
-            {
-                "v": 0,
-                "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "source": RUNNER_SOURCES[runner],
-                "agent_id": agent_id,
-                "project": _setting("PROJECT")
-                or (_safe_path(cwd) if cwd else "unknown"),
-                "cwd": cwd,
-                "type": etype,
-                "payload": payload,
-            }
-        )
+        event = {
+            "v": 0,
+            "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "source": RUNNER_SOURCES[runner],
+            "agent_id": agent_id,
+            "project": _setting("PROJECT")
+            or (_safe_path(cwd) if cwd else "unknown"),
+            "cwd": cwd,
+            "type": etype,
+            "payload": payload,
+        }
+        if deadline is None:
+            deliver(event)
+        else:
+            deliver(event, deadline)
 
 
 def run_hook_bounded(runner="claude"):
@@ -1250,7 +1342,7 @@ def run_hook_bounded(runner="claude"):
         return
     if pid == 0:
         try:
-            main(runner)
+            main(runner, work_deadline)
         except Exception as error:
             sys.stderr.write(
                 "chronicle transport failure: " + type(error).__name__[:80] + "\n"
@@ -1277,20 +1369,50 @@ def run_hook_bounded(runner="claude"):
         time.sleep(min(0.005, max(0, deadline - time.monotonic())))
 
 
+def print_emitter_status():
+    """Render local outbox health for an operator; hook execution never calls this."""
+    try:
+        with open(DIAGNOSTICS, encoding="utf-8") as stream:
+            outbox = json.load(stream).get("outbox")
+        if not isinstance(outbox, dict):
+            raise ValueError("missing outbox status")
+    except (OSError, ValueError, TypeError):
+        print("chronicle emitter outbox: no delivery status recorded")
+        return
+    oldest = outbox.get("oldest_queued_at") or "none"
+    last_ack = outbox.get("last_ack_at") or "never"
+    print(
+        "chronicle emitter outbox: %s; %s/%s queued; oldest %s (%ss); "
+        "%s hooks without ack; last ack %s"
+        % (
+            outbox.get("status", "unknown"),
+            outbox.get("records", "?"),
+            outbox.get("capacity", "?"),
+            oldest,
+            outbox.get("oldest_age_seconds", "?"),
+            outbox.get("hooks_without_ack", "?"),
+            last_ack,
+        )
+    )
+
+
 if __name__ == "__main__":
-    runner = runner_name(sys.argv[1:])
-    if runner:
-        try:
-            run_hook_bounded(runner)
-        except Exception as error:
-            # Last-resort diagnostic when even the durable state directory is
-            # unavailable. Never echo exception text: it may contain a path,
-            # URL, credential, or event detail.
-            sys.stderr.write(
-                "chronicle transport failure: " + type(error).__name__[:80] + "\n"
-            )
-    if runner == "codex":
-        # Stop/SubagentStop require JSON on stdout; an empty object is advisory
-        # and deliberately never approves, denies, blocks, or continues Codex.
-        print("{}")
+    if sys.argv[1:] == ["--status"]:
+        print_emitter_status()
+    else:
+        runner = runner_name(sys.argv[1:])
+        if runner:
+            try:
+                run_hook_bounded(runner)
+            except Exception as error:
+                # Last-resort diagnostic when even the durable state directory is
+                # unavailable. Never echo exception text: it may contain a path,
+                # URL, credential, or event detail.
+                sys.stderr.write(
+                    "chronicle transport failure: " + type(error).__name__[:80] + "\n"
+                )
+        if runner == "codex":
+            # Stop/SubagentStop require JSON on stdout; an empty object is advisory
+            # and deliberately never approves, denies, blocks, or continues Codex.
+            print("{}")
     sys.exit(0)

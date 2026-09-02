@@ -39,12 +39,19 @@ snapshot carries:
 - **`artifacts`** — the newest 30 `artifact_produced` records, each with its path, maker,
   project and time. Empty means the *retained log* holds no artifacts, which is not the
   same claim as the fleet having produced none.
-- **`tasks`** — Steward's current job queue, folded from `task_posted`, `task_claimed`,
-  `task_done` and `task_failed` by task ID, so a job's lifecycle survives being posted in
-  one session and claimed in another. A `task_failed` whose reason is `lease_expired`
-  reopens the job rather than failing it — matching Steward's own queue — and keeps naming
-  the attempt that expired. A blank skill name in an otherwise valid event stays a blank
-  name; that is not the same fact as an empty requirement list.
+- **`tasks`** — Steward's current job queue, folded by task ID, so a job's lifecycle
+  survives being opened in one session and claimed in another. A row opens two ways,
+  because Steward's own table has two: `task_posted` puts a job on the open board, and
+  `task_delegated` hands one to a named resident — that row carries the addressee in
+  `assignee`, no required skills, and the delegator as `posted_by`, mirroring the open,
+  unclaimed record Steward writes for a handoff. The identities are the village's own:
+  Steward's store addresses a handoff by *resident* id, while the event carries the agent
+  ids the village walks villagers by, which is what a later claim can be compared against.
+  `task_claimed`, `task_done` and `task_failed` then move whichever row it is.
+  A `task_failed` whose reason is `lease_expired` reopens the job rather than failing it —
+  matching Steward's own queue — and keeps naming the attempt that expired. A blank skill
+  name in an otherwise valid event stays a blank name; that is not the same fact as an
+  empty requirement list.
 - **`approvals`** — one record per `needs_human` carrying a `request_id`: the action, the
   semantic detail, Steward's approve/deny/edit options, the declared expiry, and the
   decision once a matching `needs_human_resolved` arrives. The question is immutable — a
@@ -65,7 +72,12 @@ snapshot carries:
 - **`diagnostics`**, **`capacity`** and **`capabilities`** — malformed records, the bounds
   this server actually applied, and which event families this build projects (`ingest`,
   `approvals`, `jobs`, `routines`), so a client can tell an older backend from a feature
-  the fleet is simply not using.
+  the fleet is simply not using. `diagnostics` also carries
+  `chat_message_dropped` records — a message reached a resident's chat route and was
+  deliberately not answered — naming the door, who knocked, why they got silence, and how
+  many further knocks that record stands for (`suppressed`; Steward sends one per stranger
+  per door per window). That is the only place a knock on a sleeping resident shows up,
+  because an outsider's message is never allowed to put its villager back on the map.
 
 Every villager also carries a **`mood`**: one deterministic operational reading built from
 retained failures, work density, exact human interactions and unresolved needs — not
@@ -92,6 +104,15 @@ applied to villagers, per-villager history, tasks, approvals, journals, routines
 diagnostics. Full arrays keep the newest records, so a finished job leaves `tasks` because
 newer ones pushed it out, not because a timer retired it.
 
+Two of those bounds are split rather than plain, because an outsider fills part of them.
+`ambient_events_per_villager` and `ambient_diagnostics` are how much of a villager's history
+and of the diagnostics channel a knock at a chat door is *guaranteed* — and all it gets when
+either is contested, so a knock storm cannot age out what a resident actually did or what
+the projection could not fold (warren#278). They are floors, not ceilings: when nothing else
+wants the room, knocks take it, and a full channel is still full. Rotation applies the same
+split to its own per-agent budget, published as `ambient_events_per_agent` in
+[`retention-policy.json`](retention-policy.json).
+
 ## It observes writes; it never performs them
 
 Every write in the fleet — posting a job, deciding an approval, declaring a resident,
@@ -101,11 +122,12 @@ credentials of its own. A write reaches this service only later, as the event th
 produced.
 
 That is what keeps the one rule enforceable across a write, and it is why both clients are
-built to distrust their own receipts. A job enters `tasks` when its `task_posted` event
-arrives, not when the POST was accepted — a claim or a completion for a job this log never
-saw posted is dropped rather than invented. A villager stops `knocking` on
-`needs_human_resolved`, not on a `200`, and one whose session already ended stays at your
-door for exactly as long as its approval is still open.
+built to distrust their own receipts. A job enters `tasks` when the event that opened it —
+`task_posted`, or `task_delegated` for a handoff — arrives, not when the POST was accepted;
+a claim or a completion for a job this log never saw opened is dropped rather than
+invented. A villager stops `knocking` on `needs_human_resolved`, not on a `200`, and one
+whose session already ended stays at your door for exactly as long as its approval is
+still open.
 
 Which refusals are safe to retry, how an ambiguous delivery is reconciled later, and where
 the operator credential lives are each that client's business, and documented with it:
@@ -126,13 +148,15 @@ There is one supported setup path for both Claude Code and Codex:
    [protocol guide](docs/protocol.md#runner-setup). Both runners invoke the same
    installed bundle; Codex adds `--runner codex`.
 3. Add or edit `villagers/*.resident.json`, then validate every manifest with
-   `python3 -m unittest tests.test_residents`. App-grant references and status
+   `uv run --frozen python -m unittest tests.test_residents`. App-grant references and status
    references describe public configuration/health locations only. Chronicle never
    stores app credentials; those stay in the owning app or secret store.
 4. Run the authoritative test suite with `sh tests/run.sh`.
 5. Deploy the exact tested tree with the tar-over-SSH command below and restart
-   the service. Check `/residents` for public validation diagnostics and open the
-   village at both phone and desktop widths.
+   the service. Check `/residents` for public validation diagnostics — on the
+   arcadia origin that report is `/burrow/residents`, because a bare `/residents`
+   there is steward's own resident listing — and open the village at both phone and
+   desktop widths.
 
 The detailed protocol sections explain event mappings and privacy, but the steps
 above are the canonical install, validation, test, and deployment sequence.
@@ -140,8 +164,11 @@ above are the canonical install, validation, test, and deployment sequence.
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
 on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/burrow/`. Never exposed to the public internet — the event
-log is a map of everything the fleet does.
+`http://dxp2800:8737/burrow/`, which carries `/state`, `/state/stream` and `/residents`.
+The origin also answers `/state` and `/state/stream` unprefixed (they rewrite to the
+same place) and proxies `/events` there; what it does not send here it serves itself —
+the village at `/`, townhall at `/observatory/` — or hands to steward. Never exposed to
+the public internet — the event log is a map of everything the fleet does.
 
 **Run every command below from `warren/chronicle/`.** Since the 2026-08-31
 consolidation this service is a directory in the warren monorepo
@@ -164,11 +191,17 @@ deploy is pushed from a machine that has the repo checked out.
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:
   `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
-  `uv sync --frozen --no-dev` and runs `uv run uvicorn serve:app --host 0.0.0.0 --port 8737`
-  with `CHRONICLE_HOST=0.0.0.0`,
-  `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_TOKEN=<shared secret>`. Deploy code
+  `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
+  `CHRONICLE_HOST=0.0.0.0`, `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_ARCHIVE`,
+  `CHRONICLE_VILLAGERS` and `CHRONICLE_TOKEN=<shared secret>` from the environment.
+  `uvicorn serve:app` reads the same settings at import (only the bind address is
+  uvicorn's own `--host`/`--port`); it did not until warren#313, and the NAS ran it
+  for six days with every setting silently ignored. `tests/test_deployment_bundle.py`
+  boots the shipped tree that way and asserts the token gates ingest and the log lands
+  at `CHRONICLE_EVENTS`. The compose file is
+  [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
-  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py state_coordinator.py village_state.py retention.py
+  tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
@@ -243,7 +276,12 @@ village's `CHRONICLE_TOKEN` is deliberately never sent to a mirror.
 
 A mirror success never acknowledges the shared village. Primary failures remain in
 `~/.chronicle/primary-outbox.jsonl` until a later hook replays them. Delivery attempts
-to independent targets run concurrently and rotate fairly through a durable queue.
+to independent targets run concurrently and rotate fairly through a durable queue. Replay
+is time-sized: each worker measures its target's round-trip time, starts another POST only
+when that observation says it fits, and reserves the final 100 ms of the hook for a durable
+acknowledgement. Every completed POST is published to the acknowledging thread immediately,
+so a deadline-cut batch still shrinks the outbox instead of replaying its successful prefix
+on the next hook.
 The complete transport path runs in a killable helper under a documented one-second
 host-hook budget; stalled persistence, diagnostics, or fallback cannot hold up the
 hosting agent. A helper killed before its first durable commit can still lose that
@@ -252,7 +290,14 @@ One stable outbox transaction lock orders main and journal authorities by a
 pre-lock enqueue ID and enforces their aggregate caps. Lock contention and capped
 targets are durably deferred and diagnosed. Serialized bounded payload-free
 counters and recent failures are inspectable in
-`~/.chronicle/transport-diagnostics.json`.
+`~/.chronicle/transport-diagnostics.json`. Its payload-free `outbox` object reports
+`status`, `records`, `capacity`, `oldest_queued_at`, `oldest_age_seconds`,
+`hooks_without_ack`, and `last_ack_at`. Ten hooks without an acknowledgement name the
+outbox `stuck` when it is full or its oldest record is at least one day old; the transition
+also adds one `stuck_outbox` entry to the bounded recent history. This local report remains
+available when the emitter is too dark for a central status page to observe truthfully.
+Run `chronicle-emit --status` (or the installed legacy `burrow-emit --status`) to render
+that health as one operator-facing line; ordinary hook invocations remain silent.
 Local-log rotation contention uses the same crash-safe pattern: a stable-lock
 deferred journal, atomic handoff, and idempotent replay IDs. Active plus replay
 deferred authority retains the newest 1,024 records within 5 MiB; capacity drops
@@ -327,9 +372,29 @@ identity, stable append order and an explicit conservative overflow state; it is
 every ordinary projection and cannot create presence. Exact future invalidation over
 unrestricted request IDs is impossible in fixed space, so overflow resolves to an uncertain
 mood instead of a guess. The delivery-ID acceleration ledger is separately bounded to 1,024
-records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults); retained
-live/archive events remain the dedupe authority after ledger eviction. This is exactly-once
-replay within retained event authority, not a global-forever guarantee.
+records/5 MiB plus one atomic-copy allowance (10 MiB physical at defaults). On a ledger
+miss, a local SQLite side index provides exact membership without reparsing retained
+history. It is derived state, stored beside the live log as
+`events.jsonl.delivery-index.sqlite3`: deleting or corrupting it causes a rebuild or
+reconciliation from the retained live log and plain-JSONL archives. Those JSONL files
+remain the sole dedupe authority. This is exactly-once replay within retained event
+authority, not a global-forever guarantee.
+
+This use reconciles the parked storage decision in warren#223: warren#290 made exact
+retained-history membership an ingestion feature with a bounded-cost requirement, which
+is the decision's trigger for a local, stdlib SQLite index. It does not move event history
+into a database or add a service dependency; ingest safely scans JSONL if derived state is
+unavailable. The index uses space proportional to the distinct delivery IDs in the live
+log plus every retained archive. Removing archives removes their authority only after the
+archive change is published; Chronicle rotation publishes an atomic, opaque generation in
+`events.jsonl.archives-generation`, and operators that edit, replace, or remove archives
+must publish a new generation with `DeliveryIdIndex.publish_archives()` after fsyncing the
+canonical files. The next lookup streams JSONL in bounded batches, rebuilds the exact set,
+and vacuums the database so removed archive generations release storage. The generation
+token avoids timestamp collisions while allowing clean membership reads to remain
+read-only and avoid enumerating archives. A process also content-hashes the archive set
+once at startup, so an unpublished change made while Chronicle was stopped still repairs
+on restart; publication is required for reconciliation during a running process.
 
 Event schema, transports, and projection rules: [docs/protocol.md](docs/protocol.md).
 
@@ -383,7 +448,7 @@ with status labels. The convention, for humans and agents alike:
 Remove the status label when the issue closes.
 
 Tests are plain scripts throughout the repository. For example, the root-level
-server test can be run directly with `python3 test_serve.py`.
+server test can be run directly with `uv run --frozen python test_serve.py`.
 
 ### Tests
 
@@ -400,7 +465,7 @@ publishes complete snapshots. That is the whole reduction: no second reducer in 
 no browser tests here, no build step:
 
 ```sh
-python3 -m unittest tests.test_village_state tests.test_state_coordinator
+uv run --frozen python -m unittest tests.test_village_state tests.test_state_coordinator
 sh tests/ui-contract.sh
 ```
 

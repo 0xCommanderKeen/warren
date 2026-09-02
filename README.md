@@ -36,7 +36,7 @@ Each service is self-contained — work inside its directory:
 
 ```sh
 cd steward   && make check                # uv: ruff + ty + pytest + validate
-cd chronicle && uv run sh tests/run.sh    # full suite
+cd chronicle && sh tests/run.sh           # full suite (selects locked uv environment)
 cd townhall  && pnpm test && pnpm build
 cd arcadia   && pnpm test && pnpm build
 ```
@@ -58,8 +58,10 @@ There is no registry either: images travel as `docker save | ssh … docker load
 | steward | `:8802` → container `8801` | `~/docker/steward`, residents in `~/docker/steward-<id>` | [steward README](steward/README.md#deployment) |
 
 One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
-`/observatory/`, and proxies `/burrow/state`, `/state`, `/events` to chronicle and the
-write routes to steward. So a townhall release is published into *arcadia's* deploy
+`/observatory/`, proxies `/burrow/state`, `/state`, `/events` and `/burrow/residents` to
+chronicle, and hands steward every one of its own top-level routes. Both services answer
+`GET /residents`, so the bare path is steward's and chronicle's report is the prefixed
+one (warren#242). So a townhall release is published into *arcadia's* deploy
 directory, and `CHRONICLE_URL=http://dxp2800:8737` (still accepted as `BURROW_URL`)
 is correct even though chronicle listens on 8738 — the origin proxies `/events` through.
 
@@ -72,9 +74,14 @@ now both print a topology report naming any container the process cannot reach.
 [`steward/docs/topology.md`](steward/docs/topology.md) has the rule, what it costs to break
 it, and how far `DOCKER_HOST` actually goes.
 
-Run each runbook from its own service directory (`warren/chronicle/`, `warren/arcadia/`, …).
-The tar recipes pack paths relative to the working directory, so the directory you stand in
-is part of the command.
+**`deploy/deploy.sh <service>` runs those runbooks for you** — from a laptop, or from
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml) on every merge to `main` —
+converging each deploy directory rather than accreting into it, and leaving a
+`DEPLOYED-<service>` marker the NAS can be asked about with `deploy/status.sh`.
+[`deploy/README.md`](deploy/README.md) is the runbook for the script and the pipeline.
+Running a recipe by hand still works: do it from its own service directory
+(`warren/chronicle/`, `warren/arcadia/`, …) — the tar recipes pack paths relative to the
+working directory, so the directory you stand in is part of the command.
 
 The directory names on the NAS still say `burrow` and the mount still says `/observatory/`;
 they are paths, not identifiers. warren#216 renamed the identifiers and deliberately left

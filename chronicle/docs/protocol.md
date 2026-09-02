@@ -50,9 +50,24 @@ Two transports; the event shape is the contract, not the pipe:
   The server's delivery-ID acceleration ledger is independently capped at 1,024
   records/5 MiB and uses one same-size atomic replacement (10 MiB physical
   crash-copy ceiling at defaults). Eviction does not weaken replay deduplication:
-  the retained live log and archives remain canonical and are scanned on a ledger
-  miss. Exactly-once ingest therefore applies only while that event/archive
-  authority is retained, not globally forever.
+  a ledger miss consults a local SQLite delivery-ID index. The index reconciles an
+  unindexed live suffix, notices the collision-safe archive publication generation,
+  and is discarded and rebuilt
+  after missing, incompatible, or corrupt state. It is acceleration only; retained
+  live and archive JSONL remain canonical and can reproduce it completely. Normal
+  unique ingest performs an indexed membership lookup rather than parsing retained
+  rows. Exactly-once ingest therefore applies only while that event/archive authority
+  is retained, not globally forever.
+  This is the history-query trigger anticipated by the flat-file decision in warren#223,
+  not a replacement authority: warren#290 requires exact retained-history membership at
+  bounded lookup cost. Index storage is proportional to distinct IDs in retained JSONL;
+  archive retention therefore governs both the dedupe window and its derived storage.
+  Rebuild streams bounded batches and vacuums removed generations. Chronicle publishes a
+  fresh atomic `events.jsonl.archives-generation` token after rotation; any other archive
+  editor must publish one after its canonical mutation so in-place edits and rapid
+  replacements cannot alias through filesystem timestamps. Chronicle additionally hashes
+  the archive set once on process startup to catch unpublished changes made while stopped;
+  clean subsequent membership reads neither enumerate archives nor write metadata.
 - **Mirrors**: the same event is POSTed to every `CHRONICLE_MIRROR` target as well
   (default `http://127.0.0.1:8737`, i.e. a local dev server). A mirror never
   acknowledges or drains a primary's outbox. Mirrors carry
@@ -93,6 +108,18 @@ than silently omitted. Every error is swallowed and the hook exits zero. Bounded
 payload-free diagnostics serialize cross-process updates, keep exact counters,
 and retain only the 20 newest records in
 `~/.chronicle/transport-diagnostics.json`.
+
+Primary replay is bounded by time rather than a fixed record count. A worker reserves the
+last 100 ms of the one-second hook for acknowledgement, measures each successful round trip,
+and only begins another POST when the measured cost plus a safety margin fits before that
+reserve. Delivered IDs are shared with the parent after every POST, and the parent durably
+acknowledges the completed prefix before writing diagnostics. The diagnostics file's
+payload-free `outbox` object reports queue depth and capacity, oldest-record time and age,
+hooks since an acknowledgement, last acknowledgement time, and `healthy` or `stuck` status.
+Ten hooks without an acknowledgement mark a full outbox, or one whose oldest record is at
+least 24 hours old, as stuck and add a bounded `stuck_outbox` diagnostic.
+The installed `chronicle-emit --status` command renders this report as one payload-free
+operator line. It is an explicit inspection mode only and never changes ordinary hook output.
 
 Primary requests carry a random `X-Burrow-Delivery-ID`. A retry retains that ID;
 the server records accepted IDs in a fsynced sidecar ledger and returns 204
@@ -256,6 +283,20 @@ The stricter journal observation fields are additionally shared through
 - `task_posted.required_skills` follows Steward's exact `list[str]` contract. The
   list may be empty and individual strings may be blank or whitespace-only; Chronicle
   preserves those values instead of rejecting or normalizing valid evidence.
+- Steward's own lifecycle facts are validated as strictly as the job events, and
+  `source: "steward"` is the whole of their authority. `task_delegated` names both ends —
+  `from`, exactly equal to the emitting `agent_id` because the carrier is the villager
+  that walks, `to`, and the `route` the letter was delivered into — always carries
+  `parent_task_id` explicitly (`null` starts a chain; blank is invalid, unlike the job
+  events where the field is simply absent), and a non-negative integer `depth`.
+  `task_session_finished` repeats the close contract (`task_id`, `title`, `claimant`
+  equal to `agent_id`, non-empty `artifacts` strings) and adds the late run's `run_id`,
+  `outcome`, finite non-negative `duration_s`, and the `reason` its claim was gone.
+  `resident_restarted` carries a non-empty `reason` and an `attempt` counted from one,
+  plus an optional non-empty `supervisor`. `chat_message_dropped` carries the `route` and
+  `address` that were knocked on, who knocked (`from`), and the `reason` they were not
+  answered — and never what they said — plus an optional `suppressed`, a non-negative
+  integer counting the other knocks that record stands for.
 
 Invalid HTTP records return 400 and are never appended or notified. Projection
 silently ignores the same invalid records. Unknown extension fields remain
@@ -298,6 +339,10 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `task_claimed`      | a resident atomically claimed that job       | `task_id`, `title`, `claimant` |
 | `task_done`         | the claimant finished the job                | `task_id`, `title`, `claimant`, `artifacts` |
 | `task_failed`       | the claimant failed or its lease expired      | `task_id`, `title`, `claimant`, `reason` |
+| `task_session_finished` | a claimant's session reported back after losing its claim | `task_id`, `title`, `claimant`, `run_id`, `outcome`, `artifacts`, `duration_s`, `reason` |
+| `task_delegated`    | Steward accepted a handoff and put it in somebody's inbox | `task_id`, `title`, `from`, `to`, `route`, `parent_task_id`, `depth` |
+| `resident_restarted` | Steward's watchdog took a resident down and brought it back | `reason`, `attempt`; optional `supervisor` |
+| `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason`; optional `suppressed` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
@@ -325,6 +370,74 @@ slots inside the visible 80-record transport allowance rather than extending it.
 Only events whose source is exactly `steward` are routine lifecycle evidence. This is
 Steward's `EVENT_SOURCE` contract; a `routine_*` event from any other producer is
 diagnosed and ignored, including for run-now acknowledgement.
+
+### Steward's lifecycle facts
+
+`task_delegated`, `task_session_finished` and `resident_restarted` are ordinary villager
+activity: they enter the villager's bounded visible history and read as sentences — “handed
+“Draft the letter” to codex:keeper”, “reported back on “Research X” after losing the claim”,
+“was restarted (attempt 2): container was not running”.
+
+A late session report describes the *run*, not the row: the lease sweep remains the
+authority on the task, so `task_session_finished` never claims, closes or reopens one.
+
+`task_delegated` is the exception that is both at once. It is the delegator's visible
+action *and* the event that opens the row, because Steward writes a handoff into the same
+table as a posted job — open, unclaimed, addressed to one resident. So it folds into the
+`tasks` ledger as that row's origin: `state: "open"`, `posted_by` the delegator, no
+required skills, and `assignee` naming who it is for. Both are the `agent_id` spellings
+the event carries, not the resident ids Steward's own store addresses a handoff by, so
+`assignee` compares directly against a later `claimant`. Only that resident may claim it,
+so an open row with an addressee is not work anybody can take. Rotation follows the same
+rule: whatever keeps a handoff — the ledger, the villager's history, mood — keeps the
+newest transition on its row with it, because an origin retained alone would show claimed
+or finished work as open.
+
+`chat_message_dropped` is **ambient**, the one class of event that is filed under a
+villager without being that villager's action. It records that an outsider knocked on a
+resident's chat route and was deliberately not answered, and it is not evidence the
+resident is alive, present, or working. So it never creates a villager, never keeps one
+in the village, and never decides its state, its visible line, its clock or its mood
+anchor: a stranger messaging a resident's bot at three in the morning must not make the
+village show that resident at work. It rides along in the history of a villager that
+exists for its own reasons, and — because a resident may have no villager at all when a
+stranger finds its bot — every drop is also a bounded `diagnostics` record carrying
+`kind: "chat_message_dropped"`, the agent and project, the `route` and `address` knocked
+on, who knocked (`from`), the `reason`, the `suppressed` count (zero when the event carried
+none) and the event `ts`. Those named fields only: the
+raw record still reaches that villager's history exactly as it arrived, which is why
+Steward keeps the stranger's text out of the event in the first place.
+
+Rotation holds the same line: `retention` imports the reducer's ambient set rather than
+mirroring it, so a knock is never carried forward as a villager's state witness and a
+departed villager cannot be resurrected by somebody ringing its bell.
+
+It is also the one event type an *outsider* causes, which is why its **volume** is bounded
+as deliberately as its meaning (warren#278). A knock is a diagnostic and a retained event
+like any other, so without a share of its own a scanner that finds a resident's bot decides
+what an operator can see: the newest 200 diagnostics would fill with knocks, and a
+villager's own tools, tasks and sessions would age out of its retained history early.
+Neither is data loss — but both are an outsider choosing what the projection shows, which
+is the thing it is otherwise careful about.
+
+So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
+(`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+the fleet's own records are served first out of everything but the outsider's floor, and the
+outsider then takes whatever is genuinely left. The floors are `ambient_events_per_agent` (8
+of a villager's 80 retained events), `ambient_events_per_villager` (4 of the 40 rendered on
+its card) and `ambient_diagnostics` (40 of the snapshot's 200). A floor rather than a
+ceiling, deliberately: a knock storm alone still fills a channel nobody else wants, so "the
+newest 200" stays true of a full one. Both halves keep their newest records and append order
+survives the split. `capacity` publishes the two projection floors; rotation's is in
+`retention-policy.json`.
+
+Steward bounds the same storm at the other end: it records one knock per stranger per door
+per reason per catch-up window and counts the rest into `payload.suppressed`, an optional
+non-negative integer saying how many *other* knocks that one record stands for. A record
+therefore stands for `1 + suppressed` knocks, and the count is carried into the diagnostic so
+a fold that shows "one line per sender" can still show a true total. The two halves are
+complementary, and this one is what holds when the limiter is outrun — by a scanner rotating
+sender ids, by a daemon that restarted, or by a Steward too old to have a limiter at all.
 
 ### Journal-written observation
 
@@ -374,7 +487,10 @@ agents consume no ordinary witness capacity. If routine identities alone exceed
 the cap, their newest routine append chooses the candidate set. Newest live
 candidates are admitted first
 with their latest state, latest lineage declaration, and heartbeat action support;
-remaining capacity keeps newest visible history, at most 80 events per agent. The
+remaining capacity keeps newest visible history, at most 80 events per agent — divided so
+that ambient events are guaranteed 8 of those and get no more than 8 when the agent's own
+records want the rest, which is what stops a knock storm ageing a resident's own tools,
+tasks and sessions out of its history (warren#278). The
 composed projection has at most 4,000 witnesses. At the boundary, an agent whose
 indivisible support does not fit is omitted, then older optional history is
 truncated. Preselected journal and approval facts participate in the same set union,
@@ -450,22 +566,39 @@ the 30 most recent valid `artifact_produced` events from the live log
 window, newest first, including artifacts from agents who have since left.
 
 The separate job board is reconstructed only from valid Steward `task_posted`,
-`task_claimed`, `task_done`, and `task_failed` events. A post requires the complete
-Steward payload, including non-empty `posted_by`; a failure requires its reason. It keeps
-at most 24 task identities, keyed by
-`task_id`; duplicates cannot create another card. Capacity is applied after every valid
+`task_delegated`, `task_claimed`, `task_done`, and `task_failed` events. A row opens on a
+post or on a handoff: a post requires the complete Steward payload, including non-empty
+`posted_by`, a handoff requires both ends and its route, and a failure requires its
+reason. The board is keyed by `task_id`, one row per job: a second origin for a row that
+already exists restates it and never opens another card. It supplies the canonical title,
+skills, poster and addressee — it does not say the job is untaken, so it cannot touch the
+state or the claimant. An untaken row's clock is its posted age and the newest origin
+supplies that too; once a transition has moved the row the clock belongs to that
+transition. A transition read before the event that opens its row is held until that event
+arrives, because rotation retains a row's newest origin and its newest transition and a
+restated origin is the later of the two. Held evidence is not an invented job: a transition
+whose row never opens is discarded, as it always was. Rotation's board selection keeps at
+most 24 task identities, also keyed by `task_id`. Capacity is applied after every valid
 event, including each record in a grouped bootstrap/reset response. A later transition can
-reintroduce an identity whose post was already evicted, but cannot recover that missing post
-metadata; only a genuinely re-observed post can. This makes one-event SSE delivery, grouped
+reintroduce an identity whose origin was already evicted, but cannot recover that missing
+metadata; only a genuinely re-observed post or handoff can. That 24 bounds what the board
+selection keeps, not what the retained log can still show: a handoff is also the
+delegator's own activity, so villager retention keeps one on its own terms even when the
+board selection evicted its row, and such a row keeps its newest transition too rather
+than reappearing as an untaken job. The snapshot's own `tasks` capacity is the outer
+bound in every case. This makes one-event SSE delivery, grouped
 replay, and rotation/reset batch-invariant without inventing skills. The greatest event
 timestamp is the current state. Equal-millisecond facts use a constant-space total order:
-post, lease expiry, claim, ordinary failure, then done, with stable event identity deciding
-conflicts within one kind. Exact duplicates compare equal. This preserves Steward's
-expiry-then-reclaim hand-off while even 10,000 distinct same-millisecond transitions retain
-only the latest post and transition. A later post supplies the canonical title,
-skills, and posted age even when its claim arrived first. Open and claimed jobs remain.
-When a claim or terminal event is retained without its post, Chronicle renders required
-skills as unavailable rather than inventing an empty requirement set.
+origin (post or handoff), lease expiry, claim, ordinary failure, then done, with stable
+event identity deciding conflicts within one kind. Exact duplicates compare equal. This
+preserves Steward's expiry-then-reclaim hand-off while even 10,000 distinct
+same-millisecond transitions retain only the latest origin and transition. Those two ends
+are tracked apart: a row's standing is read from its newest transition, not its newest
+event of any kind, so an origin restated after a close neither unfinishes that row nor
+takes capacity from an open one. A later origin supplies the canonical title, skills and
+addressee even when its claim arrived first. Open and claimed jobs remain.
+When a claim or terminal event is retained without the event that opened its row, Chronicle
+renders required skills as unavailable rather than inventing an empty requirement set.
 An observed empty skills list renders as “no required skills”. Every blank or whitespace-only
 entry in a non-empty list renders as an accessible “unnamed skill” marker, one marker per
 entry, so it cannot be confused with either an empty list or unavailable orphan metadata.
@@ -651,6 +784,10 @@ The villager's state is decided by its **latest** event:
   villager frozen mid-swing would be a lie
 - no event for 12 hours → dropped from ordinary village activity. A valid structured
   approval is the exception: its villager remains at the door until its exact close.
+- an **ambient** event (`chat_message_dropped`) → nothing at all. It is somebody else's
+  action filed under this villager, so it decides no state, refreshes no clock, and
+  cannot by itself put a villager in the village. See
+  [Steward's lifecycle facts](#stewards-lifecycle-facts).
 
 These rules have exactly one implementation:
 `village_state.project_village()`, exercised by `tests/test_village_state.py`.
@@ -672,7 +809,9 @@ projection ignore heartbeats when deciding what to *show*.
 append-ordered events and has no DOM, random input, or client-owned threshold. Each agent's
 greatest retained valid timestamp is anchor `A`; every displayed duration is
 non-negative **log age as of A**. Consequently an unchanged log is byte-stable
-across wall-clock ticks, and events for another agent cannot age a mood.
+across wall-clock ticks, and events for another agent cannot age a mood. Ambient
+events are excluded for the same reason they decide no state: a stranger knocking is
+not this agent's evidence, so it neither anchors nor ages the reading.
 
 The reducer observes exactly four operational signals. Its rolling terminal
 stream uses `(A-24h,A]`, append order, failures `tool_failed`, `routine_failed`,
@@ -817,8 +956,10 @@ present, plus one canonical lineage-bearing record for each active child, and
 skipping any whose latest signal is `session_ended` or older than
 the 12 h drop window — in their original order. Separately, it keeps the canonical post
 and latest transition for the same bounded 24 task IDs the job board selects, using the
-same per-event capacity and constant-space equal-time order. An already-evicted post is not
-reconstructed merely because a transition for that task appears later in the retained input.
+same per-event capacity and constant-space equal-time order, tracking the newest origin and
+the newest transition in separate slots so a restated origin cannot evict the claim beneath
+it. An already-evicted post is not reconstructed merely because a transition for that task
+appears later in the retained input.
 Task-ID retention crosses agent groups: a central `steward:api` post remains paired with
 claim/done/failed/lease-expiry evidence after the claimant session ends.
 Structured approvals are independently retained by lifecycle: at most 40 bounded
@@ -1001,6 +1142,35 @@ The launcher locates its sibling files independently of the caller's working
 directory and returns zero even if the bundle is incomplete or the emitter hits
 an unexpected runtime failure. Transport failures remain handled by `emit.py` and
 fall back to its bounded durable local storage.
+
+### One-file bundle, for deployments that cannot carry a directory
+
+**Two shapes, one emitter.** The *installed bundle* above is a directory — `emit.py`,
+`durable.py` and the launcher, installed together. The *one-file bundle* below is the
+same emitter flattened into a single script, for a host that can only take one file.
+Where both are in play, say which; bare "the bundle" is ambiguous.
+
+Some hosts can only take a single file: steward's resident image is built from one
+directory with no pip in it, and vendors the emitter into it. `hooks/build.py`
+flattens the two source files into one self-contained stdlib-only script for exactly
+that case.
+
+```sh
+python3 hooks/build.py --output /somewhere/emit.py   # or to stdout, with no --output
+```
+
+The artifact is `emit.py` verbatim with its `import durable` block replaced by
+`durable.py`'s own source, materialized as a module — no rewriting, no import
+analysis, and a traceback still names `durable.py` and the right line. The build is
+deterministic: the same two sources produce byte-identical output, which is what lets
+a consumer rebuild it and compare rather than trust a checksum somebody recorded.
+`tests/test_bundle.py` holds it to being one file, stdlib-only across both embedded
+sources, compilable, fail-open, deterministic, and — the assertion that matters, since
+the emitter swallows everything by charter — actually able to deliver an event.
+
+It is built on demand and committed nowhere in this repository. The copy in
+`steward/docker/resident/burrow-emit.py` is refreshed by `make vendor-emitter` in
+`warren/steward/`, and both suites compare it against a fresh build.
 
 > **Both spellings work during the rename.** Every `CHRONICLE_*` variable below
 > is also read under its pre-rename `BURROW_*` name, and the same is true of the

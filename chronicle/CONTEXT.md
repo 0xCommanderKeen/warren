@@ -30,3 +30,11 @@ _Avoid_: Soul file
 **Lineage**:
 Optional event metadata associating a child villager with its parent without merging their identities or lifecycles.
 _Avoid_: Delegation destination
+
+**Handoff**:
+One villager giving work to a named Resident rather than to the open board, carried as a `task_delegated` event and opening the same kind of board row a post does.
+_Avoid_: Delegation (the act, when a row is meant), forwarding
+
+**Assignee**:
+The Resident a Handoff is addressed to, named on the row it opened. Only the Assignee may claim that row, so an open row with an Assignee is not work anybody can take. A posted job has none.
+_Avoid_: Owner, recipient, delegation destination

@@ -1,6 +1,7 @@
 """The nursery: two files in git, a container on a host, and a schedule that checks out."""
 
 import json
+import subprocess
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from uuid import UUID
 import pytest
 import yaml
 
-from conftest import ScratchRepo
+from conftest import ScratchRepo, SkillWriter
 from steward.board import (
     delegation_residents,
     load_board_residents,
@@ -32,6 +33,7 @@ from steward.nursery import (
     NurseryReport,
     commit_paths,
     declare_resident,
+    provision_resident,
     raise_resident,
     retire_resident,
     set_retired,
@@ -359,6 +361,41 @@ def test_a_runner_the_machine_cannot_launch_is_a_problem_on_the_deploy(
     assert "not on PATH" in report.register.problems[0]
 
 
+def test_granting_a_default_skill_is_a_warning_not_a_silent_no_op(
+    scratch_repo: ScratchRepo, host: LocalTransport, write_skill: SkillWriter
+) -> None:
+    """A grant of a default skill changes nothing, and steward says so (warren#90).
+
+    Every resident already holds the defaults, so naming one under `--skills` (or in
+    `POST /residents`) is a line somebody wrote believing it did something. It is not an
+    error — the effective set is the same either way — so it is not refused; it is said
+    out loud, through the same warnings channel both front doors already print.
+    """
+    write_skill("research", defaults=True, root=scratch_repo.skills)
+    write_skill("errands", root=scratch_repo.skills)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat(skills): a default one and an ordinary one")
+
+    report = raise_into(scratch_repo, host, spec=spec(skills=["research", "errands"]))
+
+    warning = next(line for line in report.warnings if "default set" in line)
+    assert "research" in warning
+    assert "errands" not in warning
+
+
+def test_granting_only_what_the_defaults_do_not_hold_warns_about_nothing(
+    scratch_repo: ScratchRepo, host: LocalTransport, write_skill: SkillWriter
+) -> None:
+    write_skill("research", defaults=True, root=scratch_repo.skills)
+    write_skill("errands", root=scratch_repo.skills)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat(skills): a default one and an ordinary one")
+
+    report = raise_into(scratch_repo, host, spec=spec(skills=["errands"]))
+
+    assert not [line for line in report.warnings if "default set" in line]
+
+
 # ---------------------------------------------------------------------- converging
 
 
@@ -651,6 +688,358 @@ def test_the_report_names_the_secrets_without_showing_them(
     )
     assert VILLAGE_TOKEN not in json.dumps(report.to_dict())
     assert VILLAGE_TOKEN not in "\n".join(report.render())
+
+
+# --------------------------------------------- provisioning a manifest somebody wrote
+
+
+#: A declaration `steward new-resident` has no flags for, and therefore can never converge
+#: onto: an inbound route and an app grant. This is the shape #270 was filed about — Hob's
+#: own manifest carries both, and so can never be reached from a command line.
+HAND_WRITTEN = {
+    "routes": [
+        {"id": "inbox", "kind": "delegation", "address": "steward:note-keeper", "note": "letters"}
+    ],
+    "app_grants": [{"id": "gmail", "name": "Gmail", "status": "granted", "scopes": ["readonly"]}],
+}
+
+
+def declare_by_hand(
+    repo: ScratchRepo,
+    resident_id: str = "note-keeper",
+    **fields: Any,  # noqa: ANN401 — a manifest holds whatever the schema holds
+) -> Path:
+    """Declare a resident, edit its manifest the way a person does, and commit that."""
+    declare_resident(spec(id=resident_id), repo.residents)
+    path = edit_manifest(repo, resident_id, **(fields or HAND_WRITTEN))
+    repo.git("add", "-A")
+    repo.git("commit", "-m", f"feat(residents): declare {resident_id} by hand")
+    return path
+
+
+def provision_into(
+    repo: ScratchRepo,
+    host: LocalTransport,
+    resident_id: str = "note-keeper",
+    **kwargs: Any,  # noqa: ANN401 — every knob raise_resident takes, and only those
+) -> NurseryReport:
+    """Provision a declared resident into a scratch checkout and a fake host."""
+    return provision_resident(
+        resident_id,
+        residents_dir=repo.residents,
+        repo=repo.root,
+        transport=host,
+        env=VILLAGE,
+        **kwargs,
+    )
+
+
+def test_a_hand_written_manifest_has_a_door_of_its_own(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The refusal stands and the manifest still gets built: #270's whole point."""
+    declare_by_hand(scratch_repo)
+
+    # The nursery still refuses to converge a command line onto it…
+    with pytest.raises(NurseryError, match="do not match"):
+        raise_into(scratch_repo, host)
+    assert not host.touched
+
+    # …and provisioning from the declaration itself is the other door.
+    report = provision_into(scratch_repo, host)
+
+    landed = host.root / "docker" / "steward-note-keeper"
+    assert (landed / "docker-compose.yaml").is_file()
+    assert (landed / "soul.md").is_file()
+    assert host.calls[-1][-2:] == ("up", "-d")
+    assert report.changed
+
+
+def test_the_refusal_names_the_door_that_does_work(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A dead end is a bug; a signpost is not. The collision refusal points at provision."""
+    declare_by_hand(scratch_repo)
+
+    with pytest.raises(NurseryError, match="steward provision note-keeper") as caught:
+        raise_into(scratch_repo, host)
+
+    assert "app_grants" in str(caught.value)
+
+
+def test_provisioning_ships_what_the_manifest_says_not_what_a_flag_says(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The bundle carries the hand-written manifest byte for byte."""
+    path = declare_by_hand(scratch_repo)
+
+    provision_into(scratch_repo, host)
+
+    shipped = host.read("~/docker/steward-note-keeper/manifest.yaml") or ""
+    assert yaml.safe_load(shipped) == yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert yaml.safe_load(shipped)["app_grants"][0]["id"] == "gmail"
+
+
+def test_provisioning_writes_nothing_into_the_repo(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Provision reads the declaration; it never writes or commits one."""
+    declare_by_hand(scratch_repo)
+    before = scratch_repo.head()
+
+    report = provision_into(scratch_repo, host)
+
+    assert scratch_repo.head() == before
+    assert report.declare.written is False
+    assert report.declare.commit is None
+    assert report.declare.note == "already declared; provisioned from the manifest itself"
+
+
+def test_provisioning_twice_converges(scratch_repo: ScratchRepo, host: LocalTransport) -> None:
+    declare_by_hand(scratch_repo)
+    provision_into(scratch_repo, host)
+
+    again = provision_into(scratch_repo, host)
+
+    assert again.provision is not None
+    assert not again.provision.sent
+    assert not again.changed
+    # …and the container is still reconciled, which is what a second run is for.
+    assert host.calls[-1][-2:] == ("up", "-d")
+
+
+def test_an_edited_manifest_is_shipped_again_by_provision(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+    provision_into(scratch_repo, host)
+    edit_manifest(scratch_repo, summary="Now with a summary.")
+
+    report = provision_into(scratch_repo, host)
+
+    assert report.provision is not None
+    assert report.provision.sent
+    assert "Now with a summary." in (host.read("~/docker/steward-note-keeper/manifest.yaml") or "")
+
+
+def test_provisioning_reports_the_next_fire_of_every_routine(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+    add_routine(scratch_repo)
+
+    report = provision_into(scratch_repo, host, now=datetime(2026, 6, 15, 9, 0, tzinfo=UTC))
+
+    assert report.register is not None
+    assert [routine for routine, _ in report.register.fires] == ["tidy-notes"]
+    assert report.register.fires[0][1].startswith("2026-06-15T20:00")
+
+
+def test_provisioning_an_unknown_resident_suggests_the_one_you_meant(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The same message retiring an unknown resident gives, from the same helper."""
+    declare_by_hand(scratch_repo)
+
+    with pytest.raises(NurseryError, match="did you mean 'note-keeper'") as caught:
+        provision_into(scratch_repo, host, resident_id="note-keper")
+
+    assert "no resident 'note-keper'" in str(caught.value)
+
+
+def test_provisioning_a_retired_resident_is_refused_until_a_person_says_so(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Provision is the way back from retirement, and it still waits for the commit."""
+    declare_by_hand(scratch_repo)
+    retire_resident(
+        "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
+    )
+    host.calls.clear()
+
+    with pytest.raises(NurseryError, match="is retired") as caught:
+        provision_into(scratch_repo, host)
+
+    assert caught.value.reason == "resident_retired"
+    assert not host.calls
+
+
+def test_provisioning_a_manifest_that_does_not_validate_is_refused(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+    edit_manifest(scratch_repo, accent="not-a-colour")
+
+    with pytest.raises(NurseryError, match="does not validate"):
+        provision_into(scratch_repo, host)
+
+    assert not host.touched
+
+
+def test_provisioning_uncommitted_bytes_is_a_warning_not_a_silence(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Provision commits nothing, so it cannot refuse — but it will not ship in silence."""
+    declare_by_hand(scratch_repo)
+    edit_manifest(scratch_repo, summary="Written but never committed.")
+
+    report = provision_into(scratch_repo, host)
+
+    assert any("is not committed" in warning for warning in report.warnings)
+    assert any("manifest.yaml" in warning for warning in report.warnings)
+    assert report.provision is not None
+    assert report.provision.sent
+
+
+def test_a_committed_manifest_provisions_without_a_word_about_git(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The warning is about *this* resident's files, not about somebody else's afternoon."""
+    declare_by_hand(scratch_repo)
+    (scratch_repo.root / "notes.txt").write_text("half an afternoon\n", encoding="utf-8")
+
+    report = provision_into(scratch_repo, host)
+
+    assert not [warning for warning in report.warnings if "committed" in warning]
+
+
+def test_a_tree_with_no_git_behind_it_provisions_without_a_complaint(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A checkout is not a requirement here: no commit is made, so none can be missing.
+
+    Steward on a deployment box may be reading a tree git knows nothing about, and that is
+    a topology somebody chose rather than a mistake to warn them about on every deploy.
+    """
+    declare_by_hand(scratch_repo)
+
+    report = provision_into(scratch_repo, host, git=refusing_git("rev-parse"))
+
+    assert report.warnings == ()
+    assert report.provision is not None
+    assert report.provision.sent
+
+
+def test_a_git_that_cannot_answer_does_not_invent_a_complaint(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Silence over a guess: an unanswerable `git status` is not evidence of anything."""
+    declare_by_hand(scratch_repo)
+
+    report = provision_into(scratch_repo, host, git=refusing_git("status"))
+
+    assert report.warnings == ()
+
+
+def test_a_repo_the_declaration_is_not_inside_is_named_as_the_mistake(
+    scratch_repo: ScratchRepo, host: LocalTransport, tmp_path: Path
+) -> None:
+    """`--repo` pointing somewhere else is an operator error, not a traceback."""
+    declare_by_hand(scratch_repo)
+    elsewhere = tmp_path / "another-checkout"
+    elsewhere.mkdir()
+    subprocess.run(["git", "-C", str(elsewhere), "init", "-q"], check=True)  # noqa: S603, S607
+
+    report = provision_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=elsewhere,
+        transport=host,
+        env=VILLAGE,
+    )
+
+    assert any("is not inside the checkout" in warning for warning in report.warnings)
+    assert report.provision is not None
+    assert report.provision.sent
+
+
+def test_a_provision_dry_run_touches_nothing_at_all(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+
+    report = provision_into(scratch_repo, host, dry_run=True)
+
+    assert not host.touched
+    assert not host.calls
+    assert report.dry_run
+    assert not report.changed
+    assert report.provision is not None
+    assert report.provision.compose_changed is None
+
+
+def test_a_provision_dry_run_prints_the_plan_new_resident_would_print(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The issue asked for this in so many words: the same plan, from the other door."""
+    declare_resident(spec(), scratch_repo.residents)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat(residents): declare note-keeper")
+
+    rehearsed = raise_into(scratch_repo, host, dry_run=True, commit=False)
+    provisioned = provision_into(scratch_repo, host, dry_run=True)
+
+    assert provisioned.provision is not None
+    assert rehearsed.provision is not None
+    assert provisioned.provision.to_dict() == rehearsed.provision.to_dict()
+    assert provisioned.register == rehearsed.register
+
+
+def test_a_provision_dry_run_says_a_real_run_needs_a_village_to_emit_into(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+
+    report = provision_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        env={},
+        dry_run=True,
+    )
+
+    assert any("CHRONICLE_URL is unset" in warning for warning in report.warnings)
+    assert not host.touched
+
+
+def test_provisioning_with_nowhere_to_emit_is_refused_for_real(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    declare_by_hand(scratch_repo)
+
+    with pytest.raises(TransportError, match="CHRONICLE_URL"):
+        provision_resident(
+            "note-keeper",
+            residents_dir=scratch_repo.residents,
+            repo=scratch_repo.root,
+            transport=host,
+            env={},
+        )
+
+
+def test_provisioning_names_the_secrets_without_showing_them(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """The secret rule is the pipeline's, not `new-resident`'s — it holds on both doors."""
+    declare_by_hand(scratch_repo)
+
+    report = provision_into(scratch_repo, host)
+
+    assert report.provision is not None
+    assert "CHRONICLE_TOKEN" in report.provision.env_keys
+    assert VILLAGE_TOKEN not in json.dumps(report.to_dict())
+    assert VILLAGE_TOKEN not in "\n".join(report.render())
+
+
+def test_provisioning_emits_nothing_on_the_residents_behalf(
+    scratch_repo: ScratchRepo, host: LocalTransport, isolated_events: Path
+) -> None:
+    declare_by_hand(scratch_repo)
+
+    provision_into(scratch_repo, host)
+
+    assert not isolated_events.exists()
 
 
 # ------------------------------------------------------------------------- retiring

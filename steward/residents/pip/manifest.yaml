@@ -40,6 +40,13 @@ routes:
     kind: cron
     address: steward:scheduler
     status: active
+  - id: chat
+    kind: chat
+    address: telegram:pip
+    status: pending
+    note: >-
+      Pip's own Telegram bot, and the fleet's chat canary. Pending until
+      STEWARD_CHAT_TOKEN_PIP is set on the burrow — see docs/chat.md.
 
 app_grants: []
 

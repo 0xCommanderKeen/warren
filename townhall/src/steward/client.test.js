@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOperatorCredential } from "./credential.js";
 import {
   StewardError, createStewardClient, describeCommit, diagnosticsFor, isSameOrigin,
-  normalizeDiagnostics,
+  isDefiniteApprovalRefusal, normalizeDiagnostics,
 } from "./client.js";
 
 const answer = (status, body, { json = true } = {}) => ({
@@ -63,6 +63,31 @@ describe("the operator credential", () => {
 });
 
 describe("the steward client", () => {
+  it("classifies only trusted approval refusals as safe to retry", () => {
+    for (const status of [401, 404, 422]) {
+      expect(isDefiniteApprovalRefusal(new StewardError("no", { status }))).toBe(true);
+    }
+    expect(isDefiniteApprovalRefusal(new StewardError("local", { code: "credential_required" }))).toBe(true);
+    expect(isDefiniteApprovalRefusal(new StewardError("expired", {
+      status: 409,
+      code: "approval_expired",
+      raw: { detail: { error: "approval_expired", message: "too late" } },
+    }))).toBe(true);
+
+    for (const error of [
+      new StewardError("timeout", { status: 408 }),
+      new StewardError("generated", { status: 409, code: "approval_expired" }),
+      new StewardError("extra", {
+        status: 409,
+        code: "approval_expired",
+        raw: { detail: { error: "approval_expired", message: "too late", offered: [] } },
+      }),
+      new StewardError("network", { status: 0, code: "unreachable" }),
+    ]) {
+      expect(isDefiniteApprovalRefusal(error)).toBe(false);
+    }
+  });
+
   it("refuses to call at all before a credential exists", async () => {
     const fetch = vi.fn();
     const client = createStewardClient({

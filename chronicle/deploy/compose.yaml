@@ -1,0 +1,42 @@
+# Chronicle's server on a burrow — the NAS today. Published to ~/docker/burrow by
+# deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
+#
+# One process: the event log and the village projection behind it, on host port 8738,
+# proxied at the origin's /burrow/ by arcadia's nginx. The code is bind-mounted read-only
+# from ./app (the tree the README's tar recipe ships); the log, its archives, the
+# delivery-id index and the notification ledgers all live under ./data, which is the
+# only thing here that must survive anything.
+#
+# The entry point is `python serve.py 8737`: serve.py's __main__ builds the app through
+# Config.from_env + create_app, the path the suite exercises, and the port argument is
+# the container-side port. Until warren#313 the alternative, `uvicorn serve:app`, was a
+# shim built from Config() defaults that read no environment at all, and the NAS ran it
+# that way from 2026-08-27 to 2026-09-02 with every setting below silently ignored: the
+# log went to /root/.burrow inside the container, knocks stopped, the token never
+# applied. Both entry points read the environment now; this one stays.
+#
+# Secrets are not in this file. CHRONICLE_NOTIFY_URL (a private ntfy topic) and, when
+# ingest is closed, CHRONICLE_TOKEN live in the .env beside it, mode 0600.
+
+services:
+  burrow:
+    image: ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+    container_name: burrow
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    ports:
+      - "8738:8737"
+    environment:
+      TZ: Europe/Ljubljana
+      UV_PROJECT_ENVIRONMENT: /data/.venv
+      CHRONICLE_HOST: 0.0.0.0
+      CHRONICLE_EVENTS: /data/events.jsonl
+      CHRONICLE_ARCHIVE: /data/archive
+      # The manifests ship with the code (README: "/villagers on the NAS matches the repo
+      # after every deploy"), so the report reads the copy the tar recipe delivered.
+      CHRONICLE_VILLAGERS: /app/villagers
+    volumes:
+      - ./app:/app:ro
+      - ./data:/data
+    command: ["sh", "-c", "cd /app && uv sync --frozen --no-dev && exec uv run --no-dev python serve.py 8737"]

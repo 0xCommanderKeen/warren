@@ -1,0 +1,2189 @@
+{
+  "components": {
+    "schemas": {
+      "AppGrant": {
+        "additionalProperties": false,
+        "description": "A declared grant to use an external application. Identifier and status only.",
+        "properties": {
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "description": "Human label, e.g. Gmail.",
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "scopes": {
+            "description": "Scope names, not values.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "granted",
+              "pending",
+              "revoked"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "status_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the grant is administered, e.g. a settings URL.",
+            "title": "Status Ref"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "title": "AppGrant",
+        "type": "object"
+      },
+      "ApprovalDecision": {
+        "additionalProperties": false,
+        "description": "A human's answer to a gated action.",
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "deny",
+              "edit"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "edit": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The modified detail, for decision=edit.",
+            "title": "Edit"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "ApprovalDecision",
+        "type": "object"
+      },
+      "Charter": {
+        "additionalProperties": false,
+        "description": "What a resident is for. Injected into every headless session for this resident.\n\nEvery field here is bounded, and the bound is a *refusal* rather than the injection cap\nthe voice, the journal, the skills, and a task's detail get (:mod:`steward.prompt`).\nThe charter is the section that has the last word and is therefore never shortened on\nits way in: a hard rule truncated mid-clause would still be read as authoritative, and\nan unbounded one would decide how much room every bounded section above it has left.\nSo the size is settled here, where it is somebody's pull request rather than a session's\nsurprise (steward #147).",
+        "properties": {
+          "duties": {
+            "description": "Standing responsibilities.",
+            "items": {
+              "maxLength": 400,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Duties",
+            "type": "array"
+          },
+          "escalation": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "$ref": "#/components/schemas/Escalation"
+              }
+            ],
+            "description": "When and how to raise needs_human.",
+            "title": "Escalation"
+          },
+          "mission": {
+            "description": "One paragraph of purpose.",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Mission",
+            "type": "string"
+          },
+          "rules": {
+            "description": "Hard constraints.",
+            "items": {
+              "maxLength": 400,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Rules",
+            "type": "array"
+          }
+        },
+        "required": [
+          "mission",
+          "duties",
+          "rules",
+          "escalation"
+        ],
+        "title": "Charter",
+        "type": "object"
+      },
+      "DeclarationPut": {
+        "additionalProperties": false,
+        "description": "A resident's declaration, as a form edits it.\n\n``manifest`` and ``text`` are two spellings of one thing and exactly one may be given.\n``manifest`` is the mapping a form builds from its fields, which steward serialises \u2014\nconvenient, and it rewrites the file, so comments in it do not survive. ``text`` is the\nYAML itself, written byte for byte, which is how a caller keeps the comments a person\nwrote. Neither is more validated than the other.",
+        "properties": {
+          "manifest": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The manifest as data. Steward serialises it to YAML.",
+            "title": "Manifest"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The revision this edit was made against. Omit it to overwrite blindly.",
+            "title": "Revision"
+          },
+          "soul": {
+            "anyOf": [
+              {
+                "maxLength": 200000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The soul document. Omit it to leave the soul untouched.",
+            "title": "Soul"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "maxLength": 200000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The manifest as YAML, written exactly as given. Preserves comments.",
+            "title": "Text"
+          }
+        },
+        "title": "DeclarationPut",
+        "type": "object"
+      },
+      "Escalation": {
+        "additionalProperties": false,
+        "description": "Structured escalation policy: when to stop and ask instead of acting.",
+        "properties": {
+          "how": {
+            "default": "needs_human",
+            "description": "The protocol event or channel used to escalate.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "How",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Extra guidance for the human.",
+            "title": "Note"
+          },
+          "when": {
+            "description": "Situations that must be escalated.",
+            "items": {
+              "maxLength": 400,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "When",
+            "type": "array"
+          }
+        },
+        "required": [
+          "when"
+        ],
+        "title": "Escalation",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HandoffPost": {
+        "additionalProperties": false,
+        "description": "Work handed to one named resident, through a route that resident declares.",
+        "properties": {
+          "detail": {
+            "default": "",
+            "description": "Everything the receiver needs to know.",
+            "maxLength": 8000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The resident handing the work over. Omit it when a person is.",
+            "title": "From"
+          },
+          "parent_task_id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The task this work descends from, for lineage and attribution.",
+            "title": "Parent Task Id"
+          },
+          "route": {
+            "description": "A delegation route that resident declares.",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Route",
+            "type": "string"
+          },
+          "title": {
+            "description": "One line naming the work.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "to": {
+            "description": "The resident id receiving the work.",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "route",
+          "title"
+        ],
+        "title": "HandoffPost",
+        "type": "object"
+      },
+      "JobPost": {
+        "additionalProperties": false,
+        "description": "A task a human wants the fleet to pick up.",
+        "properties": {
+          "detail": {
+            "default": "",
+            "description": "Everything the claimant needs to know.",
+            "maxLength": 8000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "required_skills": {
+            "description": "Skills a resident must be granted before it may claim this.",
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Required Skills",
+            "type": "array"
+          },
+          "title": {
+            "description": "One line naming the work.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "JobPost",
+        "type": "object"
+      },
+      "Memory": {
+        "additionalProperties": false,
+        "description": "Where a resident's durable knowledge lives. A location, never its contents.",
+        "properties": {
+          "journal": {
+            "default": "journal",
+            "description": "Journal directory relative to path; one entry per local day.",
+            "minLength": 1,
+            "title": "Journal",
+            "type": "string"
+          },
+          "journal_keep": {
+            "default": 30,
+            "description": "How many entries survive rotation, newest first.",
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Journal Keep",
+            "type": "integer"
+          },
+          "kind": {
+            "default": "directory",
+            "enum": [
+              "directory",
+              "file",
+              "repo"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "path": {
+            "description": "Reference to the memory location.",
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "Memory",
+        "type": "object"
+      },
+      "ProvisionPost": {
+        "additionalProperties": false,
+        "description": "Whether to build the declared resident, or only rehearse building it.\n\nThere is nothing else to say: the manifest is the request. Everything ``new-resident``\ntakes in flags this endpoint reads off ``residents/<id>/manifest.yaml``, which is the\nwhole point of the door (warren#270).",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Print the plan and reach no host. Nothing is sent, run, or written.",
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "ProvisionPost",
+        "type": "object"
+      },
+      "ResidentPost": {
+        "additionalProperties": false,
+        "description": "A resident to declare, and whether to actually build it.\n\nEverything a :class:`~steward.nursery.NewResident` says, plus one flag. ``deploy``\ndefaults to **false**, which keeps ``POST /residents`` exactly what it has always\nbeen: two files written for review, no container, no schedule, no event. Asking for\n``deploy: true`` is asking steward to reach a machine over ssh and start something\nthere, and that is not a thing a request should be able to do by leaving a field out.",
+        "properties": {
+          "accent": {
+            "description": "Hex accent colour.",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "title": "Accent",
+            "type": "string"
+          },
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Burrow identity; derived if absent.",
+            "title": "Agent Id"
+          },
+          "app_grants": {
+            "description": "Declared app access.",
+            "items": {
+              "$ref": "#/components/schemas/AppGrant"
+            },
+            "title": "App Grants",
+            "type": "array"
+          },
+          "char": {
+            "description": "Burrow sprite key, e.g. Monk.",
+            "minLength": 1,
+            "title": "Char",
+            "type": "string"
+          },
+          "charter": {
+            "$ref": "#/components/schemas/Charter",
+            "description": "Mission, duties, hard rules, escalation policy."
+          },
+          "deploy": {
+            "default": false,
+            "description": "Provision the container and check the schedule, not just declare.",
+            "title": "Deploy",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "Directory under residents/.",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Memory"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Memory location; derived if absent."
+          },
+          "name": {
+            "description": "Display name, e.g. Hob.",
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Project label, for a scoped soul.",
+            "title": "Project"
+          },
+          "role": {
+            "description": "One-line role, e.g. life bot.",
+            "minLength": 1,
+            "title": "Role",
+            "type": "string"
+          },
+          "routes": {
+            "description": "Declared inbound channels.",
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            },
+            "title": "Routes",
+            "type": "array"
+          },
+          "runner": {
+            "$ref": "#/components/schemas/Runner",
+            "description": "Which brain this resident runs on."
+          },
+          "skills": {
+            "description": "Granted capabilities.",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SkillGrant"
+                },
+                {
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "soul_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opening paragraph of soul.md.",
+            "title": "Soul Body"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "One line burrow can display.",
+            "title": "Summary"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/ToolGrant",
+            "description": "Tools a session may reach; defaults to none until declared."
+          },
+          "voice": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The soul's ## Voice section.",
+            "title": "Voice"
+          },
+          "workspace": {
+            "description": "Absolute directories a session may reach beyond its working directory.",
+            "items": {
+              "pattern": "^/[^\\s'\"`$;|&<>(){}\\[\\]!*?\\\\]*$",
+              "type": "string"
+            },
+            "title": "Workspace",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "char",
+          "accent",
+          "role",
+          "charter"
+        ],
+        "title": "ResidentPost",
+        "type": "object"
+      },
+      "Route": {
+        "additionalProperties": false,
+        "description": "A declared inbound channel through which work can reach a resident.\n\nA route of kind ``delegation`` is the receiving half of steward #7: it declares that\nthis resident accepts work handed to it by another resident, and steward will deliver\ninto it. Every other kind is a channel steward only describes.",
+        "properties": {
+          "address": {
+            "description": "Reference to the channel, not a secret.",
+            "minLength": 1,
+            "title": "Address",
+            "type": "string"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "email",
+              "chat",
+              "http",
+              "webhook",
+              "cron",
+              "cli",
+              "job-board",
+              "delegation"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "status": {
+            "default": "active",
+            "enum": [
+              "active",
+              "pending",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "address"
+        ],
+        "title": "Route",
+        "type": "object"
+      },
+      "Runner": {
+        "additionalProperties": false,
+        "description": "Which brain a resident runs on. Every session launch goes through this seam.",
+        "properties": {
+          "command": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Argv template for kind=command; placeholders {prompt} and {workdir}.",
+            "title": "Command"
+          },
+          "kind": {
+            "default": "claude",
+            "enum": [
+              "claude",
+              "codex",
+              "command",
+              "mock"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Model id passed to the CLI.",
+            "title": "Model"
+          },
+          "permission_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "acceptEdits",
+                  "auto",
+                  "bypassPermissions",
+                  "manual",
+                  "dontAsk",
+                  "plan"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Permission mode passed to the CLI; one of the modes it accepts.",
+            "title": "Permission Mode"
+          },
+          "placement": {
+            "default": "local",
+            "description": "Where a session runs: on the control plane, or inside deploy.container.",
+            "enum": [
+              "local",
+              "container"
+            ],
+            "title": "Placement",
+            "type": "string"
+          }
+        },
+        "title": "Runner",
+        "type": "object"
+      },
+      "SkillBody": {
+        "additionalProperties": false,
+        "description": "One skill, as the library stores it and a form edits it.\n\n``defaults`` is the field to look at twice: it is not a property of this skill so much\nas a grant to the entire fleet, since a default skill is held by every resident without\nany manifest saying so.",
+        "properties": {
+          "body": {
+            "description": "The instructions themselves.",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "defaults": {
+            "default": false,
+            "description": "Give this skill to every resident, granted or not.",
+            "title": "Defaults",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "One line saying what this skill is for.",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The revision this edit was made against. Omit it to overwrite blindly.",
+            "title": "Revision"
+          }
+        },
+        "required": [
+          "description",
+          "body"
+        ],
+        "title": "SkillBody",
+        "type": "object"
+      },
+      "SkillGrant": {
+        "additionalProperties": false,
+        "description": "A named, reusable capability granted to a resident.\n\nThe id names a skill in the library (``skills/<id>/SKILL.md``), and a name the\nlibrary does not have fails validation with the closest match named. The default\nskills every resident holds are not listed here: a grant is what this resident has\n*on top* of them.",
+        "properties": {
+          "id": {
+            "description": "Skill name in the library; surrounding whitespace is invalid.",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why this resident holds it.",
+            "title": "Note"
+          },
+          "source": {
+            "default": "library",
+            "description": "Where the skill body comes from.",
+            "enum": [
+              "library",
+              "local"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SkillGrant",
+        "type": "object"
+      },
+      "SkillPost": {
+        "additionalProperties": false,
+        "description": "A skill to add to the library, which names itself.",
+        "properties": {
+          "body": {
+            "description": "The instructions themselves.",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "defaults": {
+            "default": false,
+            "description": "Give this skill to every resident, granted or not.",
+            "title": "Defaults",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "One line saying what this skill is for.",
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "description": "The skill's slug; it becomes the directory name.",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The revision this edit was made against. Omit it to overwrite blindly.",
+            "title": "Revision"
+          }
+        },
+        "required": [
+          "description",
+          "body",
+          "name"
+        ],
+        "title": "SkillPost",
+        "type": "object"
+      },
+      "ToolGrant": {
+        "anyOf": [
+          {
+            "const": "unrestricted",
+            "type": "string"
+          },
+          {
+            "items": {
+              "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
+              "type": "string"
+            },
+            "type": "array"
+          }
+        ],
+        "description": "Which tools a session may reach: an exact list of names, or ``unrestricted``.\n\nThe capability dimension that used to be prose. Skills are granted and pruned, app\naccess is declared, budgets are capped and enforced \u2014 tools were said in a charter\n(*\"never send email without explicit approval\"*) and a charter is not a boundary. This\nis the declaration steward compiles into the argv that actually removes them.\n\nTwo spellings, and the word is not sugar for an absent key:\n\n``tools: unrestricted``\n    This resident reaches whatever its brain has. Byte for byte the argv steward built\n    before this field existed \u2014 the behaviour did not change, it merely became legible.\n``tools: [Read, Glob, Grep]``\n    This resident reaches these and nothing else. An empty list is a real declaration\n    too: a session that can think and reply and touch nothing.\n\nAsk :attr:`bound` rather than reading :attr:`root`, because ``None`` (not bounded) and\n``()`` (bounded to nothing) are different answers and both of them happen.\n\nThe list branch is a **tuple**, not a list, and that is not a style preference. Every\nother model here is ``frozen``, and over a ``list`` root ``frozen`` half-works: pydantic\nstops attribute assignment while ``grant.root.append(\"Bash\")`` quietly widens a bound\nsomebody already validated, and the model is unhashable on one branch and hashable on\nthe other. A boundary that can be edited after it was checked is not one.",
+        "title": "ToolGrant"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "summary": "The token-gated write path into the agent fleet burrow watches.",
+    "title": "steward",
+    "version": "0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/approvals": {
+      "get": {
+        "description": "List gated actions. Pending by default; ``?status=resolved|all`` for the rest.\n\nThe default stays ``pending`` so a panel that has always called this keeps seeing\nexactly what it saw before. ``all`` is the audit view: request and decision in one\nrow, which is how \"what did I approve, and when\" gets answered.\n\nThis route is a pure ledger read. The app lifespan owns deadline expiry, so an\nAPI-only steward still resolves overdue requests without polling causing writes.",
+        "operationId": "list_approvals_approvals_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Approvals Approvals Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Approvals"
+      }
+    },
+    "/approvals/{request_id}": {
+      "get": {
+        "description": "Return one request with its decision, decider, and timestamps. The audit query.",
+        "operationId": "get_approval_approvals__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Approval Approvals  Request Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Approval"
+      },
+      "post": {
+        "description": "Record a decision, once. A replay reads back what was already recorded.\n\nThe edit is un-redacted before it is recorded, by the same route that redacted the\ncopy the decider read (steward #144). Restoring here rather than deeper down is\ndeliberate: an edit only carries a marker because *this* route withheld the value,\nso whoever withheld it owes the restore, and a decider that was never served a\nscrubbed detail has nothing to put back.",
+        "operationId": "decide_approval_approvals__request_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Decide Approval Approvals  Request Id  Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Decide Approval"
+      }
+    },
+    "/delegate": {
+      "post": {
+        "description": "Hand work to one resident, if both manifests and the guardrails agree.\n\nThe human path into steward #7; a session uses the ``<delegate>`` block or\n``steward delegate``, neither of which needs this token. ``from`` names the\nresident handing the work over and its manifest is checked exactly as it would be\nfor a block \u2014 a person must not be able to make a resident do what its own\ndeclaration forbids. Omitting ``from`` means the person is the sender, and then\nthe receiver's route is the whole of the agreement.\n\n**A session credential is the sender**, and the body cannot say otherwise\n(steward #41). This route used to read the sender from the request body with\nnothing binding the caller to the resident it named, so a session holding the API\ntoken could sign as any resident \u2014 or omit ``from`` and be read as \"a person\nasked\" \u2014 which skips the sender-charter half of the agreement by design. With the\nsender derived from the credential, both halves of #7's both-manifests-must-agree\nrule hold for a session too.\n\nThe *chain* needs nothing further here, and that is worth saying out loud so nobody\nadds it: ``Delegator._resolve_parent`` already refuses to trust a supplied\n``parent_task_id`` once it knows who the sender is (steward #67). It derives the\nparent from the tasks that sender is actually holding, and honours a supplied id\nonly when it is one of them. Binding the sender is therefore the whole fix \u2014 a\nsecond derivation here would only turn a swept task row into a 404 where #67\ncorrectly falls back to the chain the sender is really in.",
+        "operationId": "delegate_delegate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HandoffPost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delegate Delegate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Delegate"
+      }
+    },
+    "/jobs": {
+      "get": {
+        "description": "List the board, optionally narrowed with ``?status=open|claimed|done|failed``.",
+        "operationId": "list_jobs_jobs_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Jobs Jobs Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Jobs"
+      },
+      "post": {
+        "description": "Put a task on the board and announce it. No resident is prompted.",
+        "operationId": "post_job_jobs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobPost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Post Job Jobs Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Post Job"
+      }
+    },
+    "/reload": {
+      "post": {
+        "description": "Re-read the residents tree and the skills library into this process.\n\n**This process**, and the distinction is the whole of the endpoint's honesty. The\nscheduler daemon is a *different process* \u2014 usually on the same burrow, started by\n``steward serve`` \u2014 and no HTTP call can reach into it. It does not need one: it\nwatches the trees itself and reloads on its next wake-up (:class:`TreeSource`),\nwhich is within a minute. What this endpoint fixes is the API's own long-lived\ncollaborators, the run-now scheduler and the board dispatcher, which were assembled\nat startup and would otherwise fire a routine against the manifest that was on disk\nwhen the server booted.\n\nRead views need no reload at all \u2014 they re-read the tree on every request.",
+        "operationId": "reload_fleet_reload_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reload Fleet Reload Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reload Fleet"
+      }
+    },
+    "/requests": {
+      "get": {
+        "description": "Return accepted requests and what became of them, newest first.\n\nThe endpoint that makes \"accepted\" survivable as an answer. Every mutating call\nhere returns a ``request_id`` and refuses to claim an effect; this is where the\neffect eventually shows up \u2014 ``queued`` becomes ``ran``, ``skipped: \u2026``, or\n``failed`` when the run it stands for finishes. A control panel polls one of these\nrather than deciding on its own that a 202 went well.",
+        "operationId": "list_requests_requests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Requests Requests Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Requests"
+      }
+    },
+    "/requests/{request_id}": {
+      "get": {
+        "description": "Return one accepted request and its outcome. ``404`` for an id nobody logged.",
+        "operationId": "get_request_requests__request_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Request Requests  Request Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Request"
+      }
+    },
+    "/residents": {
+      "get": {
+        "description": "List the validated residents, and name the manifests that did not validate.",
+        "operationId": "list_residents_residents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Residents Residents Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Residents"
+      },
+      "post": {
+        "description": "Declare a resident, and \u2014 only when asked \u2014 provision and check it.\n\nThe same :func:`steward.nursery.raise_resident` pipeline ``steward new-resident``\nruns, with two settings the API always makes for itself:\n\n``commit=False``\n    The *nursery* does not commit here, because its commit is bound up with its own\n    dirty-worktree refusal, which is right for a terminal and wrong for a server.\n    The declaration is committed all the same \u2014 by :mod:`steward.authoring`, after\n    the pipeline returns, staging only the two files that were written.\n\n    This reverses the endpoint's original stance, deliberately (steward #214). It\n    used to commit nothing on the grounds that the server may not own its checkout,\n    which left the fleet's newest declarations as the only ones with no history and\n    no author. The honest version of that worry is a *configured* one:\n    ``STEWARD_ALLOW_UNCOMMITTED_WRITES`` accepts a tree with no git behind it, and\n    a tree that has git gets the audit trail everything else gets.\n``provision=body.deploy``\n    Default false, so the endpoint's old behaviour is its default behaviour: files\n    for review and nothing else.",
+        "operationId": "create_resident_residents_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResidentPost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Resident Residents Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Resident"
+      }
+    },
+    "/residents/{resident_id}": {
+      "get": {
+        "description": "Return one validated manifest, runner included, so \"which brain\" is answerable.",
+        "operationId": "get_resident_residents__resident_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Resident Residents  Resident Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Resident"
+      }
+    },
+    "/residents/{resident_id}/budget": {
+      "get": {
+        "description": "Return spent-against-limit for each budget, the window, and the pause state.\n\nThe read burrow's fleet-ops view (burrow #40) draws fuel gauges from. Everything\nin it is a sum over rows steward wrote when runs finished, inside a window\ncomputed from the calendar at the moment of this request \u2014 so a steward that\nrestarted an hour ago answers exactly what one that has been up all day answers.",
+        "operationId": "get_resident_budget_residents__resident_id__budget_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Resident Budget Residents  Resident Id  Budget Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Resident Budget"
+      }
+    },
+    "/residents/{resident_id}/declaration": {
+      "get": {
+        "description": "Return the two files that declare this resident, as text and as data.\n\nThe editable source, not the projection :func:`resident_view` serves. Both are\nuseful and they are not the same thing: the view is assembled from a validated\nmodel and is what a fleet list draws, while this is what is actually in git \u2014\ncomments, field order, and all \u2014 which is the only thing you can sensibly write\nback. ``PUT`` takes exactly this shape.",
+        "operationId": "get_declaration_residents__resident_id__declaration_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Declaration Residents  Resident Id  Declaration Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Declaration"
+      },
+      "put": {
+        "description": "Replace a resident's declaration, if it validates, and commit it.\n\n**Human callers only**, and this is the sharpest instance of that rule in the whole\nAPI: a resident that could rewrite its own charter would be choosing the rules it is\nheld to.\n\nA full replacement rather than a patch. Merging a partial edit into a manifest means\nsteward deciding what a missing key meant \u2014 cleared, or untouched? \u2014 and the\ndeclaration is the wrong file to be clever with. Read it, change it, write it back.\nThe ``revision`` from the ``GET`` is how two editors find out about each other.\n\nNothing is written unless the whole tree still validates with this change applied,\nincluding the checks that only exist across residents. A refusal has written\nnothing, committed nothing, and left the resident exactly as it was.",
+        "operationId": "put_declaration_residents__resident_id__declaration_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeclarationPut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Declaration Residents  Resident Id  Declaration Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Declaration"
+      }
+    },
+    "/residents/{resident_id}/inbox": {
+      "get": {
+        "description": "List the work delegated to this resident. Pending by default.\n\nPending means *open*: handed over and not yet picked up. ``?status=`` narrows to\nany board status, and ``all`` is everything ever addressed to this resident, which\nis the audit view \u2014 who sent it, through which route, and what became of it.\n\n``routes`` names every declared delegation route *with its status*, not only the\nones open today, and ``pending`` is the open count whatever ``?status=`` asked\nfor: a caller has to be able to see letters stacked behind a route somebody shut\n(#46), which a list of accepting routes alone cannot show.",
+        "operationId": "get_inbox_residents__resident_id__inbox_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Inbox Residents  Resident Id  Inbox Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Inbox"
+      }
+    },
+    "/residents/{resident_id}/journal": {
+      "get": {
+        "description": "Return the resident's journal, newest first; an empty journal is an empty list.",
+        "operationId": "get_resident_journal_residents__resident_id__journal_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 14,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Resident Journal Residents  Resident Id  Journal Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Resident Journal"
+      }
+    },
+    "/residents/{resident_id}/provision": {
+      "post": {
+        "description": "Build a resident from the manifest already in the tree, and check its schedule.\n\nThe other door onto the nursery (warren#270). ``POST /residents`` assembles a\ndeclaration from a request body and refuses to converge it onto a manifest somebody\nhas since edited \u2014 which left every resident carrying a route, an app grant or a\n``runner.placement`` with no way onto the nursery path at all, because no body can\nexpress those fields. This one reads ``residents/<id>/manifest.yaml`` as the source\nof truth and runs provision and register against it.\n\n**200, not 202.** The container is up and the schedule has been checked by the time\nthis answers \u2014 there is nothing left to acknowledge later, and saying `accepted`\nabout work that already finished would be the one dishonesty the request log exists\nto prevent.\n\nNothing is written into the checkout, so unlike every other write here there is no\ncommit: the declaration being provisioned was committed by whoever wrote it, and a\ndeclaration whose bytes are in no commit comes back in ``warnings`` rather than as a\nrefusal this endpoint has no way to resolve.",
+        "operationId": "provision_declared_resident_residents__resident_id__provision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ProvisionPost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Provision Declared Resident Residents  Resident Id  Provision Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Provision Declared Resident"
+      }
+    },
+    "/residents/{resident_id}/routines/{routine_id}/run": {
+      "post": {
+        "description": "Ask for one run of one routine, right now, and acknowledge only that.",
+        "operationId": "run_routine_residents__resident_id__routines__routine_id__run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "title": "Routine Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Run Routine Residents  Resident Id  Routines  Routine Id  Run Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Run Routine"
+      }
+    },
+    "/routines": {
+      "get": {
+        "description": "Every routine of every valid resident: the fleet-wide standing-work ledger.\n\nAssembled from three things steward already knows and nothing it does not. The\nschedule and the switch come from the manifest. ``next_fire`` is computed from the\ncron expression in the routine's own zone, and is ``null`` for a disabled routine\nbecause a routine that is off has no next occurrence to promise.\n\nA **retired** resident's routines are listed \u2014 they are still declared, and a\nledger that hid them could not answer what used to run here \u2014 and carry\n``retired: true`` with ``next_fire: null`` for the same reason a disabled routine\ndoes: :func:`steward.scheduler.load_scheduled` leaves retired residents out, so\nthere is no next occurrence to promise. Run-now refuses them with ``409\nresident_retired``, which is what townhall reads to grey the button out.\n\n``anchor`` is the scheduler's own state file, read fresh on every request because\nthe daemon is a different process \u2014 and it is called an anchor rather than a last\nrun because that is what it is: the moment the next occurrence is computed from,\nwhich is the last fire *or* the moment steward first saw the routine. Calling it\n\"last run\" would let a routine that has never fired look like one that has.\n\n``scheduler`` is the one thing here that *is* a heartbeat: when a scheduler process\nlast woke up against that state file, how stale that may get before it stops\nmeaning anything is up, and the verdict. ``alive: null`` \u2014 never ticked \u2014 is its\nown answer, distinct from a daemon that died. A ledger is still a declaration; this\nis what says whether the declarations have anything to fire them.\n\n``last_run`` and ``last_request`` are two different facts and both are here\n(warren#104). ``last_request`` is the *API request log*: a run somebody asked for\nover HTTP. A scheduled fire is not an HTTP request, so it never appears there \u2014 and\na panel that showed only that one concluded a perfectly healthy resident \"only runs\nwhen I trigger it manually\", which was false. ``last_run`` is the run ledger, which\nevery finished session writes to whatever started it, so it carries the trigger\n(``schedule`` or ``manual``) and the outcome. Keeping both is the point: a request\nthat was accepted and never ran is exactly the case where they disagree, and that\ndisagreement is the diagnosis.",
+        "operationId": "list_routines_routines_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Routines Routines Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Routines"
+      }
+    },
+    "/skills": {
+      "get": {
+        "description": "List the skills library, and who holds each skill.\n\nRead from disk per request rather than from the copy this app started with. That\nwas always the honest thing to serve and is now the necessary one: since a skill\ncan be written over HTTP (steward #214), a listing built from a startup snapshot\nwould not contain the skill the caller just created. It costs nothing extra \u2014\n``validate_path`` on the line below already re-reads the same library.",
+        "operationId": "list_skills_skills_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Skills Skills Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Skills"
+      },
+      "post": {
+        "description": "Add a skill to the library.\n\n**Human callers only.** Refuses an existing name rather than overwriting it: a\n``POST`` that quietly replaced somebody's skill would make \"add\" and \"rewrite\" the\nsame button.\n\n``defaults: true`` deserves a second look before sending. A default skill is held\nby every resident in the fleet without any manifest granting it, so this one flag\nchanges what every session is given.",
+        "operationId": "create_skill_skills_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillPost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Skill Skills Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Skill"
+      }
+    },
+    "/skills/{name}": {
+      "get": {
+        "description": "Return one skill's frontmatter and body, with the revision to edit against.",
+        "operationId": "get_skill_skills__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Skill Skills  Name  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Skill"
+      },
+      "put": {
+        "description": "Replace one skill in the library, if it still validates for the whole fleet.\n\n**Human callers only**, like every write here.",
+        "operationId": "update_skill_skills__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Skill Skills  Name  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Skill"
+      }
+    },
+    "/tasks/{task_id}/lineage": {
+      "get": {
+        "description": "Return the whole chain this task belongs to, root first. The audit query.\n\n``chain`` is the root and everything delegated out of it, depth-first, so the\nanswer does not depend on which member of the chain was named (steward #202).\n``origin`` and ``depth`` still describe the task that was asked about.",
+        "operationId": "get_lineage_tasks__task_id__lineage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Lineage Tasks  Task Id  Lineage Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Lineage"
+      }
+    }
+  }
+}

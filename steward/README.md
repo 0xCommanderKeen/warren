@@ -115,10 +115,18 @@ a voice adds no event, no movement, no ambient liveliness to the village.
 $ steward doctor                     # which brain, the journal, the post, what fires next
 $ steward scheduler run              # the daemon: sleep to the next due routine, fire
 $ steward scheduler tick             # fire anything due now, then exit (external cron)
-$ steward scheduler tick --dry-run   # print what would fire, and the whole prompt
+$ steward scheduler tick --dry-run   # print what is due right now, and the whole prompt
 $ steward journal life-agent         # what Hob has actually written, newest first
 $ steward show life-agent            # the exact preamble Hob's next session opens with
 ```
+
+`--dry-run` rehearses **this** tick: it prints the routines that are due at this moment
+with their assembled prompts, and `nothing due` when none is — which is what a rehearsal
+against a state file whose anchors are all fresh should say. It is not a way to dump every
+routine's prompt. For a routine that is not due, `steward show <resident>` prints
+everything above the task — identity, voice, journal, skills, pending decisions, charter,
+assembled by the same module in the same order — and the task section under it is the
+routine's own `prompt` from the manifest. `steward doctor` says when each one fires next.
 
 **The HTTP API** (#3). The token-gated write path chronicle's viewer calls directly, so
 chronicle's server never gets write access to agents: run a routine now, post a job to the
@@ -175,6 +183,66 @@ emits nothing). The grammar and both paths are in [docs/approvals.md](docs/appro
 ```console
 $ steward approval raise life-agent --action send_email --detail-json '{"to": "…"}'
 $ steward approval show <request_id>  # request, decision, decider, timestamps
+```
+
+**Notifications** (warren#114). A village you have to be looking at is no good for a knock,
+and neither is a log. A manifest may declare `notifications: {transport: ntfy, on:
+[needs_human, task_done]}` — a **one-way** tap, and its own capability dimension rather than
+a route kind or a chat channel, because nothing listens for a reply: no session fires and no
+answer comes back. Chat (#108) stays conversation-only.
+
+There is no address in the manifest, because there is no address a human should be typing:
+an ntfy topic is derived from the resident's `uid` through SHA-256, so it is unguessable in
+ntfy's public namespace and cannot drift from the resident it belongs to — and so that
+*showing* a uid, which happens in git, in the API and in townhall, never incidentally
+discloses the topic. The server and its optional token are environment, never declaration.
+
+A tap's result is discarded and its errors are swallowed: an unreachable ntfy is a log line,
+never a failed transition. The POST is synchronous, bounded by a two-second timeout and a
+sixty-second circuit breaker — a background thread would make it free and unreliable, and a
+one-shot CLI would drop the knock on the way out. A knock the repeat-deny guard answered taps
+nobody, exactly as it emits nothing.
+
+Chronicle's own `CHRONICLE_NOTIFY_URL` forwarder still exists and is *not* coordinated with
+this: configure both and one knock buzzes twice. Chronicle's is one fleet-wide webhook over
+what it ingested; this is one topic per resident over what steward raised, and it also covers
+`task_done`. Pick one.
+
+```console
+$ steward notify list                 # transport, kinds, and the URL to subscribe to
+$ steward notify test life-agent      # one harmless tap, and whether it landed
+```
+
+**Chat** (#108). `routes: {kind: chat}` used to be a description; now it is a doorway.
+`steward chat run` long-polls one Telegram bot per resident, and every message from a
+named operator fires **one ordinary session** — same admission, same budget, same runner
+seam, same `routine_started`/`routine_finished` bracket, under the trigger `chat` — whose
+final message is redacted, bounded, and sent back into the conversation. Text in, text out.
+
+The route's `address` is a reference (`telegram:pip`) and the bot's token lives in
+steward's environment as `STEWARD_CHAT_TOKEN_PIP`, so a manifest can be read, reviewed and
+pasted anywhere without that being a disclosure; a token written into one is refused by
+validation and scrubbed out of any reply. Only the Telegram user ids in
+`STEWARD_CHAT_OPERATORS` are answered, in private chats only — anybody else is dropped
+**without a reply**, because a refusal still tells a scanner the bot is live, and the
+attempt becomes a `chat_message_dropped` event carrying who knocked and never what they
+said — one per sender per door per catch-up window, with the knocks in between counted
+into it, so a scanner cannot spend the village's bounded channels on itself. A busy resident is the API's 409 in sentence form: refused with a reason, never
+queued. The conversation is a rolling file in the resident's own memory directory, the last
+few turns of which are injected as context *beneath* the charter. A dispatch sweep follows
+every answered message, so a handoff written mid-conversation is delivered before you have
+read the reply.
+
+It is a separate process sharing the scheduler's state directory — which is exactly what
+the cross-process session claim (warren#111) is for — and long polling means every
+connection is outbound, so nothing on the internet gets a way into the burrow. Notifications
+(warren#114) stay the other channel: one-way, nothing listens, no session fires. This bridge
+only ever speaks when spoken to. The setup runbook — BotFather, the variables, the compose
+service — is [docs/chat.md](docs/chat.md).
+
+```console
+$ steward chat list                   # who is reachable, and which variable each bot reads
+$ steward chat run --residents residents   # the daemon; nothing arrives unless this is up
 ```
 
 **Delegation** (#7). A resident can hand work to a neighbour, and steward is the only
@@ -274,9 +342,16 @@ stay in git; retirement is a lifecycle state, not a deletion.
 ```console
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run
-$ steward new-resident … --skills research     # declare, commit, build, check
+$ steward new-resident … --skills write-blog-post   # declare, commit, build, check
+$ steward provision note-keeper                 # build the manifest a person wrote
 $ steward retire note-keeper                    # stop it, and say so in git
 ```
+
+`new-resident` describes a resident in flags and so can only ever build one a command line
+can describe. `steward provision <id>` is the door for every other resident: it skips
+declare and builds `residents/<id>/manifest.yaml` exactly as it stands — routes, app grants,
+`runner.placement` and all — which is the only way the fleet's hand-written residents get
+onto this path at all (warren#270).
 
 **The control panel** (#13, warren#225). Steward serves no UI. It used to: a browser
 console at `/ui`, static HTML and one JavaScript file, no build step. That console was the
@@ -349,6 +424,12 @@ answers to `dxp2800` either. Declare it rather than bet on it: losing that bet i
 on the right machine reporting every container it is supervising as somewhere it cannot see.
 See [docs/topology.md](docs/topology.md).
 
+`steward chat run` is the third daemon, and it sits under the same rule for a narrower
+reason: it supervises nothing and needs no docker of its own, but it *fires sessions*, so a
+chat route on a container-placed resident puts it exactly where the other two are. It also
+shares their state directory and their one `steward.db`, which is what makes a message
+arriving mid-routine find the resident busy instead of opening a second session.
+
 `DOCKER_HOST` is inherited by every docker call steward makes (measured, unlike a
 session's environment), so docker's own remote-endpoint support applies to supervision. It
 does **not** relocate execution — a container-placed session also needs the host side of
@@ -363,7 +444,7 @@ $ export CHRONICLE_TOKEN=…                    # the village's shared ingest se
 
 $ steward new-resident --id note-keeper --name Quill --char Scribe \
     --accent '#4f7ea6' --role 'note bot' --charter charter.yaml --dry-run   # read the plan first
-$ steward new-resident … --skills research     # declare, commit, build, check
+$ steward new-resident … --skills write-blog-post   # declare, commit, build, check
 ```
 
 `--charter` points at a YAML file — a charter is prose somebody thought about, and prose
@@ -381,12 +462,16 @@ escalation: When and how to raise needs_human instead of acting.
 
 The other flags: `--skills` grants library skills by name (comma-separated); `--runner`
 and `--model` choose the brain (default `claude`); `--project` and `--summary` are the
-optional soul fields; `--repo` names the checkout to commit into; `--dry-run`,
-`--allow-dirty`, and `--no-commit` behave as they do for `retire`; and **`--no-deploy`** is
-the only host-less path — it declares and checks but builds no container, for developing a
-resident before it has a machine. `--skills` is a grant *on top of* the default set every
-resident already gets, so naming a default skill (`write-journal`, `escalate`) is redundant
-rather than additive — grant only what a resident holds beyond the defaults.
+optional soul fields; `--residents` names the tree to declare into (default `residents`,
+relative to the current directory) and `--repo` the checkout to commit into (default: the
+parent of that tree); `--dry-run`, `--allow-dirty`, and `--no-commit` behave as they do for
+`retire`; and **`--no-deploy`** is the only host-less path — it declares and checks but
+builds no container, for developing a resident before it has a machine. `--skills` is a
+grant *on top of* the default set every resident already gets, so naming a default skill
+(`write-journal`, `daily-summary`, `research`, `escalate`) is redundant rather than
+additive — grant only what a resident holds beyond the defaults. It is not an error, and
+steward does not silently drop it: the effective set is the same either way, and the
+nursery warns by name so the line can be deleted from a manifest that means nothing by it.
 
 The three stages, and what each one really does:
 
@@ -427,14 +512,16 @@ Where a resident lands is a manifest question with documented defaults (`dxp2800
 
 **What a resident's container actually is.** `steward-resident` is built from
 [`docker/resident/Dockerfile`](docker/resident/Dockerfile): `node:22-slim` **pinned by
-digest**, the `claude` CLI pinned by build arg, python3, and a vendored copy of
-`chronicle/hooks/emit.py` wired into the same six claude hooks the Mac uses. Every input is
+digest**, the `claude` CLI pinned by build arg, python3, and a vendored copy of chronicle's
+emitter — built from `chronicle/hooks/` into one stdlib-only file — wired into the same six
+claude hooks the Mac uses. Every input is
 pinned so that two builds of one commit are one image, and the image says which commit that
 was — `org.opencontainers.image.revision`, stamped by `make image` from `git rev-parse
 HEAD`. Moving the base digest is its own deliberate commit; the Dockerfile carries the
 `docker buildx imagetools inspect` line that produces the new one. `make vendor-emitter`
-refreshes the emitter copy from `../chronicle` — in-tree since the consolidation, so it
-needs no second checkout and no `CHRONICLE=` argument. CI builds this image on every PR that
+rebuilds the emitter copy from `../chronicle` — in-tree since the consolidation, so it
+needs no second checkout and no `CHRONICLE=` argument — and the suite rebuilds it again and
+compares byte for byte, so the copy cannot quietly fall behind its source. CI builds this image on every PR that
 touches steward, runs the entrypoint and runs `steward-smoke` against a stub village that
 only knows how to answer 204. There is no registry here, so the image travels like
 everything else does — a pipe over ssh:
@@ -464,7 +551,37 @@ credential scanners are run over everything the nursery writes into the checkout
 test. Provisioning without `CHRONICLE_URL` is refused: a container with nowhere to emit is a
 resident that would never appear in the village at all.
 
-Retiring is the counterpart, and it goes the other way round on purpose:
+**The other door.** `new-resident` describes a resident in flags, and refuses to converge
+those flags onto a manifest a person has since edited: silently overwriting a soul somebody
+wrote is not something a command line should be able to do. That refusal is right, and on
+its own it was a dead end. There are no flags for `routes`, for `app_grants`, for a skill's
+`note` or for `runner.placement`, so a manifest carrying any of them could never match a
+spec built from flags — which left the fleet's oldest and most carefully written residents
+with no supported way onto the nursery path at all (warren#270).
+
+`steward provision` is the way in for a manifest somebody wrote:
+
+```console
+$ steward provision life-agent --dry-run    # the same plan, from the declaration itself
+$ steward provision life-agent
+```
+
+The declare stage is already done — by a person, in a file, in a commit — so this reads
+`residents/<id>/manifest.yaml` as the source of truth and runs provision and register
+against it, exactly as it stands. It is `retire`'s counterpart: same argument, same source
+of truth, opposite direction.
+
+It writes nothing into the repo, which is why it has no `--commit`, no `--allow-dirty`, and
+no dirty-worktree refusal: there is no commit here for a failed deploy to leave behind, so
+there is nothing for that refusal to protect, and somebody else's half-finished afternoon
+is none of this command's business. What it will not do is ship in silence — a declaration
+whose *own* bytes are in no commit is named in a warning, because a container built from
+bytes nobody committed is a container nobody can turn back into a diff.
+
+The flags it does have are `--residents`, `--repo`, `--dry-run` and `--format`, and each
+means what it means for the other two commands.
+
+**Retiring** is the counterpart, and it goes the other way round on purpose:
 
 ```console
 $ steward retire note-keeper --dry-run
@@ -485,10 +602,11 @@ The other flags mirror the two commands: `--dry-run` touches nothing, `--no-comm
 the mark without committing it, `--allow-dirty` commits over a dirty worktree, and `--repo`
 names the checkout when it is not the parent of the residents tree.
 
-Chronicle's viewer reaches the same pipeline through `POST /residents` with `deploy: true`
-([docs/api.md](docs/api.md#post-residents)) — one implementation, two front doors. The API
-never commits, because the server may not own the checkout it is reading, and it says so
-in the response.
+Chronicle's viewer reaches the same pipelines over HTTP: `POST /residents` with
+`deploy: true` ([docs/api.md](docs/api.md#post-residents)) is `new-resident`, and
+`POST /residents/{id}/provision` ([docs/api.md](docs/api.md#post-residentsidprovision)) is
+this command — one implementation each, two front doors each, verified by injecting the
+pipeline into the route rather than by a convention somebody has to keep.
 
 ## Residents
 
@@ -557,6 +675,62 @@ finished goes back to `open` loudly, and a request nobody answered is a `deny`, 
 quiet yes. A restart is announced, a run that never reported back is buried out loud, and
 a resident that has spent its day stops and says which number stopped it.
 
+### Driving a session offline
+
+Three of steward's most consequential paths only open when a session actually *says*
+something — an escalation, a handoff, a bill. Each has an offline way in, and none of them
+needs a model, a network, or a token. `runner.kind: mock` is not one of them: it is
+deterministic and reports no usage on purpose, its injectable `behavior` is a Python
+callable for tests with no manifest or CLI surface (a manifest field that made a resident
+fail or block on demand would be a production footgun), and `--dry-run` forces it precisely
+so a rehearsal cannot reach a brain.
+
+**A session that asks for a human, or hands work to a neighbour.** Declare a `command`
+runner pointed at a script, and print the control region. This is the whole mechanism —
+steward reads the child's stdout, and the child is whatever the manifest names:
+
+```yaml
+runner:
+  kind: command
+  command: [/path/to/session.sh, "{prompt}"]
+```
+
+```sh
+#!/bin/sh
+echo "Working on it."
+echo "===STEWARD-ACTIONS==="
+echo '<needs-human action="send_email" expires-in="4h">'
+echo '{"to": "anna@example.com", "subject": "Re: Thursday"}'
+echo '</needs-human>'
+echo "===END-STEWARD-ACTIONS==="
+```
+
+A tick against that resident emits `routine_started`, `needs_human` and
+`routine_finished`, and leaves a real request for `steward approval show` to read. Swap the
+block for `<delegate>` ([docs/delegation.md](docs/delegation.md)) to exercise the inbox the
+same way.
+
+**A session that costs money.** Cost is not steward's to invent: only the `claude` runner
+learns it, by parsing the CLI's own `--output-format json`, and a `codex` or `command` run
+is recorded honestly as *usage unknown*. So the offline costed session is a `claude` runner
+whose `claude` is a stub first on `PATH` — the same trick the test suite's `stub_bin`
+fixture uses:
+
+```sh
+#!/bin/sh
+case "$1" in --help) echo "--setting-sources --tools --strict-mcp-config --add-dir"; exit 0 ;; esac
+echo '{"result": "Done.", "is_error": false, "total_cost_usd": 0.42, "usage": {"input_tokens": 1200, "output_tokens": 300}}'
+```
+
+The `--help` arm is what keeps `steward doctor` green: doctor asks the installed binary
+what flags it supports, because every claude session carries `--setting-sources` whether a
+manifest asked for it or not. (The scheduler's own startup check is cheaper — it only asks
+whether the binary answers where sessions run, which for a container-placed resident is
+docker rather than this `PATH`.) With `budgets: {daily_cost_usd: 0.25}` on the resident,
+one tick ledgers $0.42, trips the cap, pauses the resident and knocks — the whole budget
+path, without a model call. The `result` string is the session's output, so a stub that
+puts the control region in there exercises both halves at once.
+
 ## Environment
 
 Steward reads a handful of environment variables. None is required for `steward validate`;
@@ -564,13 +738,25 @@ the scheduler and the API name the ones they need on startup.
 
 | variable | who reads it | meaning |
 |---|---|---|
-| `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. |
+| `STEWARD_STATE` | scheduler | Path to the scheduler's state **file** (its last-fire anchors), not a directory — a `STEWARD_STATE` that names a directory is fatal, because a scheduler that cannot persist an anchor re-fires forever. `steward.db` lands **beside** it, so point this at e.g. `~/.steward/state.json` and the database is `~/.steward/steward.db`. Unset, the file is `.steward/state/scheduler.json` under the current directory — which moves with the current directory, so a daemon wants this set. |
 | `STEWARD_TOKEN` | API | The bearer token every endpoint requires. Unset or blank refuses to start unless `--allow-open` says out loud this is loopback-only local development. |
 | `STEWARD_EVENTS_FALLBACK` | everything that emits | Steward's complete local event record, read by the watchdog. Remote-bound events wait for acknowledgement in its `.pending` sibling. Defaults to `~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` on a machine that still has that directory. |
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
+| `STEWARD_RESIDENTS` | API | The residents tree `create_app()` reads when nothing names one. `steward serve` always passes `--residents` (default `residents`), so on that path the flag decides and this is only read by an embedder that builds the app itself. |
+| `STEWARD_COMMIT_IDENTITY` | API | `Name <email>`, the git author the write API commits as when the caller is not a named [operator](#operator-credentials). Anything that is not that exact spelling is ignored rather than half-parsed, leaving commits reading `steward (api)` — which is true. |
+| `STEWARD_ALLOW_UNCOMMITTED_WRITES` | API | `1`/`true`/`yes`/`on` accepts a residents tree with no git behind it. Off, a write into a tree outside a checkout is refused `409 not_a_git_checkout` rather than leaving declarations with no history and no author. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
-| `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. |
-| `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. |
+| `STEWARD_REPEAT_DENY_WINDOW_H` | approvals | Whole hours a `deny` goes on answering the same `(resident, action)` a session raises, so a looping resident cannot knock on every wake-up (default 12). `0` is the kill switch: every repeat knocks again. Anything that is not a whole number ≥ 0 is logged as a misconfiguration and the default is used. Steward's own knocks are never guarded — see [docs/approvals.md](docs/approvals.md). |
+| `STEWARD_NTFY_URL` | notifications | The ntfy server outbound taps are POSTed to. Defaults to `https://ntfy.sh`, which is safe because the topic is derived and unguessable — point it at a self-hosted instance to keep even that off the public internet. |
+| `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
+| `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |
+| `STEWARD_NOTIFY_NAMESPACE` | notifications | Folded into every derived topic. Empty by default; set it on a second installation reading the same `residents/` tree, so a developer's test knock does not buzz the operator's real phone. |
+| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated Telegram user ids steward answers. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
+| `STEWARD_CHAT_TOKEN_<REF>` | chat bridge | The bot token for a chat route whose `address` is `<transport>:<ref>` — `telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`, with non-alphanumerics folded to `_`. One bot per resident, and never in a manifest: a token written into one is refused by validation. |
+| `STEWARD_CHAT_API_URL` | chat bridge | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real service. |
+| `STEWARD_CHAT_POLL_TIMEOUT_S` | chat bridge | How long one `getUpdates` may wait for a message (default 25s). The socket timeout is this plus ten seconds, because the server holds the connection for the whole poll by design. |
+| `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. Read as `BURROW_URL` too, so an environment written before warren#216 still configures steward; the new spelling wins. |
+| `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. `BURROW_TOKEN` is read the same way, and loses the same way. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
 | `STEWARD_BURROW` | doctor, watchdog | What this machine is called when its hostname is not the name manifests use for it (`deploy.host`). Read only to *report* whether supervision reaches a container; never to decide where anything runs. A declaration replaces the hostname rather than joining it, and `docker info`'s own answer outranks both. See [docs/topology.md](docs/topology.md). |
 | `DOCKER_HOST` | docker, so: watchdog + container placement | Docker's own pointer. Steward never sets it and never reads it to decide anything — but every docker call steward makes inherits it (measured), so docker's own remote-endpoint support applies to *supervision*. It does not relocate *execution*: a container-placed session also needs the host side of its memory mount on this filesystem. Reported as **unverified** unless the daemon at the far end names itself as the declared host — that answer is measured; nothing else here can prove where the endpoint lands. |

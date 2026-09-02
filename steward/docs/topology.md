@@ -38,6 +38,16 @@ Every one of those talks to whatever docker daemon *that process's environment* 
 None of them knows about `deploy.host`. So the daemons have to be where the containers
 are.
 
+**A third daemon, on the same rule for a narrower reason.** `steward chat run`
+([docs/chat.md](chat.md)) is a separate process sharing the same state directory and the
+same `steward.db` — that sharing is what the cross-process session claim (warren#111) is
+for. It supervises nothing and touches no docker socket of its own, so a fleet of
+locally-placed residents can run it anywhere the database is. But it *fires sessions*, and
+a session placed in a container is launched by `docker exec` like any other: a chat route on
+a container-placed resident puts this daemon under the same rule as the other two, needing a
+`docker` binary and access to that machine's docker. Pip, the first chat resident, is
+locally placed, so today the rule binds it only by way of the database it shares.
+
 ## What breaks when it is violated
 
 Run the watchdog somewhere else and nothing errors. That is the problem.

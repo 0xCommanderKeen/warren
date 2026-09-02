@@ -8,13 +8,15 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 import yaml
 from pydantic import ValidationError
 
+from steward import chat as ch
 from steward import events as ev
+from steward import notify as nf
 from steward.api import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -66,9 +68,11 @@ from steward.nursery import (
     NurseryError,
     NurseryReport,
     RetireReport,
+    provision_resident,
     raise_resident,
     retire_resident,
 )
+from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.prompt import assemble_preamble
 from steward.runners import Placement, check_cli_support, check_runner, skills_home
@@ -355,6 +359,31 @@ def schema(output: Path | None) -> None:
     request that makes it. Regenerate it with `make schema-write`.
     """
     text = manifest_schema_json()
+    if output is None:
+        click.echo(text, nl=False)
+        return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+
+
+@main.command()
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write the document here instead of stdout. `make openapi-write` points it at "
+    f"{OPENAPI_ARTIFACT}, the copy this repo commits.",
+)
+def openapi(output: Path | None) -> None:
+    """Print the OpenAPI document for this API (townhall's console reads the committed copy).
+
+    The API serves no schema of its own — every route is a write path, so nothing here is
+    unauthenticated, `docs_url` included. This is the offline export that takes its place:
+    the document is committed, townhall's contract test reads it in-tree, and
+    `tests/test_openapi_contract.py` fails when it drifts from the routes. Regenerate it
+    with `make openapi-write`.
+    """
+    text = openapi_json()
     if output is None:
         click.echo(text, nl=False)
         return
@@ -1035,7 +1064,7 @@ def _scheduler_options[F: Callable[..., None]](function: F) -> F:
             click.option(
                 "--dry-run",
                 is_flag=True,
-                help="Print what would fire, with the assembled prompt. Emits nothing.",
+                help="Print what is due right now, with the assembled prompt. Emits nothing.",
             ),
         ]
     ):
@@ -1139,13 +1168,23 @@ def scheduler_tick(  # noqa: PLR0913, PLR0917 — click passes one parameter per
     catchup_seconds: float,
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
 ) -> None:
-    """Fire everything due right now, sweep the board, then exit. Good under cron."""
+    """Fire everything due right now, sweep the board, then exit. Good under cron.
+
+    `--dry-run` rehearses *this* tick and no other: it reports the routines that are due
+    at this moment, which is the question a rehearsal is asked. It used to print every
+    routine in the tree as "would fire", which was untrue of all but the due ones and
+    unreadable on a fleet with more than a handful (warren#90). For a routine that is not
+    due, `steward show <resident>` prints everything above the task and the manifest holds
+    the task; `steward doctor` says when each one fires next.
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _build_scheduler(
         residents, state, workdir, db, catchup_seconds, dry_run=dry_run
     ) as engine:
         if dry_run:
-            reports = [engine.fire(item) for item in engine.scheduled]
+            # Through tick(), so "due" has exactly one definition. A dry-run tick takes no
+            # lock, persists no anchor, and sweeps no board — see Scheduler.tick.
+            reports = engine.tick()
         else:
             try:
                 engine.require_ready()
@@ -1173,13 +1212,17 @@ def scheduler_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per 
     dry_run: bool,  # noqa: FBT001 — click passes flags positionally
     max_ticks: int | None,
 ) -> None:
-    """Run the scheduler daemon: sleep to the next due routine, fire, repeat."""
+    """Run the scheduler daemon: sleep to the next due routine, fire, repeat.
+
+    `--dry-run` never enters the loop: it rehearses one tick, prints what is due now, and
+    returns — the same report `scheduler tick --dry-run` prints, for the same reason.
+    """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     with _build_scheduler(
         residents, state, workdir, db, catchup_seconds, dry_run=dry_run
     ) as engine:
         if dry_run:
-            _report_fires([engine.fire(item) for item in engine.scheduled], dry_run=True)
+            _report_fires(engine.tick(), dry_run=True)
             return
         try:
             reports = engine.run(max_ticks=max_ticks)
@@ -1530,6 +1573,235 @@ def _render_lineage_hop(item: JobRecord) -> None:
     )
     click.secho(f"{indent}{item.task_id}  {item.title}", bold=True)
     click.echo(f"{indent}  {who} — {item.status}{f' ({item.outcome})' if item.outcome else ''}")
+
+
+# --------------------------------------------------------------------------------------
+# notifications
+# --------------------------------------------------------------------------------------
+
+
+@main.group("notify")
+def notify_group() -> None:
+    """Where a resident's outbound taps go, and whether they arrive."""
+
+
+@notify_group.command("list")
+@_RESIDENTS_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def notify_list(residents: Path, output_format: str) -> None:
+    """Print every resident's notification wiring, including the address to subscribe to.
+
+    This is the operator's setup path, and it is the only one: an ntfy topic is derived from
+    a resident's ``uid`` rather than declared, so there is nowhere else to read it off. Doing
+    it here rather than in the manifest is what keeps the topic out of git, out of the API
+    and out of chronicle — and it is why this output deserves the same care a password does.
+
+    A topic on ntfy is the capability, to read *and* to write: whoever has the URL can watch
+    every knock this resident makes and can push a fake one at you. Subscribe on the phone,
+    then close the terminal.
+    """
+    result = validate_paths([residents])
+    notifier = nf.Notifier.from_env()
+    reports = [notifier.describe(resident.manifest) for resident in result.residents]
+    if output_format == "json":
+        click.echo(json.dumps([report.to_dict() for report in reports], indent=2))
+        return
+    if not reports:
+        click.secho(f"no valid residents in {residents}", fg="yellow")
+        return
+    for report in reports:
+        _report_notifications(report)
+
+
+def _report_notifications(report: nf.NotificationReport) -> None:
+    """Print one resident's notification wiring, or say plainly that it has none."""
+    if report.transport is None:
+        click.echo(f"{report.resident}: taps nobody (no notifications block)")
+        return
+    state = "active" if report.enabled else f"{report.status} — declared, and silent"
+    click.secho(
+        f"{report.resident}: {report.transport} — {state}",
+        fg="cyan" if report.enabled else "yellow",
+    )
+    click.echo(f"  on:      {', '.join(report.on)}")
+    click.echo(f"  address: {report.address}")
+    if report.note:
+        click.echo(f"  note:    {report.note}")
+
+
+@notify_group.command("test")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+def notify_test(resident_id: str, residents: Path) -> None:
+    """Send one harmless tap to a resident's transport, and say whether it landed.
+
+    The whole point of a notification is that it arrives when nobody is looking, which means
+    the only honest way to know the wiring works is to use it. The message says out loud that
+    it is a test, so a tap that arrives at 2am is never mistaken for a resident in trouble.
+
+    A resident that has not opted in is refused rather than tapped: this command proves a
+    declaration, it does not stand in for one.
+    """
+    resident = _resident_or_exit(residents, resident_id)
+    notifier = nf.Notifier.from_env()
+    transport = notifier.transport_for(resident.manifest)
+    if transport is None:
+        declared = resident.manifest.notifications
+        why = (
+            f"declared {declared.transport!r} but status is {declared.status!r}"
+            if declared.transport
+            else "declares no notifications block"
+        )
+        click.secho(f"{resident.id} taps nobody: it {why}", fg="red", err=True)
+        sys.exit(EXIT_INVALID)
+    if notifier.send(resident.manifest, nf.probe_tap(resident.manifest), transport=transport):
+        click.secho(f"sent — {resident.id} taps {transport.address(resident.manifest)}", fg="green")
+        return
+    click.secho(
+        f"not sent — {transport.name} refused or could not be reached; the log line above says why",
+        fg="red",
+        err=True,
+    )
+    sys.exit(EXIT_INVALID)
+
+
+# --------------------------------------------------------------------------------------
+# chat
+# --------------------------------------------------------------------------------------
+
+
+@main.group("chat")
+def chat_group() -> None:
+    """Talk to residents: who is reachable, and the daemon that carries it."""
+
+
+@chat_group.command("list")
+@_RESIDENTS_OPTION
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def chat_list(residents: Path, output_format: str) -> None:
+    """Print every declared chat route and what still stands between it and a message.
+
+    The operator's setup path (warren#108), and it is deliberately the *only* one: a route
+    declares a reference like ``telegram:pip`` and the bot's token lives in this process's
+    environment, so "which variable does this bot read" is a question only steward can answer
+    from the two halves together.
+
+    It prints the variable's **name** and whether something is in it, and there is nowhere in
+    this command for its value. A bot token is the whole capability — whoever holds it can
+    read every message the operator sends and can speak as the resident — so it is checked
+    here and printed nowhere.
+    """
+    result = validate_paths([residents])
+    reports = ch.describe_chat(list(result.residents))
+    if output_format == "json":
+        click.echo(json.dumps([report.to_dict() for report in reports], indent=2))
+        return
+    if not reports:
+        click.secho(f"no resident under {residents} declares a chat route", fg="yellow")
+        return
+    for report in reports:
+        state = "reachable" if report.reachable else f"{report.status} — not reachable yet"
+        click.secho(
+            f"{report.resident}/{report.route}: {report.address} — {state}",
+            fg="cyan" if report.reachable else "yellow",
+        )
+        click.echo(
+            f"  token:   {report.token_env or 'unknown'} ({'set' if report.token_set else 'unset'})"
+        )
+        if report.note:
+            click.echo(f"  note:    {report.note}")
+
+
+@chat_group.command("run")
+@_RESIDENTS_OPTION
+@_DB_OPTION
+@click.option(
+    "--workdir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Fallback working directory when a resident's memory dir is absent.",
+)
+@click.option(
+    "--state",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Where the daemon lock lives. Defaults to beside $STEWARD_STATE.",
+)
+@click.option(
+    "--catchup-seconds",
+    type=float,
+    default=ch.DEFAULT_CATCHUP_S,
+    show_default=True,
+    help="How old a message may be and still be answered rather than replied to as missed.",
+)
+@click.option("--max-polls", type=int, default=None, help="Stop after this many polls.")
+def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per option
+    residents: Path,
+    db: Path | None,
+    workdir: Path | None,
+    state: Path | None,
+    catchup_seconds: float,
+    max_polls: int | None,
+) -> None:
+    """Run the chat bridge daemon: long-poll every reachable bot and answer its operator.
+
+    A separate process from the scheduler and the watchdog, sharing their state directory
+    and their one ``steward.db`` — which is exactly why the cross-process session claim
+    exists (warren#111): a message arriving mid-routine finds the resident busy and is told
+    so rather than opening a second session for it.
+
+    Nothing here listens on a port. Long polling means every connection is outbound, so a
+    resident is reachable from a phone without anything on the internet being able to reach
+    the burrow.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    with _open_store(db) as store:
+        guard = BudgetGuard(store, ev.EventEmitter.from_env())
+        claims = ResidentClaims(store)
+        try:
+            bridge = ch.ChatBridge.from_path(
+                residents,
+                store,
+                workdir=workdir,
+                guard=guard,
+                # The board, for the two things a conversation needs from it: the decisions
+                # this resident is owed, and the sweep that hands over anything it delegated
+                # while the operator was still reading the reply.
+                hooks=Dispatcher.from_path(
+                    residents, store, workdir=workdir, guard=guard, claims=claims
+                ),
+                claims=claims,
+                state_path=state,
+                catchup_s=catchup_seconds,
+            )
+            outcomes = bridge.run(max_polls=max_polls)
+        except ch.ChatError as exc:
+            click.secho(str(exc), fg="red", err=True)
+            sys.exit(EXIT_INVALID)
+        except KeyboardInterrupt:  # pragma: no cover — a human stopping the daemon
+            click.echo("stopped")
+            return
+    for outcome in outcomes:
+        _report_chat(outcome)
+
+
+def _report_chat(outcome: ch.ChatOutcome) -> None:
+    """Print what one message came to, scrubbed of anything a session wrote.
+
+    The reply is not printed at all, and that is the point: it is a private message between
+    an operator and their resident, and a daemon's stdout is a log file. What a reader of
+    this needs is that a message arrived, who it was for, and how it ended.
+    """
+    label = f"{outcome.resident_id}/{outcome.route}"
+    loud = (ch.ChatStatus.FAILED, ch.ChatStatus.UNREACHABLE)
+    if outcome.status is ch.ChatStatus.ANSWERED:
+        colour = "green"
+    elif outcome.status in loud:
+        colour = "red"
+    else:
+        colour = "yellow"
+    reason = f": {redact_secrets(outcome.reason)}" if outcome.reason else ""
+    click.secho(f"{outcome.status} {label}{reason}", fg=colour, err=outcome.status in loud)
 
 
 # --------------------------------------------------------------------------------------
@@ -2204,7 +2476,35 @@ def _report_nursery(report: NurseryReport) -> None:
     elif not report.changed:
         click.secho("converged: nothing needed changing", fg="green")
     else:
-        click.secho(f"{report.resident_id} is raised", fg="green")
+        click.secho(f"{report.resident_id} is {report.verb}", fg="green")
+
+
+def _refuse_nursery(exc: NurseryError) -> NoReturn:
+    """Print a nursery refusal and every diagnostic behind it, and exit non-zero.
+
+    One place, because all three nursery verbs answer a refusal the same way and a
+    diagnostic list that only two of them printed would be a diagnostic list somebody
+    stopped seeing after switching command.
+    """
+    click.secho(str(exc), fg="red", err=True)
+    for diagnostic in exc.diagnostics:
+        click.secho(diagnostic.render(), fg="red", err=True)
+    sys.exit(EXIT_INVALID)
+
+
+def _finish_nursery(report: NurseryReport, output_format: str) -> None:
+    """Print the report the caller asked for, and exit non-zero if nothing can fire.
+
+    The exit status is the whole reason this is shared: a container that went up with a
+    schedule check that did not pass must not answer `0` from one command and `1` from
+    the other.
+    """
+    if output_format == "json":
+        click.echo(json.dumps(report.to_dict(), indent=2))
+    else:
+        _report_nursery(report)
+    if report.register is not None and report.register.problems:
+        sys.exit(EXIT_INVALID)
 
 
 @main.command("new-resident")
@@ -2282,22 +2582,67 @@ def new_resident(  # noqa: PLR0913, PLR0917 — click passes one parameter per o
             dry_run=dry_run,
         )
     except NurseryError as exc:
-        click.secho(str(exc), fg="red", err=True)
-        for diagnostic in exc.diagnostics:
-            click.secho(diagnostic.render(), fg="red", err=True)
-        sys.exit(EXIT_INVALID)
+        _refuse_nursery(exc)
     except TransportError as exc:
         # The declaration succeeded and the host did not answer: an ssh timeout, no route,
         # a refused key. That is an operator problem, not a stack trace — say what failed in
         # one line and exit non-zero rather than spilling a traceback (steward #90).
         click.secho(f"could not reach the host to provision: {exc}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
-    if output_format == "json":
-        click.echo(json.dumps(report.to_dict(), indent=2))
-    else:
-        _report_nursery(report)
-    if report.register is not None and report.register.problems:
+    _finish_nursery(report, output_format)
+
+
+@main.command("provision")
+@click.argument("resident_id")
+@_RESIDENTS_OPTION
+@click.option(
+    "--repo",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The checkout the declaration lives in. Defaults to the parent of the residents tree.",
+)
+@click.option("--dry-run", is_flag=True, help="Print the whole plan and touch nothing.")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def provision_command(
+    resident_id: str,
+    residents: Path,
+    repo: Path | None,
+    dry_run: bool,  # noqa: FBT001 — click passes flags positionally
+    output_format: str,
+) -> None:
+    """Build a resident from the manifest somebody wrote, and check its schedule.
+
+    `new-resident` describes a resident in flags and refuses to converge those flags onto
+    a manifest a person has since edited. This is the other door: the declaration is
+    already there, so `residents/<id>/manifest.yaml` is read as the source of truth and
+    the container is built from it exactly as it stands — including the routes, app grants
+    and `runner.placement` no flag can say (warren#270).
+
+    The counterpart to `retire`, which already works off the declared manifest alone: same
+    argument, same source of truth, opposite direction.
+
+    Nothing is written into the repo, so there is no commit and no `--allow-dirty` — a
+    dirty worktree is somebody else's afternoon and none of this command's business. A
+    declaration whose own bytes are in no commit is named in a warning instead, because
+    the commit this command cannot make is not one it should refuse over.
+    """
+    try:
+        report = provision_resident(
+            resident_id,
+            residents_dir=residents,
+            repo=repo,
+            dry_run=dry_run,
+        )
+    except NurseryError as exc:
+        _refuse_nursery(exc)
+    except TransportError as exc:
+        # "There was nobody to ask" — a host that did not answer, *or* a steward with no
+        # village address to give the container. One line and a non-zero exit rather than a
+        # traceback (steward #90), and phrased to cover both: the exception's own message
+        # already says which one it was.
+        click.secho(f"could not provision {resident_id}: {exc}", fg="red", err=True)
         sys.exit(EXIT_INVALID)
+    _finish_nursery(report, output_format)
 
 
 def _report_retire(report: RetireReport) -> None:
@@ -2367,10 +2712,7 @@ def retire_command(  # noqa: PLR0913, PLR0917 — click passes one parameter per
             dry_run=dry_run,
         )
     except NurseryError as exc:
-        click.secho(str(exc), fg="red", err=True)
-        for diagnostic in exc.diagnostics:
-            click.secho(diagnostic.render(), fg="red", err=True)
-        sys.exit(EXIT_INVALID)
+        _refuse_nursery(exc)
     if output_format == "json":
         click.echo(json.dumps(report.to_dict(), indent=2))
         return

@@ -56,6 +56,7 @@ from steward.events import utc_now_iso
 from steward.health import HealthJournal
 from steward.operator_auth import OperatorPrincipal
 from steward.runs import (
+    RUN_CHAT,
     RUN_DELEGATED,
     RUN_KINDS,
     RUN_ROUTINE,
@@ -78,6 +79,7 @@ __all__ = [
     "DECIDED_BY_REPEAT",
     "JOB_STATUSES",
     "ORIGIN_UNATTRIBUTED",
+    "RUN_CHAT",
     "RUN_DELEGATED",
     "RUN_KINDS",
     "RUN_ROUTINE",

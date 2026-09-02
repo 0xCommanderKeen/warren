@@ -5,10 +5,19 @@ import { startGame } from "./startGame.js";
 
 export function PhaserGame({ snapshot, onSceneReady }) {
   const host = useRef(null);
+  const game = useRef(null);
+  const initialSnapshot = useRef(snapshot);
+  const appliedSnapshot = useRef(snapshot);
 
   useLayoutEffect(() => {
-    const game = startGame(host.current, snapshot);
-    return () => game.destroy(true);
+    game.current = startGame(host.current, initialSnapshot.current);
+    return () => game.current.destroy(true);
+  }, []);
+
+  useEffect(() => {
+    if (snapshot === appliedSnapshot.current) return;
+    appliedSnapshot.current = snapshot;
+    game.current.applySnapshot(snapshot);
   }, [snapshot]);
 
   useEffect(() => {

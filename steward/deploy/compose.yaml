@@ -1,0 +1,77 @@
+# Steward's control plane on a burrow — the NAS today. Published to ~/docker/steward by
+# deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
+#
+# Three processes, one image, one database:
+#
+#   api        `steward serve`          the token-gated HTTP API townhall and the CLI write to
+#   scheduler  `steward scheduler run`  fires routines; a locally-placed session runs in here
+#   watchdog   `steward watchdog run`   notices dead runs and unsupervised containers
+#
+# The daemons run on the burrow whose containers they supervise (docs/topology.md), and
+# "on the burrow" is about docker, not the machine: both get this host's docker socket,
+# and the image carries a docker client to use it with. STEWARD_BURROW names the machine
+# because a container's hostname is its id.
+#
+# Secrets are not in this file and never will be. STEWARD_TOKEN lives in the .env beside
+# it (mode 0600), which no repository has ever seen; STEWARD_IMAGE_TAG is written into
+# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`".
+#
+# What the scheduler runs is deliberately narrower than what the API can see. The image
+# carries every declared resident (residents/), and the API serves them all read-only, but
+# the scheduler and watchdog are pointed at a tree holding Pip alone. Hob (life-agent) and
+# Maren (burrow-builder) declare containers this compose file does not manage: bringing
+# them under steward's supervision is the pilot (warren#29), a decision made in a manifest
+# and a PR, not in a deploy.
+
+x-steward: &steward
+  image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
+  restart: unless-stopped
+  init: true
+  env_file: .env
+  environment:
+    STEWARD_STATE: /data/state.json
+    STEWARD_BURROW: dxp2800
+    # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
+    CHRONICLE_URL: http://dockerhost:8737
+    # The pre-rename spelling, kept for one release (warren#216).
+    BURROW_URL: http://dockerhost:8737
+    TZ: Europe/Ljubljana
+  extra_hosts:
+    - "dockerhost:host-gateway"
+  volumes:
+    - ./data:/data
+    - ./claude-config:/root/.claude
+
+services:
+  api:
+    <<: *steward
+    container_name: steward-api
+    ports:
+      - "8802:8801"
+    command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "residents"]
+
+  scheduler:
+    <<: *steward
+    container_name: steward-scheduler
+    volumes:
+      - ./data:/data
+      - ./claude-config:/root/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+    # `sh -c`, not `-lc`: a login shell re-reads /etc/profile, which resets PATH and
+    # loses /app/.venv/bin — the first rollout crash-looped on exactly that. The absolute
+    # path is belt and braces.
+    # The tree the daemons read: Pip, copied out of the image at start, with the skills
+    # library linked beside it where a manifest expects it. Pip's memory is on /data so it
+    # survives the container.
+    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && cp -r /app/residents/pip /sched/residents/ && ln -sfn /app/skills /sched/skills && exec /app/.venv/bin/steward scheduler run --residents /sched/residents"]
+
+  watchdog:
+    <<: *steward
+    container_name: steward-watchdog
+    volumes:
+      - ./data:/data
+      - ./claude-config:/root/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
+    # wider list than the scheduler fires would report residents nobody is running.
+    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && cp -r /app/residents/pip /sched/residents/ && ln -sfn /app/skills /sched/skills && exec /app/.venv/bin/steward watchdog run --residents /sched/residents"]

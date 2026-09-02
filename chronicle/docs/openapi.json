@@ -337,6 +337,14 @@
       },
       "ProjectionCapacity": {
         "properties": {
+          "ambient_diagnostics": {
+            "title": "Ambient Diagnostics",
+            "type": "integer"
+          },
+          "ambient_events_per_villager": {
+            "title": "Ambient Events Per Villager",
+            "type": "integer"
+          },
           "approvals": {
             "title": "Approvals",
             "type": "integer"
@@ -369,11 +377,13 @@
         "required": [
           "villagers",
           "events_per_villager",
+          "ambient_events_per_villager",
           "tasks",
           "approvals",
           "journals",
           "routines",
-          "diagnostics"
+          "diagnostics",
+          "ambient_diagnostics"
         ],
         "title": "ProjectionCapacity",
         "type": "object"
@@ -738,8 +748,19 @@
         "type": "object"
       },
       "TaskWire": {
-        "description": "One projected task lifecycle.",
+        "description": "One projected task lifecycle.\n\n``assignee`` names the resident a job was handed to, and is null for a job posted\nto the open board. Only its addressee may claim it, so an open row with an\nassignee is not work anybody can take \u2014 that is the whole difference between the\ntwo ways Steward opens a row.",
         "properties": {
+          "assignee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignee"
+          },
           "claimant": {
             "anyOf": [
               {
@@ -791,6 +812,7 @@
           "state",
           "required_skills",
           "posted_by",
+          "assignee",
           "claimant",
           "updated_at"
         ],

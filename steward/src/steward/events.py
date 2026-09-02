@@ -69,6 +69,7 @@ __all__ = [
     "NullEmitter",
     "RunContext",
     "bounded_detail",
+    "chat_message_dropped_event",
     "default_fallback_path",
     "needs_human_event",
     "needs_human_resolved_event",
@@ -99,9 +100,14 @@ TASK_DELEGATED = "task_delegated"
 NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 RESIDENT_RESTARTED = "resident_restarted"
+CHAT_MESSAGE_DROPPED = "chat_message_dropped"
 
-#: The event types steward adds to the protocol. Additive: a v0 consumer that does not
-#: know them ignores them, which is why burrow needs no change to stay correct.
+#: The event types steward adds to the protocol. Additive in *shape* — a v0 consumer that
+#: does not know one still parses the record — but not free: chronicle validates ``type``
+#: against its own frozenset and 400s anything outside it. A type added here and not added
+#: to ``chronicle/protocol.py`` in the same change reaches steward's local fallback log and
+#: never the village, which is a silence nobody looking at the village can see. warren#276
+#: was exactly that drift, four types deep.
 EVENT_TYPES = (
     ROUTINE_STARTED,
     ROUTINE_FINISHED,
@@ -115,6 +121,7 @@ EVENT_TYPES = (
     NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
     RESIDENT_RESTARTED,
+    CHAT_MESSAGE_DROPPED,
 )
 
 #: Steward's own identity, for the work steward itself does rather than a resident.
@@ -1283,6 +1290,52 @@ def task_delegated_event(  # noqa: PLR0913 — the payload the issue documents
             "route": route,
             "parent_task_id": parent_task_id,
             "depth": depth,
+        },
+    )
+
+
+def chat_message_dropped_event(  # noqa: PLR0913 — one keyword per fact worth recording
+    *,
+    agent_id: str,
+    project: str,
+    route: str,
+    address: str,
+    sender: str,
+    reason: str,
+    suppressed: int = 0,
+) -> Event:
+    """Say that a message reached a resident's chat route and was dropped without a reply.
+
+    The visible half of the chat bridge's auth rule (warren#108). A message from anybody
+    who is not a named operator gets *no* answer — a reply would confirm to a scanner that
+    something is listening on that bot — but silence at both ends would mean an operator
+    could never find out that somebody had found their resident. So the drop is a fact in
+    the village: which resident's door, which route, and who knocked.
+
+    **What they said is deliberately not here.** A stranger's text is the one string in this
+    system written by somebody steward has no relationship with, and the village renders
+    what it is given: putting it in an event would make a chat bot a way to publish text
+    into the operator's own panel. The sender id is enough to recognise a wrong number, add
+    a second account to :data:`steward.chat.OPERATORS_ENV`, or notice a stranger — and it is
+    the only part of the message steward needs to keep.
+
+    ``suppressed`` is how many *other* knocks this one record stands for (warren#278). It
+    is the one field here a stranger does not cause: this is the only event in the log
+    somebody outside the fleet triggers, so :class:`steward.chat.KnockLimiter` emits one
+    per door per stranger per window and counts the rest into the next record. A reader
+    who wants the number of knocks adds one to it; a reader who does not care sees the
+    zero every unrepeated knock carries.
+    """
+    return Event(
+        type=CHAT_MESSAGE_DROPPED,
+        agent_id=agent_id,
+        project=project,
+        payload={
+            "route": route,
+            "address": address,
+            "from": truncate_error(sender),
+            "reason": truncate_error(reason),
+            "suppressed": suppressed,
         },
     )
 

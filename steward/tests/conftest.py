@@ -97,6 +97,52 @@ def isolated_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def isolated_notifications(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point every derived ntfy topic at a server that is not there.
+
+    Autouse and unconditional, for the reason :func:`isolated_events` is. The ntfy default
+    is the *public* ``https://ntfy.sh``, and a manifest fixture that declares
+    ``notifications: {transport: ntfy}`` would otherwise push a real message into a real
+    public topic every time the suite ran — reachable by anyone who computed the same topic
+    from a uid this repo commits in plain text. Loopback port 1 is refused instantly and
+    reaches no network at all.
+
+    A test that wants a *working* transport injects a fake one; a test that wants to check
+    the default target passes an explicit env mapping to ``from_env`` rather than the
+    process environment. The namespace is set for the same reason: a suite must not derive
+    the topics a real installation derives.
+    """
+    monkeypatch.setenv("STEWARD_NTFY_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("STEWARD_NOTIFY_NAMESPACE", "pytest")
+    monkeypatch.delenv("STEWARD_NTFY_TOKEN", raising=False)
+    monkeypatch.delenv("STEWARD_NTFY_TIMEOUT_S", raising=False)
+    return "http://127.0.0.1:1"
+
+
+@pytest.fixture(autouse=True)
+def isolated_chat(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Point the chat bridge at a bot API that is not there, and give it no bots.
+
+    Autouse and unconditional, exactly like :func:`isolated_notifications` and for a sharper
+    version of its reason: the default target is ``https://api.telegram.org``, a real service
+    on the public internet, and a bridge assembled from the process environment during a test
+    run must not be able to open a long poll against it — or, worse, pick up a token a
+    developer happens to have exported and answer a real person's real message.
+
+    Loopback port 1 is refused instantly and reaches no network at all. Every
+    ``STEWARD_CHAT_TOKEN_*`` in the developer's environment is removed for the same reason,
+    and the operator list with it: a suite must not inherit an identity it did not create. A
+    test that wants a *working* bridge injects a fake transport and passes its own tokens.
+    """
+    monkeypatch.setenv("STEWARD_CHAT_API_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("STEWARD_CHAT_POLL_TIMEOUT_S", "0")
+    monkeypatch.delenv("STEWARD_CHAT_OPERATORS", raising=False)
+    for name in [key for key in os.environ if key.startswith("STEWARD_CHAT_TOKEN_")]:
+        monkeypatch.delenv(name, raising=False)
+    return "http://127.0.0.1:1"
+
+
 type ResidentWriter = Callable[..., Path]
 
 

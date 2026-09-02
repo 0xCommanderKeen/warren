@@ -84,7 +84,18 @@ export function matchRoute(route) {
     if (parts.length === 1) return { page: "budgets", params: {} };
     if (parts.length === 2) return { page: "budgets", params: { id: parts[1] } };
   }
+  if (parts[0] === "diagnostics" && parts.length === 1) {
+    return { page: "diagnostics", params: {} };
+  }
   return { page: "unknown", params: {} };
+}
+
+/** Match an address-bar pathname against the mount this build owns. */
+export function matchPath(pathname, base) {
+  const route = stripBase(pathname, base);
+  return route === null
+    ? { route: null, page: "unknown", params: {} }
+    : { route, ...matchRoute(route) };
 }
 
 /** Route builders, so no page hand-writes a path and forgets to encode a name. */
@@ -107,6 +118,7 @@ export const routeTo = {
   approvals: () => "/approvals",
   board: () => "/board",
   budgets: (id) => (id ? `/budgets/${encodeURIComponent(id)}` : "/budgets"),
+  diagnostics: () => "/diagnostics",
 };
 
 /** The sidebar, in the console's order. `nav` is which entry a page lights up. */
@@ -118,6 +130,10 @@ export const NAV = [
   { index: "05", label: "Board", nav: "board", route: routeTo.board(), pages: ["board"] },
   { index: "06", label: "Skills", nav: "skills", route: routeTo.skills(), pages: ["skills", "skill", "skillNew"] },
   { index: "07", label: "Budgets", nav: "budgets", route: routeTo.budgets(), pages: ["budgets"] },
+  // Last, because it is the only entry that is not a thing you go and do — but in the rail
+  // rather than folded into the fleet, because a knock at a resident's bot is an outsider's
+  // doing and the fleet page is about what the fleet itself is up to (warren#279).
+  { index: "08", label: "Diagnostics", nav: "diagnostics", route: routeTo.diagnostics(), pages: ["diagnostics"] },
 ];
 
 /** Which sidebar entry owns a page, or null when none does (the 404). */

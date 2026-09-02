@@ -77,6 +77,14 @@ def test_finished_and_failed_carry_what_the_issue_asks_for() -> None:
 
 
 def test_the_added_types_are_the_additive_set() -> None:
+    """Adding a type here is half the change: chronicle's gate refuses what it lacks.
+
+    ``chronicle/protocol.py`` validates ``type`` against its own frozenset and 400s
+    anything outside it, so a type this list gains without the same addition there is
+    emitted into steward's local fallback log and never reaches the village. Four types
+    drifted that way before warren#276 noticed. If this assertion is what failed, the
+    sibling gate — and ``chronicle/docs/protocol.md``'s type table — is the other half.
+    """
     assert ev.EVENT_TYPES == (
         "routine_started",
         "routine_finished",
@@ -90,6 +98,7 @@ def test_the_added_types_are_the_additive_set() -> None:
         "needs_human",
         "needs_human_resolved",
         "resident_restarted",
+        "chat_message_dropped",
     )
 
 

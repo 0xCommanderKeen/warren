@@ -13,7 +13,8 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn('python-version: "3.14"', workflow)
         self.assertIn("astral-sh/setup-uv@", workflow)
         self.assertIn("uv sync --frozen", workflow)
-        self.assertIn("uv run sh tests/run.sh", workflow)
+        self.assertIn("- run: sh tests/run.sh", workflow)
+        self.assertNotIn("uv run sh tests/run.sh", workflow)
 
     def test_ci_installs_no_node_toolchain(self):
         """The suite is single-language; a Node step here would be dead weight."""

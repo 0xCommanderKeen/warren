@@ -17,6 +17,23 @@ Steward #4 turns raising a resident into three stages, and this module is all th
     valid, the runner exists, and here is the next fire*, and nothing is written anywhere
     to make that true.
 
+## Two doors onto the same three stages
+
+``steward new-resident`` assembles a resident from flags, and refuses to converge those
+flags onto a manifest a person has since edited — silently overwriting a soul somebody
+wrote is not something a command line should be able to do. That refusal is right, and it
+used to be a dead end: a manifest carrying a route, an app grant, or a ``runner.placement``
+can never match a spec built from flags that do not exist, so the fleet's oldest residents
+had no supported way onto the nursery path at all (warren#270).
+
+:func:`provision_resident` is the other door. It skips declare entirely — the declaration
+is already there, written by a person and committed — and runs provision and register
+against ``residents/<id>/manifest.yaml`` as the source of truth. It is
+``steward retire <id>``'s exact counterpart: same argument, same source of truth, opposite
+direction. Nothing is written into the repo, so nothing is committed and there is no
+dirty-worktree refusal to make; a declaration whose bytes are in no commit is named in a
+warning instead, because provision does not own that commit and cannot make it.
+
 ## Two callers, one difference
 
 ``steward new-resident`` commits; ``POST /residents`` does not, ever, even with
@@ -51,7 +68,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import yaml
@@ -88,6 +105,7 @@ from steward.manifest import (
     Route,
     Runner,
     SkillGrant,
+    SkillGrantInput,
     SoulDocument,
     SoulIdentity,
     ToolGrant,
@@ -104,7 +122,7 @@ from steward.scheduler import (
     default_state_path,
     next_fire_after,
 )
-from steward.skills import library_for
+from steward.skills import library_for, redundant_grants
 
 __all__ = [
     "CommitIdentity",
@@ -117,6 +135,7 @@ __all__ = [
     "RegisterStage",
     "RetireReport",
     "declare_resident",
+    "provision_resident",
     "raise_resident",
     "retire_resident",
 ]
@@ -175,7 +194,13 @@ class NewResident(BaseModel):
     agent_id: str | None = Field(default=None, description="Burrow identity; derived if absent.")
     project: str | None = Field(default=None, description="Project label, for a scoped soul.")
     summary: str | None = Field(default=None, description="One line burrow can display.")
-    skills: list[SkillGrant] = Field(default_factory=list, description="Granted capabilities.")
+    # ``SkillGrantInput``, not ``SkillGrant``, for the same reason ``Resident.skills``
+    # uses it: the bare-string spelling (`"daily-summary"`) is half of this field's
+    # public grammar, and only the annotated input type puts it in the JSON Schema.
+    # With the plain model the exported document said this had to be an object while
+    # the API happily took a list of names — and townhall's nursery form sends names
+    # (warren#321).
+    skills: list[SkillGrantInput] = Field(default_factory=list, description="Granted capabilities.")
     memory: Memory | None = Field(default=None, description="Memory location; derived if absent.")
     routes: list[Route] = Field(default_factory=list, description="Declared inbound channels.")
     app_grants: list[AppGrant] = Field(default_factory=list, description="Declared app access.")
@@ -361,6 +386,16 @@ def _git(repo: Path, *args: str, git: PipedRun = run_argv) -> CommandOutcome:
     return git(["git", "-C", str(repo), *args])
 
 
+def _dirty_names(status: CommandOutcome) -> list[str]:
+    """Return the path half of each ``git status --porcelain`` line, in git's own order.
+
+    One place knows that porcelain puts two status letters and a space before the path, so
+    the whole-worktree refusal and the one-resident warning cannot come to disagree about
+    where a path starts.
+    """
+    return [line[3:] for line in status.stdout.splitlines() if line.strip()]
+
+
 def worktree_complaint(repo: Path, *, git: PipedRun = run_argv) -> str | None:
     """Return why this worktree is not safe to commit into, or ``None``.
 
@@ -380,10 +415,10 @@ def worktree_complaint(repo: Path, *, git: PipedRun = run_argv) -> str | None:
     status = _git(repo, "status", "--porcelain", git=git)
     if not status.ok:
         return f"git could not read the worktree at {repo}: {status.summary()}"
-    dirty = [line for line in status.stdout.splitlines() if line.strip()]
+    dirty = _dirty_names(status)
     if not dirty:
         return None
-    shown = ", ".join(line[3:] for line in dirty[:DIRTY_SHOWN])
+    shown = ", ".join(dirty[:DIRTY_SHOWN])
     more = f" (+{len(dirty) - DIRTY_SHOWN} more)" if len(dirty) > DIRTY_SHOWN else ""
     return (
         f"the worktree at {repo} has uncommitted changes ({shown}{more}); commit or stash "
@@ -464,7 +499,7 @@ RETIRED_NOTE = """
 # would be a village that cannot answer what it used to do. A retired resident is
 # excluded from the scheduler, the board, delegation, and run-now — and keeps
 # validating, so `steward validate` still reads it. Set this to false and commit to
-# bring it back; `steward new-resident` puts its container up again.
+# bring it back; `steward provision <id>` puts its container up again.
 retired: true
 """
 
@@ -591,6 +626,16 @@ class NurseryReport:
     register: RegisterStage | None = None
     dry_run: bool = False
     warnings: tuple[str, ...] = ()
+    #: Which door this run came through. The stages are the same either way — this only
+    #: decides whether the report says *raised* or *provisioned*, and a command called
+    #: `provision` that announced a resident "raised" would be describing a declare stage
+    #: that did not happen.
+    act: Literal["raise", "provision"] = "raise"
+
+    @property
+    def verb(self) -> str:
+        """Return the past tense of what this run did, for the line a human reads first."""
+        return "raised" if self.act == "raise" else "provisioned"
 
     @property
     def changed(self) -> bool:
@@ -605,6 +650,7 @@ class NurseryReport:
             "resident": self.resident_id,
             "dry_run": self.dry_run,
             "changed": self.changed,
+            "act": self.act,
             "declare": self.declare.to_dict(),
             "provision": self.provision.to_dict() if self.provision else None,
             "register": self.register.to_dict() if self.register else None,
@@ -613,7 +659,7 @@ class NurseryReport:
 
     def render(self) -> list[str]:
         """Render the plan (or the result) as lines a human reads top to bottom."""
-        head = "plan for" if self.dry_run else "raised"
+        head = "plan for" if self.dry_run else self.verb
         lines = [f"{head} {self.resident_id}", ""]
         lines += ["declare", f"  {self.declare.manifest_path}", f"  {self.declare.soul_path}"]
         if self.declare.commit:
@@ -751,15 +797,141 @@ def _pending_resident(spec: NewResident, residents_dir: Path) -> Resident:
     )
 
 
-def _load_or_refuse(manifest_path: Path, skills_dir: Path | str | None) -> Resident:
-    """Load a resident through the ordinary validator, or refuse with its diagnostics."""
+def _load_or_refuse(
+    manifest_path: Path, skills_dir: Path | str | None, *, reason: str | None = None
+) -> Resident:
+    """Load a resident through the ordinary validator, or refuse with its diagnostics.
+
+    ``reason`` is opt-in and defaults to unset, because the callers that had this refusal
+    before this parameter existed answer it in prose and would change their error codes if
+    it started arriving named. The provision path asks for a name because its API twin maps
+    the reason to a status and must not have to guess one.
+    """
     try:
         return load_manifest(manifest_path, skills_dir)
     except ManifestError as exc:
         raise NurseryError(
             f"{manifest_path} does not validate, so steward will not deploy from it: {exc}",
             exc.diagnostics,
+            reason=reason,
         ) from exc
+
+
+def _declared_manifest(residents_dir: Path, resident_id: str) -> Path:
+    """Return the path of a declared manifest, or refuse naming the id you probably meant.
+
+    Shared by the two commands that take an id rather than a description —
+    ``steward provision`` and ``steward retire`` — so a typo gets the same answer whichever
+    direction you were going.
+    """
+    manifest_path = residents_dir / resident_id / MANIFEST_FILENAME
+    if manifest_path.is_file():
+        return manifest_path
+    names = [path.name for path in residents_dir.iterdir() if path.is_dir()]
+    known = ", ".join(sorted(names)) or "none"
+    close = closest_match(resident_id, names)
+    hint = f" — did you mean {close!r}?" if close else ""
+    raise NurseryError(
+        f"no resident {resident_id!r} under {residents_dir}{hint} (residents: {known})",
+        reason="unknown_resident",
+    )
+
+
+def _refuse_retired_resident(resident: Resident) -> None:
+    """Refuse to build a container for a resident the manifest says has stopped.
+
+    Both doors, one refusal: coming back is a person's decision written into the file and
+    committed, and neither a command line full of flags nor an id on its own is that
+    person saying so.
+    """
+    if not resident.retired:
+        return
+    raise NurseryError(
+        f"resident {resident.id!r} is retired; set retired: false in {resident.path} and "
+        f"commit that decision before raising it again — un-retiring a resident is "
+        f"something a person should have said out loud in git",
+        reason="resident_retired",
+    )
+
+
+def _uncommitted_complaint(
+    repo: Path, paths: Sequence[Path], *, git: PipedRun = run_argv
+) -> str | None:
+    """Name this resident's files that are in no commit, or ``None`` when they all are.
+
+    A warning and never a refusal, because provision does not write the declaration and
+    so cannot commit it either — refusing would leave the operator with a command that
+    tells them to go and do something it will not do for them. What it can do is refuse to
+    ship in silence: a container built from bytes that are in no commit is a container
+    nobody can turn back into a diff.
+
+    Scoped to this resident's own files, not the whole worktree: ``new-resident`` refuses
+    on a dirty tree because its own commit is what a failed deploy leaves to revert, and
+    there is no such commit here — somebody else's half-finished afternoon is none of
+    provision's business. A tree with no git behind it says nothing at all: that is a
+    deployment topology, not a mistake.
+    """
+    inside = _git(repo, "rev-parse", "--is-inside-work-tree", git=git)
+    if not inside.ok:
+        return None
+    try:
+        relative = [str(path.resolve().relative_to(repo.resolve())) for path in paths]
+    except ValueError:
+        # ``--repo`` names a checkout the residents tree is not inside. Not a crash and not
+        # a silence: git genuinely cannot answer the question, and which checkout the
+        # declaration belongs to is the thing the operator got wrong.
+        return (
+            f"{paths[0]} is not inside the checkout at {repo}, so steward cannot tell "
+            f"whether this declaration is committed; point --repo at the checkout the "
+            f"residents tree lives in"
+        )
+    status = _git(repo, "status", "--porcelain", "--", *relative, git=git)
+    if not status.ok:
+        return None
+    dirty = sorted({name.strip() for name in _dirty_names(status)})
+    if not dirty:
+        return None
+    return (
+        f"{', '.join(dirty)} is not committed, so this container is built from bytes that "
+        f"are in no commit; commit the declaration so the running resident can be turned "
+        f"back into a diff"
+    )
+
+
+def _redundant_grants_warning(
+    grants: Sequence[SkillGrant], residents_dir: Path, skills_dir: Path | str | None
+) -> str | None:
+    """Name the granted skills every resident already holds, or ``None``.
+
+    Not a refusal: the effective set is the same either way, and the resident is perfectly
+    valid. But a grant that adds nothing is a line somebody wrote believing it did
+    something, and the moment it can be said usefully is the one where they are declaring
+    or deploying it (warren#90).
+    """
+    already_held = redundant_grants(
+        [grant.id for grant in grants], library_for(residents_dir, skills_dir)
+    )
+    if not already_held:
+        return None
+    return (
+        f"already in the default set every resident holds, so granting them adds "
+        f"nothing: {', '.join(already_held)}"
+    )
+
+
+def _no_village_warning(source: Mapping[str, str]) -> str | None:
+    """Say that a real run would refuse for want of a village address, or ``None``.
+
+    A rehearsal still prints the whole plan (#84); it just says out loud that the real run
+    stops here, because a container with nowhere to emit is a resident that never appears
+    in the village at all.
+    """
+    if (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip():
+        return None
+    return (
+        f"{CHRONICLE_URL_ENV} is unset, so a real run would refuse to deploy a resident "
+        f"with nowhere to emit; export {CHRONICLE_URL_ENV} before running this for real"
+    )
 
 
 def _spec_differences(wanted: ResidentManifest, existing: ResidentManifest) -> list[str]:
@@ -797,20 +969,20 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
 
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
-        if existing.retired:
-            raise NurseryError(
-                f"resident {spec.id!r} is retired; set retired: false in {manifest_path} and "
-                f"commit that decision before raising it again — un-retiring a resident is "
-                f"something a person should have said out loud in git",
-                reason="resident_retired",
-            )
+        _refuse_retired_resident(existing)
         differences = _spec_differences(wanted, existing.manifest)
         if differences:
+            # Named, and then pointed somewhere. The refusal is right — a command line must
+            # not overwrite a soul somebody wrote — but on its own it was a dead end for
+            # every manifest carrying a field no flag can say (warren#270), so it names the
+            # door that does work.
             raise NurseryError(
                 f"resident {spec.id!r} already exists at {directory} and its "
                 f"{', '.join(differences)} do not match what you asked for; edit "
                 f"{manifest_path} and commit, rather than having a command line overwrite "
-                f"a soul somebody wrote"
+                f"a soul somebody wrote — then provisioning from the declaration itself "
+                f"(`steward provision {spec.id}`, or POST /residents/{spec.id}/provision) "
+                f"builds the manifest you wrote, exactly as it stands"
             )
         stage = DeclareStage(
             resident_id=spec.id,
@@ -1007,14 +1179,14 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
         elif complaint:
             warnings.append(complaint)
 
-    village_url = (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip()
-    if provision and dry_run and not village_url:
-        # The rehearsal still prints the whole plan (#84); it just says out loud that the
-        # real run would refuse until the village address is exported.
-        warnings.append(
-            f"{CHRONICLE_URL_ENV} is unset, so a real run would refuse to deploy a resident "
-            f"with nowhere to emit; export {CHRONICLE_URL_ENV} before running this for real"
+    warnings += [
+        warning
+        for warning in (
+            _redundant_grants_warning(spec.skills, root, skills_dir),
+            _no_village_warning(source) if provision and dry_run else None,
         )
+        if warning
+    ]
 
     stage, resident = _declare(
         spec,
@@ -1038,6 +1210,75 @@ def raise_resident(  # noqa: PLR0913 — every knob is keyword-only and independ
         register=registered,
         dry_run=dry_run,
         warnings=tuple(warnings),
+    )
+
+
+def provision_resident(  # noqa: PLR0913 — every knob is keyword-only and independently useful
+    resident_id: str,
+    *,
+    residents_dir: Path | str,
+    repo: Path | str | None = None,
+    transport: Transport | None = None,
+    env: Mapping[str, str] | None = None,
+    skills_dir: Path | str | None = None,
+    dry_run: bool = False,
+    git: PipedRun = run_argv,
+    now: datetime | None = None,
+) -> NurseryReport:
+    """Build a resident from the manifest a person wrote, and check it is schedulable.
+
+    The declare stage is *already done* — that is the whole difference. ``new-resident``
+    assembles a manifest from flags and refuses to converge them onto a file somebody has
+    since edited; this reads ``residents/<id>/manifest.yaml`` as the source of truth and
+    runs the other two stages against it, so a route, an app grant or a
+    ``runner.placement`` — none of which any flag can say — is deployed exactly as
+    declared rather than being the reason a deploy is impossible (warren#270).
+
+    It writes nothing into the repo, which is why there is no ``commit`` and no
+    ``--allow-dirty`` here: there is no commit for a failed deploy to leave behind, so
+    there is nothing for a dirty-worktree refusal to protect. A declaration whose bytes are
+    in no commit is a *warning* naming the files, because that is the honest thing a
+    command which does not own the commit can say.
+
+    Returns the same :class:`NurseryReport` ``raise_resident`` returns, with the declare
+    stage reporting what it found rather than what it wrote — so ``--dry-run``,
+    ``--format json`` and every reader of the report see one shape from both doors.
+    """
+    root = Path(residents_dir)
+    checkout = Path(repo) if repo is not None else root.parent
+    moment = now or datetime.now(UTC)
+    source = env if env is not None else os.environ
+
+    manifest_path = _declared_manifest(root, resident_id)
+    resident = _load_or_refuse(manifest_path, skills_dir, reason="declaration_invalid")
+    _refuse_retired_resident(resident)
+    soul_path = resident.directory / resident.manifest.soul.file
+
+    warnings = [
+        warning
+        for warning in (
+            _uncommitted_complaint(checkout, [manifest_path, soul_path], git=git),
+            _redundant_grants_warning(resident.manifest.skills, root, skills_dir),
+            _no_village_warning(source) if dry_run else None,
+        )
+        if warning
+    ]
+
+    stage = DeclareStage(
+        resident_id=resident.id,
+        manifest_path=manifest_path,
+        soul_path=soul_path,
+        written=False,
+        note="already declared; provisioned from the manifest itself",
+    )
+    return NurseryReport(
+        resident_id=resident.id,
+        declare=stage,
+        provision=_provision(resident, transport=transport, env=source, dry_run=dry_run),
+        register=_register(resident, residents_dir=root, skills_dir=skills_dir, now=moment),
+        dry_run=dry_run,
+        warnings=tuple(warnings),
+        act="provision",
     )
 
 
@@ -1176,13 +1417,7 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     """
     root = Path(residents_dir)
     checkout = Path(repo) if repo is not None else root.parent
-    manifest_path = root / resident_id / MANIFEST_FILENAME
-    if not manifest_path.is_file():
-        known = ", ".join(sorted(p.name for p in root.iterdir() if p.is_dir())) or "none"
-        close = closest_match(resident_id, [p.name for p in root.iterdir() if p.is_dir()])
-        hint = f" — did you mean {close!r}?" if close else ""
-        raise NurseryError(f"no resident {resident_id!r} under {root}{hint} (residents: {known})")
-
+    manifest_path = _declared_manifest(root, resident_id)
     resident = _load_or_refuse(manifest_path, skills_dir)
     target = target_for(resident.manifest)
     conveyance = transport if transport is not None else transport_for(target)

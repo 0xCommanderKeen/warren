@@ -8,11 +8,19 @@ on:
       # Townhall's transport tests read Chronicle's fixture in-tree rather than
       # vendoring it, so a change to that fixture must run this suite.
       - "chronicle/tests/fixtures/state-contract/**"
+      # And its dev proxy is checked against Steward's own route decorators, so a
+      # route added there must run this suite too (warren#242).
+      - "steward/src/steward/api.py"
+      # The shape half of the same seam: the client is checked against Steward's
+      # committed OpenAPI document, read in-tree (warren#321).
+      - "steward/docs/openapi.json"
       - ".github/workflows/townhall.yml"
   pull_request:
     paths:
       - "townhall/**"
       - "chronicle/tests/fixtures/state-contract/**"
+      - "steward/src/steward/api.py"
+      - "steward/docs/openapi.json"
       - ".github/workflows/townhall.yml"
 
 concurrency:
@@ -27,11 +35,11 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.22.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.22.0"
           cache: pnpm

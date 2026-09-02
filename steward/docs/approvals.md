@@ -276,6 +276,14 @@ The guard only answers for actions a *session chose*, and two kinds of knock are
 renders and ntfy forwards; everything else is additive, so a consumer that only knows the
 old bare form keeps working.
 
+Steward now has its own way to reach a phone as well, and it is a different road: a resident
+that declares [`notifications`](manifest.md#notifications--where-this-residents-outbound-taps-go)
+is tapped over ntfy directly by steward, at its own derived per-resident topic, on the
+applied branch of the raise. That is one-way and fires no session — see the manifest
+reference. It is not a replacement for chronicle's `CHRONICLE_NOTIFY_URL` forwarder and not
+coordinated with it: a fleet with both configured gets two pushes for one knock, which is a
+choice an operator makes by configuring both.
+
 ```json
 {
   "type": "needs_human",

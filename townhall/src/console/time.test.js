@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bySoonest, expired, instant, isTime, soonest, span, stamp, words } from "./time.js";
+import { byLatest, bySoonest, expired, instant, isTime, soonest, span, stamp, words } from "./time.js";
 
 /* The steward console's audit found two bugs that live in exactly these functions, so they
  * are tested as functions rather than looked for on a screen. */
@@ -28,6 +28,15 @@ describe("ordering by instant, not by text (#155)", () => {
   it("sorts a row whose time cannot be parsed last rather than first", () => {
     const rows = [{ id: "broken", at: "soon" }, { id: "real", at: ljubljana }];
     expect(soonest(rows, (row) => row.at).id).toBe("real");
+  });
+
+  it("orders newest first without putting a broken clock at the top", () => {
+    // The mirror of the rule above, for a ledger read newest-first (warren#279's
+    // diagnostics). `bySoonest` reversed would answer "most recent" with the unreadable row.
+    expect(byLatest(chicago, ljubljana)).toBeLessThan(0);
+    expect(byLatest("soon", ljubljana)).toBeGreaterThan(0);
+    expect(byLatest(ljubljana, "soon")).toBeLessThan(0);
+    expect(byLatest("soon", null)).toBe(0);
   });
 
   it("answers nothing when no row names a time at all", () => {

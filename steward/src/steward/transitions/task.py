@@ -227,6 +227,14 @@ class TaskTransitions:
         ``run_id`` names *this attempt's* run registry row rather than the task, because a
         task claimed, dropped on a dead lease and claimed again is two sessions and the
         watchdog has to be able to tell their closes apart (steward #39).
+
+        **No notification is sent from here** (warren#114), and a second caller of this method
+        has to know that. A close is *announced* by its caller, not by this seam: the board's
+        watched path publishes the durable terminal a run claimed, which is why it passes
+        ``announce=False``, and :meth:`steward.board.Dispatcher._finish` taps after whichever
+        of the two publication paths carried the fact. A new closer that wants a resident's
+        declared ``task_done`` tap to fire has to call
+        :meth:`steward.notify.Notifier.tap` alongside its own announcement.
         """
         status = STATUS_DONE if result.ok else STATUS_FAILED
         reason = None if result.ok else f"{result.outcome}: {result.summary()}"

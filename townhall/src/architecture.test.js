@@ -6,13 +6,13 @@ const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
 /** Every page component in the tree. Adding a page means adding it here. */
 const PAGES = [
   "FleetPage", "ResidentsPage", "ResidentDetail", "ResidentNew", "RoutinesPage",
-  "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage",
+  "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage", "DiagnosticsPage",
 ];
 
 /** The ones the shell itself dispatches. ResidentsPage owns its own two sub-pages. */
 const MOUNTED = [
   "FleetPage", "ResidentsPage", "RoutinesPage", "ApprovalsPage", "BoardPage", "SkillsPage",
-  "BudgetsPage",
+  "BudgetsPage", "DiagnosticsPage",
 ];
 
 describe("frontend foundation", () => {
@@ -28,6 +28,16 @@ describe("frontend foundation", () => {
 
     expect(seam).toContain("../../../chronicle/tests/fixtures/state-contract/complete-v1.json");
     expect(existsSync(new URL("./fixtures/complete-v1.json", import.meta.url))).toBe(false);
+  });
+
+  it("reads Steward's OpenAPI document in-tree rather than vendoring a copy", () => {
+    // warren#321, and the same rule as Chronicle's fixture above: Steward commits the
+    // document `make openapi-write` exports, and this tree reads that file three
+    // directories away. A copy here would be a contract that goes stale in silence.
+    const seam = read("./steward/contract.test.js");
+
+    expect(seam).toContain("../../../steward/docs/openapi.json");
+    expect(existsSync(new URL("./steward/openapi.json", import.meta.url))).toBe(false);
   });
 });
 
@@ -83,7 +93,7 @@ describe("the console shell", () => {
     // The bug arcadia/docs/deployment.md named: under /observatory/ a deep link matched
     // nothing, because the router treated the mount prefix as part of the route.
     const navigation = read("./navigation.jsx");
-    expect(navigation).toContain("stripBase");
+    expect(navigation).toContain("matchPath");
     expect(read("./App.jsx")).toContain("import.meta.env.BASE_URL");
 
     for (const page of PAGES) {
@@ -117,6 +127,43 @@ const functionBody = (source, name) => {
   expect(start, `no function ${name} to read`).toBeGreaterThan(-1);
   return source.slice(start, source.indexOf("\n}", start));
 };
+
+describe("the dev proxy is the deployed origin's route table", () => {
+  // warren#242: `vite.config.js` and `arcadia/deploy/nginx.conf` carry the same list of
+  // Steward paths, one for `pnpm dev` and one for the NAS. A path in one and not the other
+  // is a page that works in dev and serves the village's index.html deployed, or the
+  // reverse — which is how `/tasks/{id}/lineage` and `POST /delegate` were absent from both
+  // and nothing said so. Both are checked against Steward itself rather than each other.
+  // `.github/workflows/townhall.yml` lists `api.py` among this suite's paths.
+
+  /** Steward's top-level route segments, from the `@app` decorators that declare them. */
+  const stewardApiRoutes = () => {
+    const api = read("../../steward/src/steward/api.py");
+    const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
+    expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+    return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
+  };
+
+  it("proxies every top-level Steward route to Steward", () => {
+    const config = read("../vite.config.js");
+    const list = config.slice(
+      config.indexOf("...Object.fromEntries("),
+      config.indexOf("].map("),
+    );
+    expect(list, "no proxy path list to read").toContain("/residents");
+
+    const proxied = [...list.matchAll(/"\/([a-z]+)"/g)].map((match) => match[1]).sort();
+    expect(proxied).toEqual(stewardApiRoutes());
+  });
+
+  it("sends Chronicle's snapshot somewhere else entirely", () => {
+    // The one path in this proxy that is not Steward's, and the reason the list above is
+    // read from its own block rather than from every quoted path in the file.
+    const config = read("../vite.config.js");
+    expect(config).toContain('"/state"');
+    expect(stewardApiRoutes()).not.toContain("state");
+  });
+});
 
 describe("the origin overrides are a development convenience, enforced as one", () => {
   // warren#241: `?steward=` and `?backend=` were honest-system dev conveniences that the
