@@ -172,22 +172,12 @@ budgets:
 #                                 memory/ and claude/ — every byte of it written by steward.
 #
 # So this is a migration with a cutover, and the cutover is a person's job: get the image
-# onto the NAS (`make image-ship`), put the bundle in place, `docker exec
-# steward-life-agent claude` once to log the brain into the ./claude volume, copy whatever
-# journal entries the old deployment holds into ~/docker/steward-life-agent/memory/journal
-# (a resident that wakes up without them wakes up amnesiac), then stop the old container.
-# The two must never run at once — both emit under `claude-code:life-agent`, and the
-# village would show one villager doing two things.
-#
-# "Put the bundle in place" is deliberately vague, because steward cannot do it today and
-# saying otherwise would be the tidier lie this file keeps refusing to tell. `steward
-# new-resident` is the only provision path there is, and it refuses to converge onto a
-# manifest a person wrote: measured, with Hob's own identity flags, it answers *its skills,
-# routes, app_grants, runner do not match what you asked for*, because those four have no
-# command-line spelling. That refusal is right for what it was built to protect and it
-# leaves the fleet's oldest resident with no supported way onto the nursery path. Closing
-# that gap — a provision stage that reads the declared manifest instead of a spec — is
-# steward #270, and it is the other half of this cutover.
+# onto the NAS (`make image-ship`), copy the old deployment's journal entries aside, stop
+# the old container, run `steward provision life-agent`, restore those entries into
+# ~/docker/steward-life-agent/memory/journal, then `docker exec steward-life-agent claude`
+# once to log the brain into the ./claude volume. Expect brief downtime: the two containers
+# must never run at once because both emit under `claude-code:life-agent`, which would make
+# the village show one villager doing two things.
 #
 # `image` is the image this repo builds and ships (`make image`, `make image-ship`): the
 # claude CLI pinned by build arg plus chronicle's vendored hook emitter, so a session opens

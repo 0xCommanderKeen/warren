@@ -52,7 +52,7 @@ locally placed, so today the rule binds it only by way of the database it shares
 
 Run the watchdog somewhere else and nothing errors. That is the problem.
 
-`docker inspect steward-life-agent` on a machine that has never held that container exits
+`docker inspect life-agent` on a machine that has never held that container exits
 non-zero, and `DockerSupervisor.health` correctly refuses to guess: it returns
 `known=False` with `docker could not answer`. The watchdog then reports the resident as
 **unsupervised** and does not restart it — which is right, given what it was able to see,
@@ -103,33 +103,23 @@ declares a `deploy.container` — a fleet of locally-placed residents never wait
 it does not need:
 
 ```console
-$ STEWARD_BURROW=dxp2800 steward watchdog tick    # on the NAS
-topology: docker at dxp2800's own docker answers as DXP2800-2B60 27.3.1
-life-agent: container steward-life-agent on dxp2800 — supervised from here
+$ steward watchdog tick              # on the NAS
+topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
+life-agent: container life-agent on dxp2800 — supervised from here
 
 $ steward watchdog tick              # on a laptop (real output)
 topology: docker at Mihas-MacBook-Pro.local's own docker answers as docker-desktop 27.3.1
-life-agent: container steward-life-agent runs on dxp2800, but this process supervises
-  through Mihas-MacBook-Pro.local's own docker — the watchdog cannot see it. Run steward's
-  daemons on dxp2800 (the intended topology, docs/topology.md), or point DOCKER_HOST at
-  that machine's docker
+life-agent: container life-agent runs on dxp2800, but this process supervises through
+  Mihas-MacBook-Pro.local's own docker — the watchdog cannot see it. Run steward's daemons
+  on dxp2800 (the intended topology, docs/topology.md), or point DOCKER_HOST at that
+  machine's docker
 life-agent: unsupervised — steward's own state shows nothing stuck, which is not the same
-  as up; docker could not answer for 'steward-life-agent': exit status 1
+  as up; docker could not answer for 'life-agent': exit status 1
 nothing to intervene in
 ```
 
 The third line is what the watchdog said before this change, on its own. The two above it
 are why.
-
-**`STEWARD_BURROW=dxp2800` is not decoration in the first command.** Measured: the NAS's
-docker daemon names *itself* `DXP2800-2B60` — the UGOS appliance's own name for the box,
-not the tailnet name every manifest calls it by. So the first of the three signals below
-misses. `DOCKER_HOST` is unset there, so the answer falls through to what this burrow is
-called, and the only name steward has for it then is the hostname — which nobody here has
-checked answers to `dxp2800`. Declaring it costs one export and settles the question;
-leaving it undeclared bets that the hostname happens to match, and losing that bet is a
-watchdog on the right machine reporting every container it *is* supervising as running
-somewhere it cannot see. Export it wherever steward's daemons are started on the NAS.
 
 Three things decide "is this container's host the machine I am on", and each is consulted
 only because the one above it could not answer:
@@ -168,16 +158,10 @@ docker fixes it.
 
 The severities differ on purpose:
 
-- **`steward doctor` warns about *this line*, and exits 0 for it.** Doctor is routinely run
-  on a laptop while the daemons live on the NAS, and a container this host cannot see is not
-  a broken fleet — it is a report being run from somewhere other than the burrow. Same
-  judgement `_report_scheduler` already makes about a state file this host cannot see. It is
-  only the topology line that is forgiving, though: a **container-placed** resident is
-  checked by `check_runner`, which probes the container itself, and that complaint *is*
-  counted — so a fleet with one container-placed resident (today, Hob) makes `steward
-  doctor` exit 1 off the burrow. Two different questions, deliberately answered with
-  different severities: *can this process supervise that container* is a fact about where
-  you are standing; *can this resident's sessions happen at all* is a fact about the fleet.
+- **`steward doctor` warns, and still exits 0.** Doctor is routinely run on a laptop while
+  the daemons live on the NAS, and a container this host cannot see is not a broken fleet —
+  it is a report being run from somewhere other than the burrow. Same judgement
+  `_report_scheduler` already makes about a state file this host cannot see.
 - **`steward watchdog` says it in red, at startup, before its first pass.** That process
   *is* the supervisor: a container it cannot reach is not a diagnostic, it is its own
   defect. It does not refuse to start — two thirds of a pass need no docker, and stopping

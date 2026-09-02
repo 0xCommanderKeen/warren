@@ -3,7 +3,6 @@
 from conftest import REPO_ROOT, RESIDENTS_DIR
 from steward import journal
 from steward import manifest as m
-from steward.deploy import target_for
 from steward.skills import default_skills, effective_names, load_library, missing_skills
 
 
@@ -86,25 +85,15 @@ def test_every_shipped_resident_declares_a_daily_cost_cap() -> None:
         )
 
 
-def test_maren_stays_on_the_control_plane_and_declares_no_container() -> None:
-    """The other half of steward #40's deploy decision, and it is a decision (not a gap).
+def test_the_operator_placed_residents_use_the_one_container_shape() -> None:
+    """Issue #40/#332: the two operator proposals have the same declared shape."""
+    residents = {resident.id: resident for resident in m.validate_tree(RESIDENTS_DIR).residents}
 
-    Hob was cut over to a container; Maren deliberately was not. Steward launches nothing
-    for her — no routines, no board claim, no route that accepts delegated work — so a
-    placement would relocate an empty set, and a *declared* `deploy.container` is exactly
-    what `topology.supervises` and `DockerSupervisor.owns` read as a promise that a
-    container exists. Her manifest carries the reasoning; this pins the shape of it.
-    """
-    maren = m.load_manifest(RESIDENTS_DIR / "burrow-builder" / "manifest.yaml")
-
-    assert maren.manifest.runner.placement == "local"
-    assert maren.manifest.deploy.container is None
-    assert maren.manifest.routines == []
-    assert maren.manifest.board.claim is False
-    assert maren.delegation_routes == ()
-    # The address the nursery would use if she were ever provisioned, which is precisely
-    # why writing it into the manifest would have added nothing.
-    assert target_for(maren.manifest).container == "steward-burrow-builder"
+    for resident_id in ("life-agent", "pip"):
+        manifest = residents[resident_id].manifest
+        assert manifest.runner.placement == "container"
+        assert manifest.deploy.host == "dxp2800"
+        assert manifest.deploy.container is not None
 
 
 def test_shipped_souls_have_voices_within_the_cap() -> None:

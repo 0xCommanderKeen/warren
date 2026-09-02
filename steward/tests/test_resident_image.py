@@ -409,9 +409,8 @@ def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
     the container Hob had been running in since before steward existed (#52). These values
     are the other kind of true: they are what the nursery resolves for this resident, and
     the only address a container-placed resident can have. Merging the manifest is the
-    operator's half of the cutover; putting the bundle on the NAS is the rest, and steward
-    has no command for that half yet (`new-resident` refuses to converge onto a manifest a
-    person wrote — steward #270).
+    operator's half of the cutover; `steward provision life-agent` puts the reviewed bundle
+    on the NAS.
     """
     hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
     deploy = hob.manifest.deploy
@@ -445,3 +444,20 @@ def test_life_agent_runs_its_sessions_inside_that_container() -> None:
     host_side, container_side = memory_mount(hob.manifest)
     assert host_side == "~/docker/steward-life-agent/memory"
     assert container_side == "/data/residents/life-agent/memory"
+
+
+def test_pip_renders_the_nursery_container_and_memory_mount() -> None:
+    """Issue #40/#332: Pip is the second explicit operator placement proposal."""
+    pip = load_manifest(REPO_ROOT / "residents" / "pip" / "manifest.yaml")
+    target = target_for(pip.manifest)
+    service = yaml.safe_load(render_compose(pip, target))["services"]["pip"]
+
+    assert target.container == "steward-pip"
+    assert target.path == "~/docker/steward-pip"
+    assert service["container_name"] == "steward-pip"
+    assert service["image"] == DEFAULT_IMAGE
+    assert service["command"] == ["sleep", "infinity"]
+    assert memory_mount(pip.manifest) == (
+        "~/docker/steward-pip/memory",
+        "/data/residents/pip/memory",
+    )
