@@ -58,10 +58,23 @@ tools: unrestricted
 runner:
   kind: claude
   model: claude-haiku-4-5-20251001
+  # Pip is the fleet canary for the same nursery path every resident uses. Sessions run
+  # inside Pip's own container, not inside steward's scheduler container (#40, #332).
+  placement: container
 
 budgets:
   daily_cost_usd: 2.0
   max_run_seconds: 120
+
+# Explicit because this address is the operator decision in #40. These are the nursery
+# defaults, written out so merging the proposal pins Pip to dxp2800 beside Hob rather than
+# asking a reader to derive where the canary runs.
+deploy:
+  host: dxp2800
+  user: Miha
+  path: ~/docker/steward-pip
+  container: steward-pip
+  image: steward-resident:latest
 
 routines:
   - id: heartbeat

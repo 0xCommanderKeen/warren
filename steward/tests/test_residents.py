@@ -85,6 +85,17 @@ def test_every_shipped_resident_declares_a_daily_cost_cap() -> None:
         )
 
 
+def test_the_operator_placed_residents_use_the_one_container_shape() -> None:
+    """Issue #40/#332: the two operator proposals have the same declared shape."""
+    residents = {resident.id: resident for resident in m.validate_tree(RESIDENTS_DIR).residents}
+
+    for resident_id in ("life-agent", "pip"):
+        manifest = residents[resident_id].manifest
+        assert manifest.runner.placement == "container"
+        assert manifest.deploy.host == "dxp2800"
+        assert manifest.deploy.container is not None
+
+
 def test_shipped_souls_have_voices_within_the_cap() -> None:
     for resident in m.validate_tree(RESIDENTS_DIR).residents:
         assert resident.soul.voice, f"{resident.id} has no ## Voice section"

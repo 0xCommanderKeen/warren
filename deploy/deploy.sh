@@ -338,12 +338,12 @@ deploy_steward() {
     # two reads — what must never be true is that history went backwards.
     $SSH "$NAS" "cd ~/docker/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
         || die "the residents checkout no longer contains $CHECKOUT_HEAD, which it held before this deploy: a declaration written earlier may be gone — stop and look before deploying again"
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T scheduler test -f /sched/residents/pip/manifest.yaml' >/dev/null 2>&1 \
-        || die "the scheduler's tree does not reach pip's manifest in the checkout"
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T scheduler test -f /checkout/steward/residents/pip/manifest.yaml' >/dev/null 2>&1 \
+        || die "the scheduler's read-only mount of the checkout does not reach pip's manifest"
     log "steward: doctor"
     # In the watchdog's container, against the tree the daemons actually run: that is the
     # process with the docker socket, so its topology line is the true one.
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /sched/residents' 2>&1 | head -40 || true
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /checkout/steward/residents' 2>&1 | head -40 || true
     stamp steward steward
     log "steward: $SHORT is live"
 }

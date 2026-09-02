@@ -49,7 +49,8 @@ and writes — a **git checkout on the burrow**: `~/docker/steward/residents-rep
 sparse, blobless clone of this repository holding `steward/residents` and
 `steward/skills`, on a branch of its own, `burrow/residents`. The compose file mounts it
 at `/checkout`, read-write into the API and read-only into the scheduler and watchdog,
-whose own tree is a symlink farm into it. That is warren#351: without a checkout every
+which read the same tree (partitioned by `deploy.host`, warren#344) rather than a copy
+taken at container start. That is warren#351: without a checkout every
 write from townhall was a `409`, and with the tree in the image a write would have died
 on the next deploy, exactly as chronicle's event log did in warren#313.
 

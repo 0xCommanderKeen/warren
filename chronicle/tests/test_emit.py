@@ -769,6 +769,29 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         with open(emit.OUTBOX, encoding="utf-8") as stream:
             return [json.loads(line) for line in stream if line.strip()]
 
+    @staticmethod
+    def deferred_threads():
+        deferred = []
+
+        class DeferredThread:
+            def __init__(self, target, args=(), **_kwargs):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                deferred.append(self)
+
+            def join(self, _timeout=None):
+                pass
+
+            def is_alive(self):
+                return False
+
+            def run(self):
+                self.target(*self.args)
+
+        return deferred, DeferredThread
+
     def test_slow_link_acknowledges_every_post_completed_before_the_deadline(self):
         delivered = []
         with delayed_target(0.08, delivered) as target:
@@ -797,6 +820,178 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
 
         self.assertTrue(delivered)
         self.assertLess(len(self.outbox()), before)
+
+    def test_ack_reserve_harvests_a_response_published_after_the_post_window(self):
+        """Scheduler delay after HTTP acceptance may consume part of the ack tail."""
+        delivered = []
+        with delayed_target(0.08, delivered) as target:
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "post_event", return_value=False),
+            ):
+                for second in range(3):
+                    emit.deliver(
+                        dict(self.EVENT, ts="2026-08-24T12:00:0%d.000Z" % second)
+                    )
+            before = self.outbox()
+            real_post = emit.post_event
+
+            def scheduled_after_response(*args, **kwargs):
+                accepted = real_post(*args, **kwargs)
+                time.sleep(0.24)
+                return accepted
+
+            with (
+                mock.patch.dict(
+                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
+                ),
+                mock.patch.object(emit, "HOOK_BUDGET", 0.45),
+                mock.patch.object(emit, "ACK_RESERVE", 0.15),
+                mock.patch.object(emit, "POST_TIMEOUT", 0.2),
+                mock.patch.object(emit, "post_event", side_effect=scheduled_after_response),
+            ):
+                emit.deliver(dict(self.EVENT, ts="2026-08-24T12:00:03.000Z"))
+
+        self.assertTrue(delivered)
+        remaining = self.outbox()
+        self.assertLessEqual(len(remaining), len(before))
+        self.assertTrue(
+            set(delivered).isdisjoint(record["delivery_id"] for record in remaining)
+        )
+
+    def test_deferred_primary_worker_keeps_its_calls_transport_and_diagnostics(self):
+        deferred, deferred_thread = self.deferred_threads()
+
+        this_call = mock.Mock(return_value=True)
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "post_event", this_call),
+            mock.patch.object(emit.threading, "Thread", deferred_thread),
+        ):
+            emit.deliver(self.EVENT, deadline=time.monotonic() + 1)
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            retries_before_worker = json.load(stream).get("retries", 0)
+
+        next_call = mock.Mock(return_value=True)
+        next_diagnostics = os.path.join(self.tmp.name, "next-diagnostics.json")
+        with (
+            mock.patch.object(emit, "post_event", next_call),
+            mock.patch.object(emit, "DIAGNOSTICS", next_diagnostics),
+        ):
+            for worker in deferred:
+                worker.run()
+
+        this_call.assert_called_once()
+        next_call.assert_not_called()
+        self.assertFalse(os.path.exists(next_diagnostics))
+        with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
+            self.assertEqual(
+                json.load(stream)["retries"], retries_before_worker + 1
+            )
+
+    def assert_deferred_real_transport_keeps_settings(self, *, primary):
+        deferred, deferred_thread = self.deferred_threads()
+        first_opener = mock.MagicMock()
+        first_opener.return_value.__enter__.return_value = mock.MagicMock()
+        settings = {
+            "CHRONICLE_URL": "http://primary" if primary else "",
+            "CHRONICLE_MIRROR": "" if primary else "http://mirror",
+        }
+        with (
+            mock.patch.dict(os.environ, settings),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.11),
+            mock.patch.object(emit.urllib.request, "urlopen", first_opener),
+            mock.patch.object(emit.threading, "Thread", deferred_thread),
+        ):
+            emit.deliver(self.EVENT, deadline=time.monotonic() + 1)
+
+        next_opener = mock.MagicMock()
+        next_log = os.path.join(self.tmp.name, "next-log")
+        with (
+            mock.patch.object(emit, "POST_TIMEOUT", 0.99),
+            mock.patch.object(emit, "BREAKER", os.path.join(next_log, ".breaker")),
+            mock.patch.object(emit, "LOG_DIR", next_log),
+            mock.patch.object(emit.urllib.request, "urlopen", next_opener),
+        ):
+            for worker in deferred:
+                worker.run()
+
+        self.assertEqual(first_opener.call_count, 1)
+        self.assertEqual(first_opener.call_args.kwargs["timeout"], 0.11)
+        next_opener.assert_not_called()
+        self.assertFalse(os.path.exists(next_log))
+
+    def test_deferred_primary_worker_keeps_real_transport_settings(self):
+        self.assert_deferred_real_transport_keeps_settings(primary=True)
+
+    def test_deferred_mirror_worker_keeps_real_transport_settings(self):
+        self.assert_deferred_real_transport_keeps_settings(primary=False)
+
+    def test_a_slow_retry_diagnostic_cannot_turn_an_accepted_event_into_fallback(self):
+        """Acceptance is transport state before best-effort diagnostic fsync (#333)."""
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.5),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.05),
+            mock.patch.object(emit, "post_event", return_value=True),
+            mock.patch.object(
+                emit,
+                "_diagnose",
+                side_effect=lambda kind, **_kwargs: (
+                    time.sleep(0.5) if kind == "retry" else None
+                ),
+            ),
+        ):
+            emit.deliver(self.EVENT)
+
+        self.assertEqual(self.outbox(), [])
+        self.assertFalse(
+            os.path.exists(emit.LOG), "an accepted event must not be duplicated locally"
+        )
+
+    def test_slow_retry_diagnostic_keeps_unattempted_records_durable(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "post_event", return_value=False),
+        ):
+            emit.deliver(dict(self.EVENT, ts="older"))
+        older_id = self.outbox()[0]["delivery_id"]
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CHRONICLE_URL": "http://primary", "CHRONICLE_MIRROR": ""},
+            ),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.5),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.05),
+            mock.patch.object(emit, "post_event", return_value=True),
+            mock.patch.object(
+                emit,
+                "_diagnose",
+                side_effect=lambda kind, **_kwargs: (
+                    time.sleep(0.5) if kind == "retry" else None
+                ),
+            ),
+        ):
+            emit.deliver(dict(self.EVENT, ts="current"))
+
+        remaining = self.outbox()
+        self.assertEqual(len(remaining), 1)
+        self.assertNotEqual(remaining[0]["delivery_id"], older_id)
+        self.assertEqual(remaining[0]["event"]["ts"], "current")
 
     def test_capped_outbox_without_acknowledgements_is_named_stuck(self):
         with (
