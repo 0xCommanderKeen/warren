@@ -147,6 +147,12 @@ def isolated_chat(monkeypatch: pytest.MonkeyPatch) -> str:
 type ResidentWriter = Callable[..., Path]
 
 
+@pytest.fixture(autouse=True)
+def this_test_burrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make daemon partition tests deterministic on every developer and CI host."""
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+
+
 @pytest.fixture
 def write_resident(tmp_path: Path) -> ResidentWriter:
     """Write ``residents/<id>/`` into a temp dir and return the manifest path."""

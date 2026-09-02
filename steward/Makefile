@@ -148,7 +148,6 @@ image-cp:
 	docker buildx build \
 	  --platform $(PLATFORM) \
 	  --load \
-	  --build-arg CLAUDE_VERSION=$(CLAUDE_VERSION) \
 	  --build-arg IMAGE_REVISION=$(REVISION) \
 	  -f docker/control-plane/Dockerfile \
 	  -t $(CP_IMAGE):$(CP_TAG) \

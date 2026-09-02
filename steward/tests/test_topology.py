@@ -76,6 +76,42 @@ def test_a_docker_host_is_reported_only_when_it_actually_points_somewhere() -> N
     assert t.docker_endpoint({t.DOCKER_HOST_ENV: "ssh://Miha@dxp2800"}) == "ssh://Miha@dxp2800"
 
 
+@pytest.mark.parametrize(
+    ("burrow", "expected"),
+    [("dxp2800", ["first-agent"]), ("workstation", ["second-agent"])],
+)
+def test_the_fleet_partition_is_the_residents_deploy_host(
+    write_resident: ResidentWriter, burrow: str, expected: list[str]
+) -> None:
+    first_data = valid_manifest()
+    first_data["id"] = "first-agent"
+    first_data["agent_id"] = "claude-code:first-agent"
+    first_data["deploy"] = {"host": "dxp2800", "container": "steward-first-agent"}
+    first = load_manifest(
+        write_resident(
+            first_data,
+            directory="first-agent",
+            soul=VALID_SOUL.replace("claude-code:test-agent", "claude-code:first-agent"),
+        )
+    )
+    second_data = valid_manifest()
+    second_data["id"] = "second-agent"
+    second_data["agent_id"] = "claude-code:second-agent"
+    second_data["uid"] = SECOND_RESIDENT_UID
+    second_data["deploy"] = {"host": "workstation", "container": "steward-second-agent"}
+    second = load_manifest(
+        write_resident(
+            second_data,
+            directory="second-agent",
+            soul=VALID_SOUL.replace("claude-code:test-agent", "claude-code:second-agent"),
+        )
+    )
+
+    partition = t.residents_on_this_burrow([first, second], {t.BURROW_ENV: burrow})
+
+    assert [resident.id for resident in partition] == expected
+
+
 # --------------------------------------------------------------- what needs supervising
 
 
