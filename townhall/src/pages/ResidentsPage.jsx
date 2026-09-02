@@ -20,10 +20,11 @@ import {
   changed, getIn, linesToList, listToLines, scalarValue, setIn,
 } from "../manifest.js";
 import { Gate } from "../console/Gate.jsx";
+import { SkillsPanel } from "../console/skills.jsx";
 import {
-  Actions, Badge, Badges, Button, Clock, Empty, Facts, Field, Gauge, Input, Loading, Note,
-  PageHead, Panel, Problem, Receipt, Row, Rows, Section, Select, Stack, Textarea, Verbatim,
-  Who, buttonClass,
+  Actions, Badge, Badges, Button, Check, Clock, Empty, Facts, Field, Gauge, Input, Loading,
+  Note, PageHead, Panel, Problem, Receipt, Row, Rows, Section, Select, Stack, Textarea,
+  Verbatim, Who, buttonClass,
 } from "../console/ui.jsx";
 import { soonest } from "../console/time.js";
 import ResidentDetail from "./ResidentDetail.jsx";
@@ -152,7 +153,7 @@ function ResidentList() {
 
 const RUNNERS = ["claude", "codex", "command", "mock"];
 
-function ManifestFields({ draft, edit, diagnostics }) {
+function ManifestFields({ draft, edit, diagnostics, wasRetired }) {
   const text = (path, label, hint, props = {}) => (
     <Field label={label} hint={hint} problems={diagnosticsFor(diagnostics, path)} key={path}>
       <Input
@@ -235,6 +236,32 @@ function ManifestFields({ draft, edit, diagnostics }) {
         </div>
         {area("charter.escalation.note", "escalation · note", "What to say when it knocks.", 3)}
       </Panel>
+
+      <SkillsPanel manifest={draft} edit={edit} diagnostics={diagnostics} />
+
+      {/* Shown because the file on disk says retired, not because the draft does — so
+          unticking the box does not take the box off the screen, which would make an
+          accidental click cost the whole unsaved draft to undo. It stays absent for a
+          resident that is not retired, and that is the point: writing the mark without
+          stopping the container leaves it running with a live village token, so turning
+          retirement ON is the record's Retire button and never a checkbox here. */}
+      {wasRetired ? (
+        <Panel title="Retired" tone="ember">
+          <Check
+            name="retired"
+            aria-label="retired"
+            description={
+              "This manifest says retired: true, so the resident takes no routines, no board " +
+              "work, no letters and no run-now. Unticking it and saving is the FIRST half of " +
+              "coming back — a person saying so in git, which is what steward waits for. The " +
+              "second half is Provision on the resident's record, which puts its container up " +
+              "again."
+            }
+            checked={getIn(draft, "retired") === true}
+            onChange={(event) => edit("retired", event.target.checked || undefined)}
+          />
+        </Panel>
+      ) : null}
 
       <Panel title="Runner">
         <div className="grid gap-x-4 [grid-template-columns:repeat(auto-fit,minmax(190px,1fr))]">
@@ -556,7 +583,12 @@ function DeclarationEditor({ id }) {
       </div>
 
       {mode === "fields" ? (
-        <ManifestFields draft={draft.manifest} edit={edit} diagnostics={diagnostics} />
+        <ManifestFields
+          draft={draft.manifest}
+          edit={edit}
+          diagnostics={diagnostics}
+          wasRetired={loaded.data?.manifest?.retired === true}
+        />
       ) : (
         <Panel title={`manifest.yaml — written byte for byte`}>
           <Textarea

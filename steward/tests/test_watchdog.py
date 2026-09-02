@@ -16,13 +16,13 @@ from typing import Any, cast
 
 import pytest
 
-from conftest import ResidentWriter, StubWriter, valid_manifest
+from conftest import SECOND_RESIDENT_UID, VALID_SOUL, ResidentWriter, StubWriter, valid_manifest
 from steward import budgets as bg
 from steward import events as ev
 from steward import watchdog as w
 from steward.manifest import Resident, load_manifest
 from steward.runners import run_argv
-from steward.scheduler import SchedulerState
+from steward.scheduler import SchedulerState, TreeSource
 from steward.store import Store
 
 NOW = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
@@ -46,6 +46,32 @@ def watched_manifest(**overrides: object) -> dict[str, Any]:
     data["deploy"] = {"container": "steward-test-agent"}
     data.update(copy.deepcopy(overrides))
     return data
+
+
+def test_scheduler_and_watchdog_build_the_same_burrow_partition(
+    write_resident: ResidentWriter, store: Store
+) -> None:
+    here = watched_manifest(deploy={"host": "dxp2800", "container": "steward-test-agent"})
+    path = write_resident(here)
+    elsewhere = watched_manifest(
+        id="second-agent",
+        uid=SECOND_RESIDENT_UID,
+        home=1,
+        agent_id="claude-code:second-agent",
+        deploy={"host": "workstation", "container": "steward-second-agent"},
+    )
+    write_resident(
+        elsewhere,
+        directory="second-agent",
+        soul=VALID_SOUL.replace("claude-code:test-agent", "claude-code:second-agent"),
+    )
+    env = {"STEWARD_BURROW": "dxp2800"}
+
+    scheduled = TreeSource(residents_dir=path.parent.parent, env=env).load().residents
+    watched = w.Watchdog.from_path(path.parent.parent, store, env=env).residents
+
+    assert [resident.id for resident in scheduled] == ["test-agent"]
+    assert [resident.id for resident in watched] == ["test-agent"]
 
 
 @pytest.fixture
@@ -843,6 +869,20 @@ def test_docker_that_cannot_answer_is_not_a_dead_resident(
     assert not health.known
     assert not health.down
     assert "could not answer" in health.detail
+
+
+def test_an_absent_declared_container_is_refused_with_the_provision_door(
+    resident: Resident, stub_bin: StubWriter
+) -> None:
+    stub_bin("docker", 'echo "Error: No such container: steward-test-agent" >&2; exit 1')
+
+    health = w.DockerSupervisor().health(resident, NOW)
+
+    assert not health.known
+    assert health.detail == (
+        "refused: declared container 'steward-test-agent' is absent; "
+        "run steward provision test-agent"
+    )
 
 
 def test_a_resident_with_no_container_is_unsupervised_not_healthy(

@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:51c867df2eba6867466f95a441e4d080f0092064eeb5d87d57787a8a8d2a77e3
+#   hooks/emit.py     sha256:f371b3d6fb3178597667a45df32677dd98c7e9041e2d621a4ea508a4ca23205b
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -961,10 +961,11 @@ def is_loopback(url):
     return host in LOOPBACK_HOSTS
 
 
-def breaker_path(url):
+def breaker_path(url, base=None):
     """One breaker per target: a village that is down must not silence the dev
     server running next to it (that pair is exactly the off-tailnet case)."""
-    return BREAKER + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
+    base = BREAKER if base is None else base
+    return base + "-" + hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
 
 
 def targets():
@@ -989,8 +990,21 @@ def targets():
     return out
 
 
-def post_event(url, event, token="", delivery_id=""):
-    breaker = breaker_path(url)
+def post_event(
+    url,
+    event,
+    token="",
+    delivery_id="",
+    *,
+    timeout=None,
+    breaker_base=None,
+    log_dir=None,
+    opener=None,
+):
+    breaker = breaker_path(url, breaker_base)
+    timeout = POST_TIMEOUT if timeout is None else timeout
+    log_dir = LOG_DIR if log_dir is None else log_dir
+    opener = urllib.request.urlopen if opener is None else opener
     window = LOOPBACK_BREAKER_SECONDS if is_loopback(url) else BREAKER_SECONDS
     try:
         if os.path.exists(breaker) and time.time() - os.path.getmtime(breaker) < window:
@@ -1009,17 +1023,20 @@ def post_event(url, event, token="", delivery_id=""):
             headers=headers,
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=POST_TIMEOUT):
+        with opener(req, timeout=timeout):
             pass
         return True
     except Exception:
         try:
-            os.makedirs(LOG_DIR, exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True)
             with open(breaker, "w") as f:
                 f.write(str(time.time()))
         except OSError:
             pass
         return False
+
+
+_DEFAULT_POST_EVENT = post_event
 
 
 def _target_groups(pending=()):
@@ -1369,17 +1386,18 @@ def _update_outbox(delivered_keys, additions, attempted_targets=()):
                 return 0, False
 
 
-def _diagnose(kind, **details):
+def _diagnose(kind, *, diagnostics=None, **details):
     """Persist counters and a bounded, payload-free recent diagnostic list."""
+    diagnostics = DIAGNOSTICS if diagnostics is None else diagnostics
     with _DIAGNOSTIC_LOCK:
         try:
-            os.makedirs(os.path.dirname(os.path.abspath(DIAGNOSTICS)), exist_ok=True)
-            with open(durable.lock_path(DIAGNOSTICS), "a+") as lock:
+            os.makedirs(os.path.dirname(os.path.abspath(diagnostics)), exist_ok=True)
+            with open(durable.lock_path(diagnostics), "a+") as lock:
                 # Helper-side persistence may wait: the parent enforces the
                 # aggregate one-second budget and kills a stalled helper.
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 try:
-                    with open(DIAGNOSTICS, encoding="utf-8") as stream:
+                    with open(diagnostics, encoding="utf-8") as stream:
                         report = json.load(stream)
                     if not isinstance(report, dict):
                         raise ValueError("diagnostic root")
@@ -1443,11 +1461,14 @@ def _diagnose(kind, **details):
                 else:
                     report.setdefault("recent", []).append(dict(kind=kind, **details))
                 report["recent"] = report["recent"][-DIAGNOSTIC_HISTORY:]
-                pending = durable.stage_json(DIAGNOSTICS, report, ensure_ascii=False)
-                durable.publish_staged(((pending, DIAGNOSTICS),))
+                pending = durable.stage_json(diagnostics, report, ensure_ascii=False)
+                durable.publish_staged(((pending, diagnostics),))
                 return True
         except (OSError, ValueError, TypeError):
             return False
+
+
+_DEFAULT_DIAGNOSE = _diagnose
 
 
 def _diagnose_outbox(records, acknowledged):
@@ -1638,6 +1659,33 @@ def deliver(event, deadline=None):
     configured_primary = initial_primary + later_primary
     configured_mirrors = initial_mirrors + later_mirrors
     local_written = False
+    transport = post_event
+    transport_timeout = POST_TIMEOUT
+    transport_breaker = BREAKER
+    transport_log_dir = LOG_DIR
+    transport_opener = urllib.request.urlopen
+    diagnostic = _diagnose
+    diagnostic_path = DIAGNOSTICS
+
+    def post(url, posted_event, token, delivery_id):
+        if transport is not _DEFAULT_POST_EVENT:
+            return transport(url, posted_event, token, delivery_id)
+        return transport(
+            url,
+            posted_event,
+            token,
+            delivery_id,
+            timeout=transport_timeout,
+            breaker_base=transport_breaker,
+            log_dir=transport_log_dir,
+            opener=transport_opener,
+        )
+
+    def diagnose(kind, **details):
+        if diagnostic is not _DEFAULT_DIAGNOSE:
+            return diagnostic(kind, **details)
+        return diagnostic(kind, diagnostics=diagnostic_path, **details)
+
     if not configured_primary:
         _append_local(event)
         local_written = True
@@ -1647,7 +1695,7 @@ def deliver(event, deadline=None):
         result_lock = threading.Lock()
 
         def mirror_worker(url, token):
-            delivered = post_event(url, event, token, "")
+            delivered = post(url, event, token, "")
             with result_lock:
                 results.append(delivered)
 
@@ -1694,6 +1742,7 @@ def deliver(event, deadline=None):
     primary, mirrors, deferred_primary, deferred_mirrors = _target_groups(pending)
     results = {}
     result_lock = threading.Lock()
+    initial_rtt = transport_timeout
 
     # Reserve the selected turn before network work. Fairness therefore
     # survives success (which removes queue records), failure, and restart.
@@ -1706,12 +1755,12 @@ def deliver(event, deadline=None):
         target_key = _target_id(url)
         queued = [record for record in pending if record.get("target") == target_key]
         delivered_keys = []
-        estimated_rtt = POST_TIMEOUT
+        estimated_rtt = initial_rtt
         for record in queued:
             if time.monotonic() + estimated_rtt > post_deadline:
                 return
             started = time.monotonic()
-            if not post_event(
+            if not post(
                 url,
                 record.get("event") or {},
                 token,
@@ -1729,7 +1778,7 @@ def deliver(event, deadline=None):
                     len(delivered_keys) == len(queued),
                     target_key,
                 )
-            _diagnose("retry", target=target_key)
+            diagnose("retry", target=target_key)
         with result_lock:
             results[url] = (
                 list(delivered_keys),
@@ -1744,33 +1793,82 @@ def deliver(event, deadline=None):
         workers.append(worker)
     for url, token in mirrors:
         worker = threading.Thread(
-            target=post_event, args=(url, event, token, ""), daemon=True
+            target=post, args=(url, event, token, ""), daemon=True
         )
         worker.start()
         workers.append(worker)
     for worker in workers:
         worker.join(max(0, post_deadline - time.monotonic()))
 
-    delivered_keys, primary_failed = set(), False
+    # A worker can receive the HTTP response just before ``post_deadline`` yet
+    # publish its result just after it because the process was descheduled. Keep
+    # harvesting successes during the reserved acknowledgement tail and retire
+    # them durably as soon as they become visible. A single snapshot here loses
+    # accepted deliveries precisely when the host is busiest.
+    acknowledged_keys = set()
+    update_attempted = False
+
+    def observed_keys():
+        observed = set()
+        for target_url, _ in primary:
+            target_key = _target_id(target_url)
+            with result_lock:
+                replayed, _, _ = results.get(
+                    target_url, ([], False, target_key)
+                )
+            observed.update(replayed)
+        return observed
+
+    def acknowledge_observed():
+        nonlocal update_attempted
+        pending_ack = observed_keys() - acknowledged_keys
+        if not pending_ack:
+            return
+        update_attempted = True
+        _, updated = _update_outbox(pending_ack, [])
+        if updated:
+            acknowledged_keys.update(pending_ack)
+
+    while True:
+        acknowledge_observed()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # One last snapshot closes the publish-before-deadline race. The
+            # outer hook process remains the hard bound if this durable write
+            # itself stalls below Python.
+            acknowledge_observed()
+            break
+        if not any(worker.is_alive() for worker in workers):
+            # A worker can publish and exit between the first snapshot and the
+            # liveness check. Once it is dead, this snapshot is authoritative.
+            acknowledge_observed()
+            break
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(min(0.005, remaining))
+                break
+    if not update_attempted:
+        _, updated = _update_outbox(set(), [])
+        update_attempted = updated
+
+    primary_failed = False
     failed_targets = []
     for url, _ in primary:
         target_key = _target_id(url)
         with result_lock:
             replayed, current_ok, _ = results.get(url, ([], False, target_key))
-        delivered_keys.update(replayed)
         if not current_ok:
             primary_failed = True
             failed_targets.append(target_key)
     if deferred_primary:
         primary_failed = True
-    # Acknowledgement owns the reserved tail of the hook budget. Diagnostics
-    # are deliberately after it: their lock or fsync may stall, but a host
-    # timeout must never erase progress already accepted by the server.
-    _, updated = _update_outbox(delivered_keys, [])
-    if not updated:
+    # Diagnostics are deliberately after acknowledgement: their lock or fsync
+    # may stall, but a host timeout must never erase accepted progress.
+    unacknowledged_keys = observed_keys() - acknowledged_keys
+    if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
-        _diagnose_outbox(_read_durable_outbox_snapshot(), delivered_keys)
+        _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:
