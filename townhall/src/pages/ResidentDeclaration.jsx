@@ -6,14 +6,13 @@ import { describeCommit, diagnosticsFor, normalizeDiagnostics } from "../steward
 import {
   changed, getIn, linesToList, listToLines, scalarValue, setIn,
 } from "../manifest.js";
+import { SkillsPanel } from "../console/skills.jsx";
 import {
-  Actions, Button, Facts, Field, Input, Loading, Note, Panel, Problem, Receipt, Select,
-  Textarea, Verbatim, buttonClass,
+  Actions, Button, Check, Facts, Field, Input, Loading, Note, Panel, Problem, Receipt,
+  Select, Textarea, Verbatim, buttonClass,
 } from "../console/ui.jsx";
-
 const RUNNERS = ["claude", "codex", "command", "mock"];
-
-function ManifestFields({ draft, edit, diagnostics }) {
+function ManifestFields({ draft, edit, diagnostics, wasRetired }) {
   const text = (path, label, hint, props = {}) => (
     <Field label={label} hint={hint} problems={diagnosticsFor(diagnostics, path)} key={path}>
       <Input
@@ -35,7 +34,6 @@ function ManifestFields({ draft, edit, diagnostics }) {
       />
     </Field>
   );
-
   const list = (path, label, hint, rows = 5) => (
     <Field label={label} hint={hint} problems={diagnosticsFor(diagnostics, path)} key={path}>
       <Textarea
@@ -51,7 +49,6 @@ function ManifestFields({ draft, edit, diagnostics }) {
   );
 
   const accent = scalarValue(getIn(draft, "soul.accent"));
-
   return (
     <>
       <Panel title="Identity">
@@ -81,7 +78,6 @@ function ManifestFields({ draft, edit, diagnostics }) {
         </div>
         {text("summary", "summary", "One line Chronicle can display. Optional.")}
       </Panel>
-
       <Panel title="Charter">
         {area("charter.mission", "mission", "One paragraph of purpose. Injected into every session.", 5)}
         {list("charter.duties", "duties", "Standing responsibilities, one per line. At least one.")}
@@ -97,6 +93,31 @@ function ManifestFields({ draft, edit, diagnostics }) {
         {area("charter.escalation.note", "escalation · note", "What to say when it knocks.", 3)}
       </Panel>
 
+      <SkillsPanel manifest={draft} edit={edit} diagnostics={diagnostics} />
+
+      {/* Shown because the file on disk says retired, not because the draft does — so
+          unticking the box does not take the box off the screen, which would make an
+          accidental click cost the whole unsaved draft to undo. It stays absent for a
+          resident that is not retired, and that is the point: writing the mark without
+          stopping the container leaves it running with a live village token, so turning
+          retirement ON is the record's Retire button and never a checkbox here. */}
+      {wasRetired ? (
+        <Panel title="Retired" tone="ember">
+          <Check
+            name="retired"
+            aria-label="retired"
+            description={
+              "This manifest says retired: true, so the resident takes no routines, no board " +
+              "work, no letters and no run-now. Unticking it and saving is the FIRST half of " +
+              "coming back — a person saying so in git, which is what steward waits for. The " +
+              "second half is Provision on the resident's record, which puts its container up " +
+              "again."
+            }
+            checked={getIn(draft, "retired") === true}
+            onChange={(event) => edit("retired", event.target.checked || undefined)}
+          />
+        </Panel>
+      ) : null}
       <Panel title="Runner">
         <div className="grid gap-x-4 [grid-template-columns:repeat(auto-fit,minmax(190px,1fr))]">
           <Field
@@ -140,7 +161,6 @@ export default function ResidentDeclaration({ id }) {
   const [copied, setCopied] = useState(null);
   const [recoveryReadRequest, setRecoveryReadRequest] = useState(null);
   const saveGeneration = useRef(0);
-
   // Re-reading after a save must not sweep away the answer the person is still reading —
   // the commit sha is the receipt, and a form that clears it on refresh has told them
   // nothing. The receipt is cleared when a different resident is opened, or by its own ×.
@@ -172,7 +192,6 @@ export default function ResidentDeclaration({ id }) {
       revision: loaded.data.revision,
     });
   }, [loaded.data, recovery]);
-
   const diagnostics = refusal?.diagnostics || [];
   const warnings = useMemo(() => (receipt ? normalizeDiagnostics(receipt.warnings) : []), [receipt]);
   const dirty = Boolean(
@@ -182,7 +201,6 @@ export default function ResidentDeclaration({ id }) {
         draft.text !== loaded.data.text ||
         draft.soul !== loaded.data.soul),
   );
-
   const edit = (path, value) =>
     setDraft((previous) => ({ ...previous, manifest: setIn(previous.manifest, path, value) }));
 
@@ -235,11 +253,9 @@ export default function ResidentDeclaration({ id }) {
       setReloaded({ state: "refused", error: caught });
     }
   }
-
   if (loaded.loading && !loaded.data && !recovery) return <Loading>reading the declaration…</Loading>;
   if (loaded.error && !loaded.data && !recovery) return <Problem error={loaded.error} />;
   if (!draft) return null;
-
   const stale = refusal?.code === "stale_revision";
   const currentWasReread = Boolean(
     recovery &&
@@ -251,7 +267,6 @@ export default function ResidentDeclaration({ id }) {
   function rereadCurrent() {
     setRecoveryReadRequest(loaded.refresh());
   }
-
   function reapplyRejected() {
     if (!recovery || !loaded.data) return;
     // The editor remains a working copy after the refusal. Preserve anything the operator
@@ -272,7 +287,6 @@ export default function ResidentDeclaration({ id }) {
     setRefusal(null);
     setCopied(null);
   }
-
   async function copyRejected(document) {
     const value =
       document === "soul"
@@ -288,7 +302,6 @@ export default function ResidentDeclaration({ id }) {
       setCopied("failed");
     }
   }
-
   return (
     <form onSubmit={save}>
       {loaded.error ? <Problem error={loaded.error} /> : null}
@@ -400,7 +413,6 @@ export default function ResidentDeclaration({ id }) {
           </div>
         </Panel>
       ) : null}
-
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <Button tone={mode === "fields" ? "primary" : "ghost"} tiny onClick={() => setMode("fields")}>
           fields
@@ -414,9 +426,13 @@ export default function ResidentDeclaration({ id }) {
             : "Sends the YAML byte for byte, which is how the comments are kept."}
         </Note>
       </div>
-
       {mode === "fields" ? (
-        <ManifestFields draft={draft.manifest} edit={edit} diagnostics={diagnostics} />
+        <ManifestFields
+          draft={draft.manifest}
+          edit={edit}
+          diagnostics={diagnostics}
+          wasRetired={loaded.data?.manifest?.retired === true}
+        />
       ) : (
         <Panel title={`manifest.yaml — written byte for byte`}>
           <Textarea
@@ -442,7 +458,6 @@ export default function ResidentDeclaration({ id }) {
           className="text-[12px] leading-[1.65]"
         />
       </Panel>
-
       <Panel title="What steward is being sent">
         <Facts
           pairs={[

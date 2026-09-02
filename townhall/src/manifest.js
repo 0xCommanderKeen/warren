@@ -106,3 +106,54 @@ export const BUDGET_FIELDS = [
 export function changed(left, right) {
   return JSON.stringify(left) !== JSON.stringify(right);
 }
+
+/* -- skill grants -------------------------------------------------------------------- */
+
+/**
+ * The grants a manifest carries, as rows a picker can tick — with the original entry kept.
+ *
+ * A manifest may spell a grant two ways: `journal` and `{id: journal, note: "…"}` are the
+ * same grant, and steward's own `SkillGrant` accepts both. A form that normalised one into
+ * the other would rewrite `skills:` for every resident whose author preferred bare names,
+ * the moment somebody opened the editor and saved something else. So the entry that was
+ * read is carried on the row and handed straight back by {@link grantEntries} unless this
+ * row's id or note actually changed.
+ */
+export function grantRows(manifest) {
+  const entries = Array.isArray(manifest?.skills) ? manifest.skills : [];
+  return entries.map((entry) => ({
+    id: typeof entry === "string" ? entry : String(entry?.id ?? ""),
+    note: typeof entry === "object" && entry !== null && typeof entry.note === "string" ? entry.note : "",
+    entry,
+  }));
+}
+
+/** One row, back in the spelling it came in — or the smallest one that carries its note. */
+function grantEntry({ id, note, entry }) {
+  const trimmed = String(note ?? "").trim();
+  const bare = typeof entry === "string";
+  const held = bare ? entry : entry?.id;
+  const heldNote = !bare && typeof entry?.note === "string" ? entry.note : "";
+  // Untouched: hand back the very object that was read, so an editor that only changed the
+  // charter sends a `skills` block that is byte-for-byte what was on disk.
+  if (entry !== undefined && entry !== null && id === held && trimmed === heldNote.trim()) {
+    return entry;
+  }
+  if (bare || entry === undefined || entry === null) return trimmed ? { id, note: trimmed } : id;
+  // Anything else the manifest put on this grant — `source`, a key added later — survives,
+  // in its own position: only `note` is this form's to write.
+  const { note: _replaced, ...rest } = entry;
+  return trimmed ? { ...rest, id, note: trimmed } : { ...rest, id };
+}
+
+/**
+ * The `skills` value for a manifest, from the picker's rows.
+ *
+ * `undefined` for no grants at all, never `[]`: steward reads an absent `skills` as "this
+ * resident holds the library's defaults and nothing more", and writing an empty list where
+ * the key was missing would put a line in the file that says the same thing louder.
+ */
+export function grantEntries(rows) {
+  const entries = (rows || []).map(grantEntry);
+  return entries.length ? entries : undefined;
+}

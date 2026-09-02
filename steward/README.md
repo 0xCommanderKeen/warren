@@ -586,11 +586,15 @@ The other flags mirror the two commands: `--dry-run` touches nothing, `--no-comm
 the mark without committing it, `--allow-dirty` commits over a dirty worktree, and `--repo`
 names the checkout when it is not the parent of the residents tree.
 
-Chronicle's viewer reaches the same pipelines over HTTP: `POST /residents` with
-`deploy: true` ([docs/api.md](docs/api.md#post-residents)) is `new-resident`, and
+Townhall reaches the same pipelines over HTTP: `POST /residents` with `deploy: true`
+([docs/api.md](docs/api.md#post-residents)) is `new-resident`,
 `POST /residents/{id}/provision` ([docs/api.md](docs/api.md#post-residentsidprovision)) is
-this command — one implementation each, two front doors each, verified by injecting the
-pipeline into the route rather than by a convention somebody has to keep.
+`provision`, and `POST /residents/{id}/retire`
+([docs/api.md](docs/api.md#post-residentsidretire)) is this command — one implementation
+each, two front doors each, verified by injecting the pipeline into the route rather than by
+a convention somebody has to keep. The route takes the whole act or refuses: the
+break-glass flags above stay at the terminal, because each of them leaves the retirement
+half done in a way only the person who typed it can see.
 
 ## Residents
 

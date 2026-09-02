@@ -21,6 +21,7 @@ import {
   Badge, DetailHead, Empty, Facts, Loading, Panel, Problem, Section, Swatch, Tag, buttonClass,
 } from "../console/ui.jsx";
 import { ResidentRoutines, SchedulerBadge, SchedulerNote } from "../console/routines.jsx";
+import { LifecyclePanel } from "../console/lifecycle.jsx";
 import { stamp } from "../console/time.js";
 
 /** Read five things at once and keep each answer separate, refusals included. */
@@ -438,6 +439,7 @@ export default function ResidentDetail({ id }) {
         refresh={refresh}
         scheduler={scheduler}
       />
+      <LifecyclePanel resident={resident} refresh={refresh} />
       <BudgetPanel settled={data.budget} id={id} />
       <JournalPanel settled={data.journal} />
       <InboxPanel settled={data.inbox} />
