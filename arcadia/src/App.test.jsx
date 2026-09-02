@@ -5,6 +5,7 @@ import { UnsupportedSchemaVersionError } from "./contract/parseSnapshot.js";
 import { App, LiveApp, backendFromLocation } from "./App.jsx";
 import fixture from "./contract/fixtures/complete-v1.js";
 import multiplePendingFixture from "./contract/fixtures/multiple-pending-v1.json";
+import { createStewardClient } from "./steward/StewardClient.js";
 
 vi.mock("./game/PhaserGame.jsx", () => ({
   PhaserGame: () => <div data-testid="village-canvas" />,
@@ -223,6 +224,54 @@ describe("Arcadia", () => {
     expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeEnabled();
   });
 
+  it("reopens authentication after Steward rejects an expired credential", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({
+        status: 401,
+        json: async () => ({ detail: { message: "Credential expired" } }),
+      })
+      .mockResolvedValueOnce({
+        status: 202,
+        json: async () => ({
+          status: "recorded",
+          request_id: "decision-2",
+          approval_request_id: "approval-1",
+          decision: "approve",
+        }),
+      });
+    const stewardClient = createStewardClient({ fetch });
+    render(<App envelope={fixture} stewardClient={stewardClient} />);
+
+    fireEvent.change(screen.getByLabelText("Steward token"), {
+      target: { value: "expired-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock answers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Credential expired");
+    expect(screen.getByLabelText("Steward token")).toHaveValue("");
+    expect(screen.queryByDisplayValue("expired-secret")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Steward token"), {
+      target: { value: "replacement-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock answers" }));
+    fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
+
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+    expect(fetch.mock.calls.map(([, request]) => request.headers.Authorization)).toEqual([
+      "Bearer expired-secret",
+      "Bearer replacement-secret",
+    ]);
+    expect(screen.queryByDisplayValue("replacement-secret")).not.toBeInTheDocument();
+    expect(JSON.stringify({ ...localStorage, ...sessionStorage })).not.toMatch(
+      /expired-secret|replacement-secret/,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Answer sent. Waiting for Steward's confirming state",
+    );
+  });
+
   it("orders multiple fixture approvals deterministically and answers each by request id", () => {
     const stewardClient = {
       confirm: vi.fn(),
@@ -260,15 +309,19 @@ describe("Arcadia", () => {
     });
     const stewardClient = {
       confirm: vi.fn(),
+      setCredentials: vi.fn(),
       decideApproval: vi.fn().mockRejectedValue(refusal),
     };
 
     render(<App envelope={fixture} stewardClient={stewardClient} />);
+    fireEvent.change(screen.getByLabelText("Steward token"), {
+      target: { value: "stale-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock answers" }));
     fireEvent.click(screen.getByRole("button", { name: "Approve Deploy?" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Steward credentials are required");
-    await waitFor(() => expect(
-      screen.getByRole("button", { name: "Approve Deploy?" }),
-    ).toBeEnabled());
+    expect(screen.getByLabelText("Steward token")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Approve Deploy?" })).toBeDisabled();
   });
 });
