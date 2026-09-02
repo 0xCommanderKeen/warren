@@ -171,8 +171,13 @@ PY
     (cd "$ROOT" && git archive --format=tar HEAD $paths) | tar -x -C "$stage"
     log "chronicle: publishing to $NAS:~/docker/burrow/app"
     publish "$stage/chronicle" docker/burrow/app
-    log "chronicle: restarting"
-    $SSH "$NAS" 'cd ~/docker/burrow && docker compose restart burrow' >/dev/null 2>&1
+    $SSH "$NAS" 'test -f ~/docker/burrow/.env' \
+        || die "~/docker/burrow/.env is missing on $NAS — it holds CHRONICLE_NOTIFY_URL (and CHRONICLE_TOKEN when ingest is closed); see chronicle/deploy/compose.yaml"
+    publish_files docker/burrow "$ROOT/chronicle/deploy" compose.yaml
+    log "chronicle: recreating"
+    # Recreate rather than restart: the code is a bind mount, so `up -d` alone would see
+    # nothing to do, and nothing this container holds lives outside /data any more.
+    $SSH "$NAS" 'cd ~/docker/burrow && docker compose up -d --force-recreate' >/dev/null 2>&1
     wait_for "$ORIGIN/burrow/state" 200
     curl -fsS -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: /burrow/residents did not answer"
     stamp burrow chronicle

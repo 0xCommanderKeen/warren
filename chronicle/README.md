@@ -191,9 +191,12 @@ deploy is pushed from a machine that has the repo checked out.
 - **Server** — Docker Compose at `~/docker/burrow` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:
   `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
-  `uv sync --frozen --no-dev` and runs `uv run uvicorn serve:app --host 0.0.0.0 --port 8737`
-  with `CHRONICLE_HOST=0.0.0.0`,
-  `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_TOKEN=<shared secret>`. Deploy code
+  `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
+  `CHRONICLE_HOST=0.0.0.0`, `CHRONICLE_EVENTS=/data/events.jsonl`, `CHRONICLE_ARCHIVE`,
+  `CHRONICLE_VILLAGERS` and `CHRONICLE_TOKEN=<shared secret>` from the environment.
+  `uvicorn serve:app` does **not**: the module-level app is built from defaults and
+  ignores every setting (warren#313). The compose file is
+  [`deploy/compose.yaml`](deploy/compose.yaml), published by the repo's `deploy/deploy.sh`. Deploy code
   and all runtime support and resident manifests with the authoritative
   tar-over-ssh recipe (UGOS scp is broken): `tar -cf - pyproject.toml uv.lock serve.py config.py event_log.py delivery_id_index.py state_coordinator.py village_state.py retention.py
   retention-policy.json
