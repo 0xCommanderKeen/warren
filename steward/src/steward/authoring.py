@@ -43,7 +43,7 @@ import stat
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -68,13 +68,18 @@ from steward.skills import (
 __all__ = [
     "DECLARE_SUBJECT",
     "DEFAULT_IDENTITY",
+    "PUSH_TIMEOUT_S",
     "AuthoringError",
     "CommitReport",
     "Declaration",
+    "PushReport",
+    "PushTarget",
     "SkillDocument",
     "commit_write",
+    "push_commit",
     "read_declaration",
     "read_skill_document",
+    "record_push",
     "repo_toplevel",
     "resolve_skills_dir",
     "revision_of",
@@ -145,6 +150,11 @@ class CommitReport:
     sha: str | None
     message: str
     note: str
+    #: Whether the commit reached the configured remote branch (warren#351). ``None`` is
+    #: "there was nothing to push, or nowhere to push to" — no commit was made, or no
+    #: push target is configured — and is not the same answer as ``False``, which is a
+    #: commit that exists on this burrow alone until the next push carries it off.
+    pushed: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON view a response carries."""
@@ -153,6 +163,7 @@ class CommitReport:
             "sha": self.sha,
             "message": self.message,
             "note": self.note,
+            "pushed": self.pushed,
         }
 
 
@@ -388,10 +399,17 @@ def validate_declaration(
     Raises :class:`AuthoringError` if it does not pass. Returns the result of the *whole
     tree* with the write applied, so a caller can also see that its edit left everybody
     else valid — which is the failure mode a single-file check cannot catch.
+
+    The library is named before the copy is made, and it has to be: the candidate lives in
+    a temp directory with nothing beside it, so a validation left to infer the library
+    from the copy found none, and judged every routine requiring a *default* skill as
+    ungranted. A resident living on the defaults, as Hob does, could not be saved at all
+    (warren#351 — seen on the burrow, not in a suite whose resident grants everything).
     """
+    library = resolve_skills_dir(residents_dir, skills_dir)
     with candidate_tree(residents_dir) as candidate:
         _write_declaration_into(candidate / resident_id, declaration)
-        result = validate_tree(candidate, skills_dir)
+        result = validate_tree(candidate, library)
         relocated = ValidationResult(
             residents=result.residents,
             diagnostics=relocate(result.diagnostics, candidate, residents_dir),
@@ -774,6 +792,108 @@ def commit_write(  # noqa: PLR0913 — one parameter per fact the commit records
     )
 
 
+# --------------------------------------------------------------------------------------
+# the push — the record leaves the burrow (warren#351)
+# --------------------------------------------------------------------------------------
+
+#: How long one push may take before steward stops waiting and reports "not pushed". The
+#: push is the record leaving the burrow, not the write: the commit is on disk before it
+#: starts, and a save that hung for a minute because GitHub was slow would teach an operator
+#: to distrust the button that had in fact worked.
+PUSH_TIMEOUT_S = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class PushTarget:
+    """Where a burrow's commits go after they are made: a remote and a branch on it.
+
+    A branch of its own — ``burrow/residents`` on the NAS — and never ``main``: nothing
+    lands on ``main`` without a pull request, a push to any other branch triggers no
+    deploy, and so there is no write → push → deploy → restart loop for a charter edit to
+    fall into. The checkout on the burrow is authoritative for its residents; the branch is
+    where that history is kept off a machine with no backup.
+    """
+
+    remote: str
+    branch: str
+
+    @property
+    def spec(self) -> str:
+        """Return the ``remote branch`` form a note reads."""
+        return f"{self.remote} {self.branch}"
+
+
+@dataclass(frozen=True, slots=True)
+class PushReport:
+    """What one push came to. A push that failed is a report, never an exception."""
+
+    pushed: bool
+    target: PushTarget
+    note: str
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the JSON view a response carries."""
+        return {
+            "pushed": self.pushed,
+            "remote": self.target.remote,
+            "branch": self.target.branch,
+            "note": self.note,
+        }
+
+
+def push_commit(repo: Path, target: PushTarget, *, git: PipedRun = run_argv) -> PushReport:
+    """Push ``HEAD`` to the target branch. Best effort: never raises, never forces.
+
+    One bounded ``git push`` of ``HEAD`` to the branch by its full ref. No ``--force``, so
+    history somebody else put on the branch is refused rather than overwritten, and the
+    refusal comes back as ``pushed: false`` with git's reason. The write this follows is
+    already durable — a burrow that cannot reach its remote says "committed, not pushed"
+    and carries on; the next push, from the next write or the next deploy, carries every
+    commit the branch is missing, because a push is of the branch and not of one commit.
+    """
+    outcome = git(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "push",
+            "--quiet",
+            target.remote,
+            f"HEAD:refs/heads/{target.branch}",
+        ],
+        PUSH_TIMEOUT_S,
+    )
+    if outcome.ok:
+        return PushReport(pushed=True, target=target, note=f"pushed to {target.spec}")
+    return PushReport(
+        pushed=False,
+        target=target,
+        note=(
+            f"NOT pushed to {target.spec} ({outcome.summary()}); the commit is on this "
+            f"burrow alone until the next write or deploy pushes it"
+        ),
+    )
+
+
+def record_push(
+    report: CommitReport,
+    repo: Path | None,
+    target: PushTarget | None,
+    *,
+    git: PipedRun = run_argv,
+) -> CommitReport:
+    """Push what :func:`commit_write` committed, and say in the report what came of it.
+
+    Nothing to do — and ``pushed`` left ``None`` — when no target is configured, when there
+    is no checkout, or when the write converged without a commit: a save that changed
+    nothing does not go to the network to confirm it.
+    """
+    if target is None or repo is None or not report.committed:
+        return report
+    push = push_commit(repo, target, git=git)
+    return replace(report, pushed=push.pushed, note=f"{report.note}; {push.note}")
+
+
 @dataclass(frozen=True, slots=True)
 class _FileState:
     """The bytes and mode a transaction must put back after a refusal."""
@@ -1032,9 +1152,15 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
     expected_revision: str | None = None,
+    push: PushTarget | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
-    """Validate, write, and commit one resident's declaration. Refusals write nothing."""
+    """Validate, write, and commit one resident's declaration. Refusals write nothing.
+
+    ``push`` names where the commit goes afterwards (warren#351). The push happens after
+    the authoring lock is released: it is bounded but it is a network round trip, and a
+    second writer should not wait on GitHub for a commit that is already on disk.
+    """
     with _authoring_lock(residents_dir, git=git) as repo:
         resolved_id, soul_filename = _existing_declaration(residents_dir, resident_id, skills_dir)
         if declaration.soul_filename != soul_filename:
@@ -1064,7 +1190,10 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
                 allow_uncommitted=allow_uncommitted,
                 git=git,
             )
-            return WriteResult(paths=written, revision=revision, commit=commit, validation=result)
+            accepted = WriteResult(
+                paths=written, revision=revision, commit=commit, validation=result
+            )
+    return replace(accepted, commit=record_push(accepted.commit, repo, push, git=git))
 
 
 def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
@@ -1078,9 +1207,10 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
     identity: CommitIdentity = DEFAULT_IDENTITY,
     allow_uncommitted: bool = False,
     expected_revision: str | None = None,
+    push: PushTarget | None = None,
     git: PipedRun = run_argv,
 ) -> WriteResult:
-    """Validate, write, and commit one skill. Refusals write nothing."""
+    """Validate, write, and commit one skill. Refusals write nothing. Pushed after the lock."""
     path = skills_dir / document.name / SKILL_FILENAME
     with (
         _authoring_lock(residents_dir, git=git) as repo,
@@ -1111,4 +1241,5 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
             allow_uncommitted=allow_uncommitted,
             git=git,
         )
-        return WriteResult(paths=(path,), revision=revision, commit=commit, validation=result)
+        accepted = WriteResult(paths=(path,), revision=revision, commit=commit, validation=result)
+    return replace(accepted, commit=record_push(accepted.commit, repo, push, git=git))

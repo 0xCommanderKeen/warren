@@ -162,6 +162,9 @@ CORS_ENV = "STEWARD_CORS_ORIGINS"
 RESIDENTS_ENV = "STEWARD_RESIDENTS"
 COMMIT_IDENTITY_ENV = "STEWARD_COMMIT_IDENTITY"
 ALLOW_UNCOMMITTED_ENV = "STEWARD_ALLOW_UNCOMMITTED_WRITES"
+PUSH_BRANCH_ENV = "STEWARD_PUSH_BRANCH"
+PUSH_REMOTE_ENV = "STEWARD_PUSH_REMOTE"
+DEFAULT_PUSH_REMOTE = "origin"
 
 #: How the write API describes the caller in a commit. Not a name, because there is not one
 #: to know: the human token is a shared secret, so what steward can say truthfully is which
@@ -240,6 +243,11 @@ class ApiConfig:
     #: fleet whose declarations have no history is a thing to choose out loud rather than
     #: to discover on the day somebody needs to undo something.
     allow_uncommitted_writes: bool = False
+    #: Where every commit the write API makes is pushed afterwards (warren#351). ``None``
+    #: pushes nowhere — a laptop's checkout, where the person pushes. A burrow sets it to
+    #: its own branch so the history it is authoritative for exists somewhere that is not
+    #: one disk on a NAS. The push is best effort and never fails a write.
+    push: au.PushTarget | None = None
     approval_poll_interval_s: float = 1.0
     approval_close_timeout_s: float = 5.0
 
@@ -267,6 +275,7 @@ class ApiConfig:
             skills_dir=Path(skills_dir) if skills_dir is not None else None,
             commit_identity=parse_identity(source.get(COMMIT_IDENTITY_ENV)),
             allow_uncommitted_writes=_flag(source.get(ALLOW_UNCOMMITTED_ENV)),
+            push=parse_push(source.get(PUSH_BRANCH_ENV), source.get(PUSH_REMOTE_ENV)),
         )
 
 
@@ -291,6 +300,18 @@ def parse_identity(raw: str | None) -> CommitIdentity | None:
     if not name or not address:
         return None
     return CommitIdentity(name=name, email=address)
+
+
+def parse_push(branch: str | None, remote: str | None) -> au.PushTarget | None:
+    """Read where commits go from the environment, or ``None`` for nowhere.
+
+    The branch is the switch: a remote alone names nowhere to push to, and ``origin`` is
+    what a checkout made by ``git clone`` calls its remote, so it is the default.
+    """
+    target_branch = (branch or "").strip()
+    if not target_branch:
+        return None
+    return au.PushTarget(remote=(remote or "").strip() or DEFAULT_PUSH_REMOTE, branch=target_branch)
 
 
 def _flag(raw: str | None) -> bool:
@@ -1652,6 +1673,8 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             for path in (report.declare.manifest_path, report.declare.soul_path)
             if path.is_file()
         ]
+        how = write_settings(request)
+        push = how.pop("push")
         try:
             commit = au.commit_write(
                 residents_dir,
@@ -1659,11 +1682,12 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 au.DECLARE_SUBJECT.format(id=body.id),
                 request_id=request_id,
                 principal=acting_principal(request),
-                **write_settings(request),
+                **how,
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             refuse_write(exc)
+        commit = au.record_push(commit, au.repo_toplevel(residents_dir), push)
         uncommitted = commit.note
         deployed = (
             _deployed_message(report)
@@ -1705,7 +1729,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         )
 
     def write_settings(request: Request) -> dict[str, Any]:
-        """Return the two knobs every write shares, and who git records as the author.
+        """Return the knobs every write shares: the author, the no-git switch, the push.
 
         Configuration decides the author until a *named* caller turns up. An operator
         credential is one (warren#225): it was minted for a person, so their writes are
@@ -1719,7 +1743,11 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             if operator is not None
             else settings.commit_identity or au.DEFAULT_IDENTITY
         )
-        return {"identity": identity, "allow_uncommitted": settings.allow_uncommitted_writes}
+        return {
+            "identity": identity,
+            "allow_uncommitted": settings.allow_uncommitted_writes,
+            "push": settings.push,
+        }
 
     def acting_principal(request: Request) -> str:
         """How this caller is described in a commit trailer.
@@ -1891,10 +1919,20 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
         except TransportError as exc:
             record_refusal(request_id, RETIRE_REFUSED)
             _refuse(409, RETIRE_REFUSED, str(exc))
+        # The nursery committed the mark; the API pushes it, as it pushes every commit it
+        # makes (warren#351). After the host was reached, on purpose: the push is a record
+        # of a retirement that has already happened, and a burrow that cannot reach GitHub
+        # must still be able to stop a resident.
+        push = None
+        if report.commit is not None and settings.push is not None:
+            repo = au.repo_toplevel(residents_dir)
+            push = au.push_commit(repo, settings.push) if repo is not None else None
+        message = _retire_message(report)
         return {
             "request_id": request_id,
-            "message": _retire_message(report),
+            "message": message if push is None else f"{message}. {push.note}",
             **report.to_dict(),
+            "push": push.to_dict() if push is not None else None,
         }
 
     @app.get("/residents/{resident_id}/declaration")

@@ -21,6 +21,16 @@ for pair in burrow:chronicle arcadia:arcadia arcadia:townhall steward:steward; d
         printf "%-10s %s\n" "$svc" "(no marker: deployed by hand before deploy/deploy.sh)"
     fi
 done
+# The residents checkout (warren#351): the one thing on the burrow that IS git. Read
+# through the API container, the process that writes it. (No apostrophes in here: this
+# whole script is one single-quoted argument to ssh.)
+if docker ps --format "{{.Names}}" | grep -qx steward-api; then
+    branch="$(docker exec steward-api git -C /checkout rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")"
+    head="$(docker exec steward-api git -C /checkout rev-parse --short HEAD 2>/dev/null || echo "?")"
+    unpushed="$(docker exec steward-api git -C /checkout rev-list --count origin/burrow/residents..HEAD 2>/dev/null || echo "?")"
+    dirty="$(docker exec steward-api git -C /checkout status --porcelain 2>/dev/null | wc -l | tr -d " ")"
+    printf "%-10s %s @ %s, %s unpushed, %s dirty\n" "checkout" "$branch" "$head" "$unpushed" "$dirty"
+fi
 echo
 docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}" | grep -E "^(burrow|arcadia|steward-)" || true
 ' 2>/dev/null | grep -v 'post-quantum\|store now\|openssh.com/pq' || true

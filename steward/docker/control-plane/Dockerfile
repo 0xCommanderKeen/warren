@@ -30,7 +30,13 @@
 #                     the official `docker:<ver>-cli` image, pinned by digest; the socket
 #                     is the compose file's decision, not this one's.
 # `git`               Declaration and skill writes are git-backed (steward#292); a control
-#                     plane without git cannot author anything and says so honestly.
+#                     plane without git cannot author anything and says so honestly. The
+#                     tree it writes is the burrow's checkout, bind-mounted at /checkout
+#                     (deploy/compose.yaml; warren#351) — not the seed COPYed below.
+# `ssh`               What git pushes the checkout through. GitHub's host keys are baked in
+#                     so a fresh burrow's first push is verified rather than trusted on
+#                     first use, and GIT_SSH_COMMAND names the deploy key the compose file
+#                     mounts.
 # `curl`              Health checks from inside the container, and `steward doctor`'s probes.
 #
 # ## Arch
@@ -68,7 +74,24 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# GitHub's SSH host keys as it publishes them (`gh api meta -q .ssh_keys`, the same list
+# as api.github.com/meta), copied 2026-09-02. A burrow's first push has to be able to
+# verify the host it is handing the fleet's history to, and StrictHostKeyChecking=yes
+# below refuses any other. Rotate them the way the base pin is moved: re-run the command,
+# paste, update this date, own commit.
+RUN printf '%s\n' \
+    'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+    'github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=' \
+    'github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=' \
+    > /etc/ssh/ssh_known_hosts \
+    # The checkout is a bind mount owned by whoever made it on the burrow — root, through
+    # this image, or the operator by hand — and git refuses a repository owned by somebody
+    # else unless told the path is safe. Told here, for that one path, so a checkout made
+    # either way is one the API can commit into rather than a 409 not_a_git_checkout.
+    && git config --system safe.directory /checkout
 
 # node and npm, out of the resident image's pinned base rather than a third source.
 COPY --from=node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 /usr/local/bin/node /usr/local/bin/node
@@ -88,6 +111,10 @@ RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_VERS
 COPY --from=docker:29.7.2-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e /usr/local/bin/docker /usr/local/bin/docker
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
+    # How git reaches GitHub from a burrow: the deploy key the compose file mounts into the
+    # API (and deploy/deploy.sh into its one-off `docker run`s), that key only, the host
+    # keys above only, and never a prompt — a daemon has nobody to answer one.
+    GIT_SSH_COMMAND="ssh -i /run/steward/residents-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o BatchMode=yes -o ConnectTimeout=10" \
     # The pin above is the whole point; a CLI that updated itself in place would quietly
     # undo it and nobody would be able to say what version wrote what.
     DISABLE_AUTOUPDATER=1 \
@@ -108,9 +135,11 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-# The control plane's own tree: the package, and the residents, skills and schema the API
-# validates against and the scheduler reads its routines from. What is NOT here is anything
-# under local/, demo/, tests/ or .venv — see .dockerignore.
+# The control plane's own tree: the package, the schema, and the residents and skills as a
+# *seed*. On a burrow nothing reads /app/residents (warren#351): the compose file mounts
+# the burrow's own checkout at /checkout and points every process there, and this copy is
+# what a bare `docker run` of the image serves and what a new burrow is cloned from. What
+# is NOT here is anything under local/, demo/, tests/ or .venv — see .dockerignore.
 COPY src ./src
 COPY residents ./residents
 COPY skills ./skills

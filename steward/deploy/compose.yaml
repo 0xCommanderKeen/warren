@@ -14,14 +14,27 @@
 #
 # Secrets are not in this file and never will be. STEWARD_TOKEN lives in the .env beside
 # it (mode 0600), which no repository has ever seen; STEWARD_IMAGE_TAG is written into
-# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`".
+# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`". The
+# deploy key that pushes the residents checkout is the file residents-key beside them,
+# mode 0600, mounted into the API and nothing else (deploy/README.md says how it is made).
 #
-# What the scheduler runs is deliberately narrower than what the API can see. The image
-# carries every declared resident (residents/), and the API serves them all read-only, but
-# the scheduler and watchdog are pointed at a tree holding Pip alone. Hob (life-agent) and
-# Project-scoped or externally placed residents may declare containers this file does not manage: bringing
-# them under steward's supervision is the pilot (warren#29), a decision made in a manifest
-# and a PR, not in a deploy.
+# The residents tree is NOT the image's (warren#351). It is a git checkout on the burrow —
+# ~/docker/steward/residents-repo, a sparse clone of this repository on the branch
+# burrow/residents, made once by deploy/deploy.sh and never reset by it — bind-mounted at
+# /checkout. The API reads and writes /checkout/steward/residents and the skills library
+# beside it, commits every write, and pushes the branch, best effort. The daemons mount the
+# same checkout read-only: the standing rule that only the API writes declarations, written
+# into the mounts. The checkout is authoritative for this burrow's residents; steward/
+# residents/ in the repository is the seed a new burrow is cloned from, not a place charters
+# are edited. The image still carries a copy of that seed, and nothing here reads it.
+#
+# What the scheduler runs is deliberately narrower than what the API can see. The API
+# serves every resident in the checkout, but the scheduler and watchdog are pointed at a
+# tree holding Pip alone — a symlink farm into the checkout, so an edit the API commits is
+# the edit they read on their next wake-up, with no restart. Project-scoped or externally
+# placed residents may declare containers this file does not manage: bringing them under
+# steward's supervision is the pilot (warren#29), a decision made in a manifest and a PR,
+# not in a deploy.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -35,6 +48,12 @@ x-steward: &steward
     CHRONICLE_URL: http://dockerhost:8737
     # The pre-rename spelling, kept for one release (warren#216).
     BURROW_URL: http://dockerhost:8737
+    # Read by the API alone: every commit the write API makes is pushed to this branch of
+    # the checkout's origin. Best effort — a save is durable before the push starts, and a
+    # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never
+    # main: nothing lands there without a pull request, and a push to any other branch
+    # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
+    STEWARD_PUSH_BRANCH: burrow/residents
     TZ: Europe/Ljubljana
   extra_hosts:
     - "dockerhost:host-gateway"
@@ -48,7 +67,14 @@ services:
     container_name: steward-api
     ports:
       - "8802:8801"
-    command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "residents"]
+    volumes:
+      - ./data:/data
+      - ./claude-config:/root/.claude
+      # The one writable mount of the checkout.
+      - ./residents-repo:/checkout
+      # The deploy key the push uses; the image's GIT_SSH_COMMAND names this path.
+      - ./residents-key:/run/steward/residents-key:ro
+    command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "/checkout/steward/residents"]
 
   scheduler:
     <<: *steward
@@ -56,14 +82,17 @@ services:
     volumes:
       - ./data:/data
       - ./claude-config:/root/.claude
+      - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
     # `sh -c`, not `-lc`: a login shell re-reads /etc/profile, which resets PATH and
     # loses /app/.venv/bin — the first rollout crash-looped on exactly that. The absolute
     # path is belt and braces.
-    # The tree the daemons read: Pip, copied out of the image at start, with the skills
-    # library linked beside it where a manifest expects it. Pip's memory is on /data so it
-    # survives the container.
-    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && cp -r /app/residents/pip /sched/residents/ && ln -sfn /app/skills /sched/skills && exec /app/.venv/bin/steward scheduler run --residents /sched/residents"]
+    # The tree the daemons read: Pip, linked — not copied — out of the checkout, with the
+    # skills library linked beside it where a manifest expects it. A copy taken at start
+    # was warren#351's third defect: the scheduler polls its tree for edits, and it was
+    # polling a copy nothing ever updated. Pip's memory is on /data so it survives the
+    # container.
+    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && ln -sfn /checkout/steward/residents/pip /sched/residents/pip && ln -sfn /checkout/steward/skills /sched/skills && exec /app/.venv/bin/steward scheduler run --residents /sched/residents"]
 
   watchdog:
     <<: *steward
@@ -71,7 +100,8 @@ services:
     volumes:
       - ./data:/data
       - ./claude-config:/root/.claude
+      - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
     # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
     # wider list than the scheduler fires would report residents nobody is running.
-    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && cp -r /app/residents/pip /sched/residents/ && ln -sfn /app/skills /sched/skills && exec /app/.venv/bin/steward watchdog run --residents /sched/residents"]
+    command: ["sh", "-c", "mkdir -p /data/residents/pip/memory /sched/residents && ln -sfn /checkout/steward/residents/pip /sched/residents/pip && ln -sfn /checkout/steward/skills /sched/skills && exec /app/.venv/bin/steward watchdog run --residents /sched/residents"]
