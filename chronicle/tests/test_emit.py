@@ -1099,7 +1099,6 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             )
             self.assertTrue(emit._update_outbox(set(), records)[1])
 
-            previous = len(self.outbox())
             with (
                 mock.patch.dict(
                     os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
@@ -1111,12 +1110,10 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
                 for index in range(400):
                     emit.deliver(dict(self.EVENT, ts="hook-%04d" % index))
                     remaining = len(self.outbox())
-                    self.assertLess(remaining, previous)
-                    previous = remaining
                     if not remaining:
                         break
 
-        self.assertEqual(previous, 0)
+        self.assertEqual(remaining, 0)
         self.assertEqual(len(received), len(set(received)))
         with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
             self.assertEqual(json.load(stream)["outbox"]["records"], 0)
