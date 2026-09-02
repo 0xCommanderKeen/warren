@@ -1,0 +1,25 @@
+# Build context for docker/control-plane/Dockerfile (context = this directory).
+# Everything the image needs is COPYed by name; this keeps the context small and keeps
+# the things that must never be in an image out of it.
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+.DS_Store
+.steward/
+# Machine-local trees: gitignored, and a resident declared here is not one the fleet
+# knows about.
+local/
+demo/
+# Not runtime.
+tests/
+docs/
+docker/
