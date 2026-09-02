@@ -61,7 +61,7 @@ CHRONICLE ?= $(if $(BURROW),$(BURROW),../chronicle)
 #: change that would break its reader has to show up as a diff here.
 SCHEMA ?= schema/resident-manifest-v0.json
 
-.PHONY: dev lint format test check validate schema schema-write build clean image image-ship vendor-emitter
+.PHONY: dev lint format test check validate schema schema-write build clean image image-ship image-cp image-cp-ship vendor-emitter
 
 dev:
 	$(UV) sync --all-groups
@@ -122,6 +122,27 @@ image:
 # way everything else does: a pipe over ssh. gzip because tailscale is not a LAN.
 image-ship:
 	docker save $(IMAGE):$(IMAGE_VERSION) $(IMAGE):latest | gzip -1 | ssh $(NAS) 'gunzip -c | docker load'
+
+# The control-plane image — the API and the daemons the NAS runs (docker/control-plane/
+# Dockerfile). Same shape as `image`: linux/amd64 through buildx, the commit stamped in,
+# and it travels the way everything else does. CP_TAG defaults to the short sha so that
+# the tag on the burrow names the commit; deploy/deploy.sh passes both explicitly.
+CP_IMAGE ?= steward-cp
+CP_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+
+image-cp:
+	docker buildx build \
+	  --platform $(PLATFORM) \
+	  --load \
+	  --build-arg CLAUDE_VERSION=$(CLAUDE_VERSION) \
+	  --build-arg IMAGE_REVISION=$(REVISION) \
+	  -f docker/control-plane/Dockerfile \
+	  -t $(CP_IMAGE):$(CP_TAG) \
+	  -t $(CP_IMAGE):latest \
+	  .
+
+image-cp-ship:
+	docker save $(CP_IMAGE):$(CP_TAG) $(CP_IMAGE):latest | gzip -1 | ssh $(NAS) 'gunzip -c | docker load'
 
 # Refresh the vendored copy of the hook emitter: chronicle's bundle build, run against
 # ../chronicle, written where the Dockerfile COPYs from.

@@ -1,0 +1,46 @@
+name: reach the burrow
+description: >-
+  Join the tailnet as an ephemeral node tagged tag:ci and set up ssh to the NAS with the
+  deploy key. Everything deploy/deploy.sh needs to reach the burrow, and nothing else.
+
+inputs:
+  oauth-client-id:
+    description: Tailscale OAuth client id (repo secret TS_OAUTH_CLIENT_ID).
+    required: true
+  oauth-secret:
+    description: Tailscale OAuth client secret (repo secret TS_OAUTH_SECRET).
+    required: true
+  ssh-key:
+    description: The private half of the warren-deploy key (repo secret NAS_SSH_KEY).
+    required: true
+  known-hosts:
+    description: The NAS's host key, ssh-keyscan format (repo variable NAS_KNOWN_HOSTS).
+    required: true
+  nas:
+    description: user@host the deploy script will ssh to.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # An ephemeral node: it exists for this job and is removed from the tailnet when the
+    # runner goes away. The tag is what the ACL grants access to (deploy/README.md).
+    - uses: tailscale/github-action@v3
+      with:
+        oauth-client-id: ${{ inputs.oauth-client-id }}
+        oauth-secret: ${{ inputs.oauth-secret }}
+        tags: tag:ci
+
+    # Secrets reach the shell through the environment, never through template
+    # interpolation into the script text.
+    - shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        NAS: ${{ inputs.nas }}
+      run: |
+        umask 077
+        mkdir -p ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+        printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+        ssh -o BatchMode=yes -o ConnectTimeout=30 "$NAS" 'echo "reached $(hostname) as $(whoami)"'
