@@ -57,15 +57,9 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim@sha256:7cf77f594be8042dab6daa
 ARG CLAUDE_VERSION=2.1.243
 ARG DEBIAN_FRONTEND=noninteractive
 
-# What commit this image was built from. `make image-cp` passes the real one; the default
-# is `unknown` because a bare `docker build` genuinely does not know, and a label that
-# guessed would be worse than one that admits it.
-ARG IMAGE_REVISION=unknown
-
 LABEL org.opencontainers.image.title="steward-cp"
 LABEL org.opencontainers.image.description="Steward's control plane: the API and the scheduler/watchdog daemons."
 LABEL org.opencontainers.image.source="https://github.com/0xCommanderKeen/warren"
-LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 
 # Not version-pinned, for the reason docker/resident/Dockerfile gives: a bookworm point
 # release would otherwise break the build for the one reason nobody wants.
@@ -123,6 +117,14 @@ COPY skills ./skills
 COPY schema ./schema
 RUN uv sync --frozen --no-dev \
     && steward --help >/dev/null
+
+# What commit this image was built from. `make image-cp` passes the real one; the default
+# is `unknown` because a bare `docker build` genuinely does not know, and a label that
+# guessed would be worse than one that admits it. Last, on purpose: a build arg
+# invalidates every layer after its first use, and the revision changes on every commit
+# while nothing above it does.
+ARG IMAGE_REVISION=unknown
+LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 
 EXPOSE 8801
 

@@ -17,8 +17,8 @@
 # chronicle's file list is read out of its README here, exactly as
 # chronicle/tests/test_deployment_bundle.py reads it.
 #
-# Convergence, not accretion (warren#269): every published directory is `rsync --delete`d
-# from a staging copy, so a file the repo removed disappears from the burrow too — the
+# Convergence, not accretion (warren#269): every published directory is made equal to a
+# staged copy — changed files replaced, files the repo removed removed — where the
 # tar-over-ssh recipes could only ever add. Data volumes (/data, steward's steward.db) are
 # never written by this script; steward's is backed up beside itself before each rollout.
 #
@@ -30,8 +30,8 @@
 # line: revision, service, time, who — which is what deploy/status.sh reads. The NAS has
 # no git; that file is the only thing there that can say what is running.
 #
-# Preconditions: ssh to $NAS with a key (BatchMode — no prompts), rsync on both ends,
-# python3, pnpm and the node versions the CI workflows pin (24 for arcadia, 22 for
+# Preconditions: ssh to $NAS with a key (BatchMode — no prompts), tar and python3 on
+# both ends, pnpm and the node versions the CI workflows pin (24 for arcadia, 22 for
 # townhall), and, for steward, a docker that can build linux/amd64.
 set -eu
 
@@ -40,9 +40,6 @@ ORIGIN="${ORIGIN:-http://dxp2800:8737}"          # arcadia's nginx: the one publ
 STEWARD_URL="${STEWARD_URL:-http://dxp2800:8802}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=15"
-# -rlt and not -a: the burrow's directories carry UGOS ACLs and are owned by whoever
-# created them; publishing files should not be a fight about modes and owners.
-RSYNC="rsync -rlt --delete --exclude=.DS_Store --exclude=._*"
 
 log() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf 'deploy: %s\n' "$*" >&2; exit 1; }
@@ -62,6 +59,78 @@ require_clean() {
     fi
 }
 
+quietly() {
+    # quietly <label> <command...> — a step whose output only matters when it fails.
+    label="$1"; shift
+    out="$(mktemp)"
+    if "$@" >"$out" 2>&1; then
+        rm -f "$out"
+    else
+        cat "$out" >&2; rm -f "$out"
+        die "$label failed"
+    fi
+}
+
+tests_enabled() { [ "${SKIP_TESTS:-0}" != "1" ]; }
+
+# publish <local dir> <remote dir, relative to ~> — make the remote directory equal to
+# the local one.
+#
+# This is `rsync --delete` without rsync. UGOS ships an rsync that tries to become root
+# and refuses any path outside its own sandbox (its scp is broken the same way), so the
+# bytes travel the way every runbook already sends them — a tar over ssh — into a
+# staging directory beside the target, and a python3 on the burrow then converges the
+# target onto it: a changed file is written beside and renamed over, a file the repo no
+# longer has is removed, and the target directory itself is never replaced. That last
+# part is the point of doing it per file: docker bind-mounts an inode, not a path, so a
+# directory swapped out from under a running container is a directory that container
+# can no longer see.
+publish() {
+    local_dir="$1"; remote_dir="$2"
+    COPYFILE_DISABLE=1 tar --no-xattrs -cf - -C "$local_dir" . \
+        | $SSH "$NAS" "rm -rf ~/$remote_dir.incoming && mkdir -p ~/$remote_dir.incoming ~/$remote_dir && tar -xf - -C ~/$remote_dir.incoming"
+    $SSH "$NAS" "python3 - ~/$remote_dir.incoming ~/$remote_dir" <<'PY'
+import filecmp, os, shutil, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+changed = removed = 0
+
+for root, dirs, files in os.walk(src):
+    rel = os.path.relpath(root, src)
+    droot = dst if rel == "." else os.path.join(dst, rel)
+    os.makedirs(droot, exist_ok=True)
+    for name in files:
+        s, t = os.path.join(root, name), os.path.join(droot, name)
+        if os.path.isfile(t) and not os.path.islink(t) and filecmp.cmp(s, t, shallow=False):
+            continue
+        tmp = t + ".incoming"
+        shutil.copyfile(s, tmp)
+        shutil.copymode(s, tmp)
+        os.replace(tmp, t)
+        changed += 1
+
+for root, dirs, files in os.walk(dst, topdown=False):
+    rel = os.path.relpath(root, dst)
+    sroot = src if rel == "." else os.path.join(src, rel)
+    for name in files:
+        if not os.path.lexists(os.path.join(sroot, name)):
+            os.remove(os.path.join(root, name)); removed += 1
+    for name in dirs:
+        if not os.path.isdir(os.path.join(sroot, name)):
+            shutil.rmtree(os.path.join(root, name)); removed += 1
+
+shutil.rmtree(src)
+print(f"converged {dst}: {changed} written, {removed} removed")
+PY
+}
+
+# publish_files <remote dir, relative to ~> <local dir> <file>... — a few named files
+# into a directory that holds other things too (no convergence: nothing is removed).
+publish_files() {
+    remote_dir="$1"; local_dir="$2"; shift 2
+    COPYFILE_DISABLE=1 tar --no-xattrs -cf - -C "$local_dir" "$@" | $SSH "$NAS" "tar -xf - -C ~/$remote_dir"
+}
+
 stamp() {
     # stamp <nas dir> <service>
     $SSH "$NAS" "printf 'rev=%s service=%s at=%s by=%s\n' '$REV' '$2' '$NOW' '$WHO' > ~/docker/$1/DEPLOYED-$2"
@@ -78,8 +147,6 @@ wait_for() {
     die "$1 did not answer $2 within 90s (last: ${code:-none})"
 }
 
-tests_enabled() { [ "${SKIP_TESTS:-0}" != "1" ]; }
-
 # ---------------------------------------------------------------------------- chronicle
 # chronicle/README.md "Running": the tar recipe's file list, restart, /state.
 deploy_chronicle() {
@@ -95,17 +162,17 @@ PY
 )"
     if tests_enabled; then
         log "chronicle: tests"
-        (cd "$ROOT/chronicle" && sh tests/run.sh >/dev/null) || die "chronicle tests failed"
+        quietly "chronicle tests" sh -c 'cd "$1" && sh tests/run.sh' _ "$ROOT/chronicle"
     fi
     stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
     log "chronicle: staging $SHORT — $files"
     paths=""; for f in $files; do paths="$paths chronicle/$f"; done
     # shellcheck disable=SC2086 — the list is the recipe, space-separated on purpose
     (cd "$ROOT" && git archive --format=tar HEAD $paths) | tar -x -C "$stage"
-    log "chronicle: publishing to $NAS:~/docker/burrow/app (rsync --delete)"
-    $RSYNC "$stage/chronicle/" "$NAS:docker/burrow/app/"
+    log "chronicle: publishing to $NAS:~/docker/burrow/app"
+    publish "$stage/chronicle" docker/burrow/app
     log "chronicle: restarting"
-    $SSH "$NAS" 'cd ~/docker/burrow && docker compose restart burrow' >/dev/null
+    $SSH "$NAS" 'cd ~/docker/burrow && docker compose restart burrow' >/dev/null 2>&1
     wait_for "$ORIGIN/burrow/state" 200
     curl -fsS -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: /burrow/residents did not answer"
     stamp burrow chronicle
@@ -117,26 +184,25 @@ PY
 deploy_arcadia() {
     require_clean arcadia
     log "arcadia: build ($(node --version), pnpm $(pnpm --version))"
-    (cd "$ROOT/arcadia" && pnpm install --frozen-lockfile >/dev/null \
-        && { ! tests_enabled || pnpm test >/dev/null; } \
-        && pnpm build >/dev/null) || die "arcadia build failed"
-    log "arcadia: publishing dist/ to $NAS:~/docker/arcadia/dist (rsync --delete)"
-    $RSYNC "$ROOT/arcadia/dist/" "$NAS:docker/arcadia/dist/"
+    quietly "arcadia install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/arcadia"
+    if tests_enabled; then quietly "arcadia tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/arcadia"; fi
+    quietly "arcadia build" sh -c 'cd "$1" && pnpm build' _ "$ROOT/arcadia"
+    log "arcadia: publishing dist/ to $NAS:~/docker/arcadia/dist"
+    publish "$ROOT/arcadia/dist" docker/arcadia/dist
     before="$($SSH "$NAS" 'md5sum ~/docker/arcadia/nginx.conf ~/docker/arcadia/compose.yaml 2>/dev/null' || true)"
-    # The two config files land at the root of ~/docker/arcadia — beside dist/, not over it,
-    # so no --delete here.
-    rsync -lt "$ROOT/arcadia/deploy/nginx.conf" "$ROOT/arcadia/deploy/compose.yaml" "$NAS:docker/arcadia/"
+    # The two config files land at the root of ~/docker/arcadia — beside dist/, not over it.
+    publish_files docker/arcadia "$ROOT/arcadia/deploy" nginx.conf compose.yaml
     after="$($SSH "$NAS" 'md5sum ~/docker/arcadia/nginx.conf ~/docker/arcadia/compose.yaml')"
     if [ "$before" != "$after" ]; then
         log "arcadia: nginx.conf/compose.yaml changed — restarting the origin"
-        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d && docker compose restart arcadia' >/dev/null
+        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d && docker compose restart arcadia' >/dev/null 2>&1
     else
         # Static assets are bind-mounted read-only: new files are served as they land.
-        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d' >/dev/null
+        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d' >/dev/null 2>&1
     fi
     wait_for "$ORIGIN/" 200
     log "arcadia: smoke"
-    (cd "$ROOT/arcadia" && sh deploy/smoke.sh "$ORIGIN") || die "arcadia smoke failed"
+    quietly "arcadia smoke" sh -c 'cd "$1" && sh deploy/smoke.sh "$2"' _ "$ROOT/arcadia" "$ORIGIN"
     stamp arcadia arcadia
     log "arcadia: $SHORT is live"
 }
@@ -146,11 +212,11 @@ deploy_arcadia() {
 deploy_townhall() {
     require_clean townhall
     log "townhall: build --base=/observatory/ ($(node --version), pnpm $(pnpm --version))"
-    (cd "$ROOT/townhall" && pnpm install --frozen-lockfile >/dev/null \
-        && { ! tests_enabled || pnpm test >/dev/null; } \
-        && pnpm build --base=/observatory/ >/dev/null) || die "townhall build failed"
-    log "townhall: publishing dist/ to $NAS:~/docker/arcadia/observatory-dist (rsync --delete)"
-    $RSYNC "$ROOT/townhall/dist/" "$NAS:docker/arcadia/observatory-dist/"
+    quietly "townhall install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/townhall"
+    if tests_enabled; then quietly "townhall tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/townhall"; fi
+    quietly "townhall build" sh -c 'cd "$1" && pnpm build --base=/observatory/' _ "$ROOT/townhall"
+    log "townhall: publishing dist/ to $NAS:~/docker/arcadia/observatory-dist"
+    publish "$ROOT/townhall/dist" docker/arcadia/observatory-dist
     curl -fsS -m 10 "$ORIGIN/observatory/" | grep -q 'id="root"' || die "townhall: /observatory/ did not serve the app"
     stamp arcadia townhall
     log "townhall: $SHORT is live"
@@ -164,12 +230,12 @@ deploy_steward() {
     require_clean steward
     if tests_enabled; then
         log "steward: make check"
-        (cd "$ROOT/steward" && make check >/dev/null) || die "steward check failed"
+        quietly "steward check" sh -c 'cd "$1" && make check' _ "$ROOT/steward"
     fi
     log "steward: building steward-cp:$SHORT (linux/amd64)"
-    (cd "$ROOT/steward" && make image-cp CP_TAG="$SHORT" REVISION="$REV" >/dev/null) || die "steward image build failed"
+    quietly "steward image build" sh -c 'cd "$1" && make image-cp CP_TAG="$2" REVISION="$3"' _ "$ROOT/steward" "$SHORT" "$REV"
     log "steward: shipping the image to $NAS"
-    (cd "$ROOT/steward" && make image-cp-ship CP_TAG="$SHORT" NAS="$NAS" >/dev/null) || die "steward image ship failed"
+    quietly "steward image ship" sh -c 'cd "$1" && make image-cp-ship CP_TAG="$2" NAS="$3"' _ "$ROOT/steward" "$SHORT" "$NAS"
     $SSH "$NAS" 'test -f ~/docker/steward/.env' \
         || die "~/docker/steward/.env is missing on $NAS — it must hold STEWARD_TOKEN=… (chmod 600); see steward/deploy/compose.yaml"
     log "steward: stopping, backing up data/, publishing compose.yaml"
@@ -177,15 +243,15 @@ deploy_steward() {
     # service names, and --remove-orphans catches whatever it did not. Backups: keep three.
     $SSH "$NAS" 'cd ~/docker/steward && docker compose down --remove-orphans >/dev/null 2>&1; \
         cp -r data "data.bak-$(date -u +%Y%m%dT%H%M%SZ)" && ls -dt data.bak-* | tail -n +4 | xargs -r rm -rf'
-    rsync -lt "$ROOT/steward/deploy/compose.yaml" "$NAS:docker/steward/compose.yaml"
+    publish_files docker/steward "$ROOT/steward/deploy" compose.yaml
     $SSH "$NAS" "cd ~/docker/steward \
         && if grep -q '^STEWARD_IMAGE_TAG=' .env; then sed -i 's/^STEWARD_IMAGE_TAG=.*/STEWARD_IMAGE_TAG=$SHORT/' .env; else printf 'STEWARD_IMAGE_TAG=%s\n' '$SHORT' >> .env; fi \
-        && chmod 600 .env && docker compose up -d" >/dev/null
+        && chmod 600 .env && docker compose up -d" >/dev/null 2>&1
     # 401 is the API saying it is up and that it wants a credential — the smoke check
     # arcadia's origin already makes of the same route.
     wait_for "$STEWARD_URL/residents" 401
     log "steward: doctor"
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api steward doctor --residents residents' || true
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api steward doctor --residents residents' 2>/dev/null || true
     stamp steward steward
     log "steward: $SHORT is live"
 }
