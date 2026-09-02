@@ -594,6 +594,20 @@
         "title": "ResidentPost",
         "type": "object"
       },
+      "RetirePost": {
+        "additionalProperties": false,
+        "description": "Whether to retire the declared resident, or only rehearse retiring it.\n\nThe mirror of :class:`ProvisionPost`, and for the same reason there is nothing else on\nit: retirement takes an id and reads the declared manifest, so the request *is* the\nresident. The knobs ``steward retire`` offers beyond this one \u2014 ``--no-commit``,\n``--no-deploy``, ``--allow-dirty`` \u2014 are break-glass for a host that is already gone or\na checkout somebody is mid-way through, and each of them leaves the retirement half\ndone in a way only the person at the terminal can see. A control panel gets the whole\nact or a refusal naming what stopped it.",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Report the plan and touch nothing: no mark, no commit, no host. `commands` is the exact argv a real run would issue.",
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "RetirePost",
+        "type": "object"
+      },
       "Route": {
         "additionalProperties": false,
         "description": "A declared inbound channel through which work can reach a resident.\n\nA route of kind ``delegation`` is the receiving half of steward #7: it declares that\nthis resident accepts work handed to it by another resident, and steward will deliver\ninto it. Every other kind is a channel steward only describes.",
@@ -1861,6 +1875,73 @@
           }
         ],
         "summary": "Provision Declared Resident"
+      }
+    },
+    "/residents/{resident_id}/retire": {
+      "post": {
+        "description": "End a resident: mark it retired in git, stop its container, remove its token.\n\nThe counterpart of ``POST /residents/{id}/provision`` (warren#331), and the reason\nit had to exist: retirement is not a manifest edit. Writing ``retired: true``\nthrough ``PUT \u2026/declaration`` marks the resident and leaves its container running\nwith a live village token on the host \u2014 the half that matters most left undone \u2014\nso a control panel that could only edit declarations could show a retired badge it\nhad no way to make true.\n\n**The order is the safety argument, and it is the nursery's, not this route's.**\n``retired: true`` is what takes the resident out of the scheduler, the board,\ndelegation and the watchdog; stopping the container first would leave a window in\nwhich the watchdog notices it die and dutifully puts it back. So: mark, commit,\n``docker compose down``, then remove the ``.env`` and the compose file \u2014 in that\norder, by one pipeline ``steward retire`` also calls.\n\n**This one commits through the nursery**, unlike ``POST /residents``, which asks the\npipeline not to and commits afterwards through :mod:`steward.authoring`. The reason\nis the order above: retirement's commit belongs *between* the mark and the stop, and\nthe only code inside that sequence is the pipeline. What comes with the nursery's\ncommit is the nursery's dirty-worktree refusal, which is named rather than hidden \u2014\na server that committed a retirement into a checkout somebody was half-way through\nwould be a server nobody can revert one decision in.\n\n**200, not 202**, for the reason provision answers 200: by the time this returns the\ncontainer is down and the credential is gone. There is nothing left to acknowledge.",
+        "operationId": "retire_declared_resident_residents__resident_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RetirePost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retire Declared Resident Residents  Resident Id  Retire Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retire Declared Resident"
       }
     },
     "/residents/{resident_id}/routines/{routine_id}/run": {
