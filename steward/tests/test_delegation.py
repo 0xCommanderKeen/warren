@@ -883,7 +883,11 @@ def test_the_receiver_works_its_inbox_on_its_next_wake_up(
     assert report.done
     assert report.resident_id == RECEIVER
     assert job(store, task.task_id).status == "done"
-    assert [event.type for event in sink.events] == ["task_claimed", "task_done"]
+    assert [event.type for event in sink.events] == [
+        "task_claimed",
+        "resident_declared",
+        "task_done",
+    ]
 
 
 def test_pickup_and_completion_carry_the_parent(
@@ -898,7 +902,7 @@ def test_pickup_and_completion_carry_the_parent(
     sink.events.clear()
 
     dispatcher.dispatch(NOW)
-    claimed, done = sink.events
+    claimed, _, done = sink.events
     assert claimed.payload["parent_task_id"] == root.task_id
     assert done.payload["parent_task_id"] == root.task_id
 
@@ -914,7 +918,7 @@ def test_an_ordinary_board_task_says_nothing_about_a_parent(
     store.post_job(title="A notice for anybody")
 
     make_dispatcher(residents).dispatch(NOW)
-    claimed, done = sink.events
+    claimed, _, done = sink.events
     assert "parent_task_id" not in claimed.payload
     assert "parent_task_id" not in done.payload
 
@@ -1148,6 +1152,7 @@ def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     assert [event.type for event in sink.events] == [
         "task_delegated",
         "task_claimed",
+        "resident_declared",
         "task_done",
     ]
     assert sink.events[-1].payload["parent_task_id"] == root.task_id

@@ -555,7 +555,7 @@ class ResidentManifestTest(unittest.TestCase):
         self.assertEqual(report["diagnostics"], [])
         self.assertEqual(
             {resident["file"] for resident in report["residents"]},
-            {"life.resident.json"},
+            set(),
         )
         self.assertNotIn(
             "Maren", {resident["meta"]["name"] for resident in report["residents"]}

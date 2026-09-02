@@ -747,6 +747,7 @@ class Scheduler:
             guard=guard,
             hooks=hooks,
             clock=self.clock,
+            emitter=self.emitter,
         )
         self._running: set[str] = set()
         self._lock = threading.Lock()

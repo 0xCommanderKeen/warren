@@ -11,6 +11,8 @@ import re
 
 from journal_observations import validate_journal_event
 
+VILLAGE_HOME_MIN = 0
+VILLAGE_HOME_MAX = 7
 
 EVENT_TYPES = frozenset(
     {
@@ -33,6 +35,8 @@ EVENT_TYPES = frozenset(
         "task_delegated",
         "needs_human_resolved",
         "resident_restarted",
+        "resident_declared",
+        "resident_retired",
         "chat_message_dropped",
         "journal_written",
     }
@@ -190,6 +194,32 @@ def _validate_resident_restart(event):
     return None
 
 
+def _validate_resident_declared(event):
+    payload = event["payload"]
+    required = {"name", "char", "accent", "role", "summary", "resident_id", "uid", "home"}
+    if set(payload) != required:
+        return "invalid resident declaration fields"
+    for field in ("name", "char", "accent", "role", "resident_id", "uid"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    if payload["summary"] is not None and not _nonempty_text(payload["summary"]):
+        return "invalid payload.summary"
+    home = payload.get("home")
+    if type(home) is not int or not VILLAGE_HOME_MIN <= home <= VILLAGE_HOME_MAX:
+        return "invalid payload.home"
+    return None
+
+
+def _validate_resident_retired(event):
+    payload = event["payload"]
+    if set(payload) != {"resident_id", "uid"}:
+        return "invalid resident retirement fields"
+    for field in ("resident_id", "uid"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    return None
+
+
 def _validate_chat_drop(event):
     """Somebody knocked on a resident's chat route and was deliberately not answered.
 
@@ -236,6 +266,8 @@ _STEWARD_AUTHORED = {
     "task_session_finished": (_validate_session_report, _TASK_AUTHORITY),
     "needs_human_resolved": (_validate_approval_resolution, _APPROVAL_AUTHORITY),
     "resident_restarted": (_validate_resident_restart, _RESIDENT_AUTHORITY),
+    "resident_declared": (_validate_resident_declared, _RESIDENT_AUTHORITY),
+    "resident_retired": (_validate_resident_retired, _RESIDENT_AUTHORITY),
     "chat_message_dropped": (_validate_chat_drop, _CHAT_AUTHORITY),
 }
 

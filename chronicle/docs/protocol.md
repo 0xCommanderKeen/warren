@@ -342,6 +342,8 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `task_session_finished` | a claimant's session reported back after losing its claim | `task_id`, `title`, `claimant`, `run_id`, `outcome`, `artifacts`, `duration_s`, `reason` |
 | `task_delegated`    | Steward accepted a handoff and put it in somebody's inbox | `task_id`, `title`, `from`, `to`, `route`, `parent_task_id`, `depth` |
 | `resident_restarted` | Steward's watchdog took a resident down and brought it back | `reason`, `attempt`; optional `supervisor` |
+| `resident_declared` | Steward restated a resident's display identity before launch | exactly `name`, `char`, `accent`, `role`, `summary`, `resident_id`, `uid`, `home` |
+| `resident_retired` | Steward retired a resident and released its village plot | exactly `resident_id`, `uid` |
 | `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason`; optional `suppressed` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
@@ -377,6 +379,10 @@ diagnosed and ignored, including for run-now acknowledgement.
 activity: they enter the villager's bounded visible history and read as sentences — “handed
 “Draft the letter” to codex:keeper”, “reported back on “Research X” after losing the claim”,
 “was restarted (attempt 2): container was not running”.
+
+`resident_declared` and `resident_retired` are identity authority, not activity. They do
+not animate a villager, refresh its activity clock, age its mood, or enter card history.
+The latest matching declaration/retirement is retained outside the ordinary history bound.
 
 A late session report describes the *run*, not the row: the lease sweep remains the
 authority on the task, so `task_session_finished` never claims, closes or reopens one.
