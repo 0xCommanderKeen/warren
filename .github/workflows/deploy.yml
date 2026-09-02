@@ -26,6 +26,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  NAS_ADDRESS: 100.96.246.43
   # The NAS by its tailnet address — MagicDNS is not something an ephemeral node should
   # have to rely on, and the address is what the ACL names.
   NAS: Miha@100.96.246.43
@@ -42,11 +43,11 @@ jobs:
       townhall: ${{ steps.pick.outputs.townhall }}
       steward: ${{ steps.pick.outputs.steward }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The same path filters the CI workflows use, plus the deploy toolkit itself: a
       # change to the script or a compose file is a change to what the burrow runs.
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'push'
         with:
@@ -117,8 +118,8 @@ jobs:
     if: needs.changes.outputs.chronicle == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
       - uses: astral-sh/setup-uv@v7
@@ -128,11 +129,13 @@ jobs:
         working-directory: chronicle
       - uses: ./.github/actions/nas
         with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           ssh-key: ${{ secrets.NAS_SSH_KEY }}
           known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
           nas: ${{ env.NAS }}
+          nas-address: ${{ env.NAS_ADDRESS }}
       - run: deploy/deploy.sh chronicle
 
   arcadia:
@@ -144,23 +147,25 @@ jobs:
       && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           run_install: false
           package_json_file: arcadia/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: arcadia/pnpm-lock.yaml
       - uses: ./.github/actions/nas
         with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           ssh-key: ${{ secrets.NAS_SSH_KEY }}
           known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
           nas: ${{ env.NAS }}
+          nas-address: ${{ env.NAS_ADDRESS }}
       - run: deploy/deploy.sh arcadia
 
   townhall:
@@ -172,22 +177,24 @@ jobs:
       && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.22.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.22.0"
           cache: pnpm
           cache-dependency-path: townhall/pnpm-lock.yaml
       - uses: ./.github/actions/nas
         with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           ssh-key: ${{ secrets.NAS_SSH_KEY }}
           known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
           nas: ${{ env.NAS }}
+          nas-address: ${{ env.NAS_ADDRESS }}
       - run: deploy/deploy.sh townhall
 
   steward:
@@ -199,19 +206,21 @@ jobs:
       && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
       - run: uv sync --all-groups --locked
         working-directory: steward
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - uses: ./.github/actions/nas
         with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           ssh-key: ${{ secrets.NAS_SSH_KEY }}
           known-hosts: ${{ vars.NAS_KNOWN_HOSTS }}
           nas: ${{ env.NAS }}
+          nas-address: ${{ env.NAS_ADDRESS }}
       # make check, the image build, the ship, the swap — all inside the script.
       - run: deploy/deploy.sh steward
