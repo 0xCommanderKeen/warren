@@ -296,6 +296,8 @@ counters and recent failures are inspectable in
 outbox `stuck` when it is full or its oldest record is at least one day old; the transition
 also adds one `stuck_outbox` entry to the bounded recent history. This local report remains
 available when the emitter is too dark for a central status page to observe truthfully.
+Run `chronicle-emit --status` (or the installed legacy `burrow-emit --status`) to render
+that health as one operator-facing line; ordinary hook invocations remain silent.
 Local-log rotation contention uses the same crash-safe pattern: a stable-lock
 deferred journal, atomic handoff, and idempotent replay IDs. Active plus replay
 deferred authority retains the newest 1,024 records within 5 MiB; capacity drops

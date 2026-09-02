@@ -118,6 +118,8 @@ payload-free `outbox` object reports queue depth and capacity, oldest-record tim
 hooks since an acknowledgement, last acknowledgement time, and `healthy` or `stuck` status.
 Ten hooks without an acknowledgement mark a full outbox, or one whose oldest record is at
 least 24 hours old, as stuck and add a bounded `stuck_outbox` diagnostic.
+The installed `chronicle-emit --status` command renders this report as one payload-free
+operator line. It is an explicit inspection mode only and never changes ordinary hook output.
 
 Primary requests carry a random `X-Burrow-Delivery-ID`. A retry retains that ID;
 the server records accepted IDs in a fsynced sidecar ledger and returns 204

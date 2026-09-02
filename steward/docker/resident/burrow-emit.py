@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:2dd999eacc712ff8c29809c227aaebb1a0b36f83bd212c4c9c9dc562ee10d1d4
+#   hooks/emit.py     sha256:3929ef4ef5d08daefe3e838fb8fb9e2b3406007e71f5d20b62ef4371585acdf5
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -1132,6 +1132,15 @@ def _enqueue_sort_key(record):
     )
 
 
+def _enqueue_time(record):
+    """UTC timestamp encoded by a modern enqueue order, or None for legacy records."""
+    order = record.get("enqueue_order")
+    try:
+        return int(str(order).split(":", 1)[0]) / 1_000_000_000
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
 def _stamp_enqueue_order(records):
     stamped = []
     for record in records:
@@ -1446,17 +1455,14 @@ def _diagnose_outbox(records, acknowledged):
     oldest_at = None
     oldest_age = 0
     if records:
-        order = records[0].get("enqueue_order")
-        try:
-            created = int(str(order).split(":", 1)[0]) / 1_000_000_000
+        created = _enqueue_time(records[0])
+        if created is not None:
             oldest_age = max(0, int(time.time() - created))
             oldest_at = (
                 datetime.datetime.fromtimestamp(created, datetime.timezone.utc)
                 .isoformat(timespec="milliseconds")
                 .replace("+00:00", "Z")
             )
-        except (TypeError, ValueError, OverflowError):
-            oldest_at = None
     _diagnose(
         "outbox",
         records=len(records),
@@ -1617,7 +1623,7 @@ def _append_local(event):
         os.fsync(f.fileno())
 
 
-def deliver(event):
+def deliver(event, deadline=None):
     """Deliver one redacted event under one bounded hook budget.
 
     Primary queues replay oldest-first; mirrors see only the current event and
@@ -1625,7 +1631,7 @@ def deliver(event):
     worker each, capped by ``MAX_TARGETS``.
     """
     event = redact_event(event)
-    deadline = time.monotonic() + HOOK_BUDGET
+    deadline = deadline if deadline is not None else time.monotonic() + HOOK_BUDGET
     post_deadline = deadline - min(ACK_RESERVE, HOOK_BUDGET)
     current_id = uuid.uuid4().hex
     initial_primary, initial_mirrors, later_primary, later_mirrors = _target_groups()
@@ -1811,7 +1817,7 @@ def redact_event(event):
     return out
 
 
-def main(runner="claude"):
+def main(runner="claude", deadline=None):
     hook = json.loads(sys.stdin.read())
     specs = adapt_hook(runner, hook)
     if not specs:
@@ -1834,19 +1840,21 @@ def main(runner="claude"):
             # parent rests between backing sessions.
             if agent_id == resident_parent:
                 etype, payload = "idle", {}
-        deliver(
-            {
-                "v": 0,
-                "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "source": RUNNER_SOURCES[runner],
-                "agent_id": agent_id,
-                "project": _setting("PROJECT")
-                or (_safe_path(cwd) if cwd else "unknown"),
-                "cwd": cwd,
-                "type": etype,
-                "payload": payload,
-            }
-        )
+        event = {
+            "v": 0,
+            "ts": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "source": RUNNER_SOURCES[runner],
+            "agent_id": agent_id,
+            "project": _setting("PROJECT")
+            or (_safe_path(cwd) if cwd else "unknown"),
+            "cwd": cwd,
+            "type": etype,
+            "payload": payload,
+        }
+        if deadline is None:
+            deliver(event)
+        else:
+            deliver(event, deadline)
 
 
 def run_hook_bounded(runner="claude"):
@@ -1866,7 +1874,7 @@ def run_hook_bounded(runner="claude"):
         return
     if pid == 0:
         try:
-            main(runner)
+            main(runner, work_deadline)
         except Exception as error:
             sys.stderr.write(
                 "chronicle transport failure: " + type(error).__name__[:80] + "\n"
@@ -1893,20 +1901,50 @@ def run_hook_bounded(runner="claude"):
         time.sleep(min(0.005, max(0, deadline - time.monotonic())))
 
 
+def print_emitter_status():
+    """Render local outbox health for an operator; hook execution never calls this."""
+    try:
+        with open(DIAGNOSTICS, encoding="utf-8") as stream:
+            outbox = json.load(stream).get("outbox")
+        if not isinstance(outbox, dict):
+            raise ValueError("missing outbox status")
+    except (OSError, ValueError, TypeError):
+        print("chronicle emitter outbox: no delivery status recorded")
+        return
+    oldest = outbox.get("oldest_queued_at") or "none"
+    last_ack = outbox.get("last_ack_at") or "never"
+    print(
+        "chronicle emitter outbox: %s; %s/%s queued; oldest %s (%ss); "
+        "%s hooks without ack; last ack %s"
+        % (
+            outbox.get("status", "unknown"),
+            outbox.get("records", "?"),
+            outbox.get("capacity", "?"),
+            oldest,
+            outbox.get("oldest_age_seconds", "?"),
+            outbox.get("hooks_without_ack", "?"),
+            last_ack,
+        )
+    )
+
+
 if __name__ == "__main__":
-    runner = runner_name(sys.argv[1:])
-    if runner:
-        try:
-            run_hook_bounded(runner)
-        except Exception as error:
-            # Last-resort diagnostic when even the durable state directory is
-            # unavailable. Never echo exception text: it may contain a path,
-            # URL, credential, or event detail.
-            sys.stderr.write(
-                "chronicle transport failure: " + type(error).__name__[:80] + "\n"
-            )
-    if runner == "codex":
-        # Stop/SubagentStop require JSON on stdout; an empty object is advisory
-        # and deliberately never approves, denies, blocks, or continues Codex.
-        print("{}")
+    if sys.argv[1:] == ["--status"]:
+        print_emitter_status()
+    else:
+        runner = runner_name(sys.argv[1:])
+        if runner:
+            try:
+                run_hook_bounded(runner)
+            except Exception as error:
+                # Last-resort diagnostic when even the durable state directory is
+                # unavailable. Never echo exception text: it may contain a path,
+                # URL, credential, or event detail.
+                sys.stderr.write(
+                    "chronicle transport failure: " + type(error).__name__[:80] + "\n"
+                )
+        if runner == "codex":
+            # Stop/SubagentStop require JSON on stdout; an empty object is advisory
+            # and deliberately never approves, denies, blocks, or continues Codex.
+            print("{}")
     sys.exit(0)
