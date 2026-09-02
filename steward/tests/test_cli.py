@@ -2467,6 +2467,7 @@ def test_doctor_names_the_burrow_that_supervises_a_container(
     result = runner.invoke(main, ["doctor", str(residents_dir), "--db", str(tmp_path / "s.db")])
 
     assert result.exit_code == 0, result.output
+    assert "burrow dxp2800 fires: test-agent" in result.output
     assert "docker at dxp2800's own docker answers as dxp2800 27.3.1" in result.output
     assert "container steward-test-agent on dxp2800 — supervised from here" in result.output
 
@@ -2515,18 +2516,14 @@ def test_doctor_says_when_docker_itself_did_not_answer(
     assert "nothing is supervising test-agent" in result.output
 
 
-def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
+def test_the_watchdog_does_not_supervise_another_burrows_containers(
     runner: CliRunner,
     write_resident: ResidentWriter,
     stub_bin: StubWriter,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The #59 gap where it matters: this process *is* the supervisor, and it cannot see.
-
-    It still makes the pass — burying stale runs, sweeping leases, checking budgets need
-    no docker at all — so the exit code is unchanged and only the report grows a line.
-    """
+    """The deploy.host partition keeps another burrow out of every watchdog pass."""
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2537,22 +2534,44 @@ def test_the_watchdog_says_at_startup_that_it_cannot_reach_the_containers(
     )
 
     assert result.exit_code == 0, result.output
-    assert "container steward-test-agent runs on dxp2800" in result.output
-    assert "Run steward's daemons on dxp2800" in result.output
+    assert "nothing here needs docker" in result.output
+    assert "steward-test-agent" not in result.output
 
 
-def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
+def test_the_watchdog_refuses_an_absent_local_container_once_per_pass(
     runner: CliRunner,
     write_resident: ResidentWriter,
     stub_bin: StubWriter,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """`--format json` keeps stdout parseable, and still says the gap out loud on stderr.
+    stub_bin(
+        "docker",
+        'case "$1" in info) printf "dxp2800\\t27.3.1\\n" ;; '
+        'inspect) echo "No such container: steward-test-agent" >&2; exit 1 ;; esac',
+    )
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
 
-    An unattended consumer is the last caller who should be told nothing (#59), so the
-    complaint goes where it cannot corrupt the document rather than nowhere.
-    """
+    result = runner.invoke(
+        main,
+        ["watchdog", "tick", "--residents", str(residents_dir), "--db", str(tmp_path / "s.db")],
+    )
+
+    refusal = "test-agent: refused: declared container 'steward-test-agent' is absent"
+    assert result.exit_code == 0, result.output
+    assert result.output.count(refusal) == 1
+    assert "unsupervised" not in result.output
+
+
+def test_the_watchdog_json_report_excludes_another_burrows_residents(
+    runner: CliRunner,
+    write_resident: ResidentWriter,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The machine report contains only the residents this daemon is responsible for."""
     stub_bin("docker", docker_naming_itself("laptop"))
     monkeypatch.setenv("STEWARD_BURROW", "laptop")
     residents_dir = write_resident(supervised_manifest(host="dxp2800")).parent.parent
@@ -2566,9 +2585,9 @@ def test_the_watchdog_json_report_stays_parseable_and_still_says_the_gap(
     )  # fmt: skip
 
     assert result.exit_code == 0, result.output
-    assert "the watchdog cannot see it" in result.output
-    document = result.output[result.output.index("{") :]
-    assert json.loads(document)["interventions"] == 0
+    document = json.loads(result.output)
+    assert document["interventions"] == 0
+    assert document["health"] == []
     assert "topology: docker at" not in result.output, "a green line would corrupt the JSON"
 
 

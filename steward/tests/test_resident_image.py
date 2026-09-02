@@ -46,6 +46,8 @@ BUNDLE_BUILD = REPO_ROOT.parent / "chronicle" / "hooks" / "build.py"
 #: This service's CI, at the repository root: path-filtered per service, which is why the
 #: filter itself is something this suite has an opinion about.
 WORKFLOW = REPO_ROOT.parent / ".github" / "workflows" / "steward.yml"
+CONTROL_PLANE_DOCKERFILE = REPO_ROOT / "docker" / "control-plane" / "Dockerfile"
+DEPLOY_COMPOSE = REPO_ROOT / "deploy" / "compose.yaml"
 
 #: Every hook the Mac's ~/.claude/settings.json wires the emitter into, which is the whole
 #: set burrow's protocol has a mapping for. A resident missing any of them is a villager
@@ -281,6 +283,41 @@ def test_the_smoke_test_only_ever_posts_a_heartbeat_under_a_probe_identity() -> 
     assert "steward-smoke:" in text
     for forged in ("task_started", "artifact_produced", "needs_human"):
         assert forged not in text
+
+
+def test_the_canary_image_boots_pips_heartbeat_end_to_end_in_ci() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert "SMOKE_AGENT_ID=steward:pip" in workflow
+    assert "CHRONICLE_PROJECT=pip" in workflow
+
+
+def test_the_control_plane_carries_no_local_brain_or_login() -> None:
+    dockerfile = CONTROL_PLANE_DOCKERFILE.read_text(encoding="utf-8")
+    instructions = "\n".join(
+        line for line in dockerfile.lower().splitlines() if not line.lstrip().startswith("#")
+    )
+    compose = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
+
+    assert "claude-code" not in instructions
+    assert "npm install" not in instructions
+    assert "/usr/local/bin/node" not in instructions
+    assert all(
+        "claude-config" not in str(volume)
+        for service in compose["services"].values()
+        for volume in service.get("volumes", [])
+    )
+
+
+def test_both_daemons_read_the_same_resident_neutral_tree() -> None:
+    document = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
+    commands = [document["services"][name]["command"] for name in ("scheduler", "watchdog")]
+
+    assert all(command[-2:] == ["--residents", "/app/residents"] for command in commands)
+    shipped_ids = {path.parent.name for path in (REPO_ROOT / "residents").glob("*/manifest.yaml")}
+    assert not any(
+        resident_id in " ".join(command) for resident_id in shipped_ids for command in commands
+    )
 
 
 # ----------------------------------------------------------------------------- Dockerfile
