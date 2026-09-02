@@ -14,6 +14,8 @@ import { Gate } from "./console/Gate.jsx";
 import SkillsPage from "./pages/SkillsPage.jsx";
 import BudgetsPage from "./pages/BudgetsPage.jsx";
 import ResidentsPage from "./pages/ResidentsPage.jsx";
+import App from "./App.jsx";
+import fixture from "./fixtures/complete-v1.js";
 
 function memoryStorage() {
   const map = new Map();
@@ -54,7 +56,28 @@ function mount(ui, { path = "/", base = "/", fetch, token = "operator-token" } =
 beforeEach(() => {
   window.history.replaceState({}, "", "/");
 });
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+it("does not create a Chronicle stream after the owning app unmounts", async () => {
+  let finishPoll;
+  const fetch = vi.fn(() => new Promise((resolve) => { finishPoll = resolve; }));
+  const EventSource = vi.fn(class {
+    addEventListener() {}
+    close() {}
+  });
+  vi.stubGlobal("fetch", fetch);
+  vi.stubGlobal("EventSource", EventSource);
+  const mounted = render(<App />);
+  mounted.unmount();
+
+  finishPoll({ status: 200, json: async () => fixture });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(EventSource).not.toHaveBeenCalled();
+});
 
 /* -- the mount ----------------------------------------------------------------------- */
 
