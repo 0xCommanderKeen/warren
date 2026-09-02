@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dxp2800 · signpost</title>
+<meta name="description" content="Every door on the NAS, one page: the warren's UIs, the library, the media stack, the machine itself.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght,SOFT@0,9..144,300..900,0..100;1,9..144,300..900,0..100&family=Familjen+Grotesk:ital,wght@0,400..700;1,400..700&display=swap">
+<style>
+  /* Signpost at the edge of the village: peat ground, cream paint, a brass plate per door.
+     Served by arcadia's nginx from dist/hub/, so /assets/ is the village's own asset tree. */
+  @font-face {
+    font-family: "Cousine";
+    src: url("/assets/fonts/CousineSnapshot.ttf") format("truetype");
+    font-display: swap;
+  }
+  :root {
+    --peat: #1b1410;
+    --peat-2: #241b15;
+    --cream: #f1e6d0;
+    --cream-dim: #b8a88e;
+    --brass: #d9a441;
+    --brass-deep: #8a6420;
+    --moss: #7fb069;
+    --ember: #d2553f;
+    --rule: rgba(241, 230, 208, 0.12);
+    --display: "Fraunces", "Iowan Old Style", Georgia, serif;
+    --body: "Familjen Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+    --mono: "Cousine", "SFMono-Regular", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: var(--peat);
+    color: var(--cream);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.45;
+    min-height: 100dvh;
+    position: relative;
+  }
+  /* paper grain over the whole board */
+  body::before {
+    content: "";
+    position: fixed; inset: 0;
+    pointer-events: none;
+    opacity: .16;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 .92 0 0 0 0 .8 0 0 0 .5 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    mix-blend-mode: soft-light;
+  }
+  /* a low sun behind the board */
+  body::after {
+    content: "";
+    position: fixed; inset: -20% -20% auto -20%; height: 70vh;
+    pointer-events: none;
+    background: radial-gradient(60% 55% at 78% 0%, rgba(217,164,65,.22), transparent 70%);
+  }
+  main {
+    position: relative; z-index: 1;
+    max-width: 44rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 5vw, 4rem) clamp(1rem, 4vw, 2.5rem) 5rem;
+  }
+
+  header { margin-bottom: clamp(2rem, 6vw, 3.5rem); }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .8rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0 0 .6rem;
+  }
+  h1 {
+    overflow-wrap: anywhere;
+    font-family: var(--display);
+    font-variation-settings: "opsz" 144, "SOFT" 60;
+    font-weight: 800;
+    font-style: italic;
+    font-size: clamp(3rem, 10vw, 5.5rem);
+    line-height: .95;
+    letter-spacing: -.02em;
+    margin: 0;
+    color: var(--cream);
+    text-shadow: 0 1px 0 rgba(0,0,0,.4), 0 12px 30px rgba(0,0,0,.35);
+  }
+  .lede {
+    margin: 1.1rem 0 0;
+    max-width: 34rem;
+    color: var(--cream-dim);
+    font-size: 1.05rem;
+  }
+  .host {
+    display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+    margin-top: 1.4rem;
+    font-family: var(--mono);
+    font-size: .85rem;
+    color: var(--cream-dim);
+  }
+  .host button {
+    font: inherit;
+    color: var(--cream-dim);
+    background: transparent;
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    padding: .25rem .7rem;
+    cursor: pointer;
+    transition: color .15s, border-color .15s, background .15s;
+  }
+  .host button[aria-pressed="true"] {
+    color: var(--peat);
+    background: var(--brass);
+    border-color: var(--brass);
+  }
+  .host button:hover:not([aria-pressed="true"]) { color: var(--cream); border-color: var(--cream-dim); }
+
+  section { margin-top: clamp(1.6rem, 4vw, 2.6rem); }
+  h2 {
+    font-family: var(--display);
+    font-variation-settings: "opsz" 48, "SOFT" 30;
+    font-weight: 600;
+    font-size: 1.05rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0 0 .4rem;
+    display: flex; align-items: baseline; gap: .8rem;
+  }
+  h2::after { content: ""; flex: 1; height: 1px; background: var(--rule); transform: translateY(-.25em); }
+  h2 small {
+    font-family: var(--mono);
+    font-weight: 400; font-size: .75rem; letter-spacing: .06em; text-transform: none;
+    color: var(--cream-dim);
+  }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { border-bottom: 1px solid var(--rule); }
+  .door {
+    display: grid;
+    grid-template-columns: 1.1rem 1fr auto;
+    align-items: center;
+    gap: .9rem;
+    padding: .8rem .35rem .8rem 0;
+    color: inherit;
+    text-decoration: none;
+    transition: background .15s, padding-left .2s;
+    border-radius: 6px;
+  }
+  .door > * { min-width: 0; }
+  a.door:hover, a.door:focus-visible {
+    background: var(--peat-2);
+    padding-left: .5rem;
+    outline: none;
+  }
+  a.door:hover .name, a.door:focus-visible .name { color: var(--brass); }
+  .name {
+    font-family: var(--display);
+    font-variation-settings: "opsz" 24, "SOFT" 20;
+    font-weight: 600;
+    font-size: 1.2rem;
+    line-height: 1.15;
+    transition: color .15s;
+  }
+  .what { color: var(--cream-dim); font-size: .92rem; margin-top: .1rem; }
+  .plate {
+    font-family: var(--mono);
+    font-size: .82rem;
+    color: var(--cream);
+    background: linear-gradient(180deg, var(--brass), var(--brass-deep));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    padding: .2rem 0 .2rem .6rem;
+    border-left: 1px solid var(--rule);
+    white-space: nowrap;
+    text-align: right;
+  }
+  .what, .lede, .note { overflow-wrap: anywhere; }
+  .plate .path { color: var(--cream-dim); -webkit-text-fill-color: var(--cream-dim); }
+  /* liveness: a lantern that is lit, dark, or not yet checked */
+  .lamp {
+    width: .62rem; height: .62rem; border-radius: 50%;
+    border: 1.5px solid var(--cream-dim);
+    background: transparent;
+    transition: background .3s, border-color .3s, box-shadow .3s;
+  }
+  .lamp[data-state="up"]   { background: var(--moss); border-color: var(--moss); box-shadow: 0 0 10px rgba(127,176,105,.7); }
+  .lamp[data-state="down"] { background: var(--ember); border-color: var(--ember); box-shadow: 0 0 8px rgba(210,85,63,.55); }
+  .note {
+    font-family: var(--mono); font-size: .78rem; color: var(--cream-dim);
+    margin: .9rem 0 0;
+  }
+  footer {
+    margin-top: 3.5rem; padding-top: 1rem; border-top: 1px solid var(--rule);
+    font-family: var(--mono); font-size: .78rem; color: var(--cream-dim);
+    display: flex; flex-wrap: wrap; gap: .4rem 1.4rem;
+  }
+  footer a { color: var(--cream-dim); }
+  code { font-family: var(--mono); color: var(--cream); }
+
+  /* one page-load reveal: rows swing in like painted arrows, staggered */
+  @media (prefers-reduced-motion: no-preference) {
+    header, section, footer { animation: rise .7s cubic-bezier(.2,.7,.2,1) both; }
+    section:nth-of-type(1) { animation-delay: .08s; }
+    section:nth-of-type(2) { animation-delay: .16s; }
+    section:nth-of-type(3) { animation-delay: .24s; }
+    section:nth-of-type(4) { animation-delay: .32s; }
+    footer { animation-delay: .4s; }
+    li { animation: rise .5s cubic-bezier(.2,.7,.2,1) both; animation-delay: calc(var(--i, 0) * 45ms + .15s); }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  }
+  @media (max-width: 480px) {
+    .door { grid-template-columns: 1rem 1fr; }
+    .plate {
+      grid-column: 2; justify-self: start;
+      border-left: 0; padding: 0; margin-top: -.2rem;
+      text-align: left; white-space: normal; overflow-wrap: anywhere;
+    }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">dxp2800 · signpost</p>
+    <h1>Every door<br>on the NAS.</h1>
+    <p class="lede">The warren's UIs, the library, the media stack and the machine itself — one page, so nothing needs remembering but this one.</p>
+    <div class="host" id="host">
+      <span>reach it as</span>
+      <button type="button" data-host="dxp2800">dxp2800</button>
+      <button type="button" data-host="192.168.1.222">192.168.1.222</button>
+      <span id="host-note"></span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Warren <small>agents · one origin on :8737</small></h2>
+    <ul id="warren"></ul>
+    <p class="note">Steward is API only and asks for an operator token; townhall is its face. Chronicle's raw <code>/events</code> is an audit surface, not a page.</p>
+  </section>
+
+  <section>
+    <h2>Library <small>books · comics · audiobooks</small></h2>
+    <ul id="library"></ul>
+  </section>
+
+  <section>
+    <h2>Media <small>Homarr is the stack's own dashboard</small></h2>
+    <ul id="media"></ul>
+  </section>
+
+  <section>
+    <h2>Machine <small>UGOS · shell</small></h2>
+    <ul id="machine"></ul>
+    <p class="note">The lamp beside each door is lit when this browser can reach the port (a login page counts). Off the tailnet, switch the host to the LAN address.</p>
+  </section>
+
+  <footer>
+    <span>served by arcadia's nginx from <code>/hub/</code></span>
+    <span>source: <a href="https://github.com/0xCommanderKeen/warren/blob/main/arcadia/public/hub/index.html">warren/arcadia/public/hub</a></span>
+  </footer>
+</main>
+
+<script>
+  // Doors: [name, what, port, path, kind]. `kind` "self" means the origin this page is on.
+  const DOORS = {
+    warren: [
+      ["Village",            "arcadia — the fleet as a pixel village",           8737, "/",                     "self"],
+      ["Townhall",           "control panel: residents, jobs, approvals, routines", 8737, "/observatory/",      "self"],
+      ["Chronicle · state",  "the authoritative village snapshot (JSON)",         8737, "/burrow/state",         "self"],
+      ["Chronicle · residents", "manifest validation report — check after a deploy", 8737, "/burrow/residents",  "self"],
+      ["Chronicle · transport", "ingest dedupe + knock forwarding counters",       8738, "/transport/status",     "http"],
+      ["Steward API",        "control plane — token-gated, no page of its own",   8802, "/residents",            "http"],
+    ],
+    library: [
+      ["Polica",             "ebooks, comics, audiobooks — the library",          8000, "/",                     "http"],
+      ["Komga",              "comics & manga reader",                             25600, "/",                    "http"],
+      ["Audiobookshelf",     "audiobooks",                                        13378, "/",                    "http"],
+      ["Mylar3",             "comics fetching",                                   8090, "/",                     "http"],
+    ],
+    media: [
+      ["Homarr",             "media dashboard",                                   7575, "/",                     "http"],
+      ["Jellyfin",           "media server",                                      8899, "/",                     "http"],
+      ["Jellyseerr",         "request portal",                                    5055, "/",                     "http"],
+      ["Sonarr",             "TV",                                                8989, "/",                     "http"],
+      ["Radarr",             "movies",                                            7878, "/",                     "http"],
+      ["Prowlarr",           "indexers",                                          9696, "/",                     "http"],
+      ["Bazarr",             "subtitles",                                         6767, "/",                     "http"],
+      ["qBittorrent",        "downloads",                                         8080, "/",                     "http"],
+    ],
+    machine: [
+      ["UGOS",               "the NAS's own admin desktop",                       9999, "/",                     "http"],
+    ],
+  };
+  const HOSTS = ["dxp2800", "192.168.1.222"];
+  const hostBar = document.getElementById("host");
+  const hostNote = document.getElementById("host-note");
+  let host = HOSTS.includes(location.hostname) ? location.hostname : HOSTS[0];
+  try { host = localStorage.getItem("signpost-host") || host; } catch (_) {}
+
+  const urlFor = (port, path) => `http://${host}:${port}${path}`;
+
+  function render() {
+    for (const [section, doors] of Object.entries(DOORS)) {
+      const list = document.getElementById(section);
+      list.replaceChildren(...doors.map(([name, what, port, path, kind], i) => {
+        const li = document.createElement("li");
+        li.style.setProperty("--i", i);
+        const a = document.createElement("a");
+        a.className = "door";
+        a.href = kind === "self" && location.hostname === host ? path : urlFor(port, path);
+        a.innerHTML = `
+          <span class="lamp" data-state="unknown" aria-hidden="true"></span>
+          <span><div class="name"></div><div class="what"></div></span>
+          <span class="plate">:${port}<span class="path">${path === "/" ? "" : path}</span></span>`;
+        a.querySelector(".name").textContent = name;
+        a.querySelector(".what").textContent = what;
+        li.append(a);
+        probe(a.querySelector(".lamp"), urlFor(port, path));
+        return li;
+      }));
+    }
+    for (const b of hostBar.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.host === host));
+    hostNote.textContent = host === location.hostname ? "" : `(this page came from ${location.hostname})`;
+  }
+
+  // Reachability, not health: an opaque no-cors response means the port answered at all.
+  async function probe(lamp, url) {
+    lamp.dataset.state = "unknown";
+    const control = new AbortController();
+    const timer = setTimeout(() => control.abort(), 4000);
+    try {
+      await fetch(url, { mode: "no-cors", cache: "no-store", signal: control.signal });
+      lamp.dataset.state = "up";
+    } catch (_) {
+      lamp.dataset.state = "down";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  hostBar.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-host]");
+    if (!button) return;
+    host = button.dataset.host;
+    try { localStorage.setItem("signpost-host", host); } catch (_) {}
+    render();
+  });
+  render();
+</script>
+</body>
+</html>
