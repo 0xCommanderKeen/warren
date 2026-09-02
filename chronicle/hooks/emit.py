@@ -111,8 +111,8 @@ LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 POST_TIMEOUT = 0.75
 HOOK_BUDGET = 1.0
 HOOK_REAP_BUDGET = 0.05
+ACK_RESERVE = 0.1
 MAX_TARGETS = 8
-REPLAY_BATCH = 16
 OUTBOX_RECORDS = 1024
 OUTBOX_BYTES = 5 * 1024 * 1024
 SCHEDULE_RECORDS = 1024
@@ -125,6 +125,8 @@ DEFERRED_BYTES = 5 * 1024 * 1024
 DEFERRED_TORN_FILES = 8
 DEFERRED_TORN_BYTES = 256 * 1024
 DIAGNOSTIC_HISTORY = 20
+STUCK_OUTBOX_HOOKS = 10
+STUCK_OUTBOX_AGE_SECONDS = 24 * 60 * 60
 _OUTBOX_LOCK = threading.Lock()
 _DIAGNOSTIC_LOCK = threading.Lock()
 # Persisted inside spool records on disk. Deliberately NOT renamed: a record
@@ -864,13 +866,73 @@ def _diagnose(kind, **details):
                     .isoformat(timespec="milliseconds")
                     .replace("+00:00", "Z")
                 )
-                report.setdefault("recent", []).append(dict(kind=kind, **details))
+                if kind == "outbox":
+                    previous = report.get("outbox")
+                    previous = previous if isinstance(previous, dict) else {}
+                    acknowledged = int(details.pop("acknowledged", 0))
+                    hooks_without_ack = (
+                        0
+                        if acknowledged
+                        else int(previous.get("hooks_without_ack", 0)) + 1
+                    )
+                    details["hooks_without_ack"] = hooks_without_ack
+                    details["last_ack_at"] = (
+                        report["updated_at"]
+                        if acknowledged
+                        else previous.get("last_ack_at")
+                    )
+                    details["status"] = (
+                        "stuck"
+                        if (
+                            details.get("records", 0) >= details.get("capacity", 1)
+                            or details.get("oldest_age_seconds", 0)
+                            >= STUCK_OUTBOX_AGE_SECONDS
+                        )
+                        and hooks_without_ack >= STUCK_OUTBOX_HOOKS
+                        else "healthy"
+                    )
+                    report["outbox"] = details
+                    if details["status"] == "stuck" and previous.get("status") != "stuck":
+                        report.setdefault("recent", []).append(
+                            {
+                                "kind": "stuck_outbox",
+                                "reason": "old or full without acknowledgements",
+                            }
+                        )
+                else:
+                    report.setdefault("recent", []).append(dict(kind=kind, **details))
                 report["recent"] = report["recent"][-DIAGNOSTIC_HISTORY:]
                 pending = durable.stage_json(DIAGNOSTICS, report, ensure_ascii=False)
                 durable.publish_staged(((pending, DIAGNOSTICS),))
                 return True
         except (OSError, ValueError, TypeError):
             return False
+
+
+def _diagnose_outbox(records, acknowledged):
+    """Publish bounded queue health without exposing event payloads."""
+    oldest_at = None
+    oldest_age = 0
+    if records:
+        order = records[0].get("enqueue_order")
+        try:
+            created = int(str(order).split(":", 1)[0]) / 1_000_000_000
+            oldest_age = max(0, int(time.time() - created))
+            oldest_at = (
+                datetime.datetime.fromtimestamp(created, datetime.timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError, OverflowError):
+            oldest_at = None
+    _diagnose(
+        "outbox",
+        records=len(records),
+        capacity=OUTBOX_RECORDS,
+        oldest_queued_at=oldest_at,
+        oldest_age_seconds=oldest_age,
+        acknowledged=len(acknowledged),
+    )
 
 
 def _deferred_record(line):
@@ -1032,6 +1094,7 @@ def deliver(event):
     """
     event = redact_event(event)
     deadline = time.monotonic() + HOOK_BUDGET
+    post_deadline = deadline - min(ACK_RESERVE, HOOK_BUDGET)
     current_id = uuid.uuid4().hex
     initial_primary, initial_mirrors, later_primary, later_mirrors = _target_groups()
     configured_primary = initial_primary + later_primary
@@ -1092,6 +1155,7 @@ def deliver(event):
     pending = _read_durable_outbox_snapshot()
     primary, mirrors, deferred_primary, deferred_mirrors = _target_groups(pending)
     results = {}
+    result_lock = threading.Lock()
 
     # Reserve the selected turn before network work. Fairness therefore
     # survives success (which removes queue records), failure, and restart.
@@ -1104,18 +1168,32 @@ def deliver(event):
         target_key = _target_id(url)
         queued = [record for record in pending if record.get("target") == target_key]
         delivered_keys = []
-        for record in queued[:REPLAY_BATCH]:
+        estimated_rtt = POST_TIMEOUT
+        for record in queued:
+            if time.monotonic() + estimated_rtt > post_deadline:
+                return
+            started = time.monotonic()
             if not post_event(
                 url,
                 record.get("event") or {},
                 token,
                 str(record.get("delivery_id") or ""),
             ):
-                results[url] = (delivered_keys, False, target_key)
+                with result_lock:
+                    results[url] = (list(delivered_keys), False, target_key)
                 return
+            elapsed = time.monotonic() - started
+            estimated_rtt = max(elapsed * 1.25, 0.001)
             delivered_keys.append(_record_key(record))
+            with result_lock:
+                results[url] = (list(delivered_keys), False, target_key)
             _diagnose("retry", target=target_key)
-        results[url] = (delivered_keys, len(delivered_keys) == len(queued), target_key)
+        with result_lock:
+            results[url] = (
+                list(delivered_keys),
+                len(delivered_keys) == len(queued),
+                target_key,
+            )
 
     workers = []
     for url, token in primary:
@@ -1129,30 +1207,36 @@ def deliver(event):
         worker.start()
         workers.append(worker)
     for worker in workers:
-        worker.join(max(0, deadline - time.monotonic()))
+        worker.join(max(0, post_deadline - time.monotonic()))
 
     delivered_keys, primary_failed = set(), False
+    failed_targets = []
     for url, _ in primary:
         target_key = _target_id(url)
-        replayed, current_ok, _ = results.get(url, ([], False, target_key))
+        with result_lock:
+            replayed, current_ok, _ = results.get(url, ([], False, target_key))
         delivered_keys.update(replayed)
         if not current_ok:
             primary_failed = True
-            _diagnose("failure", target=target_key)
+            failed_targets.append(target_key)
     if deferred_primary:
         primary_failed = True
+    # Acknowledgement owns the reserved tail of the hook budget. Diagnostics
+    # are deliberately after it: their lock or fsync may stall, but a host
+    # timeout must never erase progress already accepted by the server.
+    _, updated = _update_outbox(delivered_keys, [])
+    if not updated:
+        _diagnose("failure", reason="outbox lock contention")
+    else:
+        _diagnose_outbox(_read_durable_outbox_snapshot(), delivered_keys)
+    for target_key in failed_targets:
+        _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:
         _diagnose(
             "failure",
             reason="target limit",
             count=len(deferred_primary) + len(deferred_mirrors),
         )
-    if time.monotonic() < deadline:
-        _, updated = _update_outbox(delivered_keys, [])
-        if not updated:
-            _diagnose("failure", reason="outbox lock contention")
-    else:
-        _diagnose("failure", reason="hook budget deferred outbox acknowledgement")
     if primary_failed and not local_written and time.monotonic() < deadline:
         _append_local(event)
 
