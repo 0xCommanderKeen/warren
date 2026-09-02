@@ -129,10 +129,19 @@ function ProvisionFacts({ report, rehearsal }) {
               : "the host already matched, byte for byte",
         ],
         [
+          // The one row of a rehearsal that is not a rehearsal. `_register` runs the real
+          // `Scheduler.check()` against this host either way — a missing `claude`, a memory
+          // directory that is not there — so what is shown here is a result, not a
+          // prediction, and saying "would" over it would be the opposite of true. It is
+          // also host-local: a resident whose sessions run somewhere else can fail this
+          // check here and pass it where it actually runs, which is why the row names the
+          // host it was run on rather than reading as a verdict on the deploy.
           "schedule",
           report.register?.ok === false
-            ? `check did not pass: ${(report.register.problems || []).join("; ")}`
-            : "checked",
+            ? `checked now, on this host — did not pass: ${(report.register.problems || []).join("; ")}`
+            : rehearsal
+              ? "checked now, on this host — passes"
+              : "checked",
         ],
       ]}
     />

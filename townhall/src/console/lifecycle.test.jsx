@@ -234,6 +234,30 @@ describe("a retired resident's record", () => {
     expect(screen.getByRole("link", { name: /edit the declaration/i })).toBeTruthy();
   });
 
+  it("says the schedule check is a result, not a prediction", async () => {
+    // The one row of a rehearsal that is not a rehearsal: `_register` runs the real
+    // `Scheduler.check()` against the control-plane host either way. Phrased in the future
+    // tense beside "only what differs is sent", a failing check reads as "provisioning will
+    // fail" — when what it actually says is "this host cannot run this resident's sessions
+    // today", which for a resident that runs somewhere else is not a verdict on the deploy.
+    const fetch = steward({
+      resident: retired,
+      posts: {
+        "/residents/life-agent/provision": json(200, {
+          ...PROVISION_PLAN,
+          register: { ok: false, problems: ["memory.path '/data/x' is not a directory on this host"], next_fires: [] },
+        }),
+      },
+    });
+    mount(fetch);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^provision…$/i }));
+    await screen.findByRole("button", { name: /provision hob for real/i });
+
+    expect(screen.getByText(/checked now, on this host — did not pass/)).toBeTruthy();
+    expect(screen.getByText(/is not a directory on this host/)).toBeTruthy();
+  });
+
   it("rehearses a provision before it runs one, exactly as retire does", async () => {
     const fetch = steward({
       resident: retired,
