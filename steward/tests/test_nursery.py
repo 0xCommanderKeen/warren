@@ -1154,6 +1154,46 @@ def test_retirement_releases_the_durable_guard_before_external_effects(
     )
 
 
+def test_retirement_derives_the_host_plan_from_the_revision_checked_under_lock(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A revision may pass only for the same bytes that choose the cleanup target."""
+    raise_into(scratch_repo, host)
+    manifest = scratch_repo.residents / "note-keeper" / "manifest.yaml"
+    checked_path = "~/docker/rehearsed-note-keeper"
+
+    @contextmanager
+    def changed_before_lock() -> Iterator[None]:
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        payload["deploy"] = {**payload.get("deploy", {}), "path": checked_path}
+        manifest.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        yield
+
+    class RecordingEmitter:
+        def emit(self, event: object) -> bool:
+            del event
+            return True
+
+    host.calls.clear()
+    retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        commit=False,
+        expected_revision="sha256:checked",
+        revision_of=lambda _path: "sha256:checked",
+        durable_guard=changed_before_lock(),
+        emitter=RecordingEmitter(),
+    )
+
+    scrub = next(call for call in host.calls if call[0] == "rm")
+    assert scrub[2:] == (
+        f"{checked_path}/.env",
+        f"{checked_path}/docker-compose.yaml",
+    )
+
+
 def test_retirement_still_keeps_the_memory_and_the_declaration(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:

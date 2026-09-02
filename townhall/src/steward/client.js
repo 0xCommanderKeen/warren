@@ -253,8 +253,14 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     updateSkill: (name, body) => call(`/skills/${at(name)}`, { method: "PUT", body }),
     writeDeclaration: (id, body) => call(`/residents/${at(id)}/declaration`, { method: "PUT", body }),
     createResident: (body) => call("/residents", { method: "POST", body }),
-    retireResident: (id, body = {}) => call(`/residents/${at(id)}/retire`, { method: "POST", body }),
-    provisionResident: (id, body = {}) => call(`/residents/${at(id)}/provision`, { method: "POST", body }),
+    // The two lifecycle doors, and the reason they are separate from `createResident`:
+    // both take an id and read the declared manifest as it stands, so a resident carrying a
+    // route, an app grant or a `runner.placement` — none of which any body can express —
+    // goes up and comes down exactly as it was written (warren#270, warren#331). Each takes
+    // `{dry_run: true}` first: the console shows steward's own plan before the button that
+    // does it for real.
+    provisionResident: (id, body) => call(`/residents/${at(id)}/provision`, { method: "POST", body }),
+    retireResident: (id, body) => call(`/residents/${at(id)}/retire`, { method: "POST", body }),
     runRoutine: (residentId, routineId) =>
       call(`/residents/${at(residentId)}/routines/${at(routineId)}/run`, { method: "POST" }),
     postJob: (body) => call("/jobs", { method: "POST", body }),

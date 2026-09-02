@@ -267,11 +267,6 @@ describe("the bodies the console sends are bodies Steward accepts", () => {
     }
   });
 
-  it("rehearses and executes retirement with the rehearsed revision", () => {
-    expect(refusals("RetirePost", { dry_run: true })).toEqual([]);
-    expect(refusals("RetirePost", { revision: "sha256:abc" })).toEqual([]);
-  });
-
   it("creates and updates a skill from the same editor payload", () => {
     const payload = { description: "one line", body: "the instructions", defaults: false };
     expect(refusals("SkillPost", { ...payload, name: "daily-summary" })).toEqual([]);

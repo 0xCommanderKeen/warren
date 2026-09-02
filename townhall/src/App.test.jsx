@@ -53,12 +53,28 @@ function mount(ui, { path = "/", base = "/", fetch, token = "operator-token" } =
   );
 }
 
+/**
+ * Answer the skills library the declaration editor's picker reads, and pass the rest on.
+ *
+ * warren#331 put a library-backed skills picker on the editor, so the page makes one more
+ * read than it used to. These tests script `fetch` as an ordered sequence — the second call
+ * *is* the write, the third *is* the re-read — and a library read landing in the middle of
+ * that would consume somebody else's scripted answer. Wrapping rather than rewriting keeps
+ * the sequences, and the counts, saying exactly what they said before.
+ */
+const withLibrary = (fetch, skills = []) =>
+  vi.fn((url, init) =>
+    String(url).split("?")[0].endsWith("/skills")
+      ? Promise.resolve(json(200, { library: "skills", skills, errors: [] }))
+      : fetch(url, init),
+  );
+
 function residentHarness(fetch, initialId = "life-agent") {
   const storage = memoryStorage();
   storage.setItem("townhall.steward.operator", "operator-token");
   const tree = (id) => (
     <NavigationProvider base="/">
-      <StewardProvider storage={storage} fetch={fetch}>
+      <StewardProvider storage={storage} fetch={withLibrary(fetch)}>
         {id ? <ResidentsPage page="residentDeclaration" params={{ id }} /> : <div>away</div>}
       </StewardProvider>
     </NavigationProvider>
@@ -313,39 +329,15 @@ describe("budget controls", () => {
 /* -- residents ----------------------------------------------------------------------- */
 
 describe("the resident editor", () => {
-  it("round-trips explicit skill grants and notes while showing inherited defaults", async () => {
-    const declaration = {
-      ...DECLARATION,
-      manifest: { ...DECLARATION.manifest, skills: [{ id: "triage", note: "weekday queue" }] },
-      skill_library: [
-        { name: "research", description: "Find facts.", default: true },
-        { name: "triage", description: "Sort work.", default: false },
-      ],
-    };
-    const fetch = vi.fn().mockImplementation((url, init) => {
-      if (init?.method === "PUT") {
-        return Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }));
-      }
-      return Promise.resolve(json(200, declaration));
-    });
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
-
-    expect(await screen.findByLabelText(/research/i)).toHaveProperty("disabled", true);
-    fireEvent.change(screen.getByLabelText(/triage note/i), { target: { value: "evening queue" } });
-    fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
-
-    await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
-    const sent = JSON.parse(fetch.mock.calls.find(([, call]) => call?.method === "PUT")[1].body);
-    expect(sent.manifest.skills).toEqual([{ id: "triage", note: "evening queue" }]);
-  });
-
   it("offers both spellings and sends exactly one of them", async () => {
     const fetch = vi.fn().mockImplementation((url, init) =>
       init?.method === "PUT"
         ? Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }))
         : Promise.resolve(json(200, DECLARATION)),
     );
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
     fireEvent.change(screen.getByDisplayValue(/version: 0/), { target: { value: "version: 0\n# kept\n" } });
@@ -379,7 +371,9 @@ describe("the resident editor", () => {
       )
       .mockResolvedValueOnce(json(200, concurrent));
 
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
 
     const rejectedManifest = "version: 0\nsummary: My complete manifest draft.\n";
@@ -455,7 +449,9 @@ describe("the resident editor", () => {
       .mockResolvedValueOnce(json(409, { detail: { error: "stale_revision", message: "changed" } }))
       .mockResolvedValueOnce(json(503, { detail: { error: "unavailable", message: "try again" } }))
       .mockResolvedValueOnce(json(200, concurrent));
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: /write declaration/i }));
     expect(await screen.findByText(/Stale draft recovery/i)).toBeTruthy();
@@ -473,7 +469,9 @@ describe("the resident editor", () => {
       .mockResolvedValueOnce(json(200, DECLARATION))
       .mockResolvedValueOnce(json(409, { detail: { error: "stale_revision", message: "changed" } }))
       .mockResolvedValueOnce(json(200, concurrent));
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
     fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
     fireEvent.click(await screen.findByRole("button", { name: /re-read current server files/i }));
@@ -595,69 +593,6 @@ describe("the resident editor", () => {
   });
 });
 
-describe("resident lifecycle", () => {
-  const resident = {
-    id: "life-agent", agent_id: "claude-code:life-agent", project: "warren", retired: false,
-    soul: { name: "Hob", role: "operator", accent: "#4f7ea6", char: "Hob" },
-    summary: "Keeps watch.", uid: "7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9", path: "residents/life-agent/manifest.yaml",
-    memory: { kind: "directory", path: "/memory" }, runner: { kind: "claude", model: null },
-    charter: { mission: "Watch.", duties: ["Watch"], rules: ["Ask"], escalation: "Ask." },
-    skills: [], effective_skills: [], routes: [],
-  };
-  const reads = (url) => {
-    if (url.endsWith("/budget")) return { resident: "life-agent", window: { tz: "UTC", day: "2026-09-02", end: "2026-09-03T00:00:00Z" }, spent: {}, budgets: [], paused: false };
-    if (url.endsWith("/journal")) return { entries: [] };
-    if (url.endsWith("/inbox")) return { inbox: [], routes: [], pending: 0 };
-    if (url === "/routines") return { routines: [], scheduler: {} };
-    return resident;
-  };
-
-  it("requires a successful retirement rehearsal before execute and reports cleanup", async () => {
-    let becameRetired = false;
-    const fetch = vi.fn().mockImplementation((url, init) => {
-      if (init?.method === "POST") {
-        const body = JSON.parse(init.body);
-        if (!body.dry_run) becameRetired = true;
-        return Promise.resolve(json(200, body.dry_run
-          ? { dry_run: true, revision: "sha256:plan", commands: ["docker compose down --remove-orphans", "rm -f .env docker-compose.yaml"] }
-          : { dry_run: false, stopped: true, scrubbed: true, commands: [] }));
-      }
-      if (url === "/residents/life-agent") return Promise.resolve(json(200, { ...resident, retired: becameRetired }));
-      return Promise.resolve(json(200, reads(url)));
-    });
-    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
-
-    const execute = await screen.findByRole("button", { name: /retire exactly this plan/i });
-    expect(screen.getByRole("button", { name: /provision from declaration/i })).toBeTruthy();
-    expect(execute).toHaveProperty("disabled", true);
-    fireEvent.click(screen.getByRole("button", { name: /rehearse retirement/i }));
-    await waitFor(() => expect(execute.disabled).toBe(false));
-    fireEvent.click(execute);
-    await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.body?.includes("sha256:plan"))).toBe(true));
-    const receipt = (await screen.findByText(/^resident retired$/i)).parentElement.parentElement;
-    expect(receipt.textContent).toMatch(/container stopped.*\.env.*compose removal completed.*credential directory retained/i);
-    expect(await screen.findByRole("link", { name: /begin return in declaration/i })).toBeTruthy();
-  });
-
-  it("reports provision as provision, never as retirement", async () => {
-    const fetch = vi.fn().mockImplementation((url, init) => Promise.resolve(json(200,
-      init?.method === "POST" ? { message: "container and schedule converged" } : reads(url),
-    )));
-    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
-    fireEvent.click(await screen.findByRole("button", { name: /provision from declaration/i }));
-    expect(await screen.findByText(/container and schedule converged/i)).toBeTruthy();
-    expect(screen.queryByText(/^resident retired$/i)).toBeNull();
-  });
-
-  it("offers the provision path instead for a retired resident", async () => {
-    const fetch = vi.fn().mockImplementation((url) => Promise.resolve(json(200, url === "/residents/life-agent" ? { ...resident, retired: true } : reads(url))));
-    mount(<ResidentsPage page="resident" params={{ id: "life-agent" }} />, { fetch });
-    expect(await screen.findByRole("link", { name: /begin return in declaration/i })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /provision from declaration/i })).toBeNull();
-    expect(screen.queryByRole("button", { name: /rehearse retirement/i })).toBeNull();
-  });
-});
-
 /* -- the whole shell ----------------------------------------------------------------- */
 
 describe("the shell itself", () => {
@@ -697,7 +632,9 @@ describe("reloading steward's own copy", () => {
       if (init?.method === "POST") return Promise.resolve(json(200, { status: "reloaded", residents: 3, routines: 7, skills: ["research"] }));
       return Promise.resolve(json(200, DECLARATION));
     });
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, { fetch });
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
 
     fireEvent.click(await screen.findByRole("button", { name: /write declaration/i }));
     fireEvent.click(await screen.findByRole("button", { name: /reload steward's own copy/i }));

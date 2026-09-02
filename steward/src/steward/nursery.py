@@ -130,6 +130,8 @@ from steward.scheduler import (
 from steward.skills import library_for, redundant_grants
 
 __all__ = [
+    "COMMIT_FAILED",
+    "WORKTREE_REFUSED",
     "CommitIdentity",
     "CreatedResident",
     "DeclareStage",
@@ -286,7 +288,7 @@ def _soul_document(spec: NewResident, agent_id: str | None) -> str:
 
 
 def _next_home(residents_dir: Path) -> int:
-    """Return the lowest plot not claimed by a valid resident declaration."""
+    """Return the lowest village home not claimed by a valid resident."""
     used = {resident.manifest.home for resident in validate_path(residents_dir).residents}
     try:
         return next(
@@ -294,7 +296,8 @@ def _next_home(residents_dir: Path) -> int:
         )
     except StopIteration as exc:
         raise NurseryError(
-            "cannot declare a resident: all village homes 0 through 7 are claimed"
+            f"cannot declare a resident: all village homes {VILLAGE_HOME_MIN} through "
+            f"{VILLAGE_HOME_MAX} are claimed"
         ) from exc
 
 
@@ -399,6 +402,21 @@ CLAUDE_LOGIN_REMAINS = (
 #: How many dirty paths a refusal names before it starts counting instead.
 DIRTY_SHOWN = 5
 
+#: Why a retirement's commit could not be made safely, for a caller that needs a code
+#: rather than a paragraph. One name for both shapes :func:`worktree_complaint` reports —
+#: a worktree carrying somebody else's half-finished afternoon, and a tree with no git
+#: behind it at all — because the answer is the same either way: steward will not commit
+#: here, and the message says which of the two it is.
+WORKTREE_REFUSED = "worktree_refused"
+
+#: Why a commit steward tried to make did not happen: git refused the stage or the commit
+#: itself. Named because the answer a caller needs is *which side of the commit it stopped
+#: on* — a retirement that fails here has already written ``retired: true`` to the file and
+#: has nothing in git saying so, which is a different situation from one that never started.
+#: The same name :data:`steward.api.WRITE_STATUS` already gives it, so one code means one
+#: thing across every door.
+COMMIT_FAILED = "commit_failed"
+
 
 def _git(repo: Path, *args: str, git: PipedRun = run_argv) -> CommandOutcome:
     """Run one git command against a checkout. ``-C`` rather than a chdir, always."""
@@ -447,25 +465,26 @@ def worktree_complaint(repo: Path, *, git: PipedRun = run_argv) -> str | None:
 
 
 def path_complaint(repo: Path, path: Path, *, git: PipedRun = run_argv) -> str | None:
-    """Refuse uncommitted bytes in the declaration retirement would commit.
-
-    The HTTP lifecycle door owns one resident, not the operator's whole checkout. Unrelated
-    work cannot enter its path-limited commit; edits already present in this manifest can,
-    so those are named and refused instead of being silently folded into retirement.
-    """
+    """Name uncommitted bytes in the file retirement will commit, ignoring other work."""
+    outcome = _git(repo, "rev-parse", "--is-inside-work-tree", git=git)
+    if not outcome.ok:
+        return (
+            f"{repo} is not a git checkout, so there is nothing to commit the retirement "
+            "into; point --repo at the steward repo or pass --no-commit"
+        )
     try:
-        relative = str(path.resolve().relative_to(repo.resolve()))
+        relative = path.resolve().relative_to(repo.resolve())
     except ValueError:
-        return f"{path} is not inside the checkout at {repo}"
-    status = _git(repo, "status", "--porcelain", "--", relative, git=git)
+        return f"{path} is outside the git checkout at {repo}, so steward cannot commit it"
+    status = _git(repo, "status", "--porcelain", "--", str(relative), git=git)
     if not status.ok:
-        return f"git could not read {relative} in the worktree at {repo}: {status.summary()}"
+        return f"git could not inspect {path}: {status.summary()}"
     dirty = _dirty_names(status)
     if not dirty:
         return None
     return (
         f"{', '.join(dirty)} has uncommitted changes; commit or discard them before "
-        "retiring this resident so retirement is one reviewable commit"
+        "retiring this resident"
     )
 
 
@@ -521,14 +540,18 @@ def commit_paths(
     relative = [str(path.resolve().relative_to(repo.resolve())) for path in paths]
     added = _git(repo, "add", "--", *relative, git=git)
     if not added.ok:
-        raise NurseryError(f"git could not stage the declaration: {added.summary()}")
+        raise NurseryError(
+            f"git could not stage the declaration: {added.summary()}", reason=COMMIT_FAILED
+        )
     staged = _git(repo, "diff", "--cached", "--quiet", "--", *relative, git=git)
     if staged.exit_status == 0:
         return None  # Already committed, byte for byte. Converged.
     config = identity.config_args() if identity is not None else ()
     committed = _git(repo, *config, "commit", "-m", message, "--", *relative, git=git)
     if not committed.ok:
-        raise NurseryError(f"git could not commit the declaration: {committed.summary()}")
+        raise NurseryError(
+            f"git could not commit the declaration: {committed.summary()}", reason=COMMIT_FAILED
+        )
     head = _git(repo, "rev-parse", "HEAD", git=git)
     return head.stdout.strip() or None
 
@@ -1007,6 +1030,7 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
     """
     directory = residents_dir / spec.id
     manifest_path = directory / MANIFEST_FILENAME
+
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
         wanted = _manifest_model(spec, home=existing.manifest.home)
@@ -1425,7 +1449,7 @@ def _stop_retired_container(
     return True, ""
 
 
-def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable collaborators
+def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; collaborators are explicit
     resident_id: str,
     *,
     residents_dir: Path | str,
@@ -1436,13 +1460,13 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable col
     deploy: bool = True,
     allow_dirty: bool = False,
     dry_run: bool = False,
-    emitter: ev.Emitter | None = None,
-    refuse_retired: bool = False,
+    identity: CommitIdentity | None = None,
+    git: PipedRun = run_argv,
     resident_dirty_only: bool = False,
     expected_revision: str | None = None,
     revision_of: Callable[[Path], str] | None = None,
-    durable_guard: AbstractContextManager[object] | None = None,
-    git: PipedRun = run_argv,
+    durable_guard: AbstractContextManager[Any] | None = None,
+    emitter: ev.Emitter | None = None,
 ) -> RetireReport:
     """Retire a resident: mark it retired in git, then stop and remove its container.
 
@@ -1452,20 +1476,52 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable col
     away and dutifully restart it. Stopping first and marking second leaves a window in
     which steward is fighting itself.
 
+    ``identity`` names who git records as having made the retirement commit. ``None`` keeps
+    the terminal's behaviour — the person's own git config, because ``steward retire`` is
+    something a person ran — while :data:`POST /residents/{id}/retire <steward.api>` passes
+    one, because a server has nobody at the keyboard to inherit an identity from and would
+    otherwise stage the mark perfectly and then fail on "Please tell me who you are".
+
     ``deploy=False`` marks and commits the manifest but reaches no host — the counterpart
     to ``new-resident``'s ``--no-deploy``, for the resident whose host is already gone (or
     was never steward's to stop). The container, if there is one, is left exactly as it is;
     the resident stops taking work the moment the mark is committed either way.
 
-    Once the durable mark and requested host cleanup succeed, Steward emits
-    ``resident_retired`` under the resident's own event identity. Chronicle can then drop
-    its folded declaration and free the plot immediately; no ``session_ended`` is forged.
+    Once the durable mark is committed, Steward emits ``resident_retired`` under the
+    resident's declared identity before touching the host. This is Steward's own lifecycle
+    fact, not a forged ``session_ended`` on the resident's behalf.
     """
     root = Path(residents_dir)
     checkout = Path(repo) if repo is not None else root.parent
-    with durable_guard or nullcontext():
-        manifest_path = _declared_manifest(root, resident_id)
-        resident = _load_or_refuse(manifest_path, skills_dir)
+    manifest_path = _declared_manifest(root, resident_id)
+
+    if dry_run:
+        resident = _load_or_refuse(manifest_path, skills_dir, reason="declaration_invalid")
+        target = target_for(resident.manifest)
+        conveyance = transport if transport is not None else transport_for(target)
+        down = compose_argv(target, "down", "--remove-orphans")
+        scrub = scrub_argv(target)
+        plan = (conveyance.plan(down), conveyance.plan(scrub)) if deploy else ()
+        if not deploy:
+            note = "a dry run stops nothing and commits nothing; --no-deploy reaches no host"
+        elif resident.retired:
+            note = "already retired; a real run would only reconcile the container"
+        else:
+            note = "a dry run stops nothing and commits nothing"
+        return RetireReport(
+            resident_id=resident_id,
+            manifest_path=manifest_path,
+            marked=not resident.retired,
+            stopped=False,
+            commands=plan,
+            dry_run=True,
+            note=note,
+        )
+
+    with durable_guard if durable_guard is not None else nullcontext():
+        # Re-read the bytes under the same checkout lock that protects revision, dirt,
+        # mutation, and commit. Host and Chronicle I/O deliberately happen after release.
+        resident = _load_or_refuse(manifest_path, skills_dir, reason="declaration_invalid")
         if expected_revision is not None and (
             revision_of is None or revision_of(manifest_path) != expected_revision
         ):
@@ -1473,35 +1529,13 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable col
                 "the resident declaration changed after rehearsal; rehearse the current plan",
                 reason="stale_retirement_plan",
             )
-        if resident.retired and refuse_retired:
-            raise NurseryError(
-                f"resident {resident.id!r} is already retired; provision it only after a person "
-                "sets retired: false and commits that decision",
-                reason="resident_retired",
-            )
+        # The target and its argv are derived from those same locked bytes. Deriving them
+        # before the lock would let revision B pass while the host cleanup still used A.
         target = target_for(resident.manifest)
         conveyance = transport if transport is not None else transport_for(target)
         down = compose_argv(target, "down", "--remove-orphans")
         scrub = scrub_argv(target)
         plan = (conveyance.plan(down), conveyance.plan(scrub)) if deploy else ()
-
-        if dry_run:
-            if not deploy:
-                note = "a dry run stops nothing and commits nothing; --no-deploy reaches no host"
-            elif resident.retired:
-                note = "already retired; a real run would only reconcile the container"
-            else:
-                note = "a dry run stops nothing and commits nothing"
-            return RetireReport(
-                resident_id=resident_id,
-                manifest_path=manifest_path,
-                marked=not resident.retired,
-                stopped=False,
-                commands=plan,
-                dry_run=True,
-                note=note,
-            )
-
         if commit:
             complaint = (
                 path_complaint(checkout, manifest_path, git=git)
@@ -1509,29 +1543,38 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable col
                 else worktree_complaint(checkout, git=git)
             )
             if complaint and not allow_dirty:
-                raise NurseryError(complaint, reason="dirty_worktree")
+                raise NurseryError(complaint, reason=WORKTREE_REFUSED)
 
         marked = set_retired(manifest_path)
         if marked:
             try:
-                _load_or_refuse(manifest_path, skills_dir)
+                resident = _load_or_refuse(manifest_path, skills_dir)
             except NurseryError:
                 set_retired(manifest_path, retired=False)
                 raise
 
-        sha = (
-            commit_paths(
-                checkout,
-                [manifest_path],
-                RETIRE_SUBJECT.format(id=resident_id),
-                git=git,
+        try:
+            sha = (
+                commit_paths(
+                    checkout,
+                    [manifest_path],
+                    RETIRE_SUBJECT.format(id=resident_id),
+                    identity=identity,
+                    git=git,
+                )
+                if commit
+                else None
             )
-            if commit
-            else None
-        )
+        except NurseryError as exc:
+            raise NurseryError(
+                f"{exc}; {manifest_path} now says retired: true and nothing has committed it, "
+                f"so {resident_id} has already stopped taking work with no history of the "
+                "decision. Commit that file to finish the retirement, or set retired: false "
+                "to undo it — the container was not touched either way",
+                exc.diagnostics,
+                reason=COMMIT_FAILED,
+            ) from exc
 
-    # The durable declaration is authoritative before host reconciliation. If the host is
-    # unreachable, the resident is still retired and Chronicle must free its plot now.
     (emitter or ev.EventEmitter.from_env()).emit(ev.resident_retired_event(resident=resident))
 
     scrubbed = False
