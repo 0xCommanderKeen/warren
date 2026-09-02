@@ -131,9 +131,6 @@ const UNCALLED = [
   "GET /tasks/{task_id}/lineage",
   // Delegation is resident-to-resident, through the `<delegate>` block in a session.
   "POST /delegate",
-  // warren#270's second door: provisioning a manifest a human wrote by hand, from the CLI.
-  // The console's own path to a container is `POST /residents` with `deploy: true`.
-  "POST /residents/{resident_id}/provision",
 ];
 
 describe("the client speaks the routes Steward declares", () => {
@@ -268,6 +265,11 @@ describe("the bodies the console sends are bodies Steward accepts", () => {
       const body = { ...half, soul: "---\nname: Pip\n---\n", revision: "sha256:abc" };
       expect(refusals("DeclarationPut", body)).toEqual([]);
     }
+  });
+
+  it("rehearses and executes retirement with the rehearsed revision", () => {
+    expect(refusals("RetirePost", { dry_run: true })).toEqual([]);
+    expect(refusals("RetirePost", { revision: "sha256:abc" })).toEqual([]);
   });
 
   it("creates and updates a skill from the same editor payload", () => {

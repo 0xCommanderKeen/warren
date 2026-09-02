@@ -14,7 +14,7 @@ import {
 
 const RUNNERS = ["claude", "codex", "command", "mock"];
 
-function ManifestFields({ draft, edit, diagnostics }) {
+function ManifestFields({ draft, edit, diagnostics, library }) {
   const text = (path, label, hint, props = {}) => (
     <Field label={label} hint={hint} problems={diagnosticsFor(diagnostics, path)} key={path}>
       <Input
@@ -52,6 +52,17 @@ function ManifestFields({ draft, edit, diagnostics }) {
   );
 
   const accent = scalarValue(getIn(draft, "soul.accent"));
+  const grants = Array.isArray(draft.skills) ? draft.skills : [];
+  const grantOf = (name) => grants.find((grant) => grant?.id === name);
+  const setGrant = (skill, enabled) => {
+    const kept = grants.filter((grant) => grant?.id !== skill.name);
+    edit("skills", enabled ? [...kept, { id: skill.name }] : kept);
+  };
+  const setGrantNote = (skill, note) => {
+    const kept = grants.filter((grant) => grant?.id !== skill.name);
+    const current = grantOf(skill.name) || { id: skill.name };
+    edit("skills", [...kept, { ...current, ...(note ? { note } : { note: undefined }) }]);
+  };
 
   return (
     <>
@@ -123,6 +134,45 @@ function ManifestFields({ draft, edit, diagnostics }) {
           </Field>
           {text("runner.model", "model", "Passed to the CLI. Blank means that runner's default.")}
         </div>
+      </Panel>
+
+      <Panel title="Skills">
+        <p className="mt-0 text-[12px] leading-[1.7] text-dim">
+          Defaults are inherited from the library. Checked optional skills are explicit grants;
+          their notes travel with the declaration.
+        </p>
+        {(library || []).map((skill) => {
+          const grant = grantOf(skill.name);
+          const index = grants.findIndex((item) => item?.id === skill.name);
+          const problems = index < 0 ? [] : [
+            ...diagnosticsFor(diagnostics, `skills.${index}.id`),
+            ...diagnosticsFor(diagnostics, `skills.${index}.note`),
+          ];
+          return (
+            <div key={skill.name} className="mb-3 border-l border-rule pl-3">
+              <label className="flex items-start gap-2 text-[12px] text-read">
+                <input
+                  type="checkbox"
+                  aria-label={`${skill.name}${skill.default ? " inherited default" : " grant"}`}
+                  checked={skill.default || Boolean(grant)}
+                  disabled={skill.default}
+                  onChange={(event) => setGrant(skill, event.target.checked)}
+                />
+                <span><code>{skill.name}</code> — {skill.description}</span>
+              </label>
+              {grant ? (
+                <Field label={`${skill.name} note`} problems={problems}>
+                  <Input
+                    aria-label={`${skill.name} note`}
+                    value={grant.note || ""}
+                    onChange={(event) => setGrantNote(skill, event.target.value)}
+                    invalid={problems.length > 0}
+                  />
+                </Field>
+              ) : null}
+            </div>
+          );
+        })}
       </Panel>
     </>
   );
@@ -404,7 +454,12 @@ export default function ResidentDeclaration({ id }) {
       </div>
 
       {mode === "fields" ? (
-        <ManifestFields draft={draft.manifest} edit={edit} diagnostics={diagnostics} />
+        <ManifestFields
+          draft={draft.manifest}
+          edit={edit}
+          diagnostics={diagnostics}
+          library={loaded.data?.skill_library || []}
+        />
       ) : (
         <Panel title={`manifest.yaml — written byte for byte`}>
           <Textarea

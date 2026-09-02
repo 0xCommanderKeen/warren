@@ -64,7 +64,8 @@ then checking the recording is empty.
 import os
 import re
 import shutil
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -442,6 +443,29 @@ def worktree_complaint(repo: Path, *, git: PipedRun = run_argv) -> str | None:
         f"the worktree at {repo} has uncommitted changes ({shown}{more}); commit or stash "
         f"them so a failed deploy leaves exactly one commit to revert, or pass "
         f"--allow-dirty to go ahead anyway"
+    )
+
+
+def path_complaint(repo: Path, path: Path, *, git: PipedRun = run_argv) -> str | None:
+    """Refuse uncommitted bytes in the declaration retirement would commit.
+
+    The HTTP lifecycle door owns one resident, not the operator's whole checkout. Unrelated
+    work cannot enter its path-limited commit; edits already present in this manifest can,
+    so those are named and refused instead of being silently folded into retirement.
+    """
+    try:
+        relative = str(path.resolve().relative_to(repo.resolve()))
+    except ValueError:
+        return f"{path} is not inside the checkout at {repo}"
+    status = _git(repo, "status", "--porcelain", "--", relative, git=git)
+    if not status.ok:
+        return f"git could not read {relative} in the worktree at {repo}: {status.summary()}"
+    dirty = _dirty_names(status)
+    if not dirty:
+        return None
+    return (
+        f"{', '.join(dirty)} has uncommitted changes; commit or discard them before "
+        "retiring this resident so retirement is one reviewable commit"
     )
 
 
@@ -1401,7 +1425,7 @@ def _stop_retired_container(
     return True, ""
 
 
-def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and independently useful
+def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; injectable collaborators
     resident_id: str,
     *,
     residents_dir: Path | str,
@@ -1413,6 +1437,11 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     allow_dirty: bool = False,
     dry_run: bool = False,
     emitter: ev.Emitter | None = None,
+    refuse_retired: bool = False,
+    resident_dirty_only: bool = False,
+    expected_revision: str | None = None,
+    revision_of: Callable[[Path], str] | None = None,
+    durable_guard: AbstractContextManager[object] | None = None,
     git: PipedRun = run_argv,
 ) -> RetireReport:
     """Retire a resident: mark it retired in git, then stop and remove its container.
@@ -1434,56 +1463,72 @@ def retire_resident(  # noqa: PLR0913 — every knob is keyword-only and indepen
     """
     root = Path(residents_dir)
     checkout = Path(repo) if repo is not None else root.parent
-    manifest_path = _declared_manifest(root, resident_id)
-    resident = _load_or_refuse(manifest_path, skills_dir)
-    target = target_for(resident.manifest)
-    conveyance = transport if transport is not None else transport_for(target)
-    down = compose_argv(target, "down", "--remove-orphans")
-    scrub = scrub_argv(target)
-    plan = (conveyance.plan(down), conveyance.plan(scrub)) if deploy else ()
+    with durable_guard or nullcontext():
+        manifest_path = _declared_manifest(root, resident_id)
+        resident = _load_or_refuse(manifest_path, skills_dir)
+        if expected_revision is not None and (
+            revision_of is None or revision_of(manifest_path) != expected_revision
+        ):
+            raise NurseryError(
+                "the resident declaration changed after rehearsal; rehearse the current plan",
+                reason="stale_retirement_plan",
+            )
+        if resident.retired and refuse_retired:
+            raise NurseryError(
+                f"resident {resident.id!r} is already retired; provision it only after a person "
+                "sets retired: false and commits that decision",
+                reason="resident_retired",
+            )
+        target = target_for(resident.manifest)
+        conveyance = transport if transport is not None else transport_for(target)
+        down = compose_argv(target, "down", "--remove-orphans")
+        scrub = scrub_argv(target)
+        plan = (conveyance.plan(down), conveyance.plan(scrub)) if deploy else ()
 
-    if dry_run:
-        if not deploy:
-            note = "a dry run stops nothing and commits nothing; --no-deploy reaches no host"
-        elif resident.retired:
-            note = "already retired; a real run would only reconcile the container"
-        else:
-            note = "a dry run stops nothing and commits nothing"
-        return RetireReport(
-            resident_id=resident_id,
-            manifest_path=manifest_path,
-            marked=not resident.retired,
-            stopped=False,
-            commands=plan,
-            dry_run=True,
-            note=note,
+        if dry_run:
+            if not deploy:
+                note = "a dry run stops nothing and commits nothing; --no-deploy reaches no host"
+            elif resident.retired:
+                note = "already retired; a real run would only reconcile the container"
+            else:
+                note = "a dry run stops nothing and commits nothing"
+            return RetireReport(
+                resident_id=resident_id,
+                manifest_path=manifest_path,
+                marked=not resident.retired,
+                stopped=False,
+                commands=plan,
+                dry_run=True,
+                note=note,
+            )
+
+        if commit:
+            complaint = (
+                path_complaint(checkout, manifest_path, git=git)
+                if resident_dirty_only
+                else worktree_complaint(checkout, git=git)
+            )
+            if complaint and not allow_dirty:
+                raise NurseryError(complaint, reason="dirty_worktree")
+
+        marked = set_retired(manifest_path)
+        if marked:
+            try:
+                _load_or_refuse(manifest_path, skills_dir)
+            except NurseryError:
+                set_retired(manifest_path, retired=False)
+                raise
+
+        sha = (
+            commit_paths(
+                checkout,
+                [manifest_path],
+                RETIRE_SUBJECT.format(id=resident_id),
+                git=git,
+            )
+            if commit
+            else None
         )
-
-    if commit:
-        complaint = worktree_complaint(checkout, git=git)
-        if complaint and not allow_dirty:
-            raise NurseryError(complaint)
-
-    marked = set_retired(manifest_path)
-    if marked:
-        # Read it back through the ordinary validator, exactly as declare does: a manifest
-        # steward edited and broke would be a resident nobody could load again.
-        try:
-            _load_or_refuse(manifest_path, skills_dir)
-        except NurseryError:
-            set_retired(manifest_path, retired=False)
-            raise
-
-    sha = (
-        commit_paths(
-            checkout,
-            [manifest_path],
-            RETIRE_SUBJECT.format(id=resident_id),
-            git=git,
-        )
-        if commit
-        else None
-    )
 
     # The durable declaration is authoritative before host reconciliation. If the host is
     # unreachable, the resident is still retired and Chronicle must free its plot now.

@@ -200,6 +200,8 @@ worth knowing:
   again. Named separately from declaring, and matched ahead of it, because the two are
   different acts and a refusal that called this one "declaring" would be describing
   something the caller did not try.
+- **`POST /residents/{id}/retire`** — retirement is the operator's lifecycle decision. A
+  session may not stop itself or another resident.
 - **`POST /residents/{id}/routines/{routine}/run`** — firing a routine is a human act; a
   session's own work arrives through the board and its inbox.
 
@@ -623,12 +625,21 @@ host is compared file by file and not re-sent, `sent` and `changed` are `false`,
 `docker compose up -d` is issued anyway — reconciling a container that is *down* is what a
 second run is for.
 
-**There is no HTTP counterpart to `steward retire`, and this change did not add one.**
-warren#270 asked whether retire's counterpart should be symmetric, and the answer it took
-is about the *argument*, not the surface: provisioning now takes an id and reads the
-declared manifest, exactly as `steward retire <id>` does. Retiring over HTTP is a separate
-decision — it stops a container and scrubs a village token — and nothing has asked for it,
-so it stays a CLI act rather than being added on the strength of a symmetry argument.
+### `POST /residents/{id}/retire`
+
+**Human callers only.** A rehearsal sends `{"dry_run": true}` and returns the exact host
+commands plus the declaration `revision`, without marking, committing, emitting, or reaching
+the host. Execution sends `{"revision": "sha256:…"}`; a missing rehearsal or a declaration
+changed since it is refused, so the destructive button is bound to the plan it displays. A
+real request runs the same `steward.nursery.retire_resident` pipeline as the CLI: mark and commit
+`retired: true`, emit `resident_retired` under the resident identity, stop the container,
+then remove Steward's generated `.env` and compose file. The `claude/` credential directory
+is retained and named in the report because Steward neither wrote it nor can restore it.
+
+The API's commit is path-limited to this resident's manifest. Unrelated worktree changes are
+left alone; uncommitted bytes already in that manifest are `409 dirty_worktree`, named before
+anything changes. `409 resident_retired` is also a refusal: return is an explicit edit to
+`retired: false`, a commit, then the existing provision endpoint.
 
 The refusals:
 

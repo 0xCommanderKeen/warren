@@ -14,11 +14,13 @@
  * failure than a page that is entirely a stack trace.
  */
 
+import { useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
 import {
-  Badge, DetailHead, Empty, Facts, Loading, Panel, Problem, Section, Swatch, Tag, buttonClass,
+  Actions, Badge, Button, DetailHead, Empty, Facts, Loading, Note, Panel, Problem, Receipt,
+  Section, Swatch, Tag, buttonClass,
 } from "../console/ui.jsx";
 import { ResidentRoutines, SchedulerBadge, SchedulerNote } from "../console/routines.jsx";
 import { stamp } from "../console/time.js";
@@ -365,6 +367,92 @@ function InboxPanel({ settled }) {
   );
 }
 
+function RetirementReceipt({ report }) {
+  return (
+    <Receipt title="resident retired">
+      {report.stopped ? "container stopped" : "no container was present"}; generated <code>.env</code> and compose removal completed. {report.scrubbed ? "A generated token file was present and removed." : "No generated token file was present."} Resident credential directory retained.
+    </Receipt>
+  );
+}
+
+function LifecyclePanel({ resident, client, refresh }) {
+  const [plan, setPlan] = useState(null);
+  const [answer, setAnswer] = useState(null);
+  const [error, setError] = useState(null);
+  const [asking, setAsking] = useState(false);
+
+  async function ask(kind, action, body) {
+    setAsking(true);
+    setError(null);
+    try {
+      const result = await action(resident.id, body);
+      setAnswer({ kind, result });
+      refresh();
+      return result;
+    } catch (caught) {
+      setError(caught);
+      return null;
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  if (resident.retired) {
+    return (
+      <Panel title="Lifecycle">
+        <p className="mt-0 text-[12px] leading-[1.7] text-dim">
+          This declaration is retired. Set <code>retired: false</code>, commit that decision,
+          then provision the resident from the declaration.
+        </p>
+        {answer?.kind === "retire" ? (
+          <RetirementReceipt report={answer.result} />
+        ) : null}
+        <Link to={routeTo.residentDeclaration(resident.id)} className={buttonClass("ghost")}>
+          Begin return in declaration
+        </Link>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="Retire resident">
+      <p className="mt-0 text-[12px] leading-[1.7] text-dim">
+        Steward first marks and commits the declaration, then stops the container and removes
+        its generated <code>.env</code> and compose file. The resident credential directory is
+        retained for the documented return path.
+      </p>
+      {error ? <Problem error={error} /> : null}
+      {plan ? (
+        <Receipt title="retirement rehearsal">
+          {(plan.commands || []).join(" · ")}. Nothing was stopped, removed, marked, or committed.
+        </Receipt>
+      ) : null}
+      {answer?.kind === "provision" ? (
+        <Receipt title="resident provisioned">{answer.result.message}</Receipt>
+      ) : null}
+      {answer?.kind === "retire" ? (
+        <RetirementReceipt report={answer.result} />
+      ) : null}
+      <Actions>
+        <Button onClick={() => ask("provision", client.provisionResident, {})} disabled={asking}>
+          {asking ? "asking steward…" : "Provision from declaration"}
+        </Button>
+        <Button onClick={async () => setPlan(await ask("rehearsal", client.retireResident, { dry_run: true }))} disabled={asking}>
+          {asking ? "asking steward…" : "Rehearse retirement"}
+        </Button>
+        <Button
+          tone="danger"
+          onClick={() => ask("retire", client.retireResident, { revision: plan.revision })}
+          disabled={asking || !plan}
+        >
+          Retire exactly this plan
+        </Button>
+        <Note>The execute control unlocks only after Steward successfully answers the rehearsal.</Note>
+      </Actions>
+    </Panel>
+  );
+}
+
 /* -- the page ------------------------------------------------------------------------- */
 
 export default function ResidentDetail({ id }) {
@@ -441,6 +529,7 @@ export default function ResidentDetail({ id }) {
       <BudgetPanel settled={data.budget} id={id} />
       <JournalPanel settled={data.journal} />
       <InboxPanel settled={data.inbox} />
+      <LifecyclePanel resident={resident} client={client} refresh={refresh} />
 
       <Section>Where the rest of this resident is</Section>
       <p className="max-w-[78ch] text-[12px] leading-[1.7] text-dim">

@@ -37,7 +37,7 @@ import threading
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import wait as wait_for_futures
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
@@ -78,8 +78,10 @@ from steward.nursery import (
     NewResident,
     NurseryError,
     NurseryReport,
+    RetireReport,
     provision_resident,
     raise_resident,
+    retire_resident,
 )
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
@@ -135,6 +137,7 @@ type NurseryPipeline = Callable[..., NurseryReport]
 #: Injectable for the reason :data:`NurseryPipeline` is: a test proves the route and
 #: ``steward provision`` run one pipeline rather than two that happen to agree.
 type ProvisionPipeline = Callable[..., NurseryReport]
+type RetirePipeline = Callable[..., RetireReport]
 
 log = logging.getLogger("steward.api")
 
@@ -392,6 +395,19 @@ class ProvisionPost(_Body):
     dry_run: bool = Field(
         default=False,
         description="Print the plan and reach no host. Nothing is sent, run, or written.",
+    )
+
+
+class RetirePost(_Body):
+    """Whether to retire the resident, or rehearse the exact retirement plan."""
+
+    dry_run: bool = Field(
+        default=False,
+        description="Return the plan without marking, committing, emitting, or reaching a host.",
+    )
+    revision: str | None = Field(
+        default=None,
+        description="Manifest revision returned by the successful rehearsal being executed.",
     )
 
 
@@ -945,6 +961,13 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        "/retire",
+        (
+            "retirement is an operator lifecycle decision; a session may not stop itself "
+            "or another resident"
+        ),
+    ),
+    (
         "/residents",
         ("declaring a resident is a human act; a session may not add to the fleet it is part of"),
     ),
@@ -1234,6 +1257,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     runner_factory: RunnerFactory = build_runner,
     nursery: NurseryPipeline = raise_resident,
     provisioner: ProvisionPipeline = provision_resident,
+    retirer: RetirePipeline = retire_resident,
     transport: Transport | None = None,
     approval_expiry_interval_s: float = APPROVAL_EXPIRY_INTERVAL_S,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -1697,6 +1721,56 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             **report.to_dict(),
         }
 
+    @app.post("/residents/{resident_id}/retire")
+    def retire_declared_resident(
+        resident_id: str, request: Request, body: RetirePost | None = None
+    ) -> dict[str, Any]:
+        """Mark and commit a retirement, then reconcile its declared container."""
+        asked = body or RetirePost()
+        manifest_path = residents_dir / resident_id / m.MANIFEST_FILENAME
+        if not asked.dry_run and asked.revision is None:
+            _refuse(
+                409,
+                "retirement_rehearsal_required",
+                "rehearse this retirement first and execute the revision Steward returned",
+            )
+        try:
+            # The same checkout-scoped lock declaration writes hold spans revision check,
+            # manifest load, mark, and commit. "Exactly this plan" is therefore a bound,
+            # not a check/use race against another API editor.
+            guard = au.authoring_lock(residents_dir) if asked.dry_run else nullcontext()
+            with guard:
+                current_revision = (
+                    au.revision_of(manifest_path) if manifest_path.is_file() else None
+                )
+                report = retirer(
+                    resident_id,
+                    residents_dir=residents_dir,
+                    repo=settings.workdir or residents_dir.parent,
+                    skills_dir=settings.skills_dir,
+                    transport=transport,
+                    dry_run=asked.dry_run,
+                    emitter=sink,
+                    refuse_retired=True,
+                    resident_dirty_only=True,
+                    expected_revision=None if asked.dry_run else asked.revision,
+                    revision_of=au.revision_of,
+                    durable_guard=(None if asked.dry_run else au.authoring_lock(residents_dir)),
+                )
+        except au.AuthoringError as exc:
+            _refuse(409, exc.reason, str(exc))
+        except NurseryError as exc:
+            reason = exc.reason or "retire_failed"
+            _refuse(PROVISION_STATUS.get(reason, 409), reason, str(exc))
+        except TransportError as exc:
+            _refuse(409, "retire_refused", str(exc))
+        request_id = accept(
+            request,
+            "rehearsed" if asked.dry_run else "retired",
+            {"resident": report.resident_id},
+        )
+        return {"request_id": request_id, "revision": current_revision, **report.to_dict()}
+
     @app.get("/residents/{resident_id}/declaration")
     def get_declaration(resident_id: str) -> dict[str, Any]:
         """Return the two files that declare this resident, as text and as data.
@@ -1722,6 +1796,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
                 *au.declaration_paths(residents_dir, resident.id, soul_file)
             ),
             "paths": [str(p) for p in au.declaration_paths(residents_dir, resident.id, soul_file)],
+            "skill_library": [skill.as_dict() for skill in library.skills.values()],
         }
 
     @app.put("/residents/{resident_id}/declaration")

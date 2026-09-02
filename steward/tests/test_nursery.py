@@ -2,7 +2,8 @@
 
 import json
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1104,6 +1105,53 @@ def test_the_token_is_removed_only_after_the_container_is_down(
     down = next(index for index, call in enumerate(host.calls) if "down" in call)
     scrub = next(index for index, call in enumerate(host.calls) if call[0] == "rm")
     assert down < scrub
+
+
+def test_retirement_releases_the_durable_guard_before_external_effects(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Authoring is serialized through commit, never behind Chronicle or the host."""
+    raise_into(scratch_repo, host)
+    held = False
+
+    @contextmanager
+    def durable_guard() -> Iterator[None]:
+        nonlocal held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    def revision(_path: Path) -> str:
+        assert held, "the expected revision must be checked inside the durable guard"
+        return "sha256:rehearsed"
+
+    class OutsideGuardTransport(LocalTransport):
+        def exists(self, path: str) -> bool:
+            assert not held, "host reconciliation must not hold the authoring guard"
+            return super().exists(path)
+
+        def run(self, argv: Sequence[str]) -> CommandOutcome:
+            assert not held, "host reconciliation must not hold the authoring guard"
+            return super().run(argv)
+
+    class OutsideGuardEmitter:
+        def emit(self, event: object) -> bool:
+            del event
+            assert not held, "Chronicle emission must not hold the authoring guard"
+            return True
+
+    retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=OutsideGuardTransport(root=host.root),
+        emitter=OutsideGuardEmitter(),
+        expected_revision="sha256:rehearsed",
+        revision_of=revision,
+        durable_guard=durable_guard(),
+    )
 
 
 def test_retirement_still_keeps_the_memory_and_the_declaration(

@@ -594,6 +594,32 @@
         "title": "ResidentPost",
         "type": "object"
       },
+      "RetirePost": {
+        "additionalProperties": false,
+        "description": "Whether to retire the resident, or rehearse the exact retirement plan.",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Return the plan without marking, committing, emitting, or reaching a host.",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Manifest revision returned by the successful rehearsal being executed.",
+            "title": "Revision"
+          }
+        },
+        "title": "RetirePost",
+        "type": "object"
+      },
       "Route": {
         "additionalProperties": false,
         "description": "A declared inbound channel through which work can reach a resident.\n\nA route of kind ``delegation`` is the receiving half of steward #7: it declares that\nthis resident accepts work handed to it by another resident, and steward will deliver\ninto it. Every other kind is a channel steward only describes.",
@@ -1861,6 +1887,73 @@
           }
         ],
         "summary": "Provision Declared Resident"
+      }
+    },
+    "/residents/{resident_id}/retire": {
+      "post": {
+        "description": "Mark and commit a retirement, then reconcile its declared container.",
+        "operationId": "retire_declared_resident_residents__resident_id__retire_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "resident_id",
+            "required": true,
+            "schema": {
+              "title": "Resident Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RetirePost"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retire Declared Resident Residents  Resident Id  Retire Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retire Declared Resident"
       }
     },
     "/residents/{resident_id}/routines/{routine_id}/run": {

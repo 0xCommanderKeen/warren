@@ -253,6 +253,8 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     updateSkill: (name, body) => call(`/skills/${at(name)}`, { method: "PUT", body }),
     writeDeclaration: (id, body) => call(`/residents/${at(id)}/declaration`, { method: "PUT", body }),
     createResident: (body) => call("/residents", { method: "POST", body }),
+    retireResident: (id, body = {}) => call(`/residents/${at(id)}/retire`, { method: "POST", body }),
+    provisionResident: (id, body = {}) => call(`/residents/${at(id)}/provision`, { method: "POST", body }),
     runRoutine: (residentId, routineId) =>
       call(`/residents/${at(residentId)}/routines/${at(routineId)}/run`, { method: "POST" }),
     postJob: (body) => call("/jobs", { method: "POST", body }),

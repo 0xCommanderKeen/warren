@@ -64,7 +64,7 @@ from steward.input_bounds import (
 )
 from steward.manifest import Runner as RunnerSpec
 from steward.manifest import validate_tree
-from steward.nursery import RegisterStage, provision_resident, raise_resident
+from steward.nursery import RegisterStage, provision_resident, raise_resident, retire_resident
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import MockRunner, Outcome, RunRequest, RunResult
@@ -147,6 +147,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         residents: bool = True,
         nursery: Any = raise_resident,  # noqa: ANN401 — the pipeline seam, injected
         provisioner: Any = provision_resident,  # noqa: ANN401 — the other door's seam
+        retirer: Any = retire_resident,  # noqa: ANN401 — resident lifecycle seam
         git: bool = True,
         transport: LocalTransport | None = None,
         emitter: ev.Emitter | None = None,
@@ -180,6 +181,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
             runner_factory=lambda spec, placement: MockRunner(spec, placement, behavior=behavior),
             nursery=nursery,
             provisioner=provisioner,
+            retirer=retirer,
             transport=transport,
             approval_expiry_interval_s=approval_expiry_interval_s,
             now=now,
@@ -205,6 +207,27 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
 def init_repo(root: Path) -> None:
     """Make a directory a git checkout, the way a burrow holding the tree actually is."""
     subprocess.run(["git", "-C", str(root), "init", "-b", "main"], check=True, capture_output=True)  # noqa: S603, S607
+
+
+def commit_fixture(root: Path) -> None:
+    """Commit the harness declaration before testing a lifecycle commit."""
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True, capture_output=True)  # noqa: S603, S607
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+        check=True,
+        capture_output=True,
+    )
 
 
 def disabled_routine_manifest() -> dict[str, Any]:
@@ -1890,6 +1913,89 @@ def test_a_credential_shaped_field_never_reaches_a_manifest(api: ApiFactory) -> 
 
     assert response.status_code == 422
     assert not (harness.residents_dir / "note-keeper").exists()
+
+
+def test_retire_api_rehearses_and_executes_the_same_plan(api: ApiFactory, tmp_path: Path) -> None:
+    host = LocalTransport(root=tmp_path / "retire-host")
+    harness = api(transport=host)
+    manifest = harness.residents_dir / "test-agent" / "manifest.yaml"
+    commit_fixture(tmp_path)
+    before = manifest.read_text(encoding="utf-8")
+
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
+    assert rehearsal.status_code == 200
+    assert rehearsal.json()["dry_run"] is True
+    assert rehearsal.json()["commands"]
+    assert manifest.read_text(encoding="utf-8") == before
+    assert harness.events() == []
+
+    executed = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal.json()["revision"]}
+    )
+    assert executed.status_code == 200
+    assert executed.json()["commands"] == rehearsal.json()["commands"]
+    assert executed.json()["marked"] is True
+    assert "retired: true" in manifest.read_text(encoding="utf-8")
+    assert harness.events()[-1]["type"] == "resident_retired"
+
+
+def test_retire_api_refuses_an_already_retired_resident(api: ApiFactory) -> None:
+    manifest = valid_manifest()
+    manifest["retired"] = True
+    harness = api(manifest=manifest)
+
+    response = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_retired"
+
+
+def test_retire_api_names_dirty_target_but_ignores_unrelated_dirt(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    harness = api()
+    manifest = harness.residents_dir / "test-agent" / "manifest.yaml"
+    commit_fixture(tmp_path)
+    (tmp_path / "unrelated.txt").write_text("keep me\n", encoding="utf-8")
+    assert (
+        harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).status_code
+        == 200
+    )
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + "\nsummary: edited\n", encoding="utf-8"
+    )
+    dirty_plan = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": dirty_plan.json()["revision"]}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "dirty_worktree"
+    assert "manifest.yaml" in response.json()["detail"]["message"]
+
+
+def test_retire_api_refuses_execution_when_the_rehearsed_revision_changed(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    harness = api()
+    commit_fixture(tmp_path)
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
+    manifest = harness.residents_dir / "test-agent" / "manifest.yaml"
+    manifest.write_text(manifest.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal.json()["revision"]}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "stale_retirement_plan"
+
+
+def test_retire_api_requires_a_rehearsal_revision_to_execute(api: ApiFactory) -> None:
+    harness = api()
+    response = harness.client.post("/residents/test-agent/retire")
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "retirement_rehearsal_required"
 
 
 # --------------------------------------------------------------------------------------
