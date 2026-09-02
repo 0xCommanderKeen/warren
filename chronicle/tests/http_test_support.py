@@ -66,3 +66,18 @@ class _ServerView:
     @property
     def event_log(self):
         return self._application.state.runtime.event_log
+
+
+def wait_until(condition, timeout=3.0):
+    """Poll ``condition`` until it holds or ``timeout`` seconds pass.
+
+    Returns the condition's last value, so a caller asserts on what it waited
+    for rather than on the wait itself. Worker delivery in the transport tests
+    is asynchronous, so a reading taken once can run ahead of the worker.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        outcome = condition()
+        if outcome or time.monotonic() >= deadline:
+            return outcome
+        time.sleep(0.01)
