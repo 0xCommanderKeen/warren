@@ -1175,7 +1175,7 @@ sources, compilable, fail-open, deterministic, and — the assertion that matter
 the emitter swallows everything by charter — actually able to deliver an event.
 
 It is built on demand and committed nowhere in this repository. The copy in
-`steward/docker/resident/burrow-emit.py` is refreshed by `make vendor-emitter` in
+`steward/docker/resident/chronicle-emit.py` is refreshed by `make vendor-emitter` in
 `warren/steward/`, and both suites compare it against a fresh build.
 
 > **Both spellings work during the rename.** Every `CHRONICLE_*` variable below
