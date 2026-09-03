@@ -42,21 +42,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
 from pathlib import Path
-from typing import Annotated, Any, Literal, NoReturn
+from typing import Any, NoReturn
 
 import yaml
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, model_validator
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from steward import authoring as au
 from steward import delegation as dg
 from steward import events as ev
 from steward import manifest as m
-from steward.approvals import WithheldValueError, redact_decision, restore_withheld
 from steward.board import Dispatcher
 from steward.budgets import PAUSED_ERROR, BudgetGuard, BudgetStatus
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
@@ -66,9 +65,7 @@ from steward.input_bounds import (
     DETAIL_MAX_CHARS,
     EDIT_MAX_DEPTH,
     IDENTIFIER_MAX_CHARS,
-    SKILLS_MAX_ITEMS,
     TITLE_MAX_CHARS,
-    validate_approval_edit,
     validate_json_container_depth,
 )
 from steward.journal import journal_complaint, read_entries
@@ -87,6 +84,10 @@ from steward.nursery import (
     retire_resident,
 )
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
+from steward.routes import approvals as approval_routes
+from steward.routes import board as board_routes
+from steward.routes import requests as request_routes
+from steward.routes.deps import DOCUMENT_MAX_CHARS, Deps, _Body, _refuse
 from steward.run_lifecycle import RUN_LEASE_GRACE_S
 from steward.runners import build_runner
 from steward.scheduler import (
@@ -350,32 +351,6 @@ def resolve_token(token: str | None, *, allow_open: bool) -> str | None:
 # --------------------------------------------------------------------------------------
 
 
-class _Body(BaseModel):
-    """Base for request bodies: unknown keys are a 422, not a silently ignored field."""
-
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-
-class JobPost(_Body):
-    """A task a human wants the fleet to pick up."""
-
-    title: str = Field(
-        min_length=1, max_length=TITLE_MAX_CHARS, description="One line naming the work."
-    )
-    detail: str = Field(
-        default="",
-        max_length=DETAIL_MAX_CHARS,
-        description="Everything the claimant needs to know.",
-    )
-    required_skills: list[Annotated[str, Field(min_length=1, max_length=IDENTIFIER_MAX_CHARS)]] = (
-        Field(
-            default_factory=list,
-            max_length=SKILLS_MAX_ITEMS,
-            description="Skills a resident must be granted before it may claim this.",
-        )
-    )
-
-
 class ResidentPost(NewResident):
     """A resident to declare, and whether to actually build it.
 
@@ -432,13 +407,6 @@ class RetirePost(_Body):
             "the confirmed plan cannot retire changed bytes."
         ),
     )
-
-
-#: How much manifest, soul, or skill text one request may carry. Generous next to the
-#: caps validation applies to individual fields, because it is not trying to be those caps
-#: — it is the bound that stops a write path from having to materialise something
-#: unreasonable before the real limits get a chance to speak.
-DOCUMENT_MAX_CHARS = 200_000
 
 
 class DeclarationPut(_Body):
@@ -512,21 +480,6 @@ class SkillPost(SkillBody):
         max_length=IDENTIFIER_MAX_CHARS,
         description="The skill's slug; it becomes the directory name.",
     )
-
-
-class ApprovalDecision(_Body):
-    """A human's answer to a gated action."""
-
-    decision: Literal["approve", "deny", "edit"]
-    edit: dict[str, Any] | None = Field(
-        default=None, description="The modified detail, for decision=edit."
-    )
-
-    @field_validator("edit")
-    @classmethod
-    def _bounded_edit(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
-        validate_approval_edit(value)
-        return value
 
 
 class HandoffPost(_Body):
@@ -805,11 +758,6 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     }
 
 
-def _refuse(status: int, error: str, message: str) -> NoReturn:
-    """Fail a request immediately, with a reason a UI can key on and a human can read."""
-    raise HTTPException(status_code=status, detail={"error": error, "message": message})
-
-
 #: How a refused provision is answered. A reason the nursery named maps to the status that
 #: reason means; anything it did not name is the host having answered and said no, which is
 #: not something the caller can fix by sending different bytes — the same reasoning
@@ -955,7 +903,9 @@ def _refuse_if_retired(resident: Resident) -> None:
         _refuse(409, "resident_retired", complaint)
 
 
-def _find_resident(result: ValidationResult, resident_id: str, residents_dir: Path) -> Resident:
+def _find_resident(  # noqa: RET503 — every fallthrough raises through the shared refusal seam
+    result: ValidationResult, resident_id: str, residents_dir: Path
+) -> Resident:
     for resident in result.residents:
         if resident.id == resident_id:
             return resident
@@ -1541,6 +1491,28 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
     app.state.library = library
     app.state.open_mode = token is None
     app.state.approval_outbox = outbox
+
+    deps = Deps(
+        settings=settings,
+        db=db,
+        sink=sink,
+        residents_dir=residents_dir,
+        now=now,
+        nursery=nursery,
+        provisioner=provisioner,
+        retirer=retirer,
+        transport=transport,
+        tasks=tasks,
+        approvals=approvals,
+        guard=guard,
+        outbox=outbox,
+        runs=runs,
+        hooks=hooks,
+        claims=claims,
+    )
+    app.include_router(request_routes.router(deps))
+    app.include_router(board_routes.router(deps))
+    app.include_router(approval_routes.router(deps))
 
     def accept(request: Request, outcome: str, detail: Mapping[str, Any] | None = None) -> str:
         """Log an accepted mutating request and return the id it is traceable by."""
@@ -2324,40 +2296,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             ),
         }
 
-    # -- job board -------------------------------------------------------------------
-
-    @app.get("/jobs")
-    def list_jobs(status: str | None = None) -> dict[str, Any]:
-        """List the board, optionally narrowed with ``?status=open|claimed|done|failed``."""
-        if status is not None and status not in JOB_STATUSES:
-            _refuse(
-                422,
-                "unknown_status",
-                f"status {status!r} is not a board status; use one of: "
-                f"{', '.join(JOB_STATUSES)}, or leave it off for the whole board",
-            )
-        return {"jobs": [job.to_dict() for job in db.jobs(status)]}
-
-    @app.post("/jobs", status_code=202)
-    def post_job(body: JobPost, request: Request) -> dict[str, Any]:
-        """Put a task on the board and announce it. No resident is prompted."""
-        job = tasks.post(
-            title=body.title,
-            detail=body.detail,
-            required_skills=body.required_skills,
-            posted_by=acted_by(request),
-        ).require()
-        request_id = accept(request, "posted", {"task_id": job.task_id})
-        return {
-            "request_id": request_id,
-            "task_id": job.task_id,
-            "status": "accepted",
-            "message": (
-                "queued on the board; a resident claims it on its own next wake-up, and "
-                "task_claimed in burrow's log is the only proof that happened"
-            ),
-        }
-
     # -- delegation ------------------------------------------------------------------
 
     @app.get("/residents/{resident_id}/inbox")
@@ -2488,176 +2426,6 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "depth": asked.depth,
             "chain": [item.to_dict() for item in chain],
         }
-
-    # -- approvals -------------------------------------------------------------------
-
-    @app.get("/approvals")
-    def list_approvals(status: str | None = None) -> dict[str, Any]:
-        """List gated actions. Pending by default; ``?status=resolved|all`` for the rest.
-
-        The default stays ``pending`` so a panel that has always called this keeps seeing
-        exactly what it saw before. ``all`` is the audit view: request and decision in one
-        row, which is how "what did I approve, and when" gets answered.
-
-        This route is a pure ledger read. The app lifespan owns deadline expiry, so an
-        API-only steward still resolves overdue requests without polling causing writes.
-        """
-        wanted = status or APPROVAL_STATUS_PENDING
-        if wanted not in APPROVAL_STATUSES:
-            _refuse(
-                422,
-                "unknown_status",
-                f"status {status!r} is not an approval status; use one of: "
-                f"{', '.join(APPROVAL_STATUSES)}",
-            )
-        records = db.approvals(None if wanted == APPROVAL_STATUS_ALL else wanted)
-        if wanted == APPROVAL_STATUS_PENDING:
-            moment = ev.utc_now_iso(now())
-            records = [r for r in records if r.expires_at is None or r.expires_at > moment]
-        return {
-            "status": wanted,
-            "approvals": [redact_decision(record).to_dict() for record in records],
-        }
-
-    @app.get("/approvals/{request_id}")
-    def get_approval(request_id: str) -> dict[str, Any]:
-        """Return one request with its decision, decider, and timestamps. The audit query."""
-        record = db.approval(request_id)
-        if record is None:
-            _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
-        return redact_decision(record).to_dict()
-
-    @app.post("/approvals/{request_id}")
-    def decide_approval(
-        request_id: str, body: ApprovalDecision, request: Request, response: Response
-    ) -> dict[str, Any]:
-        """Record a decision, once. A replay reads back what was already recorded.
-
-        The edit is un-redacted before it is recorded, by the same route that redacted the
-        copy the decider read (steward #144). Restoring here rather than deeper down is
-        deliberate: an edit only carries a marker because *this* route withheld the value,
-        so whoever withheld it owes the restore, and a decider that was never served a
-        scrubbed detail has nothing to put back.
-        """
-        ledger_id = new_id()
-        moment = now()
-        edit = body.edit
-        stored = db.approval(request_id)
-        if stored is not None and edit is not None:
-            try:
-                edit = restore_withheld(edit, stored.detail)
-            except WithheldValueError as exc:
-                _refuse(422, "edit_withheld_value", str(exc))
-        decided = approvals.decide(
-            request_id,
-            body.decision,
-            decided_by=acted_by(request),
-            edit=edit,
-            now=moment,
-            request_log=(ledger_id, request.method, request.url.path),
-        )
-        record = decided.record
-        if record is None:
-            _refuse(404, "unknown_approval", f"no approval request {request_id!r}")
-        if decided.expired:
-            # Deny-by-default has the last word — a click a minute past the deadline must
-            # not slip an action through ahead of the sweep, which denies it and closes the
-            # loop in the log (steward #66). Do that sweep here too: an API-only steward
-            # must not leave the refused request pending forever.
-            approvals.expire(moment)
-            _refuse(
-                409,
-                "approval_expired",
-                f"approval request {request_id!r} expired at {record.expires_at} and denies "
-                f"by default; it can no longer be decided",
-            )
-        if decided.refused:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "approval_decision_not_offered",
-                    "message": f"decision {body.decision!r} was not offered for this approval; "
-                    f"use one of: {', '.join(record.options)}",
-                    "offered": list(record.options),
-                },
-            )
-        state = db.approval_announcement_state(request_id)
-        if decided.replayed and state != "pending":
-            # The first decision won. A double-tapped notification changes nothing and
-            # emitted nothing — it is told what was recorded.
-            response.status_code = 200
-            return {
-                "request_id": ledger_id,
-                "approval_request_id": request_id,
-                "status": "recorded",
-                "decision": record.decision,
-                "decided_by": record.decided_by,
-                "decided_at": record.decided_at,
-                "message": "this request was already decided; nothing changed",
-            }
-        # A replay that recovered an abandoned announcement must also finish the
-        # idempotent workflow below (notably budget unpause). The decision did not change,
-        # but this request completed work the dead first process did not.
-        announced = state in {"announced", "complete"}
-        outcome = "recorded" if announced else "recorded_announcement_pending"
-        outbox.notify()
-        response.status_code = 202
-        resumed = None
-        if announced:
-            claimed = db.claim_approval_effects(request_id)
-            if claimed is not None:
-                effect_record, token = claimed
-                completed, resumed = db.complete_approval_effects(effect_record, token)
-                if not completed:
-                    db.release_approval_effects(request_id, token)
-        return {
-            "request_id": ledger_id,
-            "approval_request_id": request_id,
-            "status": outcome,
-            "decision": record.decision,
-            "decided_by": record.decided_by,
-            "decided_at": record.decided_at,
-            "resumed": resumed,
-            "message": (
-                f"recorded; {resumed} is no longer paused and fires on its next schedule"
-                if resumed
-                else (
-                    "recorded; the resident acts on it when the blocked session reads it "
-                    "or the parked work resumes on its next wake-up"
-                    if announced
-                    else "recorded; announcement pending and completion side effects are deferred"
-                )
-            ),
-        }
-
-    # -- the request log -------------------------------------------------------------
-
-    @app.get("/requests")
-    def list_requests(limit: int = REQUESTS_DEFAULT_LIMIT) -> dict[str, Any]:
-        """Return accepted requests and what became of them, newest first.
-
-        The endpoint that makes "accepted" survivable as an answer. Every mutating call
-        here returns a ``request_id`` and refuses to claim an effect; this is where the
-        effect eventually shows up — ``queued`` becomes ``ran``, ``skipped: …``, or
-        ``failed`` when the run it stands for finishes. A control panel polls one of these
-        rather than deciding on its own that a 202 went well.
-        """
-        window = max(1, min(limit, REQUESTS_MAX_LIMIT))
-        rows = db.requests()[-window:]
-        return {"requests": [record.to_dict() for record in reversed(rows)]}
-
-    @app.get("/requests/{request_id}")
-    def get_request(request_id: str) -> dict[str, Any]:
-        """Return one accepted request and its outcome. ``404`` for an id nobody logged."""
-        record = db.request(request_id)
-        if record is None:
-            _refuse(
-                404,
-                "unknown_request",
-                f"no request {request_id!r}; only accepted mutating requests are logged, "
-                f"so a refused one has no id to look up",
-            )
-        return record.to_dict()
 
     return app
 

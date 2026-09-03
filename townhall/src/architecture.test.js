@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
@@ -138,9 +138,16 @@ describe("the dev proxy is the deployed origin's route table", () => {
 
   /** Steward's top-level route segments, from the `@app` decorators that declare them. */
   const stewardApiRoutes = () => {
-    const api = read("../../steward/src/steward/api.py");
+    const directory = "../steward/src/steward/routes";
+    const api = [
+      read("../../steward/src/steward/api.py"),
+      ...readdirSync(directory)
+        .filter((name) => name.endsWith(".py"))
+        .map((name) => readFileSync(`${directory}/${name}`, "utf8")),
+    ].join("\n");
     const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
-    expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+    declared.push(...api.matchAll(/@routes\.(?:get|post|put|patch|delete)\("(\/[^\"]*)"/g));
+    expect(declared.length, "no API routes found — the reader has gone stale").toBeGreaterThan(0);
     return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
   };
 
