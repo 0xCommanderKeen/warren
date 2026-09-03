@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:f371b3d6fb3178597667a45df32677dd98c7e9041e2d621a4ea508a4ca23205b
+#   hooks/emit.py     sha256:ffe5cce570801cfd6c893278b81a13b3a3386ceeac09306d751a7a9c3da34d19
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -35,8 +35,7 @@ spelling; both have to work or the rename would silence whichever fleet had not
 been restarted yet.
 
 Transport: if CHRONICLE_URL is set, POST the event to <CHRONICLE_URL>/events; if
-no target takes it, fall back to appending to ~/.chronicle/events.jsonl locally
-(or ~/.burrow/events.jsonl on a machine that still has that directory). A failed
+no target takes it, fall back to appending to ~/.chronicle/events.jsonl locally. A failed
 POST trips a per-target circuit breaker so an unreachable server never slows
 hooks down. If CHRONICLE_TOKEN is set it is sent as `Authorization: Bearer
 <token>`; a server that rejects it (401) is just another failed POST — the event
@@ -609,23 +608,17 @@ def _setting(name, default=None):
 
 
 def _state_dir():
-    """~/.chronicle, or ~/.burrow on a machine that already has one.
+    """~/.chronicle — the offline fallback log and the durable primary outbox.
 
-    This directory is not a cache: it holds the offline fallback log and the
-    durable primary outbox, so an existing one can be carrying events that no
-    server has seen yet. Switching to the new name unconditionally would leave
-    those behind with nothing left to replay them. A machine with neither gets
-    the new name; renaming an existing directory is an operator step, safe once
-    the outbox has drained.
+    It used to be ~/.burrow, and until warren#361 an existing one was preferred so
+    that a machine mid-rename would not strand a spool with undelivered events in
+    it. That fallback is gone: every deployed container is now on an image that has
+    only ever written ~/.chronicle, and the dev machines were renamed by hand with
+    their spools drained. A machine that still has a ~/.burrow keeps it as a static
+    archive — nothing appends to it, and `mv ~/.burrow ~/.chronicle` is the one
+    operator step that adopts it.
     """
-    home = os.path.expanduser("~")
-    new = os.path.join(home, ".chronicle")
-    if os.path.isdir(new):
-        return new
-    old = os.path.join(home, ".burrow")
-    if os.path.isdir(old):
-        return old
-    return new
+    return os.path.join(os.path.expanduser("~"), ".chronicle")
 
 
 LOG_DIR = _state_dir()

@@ -126,8 +126,6 @@ def test_a_routine_runs_and_accounts_through_the_resident_session_seam(
     assert request.env == {
         "CHRONICLE_AGENT_ID": "claude-code:test-agent",
         "CHRONICLE_PROJECT": "test-agent",
-        "BURROW_AGENT_ID": "claude-code:test-agent",
-        "BURROW_PROJECT": "test-agent",
         "STEWARD_ROUTINE": "daily-summary",
         "STEWARD_RUN_ID": "run-1",
     }
@@ -253,8 +251,6 @@ def test_a_claimed_task_uses_the_same_context_run_account_and_harvest_sequence(
     assert runner.requests[0].env == {
         "CHRONICLE_AGENT_ID": "claude-code:test-agent",
         "CHRONICLE_PROJECT": "test-agent",
-        "BURROW_AGENT_ID": "claude-code:test-agent",
-        "BURROW_PROJECT": "test-agent",
         "STEWARD_TASK_ID": "task-1",
         "STEWARD_RUN_ID": "run-task-1",
     }

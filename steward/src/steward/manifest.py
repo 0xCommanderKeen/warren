@@ -303,7 +303,7 @@ SSH_USER_PATTERN = r"^[A-Za-z_][A-Za-z0-9._-]*$"
 REMOTE_PATH_PATTERN = r"^[A-Za-z0-9~/][A-Za-z0-9_./-]*$"
 IMAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$"
 
-#: ``project`` becomes ``BURROW_PROJECT`` in the resident's compose environment, so like
+#: ``project`` becomes ``CHRONICLE_PROJECT`` in the resident's compose environment, so like
 #: every value that lands in generated YAML it has to be data and not markup: a slug-ish
 #: label with no whitespace, no ``:`` and no newline. Without this a project string could
 #: reopen the compose document from inside a value (#61).
@@ -592,7 +592,7 @@ def scan_text_for_secrets(text: str, source: Path, field_path: str) -> list[Diag
 #: gap that reads like the session simply said nothing.
 SECRET_REDACTION = "[redacted:secret]"  # noqa: S105 — a redaction marker, not a credential
 
-#: A credential-shaped assignment in free-form text — ``BURROW_TOKEN=…``, ``api_key: …`` —
+#: A credential-shaped assignment in free-form text — ``CHRONICLE_TOKEN=…``, ``api_key: …`` —
 #: built from the same vocabulary the manifest validator rejects (:data:`_CREDENTIAL_WORDS`)
 #: so a secret a session writes into a ``needs_human`` detail is scrubbed by the same
 #: definition of "credential" that keeps one out of a manifest. Authorization headers

@@ -181,12 +181,9 @@ SESSION_ENV_BASE = (
     "STEWARD_MAX_DELEGATION_DEPTH",
     "STEWARD_REPEAT_DENY_WINDOW_H",
     "STEWARD_STATE",
-    # Where the village is, so a session's own emitter posts to the same burrow. Both
-    # spellings pass through, because the emitter on the far side may predate the
-    # warren#216 rename. The ingest token is deliberately *not* here — see
-    # :data:`SESSION_ENV_REFUSED`.
+    # Where the village is, so a session's own emitter posts to the same burrow. The
+    # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
     "CHRONICLE_URL",
-    "BURROW_URL",
 )
 
 #: Names a runner adds for its own brain, on top of :data:`SESSION_ENV_BASE`.
@@ -235,7 +232,7 @@ SESSION_ENV_PASSTHROUGH_ENV = "STEWARD_SESSION_ENV_PASSTHROUGH"
 #: from the mint at fire time, per run, and an operator-supplied one would be a credential
 #: with no run behind it and no expiry.
 #:
-#: ``BURROW_TOKEN`` is not in this set, and that is a narrower statement than it looks.
+#: ``CHRONICLE_TOKEN`` is not in this set, and that is a narrower statement than it looks.
 #: It is off the default allowlist for its own reason — one shared ingest secret whose
 #: holder can post events as any ``agent_id`` — and a session should not be given it. What
 #: a session loses without it is nothing durable: the emitter queues its events in
@@ -272,7 +269,7 @@ def session_environment(
 
     Two sources, in this order: the allowlisted names this host actually has set, then
     ``request.env`` — the facts steward *chose* to tell this session, which win, because a
-    resident's ``BURROW_AGENT_ID`` is its identity and not the launching process's.
+    resident's ``CHRONICLE_AGENT_ID`` is its identity and not the launching process's.
 
     An unset name is absent rather than empty. ``PATH=""`` is not "no preference", it is a
     ``PATH`` with one entry, the current directory, and a session that cannot find its own
@@ -482,7 +479,7 @@ class RunResult:
         Steward's own diagnostics — a timeout, a launch that failed, a pre-flight refusal a
         caller built into ``error`` — are surfaced, because they are steward's words and
         they are the useful ones. But the child's own stdout or stderr never is: that text
-        can carry a secret the session printed (an ``sk-ant-…`` key, a ``BURROW_TOKEN=``),
+        can carry a secret the session printed (an ``sk-ant-…`` key, a ``CHRONICLE_TOKEN=``),
         so when :attr:`error_is_child` is set the summary falls back to the *class* of the
         failure — an exit status, or ``"runner error"`` — and the raw text stays in the
         local log only, reachable through :attr:`error`.

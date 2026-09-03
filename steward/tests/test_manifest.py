@@ -390,7 +390,7 @@ def test_a_directory_memory_path_that_would_inject_the_compose_fails(
 
 
 def test_a_project_that_would_inject_the_compose_fails(write_resident: ResidentWriter) -> None:
-    """#61: project becomes BURROW_PROJECT in the compose env, so it is data, not markup."""
+    """#61: project becomes CHRONICLE_PROJECT in the compose env, so it is data, not markup."""
     data = valid_manifest() | {"project": "burrow\n    privileged: true"}
     result = m.validate_manifest(write_resident(data))
 

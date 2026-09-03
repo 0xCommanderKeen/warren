@@ -301,11 +301,6 @@ class RoutineWake:
         return {
             "CHRONICLE_AGENT_ID": resident.agent_id,
             "CHRONICLE_PROJECT": resident.project,
-            # Both spellings: a session may be picked up by an emitter older than the
-            # warren#216 rename, and an unrecognised identity files its events under a
-            # different villager rather than failing.
-            "BURROW_AGENT_ID": resident.agent_id,
-            "BURROW_PROJECT": resident.project,
             "STEWARD_ROUTINE": self.routine.id,
             "STEWARD_RUN_ID": self.run_id,
             **session_credential_env(self.session_credential),
@@ -390,11 +385,6 @@ class ChatWake:
         return {
             "CHRONICLE_AGENT_ID": resident.agent_id,
             "CHRONICLE_PROJECT": resident.project,
-            # Both spellings: a session may be picked up by an emitter older than the
-            # warren#216 rename, and an unrecognised identity files its events under a
-            # different villager rather than failing.
-            "BURROW_AGENT_ID": resident.agent_id,
-            "BURROW_PROJECT": resident.project,
             "STEWARD_CHAT_ROUTE": self.route,
             "STEWARD_RUN_ID": self.run_id,
             **session_credential_env(self.session_credential),
@@ -455,11 +445,6 @@ class _BoardWake:
         env = {
             "CHRONICLE_AGENT_ID": resident.agent_id,
             "CHRONICLE_PROJECT": resident.project,
-            # Both spellings: a session may be picked up by an emitter older than the
-            # warren#216 rename, and an unrecognised identity files its events under a
-            # different villager rather than failing.
-            "BURROW_AGENT_ID": resident.agent_id,
-            "BURROW_PROJECT": resident.project,
             "STEWARD_TASK_ID": self.task_id,
             "STEWARD_RUN_ID": self.run_id,
             **session_credential_env(self.session_credential),

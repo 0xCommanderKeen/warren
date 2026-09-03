@@ -7,10 +7,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/state": {
-        target:
-          process.env.CHRONICLE_URL ||
-          process.env.BURROW_URL ||
-          "http://127.0.0.1:8737",
+        target: process.env.CHRONICLE_URL || "http://127.0.0.1:8737",
         changeOrigin: true,
       },
       // Steward's routes, so `pnpm dev` reaches them same-origin exactly as the deployed

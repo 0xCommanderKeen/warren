@@ -96,9 +96,9 @@ function RetireFacts({ report, rehearsal }) {
         [
           "token",
           rehearsal
-            ? "the .env holding BURROW_TOKEN is removed after the stop, never before"
+            ? "the .env holding CHRONICLE_TOKEN is removed after the stop, never before"
             : report.scrubbed
-              ? "the .env holding BURROW_TOKEN was removed"
+              ? "the .env holding CHRONICLE_TOKEN was removed"
               : "no .env was found to remove",
         ],
         [

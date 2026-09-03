@@ -155,7 +155,7 @@ def test_a_needs_human_knock_has_its_secrets_redacted_before_it_leaves() -> None
         agent_id="claude-code:life-agent",
         project="household",
         detail={
-            "env": "BURROW_TOKEN=supersecretvalue1234567890",
+            "env": "CHRONICLE_TOKEN=supersecretvalue1234567890",
             "pem": "-----BEGIN PRIVATE KEY-----\nMIIBjunk\n-----END PRIVATE KEY-----",
             "jwt": "eyJhbGciOiJIUzI1Niabc.eyJzdWIiOiIxMjM0NQ.SflKxwRJSMeKKF2QT4",
             "url": "postgres://user:hunter2secret@db.internal/app",
@@ -171,7 +171,7 @@ def test_a_needs_human_knock_has_its_secrets_redacted_before_it_leaves() -> None
     encoded = json.dumps(payload["detail"])
     for leaked in ("supersecretvalue", "MIIBjunk", "SflKxwRJSMeKKF2QT4", "hunter2secret", "ZZZZ"):
         assert leaked not in encoded
-    assert "BURROW_TOKEN=[redacted:secret]" in payload["detail"]["env"]
+    assert "CHRONICLE_TOKEN=[redacted:secret]" in payload["detail"]["env"]
     assert payload["detail"]["runs"] == 3
     assert payload["detail"]["nested"]["deeper"][0] == "ok"
 
@@ -1071,9 +1071,9 @@ def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------- environment
 
 
-def test_the_emitter_reads_burrow_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("BURROW_URL", "https://village.example/")
-    monkeypatch.setenv("BURROW_TOKEN", "  tok  ")
+def test_the_emitter_reads_chronicle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("CHRONICLE_URL", "https://village.example/")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "  tok  ")
     monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "fallback.jsonl"))
     emitter = ev.EventEmitter.from_env()
     assert emitter.url == "https://village.example"
@@ -1081,35 +1081,41 @@ def test_the_emitter_reads_burrow_env(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert emitter.fallback == tmp_path / "fallback.jsonl"
 
 
+def test_the_emitter_no_longer_reads_the_pre_rename_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """warren#361: BURROW_URL/BURROW_TOKEN configure nothing any more."""
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
+    monkeypatch.delenv("CHRONICLE_TOKEN", raising=False)
+    monkeypatch.setenv("BURROW_URL", "https://village.example/")
+    monkeypatch.setenv("BURROW_TOKEN", "tok")
+    monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "fallback.jsonl"))
+    emitter = ev.EventEmitter.from_env()
+    assert emitter.url is None
+    assert emitter.token is None
+
+
 @pytest.mark.parametrize(
-    ("existing", "expected"),
-    [
-        ((), ".chronicle"),
-        ((".burrow",), ".burrow"),
-        ((".chronicle",), ".chronicle"),
-        ((".burrow", ".chronicle"), ".chronicle"),
-    ],
+    "existing",
+    [(), (".burrow",), (".chronicle",), (".burrow", ".chronicle")],
 )
 def test_the_default_fallback_is_chronicles_own_log(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     existing: tuple[str, ...],
-    expected: str,
 ) -> None:
-    """Prefer ~/.chronicle, but keep using ~/.burrow where the machine already has one.
+    """~/.chronicle whatever is on disk (warren#361).
 
-    Parameterised over a fake home rather than asserting one path, because the answer
-    depends on what is on disk: a developer who has been running the fleet has ~/.burrow
-    and a clean CI runner has neither, so a single hard-coded expectation passes on one
-    and fails on the other. The rule is what is being pinned here, not one machine's
-    answer to it.
+    Still parameterised over a fake home, because the answer used to depend on what was
+    there: a leftover ~/.burrow was adopted, so a developer's machine and a clean CI
+    runner disagreed. The case that would have failed before is ``(".burrow",)``.
     """
     monkeypatch.delenv("STEWARD_EVENTS_FALLBACK", raising=False)
     for name in existing:
         (tmp_path / name).mkdir()
     monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
 
-    assert ev.default_fallback_path() == tmp_path / expected / "events.jsonl"
+    assert ev.default_fallback_path() == tmp_path / ".chronicle" / "events.jsonl"
 
 
 def test_repr_never_shows_the_token() -> None:
