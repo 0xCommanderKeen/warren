@@ -45,7 +45,7 @@ describe("Arcadia", () => {
     const stewardClient = { confirm: vi.fn() };
     const { unmount } = render(
       <LiveApp
-        baseUrl="/burrow"
+        baseUrl="/chronicle"
         stewardClient={stewardClient}
         transportFactory={transportFactory}
       />,
@@ -53,7 +53,7 @@ describe("Arcadia", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("Village snapshot has not loaded yet.");
     await waitFor(() => expect(transportFactory).toHaveBeenCalledWith(
-      expect.objectContaining({ baseUrl: "/burrow" }),
+      expect.objectContaining({ baseUrl: "/chronicle" }),
     ));
     options.onEnvelope(fixture);
     await waitFor(() => expect(screen.getAllByText("Keeper").length).toBeGreaterThan(0));
@@ -64,8 +64,8 @@ describe("Arcadia", () => {
   });
 
   it("uses the backend query parameter as the live transport prefix", () => {
-    expect(backendFromLocation("?backend=%2Fburrow")).toBe("/burrow");
-    expect(backendFromLocation("?unrelated=true")).toBe("/burrow");
+    expect(backendFromLocation("?backend=%2Fchronicle")).toBe("/chronicle");
+    expect(backendFromLocation("?unrelated=true")).toBe("/chronicle");
   });
 
   it("keeps valid state visible through a transient transport failure", async () => {

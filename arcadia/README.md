@@ -9,7 +9,7 @@ Arcadia is allowed to read only these Chronicle endpoints:
 - `GET /state` — complete snapshots, or `204` when unchanged.
 - `GET /state/stream` — server-sent `snapshot` and `reset` envelopes.
 
-It does not consume `/events` or recreate Chronicle's projection decisions. The deployed client uses the same-origin `/burrow` prefix; `?backend=` can select another compatible prefix. During development, Vite proxies `/burrow` to `http://127.0.0.1:8737`; set `CHRONICLE_URL` to use another Chronicle origin.
+It does not consume `/events` or recreate Chronicle's projection decisions. The deployed client uses the same-origin `/chronicle` prefix (`/burrow` 301s there for a release after warren#361); `?backend=` can select another compatible prefix. During development, Vite proxies `/chronicle` to `http://127.0.0.1:8737`; set `CHRONICLE_URL` to use another Chronicle origin.
 
 The app loads `/state`, then opens `/state/stream` from the returned generation and cursor. Reconnects first catch up from the last applied boundary and then reopen the stream. Unsupported `schema_version` values replace the village with a visible contract-mismatch screen instead of applying unknown state.
 

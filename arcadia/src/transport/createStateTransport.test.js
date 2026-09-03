@@ -46,15 +46,15 @@ describe("createStateTransport", () => {
     const transport = createStateTransport({
       fetch,
       EventSource: FakeEventSource,
-      baseUrl: "/burrow/",
+      baseUrl: "/chronicle/",
       onEnvelope,
     });
     await transport.start();
 
-    expect(fetch).toHaveBeenCalledWith("/burrow/state", { cache: "no-store" });
+    expect(fetch).toHaveBeenCalledWith("/chronicle/state", { cache: "no-store" });
     expect(onEnvelope).toHaveBeenCalledWith(initial);
     expect(FakeEventSource.instances[0].url).toBe(
-      "/burrow/state/stream?generation=4&cursor=cursor%204",
+      "/chronicle/state/stream?generation=4&cursor=cursor%204",
     );
   });
 

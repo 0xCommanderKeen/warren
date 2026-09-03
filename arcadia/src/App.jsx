@@ -22,7 +22,7 @@ function ContractMismatch({ error }) {
 }
 
 export function backendFromLocation(search = window.location.search) {
-  return new URLSearchParams(search).get("backend") || "/burrow";
+  return new URLSearchParams(search).get("backend") || "/chronicle";
 }
 
 export function LiveApp({

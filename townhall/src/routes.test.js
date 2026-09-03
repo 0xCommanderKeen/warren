@@ -30,7 +30,7 @@ describe("base-prefix routing", () => {
   it("refuses a path outside the mount rather than guessing at a route", () => {
     // /observatoryfoo is a different mount, not this app's /foo.
     expect(stripBase("/observatoryfoo", "/observatory/")).toBeNull();
-    expect(stripBase("/burrow/state", "/observatory/")).toBeNull();
+    expect(stripBase("/chronicle/state", "/observatory/")).toBeNull();
   });
 
   it("round-trips every built route through the deployed prefix", () => {
@@ -54,7 +54,7 @@ describe("base-prefix routing", () => {
     expect(matchPath("/observatory/nope", "/observatory/")).toEqual({
       route: "/nope", page: "unknown", params: {},
     });
-    expect(matchPath("/burrow/state", "/observatory/")).toEqual({
+    expect(matchPath("/chronicle/state", "/observatory/")).toEqual({
       route: null, page: "unknown", params: {},
     });
   });

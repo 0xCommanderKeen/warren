@@ -154,7 +154,7 @@ There is one supported setup path for both Claude Code and Codex:
 4. Run the authoritative test suite with `sh tests/run.sh`.
 5. Deploy the exact tested tree with the tar-over-SSH command below and restart
    the service. Check `/residents` for public validation diagnostics — on the
-   arcadia origin that report is `/burrow/residents`, because a bare `/residents`
+   arcadia origin that report is `/chronicle/residents`, because a bare `/residents`
    there is steward's own resident listing — and open the village at both phone and
    desktop widths.
 
@@ -164,7 +164,9 @@ above are the canonical install, validation, test, and deployment sequence.
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
 on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/burrow/`, which carries `/state`, `/state/stream` and `/residents`.
+`http://dxp2800:8737/chronicle/`, which carries `/state`, `/state/stream` and
+`/residents`. That prefix was `/burrow/` until warren#361; the origin 301s the old
+spelling for a release.
 The origin also answers `/state` and `/state/stream` unprefixed (they rewrite to the
 same place) and proxies `/events` there; what it does not send here it serves itself —
 the village at `/`, townhall at `/observatory/` — or hands to steward. Never exposed to
@@ -184,9 +186,9 @@ deploy is pushed from a machine that has the repo checked out.
 > both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name, with the new one
 > winning where both are set, so the compose file and `.env` already on the NAS
 > keep working across this deploy and can be re-spelled whenever it suits. The
-> deployed *paths* — the `/burrow/` proxy prefix and `~/.burrow/` — are deliberately not
-> renamed; every client and the origin's route table depend on them. The deploy directory
-> and the container are the exception: `~/docker/burrow` / `burrow` became
+> deployed *paths* have moved on: `~/.burrow/` and the `/burrow/` proxy prefix are both
+> `chronicle` now (warren#361), and warren's origin 301s the old prefix for a release.
+> The deploy directory and the container went first: `~/docker/burrow` / `burrow` became
 > `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a rename an
 > operator does once, with everything down.
 

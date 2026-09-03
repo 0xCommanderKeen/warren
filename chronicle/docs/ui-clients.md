@@ -71,16 +71,16 @@ without a live backend. Run `sh tests/ui-contract.sh` before using a fixture in 
 ## Production
 
 When hosting a client under the same origin, proxy Chronicle's state endpoints under
-`/burrow/`. The client itself is served by its own deployment; this shape exposes only the
-shared state transport:
+`/chronicle/`. The client itself is served by its own deployment; this shape exposes only
+the shared state transport:
 
 ```nginx
-location = /burrow/state {
+location = /chronicle/state {
     proxy_pass http://127.0.0.1:8737/state;
     proxy_http_version 1.1;
 }
 
-location = /burrow/state/stream {
+location = /chronicle/state/stream {
     proxy_pass http://127.0.0.1:8737/state/stream;
     proxy_http_version 1.1;
     proxy_buffering off;
@@ -90,13 +90,13 @@ location = /burrow/state/stream {
 }
 
 # Existing village delivery telemetry; not part of the public state contract.
-location = /burrow/transport/status {
+location = /chronicle/transport/status {
     proxy_pass http://127.0.0.1:8737/transport/status;
     proxy_http_version 1.1;
 }
 ```
 
-Clients set their backend prefix to `/burrow`. The proxy preserves the SSE body, event type,
+Clients set their backend prefix to `/chronicle`. It was `/burrow` before warren#361, and warren's own origin still 301s that spelling for a release. The proxy preserves the SSE body, event type,
 query string, and connection lifetime, so the transport retains keepalive, reconnection,
 generation, cursor, and reset semantics. Routes for Steward writes are deliberately absent
 from this read-only client setup.

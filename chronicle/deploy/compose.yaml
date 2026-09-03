@@ -2,7 +2,7 @@
 # deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
 #
 # One process: the event log and the village projection behind it, on host port 8738,
-# proxied at the origin's /burrow/ by arcadia's nginx. The code is bind-mounted read-only
+# proxied at the origin's /chronicle/ by arcadia's nginx. The code is bind-mounted read-only
 # from ./app (the tree the README's tar recipe ships); the log, its archives, the
 # delivery-id index and the notification ledgers all live under ./data, which is the
 # only thing here that must survive anything.

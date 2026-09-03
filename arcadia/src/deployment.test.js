@@ -12,13 +12,13 @@ describe("production deployment contract", () => {
   });
 
   it("proxies the prefixed state stream without buffering or losing queries", () => {
-    expect(nginx).toContain("location = /burrow/state/stream");
+    expect(nginx).toContain("location = /chronicle/state/stream");
     expect(nginx).toContain("proxy_pass http://host.docker.internal:8738/state/stream;");
     expect(nginx).toContain("proxy_buffering off");
     expect(nginx).toContain("proxy_cache off");
     expect(nginx).toContain("proxy_read_timeout 1h");
     expect(nginx).toContain("X-Accel-Buffering no");
-    expect(nginx).toContain("rewrite ^ /burrow/state/stream last");
+    expect(nginx).toContain("rewrite ^ /chronicle/state/stream last");
   });
 
   it("serves the bundle with real MIME types, and the smoke test proves it", () => {
@@ -91,19 +91,36 @@ describe("the origin's route table matches the services behind it", () => {
   it("leaves /residents unambiguously Steward's, and gives Chronicle's report its own path", () => {
     // Both services answer `GET /residents` — Steward's is the fleet's resident listing,
     // Chronicle's is the manifest-validation report its runbook checks after a deploy. The
-    // regex hands the bare path to Steward, so Chronicle's answers under the `/burrow/`
+    // regex hands the bare path to Steward, so Chronicle's answers under the `/chronicle/`
     // prefix that already fronts its state routes.
     expect(stewardRoutes()).toContain("residents");
-    expect(nginx).toContain("location = /burrow/residents");
+    expect(nginx).toContain("location = /chronicle/residents");
     expect(nginx).toContain("proxy_pass http://host.docker.internal:8738/residents;");
     // Exact matches take one spelling each; the other one must not reach the SPA.
-    expect(nginx).toContain("location = /burrow/residents/");
-    expect(nginx).toContain("return 301 /burrow/residents;");
+    expect(nginx).toContain("location = /chronicle/residents/");
+    expect(nginx).toContain("return 301 /chronicle/residents;");
+  });
+
+  it("keeps the pre-warren#361 /burrow/ prefix answering, as a redirect", () => {
+    // The prefix moved to /chronicle/, and an unclaimed path on this origin does not 404
+    // — `location /` answers 200 with the SPA's index.html (warren#242). So a bookmark, an
+    // open tab, or a curl in somebody's notes would get a page of HTML where it asked for
+    // JSON, which is the shape that hid a broken route for a week. `^~` matters: without
+    // it the regex block below would hand /burrow/residents to Steward instead.
+    expect(nginx).toContain("location ^~ /burrow/");
+    expect(nginx).toContain("rewrite ^/burrow/(.*)$ /chronicle/$1 permanent;");
+    // And nothing is *served* under the old prefix any more — a proxy_pass left behind
+    // would be a second route table nobody is keeping in step.
+    expect(nginx).not.toMatch(/location = \/burrow\//);
+    // Relative Location headers. nginx's default absolute one is built from the `listen`
+    // port, which is a guess about how the client reached this origin — wrong the moment
+    // the config is run behind a published port that is not 8737.
+    expect(nginx).toContain("absolute_redirect off;");
   });
 
   it("smoke-tests both gaps against a running origin", () => {
     const smoke = readFileSync("deploy/smoke.sh", "utf8");
-    expect(smoke).toContain("$origin/burrow/residents");
+    expect(smoke).toContain("$origin/chronicle/residents");
     // 401 is Steward answering; the SPA fallback would be a 200 carrying index.html.
     expect(smoke).toContain("lineage-preflight=401");
   });

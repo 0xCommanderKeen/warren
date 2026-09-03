@@ -2,7 +2,7 @@
 
 Arcadia owns the NAS origin on port 8737. The static village is served at `/`, townhall is
 mounted at `/observatory/`, Chronicle state and its resident report are exposed at
-`/burrow/`, and Steward's API is same-origin — all of it, reads included, since a route the
+`/chronicle/` (`/burrow/` still 301s there), and Steward's API is same-origin — all of it, reads included, since a route the
 origin does not carry answers 200 with the village's index.html rather than a 404
 (warren#242). Chronicle itself listens on host port 8738 after the cutover; its
 old built-in viewer is no longer reachable at `/`.

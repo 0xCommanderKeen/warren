@@ -19,16 +19,25 @@ for page in "" "observatory/"; do
   }
 done
 printf '%s\n' "module-type=javascript"
-curl -fsS "$origin/burrow/state" >/dev/null
+curl -fsS "$origin/chronicle/state" >/dev/null
+# The pre-warren#361 prefix still answers, as a 301 to the new one. Checked here rather
+# than trusted, because an unclaimed path on this origin is not a 404 — it is the SPA's
+# index.html under a 200, so a redirect block that silently stopped matching would look
+# exactly like one that works until somebody parsed the JSON (warren#242).
+redirect=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$origin/burrow/state")
+case "$redirect" in
+  */chronicle/state) : ;;
+  *) printf '%s\n' "/burrow/state redirects to '$redirect', not /chronicle/state"; exit 1 ;;
+esac
 # Chronicle's manifest-validation report, on the prefixed path Steward's `/residents` left
 # free (warren#242). The `grep` is the real check, not `-f`: an unproxied path is not a 404
 # here, it is the SPA's index.html under a 200, which `-f` is happy with.
-curl -fsS "$origin/burrow/residents" | grep -q '"residents"'
+curl -fsS "$origin/chronicle/residents" | grep -q '"residents"'
 
 headers=$(mktemp)
 body=$(mktemp)
 trap 'rm -f "$headers" "$body"' EXIT
-curl -fsS --max-time 18 -D "$headers" -o "$body" "$origin/burrow/state/stream?generation=0" || status=$?
+curl -fsS --max-time 18 -D "$headers" -o "$body" "$origin/chronicle/state/stream?generation=0" || status=$?
 test "${status:-0}" -eq 28
 grep -qi '^X-Accel-Buffering: no' "$headers"
 grep -Eq '^(event: (snapshot|reset)|: keepalive)' "$body"
