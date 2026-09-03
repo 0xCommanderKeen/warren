@@ -84,6 +84,13 @@ def valid_manifest() -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
+def isolated_chronicle_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Require every test that talks to Chronicle to name its target explicitly."""
+    for name in ("CHRONICLE_URL", "CHRONICLE_TOKEN", "BURROW_URL", "BURROW_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def isolated_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the undelivered-event fallback at this test's own directory.
 
