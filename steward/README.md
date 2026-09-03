@@ -370,10 +370,17 @@ across the village, the fleet-ops fuel gauges — live in chronicle's issues.
 ## Deployment
 
 Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
-chronicle's own server at `~/docker/warren/burrow`. **Steward puts them there.** This section
+chronicle's own server at `~/docker/warren/chronicle`. **Steward puts them there.** This section
 replaces the manual ritual in chronicle's README for anything that is a resident; the
 event server itself is still deployed by hand, now from
 [`warren/chronicle/`](../chronicle/README.md) rather than from a repo of its own.
+
+**On the burrow, the control plane provisions its own residents.** A resident whose
+`deploy.host` is the burrow the API runs on (`STEWARD_BURROW`) is written into
+`~/docker/warren/residents/<id>` through a mount and brought up through the docker socket,
+in the API's own process — `steward.deploy.BurrowTransport`. That is what makes townhall's
+New resident form and its provision button real on the NAS: the API cannot ssh to the
+machine it is already on. From a laptop the same manifests still deploy over ssh.
 
 Run every command below from `warren/steward/`, on a machine with the repo checked out and
 ssh access to the NAS. Nothing pulls on the NAS — it has no git of its own; steward pushes

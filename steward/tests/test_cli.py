@@ -3172,7 +3172,7 @@ def nas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalTransport:
     than growing a flag nobody would ever use in production.
     """
     host = LocalTransport(root=tmp_path / "nas")
-    monkeypatch.setattr("steward.nursery.transport_for", lambda _target: host)
+    monkeypatch.setattr("steward.nursery.transport_for", lambda _target, _env=None: host)
     monkeypatch.setenv("BURROW_URL", "http://dxp2800:8737")
     monkeypatch.setenv("BURROW_TOKEN", "cli-village-token")
     return host

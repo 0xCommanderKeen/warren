@@ -49,7 +49,9 @@
 # and not one architecture's. To move it: re-run the line above, paste the new digest,
 # update this date, and make that its own commit. The node digest is the resident image's
 # (docker/resident/Dockerfile carries its provenance); the docker CLI digest was resolved
-# the same day from `docker:29.7.2-cli` — the NAS runs a 29.x daemon.
+# the same day from `docker:29.7.2-cli` — the NAS runs a 29.x daemon. The compose plugin
+# digest was resolved 2026-09-03 from `docker/compose-bin:v5.1.3`, the version the NAS's
+# own `docker compose version` reports.
 
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim@sha256:7cf77f594be8042dab6daa9fe326f90962252268b4f120a7f5dccce4d947e6c1
 
@@ -88,6 +90,11 @@ RUN printf '%s\n' \
 # The docker *client* only. Whether it can reach a daemon is the compose file's
 # `/var/run/docker.sock` mount; without one, `steward doctor` says so by name.
 COPY --from=docker:29.7.2-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e /usr/local/bin/docker /usr/local/bin/docker
+# And the compose plugin beside it, where the CLI looks for plugins: the API brings a
+# resident of its own burrow up with `docker compose up -d` in this process
+# (steward.deploy.BurrowTransport), and `docker compose` without the plugin is
+# "unknown command".
+COPY --from=docker/compose-bin:v5.1.3@sha256:6d7c88928df9682427c7d5d0107be041e499c0f5a46760b2330274d1173faa48 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
 
 ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     # The pin above is the whole point; a CLI that updated itself in place would quietly

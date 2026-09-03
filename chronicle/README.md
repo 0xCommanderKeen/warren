@@ -176,7 +176,7 @@ consolidation this service is a directory in the warren monorepo
 `burrow` repo is not what gets deployed. The tar recipe packs paths relative to
 the working directory, so running it one level up silently bundles the wrong tree.
 
-The NAS has no git installed and holds no clone: `~/docker/warren/burrow/app` is an
+The NAS has no git installed and holds no clone: `~/docker/warren/chronicle/app` is an
 unpacked copy of the tree the tar below carried. Nothing there pulls — every
 deploy is pushed from a machine that has the repo checked out.
 
@@ -184,13 +184,13 @@ deploy is pushed from a machine that has the repo checked out.
 > both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name, with the new one
 > winning where both are set, so the compose file and `.env` already on the NAS
 > keep working across this deploy and can be re-spelled whenever it suits. The
-> deployed *paths* — the `burrow/` directory under `~/docker/warren`, the `/burrow/`
-> proxy prefix, `~/.burrow/` — are deliberately not renamed; they are directory names
-> the NAS already has, not identifiers. (The directory did move once, from the top of
-> `~/docker` to `~/docker/warren/burrow` with everything else the warren runs —
-> warren#358 — and kept its name.)
+> deployed *paths* — the `/burrow/` proxy prefix and `~/.burrow/` — are deliberately not
+> renamed; every client and the origin's route table depend on them. The deploy directory
+> and the container are the exception: `~/docker/burrow` / `burrow` became
+> `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a rename an
+> operator does once, with everything down.
 
-- **Server** — Docker Compose at `~/docker/warren/burrow` on the NAS (`dxp2800`), which
+- **Server** — Docker Compose at `~/docker/warren/chronicle` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:
   `ghcr.io/astral-sh/uv:python3.14-bookworm-slim` installs the locked environment with
   `uv sync --frozen --no-dev` and runs `uv run --no-dev python serve.py 8737` — the `__main__` entry point, which reads
@@ -207,8 +207,8 @@ deploy is pushed from a machine that has the repo checked out.
   retention-policy.json
   approval_protocol.py journal_observations.py notification_persistence.py protocol.py
   residents.py typed_json.py hooks villagers | ssh
-  Miha@dxp2800 'tar -xf - -C ~/docker/warren/burrow/app'`, then
-  `ssh Miha@dxp2800 'cd ~/docker/warren/burrow && docker compose restart burrow'`. Manifests
+  Miha@dxp2800 'tar -xf - -C ~/docker/warren/chronicle/app'`, then
+  `ssh Miha@dxp2800 'cd ~/docker/warren/chronicle && docker compose restart chronicle'`. Manifests
   ship with the code, so `/villagers` on the NAS matches the repo after every
   deploy — no manual file copying. `tests/test_deployment_bundle.py` parses this
   exact command and boots the tree it packs, so the file list and the test move

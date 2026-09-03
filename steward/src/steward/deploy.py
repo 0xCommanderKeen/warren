@@ -50,6 +50,7 @@ how it gets there.
 """
 
 import io
+import os
 import tarfile
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -71,6 +72,8 @@ from steward.runners import (
 
 __all__ = [
     "BUNDLE_NAMES",
+    "BURROW_ENV",
+    "BURROW_HOME_ENV",
     "COMPOSE_FILENAME",
     "DEFAULT_COMMAND",
     "DEFAULT_HOST",
@@ -80,6 +83,7 @@ __all__ = [
     "DEFAULT_USER",
     "ENV_FILENAME",
     "SSH_FAILURE_STATUS",
+    "BurrowTransport",
     "DeployTarget",
     "LocalTransport",
     "SshTransport",
@@ -120,6 +124,19 @@ DEFAULT_ROOT = "~/docker/warren"
 #: resident whose manifest puts ``deploy.path`` elsewhere on the burrow is one they cannot
 #: journal for.
 DEFAULT_RESIDENTS_ROOT = f"{DEFAULT_ROOT}/residents"
+
+#: What this burrow is called, when the machine's own hostname is not the name manifests
+#: use for it (``topology.py`` reads the same variable to partition the residents tree).
+#: The deployed control plane compares a resident's ``deploy.host`` against it: a match
+#: means *this machine*, and provisioning then goes through :class:`BurrowTransport`
+#: rather than ssh to itself.
+BURROW_ENV = "STEWARD_BURROW"
+
+#: The deploy user's home *as the host knows it* — ``/home/Miha`` on the NAS — for the
+#: process that provisions this burrow's residents from inside a container, where its own
+#: ``$HOME`` is ``/root`` and means nothing to the docker daemon. Defaults to
+#: ``/home/<deploy.user>``.
+BURROW_HOME_ENV = "STEWARD_BURROW_HOME"
 
 #: What a resident's container name is when nobody says: the same prefix the watchdog has
 #: been reading out of ``deploy.container`` since #8.
@@ -383,6 +400,11 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
             "STEWARD_RESIDENT": resident.id,
         },
         "volumes": [f"./memory:{memory_path}", "./claude:/root/.claude"],
+        # The name the burrow's own containers use for the machine they run on — the
+        # control plane's CHRONICLE_URL is http://dockerhost:8737 — so the village address
+        # steward copies into the resident's .env at provision time resolves in there too.
+        # A LAN address in .env keeps working; a bare hostname never did.
+        "extra_hosts": ["dockerhost:host-gateway"],
         "command": list(target.command),
     }
     document = {"services": {target.service: service}}
@@ -752,6 +774,99 @@ class SshTransport:
 
 
 @dataclass
+class BurrowTransport:
+    """The burrow provisioning its own residents: files through a mount, docker through the socket.
+
+    The deployed control plane runs *on* the burrow, and :class:`SshTransport` from inside it
+    would have to ssh back to its own host — a container with no key for that, no host entry,
+    and a hostname it cannot even resolve (warren#356). So when a resident's ``deploy.host``
+    is this burrow (:data:`BURROW_ENV`), the bundle is written straight into the residents
+    directory, which the compose file mounts into the API, and ``docker compose up -d`` runs
+    in this process against the socket the same file mounts. No ssh, no tar pipe, and the
+    New resident form in townhall reaches the container it promised.
+
+    ``home`` is the deploy user's home **on the host** (:data:`BURROW_HOME_ENV`), never this
+    process's ``$HOME``. Every remote path steward renders starts with ``~/``; here it is
+    resolved to a host path before anything runs, because the compose CLI in this process
+    resolves the rendered file's relative binds (``./memory``) against the project directory
+    and hands the daemon *host* paths — so the residents directory must be mounted at the
+    same path in here as it has on the host. ``deploy/compose.yaml`` pins exactly that, and
+    :meth:`plan` shows the resolved argv, which is the argv that runs.
+
+    Files land owned by whoever this process runs as (root, in the image). Reads and
+    existence checks fail closed the way :class:`SshTransport`'s do: a path this process is
+    not allowed to look at is a :class:`TransportError`, never "absent" (steward #136).
+    """
+
+    burrow: str
+    user: str = DEFAULT_USER
+    home: str = ""
+    command: PipedRun = run_argv
+    kind: str = "burrow"
+
+    def __post_init__(self) -> None:
+        """Default ``home`` to the deploy user's, the way the NAS lays its users out."""
+        if not self.home:
+            self.home = f"/home/{self.user}"
+
+    def describe(self) -> str:
+        """Name the machine: this one."""
+        return f"{self.burrow} itself, through its own docker"
+
+    def resolve(self, path: str) -> str:
+        """Turn a rendered ``~/…`` path into the host path it means here."""
+        if path == "~":
+            return self.home
+        if path.startswith("~/"):
+            return f"{self.home}/{path[2:]}"
+        return path
+
+    def plan(self, argv: Sequence[str]) -> tuple[str, ...]:
+        """Return the argv that runs: no prefix, every ``~/`` already a host path."""
+        return tuple(self.resolve(str(part)) for part in argv)
+
+    def run(self, argv: Sequence[str]) -> CommandOutcome:
+        """Run one command here, bounded the way the same command over ssh would be."""
+        parts = self.plan(argv)
+        return self.command(parts, SshTransport._timeout_for(parts))  # noqa: SLF001 — one timeout table
+
+    def send(self, files: Mapping[str, bytes], path: str) -> CommandOutcome:
+        """Unpack the bundle into the residents directory, from the same tar ssh would pipe."""
+        destination = Path(self.resolve(path))
+        argv = ("tar", "-xf", "-", "-C", str(destination))
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            with tarfile.open(fileobj=io.BytesIO(pack(files)), mode="r") as archive:
+                archive.extractall(destination, filter="data")
+        except OSError as exc:
+            return CommandOutcome(argv=argv, exit_status=1, stderr=f"{destination}: {exc}")
+        return CommandOutcome(argv=argv, exit_status=0)
+
+    def read(self, path: str) -> str | None:
+        """Read a file here, or ``None`` when there is no such file."""
+        target = Path(self.resolve(path))
+        try:
+            return target.read_text(encoding="utf-8")
+        except FileNotFoundError, NotADirectoryError, IsADirectoryError:
+            return None
+        except OSError as exc:
+            raise TransportError(f"{self.burrow}: cannot read {path}: {exc}") from exc
+
+    def exists(self, path: str) -> bool:
+        """Report whether a path is here; a path this process may not inspect is an error."""
+        # ``os.stat`` rather than ``Path.exists``, which since Python 3.13 answers False to
+        # *every* OSError — a directory this process may not enter would read as empty.
+        target = Path(self.resolve(path))
+        try:
+            target.stat()
+        except FileNotFoundError, NotADirectoryError:
+            return False
+        except OSError as exc:
+            raise TransportError(f"{self.burrow}: cannot inspect {path}: {exc}") from exc
+        return True
+
+
+@dataclass
 class LocalTransport:
     """A directory that plays a host, for tests and rehearsals. Starts no processes.
 
@@ -827,8 +942,20 @@ class LocalTransport:
         return self.resolve(path).exists()
 
 
-def transport_for(target: DeployTarget) -> Transport:
-    """Build the real transport for a resolved target. The default everywhere."""
+def transport_for(target: DeployTarget, env: Mapping[str, str] | None = None) -> Transport:
+    """Build the real transport for a resolved target.
+
+    ssh to the target's host — unless the target's host *is* this burrow, named by
+    :data:`BURROW_ENV` in ``env`` (steward's own environment when none is given), in which
+    case the burrow provisions its own resident through :class:`BurrowTransport`. A laptop
+    never sets the variable, so from a laptop every host is reached over ssh, the NAS
+    included; the deployed control plane sets it, so from there the NAS is *here*.
+    """
+    source = os.environ if env is None else env
+    burrow = (source.get(BURROW_ENV) or "").strip()
+    if burrow and burrow == target.host:
+        home = (source.get(BURROW_HOME_ENV) or "").strip()
+        return BurrowTransport(burrow=burrow, user=target.user, home=home)
     return SshTransport(host=target.host, user=target.user)
 
 

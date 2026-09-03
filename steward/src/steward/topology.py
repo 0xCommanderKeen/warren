@@ -49,7 +49,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from steward.deploy import target_for
+from steward.deploy import BURROW_ENV, target_for
 from steward.manifest import Resident, ResidentManifest
 from steward.runners import CommandRun, run_argv
 
@@ -76,8 +76,8 @@ __all__ = [
 #: What this burrow is called, when the machine's own hostname is not the name manifests
 #: use for it. A ``deploy.host`` is matched against this before anything else the operator
 #: did not write down, because the NAS answers to ``dxp2800`` on the tailnet whatever
-#: ``hostname`` happens to return locally.
-BURROW_ENV = "STEWARD_BURROW"
+#: ``hostname`` happens to return locally. Defined in ``deploy.py``, which also reads it to
+#: decide that a resident of this burrow is provisioned here rather than over ssh.
 
 #: Docker's own pointer. Steward never sets it and never reads it to *decide* anything —
 #: it is read here only so a report can say where the docker calls are going.

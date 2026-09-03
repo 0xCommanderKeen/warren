@@ -13,7 +13,7 @@ main="$(git -C "$ROOT" rev-parse origin/main 2>/dev/null || git -C "$ROOT" rev-p
 printf '%-10s %s\n' 'main' "$main"
 
 ssh -o BatchMode=yes -o ConnectTimeout=15 "$NAS" '
-for pair in burrow:chronicle arcadia:arcadia arcadia:townhall steward:steward; do
+for pair in chronicle:chronicle arcadia:arcadia arcadia:townhall steward:steward; do
     dir="${pair%%:*}"; svc="${pair##*:}"
     if [ -f ~/docker/warren/$dir/DEPLOYED-$svc ]; then
         printf "%-10s %s\n" "$svc" "$(cat ~/docker/warren/$dir/DEPLOYED-$svc)"
@@ -32,5 +32,5 @@ if docker ps --format "{{.Names}}" | grep -qx steward-api; then
     printf "%-10s %s @ %s, %s unpushed, %s dirty\n" "checkout" "$branch" "$head" "$unpushed" "$dirty"
 fi
 echo
-docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}" | grep -E "^(burrow|arcadia|steward-)" || true
+docker ps --format "{{.Names}}\t{{.Image}}\t{{.Status}}" | grep -E "^(chronicle|arcadia|steward-)" || true
 ' 2>/dev/null | grep -v 'post-quantum\|store now\|openssh.com/pq' || true
