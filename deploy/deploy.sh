@@ -33,7 +33,7 @@
 # control-plane image, and it names its own revision — see ensure_checkout.)
 #
 # Everything the warren puts on a burrow lives under ~/docker/warren (warren#358):
-# burrow/ is chronicle, arcadia/ the origin (townhall's build inside it), steward/ the
+# chronicle/ is chronicle's server, arcadia/ the origin (townhall's build inside it), steward/ the
 # control plane, residents/<id> each resident `steward provision` writes. Not the
 # pre-steward bot in ~/docker/life-agent, which is not the warren's.
 #
@@ -163,15 +163,16 @@ wait_for() {
     die "$1 did not answer $2 within 90s (last: ${code:-none})"
 }
 
-# require_layout <dir> — refuse a burrow still laid out the way it was before warren#358,
-# with ~/docker/<dir> at the top of ~/docker and nothing yet at ~/docker/warren/<dir>.
+# require_layout <old dir> <new dir> — refuse a burrow still laid out the way it was before
+# warren#358: ~/docker/<old dir> at the top of ~/docker and nothing yet at ~/docker/warren/<new
+# dir> (chronicle's directory was named burrow then; the others keep their names).
 # Refuse rather than move: chronicle's data/, steward's data/, .env and residents
 # checkout, every resident's memory/ are not things this script created, and a deploy
 # into the new place beside them would leave the old one running unnoticed. The move is
 # one operator's session — deploy/README.md "Moving a burrow under ~/docker/warren".
 require_layout() {
-    if $SSH "$NAS" "test -d ~/docker/$1 && ! test -d ~/docker/warren/$1"; then
-        die "~/docker/$1 on $NAS is the pre-warren#358 layout and ~/docker/warren/$1 does not exist yet; move the burrow first — deploy/README.md \"Moving a burrow under ~/docker/warren\""
+    if $SSH "$NAS" "test -d ~/docker/$1 && ! test -d ~/docker/warren/$2"; then
+        die "~/docker/$1 on $NAS is the pre-warren#358 layout and ~/docker/warren/$2 does not exist yet; move the burrow first — deploy/README.md \"Moving a burrow under ~/docker/warren\""
     fi
 }
 
@@ -179,7 +180,7 @@ require_layout() {
 # chronicle/README.md "Running": the tar recipe's file list, restart, /state.
 deploy_chronicle() {
     require_clean chronicle
-    require_layout burrow
+    require_layout burrow chronicle
     files="$(python3 - "$ROOT/chronicle/README.md" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
@@ -198,18 +199,18 @@ PY
     paths=""; for f in $files; do paths="$paths chronicle/$f"; done
     # shellcheck disable=SC2086 — the list is the recipe, space-separated on purpose
     (cd "$ROOT" && git archive --format=tar HEAD $paths) | tar -x -C "$stage"
-    log "chronicle: publishing to $NAS:~/docker/warren/burrow/app"
-    publish "$stage/chronicle" docker/warren/burrow/app
-    $SSH "$NAS" 'test -f ~/docker/warren/burrow/.env' \
-        || die "~/docker/warren/burrow/.env is missing on $NAS — it holds CHRONICLE_NOTIFY_URL (and CHRONICLE_TOKEN when ingest is closed); see chronicle/deploy/compose.yaml"
-    publish_files docker/warren/burrow "$ROOT/chronicle/deploy" compose.yaml
+    log "chronicle: publishing to $NAS:~/docker/warren/chronicle/app"
+    publish "$stage/chronicle" docker/warren/chronicle/app
+    $SSH "$NAS" 'test -f ~/docker/warren/chronicle/.env' \
+        || die "~/docker/warren/chronicle/.env is missing on $NAS — it holds CHRONICLE_NOTIFY_URL (and CHRONICLE_TOKEN when ingest is closed); see chronicle/deploy/compose.yaml"
+    publish_files docker/warren/chronicle "$ROOT/chronicle/deploy" compose.yaml
     log "chronicle: recreating"
     # Recreate rather than restart: the code is a bind mount, so `up -d` alone would see
     # nothing to do, and nothing this container holds lives outside /data any more.
-    $SSH "$NAS" 'cd ~/docker/warren/burrow && docker compose up -d --force-recreate' >/dev/null 2>&1
+    $SSH "$NAS" 'cd ~/docker/warren/chronicle && docker compose up -d --force-recreate' >/dev/null 2>&1
     wait_for "$ORIGIN/burrow/state" 200
     curl -fsS -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: /burrow/residents did not answer"
-    stamp burrow chronicle
+    stamp chronicle chronicle
     log "chronicle: $SHORT is live"
 }
 
@@ -217,7 +218,7 @@ PY
 # arcadia/docs/deployment.md "Deploy", steps 1, 3, 4, 5.
 deploy_arcadia() {
     require_clean arcadia
-    require_layout arcadia
+    require_layout arcadia arcadia
     log "arcadia: build ($(node --version), pnpm $(pnpm --version))"
     quietly "arcadia install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/arcadia"
     if tests_enabled; then quietly "arcadia tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/arcadia"; fi
@@ -246,7 +247,7 @@ deploy_arcadia() {
 # townhall/docs/deployment.md: build with the mount prefix, publish into arcadia's dir.
 deploy_townhall() {
     require_clean townhall
-    require_layout arcadia
+    require_layout arcadia arcadia
     log "townhall: build --base=/observatory/ ($(node --version), pnpm $(pnpm --version))"
     quietly "townhall install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/townhall"
     if tests_enabled; then quietly "townhall tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/townhall"; fi
@@ -324,7 +325,7 @@ ensure_checkout() {
 # made here once and only ever fetched afterwards — see ensure_checkout.
 deploy_steward() {
     require_clean steward
-    require_layout steward
+    require_layout steward steward
     if tests_enabled; then
         log "steward: make check"
         quietly "steward check" sh -c 'cd "$1" && make check' _ "$ROOT/steward"
@@ -366,8 +367,8 @@ deploy_steward() {
     # Through a one-off container rather than `exec` into the scheduler: the daemons' health
     # is doctor's question below, and a scheduler refusing to start over a missing resident
     # container (its own, correct, refusal) must not read as "the checkout is not mounted".
-    $SSH "$NAS" "docker run --rm -v ~/docker/warren/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -f /checkout/steward/residents/pip/manifest.yaml" >/dev/null 2>&1 \
-        || die "the residents checkout on $NAS does not hold pip's manifest where the daemons read it"
+    $SSH "$NAS" "docker run --rm -v ~/docker/warren/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -d /checkout/steward/residents" >/dev/null 2>&1 \
+        || die "the residents checkout on $NAS does not hold steward/residents where the daemons read it"
     log "steward: doctor"
     # In the watchdog's container, against the tree the daemons actually run: that is the
     # process with the docker socket, so its topology line is the true one.

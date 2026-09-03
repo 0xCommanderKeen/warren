@@ -37,14 +37,17 @@ interleave the warren's directories with theirs:
 
 | Directory | What | Written by |
 | --- | --- | --- |
-| `burrow/` | chronicle: `app/` (the tree its README's tar recipe ships), `data/`, `compose.yaml`, `.env` | `deploy.sh chronicle` |
+| `chronicle/` | chronicle's server: `app/` (the tree its README's tar recipe ships), `data/`, `compose.yaml`, `.env` | `deploy.sh chronicle` |
 | `arcadia/` | the origin: `dist/`, `observatory-dist/` (townhall's build), `nginx.conf`, `compose.yaml` | `deploy.sh arcadia`, `deploy.sh townhall` |
 | `steward/` | the control plane: `compose.yaml`, `.env`, `data/`, `residents-key`, `residents-repo/` | `deploy.sh steward` |
-| `residents/<id>/` | one resident: `docker-compose.yaml`, `.env`, `manifest.yaml`, `soul.md`, `memory/`, `claude/` | `steward provision <id>`, from a laptop — never this script |
+| `residents/<id>/` | one resident: `docker-compose.yaml`, `.env`, `manifest.yaml`, `soul.md`, `memory/`, `claude/` | the control plane itself, on a declare or provision through the API (townhall's New resident) — or `steward provision <id>` from a laptop; never this script |
 
 The control plane's daemons bind-mount `residents/` and nothing wider: that is what lets
 them journal for a container-placed resident without also seeing steward's own `.env`
-and deploy key next door. A resident whose manifest sets `deploy.path` outside
+and deploy key next door. The API mounts the same directory at its host path, with the
+docker socket, because it is the process that writes a resident's bundle there and
+brings the container up — a resident whose `deploy.host` is this burrow is provisioned
+by the burrow, not over ssh to itself. A resident whose manifest sets `deploy.path` outside
 `residents/` is one the daemons cannot see. The pre-steward bot in `~/docker/life-agent`
 is not the warren's and stays where it is. A burrow still laid out the old way — the
 same directories at the top of `~/docker` — is refused by `deploy.sh`, not moved; see
@@ -56,7 +59,7 @@ Secrets, in a `.env` beside each compose file, mode `0600`, never in git:
 
 | Directory | `.env` holds | Compose file (in the repo) |
 | --- | --- | --- |
-| `~/docker/warren/burrow` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
+| `~/docker/warren/chronicle` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
 | `~/docker/warren/arcadia` | — | [`arcadia/deploy/compose.yaml`](../arcadia/deploy/compose.yaml) + `nginx.conf` |
 | `~/docker/warren/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`. Beside it: `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
 
@@ -268,12 +271,15 @@ places.
      cd ~/docker/burrow && docker compose down'
    ```
 
-4. **Move.** `~/docker/life-agent` does not match `steward-*` and stays.
+4. **Move.** `~/docker/life-agent` does not match `steward-*` and stays. Chronicle's directory
+   changes name here, `burrow` to `chronicle`, and its compose project name follows the
+   directory — which is why step 3 ran `down` from the old one: skipping it would leave the
+   `burrow` project's container orphaned under the old name.
 
    ```sh
    ssh Miha@dxp2800 'set -e
      mkdir -p ~/docker/warren/residents
-     mv ~/docker/burrow ~/docker/warren/burrow
+     mv ~/docker/burrow ~/docker/warren/chronicle
      mv ~/docker/arcadia ~/docker/warren/arcadia
      mv ~/docker/steward ~/docker/warren/steward
      for d in ~/docker/steward-*; do mv "$d" ~/docker/warren/residents/"${d##*/steward-}"; done
@@ -287,11 +293,11 @@ places.
 
    ```sh
    ssh Miha@dxp2800 'set -e
-     cd ~/docker/warren/burrow && docker compose up -d
+     cd ~/docker/warren/chronicle && docker compose up -d
      cd ~/docker/warren/arcadia && docker compose up -d
      for d in ~/docker/warren/residents/*; do docker compose -f "$d/docker-compose.yaml" --project-directory "$d" -p "${d##*/}" up -d; done
      cd ~/docker/warren/steward && docker compose up -d
-     sleep 30; docker ps --format "{{.Names}}\t{{.Status}}\t{{.Label \"com.docker.compose.project.working_dir\"}}" | grep -E "^(burrow|arcadia|steward)"'
+     sleep 30; docker ps --format "{{.Names}}\t{{.Status}}\t{{.Label \"com.docker.compose.project.working_dir\"}}" | grep -E "^(chronicle|arcadia|steward)"'
    ```
 
    Every warren container's working directory reads `/home/Miha/docker/warren/…`, and

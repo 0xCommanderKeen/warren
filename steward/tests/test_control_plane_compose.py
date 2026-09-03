@@ -120,3 +120,30 @@ def test_the_daemons_see_the_residents_deploy_directories(
 def test_the_api_does_not_hold_the_residents_directories(services: dict[str, Any]) -> None:
     """The API writes declarations into the checkout, never into a resident's memory."""
     assert DAEMON_RESIDENTS not in mounts(services["api"])
+
+
+#: Where this burrow's residents are on the host — and, for the API, in the container too.
+HOST_RESIDENTS_SAME_PATH = f"{HOST_RESIDENTS}:{HOST_RESIDENTS}"
+SOCKET = "/var/run/docker.sock"
+
+
+def test_the_api_provisions_this_burrows_residents_itself(services: dict[str, Any]) -> None:
+    """warren#356 gap two: the API cannot ssh to the machine it is on, so it does not.
+
+    It writes a resident's bundle into the residents directory and runs docker compose
+    against the socket — through deploy.BurrowTransport, which resolves every ``~/`` path
+    against STEWARD_BURROW_HOME. The directory is mounted at its *host* path because the
+    compose CLI in the API's process hands the daemon the paths it resolves ``./memory`` to.
+    """
+    api = services["api"]
+    assert mounts(api)[HOST_RESIDENTS] == HOST_RESIDENTS_SAME_PATH, (
+        "the residents directory must have the same path in the API as on the host"
+    )
+    assert mounts(api)[SOCKET] == f"{SOCKET}:{SOCKET}"
+    assert api["environment"]["STEWARD_BURROW_HOME"] == "/home/Miha"
+    assert api["environment"]["STEWARD_BURROW"] == "dxp2800", (
+        "the name deploy.host is matched against"
+    )
+    assert DAEMON_RESIDENTS not in mounts(api), (
+        "the /root view is the daemons' — docker would not find it"
+    )

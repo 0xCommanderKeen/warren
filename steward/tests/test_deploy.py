@@ -1,6 +1,7 @@
 """The transport seam and the compose fragment: everything the nursery ships, without a NAS."""
 
 import io
+import os
 import tarfile
 from collections.abc import Sequence
 from dataclasses import replace
@@ -11,6 +12,8 @@ import yaml
 
 from conftest import ResidentWriter, valid_manifest
 from steward.deploy import (
+    BURROW_ENV,
+    BURROW_HOME_ENV,
     CHRONICLE_TOKEN_ENV,
     CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
@@ -19,6 +22,7 @@ from steward.deploy import (
     ENV_FILENAME,
     LEGACY_TOKEN_ENV,
     LEGACY_URL_ENV,
+    BurrowTransport,
     LocalTransport,
     SshTransport,
     TransportError,
@@ -118,6 +122,9 @@ def test_the_compose_fragment_is_valid_yaml_naming_this_resident(write_resident)
     assert service["command"] == ["sleep", "infinity"]
     assert "./memory:/data/residents/test-agent/memory" in service["volumes"]
     assert "./claude:/root/.claude" in service["volumes"]
+    assert service["extra_hosts"] == ["dockerhost:host-gateway"], (
+        "the village address steward copies into .env is http://dockerhost:8737 on the burrow"
+    )
 
 
 def test_the_compose_fragment_references_the_secrets_instead_of_carrying_them(
@@ -158,6 +165,7 @@ def test_a_smuggled_memory_path_stays_data_and_makes_no_new_compose_keys(write_r
         "container_name",
         "restart",
         "init",
+        "extra_hosts",
         "working_dir",
         "environment",
         "volumes",
@@ -580,7 +588,148 @@ def test_a_host_that_answered_and_said_no_is_still_an_empty_one() -> None:
 
 def test_the_default_transport_is_built_from_the_manifest(write_resident) -> None:
     target = target_for(resident(write_resident, deploy={"host": "other-nas"}).manifest)
-    built = transport_for(target)
+    built = transport_for(target, {})
 
     assert isinstance(built, SshTransport)
     assert built.target == "Miha@other-nas"
+
+
+def test_a_resident_of_this_burrow_is_provisioned_here_not_over_ssh(write_resident) -> None:
+    """warren#356: the deployed API cannot ssh to the machine it is on, so it does not.
+
+    STEWARD_BURROW names this machine; a target whose host is that name is *here*. A
+    laptop never sets the variable, so from a laptop the NAS stays an ssh target.
+    """
+    here = target_for(resident(write_resident).manifest)
+    elsewhere = target_for(resident(write_resident, deploy={"host": "other-nas"}).manifest)
+    burrow = {BURROW_ENV: DEFAULT_HOST, BURROW_HOME_ENV: "/home/Miha"}
+
+    local = transport_for(here, burrow)
+    assert isinstance(local, BurrowTransport)
+    assert local.home == "/home/Miha"
+    assert local.kind == "burrow"
+    assert isinstance(transport_for(elsewhere, burrow), SshTransport)
+    assert isinstance(transport_for(here, {}), SshTransport), "a laptop reaches the NAS over ssh"
+
+
+def test_the_burrow_transport_defaults_home_to_the_deploy_user(write_resident) -> None:
+    target = target_for(resident(write_resident).manifest)
+    built = transport_for(target, {BURROW_ENV: DEFAULT_HOST})
+    assert isinstance(built, BurrowTransport)
+    assert built.home == f"/home/{DEFAULT_USER}"
+
+
+# ------------------------------------------------------------------ the burrow transport
+
+
+def recording(outcomes: list[tuple[tuple[str, ...], float]]):
+    """Record what would have run and say it succeeded: a stand-in for run_argv."""
+
+    def command(
+        argv: Sequence[str], timeout_s: float = 20.0, *, stdin: bytes | None = None
+    ) -> CommandOutcome:
+        del stdin  # a fake feeds nothing
+        parts = tuple(argv)
+        outcomes.append((parts, timeout_s))
+        return CommandOutcome(argv=parts, exit_status=0)
+
+    return command
+
+
+def test_the_burrow_transport_runs_host_paths_with_no_ssh_in_front(write_resident) -> None:
+    """The plan is the argv that runs: every ~/ already the host's path, no prefix at all.
+
+    The compose CLI in the API's process resolves the bundle's ./memory against the
+    project directory and hands the daemon host paths — so the directory has to be named
+    by its host path here, and steward's own $HOME (/root in the image) must never leak in.
+    """
+    seen: list[tuple[tuple[str, ...], float]] = []
+    burrow = BurrowTransport(
+        burrow="dxp2800", user="Miha", home="/home/Miha", command=recording(seen)
+    )
+    target = target_for(resident(write_resident).manifest)
+
+    outcome = burrow.run(compose_argv(target, "up", "-d"))
+
+    assert outcome.ok
+    assert seen == [
+        (
+            (
+                "docker",
+                "compose",
+                "-f",
+                "/home/Miha/docker/warren/residents/test-agent/docker-compose.yaml",
+                "--project-directory",
+                "/home/Miha/docker/warren/residents/test-agent",
+                "-p",
+                "test-agent",
+                "up",
+                "-d",
+            ),
+            300.0,
+        )
+    ]
+    assert burrow.plan(("rm", "-f", "~/docker/x/.env", "~")) == (
+        "rm",
+        "-f",
+        "/home/Miha/docker/x/.env",
+        "/home/Miha",
+    )
+    assert "~" not in " ".join(seen[0][0])
+
+
+def test_the_burrow_transport_writes_the_bundle_where_the_host_has_it(
+    tmp_path: Path, write_resident
+) -> None:
+    """The same tar ssh would pipe, unpacked in place: .env at 0600, directories made."""
+    home = tmp_path / "home" / "Miha"
+    burrow = BurrowTransport(burrow="dxp2800", home=str(home), command=recording([]))
+    one = resident(write_resident)
+    target = target_for(one.manifest)
+    files = bundle_for(one, target, VILLAGE)
+
+    assert burrow.exists(target.path) is False
+    assert burrow.read(target.compose_path) is None
+    assert bundle_changes(burrow, files, target.path) == tuple(
+        sorted(n for n in files if not n.endswith("/.keep"))
+    )
+
+    sent = burrow.send(files, target.path)
+
+    landed = home / "docker" / "warren" / "residents" / "test-agent"
+    assert sent.ok
+    assert (landed / COMPOSE_FILENAME).read_bytes() == files[COMPOSE_FILENAME]
+    assert (landed / ENV_FILENAME).stat().st_mode & 0o777 == 0o600
+    assert (landed / "memory").is_dir()
+    assert burrow.exists(target.path) is True
+    assert burrow.read(target.compose_path) == files[COMPOSE_FILENAME].decode()
+    assert bundle_changes(burrow, files, target.path) == (), "a second run has nothing to send"
+
+
+def test_the_burrow_transport_reports_a_directory_it_could_not_write(tmp_path: Path) -> None:
+    """A failure to land the bundle is an outcome the nursery can name, not an exception."""
+    blocked = tmp_path / "file-not-a-directory"
+    blocked.write_text("in the way", encoding="utf-8")
+    burrow = BurrowTransport(burrow="dxp2800", home=str(tmp_path), command=recording([]))
+
+    outcome = burrow.send({"a.txt": b"hello"}, "~/file-not-a-directory/a")
+
+    assert not outcome.ok
+    assert "file-not-a-directory" in outcome.stderr
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can look at anything")
+def test_the_burrow_transport_fails_closed_on_a_path_it_may_not_inspect(tmp_path: Path) -> None:
+    """Steward #136 again: 'forbidden' must never read as 'absent'."""
+    sealed = tmp_path / "sealed"
+    sealed.mkdir()
+    (sealed / "docker-compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    sealed.chmod(0)
+    burrow = BurrowTransport(burrow="dxp2800", home=str(tmp_path), command=recording([]))
+    try:
+        with pytest.raises(TransportError, match="cannot inspect"):
+            burrow.exists("~/sealed/docker-compose.yaml")
+        with pytest.raises(TransportError, match="cannot read"):
+            burrow.read("~/sealed/docker-compose.yaml")
+    finally:
+        sealed.chmod(0o700)

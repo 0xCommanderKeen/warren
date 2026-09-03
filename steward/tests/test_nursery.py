@@ -18,7 +18,14 @@ from steward.board import (
     load_board_residents,
     load_residents,
 )
-from steward.deploy import LocalTransport, SshTransport, TransportError
+from steward.deploy import (
+    BURROW_ENV,
+    BURROW_HOME_ENV,
+    BurrowTransport,
+    LocalTransport,
+    SshTransport,
+    TransportError,
+)
 from steward.manifest import (
     Diagnostic,
     ValidationResult,
@@ -1730,3 +1737,52 @@ def test_a_run_that_declares_nothing_new_still_reports_where_it_lives(
     assert "compose unchanged" in plan
     assert "already declared and unchanged" in plan
     assert "no enabled routines" in plan
+
+
+# ------------------------------------------------------ the burrow provisions its own
+
+
+def test_the_pipeline_provisions_a_resident_of_this_burrow_without_ssh(
+    scratch_repo: ScratchRepo, tmp_path: Path
+) -> None:
+    """The deployed control plane's case: the bundle lands through the mount, compose runs here.
+
+    The transport is injected with a recording command so no docker runs in the suite;
+    that `transport_for` picks BurrowTransport from STEWARD_BURROW is test_deploy's.
+    """
+    home = tmp_path / "home" / "Miha"
+    ran: list[tuple[str, ...]] = []
+
+    def command(argv, timeout_s=20.0, *, stdin=None):  # noqa: ANN202, ARG001
+        ran.append(tuple(argv))
+        return CommandOutcome(argv=tuple(argv), exit_status=0)
+
+    burrow = BurrowTransport(burrow="dxp2800", home=str(home), command=command)
+    report = raise_resident(
+        spec(),
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=burrow,
+        env={**VILLAGE, BURROW_ENV: "dxp2800", BURROW_HOME_ENV: str(home)},
+    )
+
+    landed = home / "docker" / "warren" / "residents" / "note-keeper"
+    assert report.provision is not None
+    assert report.provision.sent
+    assert (landed / "docker-compose.yaml").is_file()
+    assert (landed / ".env").stat().st_mode & 0o777 == 0o600
+    assert ran == [
+        (
+            "docker",
+            "compose",
+            "-f",
+            f"{landed}/docker-compose.yaml",
+            "--project-directory",
+            str(landed),
+            "-p",
+            "note-keeper",
+            "up",
+            "-d",
+        )
+    ]
+    assert not any(part == "ssh" for argv in report.provision.commands for part in argv)

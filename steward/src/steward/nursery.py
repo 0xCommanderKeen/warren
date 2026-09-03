@@ -1112,7 +1112,7 @@ def _provision(
     # still goes through `emitter_env`, so a deploy with nowhere to emit is still stopped.
     values = planned_env(env) if dry_run else emitter_env(env)
     compose = render_compose(resident, target)
-    conveyance = transport if transport is not None else transport_for(target)
+    conveyance = transport if transport is not None else transport_for(target, env)
     up = compose_argv(target, "up", "-d")
     plan = (
         conveyance.plan(["mkdir", "-p", target.path]),

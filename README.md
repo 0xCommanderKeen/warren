@@ -54,7 +54,7 @@ There is no registry either: images travel as `docker save | ssh … docker load
 | What | Where it listens | Deploy directory on the NAS | Runbook |
 | --- | --- | --- | --- |
 | arcadia + townhall | `:8737` (the origin) | `~/docker/warren/arcadia` | [`arcadia/docs/deployment.md`](arcadia/docs/deployment.md) |
-| chronicle | `:8738`, proxied at `:8737/burrow/` | `~/docker/warren/burrow` | [chronicle README](chronicle/README.md#running) |
+| chronicle | `:8738`, proxied at `:8737/burrow/` | `~/docker/warren/chronicle` | [chronicle README](chronicle/README.md#running) |
 | steward | `:8802` → container `8801` | `~/docker/warren/steward`, residents in `~/docker/warren/residents/<id>` | [steward README](steward/README.md#deployment) |
 
 One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at

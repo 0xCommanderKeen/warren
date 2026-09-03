@@ -43,6 +43,11 @@
 # plane's own directory beside it holds the .env and the deploy key, and the daemons have
 # no business with either. Without the mount every container-placed resident is
 # "unprovisioned" to the scheduler no matter what was provisioned, and it refuses to start.
+#
+# The API mounts the same directory at its host path instead, plus the docker socket: it
+# is the process that *writes* a resident's bundle and brings the container up, and the
+# paths it hands docker must be the host's (see the api service). Two mount points for one
+# directory is a wart; one will go when memory_host_dir stops expanding ~ with $HOME.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -52,6 +57,10 @@ x-steward: &steward
   environment:
     STEWARD_STATE: /data/state.json
     STEWARD_BURROW: dxp2800
+    # The deploy user's home on this machine. The API provisions this burrow's residents
+    # itself (deploy.BurrowTransport): it resolves every rendered ~/ path against this,
+    # not against its own /root, because the paths it hands docker are host paths.
+    STEWARD_BURROW_HOME: /home/Miha
     # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
     CHRONICLE_URL: http://dockerhost:8737
     # The pre-rename spelling, kept for one release (warren#216).
@@ -80,6 +89,13 @@ services:
       - ./residents-repo:/checkout
       # The deploy key the push uses; the image's GIT_SSH_COMMAND names this path.
       - ./residents-key:/run/steward/residents-key:ro
+      # This burrow's residents, at the SAME path as on the host, and the socket to bring
+      # them up: the API provisions a resident of this burrow itself rather than ssh-ing
+      # to the machine it is on (which it cannot — warren#356). Same path because the
+      # compose CLI in here resolves a bundle's ./memory against the project directory
+      # and hands the daemon host paths; a different mount point would bind nothing.
+      - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
+      - /var/run/docker.sock:/var/run/docker.sock
     command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "/checkout/steward/residents"]
 
   scheduler:
