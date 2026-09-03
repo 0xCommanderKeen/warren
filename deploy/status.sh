@@ -15,8 +15,8 @@ printf '%-10s %s\n' 'main' "$main"
 ssh -o BatchMode=yes -o ConnectTimeout=15 "$NAS" '
 for pair in burrow:chronicle arcadia:arcadia arcadia:townhall steward:steward; do
     dir="${pair%%:*}"; svc="${pair##*:}"
-    if [ -f ~/docker/$dir/DEPLOYED-$svc ]; then
-        printf "%-10s %s\n" "$svc" "$(cat ~/docker/$dir/DEPLOYED-$svc)"
+    if [ -f ~/docker/warren/$dir/DEPLOYED-$svc ]; then
+        printf "%-10s %s\n" "$svc" "$(cat ~/docker/warren/$dir/DEPLOYED-$svc)"
     else
         printf "%-10s %s\n" "$svc" "(no marker: deployed by hand before deploy/deploy.sh)"
     fi

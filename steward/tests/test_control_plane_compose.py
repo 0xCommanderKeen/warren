@@ -22,11 +22,13 @@ CHECKOUT = "/checkout"
 RESIDENTS = f"{CHECKOUT}/steward/residents"
 #: Where the image's ``GIT_SSH_COMMAND`` expects the deploy key that pushes the checkout.
 KEY = "/run/steward/residents-key"
-#: Where the daemons find the residents' deploy directories (warren#356). ``deploy.py``
-#: resolves ``~/docker/steward-<id>/memory`` in the asking process, and the image's HOME
-#: is ``/root`` — so the burrow's ``~/docker`` has to be there.
-HOST_DOCKER = "/home/Miha/docker"
-DAEMON_DOCKER = "/root/docker"
+#: Where the daemons find the residents' deploy directories (warren#356, warren#358).
+#: ``deploy.py`` resolves ``~/docker/warren/residents/<id>/memory`` in the asking process,
+#: and the image's HOME is ``/root`` — so the burrow's residents directory has to be there.
+#: That directory and no wider: the control plane's own directory beside it holds the
+#: ``.env`` and the deploy key, which the daemons have no business with.
+HOST_RESIDENTS = "/home/Miha/docker/warren/residents"
+DAEMON_RESIDENTS = "/root/docker/warren/residents"
 
 
 @pytest.fixture(scope="module")
@@ -100,15 +102,21 @@ def test_the_daemons_see_the_residents_deploy_directories(
 
     A container-placed resident's memory lives at ``<deploy.path>/memory`` on the burrow,
     and ``memory_host_dir`` expands the ``~`` in that path with the daemon's own HOME. Inside
-    the image that is ``/root``, so the host's ``~/docker`` is mounted there — read-write,
-    because the scheduler journals into and materializes skills onto that directory.
+    the image that is ``/root``, so the host's residents directory is mounted there —
+    read-write, because the scheduler journals into and materializes skills onto it. Since
+    warren#358 that is ``~/docker/warren/residents`` and nothing above it: mounting all of
+    ``~/docker`` handed the daemons steward's ``.env`` and deploy key next door.
     """
     daemon = services[name]
-    assert mounts(daemon)[DAEMON_DOCKER] == f"{HOST_DOCKER}:{DAEMON_DOCKER}", (
-        "the daemons compute /root/docker/steward-<id>/memory; that path must be the host's"
+    assert mounts(daemon)[DAEMON_RESIDENTS] == f"{HOST_RESIDENTS}:{DAEMON_RESIDENTS}", (
+        "the daemons compute /root/docker/warren/residents/<id>/memory; that path must be "
+        "the host's"
+    )
+    assert "/root/docker" not in {spec.split(":")[1] for spec in daemon["volumes"]}, (
+        "the whole of ~/docker would include steward/.env and the deploy key"
     )
 
 
 def test_the_api_does_not_hold_the_residents_directories(services: dict[str, Any]) -> None:
     """The API writes declarations into the checkout, never into a resident's memory."""
-    assert DAEMON_DOCKER not in mounts(services["api"])
+    assert DAEMON_RESIDENTS not in mounts(services["api"])

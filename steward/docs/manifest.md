@@ -555,7 +555,7 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 ```console
 $ steward doctor
 life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready
-life-agent: journal /home/Miha/docker/steward-life-agent/memory/journal — writable, closed by close-of-day
+life-agent: journal /home/Miha/docker/warren/residents/life-agent/memory/journal — writable, closed by close-of-day
 life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
@@ -972,21 +972,21 @@ is worth noticing while you are reading the two numbers side by side.
 deploy:
   host: dxp2800                       # the NAS, over Tailscale
   user: Miha                          # the ssh user steward reaches it as
-  path: ~/docker/steward-life-agent   # the compose directory on that host
+  path: ~/docker/warren/residents/life-agent   # the compose directory on that host
   container: steward-life-agent       # the docker container name
   image: steward-resident:latest      # what the container runs
   command: [sleep, infinity]          # argv inside it
 ```
 
 Every field is optional, and every one has a default for the layout this fleet already
-uses — chronicle's own server is `~/docker/burrow` on `dxp2800`, and a new resident lands
-beside it:
+uses — everything the warren puts on `dxp2800` lives under `~/docker/warren`, chronicle's
+own server at `burrow/` in it, and a new resident lands in `residents/<id>` beside it:
 
 | field | default |
 |---|---|
 | `host` | `dxp2800` |
 | `user` | `Miha` |
-| `path` | `~/docker/<container>` |
+| `path` | `~/docker/warren/residents/<id>` |
 | `container` | `steward-<id>` |
 | `image` | `steward-resident:latest` |
 | `command` | `["sleep", "infinity"]` |
@@ -1230,7 +1230,8 @@ exists.
 ### What retirement removes from the host, and what it leaves
 
 **Steward removes on retire exactly what steward rewrites on provision.** That is two
-files under `~/docker/<container>/`, deleted after the container is down:
+files under `deploy.path` (`~/docker/warren/residents/<id>/` by default), deleted after the
+container is down:
 
 | removed | why |
 |---|---|

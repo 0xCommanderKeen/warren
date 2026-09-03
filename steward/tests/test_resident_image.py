@@ -459,7 +459,7 @@ def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
     assert deploy.container == "steward-life-agent"
     assert deploy.host == "dxp2800"
     assert deploy.user == "Miha"
-    assert deploy.path == "~/docker/steward-life-agent"
+    assert deploy.path == "~/docker/warren/residents/life-agent"
     assert deploy.image == DEFAULT_IMAGE, (
         "Hob runs the image this repo builds and ships, so his container has a brain "
         "before a session opens instead of installing one on every cold start"
@@ -483,7 +483,7 @@ def test_life_agent_runs_its_sessions_inside_that_container() -> None:
     assert hob.manifest.runner.placement == "container"
     assert hob.manifest.runner.container_placed is True
     host_side, container_side = memory_mount(hob.manifest)
-    assert host_side == "~/docker/steward-life-agent/memory"
+    assert host_side == "~/docker/warren/residents/life-agent/memory"
     assert container_side == "/data/residents/life-agent/memory"
 
 
@@ -494,11 +494,11 @@ def test_pip_renders_the_nursery_container_and_memory_mount() -> None:
     service = yaml.safe_load(render_compose(pip, target))["services"]["pip"]
 
     assert target.container == "steward-pip"
-    assert target.path == "~/docker/steward-pip"
+    assert target.path == "~/docker/warren/residents/pip"
     assert service["container_name"] == "steward-pip"
     assert service["image"] == DEFAULT_IMAGE
     assert service["command"] == ["sleep", "infinity"]
     assert memory_mount(pip.manifest) == (
-        "~/docker/steward-pip/memory",
+        "~/docker/warren/residents/pip/memory",
         "/data/residents/pip/memory",
     )

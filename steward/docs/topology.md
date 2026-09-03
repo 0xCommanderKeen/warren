@@ -75,7 +75,7 @@ what steward#59 was filed about.
 
 ## "On the burrow" is about docker, not about the machine
 
-Steward is itself deployed as a container on the NAS (`~/docker/steward`, `:8802` →
+Steward is itself deployed as a container on the NAS (`~/docker/warren/steward`, `:8802` →
 container `8801`). Being on the right *machine* is therefore necessary and not sufficient:
 a process inside a container has no docker client and no docker socket unless it was given
 one. A daemon in that position reaches nothing, and reaches it silently, in exactly the way

@@ -370,7 +370,7 @@ across the village, the fleet-ops fuel gauges — live in chronicle's issues.
 ## Deployment
 
 Residents run as docker compose services on the NAS (`dxp2800`), over Tailscale, beside
-chronicle's own server at `~/docker/burrow`. **Steward puts them there.** This section
+chronicle's own server at `~/docker/warren/burrow`. **Steward puts them there.** This section
 replaces the manual ritual in chronicle's README for anything that is a resident; the
 event server itself is still deployed by hand, now from
 [`warren/chronicle/`](../chronicle/README.md) rather than from a repo of its own.
@@ -379,7 +379,7 @@ Run every command below from `warren/steward/`, on a machine with the repo check
 ssh access to the NAS. Nothing pulls on the NAS — it has no git of its own; steward pushes
 the runtime bundle over ssh, and the deploy directories there are unpacked artifacts. The
 one exception is the control plane's **residents checkout** (warren#351): a sparse clone
-of this repository under `~/docker/steward/residents-repo`, made once by
+of this repository under `~/docker/warren/steward/residents-repo`, made once by
 `deploy/deploy.sh` through the control-plane image's own git, which the deployed API
 reads, writes, commits into and pushes to the branch `burrow/residents`. That checkout
 is authoritative for the burrow's residents; `residents/` here is the seed a new burrow
@@ -482,7 +482,7 @@ that you want it anyway.
 
 **Provision.** The compose fragment is rendered from `steward/templates/`, the runtime
 bundle is packed into a tar **in memory**, and the whole thing is piped over
-`ssh Miha@dxp2800 tar -xf - -C ~/docker/steward-<id>` — a pipe rather than `scp`, because
+`ssh Miha@dxp2800 tar -xf - -C ~/docker/warren/residents/<id>` — a pipe rather than `scp`, because
 UGOS's `scp` is broken and the pipe is what has actually worked all along. Then
 `docker compose up -d` over the same ssh. Every external command goes through
 `steward.runners.run_argv`, which is the only file in steward that starts a process.
@@ -497,7 +497,7 @@ exists, the journal location is writable, every granted skill resolves — the s
 `steward doctor` check — and here is when each routine next fires.
 
 Where a resident lands is a manifest question with documented defaults (`dxp2800`, `Miha`,
-`~/docker/steward-<id>`, `steward-resident:latest`); override any of them in
+`~/docker/warren/residents/<id>`, `steward-resident:latest`); override any of them in
 [`deploy`](docs/manifest.md#deploy--where-this-resident-runs).
 
 **What a resident's container actually is.** `steward-resident` is built from

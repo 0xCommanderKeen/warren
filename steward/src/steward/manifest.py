@@ -1296,7 +1296,7 @@ class Deploy(_Model):
     path: str | None = Field(
         default=None,
         pattern=REMOTE_PATH_PATTERN,
-        description="Compose directory on the host. Default: ~/docker/<container>.",
+        description="Compose directory on the host. Default: ~/docker/warren/residents/<id>.",
     )
     image: str | None = Field(
         default=None,
@@ -1783,7 +1783,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "deploy.container": "container: steward-life-agent  (the docker name, or omit the block)",
     "deploy.host": "host: dxp2800  (a hostname, no spaces: it reaches a remote shell)",
     "deploy.user": "user: Miha  (the ssh user on that host)",
-    "deploy.path": "path: ~/docker/steward-life-agent  (the compose directory on the host)",
+    "deploy.path": "path: ~/docker/warren/residents/life-agent  (compose directory on the host)",
     "deploy.image": "image: steward-resident:latest",
     "deploy.command": "command: [sleep, infinity]",
     "retired": "retired: false  (true retires the resident; the files stay in git)",

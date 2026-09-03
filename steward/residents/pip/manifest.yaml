@@ -73,7 +73,7 @@ budgets:
 deploy:
   host: dxp2800
   user: Miha
-  path: ~/docker/steward-pip
+  path: ~/docker/warren/residents/pip
   container: steward-pip
   image: steward-resident:latest
 

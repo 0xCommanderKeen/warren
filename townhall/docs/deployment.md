@@ -15,7 +15,7 @@ pnpm build --base=/observatory/
 
 This is not a guess about the live deployment: building at this revision with that flag
 reproduces the exact asset filenames currently served from
-`~/docker/arcadia/observatory-dist/` (`index-D-vL4-mh.js`, `index-DXUM8-vx.css`). Plain
+`~/docker/warren/arcadia/observatory-dist/` (`index-D-vL4-mh.js`, `index-DXUM8-vx.css`). Plain
 `pnpm build` produces different, root-absolute paths.
 
 The flag lives in this runbook rather than in `vite.config.js`, which means it can be
@@ -26,7 +26,7 @@ prefix" below.
 ## Where it actually runs
 
 Townhall has no origin of its own. On the NAS it is served by **arcadia's** nginx at
-`http://dxp2800:8737/observatory/`, from `~/docker/arcadia/observatory-dist/` — the
+`http://dxp2800:8737/observatory/`, from `~/docker/warren/arcadia/observatory-dist/` — the
 directory arcadia's compose file bind-mounts as `/srv/observatory`. Publishing a townhall
 build therefore means shipping into arcadia's deploy directory, and the runbook that owns
 that origin end to end is [`arcadia/docs/deployment.md`](../../arcadia/docs/deployment.md).
@@ -34,7 +34,7 @@ Follow it rather than reinventing the copy step here; the short version is:
 
 ```sh
 # from warren/townhall/, after pnpm build
-tar -cf - -C dist . | ssh Miha@dxp2800 'tar -xf - -C ~/docker/arcadia/observatory-dist'
+tar -cf - -C dist . | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia/observatory-dist'
 ```
 
 The mount is read-only and static, so new files are served as they land — no restart.

@@ -22,12 +22,33 @@ over running them by hand:
   like its `scp`, so this is a tar over ssh into a staging directory plus a python3 pass
   on the burrow that replaces files one by one and never swaps the directory itself
   (docker bind-mounts an inode, not a path).
-- **A marker.** `~/docker/<dir>/DEPLOYED-<service>` — revision, service, time, who. The
+- **A marker.** `~/docker/warren/<dir>/DEPLOYED-<service>` — revision, service, time, who. The
   only thing on the NAS that can say what it is running; `status.sh` reads them.
 - **A clean HEAD.** The deployed tree must be one git can name. `ALLOW_DIRTY=1` overrides
   that, out loud. `SKIP_TESTS=1` skips each service's own check first.
 - **Steward's data backed up** beside itself before every rollout (three kept), and its
   image tag written into the burrow's `.env`, so a rollback is one line and `up -d`.
+
+## Where things are on the burrow
+
+Everything the warren puts on a burrow is under one directory, `~/docker/warren`
+(warren#358), so that `ls ~/docker` on a machine that also runs other stacks does not
+interleave the warren's directories with theirs:
+
+| Directory | What | Written by |
+| --- | --- | --- |
+| `burrow/` | chronicle: `app/` (the tree its README's tar recipe ships), `data/`, `compose.yaml`, `.env` | `deploy.sh chronicle` |
+| `arcadia/` | the origin: `dist/`, `observatory-dist/` (townhall's build), `nginx.conf`, `compose.yaml` | `deploy.sh arcadia`, `deploy.sh townhall` |
+| `steward/` | the control plane: `compose.yaml`, `.env`, `data/`, `residents-key`, `residents-repo/` | `deploy.sh steward` |
+| `residents/<id>/` | one resident: `docker-compose.yaml`, `.env`, `manifest.yaml`, `soul.md`, `memory/`, `claude/` | `steward provision <id>`, from a laptop — never this script |
+
+The control plane's daemons bind-mount `residents/` and nothing wider: that is what lets
+them journal for a container-placed resident without also seeing steward's own `.env`
+and deploy key next door. A resident whose manifest sets `deploy.path` outside
+`residents/` is one the daemons cannot see. The pre-steward bot in `~/docker/life-agent`
+is not the warren's and stays where it is. A burrow still laid out the old way — the
+same directories at the top of `~/docker` — is refused by `deploy.sh`, not moved; see
+[Moving a burrow under `~/docker/warren`](#moving-a-burrow-under-dockerwarren).
 
 ## What lives on the burrow that the repo does not carry
 
@@ -35,9 +56,9 @@ Secrets, in a `.env` beside each compose file, mode `0600`, never in git:
 
 | Directory | `.env` holds | Compose file (in the repo) |
 | --- | --- | --- |
-| `~/docker/burrow` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
-| `~/docker/arcadia` | — | [`arcadia/deploy/compose.yaml`](../arcadia/deploy/compose.yaml) + `nginx.conf` |
-| `~/docker/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`. Beside it: `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
+| `~/docker/warren/burrow` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
+| `~/docker/warren/arcadia` | — | [`arcadia/deploy/compose.yaml`](../arcadia/deploy/compose.yaml) + `nginx.conf` |
+| `~/docker/warren/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`. Beside it: `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
 
 `deploy.sh` refuses to roll out a service whose `.env` is missing and says what it must
 contain. Data — chronicle's `/data`, steward's `data/` — is never written by the script.
@@ -45,7 +66,7 @@ contain. Data — chronicle's `/data`, steward's `data/` — is never written by
 ## The residents checkout
 
 The control plane does not serve the residents tree baked into its image. It serves —
-and writes — a **git checkout on the burrow**: `~/docker/steward/residents-repo`, a
+and writes — a **git checkout on the burrow**: `~/docker/warren/steward/residents-repo`, a
 sparse, blobless clone of this repository holding `steward/residents` and
 `steward/skills`, on a branch of its own, `burrow/residents`. The compose file mounts it
 at `/checkout`, read-write into the API and read-only into the scheduler and watchdog,
@@ -94,8 +115,8 @@ The checkout needs a key that can read and push this (private) repository. Gener
 key with write access. From the laptop:
 
 ```sh
-ssh Miha@dxp2800 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/steward/residents-key && chmod 600 ~/docker/steward/residents-key'
-ssh Miha@dxp2800 'cat ~/docker/steward/residents-key.pub' \
+ssh Miha@dxp2800 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/warren/steward/residents-key && chmod 600 ~/docker/warren/steward/residents-key'
+ssh Miha@dxp2800 'cat ~/docker/warren/steward/residents-key.pub' \
     | gh repo deploy-key add - -R 0xCommanderKeen/warren --allow-write --title 'dxp2800 residents checkout'
 ```
 
@@ -111,7 +132,7 @@ Two things to know about that key. A deploy key added with `gh` is tied to the t
 (Deploy keys) instead if that bothers you. And GitHub deploy keys are per repository,
 not per branch: the key *can* push `main`; steward never does, and the standing rule
 that nothing lands on `main` without a pull request is what keeps it that way. To
-revoke: delete the key on GitHub and `rm ~/docker/steward/residents-key` on the NAS —
+revoke: delete the key on GitHub and `rm ~/docker/warren/steward/residents-key` on the NAS —
 the API then answers `"committed, not pushed"` on every write until a new key exists.
 
 ## Deploy on merge
@@ -197,3 +218,100 @@ as — from tailnet addresses only. That account is in the `docker` group, so th
 root-equivalent on that machine; this is the trust the pipeline needs to recreate
 containers and it is not smaller than it looks. The repo is private, so only code merged
 to `main` ever runs there, and the ephemeral node is gone when the job ends.
+
+## Moving a burrow under `~/docker/warren`
+
+One-time, for a burrow deployed before warren#358, when `burrow`, `arcadia`, `steward` and
+`steward-<id>` sat at the top of `~/docker`. `deploy.sh` refuses such a burrow
+(`require_layout`) rather than moving it: chronicle's `data/`, steward's `data/`, `.env`,
+`residents-key` and `residents-repo/`, and every resident's `memory/` and `claude/` are not
+things it created. The move is one operator's session from a laptop, in this order, and
+everything the warren runs is down for the few minutes between steps 3 and 5. Everything
+here is a rename, so the way back is the same moves in reverse and `up -d` from the old
+places.
+
+1. **Nothing deploying.** `gh run list -R 0xCommanderKeen/warren --workflow deploy.yml -L 1`
+   shows no run in progress, and nothing is about to merge to `main`.
+
+2. **Re-address the residents on the burrow's checkout, while the API is still up.** The
+   checkout is authoritative and the daemons compute a resident's directory from its
+   manifest, so `deploy.path` must say `~/docker/warren/residents/<id>` before the daemons
+   come back in the new place. For each resident on the burrow, with `STEWARD_TOKEN` from
+   the burrow's steward `.env`:
+
+   ```sh
+   api=http://dxp2800:8802; auth="Authorization: Bearer $STEWARD_TOKEN"
+   for id in pip life-agent; do
+     curl -fsS -H "$auth" "$api/residents/$id/declaration" \
+       | python3 -c 'import json, sys
+   d = json.load(sys.stdin)
+   text = d["text"].replace("path: ~/docker/steward-" + d["id"], "path: ~/docker/warren/residents/" + d["id"])
+   print(json.dumps({"text": text}))' \
+       | curl -fsS -H "$auth" -H 'Content-Type: application/json' -X PUT "$api/residents/$id/declaration" -d @- \
+       | python3 -c 'import json, sys; c = json.load(sys.stdin)["commit"]; print(c["sha"], "pushed" if c["pushed"] else "NOT pushed")'
+   done
+   ```
+
+   Each is one commit on `burrow/residents`. A running scheduler now refuses to start —
+   the directory it computes does not exist yet — which is the downtime beginning; a
+   crash-looping one keeps crash-looping.
+
+3. **Stop everything the warren runs**, residents first, then the control plane, the
+   origin, chronicle. The resident projects are named by the nursery (`-p <id>`), so name
+   them the same way, or `down` finds nothing:
+
+   ```sh
+   ssh Miha@dxp2800 'set -e
+     for d in ~/docker/steward-*; do docker compose -f "$d/docker-compose.yaml" --project-directory "$d" -p "${d##*/steward-}" down; done
+     cd ~/docker/steward && docker compose down --remove-orphans
+     cd ~/docker/arcadia && docker compose down
+     cd ~/docker/burrow && docker compose down'
+   ```
+
+4. **Move.** `~/docker/life-agent` does not match `steward-*` and stays.
+
+   ```sh
+   ssh Miha@dxp2800 'set -e
+     mkdir -p ~/docker/warren/residents
+     mv ~/docker/burrow ~/docker/warren/burrow
+     mv ~/docker/arcadia ~/docker/warren/arcadia
+     mv ~/docker/steward ~/docker/warren/steward
+     for d in ~/docker/steward-*; do mv "$d" ~/docker/warren/residents/"${d##*/steward-}"; done
+     ls ~/docker/warren ~/docker/warren/residents'
+   ```
+
+5. **Bring it back where it now is.** Every compose file is relative to its own
+   directory, so nothing in them changes. Steward comes up on the compose file it already
+   has, whose `~/docker`-wide mount still covers the new place, and its scheduler starts
+   once it finds `residents/<id>/memory` there.
+
+   ```sh
+   ssh Miha@dxp2800 'set -e
+     cd ~/docker/warren/burrow && docker compose up -d
+     cd ~/docker/warren/arcadia && docker compose up -d
+     for d in ~/docker/warren/residents/*; do docker compose -f "$d/docker-compose.yaml" --project-directory "$d" -p "${d##*/}" up -d; done
+     cd ~/docker/warren/steward && docker compose up -d
+     sleep 30; docker ps --format "{{.Names}}\t{{.Status}}\t{{.Label \"com.docker.compose.project.working_dir\"}}" | grep -E "^(burrow|arcadia|steward)"'
+   ```
+
+   Every warren container's working directory reads `/home/Miha/docker/warren/…`, and
+   `steward-scheduler` is `Up`, not `Restarting`.
+
+6. **Deploy the fleet** from a checkout that has this section — merging its pull request
+   does it, or `deploy/deploy.sh all` from the branch. Steward's compose file with the
+   `residents/`-only mount lands, the checkout is fetched where it now is, and the markers
+   are written where `status.sh` reads them.
+
+7. **Reconcile each provisioned resident's bundle** with its re-addressed manifest, from
+   the laptop against the checkout's manifests. The bundle's copy of `manifest.yaml` is
+   the one file that differs; `--dry-run` first shows exactly that.
+
+   ```sh
+   git worktree add ../burrow-residents origin/burrow/residents 2>/dev/null; git -C ../burrow-residents pull -q
+   cd steward
+   CHRONICLE_URL=http://192.168.1.222:8737 uv run steward provision pip --residents ../../burrow-residents/steward/residents --dry-run
+   CHRONICLE_URL=http://192.168.1.222:8737 uv run steward provision pip --residents ../../burrow-residents/steward/residents
+   ```
+
+8. **Check.** `deploy/status.sh` prints four markers and the checkout line; on the burrow
+   `ls ~/docker` shows `warren` and no `burrow`, `arcadia`, `steward` or `steward-*`.

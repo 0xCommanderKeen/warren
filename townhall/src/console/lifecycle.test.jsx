@@ -60,8 +60,8 @@ const RETIRE_PLAN = {
   stopped: false,
   scrubbed: false,
   commands: [
-    "ssh Miha@dxp2800 docker compose -f ~/docker/steward-life-agent/docker-compose.yaml down --remove-orphans",
-    "ssh Miha@dxp2800 rm -f ~/docker/steward-life-agent/.env ~/docker/steward-life-agent/docker-compose.yaml",
+    "ssh Miha@dxp2800 docker compose -f ~/docker/warren/residents/life-agent/docker-compose.yaml down --remove-orphans",
+    "ssh Miha@dxp2800 rm -f ~/docker/warren/residents/life-agent/.env ~/docker/warren/residents/life-agent/docker-compose.yaml",
   ],
   commit: null,
   dry_run: true,
@@ -88,7 +88,7 @@ const PROVISION_PLAN = {
   dry_run: true,
   changed: false,
   provision: {
-    target: { host: "dxp2800", user: "Miha", path: "~/docker/steward-life-agent", container: "steward-life-agent", image: "steward-resident:latest" },
+    target: { host: "dxp2800", user: "Miha", path: "~/docker/warren/residents/life-agent", container: "steward-life-agent", image: "steward-resident:latest" },
     commands: ["ssh Miha@dxp2800 docker compose … up -d"],
     sent: false,
   },
@@ -275,6 +275,6 @@ describe("a retired resident's record", () => {
     // Addressed by id, never by the uid this page is routed on: the provision route reads
     // `residents/<id>/manifest.yaml` off the disk and a uid names no directory.
     expect(posted(fetch, "/residents/life-agent/provision")).toHaveLength(1);
-    expect(screen.getByText("Miha@dxp2800:~/docker/steward-life-agent")).toBeTruthy();
+    expect(screen.getByText("Miha@dxp2800:~/docker/warren/residents/life-agent")).toBeTruthy();
   });
 });

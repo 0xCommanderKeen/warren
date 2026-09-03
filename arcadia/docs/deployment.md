@@ -10,7 +10,7 @@ old built-in viewer is no longer reachable at `/`.
 This origin serves builds of **two** directories of the warren monorepo — `arcadia/` and
 `townhall/` — so a deploy is driven from a checkout of
 <https://github.com/0xCommanderKeen/warren>, and the working directory matters at every
-step below. The NAS has no git and no clone: `~/docker/arcadia/` holds unpacked build
+step below. The NAS has no git and no clone: `~/docker/warren/arcadia/` holds unpacked build
 output, and nothing there pulls. Every deploy is pushed.
 
 ## Deploy
@@ -33,23 +33,23 @@ Run steps 1–3 from a warren checkout on a machine that can build; steps 4–5 
 
    ```sh
    # from warren/arcadia/ — the village, then its two config files
-   tar -cf - dist | ssh Miha@dxp2800 'tar -xf - -C ~/docker/arcadia'
+   tar -cf - dist | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia'
    tar -cf - -C deploy compose.yaml nginx.conf \
-     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/arcadia'
+     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia'
 
    # from warren/townhall/ — its dist becomes the *contents* of observatory-dist
    tar -cf - -C dist . \
-     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/arcadia/observatory-dist'
+     | ssh Miha@dxp2800 'tar -xf - -C ~/docker/warren/arcadia/observatory-dist'
    ```
 
    The `-C` flags are what put the files where the compose file expects them: the config
-   pair lands at the root of `~/docker/arcadia/`, and townhall's build lands *inside*
+   pair lands at the root of `~/docker/warren/arcadia/`, and townhall's build lands *inside*
    `observatory-dist/` rather than as a nested `dist/` directory.
 
-   `compose.yaml` and `nginx.conf` live at the *root* of `~/docker/arcadia/` on the NAS,
+   `compose.yaml` and `nginx.conf` live at the *root* of `~/docker/warren/arcadia/` on the NAS,
    not under a `deploy/` subdirectory — that is what the compose file's
    `./nginx.conf:/etc/nginx/nginx.conf:ro` mount resolves to.
-4. `ssh Miha@dxp2800 'cd ~/docker/arcadia && docker compose up -d'`. Static assets are
+4. `ssh Miha@dxp2800 'cd ~/docker/warren/arcadia && docker compose up -d'`. Static assets are
    bind-mounted read-only, so a build-only change needs no restart — the container serves
    the new files as soon as they land. Changing `nginx.conf` does need
    `docker compose restart arcadia` (or `up -d` after a compose change).
@@ -98,7 +98,7 @@ no restart. That is the everyday rollback now that the origin is established.
 
 To undo the whole 2026-08-27 cutover: stop Arcadia, restore Chronicle's port mapping to
 `8737:8737`, and recreate Chronicle. The Arcadia build and configuration remain in
-`~/docker/arcadia/` for diagnosis. No data migration was part of that cutover, so rollback
+`~/docker/warren/arcadia/` for diagnosis. No data migration was part of that cutover, so rollback
 does not touch Chronicle's event log or Steward's database.
 
 That rollback no longer restores a UI. It used to bring back Chronicle's built-in viewer at

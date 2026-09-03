@@ -26,11 +26,16 @@
 # the SPAs are built from the working tree, and a deploy nobody can name by commit is a
 # deploy nobody can roll back. ALLOW_DIRTY=1 says out loud that you want it anyway.
 #
-# Every deploy leaves a marker on the burrow — ~/docker/<dir>/DEPLOYED-<service>, one
+# Every deploy leaves a marker on the burrow — ~/docker/warren/<dir>/DEPLOYED-<service>, one
 # line: revision, service, time, who — which is what deploy/status.sh reads. The NAS has
 # no git; that file is the only thing there that can say what is running. (The residents
-# checkout under ~/docker/steward is the one exception: it is git, through the
+# checkout under ~/docker/warren/steward is the one exception: it is git, through the
 # control-plane image, and it names its own revision — see ensure_checkout.)
+#
+# Everything the warren puts on a burrow lives under ~/docker/warren (warren#358):
+# burrow/ is chronicle, arcadia/ the origin (townhall's build inside it), steward/ the
+# control plane, residents/<id> each resident `steward provision` writes. Not the
+# pre-steward bot in ~/docker/life-agent, which is not the warren's.
 #
 # Preconditions: ssh to $NAS with a key (BatchMode — no prompts), tar and python3 on
 # both ends, pnpm and the node versions the CI workflows pin (24 for arcadia, 22 for
@@ -144,7 +149,7 @@ publish_files() {
 
 stamp() {
     # stamp <nas dir> <service>
-    $SSH "$NAS" "printf 'rev=%s service=%s at=%s by=%s\n' '$REV' '$2' '$NOW' '$WHO' > ~/docker/$1/DEPLOYED-$2"
+    $SSH "$NAS" "printf 'rev=%s service=%s at=%s by=%s\n' '$REV' '$2' '$NOW' '$WHO' > ~/docker/warren/$1/DEPLOYED-$2"
 }
 
 wait_for() {
@@ -158,10 +163,23 @@ wait_for() {
     die "$1 did not answer $2 within 90s (last: ${code:-none})"
 }
 
+# require_layout <dir> — refuse a burrow still laid out the way it was before warren#358,
+# with ~/docker/<dir> at the top of ~/docker and nothing yet at ~/docker/warren/<dir>.
+# Refuse rather than move: chronicle's data/, steward's data/, .env and residents
+# checkout, every resident's memory/ are not things this script created, and a deploy
+# into the new place beside them would leave the old one running unnoticed. The move is
+# one operator's session — deploy/README.md "Moving a burrow under ~/docker/warren".
+require_layout() {
+    if $SSH "$NAS" "test -d ~/docker/$1 && ! test -d ~/docker/warren/$1"; then
+        die "~/docker/$1 on $NAS is the pre-warren#358 layout and ~/docker/warren/$1 does not exist yet; move the burrow first — deploy/README.md \"Moving a burrow under ~/docker/warren\""
+    fi
+}
+
 # ---------------------------------------------------------------------------- chronicle
 # chronicle/README.md "Running": the tar recipe's file list, restart, /state.
 deploy_chronicle() {
     require_clean chronicle
+    require_layout burrow
     files="$(python3 - "$ROOT/chronicle/README.md" <<'PY'
 import re, sys
 text = open(sys.argv[1], encoding="utf-8").read()
@@ -180,15 +198,15 @@ PY
     paths=""; for f in $files; do paths="$paths chronicle/$f"; done
     # shellcheck disable=SC2086 — the list is the recipe, space-separated on purpose
     (cd "$ROOT" && git archive --format=tar HEAD $paths) | tar -x -C "$stage"
-    log "chronicle: publishing to $NAS:~/docker/burrow/app"
-    publish "$stage/chronicle" docker/burrow/app
-    $SSH "$NAS" 'test -f ~/docker/burrow/.env' \
-        || die "~/docker/burrow/.env is missing on $NAS — it holds CHRONICLE_NOTIFY_URL (and CHRONICLE_TOKEN when ingest is closed); see chronicle/deploy/compose.yaml"
-    publish_files docker/burrow "$ROOT/chronicle/deploy" compose.yaml
+    log "chronicle: publishing to $NAS:~/docker/warren/burrow/app"
+    publish "$stage/chronicle" docker/warren/burrow/app
+    $SSH "$NAS" 'test -f ~/docker/warren/burrow/.env' \
+        || die "~/docker/warren/burrow/.env is missing on $NAS — it holds CHRONICLE_NOTIFY_URL (and CHRONICLE_TOKEN when ingest is closed); see chronicle/deploy/compose.yaml"
+    publish_files docker/warren/burrow "$ROOT/chronicle/deploy" compose.yaml
     log "chronicle: recreating"
     # Recreate rather than restart: the code is a bind mount, so `up -d` alone would see
     # nothing to do, and nothing this container holds lives outside /data any more.
-    $SSH "$NAS" 'cd ~/docker/burrow && docker compose up -d --force-recreate' >/dev/null 2>&1
+    $SSH "$NAS" 'cd ~/docker/warren/burrow && docker compose up -d --force-recreate' >/dev/null 2>&1
     wait_for "$ORIGIN/burrow/state" 200
     curl -fsS -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: /burrow/residents did not answer"
     stamp burrow chronicle
@@ -199,22 +217,23 @@ PY
 # arcadia/docs/deployment.md "Deploy", steps 1, 3, 4, 5.
 deploy_arcadia() {
     require_clean arcadia
+    require_layout arcadia
     log "arcadia: build ($(node --version), pnpm $(pnpm --version))"
     quietly "arcadia install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/arcadia"
     if tests_enabled; then quietly "arcadia tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/arcadia"; fi
     quietly "arcadia build" sh -c 'cd "$1" && pnpm build' _ "$ROOT/arcadia"
-    log "arcadia: publishing dist/ to $NAS:~/docker/arcadia/dist"
-    publish "$ROOT/arcadia/dist" docker/arcadia/dist
-    before="$($SSH "$NAS" 'md5sum ~/docker/arcadia/nginx.conf ~/docker/arcadia/compose.yaml 2>/dev/null' || true)"
-    # The two config files land at the root of ~/docker/arcadia — beside dist/, not over it.
-    publish_files docker/arcadia "$ROOT/arcadia/deploy" nginx.conf compose.yaml
-    after="$($SSH "$NAS" 'md5sum ~/docker/arcadia/nginx.conf ~/docker/arcadia/compose.yaml')"
+    log "arcadia: publishing dist/ to $NAS:~/docker/warren/arcadia/dist"
+    publish "$ROOT/arcadia/dist" docker/warren/arcadia/dist
+    before="$($SSH "$NAS" 'md5sum ~/docker/warren/arcadia/nginx.conf ~/docker/warren/arcadia/compose.yaml 2>/dev/null' || true)"
+    # The two config files land at the root of ~/docker/warren/arcadia — beside dist/, not over it.
+    publish_files docker/warren/arcadia "$ROOT/arcadia/deploy" nginx.conf compose.yaml
+    after="$($SSH "$NAS" 'md5sum ~/docker/warren/arcadia/nginx.conf ~/docker/warren/arcadia/compose.yaml')"
     if [ "$before" != "$after" ]; then
         log "arcadia: nginx.conf/compose.yaml changed — restarting the origin"
-        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d && docker compose restart arcadia' >/dev/null 2>&1
+        $SSH "$NAS" 'cd ~/docker/warren/arcadia && docker compose up -d && docker compose restart arcadia' >/dev/null 2>&1
     else
         # Static assets are bind-mounted read-only: new files are served as they land.
-        $SSH "$NAS" 'cd ~/docker/arcadia && docker compose up -d' >/dev/null 2>&1
+        $SSH "$NAS" 'cd ~/docker/warren/arcadia && docker compose up -d' >/dev/null 2>&1
     fi
     wait_for "$ORIGIN/" 200
     log "arcadia: smoke"
@@ -227,12 +246,13 @@ deploy_arcadia() {
 # townhall/docs/deployment.md: build with the mount prefix, publish into arcadia's dir.
 deploy_townhall() {
     require_clean townhall
+    require_layout arcadia
     log "townhall: build --base=/observatory/ ($(node --version), pnpm $(pnpm --version))"
     quietly "townhall install" sh -c 'cd "$1" && pnpm install --frozen-lockfile' _ "$ROOT/townhall"
     if tests_enabled; then quietly "townhall tests" sh -c 'cd "$1" && pnpm test' _ "$ROOT/townhall"; fi
     quietly "townhall build" sh -c 'cd "$1" && pnpm build --base=/observatory/' _ "$ROOT/townhall"
-    log "townhall: publishing dist/ to $NAS:~/docker/arcadia/observatory-dist"
-    publish "$ROOT/townhall/dist" docker/arcadia/observatory-dist
+    log "townhall: publishing dist/ to $NAS:~/docker/warren/arcadia/observatory-dist"
+    publish "$ROOT/townhall/dist" docker/warren/arcadia/observatory-dist
     curl -fsS -m 10 "$ORIGIN/observatory/" | grep -q 'id="root"' || die "townhall: /observatory/ did not serve the app"
     stamp arcadia townhall
     log "townhall: $SHORT is live"
@@ -245,17 +265,17 @@ deploy_townhall() {
 # script must not contain single quotes: it travels through two shells as one word.
 checkout_sh() {
     case "$2" in *\'*) die "checkout_sh: the script must not contain a single quote: $2" ;; esac
-    $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout -v ~/docker/steward/residents-key:/run/steward/residents-key:ro steward-cp:$1 sh -c '$2'"
+    $SSH "$NAS" "docker run --rm -v ~/docker/warren/steward/residents-repo:/checkout -v ~/docker/warren/steward/residents-key:/run/steward/residents-key:ro steward-cp:$1 sh -c '$2'"
 }
 
 # ensure_checkout <image tag> — the residents checkout on the burrow (warren#351): made
 # once, fetched on every deploy, never reset. Runs before anything is stopped, so a refusal
 # here leaves the fleet exactly as it was.
 ensure_checkout() {
-    $SSH "$NAS" 'test -f ~/docker/steward/residents-key' \
-        || die "~/docker/steward/residents-key is missing on $NAS — the deploy key that lets the burrow's residents checkout reach $CHECKOUT_URL; deploy/README.md \"The residents checkout\" says how to make one"
-    $SSH "$NAS" 'chmod 600 ~/docker/steward/residents-key'
-    if $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/.git'; then
+    $SSH "$NAS" 'test -f ~/docker/warren/steward/residents-key' \
+        || die "~/docker/warren/steward/residents-key is missing on $NAS — the deploy key that lets the burrow's residents checkout reach $CHECKOUT_URL; deploy/README.md \"The residents checkout\" says how to make one"
+    $SSH "$NAS" 'chmod 600 ~/docker/warren/steward/residents-key'
+    if $SSH "$NAS" 'test -d ~/docker/warren/steward/residents-repo/.git'; then
         # Dirty means a write landed on disk and its commit did not — the one state this
         # script must not paper over with a reset, because the bytes are somebody's edit.
         dirty="$(checkout_sh "$1" "git -C /checkout status --porcelain")" \
@@ -284,10 +304,10 @@ ensure_checkout() {
         # else's blobs. On its own branch — an existing one continues this burrow's history,
         # a new one starts from the seed on the default branch — and pushed at once, so the
         # branch exists off the box from the first minute.
-        $SSH "$NAS" 'mkdir -p ~/docker/steward/residents-repo'
+        $SSH "$NAS" 'mkdir -p ~/docker/warren/steward/residents-repo'
         checkout_sh "$1" "git clone --quiet --filter=blob:none --sparse $CHECKOUT_URL /checkout && git -C /checkout sparse-checkout set steward/residents steward/skills && (git -C /checkout checkout --quiet -B $CHECKOUT_BRANCH origin/$CHECKOUT_BRANCH 2>/dev/null || git -C /checkout checkout --quiet -b $CHECKOUT_BRANCH) && git -C /checkout push --quiet origin HEAD:refs/heads/$CHECKOUT_BRANCH" \
             || die "could not create the residents checkout on $NAS (is residents-key's public half a deploy key with write access on the repository?)"
-        $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/steward/residents' \
+        $SSH "$NAS" 'test -d ~/docker/warren/steward/residents-repo/steward/residents' \
             || die "the checkout on $NAS came up without steward/residents"
     fi
     # What the checkout holds going into this deploy. The smoke after `up` insists it is
@@ -304,6 +324,7 @@ ensure_checkout() {
 # made here once and only ever fetched afterwards — see ensure_checkout.
 deploy_steward() {
     require_clean steward
+    require_layout steward
     if tests_enabled; then
         log "steward: make check"
         quietly "steward check" sh -c 'cd "$1" && make check' _ "$ROOT/steward"
@@ -312,16 +333,20 @@ deploy_steward() {
     quietly "steward image build" sh -c 'cd "$1" && make image-cp CP_TAG="$2" REVISION="$3"' _ "$ROOT/steward" "$SHORT" "$REV"
     log "steward: shipping the image to $NAS"
     quietly "steward image ship" sh -c 'cd "$1" && make image-cp-ship CP_TAG="$2" NAS="$3"' _ "$ROOT/steward" "$SHORT" "$NAS"
-    $SSH "$NAS" 'test -f ~/docker/steward/.env' \
-        || die "~/docker/steward/.env is missing on $NAS — it must hold STEWARD_TOKEN=… (chmod 600); see steward/deploy/compose.yaml"
+    $SSH "$NAS" 'test -f ~/docker/warren/steward/.env' \
+        || die "~/docker/warren/steward/.env is missing on $NAS — it must hold STEWARD_TOKEN=… (chmod 600); see steward/deploy/compose.yaml"
     ensure_checkout "$SHORT"
     log "steward: stopping, backing up data/, publishing compose.yaml"
     # down before the new compose file lands: the old file is the one that knows the old
     # service names, and --remove-orphans catches whatever it did not. Backups: keep three.
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose down --remove-orphans >/dev/null 2>&1; \
+    $SSH "$NAS" 'cd ~/docker/warren/steward && docker compose down --remove-orphans >/dev/null 2>&1; \
         cp -r data "data.bak-$(date -u +%Y%m%dT%H%M%SZ)" && ls -dt data.bak-* | tail -n +4 | xargs -r rm -rf'
-    publish_files docker/steward "$ROOT/steward/deploy" compose.yaml
-    $SSH "$NAS" "cd ~/docker/steward \
+    # The residents' directory the daemons mount (compose.yaml), made as the deploy user
+    # before `up` so docker does not make it root-owned on first start — `steward
+    # provision` writes each resident into it as that user, over ssh.
+    $SSH "$NAS" 'mkdir -p ~/docker/warren/residents'
+    publish_files docker/warren/steward "$ROOT/steward/deploy" compose.yaml
+    $SSH "$NAS" "cd ~/docker/warren/steward \
         && if grep -q '^STEWARD_IMAGE_TAG=' .env; then sed -i 's/^STEWARD_IMAGE_TAG=.*/STEWARD_IMAGE_TAG=$SHORT/' .env; else printf 'STEWARD_IMAGE_TAG=%s\n' '$SHORT' >> .env; fi \
         && chmod 600 .env && docker compose up -d" >/dev/null 2>&1
     # 401 is the API saying it is up and that it wants a credential — the smoke check
@@ -330,23 +355,23 @@ deploy_steward() {
     log "steward: checkout smoke"
     # The API sees the checkout on its branch, and the daemons' links reach into it: the
     # two facts behind warren#351's three defects, checked on the running containers.
-    branch="$($SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api git -C /checkout rev-parse --abbrev-ref HEAD' 2>/dev/null | tr -d '\r')"
+    branch="$($SSH "$NAS" 'cd ~/docker/warren/steward && docker compose exec -T api git -C /checkout rev-parse --abbrev-ref HEAD' 2>/dev/null | tr -d '\r')"
     [ "$branch" = "$CHECKOUT_BRANCH" ] || die "steward-api does not see the residents checkout on $CHECKOUT_BRANCH (saw: ${branch:-nothing})"
     # Nothing written before this deploy is gone: the HEAD read before anything was stopped
     # is still an ancestor of (or is) the HEAD the new API serves. An ancestor rather than
     # an equality, because the old API may legitimately have committed a save between the
     # two reads — what must never be true is that history went backwards.
-    $SSH "$NAS" "cd ~/docker/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
+    $SSH "$NAS" "cd ~/docker/warren/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
         || die "the residents checkout no longer contains $CHECKOUT_HEAD, which it held before this deploy: a declaration written earlier may be gone — stop and look before deploying again"
     # Through a one-off container rather than `exec` into the scheduler: the daemons' health
     # is doctor's question below, and a scheduler refusing to start over a missing resident
     # container (its own, correct, refusal) must not read as "the checkout is not mounted".
-    $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -f /checkout/steward/residents/pip/manifest.yaml" >/dev/null 2>&1 \
+    $SSH "$NAS" "docker run --rm -v ~/docker/warren/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -f /checkout/steward/residents/pip/manifest.yaml" >/dev/null 2>&1 \
         || die "the residents checkout on $NAS does not hold pip's manifest where the daemons read it"
     log "steward: doctor"
     # In the watchdog's container, against the tree the daemons actually run: that is the
     # process with the docker socket, so its topology line is the true one.
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /checkout/steward/residents' 2>&1 | head -40 || true
+    $SSH "$NAS" 'cd ~/docker/warren/steward && docker compose exec -T watchdog steward doctor /checkout/steward/residents' 2>&1 | head -40 || true
     log "steward: daemons"
     # Doctor reports and never fails this script, so a scheduler refusing to start — its
     # own, correct refusal over a resident container the burrow does not run (warren#356) —

@@ -56,7 +56,7 @@ def test_a_manifest_with_no_deploy_block_still_has_an_address(write_resident) ->
     assert target.host == DEFAULT_HOST
     assert target.user == DEFAULT_USER
     assert target.container == "steward-test-agent"
-    assert target.path == "~/docker/steward-test-agent"
+    assert target.path == "~/docker/warren/residents/test-agent"
     assert target.image == "steward-resident:latest"
     assert target.command == ("sleep", "infinity")
 
@@ -246,9 +246,9 @@ def test_compose_commands_name_the_file_and_the_project_explicitly(write_residen
         "docker",
         "compose",
         "-f",
-        "~/docker/steward-test-agent/docker-compose.yaml",
+        "~/docker/warren/residents/test-agent/docker-compose.yaml",
         "--project-directory",
-        "~/docker/steward-test-agent",
+        "~/docker/warren/residents/test-agent",
         "-p",
         "test-agent",
         "up",
@@ -299,10 +299,10 @@ def test_the_local_transport_unpacks_the_real_archive(tmp_path: Path, write_resi
     outcome = host.send(bundle_for(one, target, VILLAGE), target.path)
 
     assert outcome.ok
-    landed = tmp_path / "host" / "docker" / "steward-test-agent"
+    landed = tmp_path / "host" / "docker" / "warren" / "residents" / "test-agent"
     assert (landed / COMPOSE_FILENAME).is_file()
     assert host.read(target.env_path) == render_env(VILLAGE)
-    assert host.sent == ["~/docker/steward-test-agent"]
+    assert host.sent == ["~/docker/warren/residents/test-agent"]
 
 
 def test_the_local_transport_records_commands_instead_of_running_them(tmp_path: Path) -> None:

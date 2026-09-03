@@ -2977,8 +2977,10 @@ def test_deploy_true_runs_the_whole_pipeline(api: ApiFactory, tmp_path: Path) ->
     assert body["provision"]["target"]["container"] == "steward-note-keeper"
     assert body["provision"]["sent"] is True
     assert body["register"]["ok"] is True
-    assert (host.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
-    assert host.read("~/docker/steward-note-keeper/.env") is not None
+    assert (
+        host.root / "docker" / "warren" / "residents" / "note-keeper" / "docker-compose.yaml"
+    ).is_file()
+    assert host.read("~/docker/warren/residents/note-keeper/.env") is not None
 
 
 def test_a_deploy_with_nowhere_to_emit_is_a_refusal_not_a_traceback(
@@ -3022,7 +3024,9 @@ def test_a_refused_deploy_says_the_same_body_will_pick_up_where_it_stopped(
     assert retried.status_code == 201
     assert retried.json()["declare"]["written"] is False, "the skeleton was already there"
     assert retried.json()["provision"]["sent"] is True
-    assert (host.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+    assert (
+        host.root / "docker" / "warren" / "residents" / "note-keeper" / "docker-compose.yaml"
+    ).is_file()
 
 
 @pytest.mark.usefixtures("village")
@@ -3126,8 +3130,10 @@ def test_provisioning_builds_the_declared_manifest(api: ApiFactory, tmp_path: Pa
     assert body["act"] == "provision"
     assert body["declare"]["written"] is False
     assert body["provision"]["sent"] is True
-    assert (host.root / "docker" / "steward-test-agent" / "docker-compose.yaml").is_file()
-    shipped = host.read("~/docker/steward-test-agent/manifest.yaml") or ""
+    assert (
+        host.root / "docker" / "warren" / "residents" / "test-agent" / "docker-compose.yaml"
+    ).is_file()
+    shipped = host.read("~/docker/warren/residents/test-agent/manifest.yaml") or ""
     assert "app_grants" in shipped
 
 
@@ -3434,8 +3440,8 @@ def test_retiring_a_container_removes_the_token_only_after_the_container_is_down
     scrub = next(index for index, call in enumerate(host.calls) if call[0] == "rm")
     assert down < scrub
     assert host.calls[scrub][-2:] == (
-        "~/docker/steward-test-agent/.env",
-        "~/docker/steward-test-agent/docker-compose.yaml",
+        "~/docker/warren/residents/test-agent/.env",
+        "~/docker/warren/residents/test-agent/docker-compose.yaml",
     )
     assert "BURROW_TOKEN is gone" in body["message"]
     assert "claude/ still holds" in body["message"]

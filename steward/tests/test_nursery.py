@@ -289,7 +289,7 @@ def test_the_pipeline_declares_commits_provisions_and_checks(
     assert scratch_repo.log()[0] == "feat(residents): declare note-keeper"
 
     # provision: the bundle is on the host and the container was asked to come up.
-    landed = host.root / "docker" / "steward-note-keeper"
+    landed = host.root / "docker" / "warren" / "residents" / "note-keeper"
     assert (landed / "docker-compose.yaml").is_file()
     assert (landed / "soul.md").is_file()
     assert (landed / "memory").is_dir()
@@ -308,7 +308,9 @@ def test_the_deployed_container_is_wired_to_the_village(
 ) -> None:
     """The village identity and address, in both spellings, exactly as Hob is."""
     raise_into(scratch_repo, host)
-    compose = yaml.safe_load(host.read("~/docker/steward-note-keeper/docker-compose.yaml") or "")
+    compose = yaml.safe_load(
+        host.read("~/docker/warren/residents/note-keeper/docker-compose.yaml") or ""
+    )
     environment = compose["services"]["note-keeper"]["environment"]
 
     assert environment["CHRONICLE_AGENT_ID"] == "claude-code:note-keeper"
@@ -320,7 +322,7 @@ def test_the_deployed_container_is_wired_to_the_village(
     assert environment["BURROW_PROJECT"] == "note-keeper"
     assert environment["BURROW_URL"].startswith("${BURROW_URL")
     assert environment["BURROW_TOKEN"].startswith("${BURROW_TOKEN")
-    assert host.read("~/docker/steward-note-keeper/.env") == (
+    assert host.read("~/docker/warren/residents/note-keeper/.env") == (
         f"BURROW_TOKEN={VILLAGE_TOKEN}\nBURROW_URL=http://dxp2800:8737\n"
         f"CHRONICLE_TOKEN={VILLAGE_TOKEN}\nCHRONICLE_URL=http://dxp2800:8737\n"
     )
@@ -454,7 +456,7 @@ def test_an_edited_manifest_is_shipped_again(
 
     assert report.provision is not None
     assert report.provision.sent
-    assert "tidy-notes" in (host.read("~/docker/steward-note-keeper/manifest.yaml") or "")
+    assert "tidy-notes" in (host.read("~/docker/warren/residents/note-keeper/manifest.yaml") or "")
 
 
 # ----------------------------------------------------------------------- refusals
@@ -594,7 +596,7 @@ def test_a_dry_run_prints_the_whole_plan(scratch_repo: ScratchRepo, host: LocalT
     assert "note-keeper/manifest.yaml" in plan
     assert "note-keeper/soul.md" in plan
     assert "docker-compose.yaml" in plan
-    assert "docker compose -f ~/docker/steward-note-keeper/docker-compose.yaml" in plan
+    assert "docker compose -f ~/docker/warren/residents/note-keeper/docker-compose.yaml" in plan
     assert "up -d" in plan
     assert "diff not computed" in plan
     assert "services:" in plan  # the whole fragment, since there is no diff to show
@@ -677,9 +679,9 @@ def test_the_secret_reaches_the_host_and_only_the_host(
 ) -> None:
     raise_into(scratch_repo, host)
 
-    assert VILLAGE_TOKEN in (host.read("~/docker/steward-note-keeper/.env") or "")
+    assert VILLAGE_TOKEN in (host.read("~/docker/warren/residents/note-keeper/.env") or "")
     assert VILLAGE_TOKEN not in (
-        host.read("~/docker/steward-note-keeper/docker-compose.yaml") or ""
+        host.read("~/docker/warren/residents/note-keeper/docker-compose.yaml") or ""
     )
 
 
@@ -757,7 +759,7 @@ def test_a_hand_written_manifest_has_a_door_of_its_own(
     # …and provisioning from the declaration itself is the other door.
     report = provision_into(scratch_repo, host)
 
-    landed = host.root / "docker" / "steward-note-keeper"
+    landed = host.root / "docker" / "warren" / "residents" / "note-keeper"
     assert (landed / "docker-compose.yaml").is_file()
     assert (landed / "soul.md").is_file()
     assert host.calls[-1][-2:] == ("up", "-d")
@@ -784,7 +786,7 @@ def test_provisioning_ships_what_the_manifest_says_not_what_a_flag_says(
 
     provision_into(scratch_repo, host)
 
-    shipped = host.read("~/docker/steward-note-keeper/manifest.yaml") or ""
+    shipped = host.read("~/docker/warren/residents/note-keeper/manifest.yaml") or ""
     assert yaml.safe_load(shipped) == yaml.safe_load(path.read_text(encoding="utf-8"))
     assert yaml.safe_load(shipped)["app_grants"][0]["id"] == "gmail"
 
@@ -828,7 +830,9 @@ def test_an_edited_manifest_is_shipped_again_by_provision(
 
     assert report.provision is not None
     assert report.provision.sent
-    assert "Now with a summary." in (host.read("~/docker/steward-note-keeper/manifest.yaml") or "")
+    assert "Now with a summary." in (
+        host.read("~/docker/warren/residents/note-keeper/manifest.yaml") or ""
+    )
 
 
 def test_provisioning_reports_the_next_fire_of_every_routine(
@@ -1086,8 +1090,8 @@ def test_retiring_removes_the_token_from_the_host(
     assert host.calls[-1] == (
         "rm",
         "-f",
-        "~/docker/steward-note-keeper/.env",
-        "~/docker/steward-note-keeper/docker-compose.yaml",
+        "~/docker/warren/residents/note-keeper/.env",
+        "~/docker/warren/residents/note-keeper/docker-compose.yaml",
     )
 
 
@@ -1258,7 +1262,7 @@ def test_a_retirement_that_cannot_remove_the_token_says_so(
         )
 
     assert "BURROW_TOKEN" in str(refusal.value)
-    assert "~/docker/steward-note-keeper/.env" in str(refusal.value)
+    assert "~/docker/warren/residents/note-keeper/.env" in str(refusal.value)
 
 
 def test_a_host_that_dies_between_the_stop_and_the_removal_still_answers(
@@ -1506,7 +1510,7 @@ def test_a_dry_run_retirement_stops_and_commits_nothing(
     rendered = "\n".join(report.render())
     assert "down --remove-orphans" in rendered
     # A rehearsal prints the exact argv a real run would use, the removal included.
-    assert "rm -f ~/docker/steward-note-keeper/.env" in rendered
+    assert "rm -f ~/docker/warren/residents/note-keeper/.env" in rendered
 
 
 def test_retiring_without_deploy_marks_but_reaches_no_host(
