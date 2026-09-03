@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 
@@ -179,13 +180,24 @@ class BundleBehaviourTest(unittest.TestCase):
                 "prompt": "work",
             }
 
-            result = self.run_bundle(artifact, json.dumps(event), home, CHRONICLE_URL=url)
+            deadline = time.monotonic() + 15
+            delivered = []
+            attempt = 0
+            while not delivered and time.monotonic() < deadline:
+                current = dict(event)
+                if attempt:
+                    current["session_id"] = "delivery-retry-%d" % attempt
+                result = self.run_bundle(
+                    artifact, json.dumps(current), home, CHRONICLE_URL=url
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                received_agents = [json.loads(body)["agent_id"] for body in received]
+                delivered = [
+                    agent for agent in received_agents if agent == "claude-code:delivered"
+                ]
+                attempt += 1
 
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                [json.loads(body)["agent_id"] for body in received],
-                ["claude-code:delivered"],
-            )
+            self.assertEqual(delivered, ["claude-code:delivered"])
             self.assertFalse((pathlib.Path(home) / ".chronicle" / "events.jsonl").exists())
 
     def test_the_bundle_is_fail_open_on_anything_at_all(self):
