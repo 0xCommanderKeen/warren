@@ -761,8 +761,9 @@ def test_the_session_inherits_this_residents_identity(build) -> None:
     engine = build(HOURLY, runner_factory=lambda _spec, _placement: mock)
     engine.fire(engine.scheduled[0])
     env = mock.requests[0].env
-    assert env["BURROW_AGENT_ID"] == "claude-code:test-agent"
-    assert env["BURROW_PROJECT"] == "test-agent"
+    assert env["CHRONICLE_AGENT_ID"] == "claude-code:test-agent"
+    assert env["CHRONICLE_PROJECT"] == "test-agent"
+    assert not [key for key in env if key.startswith("BURROW_")]
     assert env["STEWARD_ROUTINE"] == "inbox-read"
 
 

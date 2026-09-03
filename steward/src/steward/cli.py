@@ -248,7 +248,7 @@ def events_flush(
     if fallback is not None:
         emitter.fallback = fallback
     if not emitter.url:
-        raise click.ClickException("BURROW_URL is not set; there is no remote target to flush")
+        raise click.ClickException("CHRONICLE_URL is not set; there is no remote target to flush")
     imported = emitter.import_legacy() if include_legacy else ev.ImportReport()
     report = emitter.flush(limit=limit)
     payload = {

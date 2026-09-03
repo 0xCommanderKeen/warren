@@ -328,7 +328,7 @@ def test_the_pipeline_declares_commits_provisions_and_checks(
 def test_the_deployed_container_is_wired_to_the_village(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """The village identity and address, in both spellings, exactly as Hob is."""
+    """The village identity and address, one spelling each, exactly as Hob is."""
     raise_into(scratch_repo, host)
     compose = yaml.safe_load(
         host.read("~/docker/warren/residents/note-keeper/docker-compose.yaml") or ""
@@ -342,13 +342,9 @@ def test_the_deployed_container_is_wired_to_the_village(
     assert environment["CHRONICLE_PROJECT"] == "note-keeper"
     assert environment["CHRONICLE_URL"].startswith("${CHRONICLE_URL")
     assert environment["CHRONICLE_TOKEN"].startswith("${CHRONICLE_TOKEN")
-    # The frozen vendored emitter reads only these (warren#234).
-    assert environment["BURROW_AGENT_ID"] == identity
-    assert environment["BURROW_PROJECT"] == "note-keeper"
-    assert environment["BURROW_URL"].startswith("${BURROW_URL")
-    assert environment["BURROW_TOKEN"].startswith("${BURROW_TOKEN")
+    # warren#361: no BURROW_* twins, in the compose fragment or in the .env.
+    assert not [key for key in environment if key.startswith("BURROW_")]
     assert host.read("~/docker/warren/residents/note-keeper/.env") == (
-        f"BURROW_TOKEN={VILLAGE_TOKEN}\nBURROW_URL=http://dxp2800:8737\n"
         f"CHRONICLE_TOKEN={VILLAGE_TOKEN}\nCHRONICLE_URL=http://dxp2800:8737\n"
     )
 
@@ -696,7 +692,7 @@ def test_no_secret_ever_lands_in_the_checkout(
     )
     assert scan_for_credentials(manifest, scratch_repo.root) == []
     assert validate_tree(scratch_repo.residents).ok
-    assert "BURROW_TOKEN" not in scratch_repo.git("log", "-p").stdout
+    assert "CHRONICLE_TOKEN" not in scratch_repo.git("log", "-p").stdout
 
 
 def test_the_secret_reaches_the_host_and_only_the_host(
@@ -716,12 +712,7 @@ def test_the_report_names_the_secrets_without_showing_them(
     report = raise_into(scratch_repo, host)
 
     assert report.provision is not None
-    assert report.provision.env_keys == (
-        "BURROW_TOKEN",
-        "BURROW_URL",
-        "CHRONICLE_TOKEN",
-        "CHRONICLE_URL",
-    )
+    assert report.provision.env_keys == ("CHRONICLE_TOKEN", "CHRONICLE_URL")
     assert VILLAGE_TOKEN not in json.dumps(report.to_dict())
     assert VILLAGE_TOKEN not in "\n".join(report.render())
 
@@ -1103,7 +1094,7 @@ def test_retiring_stops_the_container_and_records_the_decision(
 def test_retiring_removes_the_token_from_the_host(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """`.env` holds BURROW_TOKEN, and a retired resident is not supposed to act (#157)."""
+    """`.env` holds CHRONICLE_TOKEN, and a retired resident is not supposed to act (#157)."""
     raise_into(scratch_repo, host)
     host.calls.clear()
 
@@ -1123,7 +1114,7 @@ def test_retiring_removes_the_token_from_the_host(
 def test_the_token_is_removed_only_after_the_container_is_down(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """`docker compose down` reads the .env: `${BURROW_URL:?…}` errors when it is gone."""
+    """`docker compose down` reads the .env: `${CHRONICLE_URL:?…}` errors when it is gone."""
     raise_into(scratch_repo, host)
     host.calls.clear()
 
@@ -1286,7 +1277,7 @@ def test_a_retirement_that_cannot_remove_the_token_says_so(
             transport=host,
         )
 
-    assert "BURROW_TOKEN" in str(refusal.value)
+    assert "CHRONICLE_TOKEN" in str(refusal.value)
     assert "~/docker/warren/residents/note-keeper/.env" in str(refusal.value)
 
 
@@ -1310,7 +1301,7 @@ def test_a_host_that_dies_between_the_stop_and_the_removal_still_answers(
             transport=DiesOnRemoval(root=host.root),
         )
 
-    assert "BURROW_TOKEN" in str(refusal.value)
+    assert "CHRONICLE_TOKEN" in str(refusal.value)
     assert "could not be reached" in str(refusal.value)
 
 
@@ -1563,7 +1554,7 @@ def test_retiring_without_deploy_marks_but_reaches_no_host(
     assert "deploy skipped" in report.note
     # Reaching no host means removing nothing, and the note says which credential stays.
     assert not report.scrubbed
-    assert "BURROW_TOKEN" in report.note
+    assert "CHRONICLE_TOKEN" in report.note
 
 
 def test_a_retire_dry_run_plans_the_mark_before_the_stop(

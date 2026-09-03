@@ -675,7 +675,7 @@ routine's own `prompt`; `steward doctor` says when each routine next fires.
 
 Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
-`~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` where that already exists) as the watchdog's complete local record. Remote-bound events
+`~/.chronicle/events.jsonl`) as the watchdog's complete local record. Remote-bound events
 also enter its `.pending` sibling before POST and retain a stable Chronicle delivery ID
 until acknowledged. A failed POST trips a short per-target circuit breaker and leaves
 the event queued; later emits and `steward events flush` replay oldest first. A village
@@ -1120,9 +1120,6 @@ under `$HOME` in the container — `/root`, since the image runs as root:
 | `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`, `.lock`) | deferred events waiting to be replayed |
 | `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`, `.lock`) | the durable outbox and its delivery schedule |
 | `/root/.chronicle/transport-diagnostics.json`, `.post-failed-<target>` | the last failures, and the per-target circuit breaker |
-
-`/root/.chronicle` on a container that has never had a `/root/.burrow`; on one that has,
-the emitter keeps using the old directory rather than stranding events nobody would replay.
 
 **It is not on a volume.** The compose fragment steward renders mounts exactly two paths —
 `./memory:<memory.path>` and `./claude:/root/.claude` — and neither is this one. So the

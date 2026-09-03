@@ -62,14 +62,13 @@ PY
 fi
 
 # The village address arrives from the compose .env; say whether it is there, and never
-# say what the token is. Steward writes both spellings (warren#216), but an older .env on
-# a host that has not been re-provisioned carries only the old one, so read either.
-village_url="${CHRONICLE_URL:-${BURROW_URL:-}}"
-village_agent="${CHRONICLE_AGENT_ID:-${BURROW_AGENT_ID:-}}"
+# say what the token is.
+village_url="${CHRONICLE_URL:-}"
+village_agent="${CHRONICLE_AGENT_ID:-}"
 if [ -n "$village_url" ]; then
     echo "steward: emitting to $village_url as ${village_agent:-<no agent id set>}"
 else
-    echo "steward: WARNING no CHRONICLE_URL/BURROW_URL; events fall back to ~/.chronicle/ in this container"
+    echo "steward: WARNING no CHRONICLE_URL; events fall back to ~/.chronicle/ in this container"
 fi
 
 # Where the emitter keeps its durable outbox, said out loud at start (warren#234). The
@@ -79,7 +78,7 @@ fi
 # restart and does NOT survive `docker compose down` or an image upgrade. Mounting it is an
 # operator decision, not a default this script should make; docs/manifest.md states the
 # options. Printing the path is how a human finds the queue when it matters.
-echo "steward: durable outbox under $HOME/.chronicle (or ~/.burrow where that already"
-echo "steward:          exists) — container-local unless the compose file mounts it"
+echo "steward: durable outbox under $HOME/.chronicle — container-local unless the"
+echo "steward:          compose file mounts it"
 
 exec "$@"

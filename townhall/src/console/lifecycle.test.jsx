@@ -163,7 +163,7 @@ describe("retiring a resident from its record", () => {
     expect(screen.getByText(/rm -f/)).toBeTruthy();
     // The .env is the one worth being sure about, and claude/ is the one worth being told
     // about — a login steward never wrote and does not restore.
-    expect(screen.getByText(/BURROW_TOKEN/)).toBeTruthy();
+    expect(screen.getByText(/CHRONICLE_TOKEN/)).toBeTruthy();
     expect(screen.getByText(/claude\//)).toBeTruthy();
   });
 

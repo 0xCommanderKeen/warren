@@ -78,10 +78,10 @@ def test_events_flush_reports_delivery_and_exits_cleanly(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fallback = tmp_path / "events.jsonl"
-    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    monkeypatch.setenv("CHRONICLE_URL", "https://village.example")
     emitter = cli.ev.EventEmitter.from_env(
         {
-            "BURROW_URL": "https://village.example",
+            "CHRONICLE_URL": "https://village.example",
             "STEWARD_EVENTS_FALLBACK": str(fallback),
         }
     )
@@ -98,7 +98,7 @@ def test_events_flush_failure_is_visible_and_nonzero(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fallback = tmp_path / "events.jsonl"
-    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    monkeypatch.setenv("CHRONICLE_URL", "https://village.example")
     emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
     assert emitter._queue_record(
         cli.ev.Event(type="routine_started", agent_id="a", project="p"),
@@ -115,7 +115,7 @@ def test_events_flush_still_drains_pending_when_legacy_read_fails(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fallback = tmp_path / "events.jsonl"
-    monkeypatch.setenv("BURROW_URL", "https://village.example")
+    monkeypatch.setenv("CHRONICLE_URL", "https://village.example")
     emitter = cli.ev.EventEmitter(url="https://village.example", fallback=fallback)
     assert emitter._queue_record(
         cli.ev.Event(type="routine_started", agent_id="a", project="p"),
@@ -1739,7 +1739,7 @@ def test_approval_raise_records_a_request_a_human_can_answer(
 ) -> None:
     """The token-free path: a session with a shell, not with steward's API token."""
     monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
-    monkeypatch.delenv("BURROW_URL", raising=False)
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
     residents_dir = write_resident().parent.parent
     db = tmp_path / "approvals.db"
 
@@ -2871,7 +2871,7 @@ def test_delegate_hands_work_over_and_prints_the_task_id(
 ) -> None:
     """The token-free path: a session with a shell, not with steward's API token."""
     monkeypatch.setenv("STEWARD_EVENTS_FALLBACK", str(tmp_path / "events.jsonl"))
-    monkeypatch.delenv("BURROW_URL", raising=False)
+    monkeypatch.delenv("CHRONICLE_URL", raising=False)
     residents_dir = delegation_fleet(write_resident)
     db = tmp_path / "delegation.db"
 
@@ -3173,8 +3173,8 @@ def nas(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> LocalTransport:
     """
     host = LocalTransport(root=tmp_path / "nas")
     monkeypatch.setattr("steward.nursery.transport_for", lambda _target, _env=None: host)
-    monkeypatch.setenv("BURROW_URL", "http://dxp2800:8737")
-    monkeypatch.setenv("BURROW_TOKEN", "cli-village-token")
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "cli-village-token")
     return host
 
 
@@ -3622,7 +3622,6 @@ def test_provisioning_with_nowhere_to_emit_is_one_line_not_a_traceback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner.invoke(main, new_resident_argv(scratch_repo, charter_file, "--no-deploy"))
-    monkeypatch.delenv("BURROW_URL", raising=False)
     monkeypatch.delenv("CHRONICLE_URL", raising=False)
 
     result = runner.invoke(main, provision_argv(scratch_repo))

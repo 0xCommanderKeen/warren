@@ -108,8 +108,7 @@ pnpm dev
 ```
 
 The dev server proxies Chronicle's state endpoints to `http://127.0.0.1:8737` and steward's
-routes to `http://127.0.0.1:8801` (`CHRONICLE_URL`, still read as `BURROW_URL`, /
-`STEWARD_URL` override both), so the app
+routes to `http://127.0.0.1:8801` (`CHRONICLE_URL` / `STEWARD_URL` override both), so the app
 talks to both same-origin exactly as the deployed origin does. `?backend=` and `?steward=`
 point either at a CORS-enabled deployment instead — **in `pnpm dev` only**. Both reads sit
 behind `import.meta.env.DEV`, so Vite eliminates them from a built bundle and the deployed

@@ -180,15 +180,17 @@ The NAS has no git installed and holds no clone: `~/docker/warren/chronicle/app`
 unpacked copy of the tree the tar below carried. Nothing there pulls — every
 deploy is pushed from a machine that has the repo checked out.
 
-> **The `BURROW_*` spellings below still work.** Every setting here is read under
-> both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name, with the new one
-> winning where both are set, so the compose file and `.env` already on the NAS
-> keep working across this deploy and can be re-spelled whenever it suits. The
-> deployed *paths* — the `/burrow/` proxy prefix and `~/.burrow/` — are deliberately not
-> renamed; every client and the origin's route table depend on them. The deploy directory
-> and the container are the exception: `~/docker/burrow` / `burrow` became
-> `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a rename an
-> operator does once, with everything down.
+> **The `BURROW_*` spellings below still work — for one more release.** Every setting
+> here is *read* under both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name,
+> with the new one winning where both are set. Nothing *writes* the old spelling any
+> more: warren#361 dropped every one of those writes, so the reads are now pure
+> back-compat for an environment nobody has re-spelled, and they go next. The state
+> directory went with it: it is `~/.chronicle`, full stop, and a machine that still has a
+> `~/.burrow` adopts it with `mv ~/.burrow ~/.chronicle` once its outbox has drained.
+> The `/burrow/` proxy prefix is the one deployed path still carrying the old name.
+> The deploy directory and the container already moved: `~/docker/burrow` / `burrow`
+> became `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a
+> rename an operator does once, with everything down.
 
 - **Server** — Docker Compose at `~/docker/warren/chronicle` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:

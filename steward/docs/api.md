@@ -659,7 +659,7 @@ changed, so the confirmed plan is always the plan that runs.
 
 **Retirement is not a manifest edit**, which is the whole argument for this route existing.
 Writing `retired: true` through `PUT /residents/{id}/declaration` marks the resident and
-leaves its container running on the host with a live `BURROW_TOKEN` in the `.env` beside it
+leaves its container running on the host with a live `CHRONICLE_TOKEN` in the `.env` beside it
 — the half that matters most left undone. This runs the whole act, in the one order that is
 safe:
 
@@ -673,8 +673,8 @@ safe:
 **Marked before stopped**, always. `retired: true` is what takes the resident out of the
 scheduler, the board, delegation, run-now — and out of the watchdog, which would otherwise
 notice the container go away and dutifully restart it. And **the `.env` is removed after the
-stop**, because `docker compose down` reads it: `BURROW_URL` is interpolated as
-`${BURROW_URL:?…}`, so scrubbing first makes the stop fail on a missing variable.
+stop**, because `docker compose down` reads it: `CHRONICLE_URL` is interpolated as
+`${CHRONICLE_URL:?…}`, so scrubbing first makes the stop fail on a missing variable.
 
 What is deliberately **left**: `residents/<id>/` and its history — retirement is a lifecycle
 state, not a deletion — the resident's memory directory on the host, and `claude/`, which is

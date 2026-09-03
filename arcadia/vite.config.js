@@ -7,18 +7,12 @@ export default defineConfig({
   server: {
     proxy: {
       "/burrow": {
-        target:
-          process.env.CHRONICLE_URL ||
-          process.env.BURROW_URL ||
-          "http://127.0.0.1:8737",
+        target: process.env.CHRONICLE_URL || "http://127.0.0.1:8737",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/burrow/, ""),
       },
       "/state": {
-        target:
-          process.env.CHRONICLE_URL ||
-          process.env.BURROW_URL ||
-          "http://127.0.0.1:8737",
+        target: process.env.CHRONICLE_URL || "http://127.0.0.1:8737",
         changeOrigin: true,
       },
     },

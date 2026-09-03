@@ -88,7 +88,7 @@ def isolated_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the undelivered-event fallback at this test's own directory.
 
     Autouse and unconditional. Without it, anything that builds an emitter from the
-    environment writes into ``~/.burrow/events.jsonl`` — a developer's real village — and
+    environment writes into ``~/.chronicle/events.jsonl`` — a developer's real village — and
     the watchdog, which *reads* that file to find runs that never reported back, would
     happily bury somebody's actual work. A test suite must not be able to emit into a
     village it did not create. A test that wants a different location simply sets the

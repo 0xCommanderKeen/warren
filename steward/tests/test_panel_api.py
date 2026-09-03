@@ -448,7 +448,7 @@ def canned_pipeline(*, problems: tuple[str, ...] = ()) -> Any:  # noqa: ANN401 â
                 files=("docker-compose.yaml", ".env"),
                 compose="services:\n  note-keeper: {}\n",
                 compose_changed=True,
-                env_keys=("BURROW_TOKEN", "BURROW_URL"),
+                env_keys=("CHRONICLE_TOKEN", "CHRONICLE_URL"),
                 commands=(("ssh", "Miha@dxp2800", "docker compose up -d"),),
                 sent=True,
             )
@@ -499,7 +499,7 @@ def test_the_answer_carries_the_whole_report_for_the_panel_to_print(
     # side fails here rather than rendering a column of "undefined".
     assert body["provision"]["target"]["container"] == "steward-note-keeper"
     assert body["provision"]["commands"] == ["ssh Miha@dxp2800 docker compose up -d"]
-    assert body["provision"]["env_keys"] == ["BURROW_TOKEN", "BURROW_URL"]
+    assert body["provision"]["env_keys"] == ["CHRONICLE_TOKEN", "CHRONICLE_URL"]
     assert body["provision"]["compose"].startswith("services:")
     assert body["register"]["next_fires"] == [
         {"routine": "tidy-notes", "at": "2026-08-26T20:00:00+02:00"}

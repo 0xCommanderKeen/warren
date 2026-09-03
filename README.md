@@ -62,7 +62,7 @@ One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
 chronicle, and hands steward every one of its own top-level routes. Both services answer
 `GET /residents`, so the bare path is steward's and chronicle's report is the prefixed
 one (warren#242). So a townhall release is published into *arcadia's* deploy
-directory, and `CHRONICLE_URL=http://dxp2800:8737` (still accepted as `BURROW_URL`)
+directory, and `CHRONICLE_URL=http://dxp2800:8737`
 is correct even though chronicle listens on 8738 — the origin proxies `/events` through.
 
 **Steward's daemons run on the burrow whose containers they supervise** — today, the NAS.

@@ -60,8 +60,6 @@ x-steward: &steward
     STEWARD_BURROW_HOME: /home/Miha
     # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
     CHRONICLE_URL: http://dockerhost:8737
-    # The pre-rename spelling, kept for one release (warren#216).
-    BURROW_URL: http://dockerhost:8737
     # Read by the API alone: every commit the write API makes is pushed to this branch of
     # the checkout's origin. Best effort — a save is durable before the push starts, and a
     # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never

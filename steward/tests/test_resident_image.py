@@ -237,13 +237,15 @@ def test_every_burrow_hook_is_wired(hook: str) -> None:
 def test_the_hooks_carry_no_url_and_no_token() -> None:
     """The village address comes from the container's environment, never from this file.
 
-    The Mac's settings.json inlines `BURROW_URL=…` because a laptop has no compose .env.
-    A resident does: steward writes BURROW_URL and BURROW_TOKEN into a 0600 .env at
-    provision time, and a hardcoded copy here would be a second place to keep in step and
-    a first place for a secret to leak into an image.
+    The Mac's settings.json inlines `CHRONICLE_URL=…` because a laptop has no compose
+    .env. A resident does: steward writes CHRONICLE_URL and CHRONICLE_TOKEN into a 0600
+    .env at provision time, and a hardcoded copy here would be a second place to keep in
+    step and a first place for a secret to leak into an image.
     """
     text = SETTINGS.read_text(encoding="utf-8")
 
+    assert "CHRONICLE_URL" not in text
+    assert "CHRONICLE_TOKEN" not in text
     assert "BURROW_URL" not in text
     assert "BURROW_TOKEN" not in text
 
@@ -442,13 +444,13 @@ def test_the_container_still_just_stays_up() -> None:
 def test_the_local_dev_mirror_is_off_inside_a_container() -> None:
     """Nothing listens on the container's own loopback; every hook would pay for finding out.
 
-    Baked under both spellings (warren#216): the emitter in the image today reads the old
-    one, and the emitter warren#234 vendors will read the new one. Setting only one would
-    hand whichever emitter is running a default mirror it cannot reach.
+    One spelling since warren#361. The vendored emitter selects a setting on *presence*,
+    not truthiness, so ``CHRONICLE_MIRROR=""`` alone already means "no mirrors" and the
+    second bake bought nothing.
     """
     text = DOCKERFILE.read_text(encoding="utf-8")
-    assert 'BURROW_MIRROR=""' in text
     assert 'CHRONICLE_MIRROR=""' in text
+    assert "BURROW_MIRROR" not in text
 
 
 # --------------------------------------------------------------- life-agent, as it deploys

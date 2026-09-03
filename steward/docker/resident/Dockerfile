@@ -113,7 +113,6 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
     # emit.py mirrors every event to http://127.0.0.1:8737 by default, which is a
     # developer's laptop convenience: inside a container nothing is ever listening there,
     # and every hook would pay a refused connection and write a breaker file for it.
-    BURROW_MIRROR="" \
     CHRONICLE_MIRROR="" \
     TZ=Europe/Ljubljana
 
