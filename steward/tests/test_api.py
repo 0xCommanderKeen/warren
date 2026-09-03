@@ -4143,6 +4143,22 @@ def test_renaming_the_soul_file_is_refused_rather_than_orphaning_it(
     assert response.json()["detail"]["error"] == "soul_file_changed"
 
 
+@pytest.mark.parametrize("field", ["uid", "agent_id"])
+def test_declaration_put_cannot_replace_resident_identity(
+    writable: Callable[..., Harness], field: str
+) -> None:
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"][field] = SECOND_RESIDENT_UID if field == "uid" else "resident:replacement"
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_identity_changed"
+
+
 # -- skills ----------------------------------------------------------------------------
 
 

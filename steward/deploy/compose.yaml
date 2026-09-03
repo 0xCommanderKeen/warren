@@ -33,21 +33,18 @@
 # edit the API commits is what they read on their next wake-up, with no restart. Before
 # warren#351 they read a copy taken at container start, which nothing ever updated.
 #
-# The daemons also need the burrow's *resident* directories (warren#356). A container-placed
-# resident lives at <deploy.path> on this host — ~/docker/warren/residents/<id>, written by
-# `steward provision` — and its memory/ is the host side of the mount the scheduler journals
-# into and materializes skills onto (deploy.memory_host_dir). Steward resolves that `~` in
-# the process that asks, and inside this image HOME is /root, so the host's residents
-# directory is mounted at /root/docker/warren/residents: the path the daemons compute is
-# then the directory the host has. That directory and no wider (warren#358): the control
-# plane's own directory beside it holds the .env and the deploy key, and the daemons have
-# no business with either. Without the mount every container-placed resident is
-# "unprovisioned" to the scheduler no matter what was provisioned, and it refuses to start.
-#
-# The API mounts the same directory at its host path instead, plus the docker socket: it
-# is the process that *writes* a resident's bundle and brings the container up, and the
-# paths it hands docker must be the host's (see the api service). Two mount points for one
-# directory is a wart; one will go when memory_host_dir stops expanding ~ with $HOME.
+# Every process also needs the burrow's *resident* directories (warren#356). A container-
+# placed resident lives at <deploy.path> on this host — ~/docker/warren/residents/<id> —
+# and its memory/ is the host side of the mount the scheduler journals into and
+# materializes skills onto (deploy.memory_host_dir); the API is the process that writes
+# the bundle there and brings the container up (deploy.BurrowTransport). All three mount
+# the residents directory at its HOST path and resolve every ~/ against
+# STEWARD_BURROW_HOME, never against the image's /root: the path each computes is then the
+# directory the host has, and the paths the API hands docker are ones the daemon can bind.
+# That directory and no wider (warren#358): the control plane's own directory beside it
+# holds the .env and the deploy key, and the daemons have no business with either. Without
+# the mount every container-placed resident is "unprovisioned" to the scheduler no matter
+# what was provisioned, and it refuses to start.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -57,9 +54,9 @@ x-steward: &steward
   environment:
     STEWARD_STATE: /data/state.json
     STEWARD_BURROW: dxp2800
-    # The deploy user's home on this machine. The API provisions this burrow's residents
-    # itself (deploy.BurrowTransport): it resolves every rendered ~/ path against this,
-    # not against its own /root, because the paths it hands docker are host paths.
+    # The deploy user's home on this machine: what every ~/ in a manifest or a rendered
+    # path means to the API, the scheduler and the watchdog alike, instead of the image's
+    # /root. The residents mount below sits at the same path in every container.
     STEWARD_BURROW_HOME: /home/Miha
     # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
     CHRONICLE_URL: http://dockerhost:8737
@@ -103,8 +100,8 @@ services:
       - ./data:/data
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      # The residents' deploy directories, at the path the daemons compute for them.
-      - /home/Miha/docker/warren/residents:/root/docker/warren/residents
+      # The residents' deploy directories, at the path every process computes for them.
+      - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
     # The absolute path is belt and braces: the first rollout crash-looped on a login shell
     # that re-read /etc/profile, reset PATH, and lost /app/.venv/bin.
     command: ["/app/.venv/bin/steward", "scheduler", "run", "--residents", "/checkout/steward/residents"]
@@ -116,7 +113,7 @@ services:
       - ./data:/data
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/Miha/docker/warren/residents:/root/docker/warren/residents
+      - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
     # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
     # wider list than the scheduler fires would report residents nobody is running.
     command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/checkout/steward/residents"]

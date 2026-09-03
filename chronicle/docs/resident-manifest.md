@@ -7,7 +7,7 @@ The normative machine-readable shape is [resident-manifest.schema.json](resident
 ```json
 {
   "manifest_version": 1,
-  "match": { "agent_id": "claude-code:life-agent" },
+  "match": { "agent_id": "resident:e4af805e-cfa0-49e1-9782-93f7ae051102" },
   "home": 1,
   "soul": {
     "name": "Hob",
@@ -25,7 +25,15 @@ The normative machine-readable shape is [resident-manifest.schema.json](resident
 
 ## Matching and homes
 
-`match` contains exactly one `agent_id` or `project`. Exact `agent_id` declarations are reserved before project fallbacks, and each declaration can match at most one active villager. `home` is an explicit plot number from 0 through 7. Duplicate homes are rejected instead of being dynamically reassigned, so active fleet order, reloads, and absences cannot change where a Resident lives. Visitors never receive a plot; at-home activity and rest happen at the shared visitor lodge.
+`match` contains an `agent_id`, a `project`, or both. Steward Residents use the permanent
+wire join key `resident:<uid>`; `project` may additionally describe their scope. Event
+`source` continues to name the producer and is not identity. Exact `agent_id` declarations
+are reserved before project fallbacks, and each
+declaration can match at most one active villager. Visitors have no Steward UID, retain
+their emitter-provided `agent_id`, and never receive a plot; at-home activity and rest
+happen at the shared visitor lodge. `home` is an explicit plot number from 0 through 7.
+Duplicate homes are rejected instead of being dynamically reassigned, so active fleet
+order, reloads, and absences cannot change where a Resident lives.
 
 ## Capability truth and privacy
 

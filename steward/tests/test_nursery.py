@@ -89,6 +89,7 @@ def test_the_nursery_mints_a_random_uid_into_the_manifest(tmp_path: Path) -> Non
     uid = UUID(payload["uid"])
     assert uid.version == 4
     assert created.resident.manifest.uid == uid
+    assert created.resident.soul.frontmatter["uid"] == str(uid)
 
 
 def test_the_nursery_mints_the_lowest_free_village_home(tmp_path: Path) -> None:
@@ -127,7 +128,7 @@ def test_the_skeleton_declares_a_journal_directory_and_no_empty_deploy_block(
     assert target_for(created.resident.manifest).command == ("sleep", "infinity")
 
 
-def test_identity_is_derived_from_the_runner_when_nobody_says(tmp_path: Path) -> None:
+def test_identity_is_derived_from_the_minted_uid_when_nobody_says(tmp_path: Path) -> None:
     claude = declare_resident(spec(), tmp_path)
     codex = declare_resident(
         # `unrestricted` and not the nursery's default empty list: steward compiles no tool
@@ -136,9 +137,23 @@ def test_identity_is_derived_from_the_runner_when_nobody_says(tmp_path: Path) ->
         spec(id="scribe-two", runner={"kind": "codex", "model": "gpt-5"}, tools="unrestricted"),
         tmp_path,
     )
-    assert claude.resident.manifest.agent_id == "claude-code:note-keeper"
-    assert codex.resident.manifest.agent_id == "codex:scribe-two"
-    assert codex.resident.manifest.runner.model == "gpt-5"
+    assert claude.resident.agent_id == f"resident:{claude.resident.uid}"
+    assert codex.resident.agent_id == f"resident:{codex.resident.uid}"
+
+
+def test_changing_from_claude_to_codex_keeps_the_chronicle_identity(tmp_path: Path) -> None:
+    created = declare_resident(spec(), tmp_path)
+    before = created.resident.agent_id
+    data = yaml.safe_load(created.manifest_path.read_text(encoding="utf-8"))
+    data["runner"] = {"kind": "codex", "model": "gpt-5"}
+    data["tools"] = "unrestricted"
+    created.manifest_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    (resident,) = validate_tree(tmp_path).residents
+
+    assert resident.uid == created.resident.uid
+    assert resident.agent_id == before
+    assert resident.manifest.runner.model == "gpt-5"
 
 
 def test_a_declared_resident_arrives_able_to_touch_nothing(tmp_path: Path) -> None:
@@ -170,7 +185,7 @@ def test_the_nursery_cannot_declare_a_bound_it_could_not_hold(tmp_path: Path) ->
 
 def test_a_project_scoped_resident_keeps_its_project(tmp_path: Path) -> None:
     created = declare_resident(spec(project="burrow"), tmp_path)
-    assert created.resident.manifest.agent_id is None
+    assert created.resident.agent_id == f"resident:{created.resident.uid}"
     assert created.resident.manifest.project == "burrow"
     assert "project: burrow" in created.soul_path.read_text(encoding="utf-8")
 
@@ -200,7 +215,7 @@ def test_the_declared_paths_are_reported_for_review(tmp_path: Path) -> None:
     assert UUID(payload["uid"]) == created.resident.manifest.uid
     assert payload["manifest_path"].endswith("note-keeper/manifest.yaml")
     assert payload["soul_path"].endswith("note-keeper/soul.md")
-    assert payload["agent_id"] == "claude-code:note-keeper"
+    assert payload["agent_id"] == created.resident.agent_id
 
 
 def test_a_skeleton_that_does_not_validate_is_not_left_behind(
@@ -313,14 +328,17 @@ def test_the_pipeline_declares_commits_provisions_and_checks(
 def test_the_deployed_container_is_wired_to_the_village(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
-    """The village identity and address, in both spellings, exactly as Hob is."""
+    """The village identity and address, one spelling each, exactly as Hob is."""
     raise_into(scratch_repo, host)
     compose = yaml.safe_load(
         host.read("~/docker/warren/residents/note-keeper/docker-compose.yaml") or ""
     )
     environment = compose["services"]["note-keeper"]["environment"]
 
-    assert environment["CHRONICLE_AGENT_ID"] == "claude-code:note-keeper"
+    identity = yaml.safe_load(
+        (scratch_repo.residents / "note-keeper" / "manifest.yaml").read_text(encoding="utf-8")
+    )["agent_id"]
+    assert environment["CHRONICLE_AGENT_ID"] == identity
     assert environment["CHRONICLE_PROJECT"] == "note-keeper"
     assert environment["CHRONICLE_URL"].startswith("${CHRONICLE_URL")
     assert environment["CHRONICLE_TOKEN"].startswith("${CHRONICLE_TOKEN")
@@ -1564,6 +1582,9 @@ def test_retirement_emits_the_authoritative_terminal_identity_event(
 ) -> None:
     """It leaves through steward's own lifecycle fact, never a forged session_ended."""
     raise_into(scratch_repo, host)
+    identity = yaml.safe_load(
+        (scratch_repo.residents / "note-keeper" / "manifest.yaml").read_text(encoding="utf-8")
+    )["agent_id"]
     retire_resident(
         "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
     )
@@ -1571,7 +1592,7 @@ def test_retirement_emits_the_authoritative_terminal_identity_event(
     [record] = [json.loads(line) for line in isolated_events.read_text().splitlines()]
     assert record["type"] == "resident_retired"
     assert record["source"] == "steward"
-    assert record["agent_id"] == "claude-code:note-keeper"
+    assert record["agent_id"] == identity
     assert record["payload"]["resident_id"] == "note-keeper"
 
 
