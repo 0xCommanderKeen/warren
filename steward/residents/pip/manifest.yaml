@@ -30,8 +30,7 @@ charter:
     how: needs_human
     note: Raise needs_human and stop. Pip is a rehearsal, not a worker.
 
-skills:
-  - escalate
+skills: []
 
 memory:
   kind: directory
