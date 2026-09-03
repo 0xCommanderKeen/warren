@@ -466,7 +466,7 @@ def test_concurrent_task_sweeps_choose_one_terminal(
 
     assert sum(len(result) for result in results) == 1
     failures = [event for event in sink.events if event.type == ev.TASK_FAILED]
-    assert len(failures) == 1
+    assert {event.payload["event_id"] for event in failures} == {"run-terminal:attempt-1"}
 
 
 def test_late_finish_is_suppressed_and_retry_gets_new_run(tasks: tr.TaskTransitions) -> None:
