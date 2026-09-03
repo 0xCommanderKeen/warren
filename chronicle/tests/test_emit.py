@@ -832,42 +832,33 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
 
     def test_ack_reserve_harvests_a_response_published_after_the_post_window(self):
         """Scheduler delay after HTTP acceptance may consume part of the ack tail."""
-        delivered = []
-        with delayed_target(0.08, delivered) as target:
-            with (
-                mock.patch.dict(
-                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
-                ),
-                mock.patch.object(emit, "post_event", return_value=False),
-            ):
-                for second in range(3):
-                    emit.deliver(
-                        dict(self.EVENT, ts="2026-08-24T12:00:0%d.000Z" % second)
-                    )
-            before = self.outbox()
-            real_post = emit.post_event
+        with mock.patch.object(emit, "post_event", return_value=False):
+            emit.deliver(self.EVENT)
+        queued_id = self.outbox()[0]["delivery_id"]
+        now = 0.0
 
-            def scheduled_after_response(*args, **kwargs):
-                accepted = real_post(*args, **kwargs)
-                time.sleep(0.24)
-                return accepted
+        def monotonic():
+            return now
 
-            with (
-                mock.patch.dict(
-                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
-                ),
-                mock.patch.object(emit, "HOOK_BUDGET", 0.45),
-                mock.patch.object(emit, "ACK_RESERVE", 0.15),
-                mock.patch.object(emit, "POST_TIMEOUT", 0.2),
-                mock.patch.object(emit, "post_event", side_effect=scheduled_after_response),
-            ):
-                emit.deliver(dict(self.EVENT, ts="2026-08-24T12:00:03.000Z"))
+        def accepted_after_post_window(*_args, **_kwargs):
+            nonlocal now
+            now = 0.31
+            return True
 
-        self.assertTrue(delivered)
-        remaining = self.outbox()
-        self.assertLessEqual(len(remaining), len(before))
-        self.assertTrue(
-            set(delivered).isdisjoint(record["delivery_id"] for record in remaining)
+        with (
+            mock.patch.dict(os.environ, {"CHRONICLE_MIRROR": ""}),
+            mock.patch.object(emit, "HOOK_BUDGET", 0.45),
+            mock.patch.object(emit, "ACK_RESERVE", 0.15),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.2),
+            mock.patch.object(emit.time, "monotonic", side_effect=monotonic),
+            mock.patch.object(
+                emit, "post_event", side_effect=accepted_after_post_window
+            ),
+        ):
+            emit.deliver(dict(self.EVENT, ts="2026-08-24T12:00:01.000Z"))
+
+        self.assertNotIn(
+            queued_id, [record["delivery_id"] for record in self.outbox()]
         )
 
     def test_deferred_primary_worker_keeps_its_calls_transport_and_diagnostics(self):
@@ -882,7 +873,7 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.object(emit, "post_event", this_call),
             mock.patch.object(emit.threading, "Thread", deferred_thread),
         ):
-            emit.deliver(self.EVENT, deadline=time.monotonic() + 1)
+            emit.deliver(self.EVENT, deadline=float("inf"))
         with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
             retries_before_worker = json.load(stream).get("retries", 0)
 
@@ -1125,23 +1116,36 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
                 self.assertFalse(worker.is_alive())
 
     def test_replay_batch_is_sized_by_available_time_instead_of_sixteen_records(self):
-        with delayed_target(0.01) as target:
-            with (
-                mock.patch.dict(
-                    os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
-                ),
-                mock.patch.object(emit, "post_event", return_value=False),
-            ):
-                for second in range(30):
-                    emit.deliver(dict(self.EVENT, ts="seed-%02d" % second))
-            before = len(self.outbox())
+        with mock.patch.object(emit, "post_event", return_value=False):
+            for second in range(30):
+                emit.deliver(dict(self.EVENT, ts="seed-%02d" % second))
+        before = len(self.outbox())
+        now = 0.0
+        delivered = []
 
-            with mock.patch.dict(
-                os.environ, {"CHRONICLE_URL": target, "CHRONICLE_MIRROR": ""}
-            ):
-                emit.deliver(dict(self.EVENT, ts="current"))
+        def monotonic():
+            return now
 
-        self.assertLess(len(self.outbox()), before - 15)
+        def ten_millisecond_delivery(_url, event, *_args, **_kwargs):
+            nonlocal now
+            delivered.append(event["ts"])
+            now += 0.01
+            return True
+
+        with (
+            mock.patch.dict(os.environ, {"CHRONICLE_MIRROR": ""}),
+            mock.patch.object(emit, "HOOK_BUDGET", 1.0),
+            mock.patch.object(emit, "ACK_RESERVE", 0.1),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.01),
+            mock.patch.object(emit.time, "monotonic", side_effect=monotonic),
+            mock.patch.object(
+                emit, "post_event", side_effect=ten_millisecond_delivery
+            ),
+        ):
+            emit.deliver(dict(self.EVENT, ts="current"))
+
+        self.assertGreater(len(delivered), 16)
+        self.assertEqual(len(self.outbox()), before + 1 - len(delivered))
 
     def test_delayed_link_drains_a_capacity_outbox_without_reposting_acked_ids(self):
         received = []
@@ -1234,6 +1238,29 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
         self.assertEqual(primary_ids[0], primary_ids[1])
 
     def test_independent_targets_share_one_hook_latency_budget(self):
+        all_transports_entered = threading.Event()
+        transport_gate = threading.Barrier(3, action=all_transports_entered.set)
+        release_transports = threading.Event()
+        all_transports_finished = threading.Event()
+        attempted = []
+        finished = 0
+        attempted_lock = threading.Lock()
+
+        def blocked_transport(url, *_args, **_kwargs):
+            nonlocal finished
+            with attempted_lock:
+                attempted.append(url)
+            transport_gate.wait(5)
+            release_transports.wait(5)
+            with attempted_lock:
+                finished += 1
+                if finished == 3:
+                    all_transports_finished.set()
+            return False
+
+        def monotonic():
+            return 1.0 if all_transports_entered.is_set() else 0.0
+
         with (
             mock.patch.dict(
                 os.environ,
@@ -1245,12 +1272,17 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
             mock.patch.object(
                 emit,
                 "post_event",
-                side_effect=lambda *args, **kwargs: time.sleep(0.2) or False,
+                side_effect=blocked_transport,
             ),
+            mock.patch.object(emit, "POST_TIMEOUT", 0.1),
+            mock.patch.object(emit.time, "monotonic", side_effect=monotonic),
         ):
-            started = time.monotonic()
-            emit.deliver(self.EVENT)
-        self.assertLess(time.monotonic() - started, 0.45)
+            emit.deliver(self.EVENT, deadline=1.0)
+        self.assertTrue(all_transports_entered.is_set())
+        self.assertFalse(all_transports_finished.is_set())
+        self.assertEqual(set(attempted), {"http://one", "http://two", "http://three"})
+        release_transports.set()
+        self.assertTrue(all_transports_finished.wait(5))
         with open(emit.DIAGNOSTICS, encoding="utf-8") as stream:
             report = json.load(stream)
         self.assertGreaterEqual(report["failures"], 1)
