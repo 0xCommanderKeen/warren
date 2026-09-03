@@ -1160,10 +1160,9 @@ steward serialises — convenient, and it rewrites the file, so comments do not 
 `text` (the YAML itself, written byte for byte, which is how comments are kept). Giving
 both, or neither, is a `422`. `soul` is optional; omitting it leaves the soul untouched.
 
-The manifest and the soul move **together** because `agent_id` is in both and validation
-insists they agree — split into two endpoints, renaming a resident's agent id would be
-impossible, since whichever file you wrote first would be refused for disagreeing with the
-other.
+The manifest and the soul move **together** because identity and display frontmatter must
+agree. `uid` and `agent_id` are immutable through this endpoint: changing either returns
+`409 resident_identity_changed`; use an explicit operator migration or replace the Resident.
 
 It is a **full replacement, not a patch**. Merging a partial edit means steward deciding
 what a missing key meant — cleared, or untouched? — and the declaration is the wrong file
@@ -1178,6 +1177,7 @@ overwriting the first. Omit it to overwrite deliberately, which is what a script
 | 404 | `unknown_resident` | `PUT` updates; `POST /residents` is how one is declared |
 | 409 | `stale_revision` | somebody changed it first; re-read and reapply |
 | 409 | `soul_file_changed` | renaming `soul.file` would orphan the old file; do it in the checkout |
+| 409 | `resident_identity_changed` | ordinary edits cannot replace `uid` or `agent_id` |
 | 409 | `not_a_git_checkout` | the tree has no git behind it and this steward refuses to write unrecorded |
 | 422 | `manifest_invalid` | the tree would not validate; `diagnostics` names the fields |
 

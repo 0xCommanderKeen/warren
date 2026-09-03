@@ -24,6 +24,7 @@ WRITE_STATUS: dict[str, int] = {
     "unknown_skill": 404,
     "unknown_resident": 404,
     "resident_invalid": 409,
+    "resident_identity_changed": 409,
     "soul_file_changed": 409,
     "skill_exists": 409,
     "not_a_git_checkout": 409,

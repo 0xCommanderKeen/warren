@@ -70,7 +70,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -145,10 +145,6 @@ __all__ = [
     "raise_resident",
     "retire_resident",
 ]
-
-#: How a runner kind becomes the ``<source>`` half of a burrow agent id, when the
-#: caller does not name one. Anything else is steward's own doing, and says so.
-AGENT_ID_SOURCES = {"claude": "claude-code", "codex": "codex"}
 
 DEFAULT_MEMORY_ROOT = "/data/residents"
 
@@ -226,12 +222,9 @@ class NewResident(BaseModel):
     soul_body: str | None = Field(default=None, description="Opening paragraph of soul.md.")
     voice: str | None = Field(default=None, description="The soul's ## Voice section.")
 
-    def resolved_agent_id(self) -> str | None:
-        """Return the burrow identity to declare, deriving one when only an id was given."""
-        if self.agent_id or self.project:
-            return self.agent_id
-        source = AGENT_ID_SOURCES.get(self.runner.kind, "steward")
-        return f"{source}:{self.id}"
+    def resolved_agent_id(self, uid: UUID) -> str:
+        """Return the explicit join key, or derive the permanent one from ``uid``."""
+        return self.agent_id or f"resident:{uid}"
 
     def resolved_memory(self) -> Memory:
         """Return the declared memory location, or the conventional one for this id."""
@@ -267,9 +260,9 @@ class CreatedResident:
         }
 
 
-def _soul_document(spec: NewResident, agent_id: str | None) -> str:
+def _soul_document(spec: NewResident, uid: UUID, agent_id: str | None) -> str:
     """Render ``soul.md``: frontmatter that agrees with the manifest, then a body."""
-    frontmatter: dict[str, Any] = {}
+    frontmatter: dict[str, Any] = {"uid": str(uid)}
     if agent_id:
         frontmatter["agent_id"] = agent_id
     if spec.project:
@@ -299,14 +292,15 @@ def _next_home(residents_dir: Path) -> int:
         ) from exc
 
 
-def _manifest_model(spec: NewResident, *, home: int) -> ResidentManifest:
+def _manifest_model(spec: NewResident, *, home: int, uid: UUID | None = None) -> ResidentManifest:
     """Bind the request into a manifest model, so an invalid one never reaches disk."""
+    uid = uuid4() if uid is None else uid
     try:
         return ResidentManifest(
-            uid=uuid4(),
+            uid=uid,
             id=spec.id,
             home=home,
-            agent_id=spec.resolved_agent_id(),
+            agent_id=spec.resolved_agent_id(uid),
             project=spec.project,
             summary=spec.summary,
             soul=SoulIdentity(name=spec.name, char=spec.char, accent=spec.accent, role=spec.role),
@@ -354,7 +348,9 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
         manifest_path.write_text(
             yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
-        soul_path.write_text(_soul_document(spec, manifest.agent_id), encoding="utf-8")
+        soul_path.write_text(
+            _soul_document(spec, manifest.uid, manifest.agent_id), encoding="utf-8"
+        )
         result = validate_manifest(manifest_path)
         if not result.ok or not result.residents:
             raise NurseryError(  # noqa: TRY301 — the cleanup below is the point of the try
@@ -1030,7 +1026,7 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
     manifest_path = directory / MANIFEST_FILENAME
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
-        wanted = _manifest_model(spec, home=existing.manifest.home)
+        wanted = _manifest_model(spec, home=existing.manifest.home, uid=existing.manifest.uid)
         _refuse_retired_resident(existing)
         differences = _spec_differences(wanted, existing.manifest)
         if differences:
