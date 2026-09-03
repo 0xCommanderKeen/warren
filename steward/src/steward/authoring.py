@@ -1128,6 +1128,25 @@ def _check_revision(expected: str | None, paths: Sequence[Path]) -> None:
         )
 
 
+def _check_resident_identity_unchanged(path: Path, declaration: Declaration) -> None:
+    """Refuse identity replacement through the ordinary declaration editor."""
+    try:
+        current = yaml.safe_load(path.read_text(encoding="utf-8"))
+        proposed = yaml.safe_load(declaration.manifest_text)
+    except OSError, yaml.YAMLError:
+        return
+    if not isinstance(current, Mapping) or not isinstance(proposed, Mapping):
+        return
+    changed = [field for field in ("uid", "agent_id") if current.get(field) != proposed.get(field)]
+    if changed:
+        fields = " and ".join(changed)
+        raise AuthoringError(
+            f"ordinary declaration edits cannot change {fields}; resident identity requires "
+            "an explicit migration or replacement path",
+            reason="resident_identity_changed",
+        )
+
+
 # --------------------------------------------------------------------------------------
 # the write paths themselves
 # --------------------------------------------------------------------------------------
@@ -1176,6 +1195,7 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
         paths = declaration_paths(residents_dir, resolved_id, soul_filename)
         with _authoring_files(residents_dir, paths, repo=repo) as files:
             _check_revision(expected_revision, paths)
+            _check_resident_identity_unchanged(paths[0], declaration)
             result = validate_declaration(residents_dir, resolved_id, declaration, skills_dir)
             intended = {paths[0]: declaration.manifest_text.encode()}
             if declaration.soul_text is not None:

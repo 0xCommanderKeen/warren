@@ -142,7 +142,7 @@ def add_second_resident(repo: ScratchRepo, write_resident: ResidentWriter) -> di
     return second
 
 
-def test_a_duplicate_uid_is_caught_because_the_whole_tree_is_validated(
+def test_a_duplicate_uid_edit_is_refused_as_identity_replacement(
     fleet: ScratchRepo, write_resident: ResidentWriter
 ) -> None:
     """A single-file check could not see this, and `steward validate` would have failed."""
@@ -154,7 +154,21 @@ def test_a_duplicate_uid_is_caught_because_the_whole_tree_is_validated(
     with pytest.raises(au.AuthoringError) as refused:
         write(fleet, "second-agent", colliding)
 
-    assert "uid" in {diagnostic.field_path for diagnostic in refused.value.diagnostics}
+    assert refused.value.reason == "resident_identity_changed"
+
+
+@pytest.mark.parametrize("field", ["uid", "agent_id"])
+def test_an_ordinary_declaration_edit_cannot_replace_identity(
+    fleet: ScratchRepo, field: str
+) -> None:
+    declaration = declaration_of(fleet)
+    replacement = SECOND_RESIDENT_UID if field == "uid" else "resident:replacement"
+
+    with pytest.raises(au.AuthoringError) as refused:
+        write(fleet, "test-agent", edited(declaration, **{field: replacement}))
+
+    assert refused.value.reason == "resident_identity_changed"
+    assert field in str(refused.value)
 
 
 def test_diagnostics_name_the_real_tree_not_the_scratch_copy(fleet: ScratchRepo) -> None:
