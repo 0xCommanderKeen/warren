@@ -101,17 +101,12 @@ describe("the origin's route table matches the services behind it", () => {
     expect(nginx).toContain("return 301 /chronicle/residents;");
   });
 
-  it("keeps the pre-warren#361 /burrow/ prefix answering, as a redirect", () => {
-    // The prefix moved to /chronicle/, and an unclaimed path on this origin does not 404
-    // — `location /` answers 200 with the SPA's index.html (warren#242). So a bookmark, an
-    // open tab, or a curl in somebody's notes would get a page of HTML where it asked for
-    // JSON, which is the shape that hid a broken route for a week. `^~` matters: without
-    // it the regex block below would hand /burrow/residents to Steward instead.
-    expect(nginx).toContain("location ^~ /burrow/");
-    expect(nginx).toContain("rewrite ^/burrow/(.*)$ /chronicle/$1 permanent;");
-    // And nothing is *served* under the old prefix any more — a proxy_pass left behind
-    // would be a second route table nobody is keeping in step.
-    expect(nginx).not.toMatch(/location = \/burrow\//);
+  it("carries no /burrow/ route at all", () => {
+    // The prefix moved to /chronicle/ in warren#361 and its redirect was retired once
+    // nothing asked for it. Asserted rather than left unsaid, because an unclaimed path
+    // on this origin does not 404 — `location /` answers 200 with the SPA's index.html
+    // (warren#242) — so a route that came back by accident would look like it worked.
+    expect(nginx).not.toContain("/burrow/");
     // Relative Location headers. nginx's default absolute one is built from the `listen`
     // port, which is a guess about how the client reached this origin — wrong the moment
     // the config is run behind a published port that is not 8737.

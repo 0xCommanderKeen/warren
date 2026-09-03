@@ -1065,10 +1065,17 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
                     args=(dict(self.EVENT, ts="2026-08-24T12:00:01.000Z"),),
                 )
                 worker.start()
-                time.sleep(0.25)
-                self.assertNotIn(
-                    queued_id, [record["delivery_id"] for record in self.outbox()]
-                )
+                # Polled, not slept: the claim is that the ack lands *before* the worker
+                # blocks on the diagnostics lock, and a fixed wait turns that into a claim
+                # about how fast the machine is. A loaded CI runner failed this on 0.25 s
+                # while the ordering it tests was perfectly correct (warren#361). The
+                # deadline is generous because it is only ever paid by a real failure.
+                deadline = time.monotonic() + 5
+                queued = [record["delivery_id"] for record in self.outbox()]
+                while queued_id in queued and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    queued = [record["delivery_id"] for record in self.outbox()]
+                self.assertNotIn(queued_id, queued)
                 fcntl.flock(diagnostic_lock, fcntl.LOCK_UN)
                 worker.join(1)
                 self.assertFalse(worker.is_alive())

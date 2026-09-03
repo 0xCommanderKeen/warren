@@ -20,15 +20,16 @@ for page in "" "observatory/"; do
 done
 printf '%s\n' "module-type=javascript"
 curl -fsS "$origin/chronicle/state" >/dev/null
-# The pre-warren#361 prefix still answers, as a 301 to the new one. Checked here rather
-# than trusted, because an unclaimed path on this origin is not a 404 — it is the SPA's
-# index.html under a 200, so a redirect block that silently stopped matching would look
-# exactly like one that works until somebody parsed the JSON (warren#242).
-redirect=$(curl -fsS -o /dev/null -w '%{redirect_url}' "$origin/burrow/state")
-case "$redirect" in
-  */chronicle/state) : ;;
-  *) printf '%s\n' "/burrow/state redirects to '$redirect', not /chronicle/state"; exit 1 ;;
-esac
+# The pre-warren#361 prefix is gone, redirect and all. What is left is the SPA fallback,
+# which answers 200 with index.html rather than 404 (warren#242) — so this asks for the
+# JSON shape and insists it is *not* there. `-L` is load-bearing: without it a `/burrow/`
+# block that came back as a *redirect* would hand back nginx's 301 page, which contains
+# no snapshot either, and the check would pass while the prefix was live again. Verified
+# both ways against a real nginx before it was written down.
+if curl -fsSL "$origin/burrow/state" | grep -q '"snapshot"'; then
+  printf '%s\n' "/burrow/state is answering chronicle again; the prefix was retired in warren#361"
+  exit 1
+fi
 # Chronicle's manifest-validation report, on the prefixed path Steward's `/residents` left
 # free (warren#242). The `grep` is the real check, not `-f`: an unproxied path is not a 404
 # here, it is the SPA's index.html under a 200, which `-f` is happy with.
