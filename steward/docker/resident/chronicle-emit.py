@@ -11,7 +11,7 @@
 #
 #     python3 chronicle/hooks/build.py --output <path>
 #
-# steward vendors a copy of this artifact into docker/resident/burrow-emit.py with
+# steward vendors a copy of this artifact into docker/resident/chronicle-emit.py with
 # `make vendor-emitter`, and its suite rebuilds the bundle at HEAD and compares byte for
 # byte — so a hand edit here, or a source change nobody re-vendored, is a red build
 # rather than a resident emitting a protocol nobody reads.

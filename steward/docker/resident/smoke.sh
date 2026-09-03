@@ -34,7 +34,7 @@
 set -u
 
 CONFIG_DIR=/root/.claude
-EMITTER="$CONFIG_DIR/burrow-emit.py"
+EMITTER="$CONFIG_DIR/chronicle-emit.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 AGENT_ID="${SMOKE_AGENT_ID:-steward-smoke:$(hostname)}"
 PROJECT="${CHRONICLE_PROJECT:-steward}"

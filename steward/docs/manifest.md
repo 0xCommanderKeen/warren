@@ -1030,7 +1030,7 @@ resident cannot work without:
 
 - the **claude CLI** (`@anthropic-ai/claude-code`), pinned by the `CLAUDE_VERSION` build
   arg so a rebuild never silently changes which brain a resident has;
-- **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
+- **python3**, for the emitter — `chronicle-emit.py` is stdlib-only, which is why one file is
   the whole install;
 - a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
   (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
@@ -1091,10 +1091,13 @@ There is no registry in this fleet, so the tag is local and the image travels by
 
 **The entrypoint seeds the claude volume.** `/root/.claude` is a bind mount, and a bind
 mount hides whatever the image baked at that path, so the canonical copies live at
-`/opt/steward` and are copied in at start: `burrow-emit.py` every time (the image owns it),
+`/opt/steward` and are copied in at start: `chronicle-emit.py` every time (the image owns it),
 `settings.json` only when absent (a resident may have grown a permissions block worth
-keeping). The credentials a `docker exec <container> claude` login writes stay in the
-volume across restarts and rebuilds.
+keeping). The one exception to that is the emitter's *path*: a resident provisioned before
+warren#361 has a `settings.json` naming `burrow-emit.py`, which the new image does not
+ship, so the entrypoint repoints that one string in place, says so, and removes the
+pre-rename copy once nothing names it. The credentials a `docker exec <container> claude`
+login writes stay in the volume across restarts and rebuilds.
 
 **Where sessions run is the manifest's choice.** The default `runner.placement: local`
 keeps them in the process running `steward scheduler run`, via `subprocess.Popen` in
