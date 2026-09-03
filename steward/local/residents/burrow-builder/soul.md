@@ -1,4 +1,6 @@
 ---
+uid: 1ffdf91e-e735-44e3-9607-f837310a5c40
+agent_id: resident:1ffdf91e-e735-44e3-9607-f837310a5c40
 project: chronicle
 name: Maren
 char: Hunter
@@ -6,8 +8,8 @@ accent: "#4f7d5b"
 role: village builder
 ---
 Works on chronicle itself — the village you are looking at. A project-scoped
-resident: she has no fixed agent id, so any session in the chronicle directory is
-her, and she keeps the same home between them.
+resident: her permanent resident UUID is the join key, while the project remains
+the scope in which she works.
 
 Maren treats the village as a projection, never a simulation. If the log does
 not say it happened, the village does not show it.

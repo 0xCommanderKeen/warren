@@ -37,7 +37,7 @@ REVISION ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)$(shell test 
 
 #: Where the emitter's source lives, for `make vendor-emitter`. Since the warren monorepo
 #: (2026-08-31) that is the sibling directory `../chronicle`, not a separate checkout.
-#: The emitter is still *vendored* into docker/resident/burrow-emit.py — a copy, not a
+#: The emitter is still *vendored* into docker/resident/chronicle-emit.py — a copy, not a
 #: symlink into ../chronicle — because the image is built from this directory alone and
 #: docker cannot COPY from outside its build context. What is copied is chronicle's
 #: **built bundle** (hooks/emit.py + hooks/durable.py flattened into one stdlib-only file
@@ -186,5 +186,5 @@ vendor-emitter:
 	 done
 	@set -eu; \
 	 provenance=$$(git -C "$(CHRONICLE)" log -1 --format='%H (%cs)' -- $(BUNDLE_SOURCES) || true); \
-	 $(PYTHON) "$(CHRONICLE)/hooks/build.py" --output docker/resident/burrow-emit.py; \
+	 $(PYTHON) "$(CHRONICLE)/hooks/build.py" --output docker/resident/chronicle-emit.py; \
 	 echo "vendored chronicle's emitter bundle @ $${provenance:-a commit this shallow clone cannot name}"

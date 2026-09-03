@@ -22,11 +22,11 @@ value fails validation and is never stored. Credentials live outside both repos,
 | field | required | meaning |
 |---|---|---|
 | `version` | yes (defaults to `0`) | Manifest schema version. Only `0` exists. |
-| `uid` | yes | Random UUID minted once by the nursery; durable identity that survives renaming. |
-| `id` | yes | Slug; must equal the directory name under `residents/`. |
+| `uid` | yes | Permanent globally unique UUID, minted once and never edited. |
+| `id` | yes | Fleet-local operational slug and directory name under `residents/`. |
 | `home` | yes | Stable village plot, integer 0 through 7; duplicate plots are refused. |
-| `agent_id` | one of these two | Exact chronicle identity, `<source>:<name>` (e.g. `claude-code:life-agent`). |
-| `project` | one of these two | Project label for a project-scoped soul (e.g. `chronicle`). |
+| `agent_id` | no for legacy project-only declarations | Chronicle wire join key; new Residents use `resident:<uid>`. |
+| `project` | no | Supplemental project scope; legacy project-only declarations use it as their match. |
 | `summary` | no | One line chronicle can display. |
 | `soul` | yes | Identity dimension — see below. |
 | `charter` | yes | Purpose and obligations — see below. |
@@ -45,19 +45,31 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `deploy` | no | Where this resident runs: the nursery deploys there, the watchdog probes it. |
 | `retired` | no | Lifecycle state. `true` stops the resident; the files stay in git. |
 
-`uid` is the durable key for links, storage, and external references; display the resident's
+`uid` is the permanent, globally unique Resident identity and the durable key for links,
+storage, and external references; display the resident's
 name rather than the UUID. It is deliberately random so it can also safely contribute to an
 unguessable public topic name. The nursery writes it at creation and never derives it from
 `id`, `agent_id`, or any other renameable value.
 
+The nursery derives `agent_id: resident:<uid>` from the UUID it mints. It never derives
+identity from `id`, `soul.name`, the runner, model, placement, container, or burrow. The
+event `source` independently says which producer emitted a fact (`claude-code`, `codex`,
+or `steward`). Duplicate UIDs and duplicate exact agent IDs are refused across the fleet.
+Ordinary declaration edits may change operational settings and display names, but cannot
+change `uid` or `agent_id`; replacement requires a deliberate migration path.
+
 `agent_id` matches before `project`, mirroring chronicle's resident matching: an exact
-agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
-with neither cannot be matched to a villager and fails validation.
+agent-id manifest is reserved first, and `project` is supplemental scope when both are
+present. A legacy project-only soul catches the remaining events in that project. A
+manifest with neither cannot be matched to a villager and fails validation.
 
 The nursery mints the lowest free `home`. It is deliberately top-level: a plot is a stable
 village fact, not personality. Every launch restates `{name, char, accent, role, summary,
 resident_id, uid, home}` as `resident_declared`; retirement emits `resident_retired` so
 Chronicle frees that plot immediately.
+
+Two Residents may share `soul.name`: it is display text, not identity. Visitors have no
+Steward UID and continue to use the `agent_id` supplied by their emitter.
 
 The six capability dimensions (`soul`, `skills`, `memory`, `routes`, `app_grants`,
 `tools`) must be present explicitly. An empty list is a valid declaration ("this resident
@@ -663,7 +675,7 @@ routine's own `prompt`; `steward doctor` says when each routine next fires.
 
 Events go to `CHRONICLE_URL`/events with `Authorization: Bearer $CHRONICLE_TOKEN` when set.
 Every event remains in `$STEWARD_EVENTS_FALLBACK` (default
-`~/.chronicle/events.jsonl`, or `~/.burrow/events.jsonl` where that already exists) as the watchdog's complete local record. Remote-bound events
+`~/.chronicle/events.jsonl`) as the watchdog's complete local record. Remote-bound events
 also enter its `.pending` sibling before POST and retain a stable Chronicle delivery ID
 until acknowledged. A failed POST trips a short per-target circuit breaker and leaves
 the event queued; later emits and `steward events flush` replay oldest first. A village
@@ -1018,7 +1030,7 @@ resident cannot work without:
 
 - the **claude CLI** (`@anthropic-ai/claude-code`), pinned by the `CLAUDE_VERSION` build
   arg so a rebuild never silently changes which brain a resident has;
-- **python3**, for the emitter — `burrow-emit.py` is stdlib-only, which is why one file is
+- **python3**, for the emitter — `chronicle-emit.py` is stdlib-only, which is why one file is
   the whole install;
 - a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
   (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
@@ -1079,10 +1091,13 @@ There is no registry in this fleet, so the tag is local and the image travels by
 
 **The entrypoint seeds the claude volume.** `/root/.claude` is a bind mount, and a bind
 mount hides whatever the image baked at that path, so the canonical copies live at
-`/opt/steward` and are copied in at start: `burrow-emit.py` every time (the image owns it),
+`/opt/steward` and are copied in at start: `chronicle-emit.py` every time (the image owns it),
 `settings.json` only when absent (a resident may have grown a permissions block worth
-keeping). The credentials a `docker exec <container> claude` login writes stay in the
-volume across restarts and rebuilds.
+keeping). The one exception to that is the emitter's *path*: a resident provisioned before
+warren#361 has a `settings.json` naming `burrow-emit.py`, which the new image does not
+ship, so the entrypoint repoints that one string in place, says so, and removes the
+pre-rename copy once nothing names it. The credentials a `docker exec <container> claude`
+login writes stay in the volume across restarts and rebuilds.
 
 **Where sessions run is the manifest's choice.** The default `runner.placement: local`
 keeps them in the process running `steward scheduler run`, via `subprocess.Popen` in
@@ -1108,9 +1123,6 @@ under `$HOME` in the container — `/root`, since the image runs as root:
 | `/root/.chronicle/events.jsonl.deferred` (+ `.replay.*`, `.torn.*`, `.lock`) | deferred events waiting to be replayed |
 | `/root/.chronicle/primary-outbox.jsonl` (+ `.journal.*`, `.torn.*`, `.schedule.json`, `.lock`) | the durable outbox and its delivery schedule |
 | `/root/.chronicle/transport-diagnostics.json`, `.post-failed-<target>` | the last failures, and the per-target circuit breaker |
-
-`/root/.chronicle` on a container that has never had a `/root/.burrow`; on one that has,
-the emitter keeps using the old directory rather than stranding events nobody would replay.
 
 **It is not on a volume.** The compose fragment steward renders mounts exactly two paths —
 `./memory:<memory.path>` and `./claude:/root/.claude` — and neither is this one. So the
@@ -1340,7 +1352,8 @@ voice at all.
 
 ```markdown
 ---
-agent_id: claude-code:life-agent
+uid: e4af805e-cfa0-49e1-9782-93f7ae051102
+agent_id: resident:e4af805e-cfa0-49e1-9782-93f7ae051102
 name: Hob
 char: Monk
 accent: "#a68a4f"
@@ -1354,7 +1367,7 @@ How the resident sounds.
 ```
 
 The manifest is the source of truth. Any identity key present in the frontmatter
-(`name`, `char`, `accent`, `role`, `agent_id`, `project`) must agree with the manifest,
+(`uid`, `name`, `char`, `accent`, `role`, `agent_id`, `project`) must agree with the manifest,
 or validation fails rather than letting two files disagree about who someone is.
 
 ### `## Voice`

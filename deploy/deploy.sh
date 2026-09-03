@@ -287,6 +287,11 @@ ensure_checkout() {
     if $SSH "$NAS" 'test -d ~/docker/warren/steward/residents-repo/.git'; then
         # Dirty means a write landed on disk and its commit did not — the one state this
         # script must not paper over with a reset, because the bytes are somebody's edit.
+        # The burrow's filesystem hands every file mode 777 (UGOS ACLs), so git must not
+        # read the executable bit as a change: after the 2026-09-03 move the whole sparse
+        # tree read as modified with zero content differences. Set on every deploy — the
+        # clone below sets it too, but a checkout made before this line existed does not.
+        checkout_sh "$1" "git -C /checkout config core.fileMode false"
         dirty="$(checkout_sh "$1" "git -C /checkout status --porcelain")" \
             || die "could not read the residents checkout on $NAS (is steward-cp:$1 on the burrow?)"
         if [ -n "$dirty" ]; then
@@ -318,6 +323,7 @@ ensure_checkout() {
             || die "could not create the residents checkout on $NAS (is residents-key's public half a deploy key with write access on the repository?)"
         $SSH "$NAS" 'test -d ~/docker/warren/steward/residents-repo/steward/residents' \
             || die "the checkout on $NAS came up without steward/residents"
+        checkout_sh "$1" "git -C /checkout config core.fileMode false"
     fi
     # What the checkout holds going into this deploy. The smoke after `up` insists it is
     # still in the history — the issue's own acceptance line: a redeploy does not lose a

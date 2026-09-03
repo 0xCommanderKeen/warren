@@ -34,19 +34,15 @@
 set -u
 
 CONFIG_DIR=/root/.claude
-EMITTER="$CONFIG_DIR/burrow-emit.py"
+EMITTER="$CONFIG_DIR/chronicle-emit.py"
 SETTINGS="$CONFIG_DIR/settings.json"
 AGENT_ID="${SMOKE_AGENT_ID:-steward-smoke:$(hostname)}"
-PROJECT="${CHRONICLE_PROJECT:-${BURROW_PROJECT:-steward}}"
-# Where the emitter keeps its own state: ~/.chronicle, or ~/.burrow on a machine that
-# already has one, which is exactly what chronicle/hooks/emit.py's `_state_dir` decides. A
-# smoke test that watched the wrong file would report "the emitter delivered" for an
-# emitter that quietly fell back — the one lie this check exists to prevent.
-if [ ! -d "$HOME/.chronicle" ] && [ -d "$HOME/.burrow" ]; then
-    STATE_DIR="$HOME/.burrow"
-else
-    STATE_DIR="$HOME/.chronicle"
-fi
+PROJECT="${CHRONICLE_PROJECT:-steward}"
+# Where the emitter keeps its own state, which is exactly what chronicle/hooks/emit.py's
+# `_state_dir` decides. A smoke test that watched the wrong file would report "the emitter
+# delivered" for an emitter that quietly fell back — the one lie this check exists to
+# prevent.
+STATE_DIR="$HOME/.chronicle"
 FALLBACK="$STATE_DIR/events.jsonl"
 failed=0
 
@@ -84,10 +80,10 @@ else
 fi
 
 # ------------------------------------------------------------------- 3. the village answers
-VILLAGE_URL="${CHRONICLE_URL:-${BURROW_URL:-}}"
-VILLAGE_TOKEN="${CHRONICLE_TOKEN:-${BURROW_TOKEN:-}}"
+VILLAGE_URL="${CHRONICLE_URL:-}"
+VILLAGE_TOKEN="${CHRONICLE_TOKEN:-}"
 if [ -z "$VILLAGE_URL" ]; then
-    fail "no CHRONICLE_URL/BURROW_URL; there is no village to post to"
+    fail "no CHRONICLE_URL; there is no village to post to"
     posted=""
 else
     url=$(echo "$VILLAGE_URL" | sed 's:/*$::')
@@ -121,8 +117,7 @@ if [ -f "$EMITTER" ]; then
     before=0
     [ -f "$FALLBACK" ] && before=$(wc -l < "$FALLBACK" | tr -d ' ')
     printf '{"hook_event_name":"PostToolUse","tool_name":"SmokeTest","session_id":"steward-smoke","cwd":"%s"}' "$(pwd)" \
-        | BURROW_AGENT_ID="$AGENT_ID" BURROW_PROJECT="$PROJECT" \
-          CHRONICLE_AGENT_ID="$AGENT_ID" CHRONICLE_PROJECT="$PROJECT" python3 "$EMITTER"
+        | CHRONICLE_AGENT_ID="$AGENT_ID" CHRONICLE_PROJECT="$PROJECT" python3 "$EMITTER"
     status=$?
     after=0
     [ -f "$FALLBACK" ] && after=$(wc -l < "$FALLBACK" | tr -d ' ')

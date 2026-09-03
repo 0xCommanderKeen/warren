@@ -2,7 +2,7 @@
 
 ``hooks/build.py`` flattens ``hooks/emit.py`` and ``hooks/durable.py`` into a single
 self-contained script. Anything that deploys the emitter as one file — steward's
-resident image vendors it into ``docker/resident/burrow-emit.py`` — runs *this*
+resident image vendors it into ``docker/resident/chronicle-emit.py`` — runs *this*
 artifact, so the constraints that make a one-file emitter possible are asserted here,
 in the suite of the repository that can break them.
 """
@@ -247,7 +247,7 @@ class BundleContractTest(unittest.TestCase):
         suite, where the change was made, rather than in a sibling service's CI. Skipped
         when there is no steward beside us, so chronicle stays runnable on its own.
         """
-        vendored = ROOT.parent / "steward" / "docker" / "resident" / "burrow-emit.py"
+        vendored = ROOT.parent / "steward" / "docker" / "resident" / "chronicle-emit.py"
         if not vendored.is_file():
             self.skipTest("no steward checkout beside this one")
 

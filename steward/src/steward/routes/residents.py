@@ -328,7 +328,7 @@ def _retire_message(report: RetireReport) -> str:
     if not report.stopped:
         host = report.note
     elif report.scrubbed:
-        host = "the container is down and the .env holding BURROW_TOKEN is gone"
+        host = "the container is down and the .env holding CHRONICLE_TOKEN is gone"
     else:
         host = "the container is down; there was no .env here to remove"
     return f"{mark}; {host}. {CLAUDE_LOGIN_REMAINS}"

@@ -179,24 +179,6 @@ FALLBACK_MEMORY_PATH = "/data/memory"
 CHRONICLE_URL_ENV = "CHRONICLE_URL"
 CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a credential
 
-#: The pre-rename spellings of the same two variables (warren#216), written alongside the
-#: new ones at the same values.
-#:
-#: This pair is not politeness, it is the only thing keeping deployed residents emitting.
-#: warren#234 re-vendored the emitter, so the copy *in this repository* now reads
-#: ``CHRONICLE_*`` with a ``BURROW_*`` fallback — but the copy in a **running container**
-#: is whatever image that host was last shipped, and until every one of them has been
-#: rebuilt and recreated there are residents out there running the frozen pre-rename
-#: emitter, which reads ``BURROW_*`` and nothing else. Rendering only the new spelling
-#: would leave those with no village to post to, and it would fail the quiet way: the
-#: container starts, the agent works, and its events go to a local file nobody reads.
-#:
-#: Dropping this pair is therefore a rollout step, not a code change: `make image` +
-#: `make image-ship` to every host, re-provision, confirm each resident is emitting, then
-#: delete it.
-LEGACY_URL_ENV = "BURROW_URL"
-LEGACY_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — a variable name, not a credential
-
 
 #: ssh's reserved exit status for "ssh itself failed" — connection refused, host
 #: unreachable, auth denied, host-key mismatch. Every other status belongs to the remote
@@ -317,17 +299,29 @@ def memory_mount(manifest: ResidentManifest) -> tuple[str, str]:
     return str(PurePosixPath(target.path) / "memory"), memory_path_for(manifest)
 
 
-def memory_host_dir(manifest: ResidentManifest) -> Path:
+def memory_host_dir(manifest: ResidentManifest, env: Mapping[str, str] | None = None) -> Path:
     """Return the directory on *this* host that holds the resident's memory.
 
     The declared ``memory.path`` for a locally placed resident — the meaning it has
     always had — and the host side of :func:`memory_mount` for a container-placed one,
     where ``memory.path`` names the mount point inside the container instead.
+
+    A leading ``~`` is the deploy user's home **on the burrow** when :data:`BURROW_HOME_ENV`
+    names it, and this process's own home otherwise. The deployed control plane runs as
+    root in a container whose ``$HOME`` is ``/root``, which is nobody's home on the host;
+    with the variable set, the API, the scheduler and the watchdog all compute the path
+    the host actually has — the one their compose file mounts at that same path — rather
+    than three views of one directory.
     """
+    source = os.environ if env is None else env
     if manifest.runner.container_placed:
         host, _ = memory_mount(manifest)
-        return Path(host).expanduser()
-    return Path(manifest.memory.path).expanduser()
+    else:
+        host = manifest.memory.path
+    home = (source.get(BURROW_HOME_ENV) or "").strip()
+    if home and (host == "~" or host.startswith("~/")):
+        return Path(home) / host[2:] if host != "~" else Path(home)
+    return Path(host).expanduser()
 
 
 def placement_for(manifest: ResidentManifest) -> Placement:
@@ -385,18 +379,11 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
         # the container.
         "init": True,
         "working_dir": memory_path,
-        # Both spellings, same values: the new one for a current emitter, the old one for
-        # the pre-rename copy still running in any image that predates warren#234's
-        # re-vendoring (see LEGACY_URL_ENV).
         "environment": {
             "CHRONICLE_AGENT_ID": resident.agent_id,
             "CHRONICLE_PROJECT": resident.project,
             "CHRONICLE_URL": ("${CHRONICLE_URL:?steward writes this into .env at provision time}"),
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
-            "BURROW_AGENT_ID": resident.agent_id,
-            "BURROW_PROJECT": resident.project,
-            "BURROW_URL": "${BURROW_URL:?steward writes this into .env at provision time}",
-            "BURROW_TOKEN": "${BURROW_TOKEN-}",
             "STEWARD_RESIDENT": resident.id,
         },
         "volumes": [f"./memory:{memory_path}", "./claude:/root/.claude"],
@@ -434,28 +421,23 @@ def render_env(values: Mapping[str, str]) -> str:
 def emitter_env(source: Mapping[str, str]) -> dict[str, str]:
     """Read the village's address and secret out of steward's own environment.
 
-    Reads either spelling — steward's own environment on the NAS still exports the old one
-    — and writes **both** into the resident's ``.env`` at the same value, because the
-    emitter in the image only understands the old one (see :data:`LEGACY_URL_ENV`).
-
-    Refuses without a URL under either spelling, and the refusal is the point: a container
-    with no village to post to is a resident that will never appear in chronicle however
-    healthy it is, and finding that out three days later from an empty house is worse than
-    finding it out here. A missing token is *not* a refusal — chronicle's ingest is open
-    when its own token is unset — but the plan says so out loud.
+    Refuses without a URL, and the refusal is the point: a container with no village to
+    post to is a resident that will never appear in chronicle however healthy it is, and
+    finding that out three days later from an empty house is worse than finding it out
+    here. A missing token is *not* a refusal — chronicle's ingest is open when its own
+    token is unset — but the plan says so out loud.
     """
-    url = (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip()
+    url = (source.get(CHRONICLE_URL_ENV) or "").strip()
     if not url:
         raise TransportError(
             f"{CHRONICLE_URL_ENV} is unset in steward's environment, so the resident would "
             f"be deployed with nowhere to emit and would never appear in the village; "
             f"export {CHRONICLE_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
         )
-    values = {CHRONICLE_URL_ENV: url, LEGACY_URL_ENV: url}
-    token = (source.get(CHRONICLE_TOKEN_ENV) or source.get(LEGACY_TOKEN_ENV) or "").strip()
+    values = {CHRONICLE_URL_ENV: url}
+    token = (source.get(CHRONICLE_TOKEN_ENV) or "").strip()
     if token:
         values[CHRONICLE_TOKEN_ENV] = token
-        values[LEGACY_TOKEN_ENV] = token
     return values
 
 
@@ -468,18 +450,14 @@ def planned_env(source: Mapping[str, str]) -> dict[str, str]:
     whatever the emitter environment says (#84). This is the lenient reader the dry-run
     path uses: whatever is set, named; nothing raised.
 
-    It names both spellings of whatever it finds, so the rehearsal reports the keys the
-    real run would actually write rather than half of them.
+    It names whatever it finds, so the rehearsal reports the keys the real run would
+    actually write rather than half of them.
     """
     values: dict[str, str] = {}
-    for new_key, old_key in (
-        (CHRONICLE_URL_ENV, LEGACY_URL_ENV),
-        (CHRONICLE_TOKEN_ENV, LEGACY_TOKEN_ENV),
-    ):
-        value = (source.get(new_key) or source.get(old_key) or "").strip()
+    for key in (CHRONICLE_URL_ENV, CHRONICLE_TOKEN_ENV):
+        value = (source.get(key) or "").strip()
         if value:
-            values[new_key] = value
-            values[old_key] = value
+            values[key] = value
     return values
 
 

@@ -2994,7 +2994,6 @@ def test_a_deploy_with_nowhere_to_emit_is_a_refusal_not_a_traceback(
     `village` fixture sets it, which is exactly why nothing here ever noticed.
     """
     monkeypatch.delenv("CHRONICLE_URL", raising=False)
-    monkeypatch.delenv("BURROW_URL", raising=False)
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
 
@@ -3011,7 +3010,6 @@ def test_a_refused_deploy_says_the_same_body_will_pick_up_where_it_stopped(
 ) -> None:
     """And the claim is true, not a comfort: the retry converges rather than colliding."""
     monkeypatch.delenv("CHRONICLE_URL", raising=False)
-    monkeypatch.delenv("BURROW_URL", raising=False)
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
 
@@ -3104,12 +3102,7 @@ def test_a_deploy_leaks_no_secret_into_the_response(
     response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
     assert village not in response.text
-    assert response.json()["provision"]["env_keys"] == [
-        "BURROW_TOKEN",
-        "BURROW_URL",
-        "CHRONICLE_TOKEN",
-        "CHRONICLE_URL",
-    ]
+    assert response.json()["provision"]["env_keys"] == ["CHRONICLE_TOKEN", "CHRONICLE_URL"]
 
 
 # --------------------------------------------------------------------------------------
@@ -3264,7 +3257,6 @@ def test_provisioning_with_nowhere_to_emit_is_a_refusal_not_a_traceback(
     api: ApiFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("CHRONICLE_URL", raising=False)
-    monkeypatch.delenv("BURROW_URL", raising=False)
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
 
     response = harness.client.post("/residents/test-agent/provision")
@@ -3420,7 +3412,7 @@ def test_retiring_a_resident_with_no_container_marks_and_commits_and_says_so(
 def test_retiring_a_container_removes_the_token_only_after_the_container_is_down(
     api: ApiFactory, tmp_path: Path
 ) -> None:
-    """`docker compose down` reads the .env: `${BURROW_URL:?…}` errors once it is gone."""
+    """`docker compose down` reads the .env: `${CHRONICLE_URL:?…}` errors once it is gone."""
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
     harness.client.post("/residents/test-agent/provision")
@@ -3443,7 +3435,7 @@ def test_retiring_a_container_removes_the_token_only_after_the_container_is_down
         "~/docker/warren/residents/test-agent/.env",
         "~/docker/warren/residents/test-agent/docker-compose.yaml",
     )
-    assert "BURROW_TOKEN is gone" in body["message"]
+    assert "CHRONICLE_TOKEN is gone" in body["message"]
     assert "claude/ still holds" in body["message"]
 
 
@@ -4149,6 +4141,22 @@ def test_renaming_the_soul_file_is_refused_rather_than_orphaning_it(
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "soul_file_changed"
+
+
+@pytest.mark.parametrize("field", ["uid", "agent_id"])
+def test_declaration_put_cannot_replace_resident_identity(
+    writable: Callable[..., Harness], field: str
+) -> None:
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"][field] = SECOND_RESIDENT_UID if field == "uid" else "resident:replacement"
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "resident_identity_changed"
 
 
 # -- skills ----------------------------------------------------------------------------

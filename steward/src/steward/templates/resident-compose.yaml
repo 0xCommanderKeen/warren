@@ -4,7 +4,7 @@
 # provision — `steward new-resident` or `steward provision` — and an edit made here is an
 # edit nobody can read in git.
 #
-# Secrets are not in this file and never will be: BURROW_URL and BURROW_TOKEN are
+# Secrets are not in this file and never will be: CHRONICLE_URL and CHRONICLE_TOKEN are
 # read from the .env beside it, which steward writes at provision time from its own
 # environment and which no repository has ever seen.
 #

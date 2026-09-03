@@ -19,7 +19,7 @@ def test_the_residents_tree_validates() -> None:
 
 def test_hob_is_the_life_agent() -> None:
     hob = m.load_manifest(RESIDENTS_DIR / "life-agent" / "manifest.yaml")
-    assert hob.manifest.agent_id == "claude-code:life-agent"
+    assert hob.manifest.agent_id == f"resident:{hob.uid}"
     assert hob.manifest.soul.name == "Hob"
     assert hob.manifest.soul.char == "Monk"
     assert hob.manifest.soul.accent == "#a68a4f"

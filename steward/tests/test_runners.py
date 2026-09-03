@@ -851,14 +851,14 @@ def test_a_failure_never_leaks_child_output_into_the_summary(
 ) -> None:
     """The summary that reaches a village event is classified: never the child's own text."""
     secret_key = "sk-ant-api03-DEADBEEFsecretkeymaterial"
-    stub_bin("claude", f'echo "{secret_key}" >&2; echo "BURROW_TOKEN=hunter2" >&2; exit 1')
+    stub_bin("claude", f'echo "{secret_key}" >&2; echo "CHRONICLE_TOKEN=hunter2" >&2; exit 1')
     result = r.build_runner(RunnerSpec(kind="claude")).run(request_for(tmp_path))
 
     assert result.outcome is r.Outcome.FAILED
     # What an event builder serializes — nothing the child chose to print.
     assert result.summary() == "exit status 1"
     assert secret_key not in result.summary()
-    assert "BURROW_TOKEN" not in result.summary()
+    assert "CHRONICLE_TOKEN" not in result.summary()
     # The raw child text is still kept, but only for the local log.
     assert secret_key in (result.error or "")
 
@@ -998,7 +998,7 @@ def test_result_summary_reports_what_happened() -> None:
 
 
 def test_request_env_reaches_the_session(stub_bin: StubWriter, tmp_path: Path) -> None:
-    stub_bin("claude", 'echo "$BURROW_AGENT_ID" > "$ARGV_DUMP"')
+    stub_bin("claude", 'echo "$CHRONICLE_AGENT_ID" > "$ARGV_DUMP"')
     runner = r.build_runner(RunnerSpec(kind="claude"))
     runner.run(
         r.RunRequest(
@@ -1008,7 +1008,7 @@ def test_request_env_reaches_the_session(stub_bin: StubWriter, tmp_path: Path) -
             timeout_s=10,
             env={
                 "ARGV_DUMP": str(tmp_path / "env.txt"),
-                "BURROW_AGENT_ID": "claude-code:life-agent",
+                "CHRONICLE_AGENT_ID": "claude-code:life-agent",
             },
         )
     )
@@ -1058,12 +1058,12 @@ def test_a_session_never_sees_stewards_api_token(
     rule both assume no session holds.
     """
     monkeypatch.setenv("STEWARD_TOKEN", "the-master-key")
-    monkeypatch.setenv("BURROW_TOKEN", "the-shared-ingest-secret")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "the-shared-ingest-secret")
 
     observed = child_env(stub_bin, tmp_path)
 
     assert "STEWARD_TOKEN" not in observed
-    assert "BURROW_TOKEN" not in observed
+    assert "CHRONICLE_TOKEN" not in observed
     assert "the-master-key" not in observed.values()
 
 
@@ -1073,7 +1073,7 @@ def test_a_session_sees_only_the_allowlist_and_what_steward_chose(
     """Nothing ambient gets in, and everything deliberate does.
 
     The second half matters as much as the first: an allowlist that also dropped
-    ``request.env`` would be a session with no identity, and ``BURROW_AGENT_ID`` is how
+    ``request.env`` would be a session with no identity, and ``CHRONICLE_AGENT_ID`` is how
     burrow knows which villager acted.
     """
     monkeypatch.setenv("SOME_UNRELATED_SECRET", "nope")
@@ -1082,11 +1082,11 @@ def test_a_session_sees_only_the_allowlist_and_what_steward_chose(
     observed = child_env(
         stub_bin,
         tmp_path,
-        request=request_for(tmp_path, env={"BURROW_AGENT_ID": "claude-code:life-agent"}),
+        request=request_for(tmp_path, env={"CHRONICLE_AGENT_ID": "claude-code:life-agent"}),
     )
 
     assert "SOME_UNRELATED_SECRET" not in observed
-    assert observed["BURROW_AGENT_ID"] == "claude-code:life-agent"
+    assert observed["CHRONICLE_AGENT_ID"] == "claude-code:life-agent"
     assert observed["STEWARD_STATE"] == "/state/scheduler.json", (
         "a session's own `steward delegate` has to open the same database"
     )
@@ -1117,15 +1117,15 @@ def test_request_env_wins_over_the_launching_process(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A resident's identity is its manifest's, not the launching process's."""
-    monkeypatch.setenv("BURROW_URL", "http://the-control-planes-village")
+    monkeypatch.setenv("CHRONICLE_URL", "http://the-control-planes-village")
 
     observed = child_env(
         stub_bin,
         tmp_path,
-        request=request_for(tmp_path, env={"BURROW_URL": "http://this-residents-village"}),
+        request=request_for(tmp_path, env={"CHRONICLE_URL": "http://this-residents-village"}),
     )
 
-    assert observed["BURROW_URL"] == "http://this-residents-village"
+    assert observed["CHRONICLE_URL"] == "http://this-residents-village"
 
 
 def test_an_unset_allowlisted_name_is_absent_rather_than_empty(
@@ -1347,7 +1347,7 @@ def test_a_container_placed_session_execs_into_the_container(
     runner = r.build_runner(RunnerSpec(kind="claude", model="claude-opus-5"), PLACED)
 
     result = runner.run(
-        request_for(tmp_path, env={"STEWARD_RUN_ID": "run-42", "BURROW_AGENT_ID": "cc:testy"})
+        request_for(tmp_path, env={"STEWARD_RUN_ID": "run-42", "CHRONICLE_AGENT_ID": "cc:testy"})
     )
 
     assert result.outcome is r.Outcome.OK
@@ -1357,7 +1357,7 @@ def test_a_container_placed_session_execs_into_the_container(
 
     (call,) = docker_calls(log)
     assert call[:3] == ["exec", "-w", "/data/memory"]
-    assert call[3:7] == ["-e", "BURROW_AGENT_ID", "-e", "STEWARD_RUN_ID"]
+    assert call[3:7] == ["-e", "CHRONICLE_AGENT_ID", "-e", "STEWARD_RUN_ID"]
     assert call[7:9] == [CONTAINER, "sh"]
     assert call[9] == "-c"
     shim = call[10]

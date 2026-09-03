@@ -70,7 +70,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -80,7 +80,6 @@ from steward.deploy import (
     BUNDLE_NAMES,
     CHRONICLE_URL_ENV,
     COMPOSE_FILENAME,
-    LEGACY_URL_ENV,
     DeployTarget,
     Transport,
     TransportError,
@@ -146,10 +145,6 @@ __all__ = [
     "raise_resident",
     "retire_resident",
 ]
-
-#: How a runner kind becomes the ``<source>`` half of a burrow agent id, when the
-#: caller does not name one. Anything else is steward's own doing, and says so.
-AGENT_ID_SOURCES = {"claude": "claude-code", "codex": "codex"}
 
 DEFAULT_MEMORY_ROOT = "/data/residents"
 
@@ -227,12 +222,9 @@ class NewResident(BaseModel):
     soul_body: str | None = Field(default=None, description="Opening paragraph of soul.md.")
     voice: str | None = Field(default=None, description="The soul's ## Voice section.")
 
-    def resolved_agent_id(self) -> str | None:
-        """Return the burrow identity to declare, deriving one when only an id was given."""
-        if self.agent_id or self.project:
-            return self.agent_id
-        source = AGENT_ID_SOURCES.get(self.runner.kind, "steward")
-        return f"{source}:{self.id}"
+    def resolved_agent_id(self, uid: UUID) -> str:
+        """Return the explicit join key, or derive the permanent one from ``uid``."""
+        return self.agent_id or f"resident:{uid}"
 
     def resolved_memory(self) -> Memory:
         """Return the declared memory location, or the conventional one for this id."""
@@ -268,9 +260,9 @@ class CreatedResident:
         }
 
 
-def _soul_document(spec: NewResident, agent_id: str | None) -> str:
+def _soul_document(spec: NewResident, uid: UUID, agent_id: str | None) -> str:
     """Render ``soul.md``: frontmatter that agrees with the manifest, then a body."""
-    frontmatter: dict[str, Any] = {}
+    frontmatter: dict[str, Any] = {"uid": str(uid)}
     if agent_id:
         frontmatter["agent_id"] = agent_id
     if spec.project:
@@ -300,14 +292,15 @@ def _next_home(residents_dir: Path) -> int:
         ) from exc
 
 
-def _manifest_model(spec: NewResident, *, home: int) -> ResidentManifest:
+def _manifest_model(spec: NewResident, *, home: int, uid: UUID | None = None) -> ResidentManifest:
     """Bind the request into a manifest model, so an invalid one never reaches disk."""
+    uid = uuid4() if uid is None else uid
     try:
         return ResidentManifest(
-            uid=uuid4(),
+            uid=uid,
             id=spec.id,
             home=home,
-            agent_id=spec.resolved_agent_id(),
+            agent_id=spec.resolved_agent_id(uid),
             project=spec.project,
             summary=spec.summary,
             soul=SoulIdentity(name=spec.name, char=spec.char, accent=spec.accent, role=spec.role),
@@ -355,7 +348,9 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
         manifest_path.write_text(
             yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8"
         )
-        soul_path.write_text(_soul_document(spec, manifest.agent_id), encoding="utf-8")
+        soul_path.write_text(
+            _soul_document(spec, manifest.uid, manifest.agent_id), encoding="utf-8"
+        )
         result = validate_manifest(manifest_path)
         if not result.ok or not result.residents:
             raise NurseryError(  # noqa: TRY301 — the cleanup below is the point of the try
@@ -768,7 +763,7 @@ class RetireReport:
     #: True when this run wrote ``retired: true``; False when it already said so.
     marked: bool
     stopped: bool
-    #: True when this run found a ``.env`` holding ``BURROW_TOKEN`` on the host and removed
+    #: True when this run found a ``.env`` holding ``CHRONICLE_TOKEN`` on the host and removed
     #: it. **False when there was nothing to remove** — a host that never held a deployment,
     #: or one an earlier retirement already scrubbed — because "the token is gone" and "this
     #: run took it away" are different sentences and only the second is this field's
@@ -990,7 +985,7 @@ def _no_village_warning(source: Mapping[str, str]) -> str | None:
     stops here, because a container with nowhere to emit is a resident that never appears
     in the village at all.
     """
-    if (source.get(CHRONICLE_URL_ENV) or source.get(LEGACY_URL_ENV) or "").strip():
+    if (source.get(CHRONICLE_URL_ENV) or "").strip():
         return None
     return (
         f"{CHRONICLE_URL_ENV} is unset, so a real run would refuse to deploy a resident "
@@ -1031,7 +1026,7 @@ def _declare(  # noqa: PLR0913 — every collaborator is keyword-only and inject
     manifest_path = directory / MANIFEST_FILENAME
     if directory.exists():
         existing = _load_or_refuse(manifest_path, skills_dir)
-        wanted = _manifest_model(spec, home=existing.manifest.home)
+        wanted = _manifest_model(spec, home=existing.manifest.home, uid=existing.manifest.uid)
         _refuse_retired_resident(existing)
         differences = _spec_differences(wanted, existing.manifest)
         if differences:
@@ -1349,11 +1344,11 @@ def scrubbed_paths(target: DeployTarget) -> tuple[str, ...]:
     """Name the two host files retirement removes, through the target's own properties.
 
     The rule behind the list: **steward removes on retire exactly what steward rewrites on
-    provision** (steward #157). ``.env`` holds ``BURROW_TOKEN``, and a village ingest token
+    provision** (steward #157). ``.env`` holds ``CHRONICLE_TOKEN``, and a village ingest token
     belonging to a resident that is no longer allowed to act had been sitting on the NAS
     indefinitely with nothing in the retire report mentioning it. The compose file goes with
-    it, and not merely because it is inert without the ``.env``: ``BURROW_URL`` is
-    interpolated as ``${BURROW_URL:?…}``, so a compose file left beside a removed ``.env``
+    it, and not merely because it is inert without the ``.env``: ``CHRONICLE_URL`` is
+    interpolated as ``${CHRONICLE_URL:?…}``, so a compose file left beside a removed ``.env``
     would make the *next* ``docker compose down`` fail on a variable rather than report an
     already-stopped container. Both are written again, byte for byte, by the next provision,
     so removing them costs the documented way back nothing.
@@ -1384,7 +1379,7 @@ def _scrub_host(
     """Remove the token and the compose file, after the container is already down.
 
     **After**, not before: ``docker compose down`` reads the ``.env`` beside the compose
-    file, and ``BURROW_URL`` is interpolated as ``${BURROW_URL:?…}``, so scrubbing first
+    file, and ``CHRONICLE_URL`` is interpolated as ``${CHRONICLE_URL:?…}``, so scrubbing first
     would make the stop fail on a missing variable.
     """
     left_behind = ", ".join(scrubbed_paths(target))
@@ -1403,13 +1398,13 @@ def _scrub_host(
             f"{resident_id} is retired and its container is stopped, but "
             f"{target.user}@{target.host} could not be reached to remove its credentials: "
             f"{exc}; re-run `steward retire {resident_id}` once the host is back, or "
-            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
+            f"remove {left_behind} by hand — the .env holds CHRONICLE_TOKEN"
         ) from exc
     if not outcome.ok:
         raise NurseryError(
             f"{resident_id} is retired and its container is stopped, but the credentials "
             f"could not be removed from {target.user}@{target.host}: {outcome.summary()}; "
-            f"remove {left_behind} by hand — the .env holds BURROW_TOKEN"
+            f"remove {left_behind} by hand — the .env holds CHRONICLE_TOKEN"
         )
     return held_a_token
 
@@ -1585,7 +1580,7 @@ def retire_resident(  # noqa: C901, PLR0913 — staged lifecycle; collaborators 
             False,
             (
                 "deploy skipped: the manifest is marked and the host was left untouched, "
-                "so the .env holding BURROW_TOKEN is still there"
+                "so the .env holding CHRONICLE_TOKEN is still there"
             ),
         )
 

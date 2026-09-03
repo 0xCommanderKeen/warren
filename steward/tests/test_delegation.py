@@ -1142,7 +1142,7 @@ def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     delegated = sink.events[0]
     assert delegated.type == "task_delegated"
     assert delegated.agent_id == "steward:project-agent"
-    assert delegated.payload["to"] == "claude-code:life-agent"
+    assert delegated.payload["to"] == receiver.agent_id
     assert delegated.payload["depth"] == 1
 
     (report,) = dispatcher.dispatch(NOW).reports

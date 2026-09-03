@@ -303,7 +303,7 @@ SSH_USER_PATTERN = r"^[A-Za-z_][A-Za-z0-9._-]*$"
 REMOTE_PATH_PATTERN = r"^[A-Za-z0-9~/][A-Za-z0-9_./-]*$"
 IMAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$"
 
-#: ``project`` becomes ``BURROW_PROJECT`` in the resident's compose environment, so like
+#: ``project`` becomes ``CHRONICLE_PROJECT`` in the resident's compose environment, so like
 #: every value that lands in generated YAML it has to be data and not markup: a slug-ish
 #: label with no whitespace, no ``:`` and no newline. Without this a project string could
 #: reopen the compose document from inside a value (#61).
@@ -592,7 +592,7 @@ def scan_text_for_secrets(text: str, source: Path, field_path: str) -> list[Diag
 #: gap that reads like the session simply said nothing.
 SECRET_REDACTION = "[redacted:secret]"  # noqa: S105 — a redaction marker, not a credential
 
-#: A credential-shaped assignment in free-form text — ``BURROW_TOKEN=…``, ``api_key: …`` —
+#: A credential-shaped assignment in free-form text — ``CHRONICLE_TOKEN=…``, ``api_key: …`` —
 #: built from the same vocabulary the manifest validator rejects (:data:`_CREDENTIAL_WORDS`)
 #: so a secret a session writes into a ``needs_human`` detail is scrubbed by the same
 #: definition of "credential" that keeps one out of a manifest. Authorization headers
@@ -1409,7 +1409,7 @@ class ResidentManifest(_Model):
     agent_id: str | None = Field(
         default=None,
         pattern=AGENT_ID_PATTERN,
-        description="Burrow event join key, <source>:<name>. Matched before project.",
+        description="Chronicle event join key; resident:<uid> for Steward Residents.",
     )
     project: str | None = Field(
         default=None,
@@ -1475,7 +1475,7 @@ class ResidentManifest(_Model):
     def chronicle_agent_id(self) -> str:
         """The chronicle identity this resident's events are filed under.
 
-        The declared ``agent_id`` when there is one, and a derived ``steward:<id>`` when
+        The declared ``agent_id`` when there is one, and a legacy ``steward:<id>`` when
         the resident is project-scoped instead. Spelled once, here, because a resident
         whose events arrive under two identities is two villagers as far as chronicle is
         concerned — and nothing fails loudly when that happens, it just silently splits
@@ -2464,6 +2464,7 @@ def _check_soul_agreement(
     diagnostics: list[Diagnostic] = []
     frontmatter = soul.frontmatter
     identity = {
+        "uid": str(manifest.uid),
         "name": manifest.soul.name,
         "char": manifest.soul.char,
         "accent": manifest.soul.accent,
@@ -2560,6 +2561,33 @@ def _check_unique_uids(residents: Sequence[Resident]) -> list[Diagnostic]:
                         "exactly one resident"
                     ),
                     example="uid: 3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+                )
+            )
+    return diagnostics
+
+
+def _check_unique_agent_ids(residents: Sequence[Resident]) -> list[Diagnostic]:
+    """Reject an effective Chronicle join key used by more than one resident."""
+    by_agent_id: dict[str, list[Resident]] = {}
+    for resident in residents:
+        by_agent_id.setdefault(resident.agent_id, []).append(resident)
+
+    diagnostics: list[Diagnostic] = []
+    for agent_id, group in by_agent_id.items():
+        if len(group) <= 1:
+            continue
+        ids = sorted(resident.id for resident in group)
+        for resident in group:
+            others = [resident_id for resident_id in ids if resident_id != resident.id]
+            diagnostics.append(
+                Diagnostic(
+                    file=resident.path,
+                    field_path="agent_id",
+                    problem=(
+                        f"agent_id {agent_id!r} also belongs to {others}; a Chronicle join "
+                        "key must name exactly one resident"
+                    ),
+                    example=f"agent_id: resident:{resident.manifest.uid}",
                 )
             )
     return diagnostics
@@ -2825,6 +2853,9 @@ def validate_tree(
 
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_unique_uids(result.residents)))
+    )
+    result = result.merged_with(
+        ValidationResult(diagnostics=tuple(_check_unique_agent_ids(result.residents)))
     )
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_unique_homes(result.residents)))

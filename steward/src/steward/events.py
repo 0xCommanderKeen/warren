@@ -6,15 +6,15 @@ burrow's log, and burrow renders them. See burrow's ``docs/protocol.md`` for the
 Transport, in the spirit of burrow's own emitter but simpler because steward's
 scheduler is a long-lived process rather than a one-shot hook:
 
-- ``POST <BURROW_URL>/events`` with the event as the body, carrying
-  ``Authorization: Bearer $BURROW_TOKEN`` when the token is set.
+- ``POST <CHRONICLE_URL>/events`` with the event as the body, carrying
+  ``Authorization: Bearer $CHRONICLE_TOKEN`` when the token is set.
 - A failed POST (refusal, timeout, 401, 5xx) trips an **in-process circuit breaker**
   for that target — 60 s, or 5 s for loopback where failure is an instant refusal —
   so an unreachable village never slows a routine down. The breaker lives in memory
   rather than in a dotfile because the process that owns it outlives every event it
   sends.
 - **Every** event is also appended to a local JSONL log
-  (``STEWARD_EVENTS_FALLBACK``, default ``~/.burrow/events.jsonl``), whether or not it
+  (``STEWARD_EVENTS_FALLBACK``, default ``~/.chronicle/events.jsonl``), whether or not it
   reached burrow. That file is the watchdog's substrate: it scans the log for a
   ``routine_started`` no closing event ever answered, and a bracket split across a
   transient outage — started written locally because burrow was down, finished
@@ -157,11 +157,6 @@ DETAIL_MAX_CHARS = 8_000
 FALLBACK_ENV = "STEWARD_EVENTS_FALLBACK"
 URL_ENV = "CHRONICLE_URL"
 TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — an env var name, not a credential
-#: The pre-rename spellings (warren#216), still read so an environment written before
-#: the rename keeps configuring steward's own emitter. The new spelling wins.
-LEGACY_URL_ENV = "BURROW_URL"
-LEGACY_TOKEN_ENV = "BURROW_TOKEN"  # noqa: S105 — an env var name, not a credential
-
 _REQUIRED_FIELDS = ("v", "ts", "source", "agent_id", "project", "type", "payload")
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
 
@@ -171,12 +166,7 @@ def default_fallback_path() -> Path:
     configured = (os.environ.get(FALLBACK_ENV) or "").strip()
     if configured:
         return Path(configured).expanduser()
-    # Same rule as chronicle's own state directory (warren#216): prefer the new name, but
-    # keep using an existing ~/.burrow rather than stranding a record the watchdog reads.
-    home = Path.home()
-    if not (home / ".chronicle").is_dir() and (home / ".burrow").is_dir():
-        return home / ".burrow" / "events.jsonl"
-    return home / ".chronicle" / "events.jsonl"
+    return Path.home() / ".chronicle" / "events.jsonl"
 
 
 def truncate_error(text: str, limit: int = ERROR_MAX_CHARS) -> str:
@@ -370,15 +360,12 @@ class EventEmitter:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> EventEmitter:
-        """Build an emitter from ``CHRONICLE_URL``/``CHRONICLE_TOKEN``/the fallback var.
-
-        Each is also accepted under its pre-rename ``BURROW_*`` spelling (warren#216).
-        """
+        """Build an emitter from ``CHRONICLE_URL``/``CHRONICLE_TOKEN``/the fallback var."""
         source = os.environ if env is None else env
         fallback = (source.get(FALLBACK_ENV) or "").strip()
         return cls(
-            url=source.get(URL_ENV) or source.get(LEGACY_URL_ENV),
-            token=source.get(TOKEN_ENV) or source.get(LEGACY_TOKEN_ENV),
+            url=source.get(URL_ENV),
+            token=source.get(TOKEN_ENV),
             fallback=Path(fallback).expanduser() if fallback else None,
         )
 
@@ -1400,7 +1387,7 @@ def needs_human_event(  # noqa: PLR0913 — the payload the protocol documents
     turn that into a 200KB event POSTed to burrow.
 
     They are also *scrubbed* here (steward #65): a secret a session writes into its
-    message or a detail value — an ``sk-…`` key, a ``BURROW_TOKEN=…``, a PEM/JWT/URL
+    message or a detail value — an ``sk-…`` key, a ``CHRONICLE_TOKEN=…``, a PEM/JWT/URL
     password — is redacted before it can leave the village, and redacted *before* it is
     bounded so a secret cut in half by the length cap can never surface a live prefix.
     """

@@ -20,8 +20,6 @@ from steward.deploy import (
     DEFAULT_HOST,
     DEFAULT_USER,
     ENV_FILENAME,
-    LEGACY_TOKEN_ENV,
-    LEGACY_URL_ENV,
     BurrowTransport,
     LocalTransport,
     SshTransport,
@@ -30,6 +28,7 @@ from steward.deploy import (
     bundle_for,
     compose_argv,
     emitter_env,
+    memory_host_dir,
     pack,
     render_compose,
     render_env,
@@ -116,9 +115,8 @@ def test_the_compose_fragment_is_valid_yaml_naming_this_resident(write_resident)
     assert service["image"] == "steward-resident:latest"
     assert service["environment"]["CHRONICLE_AGENT_ID"] == "claude-code:test-agent"
     assert service["environment"]["CHRONICLE_PROJECT"] == "test-agent"
-    # The frozen vendored emitter in the image reads only the old spelling.
-    assert service["environment"]["BURROW_AGENT_ID"] == "claude-code:test-agent"
-    assert service["environment"]["BURROW_PROJECT"] == "test-agent"
+    # warren#361: the pre-rename BURROW_* twins are gone, not merely unread.
+    assert not [key for key in service["environment"] if key.startswith("BURROW_")]
     assert service["command"] == ["sleep", "infinity"]
     assert "./memory:/data/residents/test-agent/memory" in service["volumes"]
     assert "./claude:/root/.claude" in service["volumes"]
@@ -136,8 +134,6 @@ def test_the_compose_fragment_references_the_secrets_instead_of_carrying_them(
 
     assert "${CHRONICLE_TOKEN-}" in text
     assert "${CHRONICLE_URL:?" in text
-    assert "${BURROW_TOKEN-}" in text
-    assert "${BURROW_URL:?" in text
     assert VILLAGE[CHRONICLE_TOKEN_ENV] not in text
 
 
@@ -207,42 +203,32 @@ def test_a_village_with_no_token_is_allowed_and_says_so() -> None:
     """Chronicle's ingest is open when its own token is unset; that is a real deployment."""
     assert emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737"}) == {
         CHRONICLE_URL_ENV: "http://dxp2800:8737",
-        LEGACY_URL_ENV: "http://dxp2800:8737",
     }
 
 
-def test_the_env_file_carries_both_spellings_at_the_same_value() -> None:
-    """Deployed containers can still be running the pre-rename emitter (warren#234).
+def test_the_env_file_carries_one_spelling_of_each_variable() -> None:
+    """warren#361: the BURROW_* twins are gone from the resident's .env.
 
-    The vendored copy in this repository reads both spellings since #234 re-vendored it,
-    but a running container has whatever image its host was last shipped, and the older one
-    reads BURROW_* only. Writing just the new names would leave those residents posting
-    nowhere, and it would do it silently: the container starts, the agent works, the events
-    go to a file nobody reads. The pair goes away when every host has been rebuilt.
+    They were there because a deployed container ran whatever image its host was last
+    shipped, and a pre-warren#234 image's emitter read BURROW_* only. Every host has since
+    been rebuilt and re-provisioned, so the twins bought nothing and named a service that
+    no longer exists.
     """
     values = emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737", CHRONICLE_TOKEN_ENV: "s3cret"})
     assert values == {
         CHRONICLE_URL_ENV: "http://dxp2800:8737",
-        LEGACY_URL_ENV: "http://dxp2800:8737",
         CHRONICLE_TOKEN_ENV: "s3cret",
-        LEGACY_TOKEN_ENV: "s3cret",
     }
 
 
-def test_stewards_own_pre_rename_environment_still_provisions() -> None:
-    """Steward on the NAS is itself configured under the old spelling."""
-    values = emitter_env({LEGACY_URL_ENV: "http://dxp2800:8737", LEGACY_TOKEN_ENV: "s3cret"})
-    assert values[CHRONICLE_URL_ENV] == "http://dxp2800:8737"
-    assert values[LEGACY_URL_ENV] == "http://dxp2800:8737"
-    assert values[CHRONICLE_TOKEN_ENV] == "s3cret"
+def test_a_pre_rename_environment_no_longer_configures_a_provision() -> None:
+    """The old spelling is not read either: steward's own environment was re-spelled.
 
-
-def test_the_new_spelling_wins_wherever_both_are_set() -> None:
-    values = emitter_env({CHRONICLE_URL_ENV: "http://new:8737", LEGACY_URL_ENV: "http://old:8737"})
-    assert values == {
-        CHRONICLE_URL_ENV: "http://new:8737",
-        LEGACY_URL_ENV: "http://new:8737",
-    }
+    A refusal is the right failure here — a resident provisioned with nowhere to emit is
+    the silent one, and this is the loud one.
+    """
+    with pytest.raises(TransportError, match=CHRONICLE_URL_ENV):
+        emitter_env({"BURROW_URL": "http://dxp2800:8737", "BURROW_TOKEN": "s3cret"})
 
 
 def test_compose_commands_name_the_file_and_the_project_explicitly(write_resident) -> None:
@@ -733,3 +719,35 @@ def test_the_burrow_transport_fails_closed_on_a_path_it_may_not_inspect(tmp_path
             burrow.read("~/sealed/docker-compose.yaml")
     finally:
         sealed.chmod(0o700)
+
+
+# ------------------------------------------------------------- one home on the burrow
+
+
+def test_memory_host_dir_resolves_tilde_against_the_burrow_home(write_resident) -> None:
+    """The deployed control plane's ~ is /root, which is nobody's home on the host.
+
+    With STEWARD_BURROW_HOME set, every steward process on the burrow computes the path
+    the host actually has — the one their compose file mounts at that same path — instead
+    of three views of one directory. Without it, this process's own home, as always.
+    """
+    placed = resident(
+        write_resident,
+        deploy={"container": "steward-test-agent"},
+        runner={"kind": "claude", "model": "claude-haiku-4-5-20251001", "placement": "container"},
+    ).manifest
+
+    assert memory_host_dir(placed, {BURROW_HOME_ENV: "/home/Miha"}) == Path(
+        "/home/Miha/docker/warren/residents/test-agent/memory"
+    )
+    assert (
+        memory_host_dir(placed, {})
+        == Path("~/docker/warren/residents/test-agent/memory").expanduser()
+    )
+    local = resident(
+        write_resident, memory={"kind": "directory", "path": "~/notes/memory"}
+    ).manifest
+    assert memory_host_dir(local, {BURROW_HOME_ENV: "/home/Miha"}) == Path(
+        "/home/Miha/notes/memory"
+    )
+    assert memory_host_dir(local, {}) == Path("~/notes/memory").expanduser()

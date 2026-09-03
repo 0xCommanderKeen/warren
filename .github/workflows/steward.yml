@@ -1,7 +1,7 @@
 name: steward
 
 # chronicle/hooks/** is in the filter on purpose (warren#234). The emitter every resident
-# runs is built from those files and vendored into docker/resident/burrow-emit.py, and
+# runs is built from those files and vendored into docker/resident/chronicle-emit.py, and
 # tests/test_resident_image.py rebuilds the bundle and compares it byte for byte. Without
 # this line a chronicle-only PR would never run that comparison, and the drift would first
 # be noticed by whoever next ran `make vendor-emitter` — which is precisely how the copy
@@ -57,7 +57,7 @@ jobs:
       # This job reads docker/resident/ without building it — the `image` job below does
       # the building. What it reads is drift: tests/test_resident_image.py rebuilds
       # chronicle's emitter bundle from ../chronicle at HEAD and compares it to the
-      # vendored docker/resident/burrow-emit.py byte for byte (refresh it with
+      # vendored docker/resident/chronicle-emit.py byte for byte (refresh it with
       # `make vendor-emitter`), and holds the two copies of the CLAUDE_VERSION pin to each
       # other. Neither is a thing a build would notice.
       - name: Tests
@@ -153,7 +153,6 @@ jobs:
         run: |
           docker run --rm --network village-net \
             -e CHRONICLE_URL=http://village:8737 \
-            -e BURROW_URL=http://village:8737 \
             -e SMOKE_AGENT_ID=steward:pip \
             -e CHRONICLE_PROJECT=pip \
             steward-resident:latest steward-smoke
@@ -167,7 +166,23 @@ jobs:
           mkdir -p "$RUNNER_TEMP/claude"
           echo '{"hooks":{}}' > "$RUNNER_TEMP/claude/settings.json"
           docker run --rm -v "$RUNNER_TEMP/claude:/root/.claude" steward-resident:latest true \
-            2>&1 | tee /dev/stderr | grep -q "does not wire burrow-emit.py"
+            2>&1 | tee /dev/stderr | grep -q "does not wire chronicle-emit.py"
+
+      # And the third: a volume seeded before warren#361 renamed the emitter. The claude
+      # volume outlives the image, so this is what every resident provisioned before that
+      # rename actually comes back up as — a settings.json naming a file the image no
+      # longer ships. It has to be repointed in place, and the stale copy has to go.
+      - name: Run the entrypoint against a pre-rename claude volume
+        run: |
+          rm -rf "$RUNNER_TEMP/legacy" && mkdir -p "$RUNNER_TEMP/legacy"
+          sed 's/chronicle-emit\.py/burrow-emit.py/g' docker/resident/settings.json \
+            > "$RUNNER_TEMP/legacy/settings.json"
+          cp docker/resident/chronicle-emit.py "$RUNNER_TEMP/legacy/burrow-emit.py"
+          docker run --rm -v "$RUNNER_TEMP/legacy:/root/.claude" steward-resident:latest true \
+            2>&1 | tee /dev/stderr | grep -q "repointed .* to chronicle-emit.py"
+          grep -q "chronicle-emit.py" "$RUNNER_TEMP/legacy/settings.json"
+          ! grep -q "burrow-emit.py" "$RUNNER_TEMP/legacy/settings.json"
+          test ! -e "$RUNNER_TEMP/legacy/burrow-emit.py"
 
       - name: Show what the village received, then take it down
         if: always()

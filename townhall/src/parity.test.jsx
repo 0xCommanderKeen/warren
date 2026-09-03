@@ -159,6 +159,47 @@ afterEach(() => {
 /* -- the resident record -------------------------------------------------------------- */
 
 describe("a resident's record", () => {
+  it("shows the matching resident's Chronicle events at the bottom, newest first", async () => {
+    const model = {
+      people: [
+        {
+          id: "resident:0198-uid",
+          residency: "resident",
+          history: [
+            {
+              ts: "2026-09-03T10:00:00Z",
+              type: "routine_started",
+              payload: { task: "Morning round" },
+            },
+            { ts: "2026-09-03T10:05:00Z", type: "idle", payload: { status: "Waiting" } },
+          ],
+        },
+        {
+          id: "resident:somebody-else",
+          residency: "resident",
+          history: [
+            {
+              ts: "2026-09-03T10:06:00Z",
+              type: "tool_called",
+              payload: { tool: "SecretOtherTool" },
+            },
+          ],
+        },
+      ],
+    };
+    mount(<ResidentsPage page="resident" params={{ id: "0198-uid" }} model={model} />, {
+      fetch: router(residentStubs),
+    });
+
+    const feed = await screen.findByLabelText("Hob event feed");
+    expect(feed.textContent).toContain("Waiting");
+    expect(feed.textContent).toContain("Morning round");
+    expect(feed.textContent.indexOf("Waiting")).toBeLessThan(
+      feed.textContent.indexOf("Morning round"),
+    );
+    expect(feed.textContent).not.toContain("SecretOtherTool");
+  });
+
   it("shows the journal, the inbox and the budget steward holds", async () => {
     // None of these three is in Chronicle's projection: it carries journal *metadata* but
     // no text, no inbox, and no spend. So this page is steward's or it is nothing.

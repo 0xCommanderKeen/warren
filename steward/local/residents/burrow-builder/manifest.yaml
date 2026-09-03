@@ -1,6 +1,7 @@
 version: 0
 uid: 1ffdf91e-e735-44e3-9607-f837310a5c40
 id: burrow-builder
+agent_id: resident:1ffdf91e-e735-44e3-9607-f837310a5c40
 project: chronicle
 summary: Builds chronicle itself — the village you are looking at.
 

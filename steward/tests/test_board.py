@@ -625,7 +625,7 @@ def test_a_board_session_is_an_ordinary_session_with_one_more_section(
     assert posted.task_id in request.prompt
     assert "two paragraphs, please" in request.prompt
     assert request.env["STEWARD_TASK_ID"] == posted.task_id
-    assert request.env["BURROW_AGENT_ID"] == "claude-code:test-agent"
+    assert request.env["CHRONICLE_AGENT_ID"] == "claude-code:test-agent"
 
 
 def test_a_board_session_is_told_the_decisions_it_is_waiting_on(

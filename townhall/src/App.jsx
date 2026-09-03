@@ -237,7 +237,7 @@ function Page({ model, page, params }) {
     case "resident":
     case "residentNew":
     case "residentDeclaration":
-      return <ResidentsPage page={page} params={params} />;
+      return <ResidentsPage page={page} params={params} model={model} />;
     case "routines":
       return <RoutinesPage />;
     case "approvals":
