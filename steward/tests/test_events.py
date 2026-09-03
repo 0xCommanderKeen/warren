@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import socket
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -1069,6 +1071,42 @@ def test_a_non_http_url_is_never_opened(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------- environment
+
+
+def test_the_suite_does_not_inherit_a_developers_village() -> None:
+    """A test must opt into Chronicle rather than inherit a live installation (#363)."""
+    marker = "STEWARD_CHRONICLE_ISOLATION_PROBE"
+    if os.environ.get(marker):
+        emitter = ev.EventEmitter.from_env()
+        assert emitter.url is None
+        assert emitter.token is None
+        return
+
+    result = subprocess.run(  # noqa: S603 — fixed pytest probe, no external input
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--no-cov",
+            f"{Path(__file__)}::test_the_suite_does_not_inherit_a_developers_village",
+        ],
+        cwd=Path(__file__).parents[1],
+        env=os.environ
+        | {
+            marker: "1",
+            "CHRONICLE_URL": "https://live-village.invalid",
+            "CHRONICLE_TOKEN": "live-secret",
+            "BURROW_URL": "https://old-live-village.invalid",
+            "BURROW_TOKEN": "old-live-secret",
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_the_emitter_reads_chronicle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
