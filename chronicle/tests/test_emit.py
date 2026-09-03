@@ -903,6 +903,50 @@ class DurablePrimaryDeliveryTest(unittest.TestCase):
                 json.load(stream)["retries"], retries_before_worker + 1
             )
 
+    def test_delayed_delivery_keeps_its_outbox_diagnostic_destination(self):
+        entered_outbox_diagnostic = threading.Event()
+        release_outbox_diagnostic = threading.Event()
+        transport_finished = threading.Event()
+        failures = []
+        original_time = emit.time.time
+
+        def offline_primary(*_args, **_kwargs):
+            transport_finished.set()
+            return False
+
+        def pause_after_transport():
+            if transport_finished.is_set() and threading.current_thread() is delivery:
+                entered_outbox_diagnostic.set()
+                release_outbox_diagnostic.wait(5)
+            return original_time()
+
+        def deliver_in_background():
+            try:
+                emit.deliver(self.EVENT)
+            except Exception as error:  # surface thread failures in the test
+                failures.append(error)
+
+        first_diagnostics = emit.DIAGNOSTICS
+        later_diagnostics = os.path.join(self.tmp.name, "later-diagnostics.json")
+        with (
+            mock.patch.dict(os.environ, {"CHRONICLE_MIRROR": ""}),
+            mock.patch.object(emit, "post_event", side_effect=offline_primary),
+            mock.patch.object(emit.time, "time", side_effect=pause_after_transport),
+        ):
+            delivery = threading.Thread(target=deliver_in_background)
+            delivery.start()
+            self.assertTrue(entered_outbox_diagnostic.wait(5))
+            with mock.patch.object(emit, "DIAGNOSTICS", later_diagnostics):
+                release_outbox_diagnostic.set()
+                delivery.join(5)
+
+        self.assertFalse(delivery.is_alive())
+        self.assertEqual(failures, [])
+        with open(first_diagnostics, encoding="utf-8") as stream:
+            self.assertIn("outbox", json.load(stream))
+        with open(later_diagnostics, encoding="utf-8") as stream:
+            self.assertNotIn("outbox", json.load(stream))
+
     def assert_deferred_real_transport_keeps_settings(self, *, primary):
         deferred, deferred_thread = self.deferred_threads()
         first_opener = mock.MagicMock()
