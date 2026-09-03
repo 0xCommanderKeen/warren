@@ -79,14 +79,14 @@ describe("the console shell", () => {
     }
   });
 
-  it("keeps the atlas look inside the fleet page and nowhere else", () => {
+  it("renders fleet telemetry with the same console primitives as every other page", () => {
     const fleet = read("./pages/FleetPage.jsx");
-    const app = read("./App.jsx");
 
-    // warren#225: the fleet views become one subpage; their styling survives there only.
-    expect(fleet).toContain("text-amber-300");
-    expect(fleet).toContain("lg:grid-cols-");
-    expect(app).not.toContain("text-amber-300");
+    expect(fleet).toContain("PageHead");
+    expect(fleet).toContain("DetailHead");
+    expect(fleet).toContain("<Rows>");
+    expect(fleet).not.toContain("font-display");
+    expect(fleet).not.toContain("orbit-sweep");
   });
 
   it("routes through the base prefix instead of reading pathname raw", () => {
