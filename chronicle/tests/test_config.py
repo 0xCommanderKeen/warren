@@ -75,8 +75,15 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             config.port = 1
 
-    def test_the_pre_rename_burrow_spelling_still_configures_every_setting(self):
-        """Deployed .env files predate the rename; one release accepts both."""
+    def test_the_pre_rename_burrow_spelling_configures_nothing(self):
+        """warren#361: the fallback is gone, so a stale .env gets the defaults.
+
+        Asserted rather than left unsaid, because "it is ignored" is exactly what
+        an operator with a pre-rename `.env` needs to be told — and because the
+        opposite of this test is what stood here until the rename finished, so it
+        is a claim that can fail.
+        """
+        defaults = Config()
         config = Config.from_env(
             {
                 "BURROW_HOST": "0.0.0.0",
@@ -93,16 +100,21 @@ class ConfigTests(unittest.TestCase):
             },
             ["9000"],
         )
-        self.assertEqual((config.host, config.port), ("0.0.0.0", 9000))
-        self.assertEqual(config.events, Path("/tmp/events.jsonl"))
-        self.assertEqual(config.villagers_dir, Path("/tmp/villagers"))
-        self.assertEqual((config.token, config.notify_token), ("secret", "bearer"))
-        self.assertEqual(config.archive_dir, Path("/tmp/archive"))
-        self.assertEqual((config.max_log_bytes, config.notify_timeout), (42, 1.5))
-        self.assertEqual((config.knock_records, config.knock_bytes), (7, 99))
+        self.assertEqual(config.host, defaults.host)
+        self.assertEqual(config.port, 9000)  # argv, not the environment
+        self.assertEqual(config.events, defaults.events)
+        self.assertEqual(config.villagers_dir, defaults.villagers_dir)
+        self.assertEqual((config.token, config.notify_token), ("", ""))
+        self.assertIsNone(config.archive_dir)
+        self.assertEqual(config.max_log_bytes, defaults.max_log_bytes)
+        self.assertEqual(config.notify_timeout, defaults.notify_timeout)
+        self.assertEqual(
+            (config.knock_records, config.knock_bytes),
+            (defaults.knock_records, defaults.knock_bytes),
+        )
 
-    def test_the_new_spelling_wins_wherever_both_are_set(self):
-        """A half-migrated environment must resolve one way, not by setting."""
+    def test_the_new_spelling_is_the_only_one_read(self):
+        """Every setting, under its own name, with a stale twin sitting beside it."""
         environ = {}
         for name in SETTINGS:
             environ["BURROW_" + name] = "old"
@@ -129,11 +141,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.notify_timeout, 2.0)
         self.assertEqual((config.knock_records, config.knock_bytes), (2, 2))
 
-    def test_an_empty_new_spelling_still_overrides_the_old_one(self):
-        """Presence selects the spelling; "" is a value, not an absence."""
-        config = Config.from_env(
-            {"BURROW_TOKEN": "leftover", "CHRONICLE_TOKEN": ""}
-        )
+    def test_an_empty_value_is_a_value_and_not_an_absence(self):
+        """``CHRONICLE_TOKEN=`` means open ingest, not "fall through to a default"."""
+        config = Config.from_env({"CHRONICLE_TOKEN": ""})
         self.assertEqual(config.token, "")
 
     def test_import_does_not_parse_argv_or_environment(self):

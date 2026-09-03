@@ -26,9 +26,11 @@ directory carries its full history. The event service was renamed burrow →
 chronicle when "burrow" was promoted to mean a machine in the warren; the
 control panel was renamed observatory → townhall when it gained its write
 mission. Code-level identifiers followed in warren#216: the package is
-`chronicle` and the settings are `CHRONICLE_*`, each still accepted under its old
-`BURROW_*` spelling for one release so deployed environments can be re-spelled
-whenever it suits rather than during a deploy.
+`chronicle` and the settings are `CHRONICLE_*`. Each was accepted under its old
+`BURROW_*` spelling for a release so deployed environments could be re-spelled
+whenever it suited rather than during a deploy; warren#361 finished that — nothing
+writes the old names and nothing reads them, and `/chronicle/` replaced the
+`/burrow/` prefix on the origin. What is still called a burrow is a *machine*.
 
 ## Development
 

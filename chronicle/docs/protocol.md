@@ -1178,14 +1178,14 @@ It is built on demand and committed nowhere in this repository. The copy in
 `steward/docker/resident/chronicle-emit.py` is refreshed by `make vendor-emitter` in
 `warren/steward/`, and both suites compare it against a fresh build.
 
-> **Both spellings work during the rename.** Every `CHRONICLE_*` variable below
-> is also read under its pre-rename `BURROW_*` name, and the same is true of the
-> server's settings. The new spelling wins wherever both are set. A hook's
-> environment is fixed when its session starts, so sessions already running when
-> the emitter is updated keep sending the old names — dropping them would take
-> those sessions quiet without any error. The old names go away in a later
-> release; nothing has to be renamed in lockstep with a deploy. The installed
-> bundle likewise still answers to `burrow-emit` alongside `chronicle-emit`.
+> **The pre-rename `BURROW_*` names are gone (warren#361).** Every `CHRONICLE_*`
+> variable below, and every one of the server's settings, is read under that name
+> and nothing else; a stale one is ignored rather than honoured. They were read
+> alongside the new names for a release because a hook's environment is fixed when
+> its session starts, so dropping them earlier would have taken still-running
+> sessions quiet without any error. The *installed bundle* is the exception that
+> remains: it still answers to `burrow-emit` alongside `chronicle-emit`, because
+> runner hook configs name it by absolute path.
 
 Env vars: `CHRONICLE_URL` (POST target, see Transport), `CHRONICLE_TOKEN` (ingest secret,
 see Ingest auth — sent as a bearer header, omitted when unset), `CHRONICLE_MIRROR` /

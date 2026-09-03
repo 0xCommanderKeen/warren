@@ -3,11 +3,10 @@
 chronicle protocol events. Claude Code is the default; Codex hooks pass
 ``--runner codex``. See docs/protocol.md.
 
-Every setting below is read under its CHRONICLE_ name and, for one release, its
-pre-rename BURROW_ name (see ``_setting``). Hook environment is captured when a
-session *starts*, so at any moment there are live sessions holding either
-spelling; both have to work or the rename would silence whichever fleet had not
-been restarted yet.
+Every setting below is read under its CHRONICLE_ name (see ``_setting``). The
+pre-rename BURROW_ spelling was accepted alongside it until warren#361: hook
+environment is captured when a session *starts*, so the rename had to keep both
+alive until every session holding the old one had ended.
 
 Transport: if CHRONICLE_URL is set, POST the event to <CHRONICLE_URL>/events; if
 no target takes it, fall back to appending to ~/.chronicle/events.jsonl locally. A failed
@@ -55,23 +54,19 @@ except ImportError:  # standalone deployment invokes this file from hooks/
 
 
 def _setting(name, default=None):
-    """Read CHRONICLE_<name>, falling back to the pre-rename BURROW_<name>.
+    """Read CHRONICLE_<name>.
 
-    Both spellings are live at once during the rollout: a hook's environment is
-    fixed when its session starts, so sessions already running when this file is
-    updated keep handing it BURROW_URL for as long as they last, while new ones
-    get CHRONICLE_URL. Dropping the old spelling would make those sessions go
-    quiet — events would still be logged locally, but the village would stop
-    seeing them — which is exactly the silent failure the emitter exists to
-    avoid.
+    It also read the pre-rename BURROW_<name> until warren#361 finished the
+    rename. That fallback was there because a hook's environment is fixed when its
+    session starts, so sessions already running when this file changed kept
+    handing it the old spelling — every one of those has since ended, and nothing
+    writes the old names any more.
 
-    Presence, not truthiness, selects the spelling. CHRONICLE_MIRROR= means "no
-    mirrors" and must not fall through to a leftover BURROW_MIRROR; the caller
-    also relies on ``None`` meaning neither spelling was set at all, which is
-    what turns the default mirror on.
+    Presence, not truthiness, still decides: ``None`` means the name was not set
+    at all, which is what turns the default mirror on, so an empty value is
+    returned as itself. CHRONICLE_MIRROR= means "no mirrors".
     """
-    key = "CHRONICLE_" + name
-    value = os.environ[key] if key in os.environ else os.environ.get("BURROW_" + name)
+    value = os.environ.get("CHRONICLE_" + name)
     return default if value is None else value
 
 
