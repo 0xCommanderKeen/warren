@@ -154,7 +154,7 @@ There is one supported setup path for both Claude Code and Codex:
 4. Run the authoritative test suite with `sh tests/run.sh`.
 5. Deploy the exact tested tree with the tar-over-SSH command below and restart
    the service. Check `/residents` for public validation diagnostics — on the
-   arcadia origin that report is `/burrow/residents`, because a bare `/residents`
+   arcadia origin that report is `/chronicle/residents`, because a bare `/residents`
    there is steward's own resident listing — and open the village at both phone and
    desktop widths.
 
@@ -164,7 +164,9 @@ above are the canonical install, validation, test, and deployment sequence.
 One village for the whole fleet, served from the NAS over Tailscale. Since the
 2026-08-27 cutover arcadia owns the origin on port 8737 and this service answers
 on **host port 8738** (<http://dxp2800:8738>), proxied same-origin under
-`http://dxp2800:8737/burrow/`, which carries `/state`, `/state/stream` and `/residents`.
+`http://dxp2800:8737/chronicle/`, which carries `/state`, `/state/stream` and
+`/residents`. That prefix was `/burrow/` until warren#361; the origin 301s the old
+spelling for a release.
 The origin also answers `/state` and `/state/stream` unprefixed (they rewrite to the
 same place) and proxies `/events` there; what it does not send here it serves itself —
 the village at `/`, townhall at `/observatory/` — or hands to steward. Never exposed to
@@ -184,13 +186,13 @@ deploy is pushed from a machine that has the repo checked out.
 > here is *read* under both its `CHRONICLE_*` name and its pre-rename `BURROW_*` name,
 > with the new one winning where both are set. Nothing *writes* the old spelling any
 > more: warren#361 dropped every one of those writes, so the reads are now pure
-> back-compat for an environment nobody has re-spelled, and they go next. The state
-> directory went with it: it is `~/.chronicle`, full stop, and a machine that still has a
-> `~/.burrow` adopts it with `mv ~/.burrow ~/.chronicle` once its outbox has drained.
-> The `/burrow/` proxy prefix is the one deployed path still carrying the old name.
-> The deploy directory and the container already moved: `~/docker/burrow` / `burrow`
-> became `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which is a
-> rename an operator does once, with everything down.
+> back-compat for an environment nobody has re-spelled, and they go next. Every deployed
+> *path* has moved: the state directory is `~/.chronicle` full stop (a machine that still
+> has a `~/.burrow` adopts it with `mv ~/.burrow ~/.chronicle` once its outbox has
+> drained), the proxy prefix is `/chronicle/` with the origin 301ing `/burrow/` for a
+> release, and the deploy directory and container went first — `~/docker/burrow` /
+> `burrow` became `~/docker/warren/chronicle` / `chronicle` with warren#358's move, which
+> is a rename an operator does once, with everything down.
 
 - **Server** — Docker Compose at `~/docker/warren/chronicle` on the NAS (`dxp2800`), which
   maps host `8738` to the container's `8737`:

@@ -255,7 +255,7 @@ describe("the credential never leaves this origin", () => {
 
   it("answers the same question directly, for a base that came from anywhere", () => {
     expect(isSameOrigin("")).toBe(true);
-    expect(isSameOrigin("/burrow")).toBe(true);
+    expect(isSameOrigin("/chronicle")).toBe(true);
     expect(isSameOrigin(window.location.origin)).toBe(true);
     expect(isSameOrigin("https://evil.tld")).toBe(false);
     expect(isSameOrigin("//evil.tld")).toBe(false);

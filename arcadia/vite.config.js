@@ -6,10 +6,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      "/burrow": {
+      "/chronicle": {
         target: process.env.CHRONICLE_URL || "http://127.0.0.1:8737",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/burrow/, ""),
+        rewrite: (path) => path.replace(/^\/chronicle/, ""),
       },
       "/state": {
         target: process.env.CHRONICLE_URL || "http://127.0.0.1:8737",

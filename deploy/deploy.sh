@@ -208,8 +208,16 @@ PY
     # Recreate rather than restart: the code is a bind mount, so `up -d` alone would see
     # nothing to do, and nothing this container holds lives outside /data any more.
     $SSH "$NAS" 'cd ~/docker/warren/chronicle && docker compose up -d --force-recreate' >/dev/null 2>&1
-    wait_for "$ORIGIN/burrow/state" 200
-    curl -fsS -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: /burrow/residents did not answer"
+    # Unprefixed on purpose. Chronicle is deployed *before* arcadia, which owns the
+    # origin's route table, so on the deploy that first carries warren#361 these probes
+    # still meet the old nginx — the one that knows /burrow/ and not /chronicle/. The
+    # bare /state answers 200 on both generations (each rewrites it internally to its own
+    # prefix), so it is the one liveness check that does not depend on which nginx is up.
+    wait_for "$ORIGIN/state" 200
+    # The manifest-validation report has no unprefixed spelling — a bare /residents is
+    # steward's — so this one asks for the old prefix and follows: served directly by the
+    # old origin, 301ed by the new one. Point it at /chronicle/ once the redirect goes.
+    curl -fsSL -m 10 "$ORIGIN/burrow/residents" | grep -q '"residents"' || die "chronicle: the /residents report did not answer"
     stamp chronicle chronicle
     log "chronicle: $SHORT is live"
 }

@@ -16,7 +16,7 @@ describe("browser navigation at a mounted build", () => {
     expect(screen.getByRole("link", { name: /fleet/i }).getAttribute("aria-current")).toBe("page");
 
     act(() => {
-      window.history.pushState({}, "", "/burrow/state");
+      window.history.pushState({}, "", "/chronicle/state");
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
 

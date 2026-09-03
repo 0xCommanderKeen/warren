@@ -54,11 +54,11 @@ There is no registry either: images travel as `docker save | ssh … docker load
 | What | Where it listens | Deploy directory on the NAS | Runbook |
 | --- | --- | --- | --- |
 | arcadia + townhall | `:8737` (the origin) | `~/docker/warren/arcadia` | [`arcadia/docs/deployment.md`](arcadia/docs/deployment.md) |
-| chronicle | `:8738`, proxied at `:8737/burrow/` | `~/docker/warren/chronicle` | [chronicle README](chronicle/README.md#running) |
+| chronicle | `:8738`, proxied at `:8737/chronicle/` | `~/docker/warren/chronicle` | [chronicle README](chronicle/README.md#running) |
 | steward | `:8802` → container `8801` | `~/docker/warren/steward`, residents in `~/docker/warren/residents/<id>` | [steward README](steward/README.md#deployment) |
 
 One nginx (arcadia's) owns the origin: it serves the village at `/`, townhall at
-`/observatory/`, proxies `/burrow/state`, `/state`, `/events` and `/burrow/residents` to
+`/observatory/`, proxies `/chronicle/state`, `/state`, `/events` and `/chronicle/residents` to
 chronicle, and hands steward every one of its own top-level routes. Both services answer
 `GET /residents`, so the bare path is steward's and chronicle's report is the prefixed
 one (warren#242). So a townhall release is published into *arcadia's* deploy
