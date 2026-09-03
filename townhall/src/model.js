@@ -41,7 +41,7 @@ export function viewModel(snapshot, stewardResidents = []) {
     return {
       ...villager,
       manifest,
-      hasPage: villager.residency === "resident" && Boolean(manifest),
+      hasResidentRecord: villager.residency === "resident" && Boolean(manifest),
       role: manifest?.meta?.role,
       capabilities: manifest?.capabilities,
       body: manifest?.body,
