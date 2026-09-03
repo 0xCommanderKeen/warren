@@ -32,6 +32,15 @@
 # deploy.host through topology.py, so a burrow acts only for its own residents — and an
 # edit the API commits is what they read on their next wake-up, with no restart. Before
 # warren#351 they read a copy taken at container start, which nothing ever updated.
+#
+# The daemons also need the burrow's *resident* directories (warren#356). A container-placed
+# resident lives at <deploy.path> on this host — ~/docker/steward-<id>, written by
+# `steward provision` — and its memory/ is the host side of the mount the scheduler journals
+# into and materializes skills onto (deploy.memory_host_dir). Steward resolves that `~` in
+# the process that asks, and inside this image HOME is /root, so the host's ~/docker is
+# mounted at /root/docker: the path the daemons compute is then the directory the host has.
+# Without it every container-placed resident is "unprovisioned" to the scheduler no matter
+# what was provisioned, and it refuses to start.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -78,6 +87,8 @@ services:
       - ./data:/data
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      # The residents' deploy directories, at the path the daemons compute for them.
+      - /home/Miha/docker:/root/docker
     # The absolute path is belt and braces: the first rollout crash-looped on a login shell
     # that re-read /etc/profile, reset PATH, and lost /app/.venv/bin.
     command: ["/app/.venv/bin/steward", "scheduler", "run", "--residents", "/checkout/steward/residents"]
@@ -89,6 +100,7 @@ services:
       - ./data:/data
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - /home/Miha/docker:/root/docker
     # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
     # wider list than the scheduler fires would report residents nobody is running.
     command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/checkout/steward/residents"]
