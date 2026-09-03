@@ -612,7 +612,7 @@ describe("the shell itself", () => {
     expect(within(nav).getByRole("link", { name: /fleet/i }).getAttribute("aria-current")).toBe("page");
     // The read path needs no token: the fleet renders without one being asked for.
     expect(screen.queryByText(/Unlock the write path/i)).toBeNull();
-    expect(screen.getByText(/Listening\./)).toBeTruthy();
+    expect(screen.getByText(/waiting for Chronicle's complete snapshot/i)).toBeTruthy();
   });
 
   it("says a stale deep link is unknown rather than showing the fleet", async () => {

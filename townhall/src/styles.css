@@ -62,9 +62,6 @@
     Consolas, "Liberation Mono", monospace;
   --font-serif: ui-serif, "Iowan Old Style", "Hoefler Text", "Palatino Linotype", Palatino,
     "Book Antiqua", Georgia, serif;
-  /* The fleet page's own face, kept because that page keeps its own look. */
-  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, serif;
-
   /* The console breaks its rail here, so this build does too. */
   --breakpoint-rail: 880px;
 }
@@ -121,25 +118,6 @@
   flex: 1;
   border-top: 1px solid var(--color-rule-2);
 }
-
-/* The fleet page keeps its own sky. */
-.star-field {
-  z-index: 0;
-  opacity: 0.55;
-  background-image:
-    radial-gradient(circle at 18% 14%, rgba(121, 215, 208, 0.08), transparent 22rem),
-    radial-gradient(circle at 77% 30%, rgba(243, 179, 61, 0.08), transparent 28rem),
-    radial-gradient(circle, rgba(255, 255, 255, 0.18) 0.6px, transparent 0.8px);
-  background-size: auto, auto, 31px 31px;
-  mask-image: linear-gradient(to bottom, black, transparent 90%);
-}
-
-.orbit-sweep {
-  background: conic-gradient(from 210deg, transparent 0 65%, rgba(243, 179, 61, 0.22) 82%, transparent 89%);
-  animation: orbit 14s linear infinite;
-  mask-image: radial-gradient(circle, transparent 68%, black 69% 70%, transparent 71%);
-}
-@keyframes orbit { to { transform: rotate(1turn); } }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
