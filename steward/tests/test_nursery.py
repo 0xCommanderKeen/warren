@@ -2,7 +2,8 @@
 
 import json
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,14 @@ def test_the_nursery_mints_a_random_uid_into_the_manifest(tmp_path: Path) -> Non
     uid = UUID(payload["uid"])
     assert uid.version == 4
     assert created.resident.manifest.uid == uid
+
+
+def test_the_nursery_mints_the_lowest_free_village_home(tmp_path: Path) -> None:
+    first = declare_resident(spec(id="first", agent_id="claude-code:first"), tmp_path)
+    second = declare_resident(spec(id="second", agent_id="claude-code:second"), tmp_path)
+
+    assert first.resident.manifest.home == 0
+    assert second.resident.manifest.home == 1
 
 
 def test_the_declaration_deploys_nothing_and_schedules_nothing(tmp_path: Path) -> None:
@@ -1098,6 +1107,93 @@ def test_the_token_is_removed_only_after_the_container_is_down(
     assert down < scrub
 
 
+def test_retirement_releases_the_durable_guard_before_external_effects(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """Authoring is serialized through commit, never behind Chronicle or the host."""
+    raise_into(scratch_repo, host)
+    held = False
+
+    @contextmanager
+    def durable_guard() -> Iterator[None]:
+        nonlocal held
+        held = True
+        try:
+            yield
+        finally:
+            held = False
+
+    def revision(_path: Path) -> str:
+        assert held, "the expected revision must be checked inside the durable guard"
+        return "sha256:rehearsed"
+
+    class OutsideGuardTransport(LocalTransport):
+        def exists(self, path: str) -> bool:
+            assert not held, "host reconciliation must not hold the authoring guard"
+            return super().exists(path)
+
+        def run(self, argv: Sequence[str]) -> CommandOutcome:
+            assert not held, "host reconciliation must not hold the authoring guard"
+            return super().run(argv)
+
+    class OutsideGuardEmitter:
+        def emit(self, event: object) -> bool:
+            del event
+            assert not held, "Chronicle emission must not hold the authoring guard"
+            return True
+
+    retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=OutsideGuardTransport(root=host.root),
+        emitter=OutsideGuardEmitter(),
+        expected_revision="sha256:rehearsed",
+        revision_of=revision,
+        durable_guard=durable_guard(),
+    )
+
+
+def test_retirement_derives_the_host_plan_from_the_revision_checked_under_lock(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    """A revision may pass only for the same bytes that choose the cleanup target."""
+    raise_into(scratch_repo, host)
+    manifest = scratch_repo.residents / "note-keeper" / "manifest.yaml"
+    checked_path = "~/docker/rehearsed-note-keeper"
+
+    @contextmanager
+    def changed_before_lock() -> Iterator[None]:
+        payload = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        payload["deploy"] = {**payload.get("deploy", {}), "path": checked_path}
+        manifest.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+        yield
+
+    class RecordingEmitter:
+        def emit(self, event: object) -> bool:
+            del event
+            return True
+
+    host.calls.clear()
+    retire_resident(
+        "note-keeper",
+        residents_dir=scratch_repo.residents,
+        repo=scratch_repo.root,
+        transport=host,
+        commit=False,
+        expected_revision="sha256:checked",
+        revision_of=lambda _path: "sha256:checked",
+        durable_guard=changed_before_lock(),
+        emitter=RecordingEmitter(),
+    )
+
+    scrub = next(call for call in host.calls if call[0] == "rm")
+    assert scrub[2:] == (
+        f"{checked_path}/.env",
+        f"{checked_path}/docker-compose.yaml",
+    )
+
+
 def test_retirement_still_keeps_the_memory_and_the_declaration(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
@@ -1461,16 +1557,20 @@ def test_a_retire_dry_run_plans_the_mark_before_the_stop(
     assert mark < stop
 
 
-def test_retirement_emits_nothing_on_the_residents_behalf(
+def test_retirement_emits_the_authoritative_terminal_identity_event(
     scratch_repo: ScratchRepo, host: LocalTransport, isolated_events: Path
 ) -> None:
-    """It leaves the village by going quiet. A forged session_ended would be a lie."""
+    """It leaves through steward's own lifecycle fact, never a forged session_ended."""
     raise_into(scratch_repo, host)
     retire_resident(
         "note-keeper", residents_dir=scratch_repo.residents, repo=scratch_repo.root, transport=host
     )
 
-    assert not isolated_events.exists()
+    [record] = [json.loads(line) for line in isolated_events.read_text().splitlines()]
+    assert record["type"] == "resident_retired"
+    assert record["source"] == "steward"
+    assert record["agent_id"] == "claude-code:note-keeper"
+    assert record["payload"]["resident_id"] == "note-keeper"
 
 
 # ------------------------------------------------------ what retirement excludes

@@ -57,7 +57,7 @@ from steward import events as ev
 from steward.approvals import NeedsHuman
 from steward.board import Dispatcher, DispatchRun
 from steward.budgets import BudgetGuard
-from steward.manifest import Resident, active_residents, validate_path
+from steward.manifest import Resident, validate_path
 from steward.run_lifecycle import RUN_LEASE_GRACE_S, RunTransitions
 from steward.runners import CommandRun, run_argv
 from steward.runs import ROUTINE_BRACKETED
@@ -69,7 +69,7 @@ from steward.store import (
     OpenRun,
     Store,
 )
-from steward.topology import Survey, survey
+from steward.topology import Survey, residents_on_this_burrow, survey
 from steward.transitions.approval import ApprovalTransitions
 
 __all__ = [
@@ -723,10 +723,24 @@ class DockerSupervisor:
             )
         outcome = self.command([self.binary, "inspect", "--format", "{{.State.Running}}", name])
         if not outcome.ok:
+            summary = outcome.summary()
+            # Docker's local classification is safe to inspect but not to repeat: command
+            # output may contain endpoint details, while the refusal below is steward's.
+            output = f"{outcome.stdout}\n{outcome.stderr}".casefold()
+            if "no such" in output and name.casefold() in output:
+                return Health(
+                    resident_id=resident.id,
+                    known=False,
+                    detail=(
+                        f"refused: declared container {name!r} is absent; "
+                        f"run steward provision {resident.id}"
+                    ),
+                    supervisor=self.kind,
+                )
             return Health(
                 resident_id=resident.id,
                 known=False,
-                detail=f"docker could not answer for {name!r}: {outcome.summary()}",
+                detail=f"docker could not answer for {name!r}: {summary}",
                 supervisor=self.kind,
             )
         running = outcome.stdout.strip().lower() == "true"
@@ -872,6 +886,7 @@ class Watchdog:
         supervisors: Sequence[ProcessSupervisor] | None = None,
         state: SchedulerState | None = None,
         grace_s: float = DEFAULT_GRACE_S,
+        env: Mapping[str, str] | None = None,
     ) -> Watchdog:
         """Build a watchdog over every valid resident of a residents tree.
 
@@ -887,7 +902,9 @@ class Watchdog:
         """
         sink = emitter if emitter is not None else ev.EventEmitter.from_env()
         return cls(
-            residents=active_residents(validate_path(residents_dir, skills_dir).residents),
+            residents=residents_on_this_burrow(
+                validate_path(residents_dir, skills_dir).residents, env
+            ),
             store=store,
             emitter=sink,
             supervisors=supervisors,
@@ -954,6 +971,11 @@ class Watchdog:
         alive = next((reading for reading in readings if reading.known), None)
         if alive is not None:
             return alive
+        refused = next(
+            (reading for reading in readings if reading.detail.startswith("refused:")), None
+        )
+        if refused is not None:
+            return refused
         detail = "; ".join(reading.detail for reading in readings if reading.detail)
         return Health(resident_id=resident.id, known=False, detail=detail or "nothing can see it")
 
@@ -970,7 +992,7 @@ class Watchdog:
 
         The question a give-up receipt implicitly claims an answer to. Giving up means
         having tried, and of the shipped residents only ``life-agent`` declares a
-        ``deploy.container``; ``pip`` and ``burrow-builder`` have nothing that could ever
+        ``deploy.container``; local test residents have nothing that could ever
         have tried (steward #130).
         """
         return any(_owns(supervisor, resident) for supervisor in self.supervisors)

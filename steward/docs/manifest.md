@@ -9,8 +9,9 @@ residents/<id>/
 ```
 
 Editing a resident is edit → commit → deploy. Nothing about a resident lives anywhere
-else: steward injects the charter into every headless session, and chronicle reads the same
-file for display. One place, two readers.
+else. Steward injects the charter into every headless session and emits a display-only
+`resident_declared` fact before every real launch. Chronicle folds that fact for the
+village; credentials and charter text never travel with it. One declaration, one authority.
 
 **Manifests hold references and grants, never credentials.** A manifest with a
 credential-shaped key (`token`, `secret`, `password`, `api_key`, …) or an inline secret
@@ -23,6 +24,7 @@ value fails validation and is never stored. Credentials live outside both repos,
 | `version` | yes (defaults to `0`) | Manifest schema version. Only `0` exists. |
 | `uid` | yes | Random UUID minted once by the nursery; durable identity that survives renaming. |
 | `id` | yes | Slug; must equal the directory name under `residents/`. |
+| `home` | yes | Stable village plot, integer 0 through 7; duplicate plots are refused. |
 | `agent_id` | one of these two | Exact chronicle identity, `<source>:<name>` (e.g. `claude-code:life-agent`). |
 | `project` | one of these two | Project label for a project-scoped soul (e.g. `chronicle`). |
 | `summary` | no | One line chronicle can display. |
@@ -51,6 +53,11 @@ unguessable public topic name. The nursery writes it at creation and never deriv
 `agent_id` matches before `project`, mirroring chronicle's resident matching: an exact
 agent-id manifest is reserved first, a project-scoped soul catches the rest. A manifest
 with neither cannot be matched to a villager and fails validation.
+
+The nursery mints the lowest free `home`. It is deliberately top-level: a plot is a stable
+village fact, not personality. Every launch restates `{name, char, accent, role, summary,
+resident_id, uid, home}` as `resident_declared`; retirement emits `resident_retired` so
+Chronicle frees that plot immediately.
 
 The six capability dimensions (`soul`, `skills`, `memory`, `routes`, `app_grants`,
 `tools`) must be present explicitly. An empty list is a valid declaration ("this resident
@@ -547,8 +554,8 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
 ```console
 $ steward doctor
-life-agent: runner claude (claude-opus-5) — ready
-life-agent: journal /data/residents/life-agent/memory/journal — writable, closed by close-of-day
+life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready
+life-agent: journal /home/Miha/docker/steward-life-agent/memory/journal — writable, closed by close-of-day
 life-agent: inbox 2 open via handoff
   life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
@@ -752,7 +759,7 @@ nothing. Delivery is pull-based: the receiver drains its inbox on its own next w
 ahead of the open board, and works the item as an ordinary session.
 
 ```console
-$ steward delegate burrow-builder --to life-agent --route handoff --title "…"
+$ steward delegate sender-resident --to life-agent --route handoff --title "…"
 $ steward inbox life-agent                 # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>           # the whole chain, root first
 ```
@@ -1185,6 +1192,11 @@ container — in that order, so the watchdog is not still trying to restart some
 steward is deliberately taking down. `POST /residents/{id}/retire`
 ([docs/api.md](api.md#post-residentsidretire)) is the same pipeline through the same door
 townhall's Retire button presses.
+
+The HTTP door requires a successful rehearsal revision before execution. Under one
+checkout-scoped authoring lock it verifies that revision, refuses uncommitted changes to this
+manifest (while tolerating unrelated dirty paths), marks and commits, then releases the lock.
+Only then does steward emit `resident_retired`, stop the container, and remove credentials.
 
 **Editing this field is not the same act.** Writing `retired: true` through
 `PUT /residents/{id}/declaration` marks the resident and stops there: the container keeps

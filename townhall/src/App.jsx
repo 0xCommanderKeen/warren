@@ -13,9 +13,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { NAV, navFor, routeTo } from "./routes.js";
 import { Link, NavigationProvider, useNavigation } from "./navigation.jsx";
-import { StewardProvider, useSteward } from "./steward/context.jsx";
+import { StewardProvider, useSteward, useStewardQuery } from "./steward/context.jsx";
 import { Button, Label, PageHead } from "./console/ui.jsx";
 import { viewModel } from "./model.js";
+import { residentToManifestView } from "./steward/client.js";
 import { knockCount, plural } from "./diagnostics.js";
 import { createStateTransport } from "./transport.js";
 import { LedgerProvider } from "./console/ledger.jsx";
@@ -255,7 +256,13 @@ function Page({ model, page, params }) {
 function Shell() {
   const { page, params } = useNavigation();
   const { snapshot, status } = useFleetState();
-  const model = useMemo(() => snapshot && viewModel(snapshot), [snapshot]);
+  const { client } = useSteward();
+  const residentQuery = useStewardQuery((signal) => client.listResidents({ signal }), [client]);
+  const stewardResidents = (residentQuery.data?.residents || []).map(residentToManifestView);
+  const model = useMemo(
+    () => snapshot && viewModel(snapshot, stewardResidents),
+    [snapshot, stewardResidents],
+  );
 
   useEffect(() => {
     document.title = `${TITLES[page] || "Not found"} — townhall`;

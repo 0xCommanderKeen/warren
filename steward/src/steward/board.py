@@ -395,6 +395,7 @@ class Dispatcher:
             hooks=self,
             residents=self.residents,
             clock=self.clock,
+            emitter=self.emitter,
         )
         self.run_transitions = RunTransitions(self.store)
 

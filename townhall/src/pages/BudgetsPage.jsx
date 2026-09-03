@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { Link } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
+import { useStewardWrite } from "../steward/useStewardWrite.js";
 import { describeCommit, diagnosticsFor } from "../steward/client.js";
 import { BUDGET_FIELDS, changed, getIn, numberValue, scalarValue, setIn } from "../manifest.js";
 import { Gate } from "../console/Gate.jsx";
@@ -161,9 +162,20 @@ function SpendPanel({ budget }) {
 function CapsForm({ id, declaration, onWritten }) {
   const { client } = useSteward();
   const [draft, setDraft] = useState(declaration.manifest);
-  const [saving, setSaving] = useState(false);
-  const [refusal, setRefusal] = useState(null);
-  const [receipt, setReceipt] = useState(null);
+  const {
+    saving, refusal, receipt, save: write, reset: resetWrite, clearReceipt,
+  } = useStewardWrite(
+    (manifest) =>
+      // A cap is a manifest field, so this is an ordinary declaration write — same
+      // whole-tree validation, same commit. There is no budget-shaped write endpoint and
+      // there should not be one.
+      client.writeDeclaration(id, {
+        manifest,
+        soul: declaration.soul,
+        revision: declaration.revision,
+      }),
+    { identity: id },
+  );
 
   // Sync the draft to whatever is now on disk, but keep the receipt: re-reading after a
   // save must not sweep away the commit the person is still reading. It clears when a
@@ -173,34 +185,17 @@ function CapsForm({ id, declaration, onWritten }) {
   }, [declaration]);
 
   useEffect(() => {
-    setRefusal(null);
-    setReceipt(null);
-  }, [id]);
+    resetWrite();
+  }, [id, resetWrite]);
 
   const diagnostics = refusal?.diagnostics || [];
   const dirty = changed(draft, declaration.manifest);
 
   async function save(event) {
     event.preventDefault();
-    setSaving(true);
-    setRefusal(null);
-    setReceipt(null);
-    try {
-      // A cap is a manifest field, so this is an ordinary declaration write — same
-      // whole-tree validation, same commit. There is no budget-shaped write endpoint and
-      // there should not be one.
-      const answer = await client.writeDeclaration(id, {
-        manifest: draft,
-        soul: declaration.soul,
-        revision: declaration.revision,
-      });
-      setReceipt(answer);
-      onWritten?.();
-    } catch (caught) {
-      setRefusal(caught);
-    } finally {
-      setSaving(false);
-    }
+    const answer = await write(draft);
+    if (!answer) return;
+    onWritten?.();
   }
 
   return (
@@ -253,7 +248,7 @@ function CapsForm({ id, declaration, onWritten }) {
           title="caps written"
           status={receipt.status}
           commit={describeCommit(receipt.commit)}
-          onDismiss={() => setReceipt(null)}
+          onDismiss={clearReceipt}
         >
           {receipt.message} A new cap binds the next run, not the one in flight.
         </Receipt>

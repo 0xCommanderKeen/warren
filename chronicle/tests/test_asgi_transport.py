@@ -1,5 +1,6 @@
 import http.server
 import dataclasses
+import datetime
 import os
 import tempfile
 import threading
@@ -34,6 +35,107 @@ def settled_notification_status(client, expected):
 
 
 class ASGITransportContractTests(unittest.TestCase):
+    def assert_knock_name_matches_public_state(self, event, earlier_events=()):
+        received = []
+
+        class RecordingWebhook(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                received.append((self.headers["Title"], body.decode()))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        webhook = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RecordingWebhook)
+        webhook_thread = threading.Thread(target=webhook.serve_forever, daemon=True)
+        webhook_thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                villagers = root / "villagers"
+                villagers.mkdir()
+                config = dataclasses.replace(
+                    Config(),
+                    events=root / "events.jsonl",
+                    villagers_dir=villagers,
+                    notify_url=f"http://127.0.0.1:{webhook.server_port}/",
+                    notify_workers=1,
+                )
+                with TestClient(serve.create_app(config)) as client:
+                    for earlier in earlier_events:
+                        self.assertEqual(
+                            client.post("/events", json=earlier).status_code, 204
+                        )
+                    self.assertEqual(client.post("/events", json=event).status_code, 204)
+                    wait_until(lambda: bool(received))
+                    villagers = client.get("/state").json()["snapshot"]["villagers"]
+                    state_name = next(
+                        item["name"] for item in villagers if item["id"] == event["agent_id"]
+                    )
+
+            project = event["project"]
+            message = event["payload"]["message"]
+            self.assertEqual(received[0][0], f"{state_name} is at your door ({project})")
+            self.assertEqual(received[0][1], f"{state_name} · {project}\n{message}")
+        finally:
+            webhook.shutdown()
+            webhook.server_close()
+            webhook_thread.join(3)
+
+    def test_unknown_agent_has_same_name_in_knock_and_public_state(self):
+        now = (
+            datetime.datetime.now(datetime.UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        self.assert_knock_name_matches_public_state(
+            {
+                "v": 0,
+                "ts": now,
+                "source": "test",
+                "agent_id": "agent-U0001f407",
+                "project": "chronicle",
+                "cwd": "",
+                "type": "needs_human",
+                "payload": {"message": "one identity"},
+            }
+        )
+
+    def test_declared_resident_keeps_same_name_in_knock_and_public_state(self):
+        now = (
+            datetime.datetime.now(datetime.UTC)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
+        declaration = {
+            "v": 0,
+            "ts": now,
+            "source": "steward",
+            "agent_id": "steward:pip",
+            "project": "pip",
+            "cwd": "",
+            "type": "resident_declared",
+            "payload": {
+                "name": "Pip",
+                "char": "Monk",
+                "accent": "#123456",
+                "role": "helper",
+                "summary": None,
+                "resident_id": "pip",
+                "uid": "0198-uid",
+                "home": 0,
+            },
+        }
+        knock = {
+            **declaration,
+            "source": "test",
+            "type": "needs_human",
+            "payload": {"message": "declared identity"},
+        }
+        self.assert_knock_name_matches_public_state(knock, [declaration])
+
     def test_workers_render_identity_from_their_own_runtime_resident_directory(self):
         received = [[], []]
 

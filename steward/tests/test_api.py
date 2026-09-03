@@ -334,7 +334,11 @@ def test_run_now_lands_routine_started_with_trigger_manual(api: ApiFactory) -> N
     assert started[0]["payload"]["trigger"] == "manual"
     assert started[0]["payload"]["routine"] == "daily-summary"
     assert started[0]["agent_id"] == "claude-code:test-agent"
-    assert [e["type"] for e in harness.events()] == ["routine_started", "routine_finished"]
+    assert [e["type"] for e in harness.events()] == [
+        "routine_started",
+        "resident_declared",
+        "routine_finished",
+    ]
     assert ev.validate_event(started[0]) == ()
 
 
@@ -363,7 +367,11 @@ def test_a_failed_run_is_logged_as_failed_and_emitted_as_failed(api: ApiFactory)
     logged = harness.store.request(request_id)
     assert logged is not None
     assert logged.outcome == "failed"
-    assert [e["type"] for e in harness.events()] == ["routine_started", "routine_failed"]
+    assert [e["type"] for e in harness.events()] == [
+        "routine_started",
+        "resident_declared",
+        "routine_failed",
+    ]
 
 
 def test_run_now_against_an_unknown_resident_is_404(api: ApiFactory) -> None:
@@ -3369,7 +3377,10 @@ def test_retiring_a_resident_with_no_container_marks_and_commits_and_says_so(
     harness = api(transport=host)
     commit_tree(tmp_path)
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -3392,7 +3403,10 @@ def test_retiring_a_container_removes_the_token_only_after_the_container_is_down
     commit_tree(tmp_path)
     host.calls.clear()
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -3466,12 +3480,13 @@ def test_the_retire_route_runs_the_pipeline_the_command_runs(
     harness = api(retirer=recorder, transport=host)
     commit_tree(tmp_path)
 
-    harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
-    assert len(seen) == 1
-    assert seen[0]["resident_id"] == "test-agent"
-    assert seen[0]["transport"] is host
-    assert seen[0]["dry_run"] is False
+    assert [call["dry_run"] for call in seen] == [True, False]
+    assert all(call["resident_id"] == "test-agent" for call in seen)
+    assert all(call["transport"] is host for call in seen)
+    assert seen[-1]["expected_revision"] == rehearsal["revision"]
 
 
 @pytest.mark.usefixtures("village")
@@ -3480,7 +3495,9 @@ def test_a_uid_retires_the_resident_the_id_would_have(api: ApiFactory, tmp_path:
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
     commit_tree(tmp_path)
 
-    response = harness.client.post(f"/residents/{VALID_RESIDENT_UID}/retire")
+    path = f"/residents/{VALID_RESIDENT_UID}/retire"
+    rehearsal = harness.client.post(path, json={"dry_run": True}).json()
+    response = harness.client.post(path, json={"revision": rehearsal["revision"]})
 
     assert response.status_code == 200
     assert response.json()["resident"] == "test-agent"
@@ -3497,11 +3514,50 @@ def test_retiring_into_a_dirty_worktree_is_refused_by_name(api: ApiFactory, tmp_
     host = LocalTransport(root=tmp_path / "nas")
     harness = api(transport=host)
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "worktree_refused"
     assert not host.touched
+    assert not validate_tree(harness.residents_dir).residents[0].retired
+
+
+@pytest.mark.usefixtures("village")
+def test_retirement_ignores_unrelated_dirt_but_binds_the_target_revision(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+    commit_tree(tmp_path)
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    (tmp_path / "unrelated.txt").write_text("somebody else's work", encoding="utf-8")
+
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.usefixtures("village")
+def test_retirement_requires_and_binds_a_rehearsed_revision(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"))
+    commit_tree(tmp_path)
+
+    missing = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    manifest = harness.residents_dir / "test-agent" / "manifest.yaml"
+    manifest.write_text(manifest.read_text() + "\n# changed\n", encoding="utf-8")
+    stale = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
+
+    assert missing.json()["detail"]["error"] == "retirement_rehearsal_required"
+    assert stale.json()["detail"]["error"] == "stale_retirement_plan"
     assert not validate_tree(harness.residents_dir).residents[0].retired
 
 
@@ -3513,7 +3569,10 @@ def test_a_host_that_refuses_the_stop_is_named_as_the_host(api: ApiFactory, tmp_
     harness.client.post("/residents/test-agent/provision")
     commit_tree(tmp_path)
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     assert response.status_code == 409
     assert response.json()["detail"]["error"] == "retire_failed"
@@ -3558,11 +3617,14 @@ def test_a_retirement_is_recorded_as_a_request_somebody_made(
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
     commit_tree(tmp_path)
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     logged = harness.store.requests()
-    assert [record.outcome for record in logged] == ["retired"]
-    assert response.json()["request_id"] == logged[0].request_id
+    assert [record.outcome for record in logged] == ["rehearsed", "retired"]
+    assert response.json()["request_id"] == logged[-1].request_id
 
 
 @pytest.mark.usefixtures("village")
@@ -3575,10 +3637,14 @@ def test_a_refused_retirement_says_so_in_the_request_log(api: ApiFactory, tmp_pa
     """
     harness = api(transport=LocalTransport(root=tmp_path / "nas"))
 
-    harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
     logged = harness.store.requests()
-    assert [record.outcome for record in logged] == ["refused: worktree_refused"]
+    assert [record.outcome for record in logged] == [
+        "rehearsed",
+        "refused: worktree_refused",
+    ]
 
 
 @pytest.mark.usefixtures("village")
@@ -3596,7 +3662,8 @@ def test_a_retirement_that_stopped_part_way_is_not_logged_as_refused(
     harness.client.post("/residents/test-agent/provision")
     commit_tree(tmp_path)
 
-    harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    harness.client.post("/residents/test-agent/retire", json={"revision": rehearsal["revision"]})
 
     outcomes = [record.outcome for record in harness.store.requests()]
     assert outcomes[-1] == "stopped part-way: retire_failed"
@@ -3625,7 +3692,10 @@ def test_a_retirement_whose_commit_git_refused_says_which_side_it_stopped_on(
     harness = api(retirer=unable_to_commit, transport=host)
     commit_tree(tmp_path)
 
-    response = harness.client.post("/residents/test-agent/retire")
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
 
     assert response.status_code == 409
     detail = response.json()["detail"]
@@ -3653,7 +3723,15 @@ def test_an_operator_retirement_is_committed_by_the_operator(
     commit_tree(tmp_path)
     credential = mint_operator(harness, name="Miha")
 
-    response = harness.client.post("/residents/test-agent/retire", headers=as_operator(credential))
+    headers = as_operator(credential)
+    rehearsal = harness.client.post(
+        "/residents/test-agent/retire", json={"dry_run": True}, headers=headers
+    ).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire",
+        json={"revision": rehearsal["revision"]},
+        headers=headers,
+    )
 
     assert response.status_code == 200
     assert "Miha <" in last_commit(harness)

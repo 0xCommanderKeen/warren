@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import fixture from "./fixtures/complete-v1.js";
 import { eventFeed, viewModel } from "./model.js";
+import { residentToManifestView } from "./steward/client.js";
 
 const snapshot = fixture.snapshot;
 
@@ -28,6 +29,21 @@ describe("Observatory presentation model", () => {
     const model = viewModel(changed);
     expect(model.people.find((person) => person.id === "claude:keeper").hasPage).toBe(true);
     expect(model.people.find((person) => person.id === "codex:visitor").hasPage).toBe(false);
+  });
+
+  it("joins resident capabilities from steward rather than Chronicle resident files", () => {
+    const changed = structuredClone(snapshot);
+    changed.residents = [];
+    changed.villagers[0].resident_file = null;
+    const model = viewModel(changed, [residentToManifestView({
+      id: "keeper", uid: "0198-uid", home: 2, agent_id: "claude:keeper",
+      summary: "Keeps things.", soul: { name: "Keeper", role: "archivist" },
+      skills: [{ id: "research" }], memory: { kind: "directory" }, routes: [], app_grants: [],
+    })]);
+
+    expect(model.people[0].manifest.id).toBe("keeper");
+    expect(model.people[0].capabilities.skills).toEqual([{ id: "research" }]);
+    expect(model.people[0].hasPage).toBe(true);
   });
 
   it("forms one newest-first retained activity feed", () => {

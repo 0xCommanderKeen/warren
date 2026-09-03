@@ -5,8 +5,8 @@
 # see deploy/compose.yaml beside this repo's deploy script for how they are wired.
 #
 # Before this existed the NAS ran a `steward-cp:0.2.0-amd64` built by hand on 2026-08-25
-# from a Dockerfile that lived nowhere: `python:3.14`, node from nodesource, an unpinned
-# `npm install -g @anthropic-ai/claude-code`, `pip install uv`. It answered for eight days
+# from a Dockerfile that lived nowhere: `python:3.14`, a locally installed model CLI, and
+# `pip install uv`. It answered for eight days
 # and ninety merged PRs, and nothing in the repo could say what was in it. This file is
 # that image with its inputs pinned and its recipe in git. Build it with `make image-cp`,
 # put it on the NAS with `make image-cp-ship`, or let deploy/deploy.sh do both.
@@ -17,13 +17,6 @@
 #                     pyproject requires, uv is how the locked environment is installed,
 #                     and bookworm-slim is the same Debian the node binary below was
 #                     built against. Pinned by the index digest — see "The base pin".
-# `node` + `claude`   `steward scheduler run` fires locally-placed sessions as `claude -p`
-#                     in *this* process's container (Pip runs that way today), so the CLI
-#                     has to be here. node is copied out of the digest-pinned `node:22-slim`
-#                     the resident image is built FROM (docker/resident/Dockerfile) rather
-#                     than installed from a third repository, so the two images cannot
-#                     disagree about which node a claude runs on. claude itself is pinned by
-#                     the same CLAUDE_VERSION build arg the Makefile passes to both images.
 # `docker`            A burrow's daemons reach containers through a *local* docker client
 #                     (docs/topology.md): `docker inspect`/`restart` for the watchdog,
 #                     `docker exec` for a container-placed session. The CLI is copied from
@@ -54,7 +47,6 @@
 
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim@sha256:7cf77f594be8042dab6daa9fe326f90962252268b4f120a7f5dccce4d947e6c1
 
-ARG CLAUDE_VERSION=2.1.243
 ARG DEBIAN_FRONTEND=noninteractive
 
 LABEL org.opencontainers.image.title="steward-cp"
@@ -69,19 +61,6 @@ RUN apt-get update \
         curl \
         git \
     && rm -rf /var/lib/apt/lists/*
-
-# node and npm, out of the resident image's pinned base rather than a third source.
-COPY --from=node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 /usr/local/bin/node /usr/local/bin/node
-COPY --from=node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && node --version
-
-# Pinned, and asked for its version immediately: a build whose claude does not run should
-# fail here, not inside a routine at 07:00.
-RUN npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
-    && npm cache clean --force \
-    && claude --version
 
 # The docker *client* only. Whether it can reach a daemon is the compose file's
 # `/var/run/docker.sock` mount; without one, `steward doctor` says so by name.

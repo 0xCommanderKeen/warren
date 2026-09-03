@@ -16,13 +16,13 @@ from typing import Any
 
 import pytest
 
-from conftest import REPO_ROOT, ResidentWriter, valid_manifest
+from conftest import PROJECT_AGENT_FIXTURE, REPO_ROOT, ResidentWriter, valid_manifest
 from steward import board as b
 from steward import delegation as dg
 from steward import events as ev
 from steward import prompt
 from steward.budgets import BudgetGuard
-from steward.manifest import Resident, ResidentManifest, load_manifest, validate_tree
+from steward.manifest import Resident, ResidentManifest, load_manifest
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.skills import library_for
 from steward.store import JobRecord, Store
@@ -883,7 +883,11 @@ def test_the_receiver_works_its_inbox_on_its_next_wake_up(
     assert report.done
     assert report.resident_id == RECEIVER
     assert job(store, task.task_id).status == "done"
-    assert [event.type for event in sink.events] == ["task_claimed", "task_done"]
+    assert [event.type for event in sink.events] == [
+        "task_claimed",
+        "resident_declared",
+        "task_done",
+    ]
 
 
 def test_pickup_and_completion_carry_the_parent(
@@ -898,7 +902,7 @@ def test_pickup_and_completion_carry_the_parent(
     sink.events.clear()
 
     dispatcher.dispatch(NOW)
-    claimed, done = sink.events
+    claimed, _, done = sink.events
     assert claimed.payload["parent_task_id"] == root.task_id
     assert done.payload["parent_task_id"] == root.task_id
 
@@ -914,7 +918,7 @@ def test_an_ordinary_board_task_says_nothing_about_a_parent(
     store.post_job(title="A notice for anybody")
 
     make_dispatcher(residents).dispatch(NOW)
-    claimed, done = sink.events
+    claimed, _, done = sink.events
     assert "parent_task_id" not in claimed.payload
     assert "parent_task_id" not in done.payload
 
@@ -1089,18 +1093,20 @@ def test_a_session_of_an_unknown_resident_hands_nothing_over(
 # ------------------------------------------------------------------------- the pilot
 
 
-def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
+def test_project_fixture_hands_hob_work_and_the_whole_chain_is_readable(
     store: Store, sink: ev.NullEmitter, tmp_path: Path
 ) -> None:
-    """The pilot, on the residents this repo actually ships.
+    """The handoff path, using a test-only sender and the shipped receiver.
 
-    Maren works a task, writes a ``<delegate>`` block in her output, and finishes. Steward
+    A project agent writes a ``<delegate>`` block in its output and finishes. Steward
     validates it against both manifests, delivers it into Hob's declared route, and tells
     the village. Hob picks it up on his own next wake-up, works it as an ordinary
     provisioned session, and closes it — and every event from the handoff onwards names
     the parent, so the chain from the human's task to Hob's answer reads off the log.
     """
-    residents = validate_tree(REPO_ROOT / "residents").residents
+    sender = load_manifest(PROJECT_AGENT_FIXTURE)
+    receiver = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+    residents = (sender, receiver)
     dispatcher = b.Dispatcher(
         residents=residents,
         store=store,
@@ -1109,11 +1115,10 @@ def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
         library=library_for(REPO_ROOT / "residents"),
         runner_factory=lambda _spec, _placement: ScriptedRunner(),
     )
-    maren = next(r for r in residents if r.id == "burrow-builder")
-    # The human's task, and Maren already holds it: this is the session she is finishing.
+    # The human's task, and the project agent already holds it.
     root = store.post_job(title="Rewrite the projection rules", posted_by="api")
     store.claim_next_job(
-        claimant=maren.agent_id,
+        claimant=sender.agent_id,
         skills=["research"],
         lease_expires_at=ev.utc_now_iso(NOW + timedelta(hours=1)),
     )
@@ -1127,7 +1132,7 @@ def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
         "</delegate>\n"
         f"{prompt.ACTIONS_CLOSE}\n"
     )
-    (delivery,) = dispatcher.hand_over(maren.manifest, output, parent_task_id=root.task_id)
+    (delivery,) = dispatcher.hand_over(sender.manifest, output, parent_task_id=root.task_id)
     assert delivery.accepted
     letter = delivery.task
     assert letter is not None
@@ -1136,7 +1141,7 @@ def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
 
     delegated = sink.events[0]
     assert delegated.type == "task_delegated"
-    assert delegated.agent_id == "steward:burrow-builder"
+    assert delegated.agent_id == "steward:project-agent"
     assert delegated.payload["to"] == "claude-code:life-agent"
     assert delegated.payload["depth"] == 1
 
@@ -1147,6 +1152,7 @@ def test_maren_hands_hob_a_piece_of_work_and_the_whole_chain_is_readable(
     assert [event.type for event in sink.events] == [
         "task_delegated",
         "task_claimed",
+        "resident_declared",
         "task_done",
     ]
     assert sink.events[-1].payload["parent_task_id"] == root.task_id

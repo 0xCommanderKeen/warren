@@ -332,7 +332,7 @@ def test_two_threads_racing_one_open_task_yield_exactly_one_claimant(tmp_path: P
 
     threads = [
         threading.Thread(target=contend, args=("claude-code:hob",)),
-        threading.Thread(target=contend, args=("claude-code:maren",)),
+        threading.Thread(target=contend, args=("claude-code:other",)),
     ]
     for thread in threads:
         thread.start()
@@ -479,7 +479,7 @@ def test_a_database_written_before_claiming_existed_still_opens(tmp_path: Path) 
         # ordinary case, not an exotic one — so the combined schema is exercised here in
         # one open, on a file that predates both.
         letter = migrated.delegate_job(
-            title="Read the background", assignee="hob", delegated_by="maren", route="inbox"
+            title="Read the background", assignee="hob", delegated_by="sender", route="inbox"
         )
         assert letter.origin is None
         assert [item.task_id for item in migrated.inbox("hob")] == [letter.task_id]
@@ -562,7 +562,7 @@ def test_a_ledger_written_before_origin_existed_keeps_every_row(tmp_path: Path) 
         migrated.delegate_job(
             title="the chain the old row came off",
             assignee="hob",
-            delegated_by="maren",
+            delegated_by="sender",
             route="inbox",
             origin="task:root",
             task_id="old-task",
@@ -813,7 +813,7 @@ def test_one_resident_never_reads_another_residents_decisions(store: Store) -> N
         agent_id="a:b", project="p", action="spend", message="…", resident="life-agent"
     )
     store.decide(mine.request_id, "deny")
-    assert store.undelivered_decisions("burrow-builder") == []
+    assert store.undelivered_decisions("other-resident") == []
 
 
 def test_the_audit_view_holds_the_request_and_its_decision(store: Store) -> None:
@@ -853,7 +853,7 @@ def test_recent_denials_counts_every_way_a_resident_was_told_no(store: Store) ->
 def test_recent_denials_ignores_everything_that_is_not_this_residents_no(store: Store) -> None:
     store.decide(_ask(store).request_id, "approve", decided_by="api", now=LATER)
     store.decide(_ask(store, action="spend").request_id, "deny", decided_by="api", now=LATER)
-    store.decide(_ask(store, resident="burrow-builder").request_id, "deny", now=LATER)
+    store.decide(_ask(store, resident="other-resident").request_id, "deny", now=LATER)
     _ask(store)  # Still pending: nobody has answered it either way.
     assert store.recent_denials("life-agent", "send_email", EARLY) == 0
 
@@ -1116,10 +1116,10 @@ def test_health_writers_keep_counting_across_atomic_replacements(
 def test_the_inbox_can_be_counted_without_being_read(store: Store) -> None:
     """``doctor`` prints one number, so it asks for one number."""
     store.delegate_job(
-        title="Read the background", assignee="hob", delegated_by="maren", route="inbox"
+        title="Read the background", assignee="hob", delegated_by="sender", route="inbox"
     )
-    store.delegate_job(title="And this", assignee="hob", delegated_by="maren", route="inbox")
-    store.delegate_job(title="Not yours", assignee="pip", delegated_by="maren", route="inbox")
+    store.delegate_job(title="And this", assignee="hob", delegated_by="sender", route="inbox")
+    store.delegate_job(title="Not yours", assignee="pip", delegated_by="sender", route="inbox")
 
     assert store.inbox_count("hob") == 2
     assert store.inbox_count("nobody") == 0
@@ -1183,7 +1183,11 @@ def test_a_ref_that_collides_with_a_task_id_does_not_inherit_that_task(store: St
     descends from, so the join has nothing left to guess at.
     """
     task = store.delegate_job(
-        title="the real chain", assignee="hob", delegated_by="maren", route="inbox", origin="task:x"
+        title="the real chain",
+        assignee="hob",
+        delegated_by="sender",
+        route="inbox",
+        origin="task:x",
     )
     store.record_run(
         resident="hob",
@@ -1206,7 +1210,7 @@ def test_a_row_written_before_the_column_existed_still_rolls_up_by_its_task(stor
     task = store.delegate_job(
         title="claimed before #45",
         assignee="hob",
-        delegated_by="maren",
+        delegated_by="sender",
         route="inbox",
         origin="task:root",
     )

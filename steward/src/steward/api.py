@@ -363,6 +363,13 @@ class RetirePost(_Body):
             "the exact argv a real run would issue."
         ),
     )
+    revision: str | None = Field(
+        default=None,
+        description=(
+            "The declaration revision returned by rehearsal. Required for execution so "
+            "the confirmed plan cannot retire changed bytes."
+        ),
+    )
 
 
 class DeclarationPut(_Body):
@@ -588,6 +595,7 @@ def resident_view(resident: Resident, library: SkillLibrary | None = None) -> di
     return {
         "id": manifest.id,
         "uid": str(manifest.uid),
+        "home": manifest.home,
         "agent_id": manifest.agent_id,
         "project": manifest.project,
         "summary": manifest.summary,
@@ -660,6 +668,8 @@ RETIRE_STATUS: Mapping[str, int] = {
     "declaration_invalid": 409,
     WORKTREE_REFUSED: 409,
     COMMIT_FAILED: 409,
+    "retirement_rehearsal_required": 409,
+    "stale_retirement_plan": 409,
 }
 
 #: What an unnamed retirement failure is: the host answered and said no, or stopped
@@ -673,7 +683,13 @@ RETIRE_REFUSED = "retire_refused"
 #: up — and the request log has to be able to tell those apart. A row reading "refused" over
 #: a request that left a commit in git is the one row an audit cannot recover from.
 RETIRE_UNTOUCHED: frozenset[str] = frozenset(
-    {"unknown_resident", "declaration_invalid", WORKTREE_REFUSED}
+    {
+        "unknown_resident",
+        "declaration_invalid",
+        WORKTREE_REFUSED,
+        "retirement_rehearsal_required",
+        "stale_retirement_plan",
+    }
 )
 
 
@@ -1698,15 +1714,36 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "rehearsed" if asked.dry_run else "retired",
             {"resident": resident.id},
         )
+        if not asked.dry_run and asked.revision is None:
+            reason = "retirement_rehearsal_required"
+            record_refusal(request_id, reason)
+            _refuse(409, reason, "rehearse retirement before confirming the current plan")
         try:
-            report = retirer(
-                resident.id,
-                residents_dir=residents_dir,
-                skills_dir=settings.skills_dir,
-                transport=transport,
-                dry_run=asked.dry_run,
-                identity=write_settings(request)["identity"],
-            )
+            common = {
+                "residents_dir": residents_dir,
+                "skills_dir": settings.skills_dir,
+                "transport": transport,
+                "identity": write_settings(request)["identity"],
+                "resident_dirty_only": True,
+                "revision_of": au.revision_of,
+                "emitter": sink,
+            }
+            if asked.dry_run:
+                # The revision and the plan describe the same locked bytes. Otherwise an
+                # edit between planning and hashing could bind confirmation to a plan the
+                # operator never saw.
+                with au.authoring_lock(residents_dir):
+                    report = retirer(resident.id, dry_run=True, **common)
+                    revision = au.revision_of(resident.path)
+            else:
+                report = retirer(
+                    resident.id,
+                    dry_run=False,
+                    expected_revision=asked.revision,
+                    durable_guard=au.authoring_lock(residents_dir),
+                    **common,
+                )
+                revision = asked.revision
         except NurseryError as exc:
             # Keyed on the nursery's own `reason` exactly as provision is. An unnamed one is
             # the host: a `docker compose down` that failed, a machine that stopped
@@ -1722,6 +1759,7 @@ def create_app(  # noqa: C901, PLR0913, PLR0915 — flat routes; every collabora
             "request_id": request_id,
             "message": _retire_message(report),
             **report.to_dict(),
+            "revision": revision,
         }
 
     @app.get("/residents/{resident_id}/declaration")

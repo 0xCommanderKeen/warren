@@ -72,6 +72,7 @@ __all__ = [
     "CommitReport",
     "Declaration",
     "SkillDocument",
+    "authoring_lock",
     "commit_write",
     "read_declaration",
     "read_skill_document",
@@ -922,7 +923,7 @@ def _git_path(repo: Path, name: str, git: PipedRun) -> Path:
 
 
 @contextmanager
-def _authoring_lock(residents_dir: Path, *, git: PipedRun) -> Iterator[Path | None]:
+def authoring_lock(residents_dir: Path, *, git: PipedRun = run_argv) -> Iterator[Path | None]:
     """Hold the checkout-scoped authoring lock across every mutation preflight and write."""
     repo = repo_toplevel(residents_dir, git=git)
     lock_path = (
@@ -1035,7 +1036,7 @@ def write_declaration(  # noqa: PLR0913 — one parameter per fact about the wri
     git: PipedRun = run_argv,
 ) -> WriteResult:
     """Validate, write, and commit one resident's declaration. Refusals write nothing."""
-    with _authoring_lock(residents_dir, git=git) as repo:
+    with authoring_lock(residents_dir, git=git) as repo:
         resolved_id, soul_filename = _existing_declaration(residents_dir, resident_id, skills_dir)
         if declaration.soul_filename != soul_filename:
             raise AuthoringError(
@@ -1083,7 +1084,7 @@ def write_skill(  # noqa: PLR0913 — one parameter per fact about the write
     """Validate, write, and commit one skill. Refusals write nothing."""
     path = skills_dir / document.name / SKILL_FILENAME
     with (
-        _authoring_lock(residents_dir, git=git) as repo,
+        authoring_lock(residents_dir, git=git) as repo,
         _authoring_files(residents_dir, [path], repo=repo) as files,
     ):
         if created and path.is_file():

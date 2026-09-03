@@ -603,6 +603,18 @@
             "description": "Report the plan and touch nothing: no mark, no commit, no host. `commands` is the exact argv a real run would issue.",
             "title": "Dry Run",
             "type": "boolean"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The declaration revision returned by rehearsal. Required for execution so the confirmed plan cannot retire changed bytes.",
+            "title": "Revision"
           }
         },
         "title": "RetirePost",

@@ -15,10 +15,11 @@ asks a docker that has never heard of ``life-agent``, gets "no such container", 
 reports the resident as *unsupervised* — quietly, forever, because "docker could not
 answer" is indistinguishable from "there is nothing here to answer about".
 
-This module is the part of that sentence steward can check. It never fixes anything and
-never refuses anything; it answers one question — *does the docker this process reaches
-hold the containers these manifests name?* — for :command:`steward doctor` and for the
-watchdog's own startup, so the gap is a line somebody reads rather than a silence.
+This module is the part of that sentence steward can check and enforce. ``deploy.host``
+partitions the shipped resident tree: scheduler and watchdog act only for residents on
+this burrow, while :command:`steward doctor` reports the same placement. It also answers
+whether the docker this process reaches holds those containers, so a missing provisioned
+container is a named refusal rather than an endless, ambiguous *unsupervised* reading.
 
 Three inputs, and they are asked in order of how much they are worth:
 
@@ -66,6 +67,7 @@ __all__ = [
     "Survey",
     "burrow_names",
     "docker_endpoint",
+    "residents_on_this_burrow",
     "supervises",
     "survey",
     "this_burrow",
@@ -171,6 +173,23 @@ def supervises(manifest: ResidentManifest) -> bool:
     would not even try.
     """
     return manifest.deploy.container is not None
+
+
+def residents_on_this_burrow(
+    residents: Sequence[Resident], env: Mapping[str, str] | None = None
+) -> tuple[Resident, ...]:
+    """Return active residents whose resolved ``deploy.host`` names this burrow.
+
+    This is the fleet partition used by both daemons and by ``steward doctor``.  The
+    deploy target is resolved through the same defaults provisioning uses, so a nursery
+    manifest that omits ``deploy.host`` still lands in exactly one partition.
+    """
+    names = burrow_names(env)
+    return tuple(
+        resident
+        for resident in residents
+        if not resident.retired and target_for(resident.manifest).host.casefold() in names
+    )
 
 
 class Reach(StrEnum):

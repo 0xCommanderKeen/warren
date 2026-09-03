@@ -359,7 +359,7 @@ def test_hex_digest_where_a_reference_is_expected_is_rejected(
 def test_ordinary_paths_and_urls_survive_the_blob_check() -> None:
     for reference in (
         "/data/residents/life-agent/memory",
-        "~/.steward/memory/burrow-builder",
+        "~/.steward/memory/project-agent",
         "https://github.com/0xCommanderKeen/burrow/issues",
         "op://Private/Gmail",
         "steward:scheduler",
@@ -407,6 +407,7 @@ def test_two_residents_that_share_a_journal_directory_are_warned(
         "uid": SECOND_RESIDENT_UID,
         "id": "second-agent",
         "agent_id": "claude-code:second-agent",
+        "home": 1,
         "memory": {
             "kind": "directory",
             "path": "/data/residents/test-agent/memory",  # the same dir test-agent uses
@@ -835,11 +836,28 @@ def test_validate_tree_reports_every_resident(
     second["uid"] = SECOND_RESIDENT_UID
     second["id"] = "other-agent"
     second["agent_id"] = "claude-code:other-agent"
+    second["home"] = 1
     soul = VALID_SOUL.replace("test-agent", "other-agent")
     write_resident(second, soul=soul)
     result = m.validate_tree(tmp_path / "residents")
     assert result.ok
     assert {resident.id for resident in result.residents} == {"test-agent", "other-agent"}
+
+
+def test_validate_tree_rejects_duplicate_resident_homes(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    write_resident()
+    second = valid_manifest() | {
+        "uid": SECOND_RESIDENT_UID,
+        "id": "other-agent",
+        "agent_id": "claude-code:other-agent",
+    }
+    write_resident(second, soul=VALID_SOUL.replace("test-agent", "other-agent"))
+
+    result = m.validate_tree(tmp_path / "residents")
+
+    assert len([item for item in result.errors if item.field_path == "home"]) == 2
 
 
 def test_validate_tree_rejects_duplicate_resident_uids(
@@ -1439,7 +1457,7 @@ def test_a_permitted_sender_may_send_to_anybody_unless_it_names_a_list(
 
     narrow = m.load_manifest(write_resident(delegating({"send": True, "to": ["life-agent"]})))
     assert narrow.manifest.delegation.may_send_to("life-agent") is True
-    assert narrow.manifest.delegation.may_send_to("burrow-builder") is False
+    assert narrow.manifest.delegation.may_send_to("other-agent") is False
 
 
 def test_an_allowlist_with_the_switch_off_is_refused(write_resident: ResidentWriter) -> None:
