@@ -68,9 +68,9 @@ def on_operator_burrow(
     stub_bin("docker", OPERATOR_BURROW_DOCKER)
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     monkeypatch.setenv("HOME", str(tmp_path))
-    hob_memory = tmp_path / "docker" / "steward-life-agent" / "memory"
+    hob_memory = tmp_path / "docker" / "warren" / "residents" / "life-agent" / "memory"
     hob_memory.mkdir(parents=True)
-    (tmp_path / "docker" / "steward-pip" / "memory").mkdir(parents=True)
+    (tmp_path / "docker" / "warren" / "residents" / "pip" / "memory").mkdir(parents=True)
     return hob_memory
 
 
@@ -3239,7 +3239,9 @@ def test_new_resident_raises_a_resident_end_to_end(
     assert "note-keeper is raised" in result.output
     assert (scratch_repo.residents / "note-keeper" / "soul.md").is_file()
     assert scratch_repo.log()[0] == "feat(residents): declare note-keeper"
-    assert (nas.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+    assert (
+        nas.root / "docker" / "warren" / "residents" / "note-keeper" / "docker-compose.yaml"
+    ).is_file()
 
 
 @pytest.mark.usefixtures("nas")
@@ -3470,7 +3472,9 @@ def test_provision_builds_a_manifest_new_resident_would_refuse(
 
     assert result.exit_code == 0, result.output
     assert "note-keeper is provisioned" in result.output
-    assert (nas.root / "docker" / "steward-note-keeper" / "docker-compose.yaml").is_file()
+    assert (
+        nas.root / "docker" / "warren" / "residents" / "note-keeper" / "docker-compose.yaml"
+    ).is_file()
 
 
 def test_the_refusal_new_resident_gives_names_the_command_that_works(

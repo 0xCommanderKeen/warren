@@ -162,20 +162,25 @@ budgets:
 # operator decision #40 is about — merging this is the cutover.
 #
 # These are the values the nursery resolves for this resident — the layout every
-# provisioned resident lands in, beside chronicle's own server at ~/docker/burrow — and the
-# only address a container-placed resident can have.
+# provisioned resident lands in, under ~/docker/warren beside chronicle's own server and
+# the control plane (warren#358) — and the only address a container-placed resident can
+# have.
 #
-#   ~/docker/life-agent/          the hand-written compose.yaml, bot.py and the ~40-line
-#                                 bash bootstrap that apt-gets git and python3 and
-#                                 npm-installs the claude CLI at every cold start. Steward
-#                                 never owned that file and provisioning does not touch it.
-#   ~/docker/steward-life-agent/  docker-compose.yaml, .env, manifest.yaml, soul.md,
-#                                 memory/ and claude/ — every byte of it written by steward.
+#   ~/docker/life-agent/                   the hand-written compose.yaml, bot.py and the
+#                                          ~40-line bash bootstrap that apt-gets git and
+#                                          python3 and npm-installs the claude CLI at every
+#                                          cold start. Steward never owned that file,
+#                                          provisioning does not touch it, and it is not
+#                                          under ~/docker/warren because it is not the
+#                                          warren's.
+#   ~/docker/warren/residents/life-agent/  docker-compose.yaml, .env, manifest.yaml,
+#                                          soul.md, memory/ and claude/ — every byte of it
+#                                          written by steward.
 #
 # So this is a migration with a cutover, and the cutover is a person's job: get the image
 # onto the NAS (`make image-ship`), copy the old deployment's journal entries aside, stop
 # the old container, run `steward provision life-agent`, restore those entries into
-# ~/docker/steward-life-agent/memory/journal, then `docker exec steward-life-agent claude`
+# ~/docker/warren/residents/life-agent/memory/journal, then `docker exec steward-life-agent claude`
 # once to log the brain into the ./claude volume. Expect brief downtime: the two containers
 # must never run at once because both emit under `claude-code:life-agent`, which would make
 # the village show one villager doing two things.
@@ -197,7 +202,7 @@ budgets:
 deploy:
   host: dxp2800
   user: Miha
-  path: ~/docker/steward-life-agent
+  path: ~/docker/warren/residents/life-agent
   container: steward-life-agent
   image: steward-resident:latest
 

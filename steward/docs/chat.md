@@ -170,7 +170,7 @@ id it answers with. That number, and no other, is what
 
 ### 3. Put the secrets on the burrow
 
-In the steward deploy's `.env` on the NAS (`~/docker/steward/.env`) — the same file that
+In the steward deploy's `.env` on the NAS (`~/docker/warren/steward/.env`) — the same file that
 already holds `CHRONICLE_TOKEN` and `STEWARD_TOKEN`:
 
 ```sh

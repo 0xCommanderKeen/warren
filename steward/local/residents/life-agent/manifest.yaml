@@ -155,7 +155,7 @@ budgets:
 #    render a second compose file (docker-compose.yaml) into ~/docker/life-agent beside
 #    the existing compose.yaml and bring a bare container up in place of the bot. Do not
 #    run it here. Re-provisioning Hob under the nursery naming — steward-life-agent,
-#    ~/docker/steward-life-agent, steward-resident:latest, the bot rewritten as something
+#    ~/docker/warren/residents/life-agent, steward-resident:latest, the bot rewritten as something
 #    steward drives — is a real migration with a real cutover, and it is the pilot's
 #    decision, not a side effect of declaring where the container already is.
 # Hob takes work off the job board. One task per wake-up, so a busy board never turns

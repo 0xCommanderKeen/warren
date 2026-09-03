@@ -1,4 +1,4 @@
-# Chronicle's server on a burrow — the NAS today. Published to ~/docker/burrow by
+# Chronicle's server on a burrow — the NAS today. Published to ~/docker/warren/burrow by
 # deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
 #
 # One process: the event log and the village projection behind it, on host port 8738,

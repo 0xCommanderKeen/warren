@@ -291,7 +291,7 @@
             }
           ],
           "default": null,
-          "description": "Compose directory on the host. Default: ~/docker/<container>.",
+          "description": "Compose directory on the host. Default: ~/docker/warren/residents/<id>.",
           "title": "Path"
         },
         "image": {

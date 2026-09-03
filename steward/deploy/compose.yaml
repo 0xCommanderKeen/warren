@@ -1,4 +1,4 @@
-# Steward's control plane on a burrow — the NAS today. Published to ~/docker/steward by
+# Steward's control plane on a burrow — the NAS today. Published to ~/docker/warren/steward by
 # deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
 #
 # Three processes, one image, one database:
@@ -19,7 +19,7 @@
 # mode 0600, mounted into the API and nothing else (deploy/README.md says how it is made).
 #
 # The residents tree is NOT the image's (warren#351). It is a git checkout on the burrow —
-# ~/docker/steward/residents-repo, a sparse clone of this repository on the branch
+# ~/docker/warren/steward/residents-repo, a sparse clone of this repository on the branch
 # burrow/residents, made once by deploy/deploy.sh and never reset by it — bind-mounted at
 # /checkout. The API reads and writes /checkout/steward/residents and the skills library
 # beside it, commits every write, and pushes the branch, best effort. The daemons mount the
@@ -34,13 +34,15 @@
 # warren#351 they read a copy taken at container start, which nothing ever updated.
 #
 # The daemons also need the burrow's *resident* directories (warren#356). A container-placed
-# resident lives at <deploy.path> on this host — ~/docker/steward-<id>, written by
+# resident lives at <deploy.path> on this host — ~/docker/warren/residents/<id>, written by
 # `steward provision` — and its memory/ is the host side of the mount the scheduler journals
 # into and materializes skills onto (deploy.memory_host_dir). Steward resolves that `~` in
-# the process that asks, and inside this image HOME is /root, so the host's ~/docker is
-# mounted at /root/docker: the path the daemons compute is then the directory the host has.
-# Without it every container-placed resident is "unprovisioned" to the scheduler no matter
-# what was provisioned, and it refuses to start.
+# the process that asks, and inside this image HOME is /root, so the host's residents
+# directory is mounted at /root/docker/warren/residents: the path the daemons compute is
+# then the directory the host has. That directory and no wider (warren#358): the control
+# plane's own directory beside it holds the .env and the deploy key, and the daemons have
+# no business with either. Without the mount every container-placed resident is
+# "unprovisioned" to the scheduler no matter what was provisioned, and it refuses to start.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -88,7 +90,7 @@ services:
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # The residents' deploy directories, at the path the daemons compute for them.
-      - /home/Miha/docker:/root/docker
+      - /home/Miha/docker/warren/residents:/root/docker/warren/residents
     # The absolute path is belt and braces: the first rollout crash-looped on a login shell
     # that re-read /etc/profile, reset PATH, and lost /app/.venv/bin.
     command: ["/app/.venv/bin/steward", "scheduler", "run", "--residents", "/checkout/steward/residents"]
@@ -100,7 +102,7 @@ services:
       - ./data:/data
       - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/Miha/docker:/root/docker
+      - /home/Miha/docker/warren/residents:/root/docker/warren/residents
     # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
     # wider list than the scheduler fires would report residents nobody is running.
     command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/checkout/steward/residents"]

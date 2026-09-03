@@ -37,7 +37,7 @@ nothing in this module ever launches anything itself.
 
 A manifest that declares no ``deploy`` block still deploys, to the place everything else
 in this fleet is: host ``dxp2800``, user ``Miha``, compose directory
-``~/docker/steward-<id>``, image ``steward-resident:latest``. Those are defaults, not
+``~/docker/warren/residents/<id>``, image ``steward-resident:latest``. Those are defaults, not
 assumptions — every one of them is a field a manifest can override, and
 ``steward new-resident --dry-run`` (or ``steward provision <id> --dry-run``, for a manifest
 somebody wrote by hand) prints the resolved values before anything moves.
@@ -75,6 +75,7 @@ __all__ = [
     "DEFAULT_COMMAND",
     "DEFAULT_HOST",
     "DEFAULT_IMAGE",
+    "DEFAULT_RESIDENTS_ROOT",
     "DEFAULT_ROOT",
     "DEFAULT_USER",
     "ENV_FILENAME",
@@ -107,8 +108,18 @@ __all__ = [
 DEFAULT_HOST = "dxp2800"
 DEFAULT_USER = "Miha"
 
-#: Where compose projects live on that host, matching ``~/docker/burrow`` next door.
-DEFAULT_ROOT = "~/docker"
+#: Where the warren lives on a burrow (warren#358): one directory under the deploy user's
+#: home holding everything the warren puts there — chronicle at ``<root>/burrow``, the
+#: origin at ``<root>/arcadia``, the control plane at ``<root>/steward`` — rather than
+#: siblings at the top of ``~/docker`` beside stacks that are not the warren's.
+DEFAULT_ROOT = "~/docker/warren"
+
+#: Where a resident's compose directory goes when its manifest names none: named by the
+#: resident, under one directory for all of them — ``~/docker/warren/residents/<id>``. The
+#: control plane's daemons mount exactly this directory (deploy/compose.yaml), so a
+#: resident whose manifest puts ``deploy.path`` elsewhere on the burrow is one they cannot
+#: journal for.
+DEFAULT_RESIDENTS_ROOT = f"{DEFAULT_ROOT}/residents"
 
 #: What a resident's container name is when nobody says: the same prefix the watchdog has
 #: been reading out of ``deploy.container`` since #8.
@@ -255,7 +266,7 @@ def target_for(manifest: ResidentManifest) -> DeployTarget:
         resident_id=manifest.id,
         host=deploy.host or DEFAULT_HOST,
         user=deploy.user or DEFAULT_USER,
-        path=deploy.path or f"{DEFAULT_ROOT}/{container}",
+        path=deploy.path or f"{DEFAULT_RESIDENTS_ROOT}/{manifest.id}",
         container=container,
         image=deploy.image or DEFAULT_IMAGE,
         command=tuple(deploy.command) or DEFAULT_COMMAND,
@@ -744,10 +755,10 @@ class SshTransport:
 class LocalTransport:
     """A directory that plays a host, for tests and rehearsals. Starts no processes.
 
-    ``root`` stands in for ``/``: a remote path of ``~/docker/steward-quill`` lands at
-    ``root/docker/steward-quill``, which keeps the fake host's shape recognisable when a
-    test prints it. Files arrive by unpacking the same tar bytes :class:`SshTransport`
-    would have piped, so the archive is genuinely exercised.
+    ``root`` stands in for ``/``: a remote path of ``~/docker/warren/residents/quill``
+    lands at ``root/docker/warren/residents/quill``, which keeps the fake host's shape
+    recognisable when a test prints it. Files arrive by unpacking the same tar bytes
+    :class:`SshTransport` would have piped, so the archive is genuinely exercised.
 
     Every command is recorded rather than run, which is what makes "a dry run touched
     nothing" an assertion instead of a promise. ``unreachable`` makes every operation
