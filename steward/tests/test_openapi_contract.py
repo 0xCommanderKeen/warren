@@ -58,6 +58,16 @@ def test_the_export_is_deterministic() -> None:
     assert openapi_json() == openapi_json()
 
 
+def test_declaration_input_publishes_the_resident_mount_contract() -> None:
+    schemas = openapi_document()["components"]["schemas"]
+
+    assert schemas["Mount"]["properties"]["mode"]["enum"] == ["rw", "ro"]
+    manifest = schemas["DeclarationPut"]["properties"]["manifest"]
+    assert {branch.get("$ref") for branch in manifest["anyOf"]} >= {
+        "#/components/schemas/ResidentManifest"
+    }
+
+
 def test_the_export_does_not_open_the_unauthenticated_door() -> None:
     """Exporting is offline: it renders the document, it does not start serving one.
 

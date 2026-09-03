@@ -466,6 +466,10 @@ widening grant is also why it is worth reading out loud: `steward doctor` prints
 resident's workspace whenever it has one.
 
 Paths are **absolute**, and are checked against the same character class as `memory.path`.
+
+For a container-placed resident, every workspace path must be provided by either
+`memory.path` or an extra `deploy.mounts` container path. Steward refuses a grant the
+container cannot actually reach instead of leaving an inert `--add-dir` flag behind.
 A relative path would resolve against the working directory — the one place the resident can
 already write — so which directory a grant named would depend on where steward happened to
 be launched from. And the value is interpolated into an argv, and for a provisioned resident
@@ -1020,6 +1024,30 @@ loud when they do not. See [topology.md](topology.md).
 The default `command` is honest about what a resident's container is: a place for sessions
 to happen, not a process that does work on its own. Steward drives the brain from outside,
 so the container's job is to be there.
+
+### Extra mounts
+
+`deploy.mounts` declares host directories a container needs beyond its managed memory and
+Claude configuration:
+
+```yaml
+deploy:
+  mounts:
+    - {host: ~/docker/life/vault, container: /vault, mode: rw}
+    - {host: ~/docker/life/ssh/hob, container: /root/.ssh, mode: ro}
+workspace: [/vault]
+```
+
+`host` is absolute or `~`-relative on the burrow; `~` means
+`STEWARD_BURROW_HOME`, as it does for `deploy.path`. `container` is an absolute,
+plain-data path. `mode` is `rw` or `ro`. Extra mounts may not overlap `memory.path` or
+`/root/.claude`, which Steward owns and renders itself. A colon is refused on both sides
+because Compose's short volume syntax uses it to separate source, target, and mode.
+
+A host path is allowed to be shared, but a shared clone has **one writer**: at most one
+resident may mount it `rw`; all other residents use `ro`. Tree validation warns and names
+every competing writer. `steward doctor` prints each mount beside the resident's workspace,
+and a provision dry run shows the same mount in the complete rendered Compose fragment.
 
 ### The image
 

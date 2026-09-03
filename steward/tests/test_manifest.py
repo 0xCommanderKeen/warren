@@ -1399,6 +1399,151 @@ def test_a_workspace_grant_is_kept_in_order(write_resident: ResidentWriter) -> N
     assert resident.manifest.workspace == ["/data/library/books", "/data/incoming"]
 
 
+def test_a_container_resident_may_mount_extra_host_directories(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["runner"]["placement"] = "container"
+    data["deploy"] = {
+        "container": "steward-test-agent",
+        "mounts": [
+            {"host": "~/docker/life/vault", "container": "/vault", "mode": "rw"},
+            {"host": "/srv/keys/hob", "container": "/root/.ssh", "mode": "ro"},
+        ],
+    }
+    data["workspace"] = ["/vault"]
+
+    manifest = m.load_manifest(write_resident(data)).manifest
+
+    assert [(mount.host, mount.container, mount.mode) for mount in manifest.deploy.mounts] == [
+        ("~/docker/life/vault", "/vault", "rw"),
+        ("/srv/keys/hob", "/root/.ssh", "ro"),
+    ]
+
+
+def test_a_container_workspace_must_be_provided_by_memory_or_a_mount(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["runner"]["placement"] = "container"
+    data["deploy"] = {
+        "container": "steward-test-agent",
+        "mounts": [{"host": "/srv/books", "container": "/library", "mode": "ro"}],
+    }
+    data["workspace"] = ["/missing"]
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert "no declared mount provides" in problem_for(result, "workspace[0]")
+
+
+@pytest.mark.parametrize(
+    ("mount", "field"),
+    [
+        ({"host": "relative", "container": "/vault", "mode": "rw"}, "deploy.mounts[0].host"),
+        (
+            {"host": "~/vault\nvolumes:", "container": "/vault", "mode": "rw"},
+            "deploy.mounts[0].host",
+        ),
+        ({"host": "/srv/vault", "container": "vault", "mode": "rw"}, "deploy.mounts[0].container"),
+        (
+            {"host": "/srv/vault", "container": "/vault\nvolumes:", "mode": "rw"},
+            "deploy.mounts[0].container",
+        ),
+        ({"host": "/srv/a:b", "container": "/vault", "mode": "rw"}, "deploy.mounts[0].host"),
+        (
+            {"host": "/srv/vault", "container": "/vault:x", "mode": "rw"},
+            "deploy.mounts[0].container",
+        ),
+    ],
+)
+def test_a_mount_path_is_absolute_or_burrow_home_relative_and_never_markup(
+    write_resident: ResidentWriter, mount: dict[str, str], field: str
+) -> None:
+    data = valid_manifest()
+    data["deploy"] = {"mounts": [mount]}
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert any(d.field_path == field for d in result.errors)
+
+
+@pytest.mark.parametrize("container", ["/data/residents/test-agent/memory", "/root/.claude"])
+def test_an_extra_mount_cannot_mask_a_residents_managed_directories(
+    write_resident: ResidentWriter, container: str
+) -> None:
+    data = valid_manifest()
+    data["deploy"] = {"mounts": [{"host": "/srv/other", "container": container, "mode": "rw"}]}
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert "collides" in problem_for(result, "deploy.mounts[0].container")
+
+
+def test_two_read_write_mounts_of_one_host_path_warn_and_name_both_residents(
+    write_resident: ResidentWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEWARD_BURROW_HOME", "/home/Miha")
+    root = tmp_path / "residents"
+    first = valid_manifest()
+    first["deploy"] = {
+        "mounts": [{"host": "~/docker/shared", "container": "/shared", "mode": "rw"}]
+    }
+    second = valid_manifest() | {
+        "uid": "3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+        "id": "second-agent",
+        "home": 1,
+        "agent_id": "claude-code:second-agent",
+        "deploy": {
+            "mounts": [{"host": "/home/Miha/docker/shared", "container": "/other", "mode": "rw"}]
+        },
+    }
+    write_resident(first, root=root)
+    write_resident(
+        second,
+        root=root,
+        directory="second-agent",
+        soul=VALID_SOUL.replace("test-agent", "second-agent"),
+    )
+
+    result = m.validate_tree(root)
+
+    warnings = [d for d in result.warnings if "one writer" in d.problem]
+    assert len(warnings) == 2
+    assert all("test-agent" in d.problem and "second-agent" in d.problem for d in warnings)
+
+
+def test_a_shared_host_path_with_only_one_writer_is_silent(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    root = tmp_path / "residents"
+    first = valid_manifest()
+    first["deploy"] = {
+        "mounts": [{"host": "~/docker/shared", "container": "/shared", "mode": "rw"}]
+    }
+    second = valid_manifest() | {
+        "uid": "3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+        "id": "second-agent",
+        "home": 1,
+        "agent_id": "claude-code:second-agent",
+        "deploy": {"mounts": [{"host": "~/docker/shared", "container": "/other", "mode": "ro"}]},
+    }
+    write_resident(first, root=root)
+    write_resident(
+        second,
+        root=root,
+        directory="second-agent",
+        soul=VALID_SOUL.replace("test-agent", "second-agent"),
+    )
+
+    result = m.validate_tree(root)
+
+    assert [d for d in result.warnings if "one writer" in d.problem] == []
+
+
 @pytest.mark.parametrize(
     ("path", "why"),
     [

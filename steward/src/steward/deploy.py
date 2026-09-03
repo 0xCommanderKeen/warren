@@ -59,7 +59,12 @@ from typing import Any, Protocol
 
 import yaml
 
-from steward.manifest import MANIFEST_FILENAME, Resident, ResidentManifest
+from steward.manifest import (
+    MANIFEST_FILENAME,
+    Resident,
+    ResidentManifest,
+    resolve_mount_host_path,
+)
 from steward.runners import (
     COMMAND_TIMEOUT_S,
     LOCAL_PLACEMENT,
@@ -346,7 +351,11 @@ def placement_for(manifest: ResidentManifest) -> Placement:
 # --------------------------------------------------------------------------------------
 
 
-def render_compose(resident: Resident, target: DeployTarget) -> str:
+def render_compose(
+    resident: Resident,
+    target: DeployTarget,
+    env: Mapping[str, str] | None = None,
+) -> str:
     """Render the resident's compose fragment as data, never as markup. Deterministic.
 
     The fragment is built as a Python dict and serialised with ``yaml.safe_dump``, so any
@@ -368,6 +377,9 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
     substitutes them itself.
     """
     memory_path = memory_path_for(resident.manifest)
+    source = os.environ if env is None else env
+    burrow_home = (source.get(BURROW_HOME_ENV) or f"/home/{target.user}").rstrip("/")
+
     service: dict[str, Any] = {
         "image": target.image,
         "container_name": target.container,
@@ -386,7 +398,15 @@ def render_compose(resident: Resident, target: DeployTarget) -> str:
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
             "STEWARD_RESIDENT": resident.id,
         },
-        "volumes": [f"./memory:{memory_path}", "./claude:/root/.claude"],
+        "volumes": [
+            f"./memory:{memory_path}",
+            "./claude:/root/.claude",
+            *(
+                f"{resolve_mount_host_path(mount.host, burrow_home)}:{mount.container}"
+                + (":ro" if mount.mode == "ro" else "")
+                for mount in resident.manifest.deploy.mounts
+            ),
+        ],
         # The name the burrow's own containers use for the machine they run on — the
         # control plane's CHRONICLE_URL is http://dockerhost:8737 — so the village address
         # steward copies into the resident's .env at provision time resolves in there too.
@@ -462,7 +482,11 @@ def planned_env(source: Mapping[str, str]) -> dict[str, str]:
 
 
 def bundle_for(
-    resident: Resident, target: DeployTarget, env: Mapping[str, str]
+    resident: Resident,
+    target: DeployTarget,
+    env: Mapping[str, str],
+    *,
+    host_env: Mapping[str, str] | None = None,
 ) -> dict[str, bytes]:
     """Build the resident's whole runtime bundle, as ``{name: bytes}``, in memory.
 
@@ -472,7 +496,7 @@ def bundle_for(
     docker does not create them as root.
     """
     files: dict[str, bytes] = {
-        COMPOSE_FILENAME: render_compose(resident, target).encode("utf-8"),
+        COMPOSE_FILENAME: render_compose(resident, target, host_env).encode("utf-8"),
         ENV_FILENAME: render_env(env).encode("utf-8"),
         MANIFEST_FILENAME: resident.path.read_bytes(),
         "memory/.keep": b"",

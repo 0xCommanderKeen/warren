@@ -336,9 +336,10 @@ def declare_resident(spec: NewResident, residents_dir: Path | str) -> CreatedRes
     payload = manifest.model_dump(mode="json", exclude_none=True)
     # An ordinary resident declares no `deploy` block at all — docs/manifest.md says so, and
     # the dxp2800 defaults (image, `command: [sleep, infinity]`) fill it in. The bare model
-    # default dumps as `deploy: {command: []}`, which reads as "this container runs nothing",
-    # the opposite of the documented default. Drop it so the skeleton says what it means.
-    if payload.get("deploy") == {"command": []}:
+    # default dumps as `deploy: {command: [], mounts: []}`, which reads as "this container
+    # runs nothing and mounts nothing", the opposite of the documented default. Drop it so
+    # the skeleton says what it means.
+    if payload.get("deploy") == {"command": [], "mounts": []}:
         del payload["deploy"]
 
     directory.mkdir(parents=True)
@@ -1106,7 +1107,7 @@ def _provision(
     # nothing, where `emitter_env` refuses without a village URL (#84). The real run below
     # still goes through `emitter_env`, so a deploy with nowhere to emit is still stopped.
     values = planned_env(env) if dry_run else emitter_env(env)
-    compose = render_compose(resident, target)
+    compose = render_compose(resident, target, env)
     conveyance = transport if transport is not None else transport_for(target, env)
     up = compose_argv(target, "up", "-d")
     plan = (
@@ -1125,7 +1126,7 @@ def _provision(
             commands=plan,
         )
 
-    files = bundle_for(resident, target, values)
+    files = bundle_for(resident, target, values, host_env=env)
     try:
         changed = bundle_changes(conveyance, files, target.path)
         if changed:

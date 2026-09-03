@@ -497,6 +497,23 @@ def test_doctor_says_where_a_resident_may_work_beyond_its_own_directory(
     assert "test-agent: workspace /data/library/books" in result.output
 
 
+def test_doctor_prints_extra_mounts_beside_the_workspace(
+    runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
+) -> None:
+    stub_bin("claude", NEW_CLAUDE_HELP + '; echo "  --add-dir <directories...>"')
+    data = valid_manifest()
+    data["deploy"] = {
+        "mounts": [{"host": "~/docker/life/vault", "container": "/vault", "mode": "rw"}],
+    }
+    data["workspace"] = ["/vault"]
+
+    result = runner.invoke(main, ["doctor", str(write_resident(data).parent)])
+
+    assert result.exit_code == 0, result.output
+    assert "test-agent: workspace /vault" in result.output
+    assert "test-agent: mount ~/docker/life/vault -> /vault (rw)" in result.output
+
+
 def test_doctor_fails_when_the_brain_cannot_widen_a_session(
     runner: CliRunner, write_resident: ResidentWriter, stub_bin: StubWriter
 ) -> None:

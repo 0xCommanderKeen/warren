@@ -329,6 +329,30 @@ describe("budget controls", () => {
 /* -- residents ----------------------------------------------------------------------- */
 
 describe("the resident editor", () => {
+  it("edits deploy mounts without dropping the rest of the deploy block", async () => {
+    const fetch = vi.fn().mockImplementation((_url, init) =>
+      init?.method === "PUT"
+        ? Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }))
+        : Promise.resolve(json(200, DECLARATION)),
+    );
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+      fetch: withLibrary(fetch),
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: /add mount/i }));
+    fireEvent.change(screen.getByLabelText("mount 1 · host"), { target: { value: "~/docker/life/vault" } });
+    fireEvent.change(screen.getByLabelText("mount 1 · container"), { target: { value: "/vault" } });
+    fireEvent.change(screen.getByLabelText("mount 1 · mode"), { target: { value: "rw" } });
+    fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
+
+    await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
+    const sent = JSON.parse(fetch.mock.calls.find(([, call]) => call?.method === "PUT")[1].body);
+    expect(sent.manifest.deploy).toEqual({
+      host: "dxp2800",
+      mounts: [{ host: "~/docker/life/vault", container: "/vault", mode: "rw" }],
+    });
+  });
+
   it("offers both spellings and sends exactly one of them", async () => {
     const fetch = vi.fn().mockImplementation((url, init) =>
       init?.method === "PUT"
