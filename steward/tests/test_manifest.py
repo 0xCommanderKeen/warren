@@ -407,6 +407,7 @@ def test_two_residents_that_share_a_journal_directory_are_warned(
         "uid": SECOND_RESIDENT_UID,
         "id": "second-agent",
         "agent_id": "claude-code:second-agent",
+        "home": 1,
         "memory": {
             "kind": "directory",
             "path": "/data/residents/test-agent/memory",  # the same dir test-agent uses
@@ -835,11 +836,28 @@ def test_validate_tree_reports_every_resident(
     second["uid"] = SECOND_RESIDENT_UID
     second["id"] = "other-agent"
     second["agent_id"] = "claude-code:other-agent"
+    second["home"] = 1
     soul = VALID_SOUL.replace("test-agent", "other-agent")
     write_resident(second, soul=soul)
     result = m.validate_tree(tmp_path / "residents")
     assert result.ok
     assert {resident.id for resident in result.residents} == {"test-agent", "other-agent"}
+
+
+def test_validate_tree_rejects_duplicate_resident_homes(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    write_resident()
+    second = valid_manifest() | {
+        "uid": SECOND_RESIDENT_UID,
+        "id": "other-agent",
+        "agent_id": "claude-code:other-agent",
+    }
+    write_resident(second, soul=VALID_SOUL.replace("test-agent", "other-agent"))
+
+    result = m.validate_tree(tmp_path / "residents")
+
+    assert len([item for item in result.errors if item.field_path == "home"]) == 2
 
 
 def test_validate_tree_rejects_duplicate_resident_uids(

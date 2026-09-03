@@ -48,7 +48,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from steward.manifest import redact_mapping, redact_secrets
+from steward.manifest import Resident, redact_mapping, redact_secrets
 
 __all__ = [
     "API_AGENT_ID",
@@ -73,7 +73,9 @@ __all__ = [
     "default_fallback_path",
     "needs_human_event",
     "needs_human_resolved_event",
+    "resident_declared_event",
     "resident_restarted_event",
+    "resident_retired_event",
     "routine_failed_event",
     "task_claimed_event",
     "task_delegated_event",
@@ -100,6 +102,8 @@ TASK_DELEGATED = "task_delegated"
 NEEDS_HUMAN = "needs_human"
 NEEDS_HUMAN_RESOLVED = "needs_human_resolved"
 RESIDENT_RESTARTED = "resident_restarted"
+RESIDENT_DECLARED = "resident_declared"
+RESIDENT_RETIRED = "resident_retired"
 CHAT_MESSAGE_DROPPED = "chat_message_dropped"
 
 #: The event types steward adds to the protocol. Additive in *shape* — a v0 consumer that
@@ -121,6 +125,8 @@ EVENT_TYPES = (
     NEEDS_HUMAN,
     NEEDS_HUMAN_RESOLVED,
     RESIDENT_RESTARTED,
+    RESIDENT_DECLARED,
+    RESIDENT_RETIRED,
     CHAT_MESSAGE_DROPPED,
 )
 
@@ -1069,6 +1075,37 @@ def resident_restarted_event(
     if supervisor:
         payload["supervisor"] = supervisor
     return Event(type=RESIDENT_RESTARTED, agent_id=agent_id, project=project, payload=payload)
+
+
+def resident_declared_event(*, resident: Resident) -> Event:
+    """Publish only the display-safe identity steward authoritatively declares."""
+    manifest = resident.manifest
+    soul = manifest.soul
+    return Event(
+        type=RESIDENT_DECLARED,
+        agent_id=resident.agent_id,
+        project=resident.project,
+        payload={
+            "name": soul.name,
+            "char": soul.char,
+            "accent": soul.accent,
+            "role": soul.role,
+            "summary": manifest.summary,
+            "resident_id": resident.id,
+            "uid": resident.uid,
+            "home": manifest.home,
+        },
+    )
+
+
+def resident_retired_event(*, resident: Resident) -> Event:
+    """Publish the honest terminal counterpart of a resident declaration."""
+    return Event(
+        type=RESIDENT_RETIRED,
+        agent_id=resident.agent_id,
+        project=resident.project,
+        payload={"resident_id": resident.id, "uid": resident.uid},
+    )
 
 
 def task_posted_event(  # noqa: PLR0913 — every field is keyword-only and part of the payload

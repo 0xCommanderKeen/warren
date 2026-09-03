@@ -138,7 +138,11 @@ def journaling(build, tmp_path: Path):
 def emitted(path: Path) -> list[dict]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [
+        event
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if (event := json.loads(line))["type"] != ev.RESIDENT_DECLARED
+    ]
 
 
 def routine_prompt(
@@ -1937,7 +1941,11 @@ def test_a_decisions_hook_that_raises_still_brackets_the_run(
     )
     report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
     assert report.fired
-    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]
+    assert [e.type for e in sink.events] == [
+        ev.ROUTINE_STARTED,
+        ev.RESIDENT_DECLARED,
+        ev.ROUTINE_FINISHED,
+    ]
 
 
 def test_a_journal_that_raises_a_decode_error_is_a_missing_journal_not_a_crash(
@@ -2167,7 +2175,11 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
     report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
 
     assert report.fired
-    assert [e.type for e in sink.events] == [ev.ROUTINE_STARTED, ev.ROUTINE_FINISHED]
+    assert [e.type for e in sink.events] == [
+        ev.ROUTINE_STARTED,
+        ev.RESIDENT_DECLARED,
+        ev.ROUTINE_FINISHED,
+    ]
 
 
 def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
@@ -2198,7 +2210,7 @@ def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
     report = engine.fire(engine.scheduled[0], now=datetime(2026, 8, 24, 10, 15, tzinfo=UTC))
 
     assert report.fired
-    assert [event.type for event in sink.events] == [ev.ROUTINE_STARTED]
+    assert [event.type for event in sink.events] == [ev.ROUTINE_STARTED, ev.RESIDENT_DECLARED]
 
 
 # --------------------------------------------------------------------------------------
@@ -2362,6 +2374,7 @@ def test_the_board_dispatcher_is_refreshed_with_the_fleet(
         second["id"] = "second-agent"
         second["agent_id"] = "claude-code:second-agent"
         second["uid"] = "3a78217a-df03-4f3b-a46a-4c75b4ad929f"
+        second["home"] = 1
         write_resident(
             second,
             directory="second-agent",

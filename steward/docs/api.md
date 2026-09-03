@@ -650,11 +650,12 @@ The refusals:
 refused here; see [Three kinds of caller](#three-kinds-of-caller).
 
 ```json
-{"dry_run": false}
+{"dry_run": false, "revision": "sha256:…"}
 ```
 
-The mirror of the provision door, with the same one-field body and for the same reason: the
-manifest is the request.
+The manifest is the request. First send `{"dry_run": true}`; its answer includes the
+declaration `revision`. Execution requires that revision and refuses if the declaration
+changed, so the confirmed plan is always the plan that runs.
 
 **Retirement is not a manifest edit**, which is the whole argument for this route existing.
 Writing `retired: true` through `PUT /residents/{id}/declaration` marks the resident and
@@ -665,8 +666,9 @@ safe:
 1. `retired: true` into `residents/<id>/manifest.yaml`, read straight back through the
    ordinary validator;
 2. commit it;
-3. `docker compose down --remove-orphans`;
-4. `rm -f` the `.env` and the compose file.
+3. emit the authoritative `resident_retired` lifecycle fact;
+4. `docker compose down --remove-orphans`;
+5. `rm -f` the `.env` and the compose file.
 
 **Marked before stopped**, always. `retired: true` is what takes the resident out of the
 scheduler, the board, delegation, run-now — and out of the watchdog, which would otherwise
@@ -687,17 +689,18 @@ implementation, verified by a test that injects the pipeline into the route.
 **`200`, not `202`.** The container is down and the credential is gone by the time this
 answers.
 
-**`dry_run: true`** returns the plan — what would be marked and the exact argv a real run
-would issue — and marks nothing, commits nothing and reaches no host.
+**`dry_run: true`** returns the plan, its `revision`, what would be marked and the exact argv
+a real run would issue — and marks nothing, commits nothing and reaches no host.
 
 **This one commits through the nursery**, unlike `POST /residents`, which asks the pipeline
 not to and commits afterwards through `steward.authoring`. The reason is the order above:
 retirement's commit belongs *between* the mark and the stop, and the only code inside that
 sequence is the pipeline. What comes with the nursery's commit is the nursery's
-dirty-worktree refusal, named rather than hidden — a server that committed a retirement into
-a checkout somebody was half-way through would be a server nobody can revert one decision
-in. The commit is authored by the operator whose credential made the request, exactly as
-every other write here is.
+target-manifest dirty refusal, named rather than hidden. Unrelated checkout work is tolerated
+because the commit names exactly one path; uncommitted bytes in that resident's manifest are
+not. Revision, dirt, mark and commit are serialized under the checkout's authoring lock,
+which is released before Chronicle or host I/O. The commit is authored by the operator whose
+credential made the request, exactly as every other write here is.
 
 ```json
 {"request_id": "…", "message": "…",
@@ -706,6 +709,7 @@ every other write here is.
  "commands": ["ssh Miha@dxp2800 docker compose … down --remove-orphans",
               "ssh Miha@dxp2800 rm -f ~/docker/steward-life-agent/.env …"],
  "commit": "9f2c…", "dry_run": false, "note": "retired",
+ "revision": "sha256:…",
  "push": {"pushed": true, "remote": "origin", "branch": "burrow/residents",
           "note": "pushed to origin burrow/residents"}}
 ```
@@ -732,7 +736,9 @@ The refusals:
 | `409` | `resident_invalid` | the id names a directory whose manifest does not validate; `steward validate` says which field |
 | `409` | `resident_retired` | it is already retired, so there is nothing here to end. The message names the way back. Reconciling a *half-finished* retirement — marked, container still up — is `steward retire <id>` at a terminal, which is deliberately not what this route does |
 | `409` | `declaration_invalid` | the declaration on disk stopped validating between this route reading it and the pipeline loading it. Nothing was marked |
-| `409` | `worktree_refused` | the checkout holding the residents tree has uncommitted changes, or is not a checkout at all; the message says which. Nothing was marked and nothing was stopped |
+| `409` | `retirement_rehearsal_required` | execution omitted the revision returned by a successful rehearsal |
+| `409` | `stale_retirement_plan` | the declaration changed after rehearsal; rehearse the current bytes |
+| `409` | `worktree_refused` | this resident's manifest has uncommitted changes, or the residents tree is not in a checkout; unrelated dirty paths are tolerated. Nothing was marked or stopped |
 | `409` | `commit_failed` | git refused the stage or the commit. **The mark is on disk and in no commit**, so the resident has already stopped taking work — every path reads `retired` off the file, not out of git — with no history of the decision. The host was not reached. Commit that file to finish, or set `retired: false` to undo it |
 | `409` | `retire_failed` | the host answered and refused — a `docker compose down` that failed, credentials that could not be removed. **The mark is committed by then**, and the message says so: re-run `steward retire <id>` once the host answers |
 | `409` | `retire_refused` | there was nobody to ask |

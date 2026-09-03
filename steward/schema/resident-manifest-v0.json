@@ -804,6 +804,13 @@
       "title": "Id",
       "type": "string"
     },
+    "home": {
+      "description": "Stable Chronicle village plot, from 0 through 7.",
+      "maximum": 7,
+      "minimum": 0,
+      "title": "Home",
+      "type": "integer"
+    },
     "agent_id": {
       "anyOf": [
         {
@@ -940,6 +947,7 @@
   "required": [
     "uid",
     "id",
+    "home",
     "soul",
     "charter",
     "skills",

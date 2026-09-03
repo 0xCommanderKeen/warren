@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigation } from "../navigation.jsx";
 import { routeTo } from "../routes.js";
 import { useSteward, useStewardQuery } from "../steward/context.jsx";
+import { useStewardWrite } from "../steward/useStewardWrite.js";
 import { describeCommit, diagnosticsFor, normalizeDiagnostics } from "../steward/client.js";
 import { Gate } from "../console/Gate.jsx";
 import {
@@ -136,9 +137,15 @@ function SkillEditor({ name }) {
   );
 
   const [draft, setDraft] = useState(EMPTY_DRAFT);
-  const [saving, setSaving] = useState(false);
-  const [refusal, setRefusal] = useState(null);
-  const [receipt, setReceipt] = useState(null);
+  const {
+    saving, refusal, receipt, save: write, clearReceipt,
+  } = useStewardWrite(
+    (payload) =>
+      creating
+        ? client.createSkill({ ...payload, name: draft.name.trim() })
+        : client.updateSkill(name, payload),
+    { identity: name },
+  );
 
   useEffect(() => {
     if (creating) {
@@ -167,29 +174,17 @@ function SkillEditor({ name }) {
 
   async function save(event) {
     event.preventDefault();
-    setSaving(true);
-    setRefusal(null);
-    setReceipt(null);
-    try {
-      const payload = {
-        description: draft.description,
-        body: draft.body,
-        defaults: draft.defaults,
-        ...(draft.revision ? { revision: draft.revision } : {}),
-      };
-      const answer = creating
-        ? await client.createSkill({ ...payload, name: draft.name.trim() })
-        : await client.updateSkill(name, payload);
-      setReceipt(answer);
-      // The revision moved on: keep editing against what is now on disk rather than
-      // making the next save a stale one.
-      setDraft((previous) => ({ ...previous, revision: answer.revision || null }));
-      if (creating && answer.name) navigate(routeTo.skill(answer.name));
-    } catch (caught) {
-      setRefusal(caught);
-    } finally {
-      setSaving(false);
-    }
+    const answer = await write({
+      description: draft.description,
+      body: draft.body,
+      defaults: draft.defaults,
+      ...(draft.revision ? { revision: draft.revision } : {}),
+    });
+    if (!answer) return;
+    // The revision moved on: keep editing against what is now on disk rather than
+    // making the next save a stale one.
+    setDraft((previous) => ({ ...previous, revision: answer.revision || null }));
+    if (creating && answer.name) navigate(routeTo.skill(answer.name));
   }
 
   if (!creating && loaded.loading) return <Loading>reading the skill…</Loading>;
@@ -202,7 +197,7 @@ function SkillEditor({ name }) {
           title={creating ? "skill added" : "skill replaced"}
           status={receipt.status}
           commit={describeCommit(receipt.commit)}
-          onDismiss={() => setReceipt(null)}
+          onDismiss={clearReceipt}
         >
           {receipt.message}
           {warnings.length ? (

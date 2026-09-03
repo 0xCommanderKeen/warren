@@ -1,15 +1,15 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
 
 /** Every page component in the tree. Adding a page means adding it here. */
 const PAGES = [
-  "FleetPage", "ResidentsPage", "ResidentDetail", "ResidentNew", "RoutinesPage",
+  "FleetPage", "ResidentsPage", "ResidentList", "ResidentDeclaration", "ResidentDetail", "ResidentNew", "RoutinesPage",
   "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage", "DiagnosticsPage",
 ];
 
-/** The ones the shell itself dispatches. ResidentsPage owns its own two sub-pages. */
+/** The ones the shell itself dispatches. ResidentsPage owns its own four sub-pages. */
 const MOUNTED = [
   "FleetPage", "ResidentsPage", "RoutinesPage", "ApprovalsPage", "BoardPage", "SkillsPage",
   "BudgetsPage", "DiagnosticsPage",
@@ -138,9 +138,16 @@ describe("the dev proxy is the deployed origin's route table", () => {
 
   /** Steward's top-level route segments, from the `@app` decorators that declare them. */
   const stewardApiRoutes = () => {
-    const api = read("../../steward/src/steward/api.py");
+    const directory = "../steward/src/steward/routes";
+    const api = [
+      read("../../steward/src/steward/api.py"),
+      ...readdirSync(directory)
+        .filter((name) => name.endsWith(".py"))
+        .map((name) => readFileSync(`${directory}/${name}`, "utf8")),
+    ].join("\n");
     const declared = [...api.matchAll(/@app\.(?:get|post|put|patch|delete)\("(\/[^"]*)"/g)];
-    expect(declared.length, "no @app routes found — the reader has gone stale").toBeGreaterThan(0);
+    declared.push(...api.matchAll(/@routes\.(?:get|post|put|patch|delete)\("(\/[^\"]*)"/g));
+    expect(declared.length, "no API routes found — the reader has gone stale").toBeGreaterThan(0);
     return [...new Set(declared.map((match) => match[1].split("/")[1]))].sort();
   };
 

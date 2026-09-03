@@ -69,6 +69,37 @@ def rotate(events, minutes):
 
 
 class AmbientBudgetTests(unittest.TestCase):
+    def test_latest_resident_declaration_survives_the_history_bound(self):
+        declared = event(
+            "resident_declared", 0, source="steward", name="Pip", char="Monk",
+            accent="#123456", role="helper", summary=None, resident_id="pip",
+            uid="0198-uid", home=0,
+        )
+        work = [event("tool_called", index + 1, tool="Read") for index in range(200)]
+
+        kept = rotate([declared, *work], 240)
+
+        self.assertEqual(1, sum(item["type"] == "resident_declared" for item in kept))
+        [villager] = project_village(kept, [], NOW + datetime.timedelta(minutes=240))["villagers"]
+        self.assertEqual(("Pip", "resident", 0), (villager["name"], villager["residency"], villager["home"]))
+
+    def test_stale_retirement_cannot_displace_the_live_declaration_during_rotation(self):
+        declared = event(
+            "resident_declared", 0, source="steward", name="Pip", char="Monk",
+            accent="#123456", role="helper", summary=None, resident_id="pip",
+            uid="new-uid", home=0,
+        )
+        stale = event(
+            "resident_retired", 1, source="steward", resident_id="old-pip", uid="old-uid"
+        )
+        work = [event("tool_called", index + 2, tool="Read") for index in range(200)]
+
+        kept = rotate([declared, stale, *work], 240)
+
+        self.assertIn(declared, kept)
+        [villager] = project_village(kept, [], NOW + datetime.timedelta(minutes=240))["villagers"]
+        self.assertEqual("Pip", villager["name"])
+
     def test_a_knock_storm_cannot_push_a_residents_own_history_out(self):
         work = [event("tool_called", index, tool="Read") for index in range(20)]
         storm = [knock(30 + index, sender=str(index)) for index in range(200)]

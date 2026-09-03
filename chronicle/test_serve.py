@@ -474,20 +474,20 @@ class NotificationTests(unittest.TestCase):
         # of the wall-clock date on the machine running the suite.
         with mock.patch.object(serve.time, "time", return_value=1787574600):
             self.assertEqual(PROJECT_AGENT["soul"]["name"], self.villager_name(first))
-            self.assertEqual("Poppy", self.villager_name(second))
+            self.assertEqual("Juniper", self.villager_name(second))
 
-    def test_fallback_names_probe_hash_collisions_across_the_fleet(self):
+    def test_fallback_names_use_the_projected_identity_algorithm(self):
         first = self.event(agent_id="a")
         second = self.event(agent_id="q", ts="2026-08-24T12:00:01Z")
         self.write_events(first, second)
 
         self.assertEqual(
-            {"a": "Poppy", "q": "Wren"}, serve.villager_names([first, second])
+            {"a": "Hazel", "q": "Juniper"}, serve.villager_names([first, second])
         )
 
-    def test_hash_matches_javascript_for_non_bmp_agent_ids(self):
+    def test_fallback_identity_hashes_non_bmp_agent_ids_as_utf8(self):
         event = self.event(agent_id="agent-U0001f407")
-        self.assertEqual("Reed", serve.villager_names([event])["agent-U0001f407"])
+        self.assertEqual("Thistle", serve.villager_names([event])["agent-U0001f407"])
 
     def test_exact_soul_is_not_reused_by_another_agent(self):
         self.write_soul(

@@ -185,7 +185,10 @@ function Act({ kind, residentId, name, onDone, children }) {
     setBusy(dryRun ? "rehearsing" : "running");
     setError(null);
     try {
-      const answer = await act.call(client, residentId, { dry_run: dryRun });
+      const answer = await act.call(client, residentId, {
+        dry_run: dryRun,
+        ...(kind === "retire" && !dryRun ? { revision: plan?.revision } : {}),
+      });
       if (dryRun) {
         setPlan(answer);
       } else {

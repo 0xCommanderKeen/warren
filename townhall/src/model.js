@@ -23,13 +23,16 @@ export function eventFeed(villagers) {
     );
 }
 
-export function viewModel(snapshot) {
-  const byFile = new Map(snapshot.residents.map((item) => [item.file, item]));
+export function viewModel(snapshot, stewardResidents = []) {
+  const byFile = new Map((snapshot.residents || []).map((item) => [item.file, item]));
   const byAgent = new Map(
-    snapshot.residents
-      .filter((item) => item.match?.agent_id)
-      .map((item) => [item.match.agent_id, item]),
+    stewardResidents
+      .filter((item) => item.agent_id)
+      .map((item) => [item.agent_id, item]),
   );
+  for (const item of snapshot.residents || []) {
+    if (item.match?.agent_id && !byAgent.has(item.match.agent_id)) byAgent.set(item.match.agent_id, item);
+  }
   const people = snapshot.villagers.map((villager, index) => {
     const manifest = byFile.get(villager.resident_file) || byAgent.get(villager.id);
     const angle =
