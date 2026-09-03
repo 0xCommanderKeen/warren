@@ -13,25 +13,17 @@ ROOT = Path(__file__).resolve().parent
 
 
 def state_dir() -> Path:
-    """The local state directory: ``~/.chronicle``, or ``~/.burrow`` if that is
-    what this machine already has.
+    """The local state directory: ``~/.chronicle``.
 
-    An existing ``~/.burrow`` is live state — the emitter's offline fallback log
-    and its durable outbox — belonging to sessions that are running right now.
-    Preferring the new name unconditionally would silently strand a spool that
-    still has events in it, so the old directory keeps being used where it exists
-    and only a machine with neither gets the new name. Renaming the directory is
-    therefore an operator step, safe to take whenever the spool is drained, and
-    not something a deploy does underneath a running fleet.
+    It used to be ``~/.burrow``, and until warren#361 this function preferred an
+    existing one so that a machine mid-rename would not strand a spool with
+    undelivered events in it. That fallback is gone: every deployed container is
+    now on an image that has only ever written ``~/.chronicle``, and the dev
+    machines were renamed by hand with their spools drained. A machine that still
+    has a ``~/.burrow`` keeps it as a static archive — nothing appends to it, and
+    ``mv ~/.burrow ~/.chronicle`` is the one operator step that adopts it.
     """
-    home = Path("~").expanduser()
-    new = home / ".chronicle"
-    if new.is_dir():
-        return new
-    old = home / ".burrow"
-    if old.is_dir():
-        return old
-    return new
+    return Path("~").expanduser() / ".chronicle"
 
 
 DEFAULT_EVENTS = state_dir() / "events.jsonl"

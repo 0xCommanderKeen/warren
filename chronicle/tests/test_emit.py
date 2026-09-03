@@ -538,7 +538,7 @@ class SettingCompatibilityTest(unittest.TestCase):
 
 
 class StateDirectoryTest(unittest.TestCase):
-    """Where the offline fallback log lives across the rename."""
+    """Where the offline fallback log lives, now that the rename is finished."""
 
     def resolved(self, existing):
         with tempfile.TemporaryDirectory() as home:
@@ -550,15 +550,20 @@ class StateDirectoryTest(unittest.TestCase):
     def test_a_machine_with_neither_directory_gets_the_new_name(self):
         self.assertEqual(self.resolved([]), ".chronicle")
 
-    def test_an_existing_burrow_directory_keeps_being_used(self):
-        """It holds an outbox that may still owe the village events."""
-        self.assertEqual(self.resolved([".burrow"]), ".burrow")
+    def test_a_leftover_burrow_directory_is_no_longer_adopted(self):
+        """warren#361: the fallback is gone, so the old spool is a static archive."""
+        self.assertEqual(self.resolved([".burrow"]), ".chronicle")
 
-    def test_the_new_directory_wins_once_the_operator_has_migrated(self):
+    def test_the_new_directory_is_used_when_both_exist(self):
         self.assertEqual(self.resolved([".chronicle", ".burrow"]), ".chronicle")
 
-    def test_the_emitter_falls_back_into_an_existing_burrow_directory(self):
-        """End to end: the real script, a HOME that predates the rename."""
+    def test_the_emitter_writes_the_new_directory_beside_a_leftover_burrow(self):
+        """End to end: the real script, a HOME that predates the rename.
+
+        The negative half is the one that matters and it can fail: before
+        warren#361 this same run wrote ``.burrow/events.jsonl`` and created no
+        ``.chronicle`` at all.
+        """
         with tempfile.TemporaryDirectory() as home:
             os.mkdir(os.path.join(home, ".burrow"))
             env = without_transport_settings(os.environ)
@@ -580,9 +585,11 @@ class StateDirectoryTest(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertTrue(
+                os.path.exists(os.path.join(home, ".chronicle", "events.jsonl"))
+            )
+            self.assertFalse(
                 os.path.exists(os.path.join(home, ".burrow", "events.jsonl"))
             )
-            self.assertFalse(os.path.exists(os.path.join(home, ".chronicle")))
 
 
 class TargetsTest(unittest.TestCase):
