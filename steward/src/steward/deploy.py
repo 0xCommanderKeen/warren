@@ -317,17 +317,29 @@ def memory_mount(manifest: ResidentManifest) -> tuple[str, str]:
     return str(PurePosixPath(target.path) / "memory"), memory_path_for(manifest)
 
 
-def memory_host_dir(manifest: ResidentManifest) -> Path:
+def memory_host_dir(manifest: ResidentManifest, env: Mapping[str, str] | None = None) -> Path:
     """Return the directory on *this* host that holds the resident's memory.
 
     The declared ``memory.path`` for a locally placed resident — the meaning it has
     always had — and the host side of :func:`memory_mount` for a container-placed one,
     where ``memory.path`` names the mount point inside the container instead.
+
+    A leading ``~`` is the deploy user's home **on the burrow** when :data:`BURROW_HOME_ENV`
+    names it, and this process's own home otherwise. The deployed control plane runs as
+    root in a container whose ``$HOME`` is ``/root``, which is nobody's home on the host;
+    with the variable set, the API, the scheduler and the watchdog all compute the path
+    the host actually has — the one their compose file mounts at that same path — rather
+    than three views of one directory.
     """
+    source = os.environ if env is None else env
     if manifest.runner.container_placed:
         host, _ = memory_mount(manifest)
-        return Path(host).expanduser()
-    return Path(manifest.memory.path).expanduser()
+    else:
+        host = manifest.memory.path
+    home = (source.get(BURROW_HOME_ENV) or "").strip()
+    if home and (host == "~" or host.startswith("~/")):
+        return Path(home) / host[2:] if host != "~" else Path(home)
+    return Path(host).expanduser()
 
 
 def placement_for(manifest: ResidentManifest) -> Placement:

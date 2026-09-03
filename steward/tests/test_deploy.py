@@ -30,6 +30,7 @@ from steward.deploy import (
     bundle_for,
     compose_argv,
     emitter_env,
+    memory_host_dir,
     pack,
     render_compose,
     render_env,
@@ -733,3 +734,35 @@ def test_the_burrow_transport_fails_closed_on_a_path_it_may_not_inspect(tmp_path
             burrow.read("~/sealed/docker-compose.yaml")
     finally:
         sealed.chmod(0o700)
+
+
+# ------------------------------------------------------------- one home on the burrow
+
+
+def test_memory_host_dir_resolves_tilde_against_the_burrow_home(write_resident) -> None:
+    """The deployed control plane's ~ is /root, which is nobody's home on the host.
+
+    With STEWARD_BURROW_HOME set, every steward process on the burrow computes the path
+    the host actually has — the one their compose file mounts at that same path — instead
+    of three views of one directory. Without it, this process's own home, as always.
+    """
+    placed = resident(
+        write_resident,
+        deploy={"container": "steward-test-agent"},
+        runner={"kind": "claude", "model": "claude-haiku-4-5-20251001", "placement": "container"},
+    ).manifest
+
+    assert memory_host_dir(placed, {BURROW_HOME_ENV: "/home/Miha"}) == Path(
+        "/home/Miha/docker/warren/residents/test-agent/memory"
+    )
+    assert (
+        memory_host_dir(placed, {})
+        == Path("~/docker/warren/residents/test-agent/memory").expanduser()
+    )
+    local = resident(
+        write_resident, memory={"kind": "directory", "path": "~/notes/memory"}
+    ).manifest
+    assert memory_host_dir(local, {BURROW_HOME_ENV: "/home/Miha"}) == Path(
+        "/home/Miha/notes/memory"
+    )
+    assert memory_host_dir(local, {}) == Path("~/notes/memory").expanduser()
