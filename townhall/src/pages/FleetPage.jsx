@@ -1,5 +1,5 @@
 /* Chronicle's read-only fleet telemetry in Townhall's shared console language. */
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigation } from "../navigation.jsx";
 import { agentUuid, payloadSummary, related } from "../model.js";
 import { routeTo } from "../routes.js";
@@ -36,14 +36,16 @@ function Summary({ model }) {
   </div>;
 }
 
-function People({ people, inspect }) {
+function agentAddress(person) {
+  return routeTo.agent(person.hasResidentRecord ? agentUuid(person.id) : person.id);
+}
+
+function People({ people }) {
   if (!people.length) return <Empty title="No observed agents.">Chronicle's current snapshot contains no resident or transient session.</Empty>;
   return <Rows><Row head columns="1.5fr .8fr 1fr 1.1fr"><span>agent</span><span>state</span><span>kind</span><span>last signal</span></Row>
     {people.map((person) => {
-      const content = <><Who accent={person.accent} name={fallback(person.name, person.id)} id={person.id} role={person.role || person.project} /><Badge tone={stateTone(person.state)}>{fallback(person.state)}</Badge><Stack sub={person.project}>{person.hasPage ? "resident" : "transient"}</Stack><span className="text-[11px] text-dim">{stamp(person.last_ts)}</span></>;
-      return person.hasPage
-        ? <Row key={person.id} columns="1.5fr .8fr 1fr 1.1fr" accent={person.accent}><Link to={routeTo.agent(agentUuid(person.id))} className="contents text-inherit no-underline">{content}</Link></Row>
-        : <Row key={person.id} columns="1.5fr .8fr 1fr 1.1fr" accent={person.accent} onClick={() => inspect(person)}>{content}</Row>;
+      const content = <><Who accent={person.accent} name={fallback(person.name, person.id)} id={person.id} role={person.role || person.project} /><Badge tone={stateTone(person.state)}>{fallback(person.state)}</Badge><Stack sub={person.project}>{person.hasResidentRecord ? "resident" : "transient"}</Stack><span className="text-[11px] text-dim">{stamp(person.last_ts)}</span></>;
+      return <Row key={person.id} columns="1.5fr .8fr 1fr 1.1fr" accent={person.accent}><Link to={agentAddress(person)} className="contents text-inherit no-underline">{content}</Link></Row>;
     })}
   </Rows>;
 }
@@ -65,13 +67,13 @@ function Activity({ events }) {
   </Rows>;
 }
 
-function FleetOverview({ model, inspect }) {
+function FleetOverview({ model }) {
   const [filter, setFilter] = useState("all");
   const events = model.events.filter((event) => filter === "all" || event.agent_id === filter);
   return <>
     <PageHead title="Fleet">Chronicle's read-only view of who is present, what is moving, and where a human decision is waiting. Writes live on the other Townhall pages.</PageHead>
     <Summary model={model} />
-    <Section count={model.people.length}>Observed agents</Section><People people={model.people} inspect={inspect} />
+    <Section count={model.people.length}>Observed agents</Section><People people={model.people} />
     <div className="grid gap-7 lg:grid-cols-2"><div><Section count={model.tasks.length}>Work in motion</Section><Work tasks={model.tasks} /></div><div><Section count={model.approvals.length}>Human attention</Section><Attention approvals={model.approvals} /></div></div>
     <div className="mt-9 flex flex-wrap items-end justify-between gap-4"><Section count={events.length}>Retained activity</Section><label className="mb-[14px] min-w-[190px]"><Label className="mb-1.5 block">show signals from</Label><Select value={filter} onChange={(event) => setFilter(event.target.value)}><option value="all">all agents</option>{model.people.map((person) => <option value={person.id} key={person.id}>{person.name}</option>)}</Select></label></div>
     <Activity events={events} />
@@ -82,14 +84,14 @@ function RecordRows({ items, empty, render }) {
   return items.length ? <Rows>{items.map(render)}</Rows> : <Empty title={empty}>Chronicle retains no matching record in this snapshot.</Empty>;
 }
 
-function AgentRecord({ person, model, modal = false }) {
+function AgentRecord({ person, model }) {
   const tasks = related(model.tasks, person.id, (item, id) => item.claimant === id || item.posted_by === id);
   const approvals = related(model.approvals, person.id);
   const artifacts = related(model.artifacts, person.id);
   const journals = related(model.journals, person.id);
   const routines = related(model.routines, person.id);
   return <article>
-    <DetailHead accent={person.accent} title={fallback(person.name, person.id)} back={modal ? null : <Link to={routeTo.fleet()} className="text-[10px] uppercase tracking-[.16em] text-ember no-underline">← Fleet</Link>} aside={<Badges><Badge tone={stateTone(person.state)}>{fallback(person.state)}</Badge><Badge>{modal ? "transient" : "resident"}</Badge></Badges>}>{fallback(person.role, person.project || person.residency)}</DetailHead>
+    <DetailHead accent={person.accent} title={fallback(person.name, person.id)} back={<Link to={routeTo.fleet()} className="text-[10px] uppercase tracking-[.16em] text-ember no-underline">← Fleet</Link>} aside={<Badges><Badge tone={stateTone(person.state)}>{fallback(person.state)}</Badge><Badge>{person.hasResidentRecord ? "resident" : "transient"}</Badge></Badges>}>{fallback(person.role, person.project || person.residency)}</DetailHead>
     {person.body ? <Panel><p className="m-0 max-w-[80ch] font-serif text-[17px] leading-[1.7] text-read">{person.body}</p></Panel> : null}
     <Facts className="mb-7" pairs={[["full id", person.id], ["last signal", stamp(person.last_ts)], ["mood", person.mood?.name], ["resident file", person.resident_file], ["home", person.home], ["base / place", `${fallback(person.base)} / ${fallback(person.place)}`], ["working directory", person.cwd], ["tools", person.capabilities?.tools?.join(", ")], ["manifest", person.manifest?.manifest_version]]} />
     <div className="grid gap-7 lg:grid-cols-3">
@@ -101,24 +103,16 @@ function AgentRecord({ person, model, modal = false }) {
   </article>;
 }
 
-function VisitorDialog({ person, model, close }) {
-  useEffect(() => {
-    const keydown = (event) => event.key === "Escape" && close();
-    window.addEventListener("keydown", keydown);
-    return () => window.removeEventListener("keydown", keydown);
-  }, [close]);
-  return <div className="fixed inset-0 z-50 grid place-items-center p-2 sm:p-6"><button type="button" className="absolute inset-0 bg-void/90" aria-label="Close visitor record" onClick={close} /><aside className="relative max-h-[94vh] w-full max-w-[1120px] overflow-y-auto border border-rule-lit bg-void px-5 py-6 shadow-2xl sm:px-9" role="dialog" aria-modal="true" aria-label={`${person.name} transient record`}><Button className="sticky top-0 z-10 ml-auto mb-4 block bg-void" tiny onClick={close}>close ×</Button><AgentRecord person={person} model={model} modal /></aside></div>;
-}
-
 export default function FleetPage({ model, page, params }) {
-  const [visitor, setVisitor] = useState(null);
   const { navigate } = useNavigation();
   if (!model) return <><PageHead title="Fleet">Chronicle's read-only view of the fleet.</PageHead><Loading>waiting for Chronicle's complete snapshot…</Loading></>;
   if (page === "agent") {
-    const matches = model.people.filter((item) => item.hasPage && agentUuid(item.id) === params.uuid);
+    const matches = model.people.filter((item) =>
+      item.id === params.uuid || (item.hasResidentRecord && agentUuid(item.id) === params.uuid)
+    );
     const person = matches.length === 1 ? matches[0] : null;
-    if (!person) return <><PageHead title="No permanent record">This address does not match exactly one resident in Chronicle's current snapshot.</PageHead><Button onClick={() => navigate(routeTo.fleet())}>← return to fleet</Button></>;
+    if (!person) return <><PageHead title="No agent record">This address does not match exactly one agent in Chronicle's current snapshot.</PageHead><Button onClick={() => navigate(routeTo.fleet())}>← return to fleet</Button></>;
     return <AgentRecord person={person} model={model} />;
   }
-  return <><FleetOverview model={model} inspect={setVisitor} />{visitor ? <VisitorDialog person={visitor} model={model} close={() => setVisitor(null)} /> : null}</>;
+  return <FleetOverview model={model} />;
 }

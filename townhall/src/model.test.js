@@ -16,7 +16,7 @@ describe("Observatory presentation model", () => {
     expect(model.people.every((person) => Number.isFinite(person.x) && Number.isFinite(person.y))).toBe(true);
   });
 
-  it("gives created residents permanent UUID routes and leaves visitors transient", () => {
+  it("distinguishes manifested residents from transient agents", () => {
     const changed = structuredClone(snapshot);
     changed.residents[0].match = { project: "chronicle" };
     changed.villagers.push({
@@ -27,8 +27,8 @@ describe("Observatory presentation model", () => {
       residency: "visitor",
     });
     const model = viewModel(changed);
-    expect(model.people.find((person) => person.id === "claude:keeper").hasPage).toBe(true);
-    expect(model.people.find((person) => person.id === "codex:visitor").hasPage).toBe(false);
+    expect(model.people.find((person) => person.id === "claude:keeper").hasResidentRecord).toBe(true);
+    expect(model.people.find((person) => person.id === "codex:visitor").hasResidentRecord).toBe(false);
   });
 
   it("joins resident capabilities from steward rather than Chronicle resident files", () => {
@@ -43,7 +43,7 @@ describe("Observatory presentation model", () => {
 
     expect(model.people[0].manifest.id).toBe("keeper");
     expect(model.people[0].capabilities.skills).toEqual([{ id: "research" }]);
-    expect(model.people[0].hasPage).toBe(true);
+    expect(model.people[0].hasResidentRecord).toBe(true);
   });
 
   it("forms one newest-first retained activity feed", () => {
