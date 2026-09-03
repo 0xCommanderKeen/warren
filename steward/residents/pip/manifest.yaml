@@ -1,3 +1,4 @@
+# checkout verified live 2026-09-03 (warren#351): this comment was written through the API
 version: 0
 uid: ecac48b1-a2c2-4d78-8158-fa204764a8ce
 id: pip
@@ -29,7 +30,8 @@ charter:
     how: needs_human
     note: Raise needs_human and stop. Pip is a rehearsal, not a worker.
 
-skills: []
+skills:
+  - escalate
 
 memory:
   kind: directory
