@@ -927,7 +927,7 @@ def _diagnose(kind, *, diagnostics=None, **details):
 _DEFAULT_DIAGNOSE = _diagnose
 
 
-def _diagnose_outbox(records, acknowledged):
+def _diagnose_outbox(records, acknowledged, diagnostics=None):
     """Publish bounded queue health without exposing event payloads."""
     oldest_at = None
     oldest_age = 0
@@ -942,6 +942,7 @@ def _diagnose_outbox(records, acknowledged):
             )
     _diagnose(
         "outbox",
+        diagnostics=diagnostics,
         records=len(records),
         capacity=OUTBOX_RECORDS,
         oldest_queued_at=oldest_at,
@@ -1324,7 +1325,9 @@ def deliver(event, deadline=None):
     if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
-        _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
+        _diagnose_outbox(
+            _read_durable_outbox_snapshot(), acknowledged_keys, diagnostic_path
+        )
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:

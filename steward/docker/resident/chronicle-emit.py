@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:f1805dc4ef86833ca770550a6043cd9fc551da1bf38267562d7bbb231908a614
+#   hooks/emit.py     sha256:abc2340c2e2ef4e52362c82ddd1616571a4a3255d2aa320455dba04d481a33d7
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -1459,7 +1459,7 @@ def _diagnose(kind, *, diagnostics=None, **details):
 _DEFAULT_DIAGNOSE = _diagnose
 
 
-def _diagnose_outbox(records, acknowledged):
+def _diagnose_outbox(records, acknowledged, diagnostics=None):
     """Publish bounded queue health without exposing event payloads."""
     oldest_at = None
     oldest_age = 0
@@ -1474,6 +1474,7 @@ def _diagnose_outbox(records, acknowledged):
             )
     _diagnose(
         "outbox",
+        diagnostics=diagnostics,
         records=len(records),
         capacity=OUTBOX_RECORDS,
         oldest_queued_at=oldest_at,
@@ -1856,7 +1857,9 @@ def deliver(event, deadline=None):
     if unacknowledged_keys or not update_attempted:
         _diagnose("failure", reason="outbox lock contention")
     else:
-        _diagnose_outbox(_read_durable_outbox_snapshot(), acknowledged_keys)
+        _diagnose_outbox(
+            _read_durable_outbox_snapshot(), acknowledged_keys, diagnostic_path
+        )
     for target_key in failed_targets:
         _diagnose("failure", target=target_key)
     if deferred_primary or deferred_mirrors:
