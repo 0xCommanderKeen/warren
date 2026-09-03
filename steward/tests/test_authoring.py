@@ -23,6 +23,8 @@ from conftest import (
     ResidentWriter,
     ScratchRepo,
     SkillWriter,
+    bare_origin,
+    branch_head,
     valid_manifest,
 )
 from steward import authoring as au
@@ -1364,3 +1366,158 @@ def test_reading_an_unknown_skill_says_so(fleet: ScratchRepo) -> None:
         au.read_skill_document(fleet.skills, "nobody-wrote-this")
 
     assert refused.value.reason == "unknown_skill"
+
+
+# --------------------------------------------------------------------------------------
+# the library an edit is judged against is the one beside the real tree
+# --------------------------------------------------------------------------------------
+
+
+def test_an_edit_is_judged_against_the_library_beside_the_tree(
+    scratch_repo: ScratchRepo, write_resident: ResidentWriter, write_skill: SkillWriter
+) -> None:
+    """A default skill grants itself to every resident — if the library is found at all.
+
+    Found beside the *real* tree, that is. The candidate copy lives in a temp directory with
+    no library beside it, and a validation that inferred the library from the copy judged
+    every routine requiring a default skill as ungranted — so a resident living on the
+    defaults, as Hob does, could not be saved at all. Seen on the burrow (warren#351).
+    """
+    for name in GRANTED:
+        write_skill(name, root=scratch_repo.skills, defaults=True)
+    manifest = valid_manifest()
+    manifest["skills"] = []
+    manifest["routines"][0]["requires"] = ["daily-summary"]
+    write_resident(manifest, root=scratch_repo.residents)
+    scratch_repo.git("add", "-A")
+    scratch_repo.git("commit", "-m", "feat: a resident living on the defaults")
+    declaration = declaration_of(scratch_repo)
+
+    result = au.write_declaration(
+        scratch_repo.residents,
+        "test-agent",
+        edited(declaration, summary="Judged against the library beside the tree."),
+        request_id=REQUEST_ID,
+        principal=PRINCIPAL,
+    )
+
+    assert result.commit.committed
+
+
+# --------------------------------------------------------------------------------------
+# the push: the burrow's commits leave the burrow (warren#351)
+# --------------------------------------------------------------------------------------
+
+BURROW_BRANCH = "burrow/residents"
+PUSH = au.PushTarget(remote="origin", branch=BURROW_BRANCH)
+
+
+def with_remote(repo: ScratchRepo, tmp_path: Path) -> Path:
+    """Give the scratch checkout an ``origin`` it can push to: a bare repo beside it."""
+    return bare_origin(repo.root, tmp_path / "origin.git")
+
+
+def pushed_write(repo: ScratchRepo, declaration: au.Declaration) -> au.WriteResult:
+    """Run the write path the way the deployed API runs it: committed, then pushed."""
+    return au.write_declaration(
+        repo.residents,
+        "test-agent",
+        declaration,
+        request_id=REQUEST_ID,
+        principal=PRINCIPAL,
+        skills_dir=repo.skills,
+        push=PUSH,
+    )
+
+
+def test_an_accepted_edit_is_pushed_to_the_burrow_branch(
+    fleet: ScratchRepo, tmp_path: Path
+) -> None:
+    """The commit is the record; the push is what keeps that record off a NAS with no backup."""
+    remote = with_remote(fleet, tmp_path)
+
+    result = pushed_write(fleet, edited(declaration_of(fleet), summary="Pushed as well."))
+
+    assert result.commit.committed
+    assert result.commit.pushed is True
+    assert branch_head(remote, BURROW_BRANCH) == result.commit.sha == fleet.head()
+    assert "pushed to origin burrow/residents" in result.commit.note
+    assert result.commit.to_dict()["pushed"] is True
+
+
+def test_a_push_that_fails_never_fails_the_write(fleet: ScratchRepo, tmp_path: Path) -> None:
+    """A burrow that cannot reach GitHub answers "committed, not pushed" and carries on."""
+    fleet.git("remote", "add", "origin", str(tmp_path / "nowhere.git"))
+
+    result = pushed_write(fleet, edited(declaration_of(fleet), summary="Kept locally."))
+
+    assert result.commit.committed
+    assert result.commit.pushed is False
+    assert fleet.head() == result.commit.sha
+    assert "committed as" in result.commit.note
+    assert "NOT pushed to origin burrow/residents" in result.commit.note
+    assert result.commit.to_dict()["pushed"] is False
+    data = yaml.safe_load((fleet.residents / "test-agent" / MANIFEST_FILENAME).read_text())
+    assert data["summary"] == "Kept locally."
+
+
+def test_a_push_is_never_forced(fleet: ScratchRepo, tmp_path: Path) -> None:
+    """History somebody else put on the branch is not steward's to overwrite."""
+    remote = with_remote(fleet, tmp_path)
+    fleet.git("commit", "--allow-empty", "-m", "chore: written somewhere else")
+    fleet.git("push", "--quiet", "origin", f"HEAD:refs/heads/{BURROW_BRANCH}")
+    elsewhere = fleet.head()
+    fleet.git("reset", "--hard", "--quiet", "HEAD~1")
+
+    result = pushed_write(fleet, edited(declaration_of(fleet), summary="Diverged."))
+
+    assert result.commit.committed
+    assert result.commit.pushed is False
+    assert branch_head(remote, BURROW_BRANCH) == elsewhere
+
+
+def test_nothing_is_pushed_when_nothing_was_committed(fleet: ScratchRepo, tmp_path: Path) -> None:
+    """A converged save has no commit to push, and does not go to the network to say so."""
+    remote = with_remote(fleet, tmp_path)
+
+    result = pushed_write(fleet, declaration_of(fleet))
+
+    assert not result.commit.committed
+    assert result.commit.pushed is None
+    assert branch_head(remote, BURROW_BRANCH) is None
+
+
+def test_a_write_with_no_push_configured_reports_no_push(fleet: ScratchRepo) -> None:
+    """``pushed: null`` is "there was nothing to push to", distinct from a push that failed."""
+    result = write(fleet, "test-agent", edited(declaration_of(fleet), summary="Local only."))
+
+    assert result.commit.committed
+    assert result.commit.pushed is None
+    assert "pushed" not in result.commit.note
+
+
+def test_a_push_is_bounded_and_pushes_head_by_name(fleet: ScratchRepo) -> None:
+    """One bounded ``git push`` of HEAD to the branch by its full ref: no force, no guessing."""
+    seen: list[tuple[list[str], float | None]] = []
+
+    def observing_git(argv: list[str], timeout_s: float | None = None) -> CommandOutcome:
+        seen.append((list(argv), timeout_s))
+        return CommandOutcome(argv=tuple(argv), exit_status=0)
+
+    report = au.push_commit(fleet.root, PUSH, git=observing_git)
+
+    assert report.pushed
+    assert seen == [
+        (
+            [
+                "git",
+                "-C",
+                str(fleet.root),
+                "push",
+                "--quiet",
+                "origin",
+                "HEAD:refs/heads/burrow/residents",
+            ],
+            au.PUSH_TIMEOUT_S,
+        )
+    ]

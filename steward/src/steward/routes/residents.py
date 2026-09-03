@@ -458,6 +458,8 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             for path in (report.declare.manifest_path, report.declare.soul_path)
             if path.is_file()
         ]
+        knobs = deps.write_settings(request)
+        push = knobs.pop("push")  # commit_write takes no push; it is recorded after
         try:
             commit = au.commit_write(
                 residents_dir,
@@ -465,12 +467,13 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
                 au.DECLARE_SUBJECT.format(id=body.id),
                 request_id=request_id,
                 principal=deps.acting_principal(request),
-                **deps.write_settings(request),
+                **knobs,
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
             deps.refuse_write(exc)
-        uncommitted = commit.note
+        commit = au.record_push(commit, au.repo_toplevel(residents_dir), push)
+        recorded = commit.note
         deployed = (
             _deployed_message(report)
             if body.deploy
@@ -479,7 +482,7 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
         return {
             "request_id": request_id,
             "status": "accepted",
-            "message": f"{deployed}. {uncommitted}",
+            "message": f"{deployed}. {recorded}",
             # The four keys this endpoint has always returned, kept at the top level so
             # the deploy flag is additive for anything already reading the response.
             "id": body.id,
@@ -664,11 +667,21 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
         except TransportError as exc:
             record_refusal(request_id, RETIRE_REFUSED)
             _refuse(409, RETIRE_REFUSED, str(exc))
+        # The nursery committed the mark; the API pushes it, as it pushes every commit it
+        # makes (warren#351). After the host was reached, on purpose: the push is a record
+        # of a retirement that has already happened, and a burrow that cannot reach GitHub
+        # must still be able to stop a resident.
+        push = None
+        if report.commit is not None and deps.settings.push is not None:
+            repo = au.repo_toplevel(residents_dir)
+            push = au.push_commit(repo, deps.settings.push) if repo is not None else None
+        message = _retire_message(report)
         return {
             "request_id": request_id,
-            "message": _retire_message(report),
+            "message": message if push is None else f"{message.rstrip('.')}. {push.note}",
             **report.to_dict(),
             "revision": revision,
+            "push": push.to_dict() if push is not None else None,
         }
 
     @routes.get("/residents/{resident_id}/declaration")

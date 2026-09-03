@@ -2244,6 +2244,30 @@ def test_a_routine_added_on_disk_is_picked_up_without_a_restart(
     assert sorted(item.routine.id for item in engine.scheduled) == ["daily-summary", "inbox-read"]
 
 
+def test_an_edit_behind_a_symlinked_resident_is_noticed(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """The daemons on a burrow read a symlink farm into the checkout (warren#351).
+
+    The tree they are pointed at holds *links* to the residents they run, so an edit the
+    API commits into the checkout is the edit they see — provided the fingerprint follows
+    the links. Edited in place here, without a rename, so the resident directory's own
+    mtime does not move: a fingerprint that stopped at the link would call this unchanged.
+    """
+    checkout = tmp_path / "checkout" / "residents"
+    manifest = write_resident(manifest_with(DAILY), root=checkout)
+    farm = tmp_path / "sched" / "residents"
+    farm.mkdir(parents=True)
+    (farm / manifest.parent.name).symlink_to(manifest.parent)
+    engine = reloading(farm, tmp_path)
+    assert [item.routine.id for item in engine.scheduled] == ["daily-summary"]
+
+    write_resident(manifest_with(DAILY, HOURLY), root=checkout)
+
+    assert engine.reload_if_changed()
+    assert sorted(item.routine.id for item in engine.scheduled) == ["daily-summary", "inbox-read"]
+
+
 def test_an_unchanged_tree_is_not_reloaded(write_resident: ResidentWriter, tmp_path: Path) -> None:
     """The check runs on every wake-up, so it has to be cheap and has to stay quiet."""
     path = write_resident(manifest_with(DAILY))

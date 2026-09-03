@@ -14,10 +14,24 @@
 #
 # Secrets are not in this file and never will be. STEWARD_TOKEN lives in the .env beside
 # it (mode 0600), which no repository has ever seen; STEWARD_IMAGE_TAG is written into
-# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`".
+# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`". The
+# deploy key that pushes the residents checkout is the file residents-key beside them,
+# mode 0600, mounted into the API and nothing else (deploy/README.md says how it is made).
 #
-# Every process reads the same shipped declarations. The scheduler and watchdog partition
-# that tree by deploy.host through topology.py, so a burrow acts only for its own residents.
+# The residents tree is NOT the image's (warren#351). It is a git checkout on the burrow —
+# ~/docker/steward/residents-repo, a sparse clone of this repository on the branch
+# burrow/residents, made once by deploy/deploy.sh and never reset by it — bind-mounted at
+# /checkout. The API reads and writes /checkout/steward/residents and the skills library
+# beside it, commits every write, and pushes the branch, best effort. The daemons mount the
+# same checkout read-only: the standing rule that only the API writes declarations, written
+# into the mounts. The checkout is authoritative for this burrow's residents; steward/
+# residents/ in the repository is the seed a new burrow is cloned from, not a place charters
+# are edited. The image still carries a copy of that seed, and nothing here reads it.
+#
+# Every process reads the same checkout. The scheduler and watchdog partition that tree by
+# deploy.host through topology.py, so a burrow acts only for its own residents — and an
+# edit the API commits is what they read on their next wake-up, with no restart. Before
+# warren#351 they read a copy taken at container start, which nothing ever updated.
 
 x-steward: &steward
   image: steward-cp:${STEWARD_IMAGE_TAG:?written by deploy/deploy.sh into .env}
@@ -31,11 +45,17 @@ x-steward: &steward
     CHRONICLE_URL: http://dockerhost:8737
     # The pre-rename spelling, kept for one release (warren#216).
     BURROW_URL: http://dockerhost:8737
+    # Read by the API alone: every commit the write API makes is pushed to this branch of
+    # the checkout's origin. Best effort — a save is durable before the push starts, and a
+    # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never
+    # main: nothing lands there without a pull request, and a push to any other branch
+    # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
+    STEWARD_PUSH_BRANCH: burrow/residents
     TZ: Europe/Ljubljana
   extra_hosts:
     - "dockerhost:host-gateway"
-  volumes:
-    - ./data:/data
+  # No volumes here: a YAML merge is shallow and a list does not merge, so every service
+  # states its own mounts in full below — which is also where the read/write split lives.
 
 services:
   api:
@@ -43,23 +63,32 @@ services:
     container_name: steward-api
     ports:
       - "8802:8801"
-    command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "residents"]
+    volumes:
+      - ./data:/data
+      # The one writable mount of the checkout.
+      - ./residents-repo:/checkout
+      # The deploy key the push uses; the image's GIT_SSH_COMMAND names this path.
+      - ./residents-key:/run/steward/residents-key:ro
+    command: ["steward", "serve", "--host", "0.0.0.0", "--port", "8801", "--residents", "/checkout/steward/residents"]
 
   scheduler:
     <<: *steward
     container_name: steward-scheduler
     volumes:
       - ./data:/data
+      - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
-    # `sh -c`, not `-lc`: a login shell re-reads /etc/profile, which resets PATH and
-    # loses /app/.venv/bin — the first rollout crash-looped on exactly that. The absolute
-    # path is belt and braces.
-    command: ["/app/.venv/bin/steward", "scheduler", "run", "--residents", "/app/residents"]
+    # The absolute path is belt and braces: the first rollout crash-looped on a login shell
+    # that re-read /etc/profile, reset PATH, and lost /app/.venv/bin.
+    command: ["/app/.venv/bin/steward", "scheduler", "run", "--residents", "/checkout/steward/residents"]
 
   watchdog:
     <<: *steward
     container_name: steward-watchdog
     volumes:
       - ./data:/data
+      - ./residents-repo:/checkout:ro
       - /var/run/docker.sock:/var/run/docker.sock
-    command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/app/residents"]
+    # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
+    # wider list than the scheduler fires would report residents nobody is running.
+    command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/checkout/steward/residents"]

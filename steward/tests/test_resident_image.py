@@ -313,7 +313,11 @@ def test_both_daemons_read_the_same_resident_neutral_tree() -> None:
     document = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
     commands = [document["services"][name]["command"] for name in ("scheduler", "watchdog")]
 
-    assert all(command[-2:] == ["--residents", "/app/residents"] for command in commands)
+    # The burrow's checkout, not the tree baked into the image (warren#351); the same path
+    # for both, and the checkout's residents tree rather than any resident's directory.
+    assert all(
+        command[-2:] == ["--residents", "/checkout/steward/residents"] for command in commands
+    )
     shipped_ids = {path.parent.name for path in (REPO_ROOT / "residents").glob("*/manifest.yaml")}
     assert not any(
         resident_id in " ".join(command) for resident_id in shipped_ids for command in commands

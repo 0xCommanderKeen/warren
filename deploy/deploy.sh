@@ -28,7 +28,9 @@
 #
 # Every deploy leaves a marker on the burrow — ~/docker/<dir>/DEPLOYED-<service>, one
 # line: revision, service, time, who — which is what deploy/status.sh reads. The NAS has
-# no git; that file is the only thing there that can say what is running.
+# no git; that file is the only thing there that can say what is running. (The residents
+# checkout under ~/docker/steward is the one exception: it is git, through the
+# control-plane image, and it names its own revision — see ensure_checkout.)
 #
 # Preconditions: ssh to $NAS with a key (BatchMode — no prompts), tar and python3 on
 # both ends, pnpm and the node versions the CI workflows pin (24 for arcadia, 22 for
@@ -38,6 +40,15 @@ set -eu
 NAS="${NAS:-Miha@dxp2800}"
 ORIGIN="${ORIGIN:-http://dxp2800:8737}"          # arcadia's nginx: the one public origin
 STEWARD_URL="${STEWARD_URL:-http://dxp2800:8802}"
+# The burrow's residents checkout (warren#351): a sparse clone of this repository on a
+# branch of its own, which the control plane commits into and pushes. Made once here and
+# never reset here. The branch is the one steward/deploy/compose.yaml sets as
+# STEWARD_PUSH_BRANCH; the two must agree or the deploy's push and the API's push diverge.
+CHECKOUT_URL="${CHECKOUT_URL:-git@github.com:0xCommanderKeen/warren.git}"
+CHECKOUT_BRANCH="${CHECKOUT_BRANCH:-burrow/residents}"
+case "$CHECKOUT_URL$CHECKOUT_BRANCH" in
+    *[\'\"\ ]*) printf 'deploy: CHECKOUT_URL and CHECKOUT_BRANCH may not contain quotes or spaces\n' >&2; exit 1 ;;
+esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SSH="ssh -o BatchMode=yes -o ConnectTimeout=15"
 
@@ -227,10 +238,70 @@ deploy_townhall() {
     log "townhall: $SHORT is live"
 }
 
+# checkout_sh <image tag> <shell script> — run a script on the burrow inside the control-
+# plane image, against the residents checkout, with the deploy key. The NAS has no git of
+# its own; the image has git, ssh, GitHub's host keys and a GIT_SSH_COMMAND naming the key
+# mounted here, so this is the one way anything on the burrow talks to the repository. The
+# script must not contain single quotes: it travels through two shells as one word.
+checkout_sh() {
+    case "$2" in *\'*) die "checkout_sh: the script must not contain a single quote: $2" ;; esac
+    $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout -v ~/docker/steward/residents-key:/run/steward/residents-key:ro steward-cp:$1 sh -c '$2'"
+}
+
+# ensure_checkout <image tag> — the residents checkout on the burrow (warren#351): made
+# once, fetched on every deploy, never reset. Runs before anything is stopped, so a refusal
+# here leaves the fleet exactly as it was.
+ensure_checkout() {
+    $SSH "$NAS" 'test -f ~/docker/steward/residents-key' \
+        || die "~/docker/steward/residents-key is missing on $NAS — the deploy key that lets the burrow's residents checkout reach $CHECKOUT_URL; deploy/README.md \"The residents checkout\" says how to make one"
+    $SSH "$NAS" 'chmod 600 ~/docker/steward/residents-key'
+    if $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/.git'; then
+        # Dirty means a write landed on disk and its commit did not — the one state this
+        # script must not paper over with a reset, because the bytes are somebody's edit.
+        dirty="$(checkout_sh "$1" "git -C /checkout status --porcelain")" \
+            || die "could not read the residents checkout on $NAS (is steward-cp:$1 on the burrow?)"
+        if [ -n "$dirty" ]; then
+            printf '%s\n' "$dirty" >&2
+            die "the residents checkout on $NAS has uncommitted changes and this script will not reset them; look with: ssh $NAS docker exec steward-api git -C /checkout status"
+        fi
+        log "steward: residents checkout — fetching, never resetting"
+        checkout_sh "$1" "git -C /checkout fetch --quiet origin" \
+            || log "steward: WARNING — the burrow could not fetch from origin; continuing with what it has"
+        # What the burrow holds that the branch does not is history that exists in one place.
+        if checkout_sh "$1" "git -C /checkout rev-parse --verify --quiet origin/$CHECKOUT_BRANCH >/dev/null"; then
+            unpushed="$(checkout_sh "$1" "git -C /checkout rev-list --count origin/$CHECKOUT_BRANCH..HEAD")"
+        else
+            unpushed="every"
+        fi
+        if [ "$unpushed" != "0" ]; then
+            log "steward: pushing $unpushed commit(s) the burrow holds that origin/$CHECKOUT_BRANCH does not"
+            checkout_sh "$1" "git -C /checkout push --quiet origin HEAD:refs/heads/$CHECKOUT_BRANCH" \
+                || log "steward: WARNING — the push failed; those commits exist on $NAS alone until one succeeds"
+        fi
+    else
+        log "steward: creating the residents checkout on $NAS from $CHECKOUT_URL ($CHECKOUT_BRANCH)"
+        # A sparse, blobless clone: the two directories the control plane reads, nothing
+        # else's blobs. On its own branch — an existing one continues this burrow's history,
+        # a new one starts from the seed on the default branch — and pushed at once, so the
+        # branch exists off the box from the first minute.
+        $SSH "$NAS" 'mkdir -p ~/docker/steward/residents-repo'
+        checkout_sh "$1" "git clone --quiet --filter=blob:none --sparse $CHECKOUT_URL /checkout && git -C /checkout sparse-checkout set steward/residents steward/skills && (git -C /checkout checkout --quiet -B $CHECKOUT_BRANCH origin/$CHECKOUT_BRANCH 2>/dev/null || git -C /checkout checkout --quiet -b $CHECKOUT_BRANCH) && git -C /checkout push --quiet origin HEAD:refs/heads/$CHECKOUT_BRANCH" \
+            || die "could not create the residents checkout on $NAS (is residents-key's public half a deploy key with write access on the repository?)"
+        $SSH "$NAS" 'test -d ~/docker/steward/residents-repo/steward/residents' \
+            || die "the checkout on $NAS came up without steward/residents"
+    fi
+    # What the checkout holds going into this deploy. The smoke after `up` insists it is
+    # still in the history — the issue's own acceptance line: a redeploy does not lose a
+    # declaration written the day before.
+    CHECKOUT_HEAD="$(checkout_sh "$1" "git -C /checkout rev-parse HEAD")"
+    [ -n "$CHECKOUT_HEAD" ] || die "could not read the residents checkout's HEAD on $NAS"
+}
+
 # ------------------------------------------------------------------------------ steward
 # steward/README.md "Deployment": the control-plane image travels as `docker save | ssh
 # docker load` (no registry), the compose file is steward/deploy/compose.yaml, and the
-# secrets are in a .env this script never writes.
+# secrets are in a .env this script never writes. The residents checkout beside them is
+# made here once and only ever fetched afterwards — see ensure_checkout.
 deploy_steward() {
     require_clean steward
     if tests_enabled; then
@@ -243,6 +314,7 @@ deploy_steward() {
     quietly "steward image ship" sh -c 'cd "$1" && make image-cp-ship CP_TAG="$2" NAS="$3"' _ "$ROOT/steward" "$SHORT" "$NAS"
     $SSH "$NAS" 'test -f ~/docker/steward/.env' \
         || die "~/docker/steward/.env is missing on $NAS — it must hold STEWARD_TOKEN=… (chmod 600); see steward/deploy/compose.yaml"
+    ensure_checkout "$SHORT"
     log "steward: stopping, backing up data/, publishing compose.yaml"
     # down before the new compose file lands: the old file is the one that knows the old
     # service names, and --remove-orphans catches whatever it did not. Backups: keep three.
@@ -255,10 +327,26 @@ deploy_steward() {
     # 401 is the API saying it is up and that it wants a credential — the smoke check
     # arcadia's origin already makes of the same route.
     wait_for "$STEWARD_URL/residents" 401
+    log "steward: checkout smoke"
+    # The API sees the checkout on its branch, and the daemons' links reach into it: the
+    # two facts behind warren#351's three defects, checked on the running containers.
+    branch="$($SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T api git -C /checkout rev-parse --abbrev-ref HEAD' 2>/dev/null | tr -d '\r')"
+    [ "$branch" = "$CHECKOUT_BRANCH" ] || die "steward-api does not see the residents checkout on $CHECKOUT_BRANCH (saw: ${branch:-nothing})"
+    # Nothing written before this deploy is gone: the HEAD read before anything was stopped
+    # is still an ancestor of (or is) the HEAD the new API serves. An ancestor rather than
+    # an equality, because the old API may legitimately have committed a save between the
+    # two reads — what must never be true is that history went backwards.
+    $SSH "$NAS" "cd ~/docker/steward && docker compose exec -T api git -C /checkout merge-base --is-ancestor $CHECKOUT_HEAD HEAD" >/dev/null 2>&1 \
+        || die "the residents checkout no longer contains $CHECKOUT_HEAD, which it held before this deploy: a declaration written earlier may be gone — stop and look before deploying again"
+    # Through a one-off container rather than `exec` into the scheduler: the daemons' health
+    # is doctor's question below, and a scheduler refusing to start over a missing resident
+    # container (its own, correct, refusal) must not read as "the checkout is not mounted".
+    $SSH "$NAS" "docker run --rm -v ~/docker/steward/residents-repo:/checkout:ro steward-cp:$SHORT test -f /checkout/steward/residents/pip/manifest.yaml" >/dev/null 2>&1 \
+        || die "the residents checkout on $NAS does not hold pip's manifest where the daemons read it"
     log "steward: doctor"
     # In the watchdog's container, against the tree the daemons actually run: that is the
     # process with the docker socket, so its topology line is the true one.
-    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /sched/residents' 2>&1 | head -40 || true
+    $SSH "$NAS" 'cd ~/docker/steward && docker compose exec -T watchdog steward doctor /checkout/steward/residents' 2>&1 | head -40 || true
     stamp steward steward
     log "steward: $SHORT is live"
 }

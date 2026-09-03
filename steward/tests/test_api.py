@@ -32,6 +32,8 @@ from conftest import (
     ClaimHolderSpawner,
     ResidentWriter,
     SkillWriter,
+    bare_origin,
+    branch_head,
     valid_manifest,
 )
 from steward import authoring as au
@@ -149,6 +151,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
         provisioner: Any = provision_resident,  # noqa: ANN401 — the other door's seam
         retirer: Any = retire_resident,  # noqa: ANN401 — the door back out (warren#331)
         git: bool = True,
+        push: au.PushTarget | None = None,
         transport: LocalTransport | None = None,
         emitter: ev.Emitter | None = None,
         approval_expiry_interval_s: float = 30.0,
@@ -173,6 +176,7 @@ def api(tmp_path: Path, write_resident: ResidentWriter) -> Iterator[ApiFactory]:
                 allow_open=allow_open,
                 cors_origins=cors_origins,
                 workdir=tmp_path,
+                push=push,
             ),
             store=store,
             emitter=(
@@ -1975,6 +1979,20 @@ def test_config_defaults_to_the_residents_tree(monkeypatch: pytest.MonkeyPatch) 
     config = ApiConfig.from_env({})
     assert config.residents_dir == Path("residents")
     assert config.cors_origins == ()
+    assert config.push is None
+
+
+def test_config_reads_the_push_target_from_the_environment() -> None:
+    """``STEWARD_PUSH_BRANCH`` turns the push on; the remote is ``origin`` unless named."""
+    assert ApiConfig.from_env({"STEWARD_PUSH_BRANCH": "burrow/residents"}).push == au.PushTarget(
+        remote="origin", branch="burrow/residents"
+    )
+    assert ApiConfig.from_env(
+        {"STEWARD_PUSH_BRANCH": " burrow/residents ", "STEWARD_PUSH_REMOTE": " github "}
+    ).push == au.PushTarget(remote="github", branch="burrow/residents")
+    # A remote alone names nowhere to push to, and a blank branch is no branch.
+    assert ApiConfig.from_env({"STEWARD_PUSH_REMOTE": "origin"}).push is None
+    assert ApiConfig.from_env({"STEWARD_PUSH_BRANCH": "   "}).push is None
 
 
 def test_a_manual_run_uses_the_declared_runner_and_prompt(api: ApiFactory) -> None:
@@ -3838,6 +3856,132 @@ def test_an_edited_declaration_is_written_validated_and_committed(
     assert response.status_code == 200
     assert response.json()["commit"]["committed"]
     assert declaration(harness)["manifest"]["summary"] == "A resident with a tidier summary."
+
+
+BURROW_PUSH = au.PushTarget(remote="origin", branch="burrow/residents")
+
+
+def harness_origin(tmp_path: Path) -> Path:
+    """Give the harness's checkout — ``tmp_path`` itself — an ``origin`` beside it."""
+    return bare_origin(tmp_path, tmp_path.parent / f"{tmp_path.name}-origin.git")
+
+
+def test_an_accepted_write_is_pushed_to_the_burrow_branch(
+    writable: Callable[..., Harness], tmp_path: Path
+) -> None:
+    """The commit is the record; the push keeps it off a burrow with no backup (warren#351)."""
+    harness = writable(push=BURROW_PUSH)
+    remote = harness_origin(tmp_path)
+    body = declaration(harness)
+    body["manifest"]["summary"] = "Pushed as well as committed."
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 200
+    commit = response.json()["commit"]
+    assert commit["committed"]
+    assert commit["pushed"] is True
+    assert branch_head(remote, "burrow/residents") == commit["sha"]
+    assert "pushed to origin burrow/residents" in response.json()["message"]
+
+
+def test_a_write_whose_push_fails_is_still_accepted(
+    writable: Callable[..., Harness], tmp_path: Path
+) -> None:
+    """The push is a record, not a gate: it can never fail a save that is already on disk."""
+    harness = writable(push=BURROW_PUSH)
+    subprocess.run(  # noqa: S603
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", str(tmp_path / "nowhere.git")],  # noqa: S607
+        check=True,
+        capture_output=True,
+    )
+    body = declaration(harness)
+    body["manifest"]["summary"] = "Committed here, and only here."
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 200
+    commit = response.json()["commit"]
+    assert commit["committed"]
+    assert commit["pushed"] is False
+    assert "NOT pushed to origin burrow/residents" in response.json()["message"]
+    assert declaration(harness)["manifest"]["summary"] == "Committed here, and only here."
+
+
+def test_a_write_with_no_push_configured_says_nothing_about_pushing(
+    writable: Callable[..., Harness],
+) -> None:
+    """``pushed: null`` — a steward with no remote is not a steward whose push failed."""
+    harness = writable()
+    body = declaration(harness)
+    body["manifest"]["summary"] = "Local checkout only."
+
+    response = harness.client.put(
+        "/residents/test-agent/declaration", json={"manifest": body["manifest"]}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["commit"]["pushed"] is None
+    assert "pushed" not in response.json()["message"]
+
+
+def test_a_declared_resident_is_pushed_like_any_other_write(
+    api: ApiFactory, tmp_path: Path
+) -> None:
+    """``POST /residents`` commits through authoring, so its commit is pushed the same way."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
+    remote = harness_origin(tmp_path)
+
+    response = harness.client.post("/residents", json=NEW_RESIDENT)
+
+    assert response.status_code == 201, response.text
+    commit = response.json()["commit"]
+    assert commit["committed"]
+    assert commit["pushed"] is True
+    assert branch_head(remote, "burrow/residents") == commit["sha"]
+
+
+@pytest.mark.usefixtures("village")
+def test_a_retirement_is_pushed_after_its_commit(api: ApiFactory, tmp_path: Path) -> None:
+    """The nursery commits the mark; the API then pushes it, and the response says so."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
+    commit_tree(tmp_path)
+    remote = harness_origin(tmp_path)
+
+    rehearsal = harness.client.post("/residents/test-agent/retire", json={"dry_run": True}).json()
+    response = harness.client.post(
+        "/residents/test-agent/retire", json={"revision": rehearsal["revision"]}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["commit"]
+    assert body["push"] == {
+        "pushed": True,
+        "remote": "origin",
+        "branch": "burrow/residents",
+        "note": "pushed to origin burrow/residents",
+    }
+    assert branch_head(remote, "burrow/residents") == body["commit"]
+    assert "pushed to origin burrow/residents" in body["message"]
+
+
+@pytest.mark.usefixtures("village")
+def test_a_retirement_with_nothing_to_push_carries_no_push(api: ApiFactory, tmp_path: Path) -> None:
+    """A dry run commits nothing, so there is nothing to push and ``push`` says so with null."""
+    harness = api(transport=LocalTransport(root=tmp_path / "nas"), push=BURROW_PUSH)
+    commit_tree(tmp_path)
+    harness_origin(tmp_path)
+
+    response = harness.client.post("/residents/test-agent/retire", json={"dry_run": True})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["commit"] is None
+    assert response.json()["push"] is None
 
 
 def test_a_declaration_can_be_written_as_text_so_comments_survive(

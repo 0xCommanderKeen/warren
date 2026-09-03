@@ -667,12 +667,19 @@ class TreeSource:
         that restores a file to a previous size within the same mtime granularity; the
         explicit reload endpoint exists for anybody who needs certainty rather than
         cheapness.
+
+        Symlinks are followed (warren#351). A burrow may point the daemons at a tree of
+        links into the checkout the API writes — the NAS did, until warren#344 pointed
+        them at the checkout itself — and a walk that stopped at the link would
+        fingerprint the link, so an edit behind it would never be noticed. A link cycle is
+        bounded by the kernel's own symlink-depth limit, which the walk reports as an
+        unreadable path rather than a hang.
         """
         parts: list[str] = []
         for root in (self.residents_dir, self.skills_root()):
             if root is None or not Path(root).is_dir():
                 continue
-            for path in sorted(Path(root).rglob("*")):
+            for path in sorted(Path(root).rglob("*", recurse_symlinks=True)):
                 try:
                     info = path.stat()
                 except OSError:  # pragma: no cover — a file removed mid-walk

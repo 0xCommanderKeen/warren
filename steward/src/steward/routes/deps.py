@@ -98,6 +98,7 @@ class Deps:
         return {
             "identity": identity,
             "allow_uncommitted": self.settings.allow_uncommitted_writes,
+            "push": self.settings.push,
         }
 
     @staticmethod

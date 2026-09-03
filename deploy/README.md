@@ -37,10 +37,82 @@ Secrets, in a `.env` beside each compose file, mode `0600`, never in git:
 | --- | --- | --- |
 | `~/docker/burrow` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
 | `~/docker/arcadia` | — | [`arcadia/deploy/compose.yaml`](../arcadia/deploy/compose.yaml) + `nginx.conf` |
-| `~/docker/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md` | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
+| `~/docker/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`. Beside it: `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
 
 `deploy.sh` refuses to roll out a service whose `.env` is missing and says what it must
 contain. Data — chronicle's `/data`, steward's `data/` — is never written by the script.
+
+## The residents checkout
+
+The control plane does not serve the residents tree baked into its image. It serves —
+and writes — a **git checkout on the burrow**: `~/docker/steward/residents-repo`, a
+sparse, blobless clone of this repository holding `steward/residents` and
+`steward/skills`, on a branch of its own, `burrow/residents`. The compose file mounts it
+at `/checkout`, read-write into the API and read-only into the scheduler and watchdog,
+which read the same tree (partitioned by `deploy.host`, warren#344) rather than a copy
+taken at container start. That is warren#351: without a checkout every
+write from townhall was a `409`, and with the tree in the image a write would have died
+on the next deploy, exactly as chronicle's event log did in warren#313.
+
+What that makes true:
+
+- **A charter edit is a change, not a proposal.** Saving in townhall commits into the
+  checkout and the running daemons read the commit on their next wake-up, with no
+  restart and no pull request. The commit is the record of what already happened.
+- **The checkout is authoritative for this burrow's residents.** `steward/residents/`
+  in the repository is the *seed* a new burrow is cloned from, and stops being a place
+  charters are edited. There is no two-way sync, on purpose: that is where the conflict
+  story lives. A change merged to `main` under `steward/residents/` or `steward/skills/`
+  does **not** reach a burrow that already has a checkout — apply it through the API
+  (`PUT /residents/{id}/declaration`, `PUT /skills/{name}`; townhall's editors), which
+  validates the whole tree before it writes. Committing in the checkout by hand
+  (`docker exec steward-api git -C /checkout …`) skips that gate and is break-glass:
+  run `steward validate /checkout/steward/residents` in the container first.
+- **Every commit the API makes is pushed to `burrow/residents`**, best effort. The save
+  is durable on disk before the push starts, so a burrow that cannot reach GitHub
+  answers `"committed, not pushed"` (`commit.pushed: false`) and carries on; the next
+  write that commits, or the next deploy, pushes whatever the branch is missing (a save
+  that changed nothing pushes nothing). Never `main`: nothing
+  lands there without a pull request, and a push to any other branch deploys nothing,
+  so a charter edit cannot loop into a rollout of the fleet it edited.
+- **`deploy.sh` makes the checkout once and never resets it.** On every steward deploy
+  it fetches, pushes anything the burrow holds that the branch does not, and **refuses
+  to continue if the checkout is dirty** — a write that landed on disk without its
+  commit is somebody's edit, and the script will not reset it. All of that runs before
+  anything is stopped. Look with `ssh Miha@dxp2800 docker exec steward-api git -C
+  /checkout status`; `deploy/status.sh` prints the branch, head, unpushed and dirty
+  counts on every run.
+
+The NAS has no git. Every git command above runs inside the control-plane image, which
+carries git, an ssh client, GitHub's published host keys, and a `GIT_SSH_COMMAND` that
+names the deploy key at `/run/steward/residents-key`.
+
+### One-time setup — the deploy key
+
+The checkout needs a key that can read and push this (private) repository. Generated
+**on the NAS**, so the private half never travels; its public half becomes a deploy
+key with write access. From the laptop:
+
+```sh
+ssh Miha@dxp2800 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/steward/residents-key && chmod 600 ~/docker/steward/residents-key'
+ssh Miha@dxp2800 'cat ~/docker/steward/residents-key.pub' \
+    | gh repo deploy-key add - -R 0xCommanderKeen/warren --allow-write --title 'dxp2800 residents checkout'
+```
+
+Both commands are quoted so the `~` reaches the NAS: unquoted, your own shell expands it
+to your laptop home, and `cat` on the NAS answers `No such file or directory`.
+
+Then deploy steward (`deploy/deploy.sh steward`, or merge anything under `steward/`):
+the first run creates the checkout, pushes `burrow/residents`, and the smoke check
+confirms the API sees the branch and the scheduler's links reach Pip's manifest.
+
+Two things to know about that key. A deploy key added with `gh` is tied to the token
+`gh` used and is removed if that token is revoked — add it in the repository's settings
+(Deploy keys) instead if that bothers you. And GitHub deploy keys are per repository,
+not per branch: the key *can* push `main`; steward never does, and the standing rule
+that nothing lands on `main` without a pull request is what keeps it that way. To
+revoke: delete the key on GitHub and `rm ~/docker/steward/residents-key` on the NAS —
+the API then answers `"committed, not pushed"` on every write until a new key exists.
 
 ## Deploy on merge
 

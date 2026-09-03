@@ -376,9 +376,15 @@ event server itself is still deployed by hand, now from
 [`warren/chronicle/`](../chronicle/README.md) rather than from a repo of its own.
 
 Run every command below from `warren/steward/`, on a machine with the repo checked out and
-ssh access to the NAS. Nothing pulls on the NAS — it has no git and no clone; steward
-pushes the runtime bundle over ssh, and the deploy directories there are unpacked
-artifacts.
+ssh access to the NAS. Nothing pulls on the NAS — it has no git of its own; steward pushes
+the runtime bundle over ssh, and the deploy directories there are unpacked artifacts. The
+one exception is the control plane's **residents checkout** (warren#351): a sparse clone
+of this repository under `~/docker/steward/residents-repo`, made once by
+`deploy/deploy.sh` through the control-plane image's own git, which the deployed API
+reads, writes, commits into and pushes to the branch `burrow/residents`. That checkout
+is authoritative for the burrow's residents; `residents/` here is the seed a new burrow
+is cloned from. [`deploy/README.md`](../deploy/README.md#the-residents-checkout) has the
+whole story and the one-time key setup.
 
 ### Where the daemons run
 
@@ -737,7 +743,9 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_CORS_ORIGINS` | API | Comma-separated origins allowed to call the API from a browser. Unset means same-origin only. |
 | `STEWARD_RESIDENTS` | API | The residents tree `create_app()` reads when nothing names one. `steward serve` always passes `--residents` (default `residents`), so on that path the flag decides and this is only read by an embedder that builds the app itself. |
 | `STEWARD_COMMIT_IDENTITY` | API | `Name <email>`, the git author the write API commits as when the caller is not a named [operator](#operator-credentials). Anything that is not that exact spelling is ignored rather than half-parsed, leaving commits reading `steward (api)` — which is true. |
-| `STEWARD_ALLOW_UNCOMMITTED_WRITES` | API | `1`/`true`/`yes`/`on` accepts a residents tree with no git behind it. Off, a write into a tree outside a checkout is refused `409 not_a_git_checkout` rather than leaving declarations with no history and no author. |
+| `STEWARD_ALLOW_UNCOMMITTED_WRITES` | API | `1`/`true`/`yes`/`on` accepts a residents tree with no git behind it. Off, a write into a tree outside a checkout is refused `409 not_a_git_checkout` rather than leaving declarations with no history and no author. Never set this on a burrow whose tree lives in the image: the writes would land in the container layer and die on the next deploy (warren#313, warren#351). |
+| `STEWARD_PUSH_BRANCH` | API | The branch every commit the write API makes is pushed to afterwards — `burrow/residents` on the NAS. Unset, nothing is pushed (a laptop's checkout, where the person pushes). The push is best effort and never fails a write: the response carries `commit.pushed` — `true`, `false` with the reason in `commit.note`, or `null` when there was nothing to push. |
+| `STEWARD_PUSH_REMOTE` | API | The remote that branch is on. Defaults to `origin`, which is what a `git clone` calls it; read only when `STEWARD_PUSH_BRANCH` is set. |
 | `STEWARD_MAX_DELEGATION_DEPTH` | delegation | How deep a chain of delegated work may run before steward refuses (default 3). `0` is the fleet-wide kill switch. |
 | `STEWARD_REPEAT_DENY_WINDOW_H` | approvals | Whole hours a `deny` goes on answering the same `(resident, action)` a session raises, so a looping resident cannot knock on every wake-up (default 12). `0` is the kill switch: every repeat knocks again. Anything that is not a whole number ≥ 0 is logged as a misconfiguration and the default is used. Steward's own knocks are never guarded — see [docs/approvals.md](docs/approvals.md). |
 | `STEWARD_NTFY_URL` | notifications | The ntfy server outbound taps are POSTed to. Defaults to `https://ntfy.sh`, which is safe because the topic is derived and unguessable — point it at a self-hosted instance to keep even that off the public internet. |

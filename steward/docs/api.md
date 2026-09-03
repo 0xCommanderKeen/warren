@@ -709,10 +709,14 @@ credential made the request, exactly as every other write here is.
  "commands": ["ssh Miha@dxp2800 docker compose … down --remove-orphans",
               "ssh Miha@dxp2800 rm -f ~/docker/steward-life-agent/.env …"],
  "commit": "9f2c…", "dry_run": false, "note": "retired",
- "revision": "sha256:…"}
+ "revision": "sha256:…",
+ "push": {"pushed": true, "remote": "origin", "branch": "burrow/residents",
+          "note": "pushed to origin burrow/residents"}}
 ```
 
-`marked` is `false` when the manifest already said retired, `stopped` is `false` when there
+`push` is what became of the commit afterwards when `STEWARD_PUSH_BRANCH` is set (see
+[the write API](#writing-declarations-and-skills), warren#351) — and `null` when nothing was committed or
+nothing is configured. `marked` is `false` when the manifest already said retired, `stopped` is `false` when there
 was nothing on the host to stop, and `scrubbed` is `false` when there was no `.env` to
 remove — "the token is gone" and "this run took it away" are different sentences, and only
 the second is what `scrubbed` reports. A **local-placed** resident that ships inside the
@@ -1114,11 +1118,26 @@ committer are set, so the commit works on a server with no ambient `git config` 
 `committed: false` with `sha: null` is the converged answer, not a failure: what is on
 disk was already what is in git.
 
+**The commit is pushed afterwards** when `STEWARD_PUSH_BRANCH` names a branch — on a
+burrow, `burrow/residents`, so the history the checkout is authoritative for exists
+somewhere that is not one disk on a NAS (warren#351). `commit.pushed` says what came of
+it: `true`; `false`, with git's reason appended to `commit.note` (`"…; NOT pushed to
+origin burrow/residents (…)"`), which never fails the write — the save was durable before
+the push started, and the next write that commits, or the next deploy, carries every
+commit the branch is missing; or `null`, meaning there was nothing to push — no commit was made, or no branch
+is configured. The push is of `HEAD` to the branch by its full ref, bounded, and never
+forced: history somebody else put on the branch is refused, not overwritten.
+`POST /residents/{id}/retire` commits through the nursery and reports its push under a
+top-level `push` key (`{pushed, remote, branch, note}`, or `null`) for the same reason.
+
 **If the residents tree is not inside a git checkout**, the write is **refused** with
 `409 not_a_git_checkout`. A fleet whose declarations have no history and no way back is a
 thing to choose out loud rather than to discover on the day somebody needs to undo
 something. `STEWARD_ALLOW_UNCOMMITTED_WRITES=1` accepts it, and then every response says
-so in `commit.note`.
+so in `commit.note` — but never on a burrow whose tree lives in the image, where an
+accepted write lands in the container layer and dies on the next deploy; the deployed
+control plane mounts a real checkout instead (`deploy/README.md`, "The residents
+checkout").
 
 ### `GET /residents/{id}/declaration` · `PUT /residents/{id}/declaration`
 
