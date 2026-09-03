@@ -95,9 +95,12 @@ key with write access. From the laptop:
 
 ```sh
 ssh Miha@dxp2800 'ssh-keygen -t ed25519 -N "" -C "warren residents checkout (dxp2800)" -f ~/docker/steward/residents-key && chmod 600 ~/docker/steward/residents-key'
-ssh Miha@dxp2800 cat ~/docker/steward/residents-key.pub \
+ssh Miha@dxp2800 'cat ~/docker/steward/residents-key.pub' \
     | gh repo deploy-key add - -R 0xCommanderKeen/warren --allow-write --title 'dxp2800 residents checkout'
 ```
+
+Both commands are quoted so the `~` reaches the NAS: unquoted, your own shell expands it
+to your laptop home, and `cat` on the NAS answers `No such file or directory`.
 
 Then deploy steward (`deploy/deploy.sh steward`, or merge anything under `steward/`):
 the first run creates the checkout, pushes `burrow/residents`, and the smoke check
