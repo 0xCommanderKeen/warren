@@ -119,12 +119,12 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false \
 # Baked under /opt/steward, not /root/.claude: that path is a bind mount from the host and
 # a mount hides whatever the image put there. The entrypoint copies these into the volume
 # at start — see entrypoint.sh for what it will and will not overwrite.
-COPY burrow-emit.py /opt/steward/burrow-emit.py
+COPY chronicle-emit.py /opt/steward/chronicle-emit.py
 COPY settings.json /opt/steward/settings.json
 COPY entrypoint.sh /usr/local/bin/steward-entrypoint
 COPY smoke.sh /usr/local/bin/steward-smoke
 RUN chmod 0755 /usr/local/bin/steward-entrypoint /usr/local/bin/steward-smoke \
-    && chmod 0644 /opt/steward/burrow-emit.py /opt/steward/settings.json
+    && chmod 0644 /opt/steward/chronicle-emit.py /opt/steward/settings.json
 
 # Root, deliberately: the compose fragment mounts the claude config at /root/.claude and
 # the resident's memory at a path its manifest names, both bind mounts owned by the host

@@ -42,7 +42,7 @@ src = ["src", "tests"]
 # file by chronicle/hooks/build.py, and byte-identical to a rebuild by design and by test
 # (tests/test_resident_image.py). Formatting or "fixing" it here would break that identity
 # and would edit code this repo does not own — the file says so in its own header.
-extend-exclude = ["docker/resident/burrow-emit.py"]
+extend-exclude = ["docker/resident/chronicle-emit.py"]
 
 [tool.ruff.lint]
 select = ["ALL"]

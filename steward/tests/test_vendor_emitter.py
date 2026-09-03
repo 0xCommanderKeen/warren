@@ -1,6 +1,6 @@
 """The vendoring command must produce the artifact it claims to, from bytes that exist.
 
-``make vendor-emitter`` is the one command that writes ``docker/resident/burrow-emit.py``,
+``make vendor-emitter`` is the one command that writes ``docker/resident/chronicle-emit.py``,
 the emitter every deployed resident runs. It builds chronicle's bundle (warren#234) rather
 than copying a source file, so what it has to get right is: refuse inputs that are in no
 commit, need nothing on ``PATH`` that a fresh checkout lacks, and never leave a
@@ -105,7 +105,7 @@ def vendor(
 
 
 def vendored(steward: Path) -> Path:
-    return steward / "docker" / "resident" / "burrow-emit.py"
+    return steward / "docker" / "resident" / "chronicle-emit.py"
 
 
 @pytest.mark.parametrize("source", SOURCES)
@@ -198,4 +198,6 @@ def test_vendor_emitter_records_no_checksum_beside_the_copy(tmp_path: Path) -> N
     steward = steward_copy(tmp_path)
 
     assert vendor(steward, chronicle).returncode == 0
-    assert [path.name for path in (steward / "docker" / "resident").iterdir()] == ["burrow-emit.py"]
+    assert [path.name for path in (steward / "docker" / "resident").iterdir()] == [
+        "chronicle-emit.py"
+    ]

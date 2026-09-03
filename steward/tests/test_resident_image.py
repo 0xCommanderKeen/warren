@@ -31,7 +31,7 @@ from steward.manifest import load_manifest
 
 IMAGE_DIR = REPO_ROOT / "docker" / "resident"
 DOCKERFILE = IMAGE_DIR / "Dockerfile"
-EMITTER = IMAGE_DIR / "burrow-emit.py"
+EMITTER = IMAGE_DIR / "chronicle-emit.py"
 SETTINGS = IMAGE_DIR / "settings.json"
 SMOKE = IMAGE_DIR / "smoke.sh"
 ENTRYPOINT = IMAGE_DIR / "entrypoint.sh"
@@ -110,7 +110,7 @@ def test_the_vendored_emitter_is_the_bundle_chronicle_builds_today(tmp_path: Pat
         f"{BUNDLE_BUILD} is missing. chronicle is a sibling directory in this monorepo, "
         f"and the resident image's emitter is built from it."
     )
-    built = tmp_path / "burrow-emit.py"
+    built = tmp_path / "chronicle-emit.py"
 
     result = subprocess.run(  # noqa: S603 — a fixed argv, no shell, no template
         [sys.executable, str(BUNDLE_BUILD), "--output", str(built)],
@@ -220,7 +220,7 @@ def test_every_burrow_hook_is_wired(hook: str) -> None:
         if step.get("type") == "command"
     ]
     assert commands, f"{hook} is declared but runs nothing"
-    assert all("burrow-emit.py" in command for command in commands)
+    assert all("chronicle-emit.py" in command for command in commands)
 
 
 def test_the_hooks_carry_no_url_and_no_token() -> None:
@@ -261,6 +261,127 @@ def test_the_shell_scripts_parse(script: Path) -> None:
     )
 
     assert result.returncode == 0, f"{script.name}: {result.stderr.strip()}"
+
+
+def seed_volume(
+    tmp_path: Path,
+    settings: str | None,
+    emitter_names: tuple[str, ...],
+    *,
+    settings_writable: bool = True,
+) -> tuple[Path, str]:
+    """Run the entrypoint against a fake claude volume; return the volume and what it said.
+
+    The two directories the script uses are absolute container paths, so a copy with those
+    two assignments repointed is what runs here. Everything under test — which file is
+    copied in, what happens to a settings.json that is already there — is the copy's own
+    logic, unmodified. The image job in CI runs the real script in the real image; this is
+    the same behaviour at a millisecond, so a broken migration is red before a build.
+    """
+    volume, baked = tmp_path / "claude", tmp_path / "baked"
+    volume.mkdir()
+    baked.mkdir()
+    (baked / "chronicle-emit.py").write_text("# the emitter\n", encoding="utf-8")
+    (baked / "settings.json").write_text(SETTINGS.read_text(encoding="utf-8"), encoding="utf-8")
+    if settings is not None:
+        (volume / "settings.json").write_text(settings, encoding="utf-8")
+        if not settings_writable:
+            (volume / "settings.json").chmod(0o444)
+    for name in emitter_names:
+        (volume / name).write_text("# a stale emitter\n", encoding="utf-8")
+
+    script = tmp_path / "entrypoint.sh"
+    script.write_text(
+        re.sub(
+            r"^BAKED_DIR=.*$",
+            f"BAKED_DIR={baked}",
+            re.sub(
+                r"^CONFIG_DIR=.*$",
+                f"CONFIG_DIR={volume}",
+                ENTRYPOINT.read_text(encoding="utf-8"),
+                flags=re.MULTILINE,
+            ),
+            flags=re.MULTILINE,
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(  # noqa: S603 — a fixed argv, no shell, no template
+        ["/bin/sh", str(script), "true"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    return volume, result.stdout
+
+
+def test_a_pre_rename_volume_is_repointed_at_the_new_emitter(tmp_path: Path) -> None:
+    """warren#361: the claude volume outlives the image, and the rename is not a code change.
+
+    A resident provisioned before the rename comes back up with `burrow-emit.py` in its
+    volume and a settings.json naming it — a file the new image does not ship. Nothing
+    fails: claude starts, the agent works, and the hooks run a script that is not there.
+    So the entrypoint repoints that one string and removes the stale copy.
+    """
+    legacy = SETTINGS.read_text(encoding="utf-8").replace("chronicle-emit.py", "burrow-emit.py")
+    document = json.loads(legacy)
+    # An operator's own addition, to prove the repoint is surgical rather than a clobber.
+    document["permissions"] = {"allow": ["Bash(ls:*)"]}
+
+    volume, said = seed_volume(tmp_path, json.dumps(document, indent=2), ("burrow-emit.py",))
+
+    settings = json.loads((volume / "settings.json").read_text(encoding="utf-8"))
+    commands = [
+        hook["command"]
+        for group in settings["hooks"].values()
+        for entry in group
+        for hook in entry["hooks"]
+    ]
+    assert commands
+    assert all("chronicle-emit.py" in command for command in commands)
+    assert "burrow-emit.py" not in json.dumps(settings)
+    assert settings["permissions"] == {"allow": ["Bash(ls:*)"]}
+    assert not (volume / "burrow-emit.py").exists()
+    assert (volume / "chronicle-emit.py").is_file()
+    assert "repointed" in said
+
+
+def test_a_stale_emitter_stays_while_anything_still_names_it(tmp_path: Path) -> None:
+    """The removal is conditional, and the condition has to be able to hold.
+
+    If the repoint fails, the reference to the old name survives — and deleting the file
+    it points at would then be exactly the silent failure the whole block exists to avoid.
+    A read-only settings.json is the reachable version of that: the file still parses and
+    still names `burrow-emit.py`, and the write is refused. (Under docker the entrypoint
+    is root, for which a mode bit is not a refusal; a read-only bind mount is.)
+    """
+    legacy = SETTINGS.read_text(encoding="utf-8").replace("chronicle-emit.py", "burrow-emit.py")
+
+    volume, said = seed_volume(tmp_path, legacy, ("burrow-emit.py",), settings_writable=False)
+
+    assert "could not repoint" in said
+    assert "burrow-emit.py" in (volume / "settings.json").read_text(encoding="utf-8")
+    assert (volume / "burrow-emit.py").is_file()
+
+
+def test_an_unreadable_settings_json_is_reported_rather_than_rewritten(tmp_path: Path) -> None:
+    """Parsed before it is touched: a file that is already broken is a message, not a write."""
+    volume, said = seed_volume(tmp_path, "{not json", ())
+
+    assert "unreadable" in said
+    assert (volume / "settings.json").read_text(encoding="utf-8") == "{not json"
+
+
+def test_a_volume_seeded_after_the_rename_is_left_alone(tmp_path: Path) -> None:
+    """The migration is a no-op on a resident that never saw the old name."""
+    volume, said = seed_volume(tmp_path, SETTINGS.read_text(encoding="utf-8"), ())
+
+    assert (volume / "settings.json").read_text(encoding="utf-8") == SETTINGS.read_text(
+        encoding="utf-8"
+    )
+    assert "repointed" not in said
+    assert "does not wire" not in said
 
 
 def test_the_smoke_test_asserts_the_status_code_issue_51_asks_for() -> None:
@@ -413,7 +534,7 @@ def test_the_image_carries_everything_a_session_needs() -> None:
 
     assert "python3" in text
     assert "git" in text
-    assert "COPY burrow-emit.py /opt/steward/burrow-emit.py" in text
+    assert "COPY chronicle-emit.py /opt/steward/chronicle-emit.py" in text
     assert "COPY settings.json /opt/steward/settings.json" in text
 
 
