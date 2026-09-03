@@ -28,7 +28,7 @@ class ClaudeSubagentAdapterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as home:
             env = dict(os.environ, HOME=home, CHRONICLE_MIRROR="")
             # Both spellings are live during the rename, so clearing only the new
-            # one would let an exported BURROW_URL reach the emitter anyway.
+            # a stale one in the developer's shell would still be inherited here.
             for stale in ("CHRONICLE_URL", "BURROW_URL", "BURROW_MIRROR"):
                 env.pop(stale, None)
             for hook in hooks:

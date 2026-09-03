@@ -28,9 +28,9 @@ _spec = importlib.util.spec_from_file_location("chronicle_emit", EMIT)
 emit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(emit)
 
-# The emitter answers to both spellings for one release, so a test that clears
-# only the new one is not isolated: whatever the developer or the NAS has
-# exported under the old name would leak straight back in through the fallback.
+# Both spellings are cleared even though warren#361 left only CHRONICLE_ being read.
+# The old names cost nothing to clear and a machine that still exports one should not
+# be able to make a test look different from CI.
 TRANSPORT_SETTINGS = ("URL", "TOKEN", "MIRROR", "MIRROR_TOKEN", "AGENT_ID", "PROJECT")
 BOTH_SPELLINGS = tuple(
     prefix + name
@@ -473,35 +473,38 @@ class EndToEndTest(unittest.TestCase):
         self.assertLess(len(proc.stderr), 128)
 
 
-class SettingCompatibilityTest(unittest.TestCase):
-    """Both spellings are live during the rename; neither may lose events.
+class SettingResolutionTest(unittest.TestCase):
+    """CHRONICLE_ is the only spelling read, and an empty value is a value.
 
-    Hook environment is frozen when a session starts, so on the day this ships
-    the fleet is a mixture: old sessions still exporting BURROW_URL, new ones
-    exporting CHRONICLE_URL. An emitter that honoured only one of them would
-    keep exiting 0 and keep writing locally while the village quietly stopped
-    hearing from half the fleet — the exact failure the emitter is built to make
-    impossible.
+    The pre-rename BURROW_ names were read alongside these until warren#361: hook
+    environment is frozen when a session starts, so the rename had to keep both
+    alive until every session holding an old one had ended. They have, and the
+    burrow's own environment was checked to be free of the old names before the
+    fallback went — so what these tests now pin is that a stale name is *ignored*
+    rather than quietly honoured.
     """
 
     def setUp(self):
-        self.saved = {k: os.environ.get(k) for k in BOTH_SPELLINGS}
+        # The whole environment, saved and restored — not a hand-kept list of names.
+        # A list has to be extended every time a test touches a new setting, and the
+        # time it was not, `CHRONICLE_DETAIL` escaped this class and redacted the
+        # payloads of every module that ran after it in the same interpreter. That was
+        # invisible to `tests/run.sh`, which gives each module its own process
+        # (warren#361).
+        patcher = mock.patch.dict(os.environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for key in BOTH_SPELLINGS:
             os.environ.pop(key, None)
 
-    def tearDown(self):
-        for key, value in self.saved.items():
-            os.environ.pop(key, None) if value is None else os.environ.__setitem__(
-                key, value
-            )
-
-    def test_the_pre_rename_spelling_still_routes_the_event(self):
+    def test_the_pre_rename_spelling_routes_nothing(self):
+        """A stale BURROW_URL is not a target; it is not read at all."""
         os.environ["BURROW_URL"] = "http://village:8737"
         os.environ["BURROW_TOKEN"] = "s3cret"
-        os.environ["BURROW_MIRROR"] = ""
-        self.assertEqual(emit.targets(), [("http://village:8737", "s3cret")])
+        os.environ["CHRONICLE_MIRROR"] = ""
+        self.assertEqual(emit.targets(), [])
 
-    def test_the_new_spelling_wins_wherever_both_are_set(self):
+    def test_the_new_spelling_is_the_only_one_read(self):
         os.environ["BURROW_URL"] = "http://old:8737"
         os.environ["CHRONICLE_URL"] = "http://new:8737"
         os.environ["BURROW_TOKEN"] = "old-secret"
@@ -510,29 +513,28 @@ class SettingCompatibilityTest(unittest.TestCase):
         os.environ["CHRONICLE_MIRROR"] = ""
         self.assertEqual(emit.targets(), [("http://new:8737", "new-secret")])
 
-    def test_an_empty_new_spelling_turns_the_mirror_off_over_a_stale_old_one(self):
-        """"" is a value: it must override, not fall through to the old name."""
+    def test_an_empty_value_turns_the_mirror_off(self):
+        '''"" is a value, not an absence: it must not read as "no setting".'''
         os.environ["CHRONICLE_URL"] = "http://village:8737"
-        os.environ["BURROW_MIRROR"] = "http://leftover:9000"
         os.environ["CHRONICLE_MIRROR"] = ""
         self.assertEqual(emit.targets(), [("http://village:8737", "")])
 
-    def test_neither_spelling_set_still_means_mirror_to_the_local_dev_server(self):
-        """``None`` has to survive the fallback, or the default mirror is lost."""
+    def test_no_setting_at_all_still_means_mirror_to_the_local_dev_server(self):
+        """``None`` and ``""`` have to stay distinguishable, or the default is lost."""
         self.assertEqual(emit.targets(), [(emit.DEFAULT_MIRROR, "")])
 
-    def test_the_resident_identity_reads_either_spelling(self):
-        for spelling in ("BURROW_AGENT_ID", "CHRONICLE_AGENT_ID"):
-            with self.subTest(spelling=spelling):
-                os.environ.pop("BURROW_AGENT_ID", None)
-                os.environ.pop("CHRONICLE_AGENT_ID", None)
-                os.environ[spelling] = "life-agent"
-                self.assertEqual(emit._setting("AGENT_ID"), "life-agent")
+    def test_the_resident_identity_reads_the_new_spelling(self):
+        os.environ["CHRONICLE_AGENT_ID"] = "life-agent"
+        self.assertEqual(emit._setting("AGENT_ID"), "life-agent")
 
-    def test_the_detail_policy_default_survives_the_fallback(self):
+    def test_a_pre_rename_identity_is_not_read(self):
+        os.environ["BURROW_AGENT_ID"] = "life-agent"
+        self.assertIsNone(emit._setting("AGENT_ID"))
+
+    def test_the_detail_policy_defaults_to_full_and_reads_the_new_spelling(self):
         self.assertEqual(emit.detail_policy(), "full")
         os.environ["BURROW_DETAIL"] = "safe"
-        self.assertEqual(emit.detail_policy(), "safe")
+        self.assertEqual(emit.detail_policy(), "full")
         os.environ["CHRONICLE_DETAIL"] = "off"
         self.assertEqual(emit.detail_policy(), "off")
 

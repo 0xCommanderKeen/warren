@@ -9,8 +9,8 @@ docs/ui-clients.md).
     python3 serve.py [port]                          # default 8737
     uvicorn serve:app --host 127.0.0.1 --port 8737   # the same app under uvicorn's flags
 
-Env, read by both entry points (each also accepted under its pre-rename BURROW_*
-spelling for one release; the CHRONICLE_* spelling wins wherever both are set):
+Env, read by both entry points (CHRONICLE_* only — the pre-rename BURROW_*
+spelling was accepted until warren#361 finished the rename):
     CHRONICLE_HOST          bind address (default 127.0.0.1; 0.0.0.0 in the container;
                             under uvicorn its --host/--port bind instead)
     CHRONICLE_EVENTS        event log path (default ~/.chronicle/events.jsonl)

@@ -2,11 +2,10 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-# CHRONICLE_INSTALL_ROOT, or the pre-rename BURROW_INSTALL_ROOT for one release.
+# CHRONICLE_INSTALL_ROOT names the target. The pre-rename BURROW_INSTALL_ROOT was
+# read here too until warren#361 finished the rename.
 if [ "${CHRONICLE_INSTALL_ROOT+x}" = x ]; then
   install_root=$CHRONICLE_INSTALL_ROOT
-elif [ "${BURROW_INSTALL_ROOT+x}" = x ]; then
-  install_root=$BURROW_INSTALL_ROOT
 else
   lib="${HOME:?HOME is required}/.local/lib"
   # An existing bundle is upgraded where it already lives. Runner hook configs

@@ -30,22 +30,17 @@ DEFAULT_EVENTS = state_dir() / "events.jsonl"
 
 
 def setting(environ: Mapping[str, str], name: str) -> str | None:
-    """Read ``CHRONICLE_<name>``, falling back to the pre-rename ``BURROW_<name>``.
+    """Read ``CHRONICLE_<name>``.
 
-    Both spellings are accepted for one release: the compose file and ``.env`` on
-    the NAS were written before the rename, and a redeploy that flipped the names
-    in the same breath as the code would leave no window in which either could be
-    wrong. The new spelling wins wherever both are set, so a half-migrated
-    environment resolves one way rather than per setting.
-
-    Presence — not truthiness — selects the spelling. ``CHRONICLE_TOKEN=`` means
-    "open ingest", and must override a stale ``BURROW_TOKEN`` rather than fall
-    through to it.
+    It also read the pre-rename ``BURROW_<name>`` until warren#361 finished the
+    rename. That fallback existed so a redeploy did not have to flip the names in
+    the same breath as the code — and it is gone because nothing writes the old
+    spelling any more and the burrow's own environment was checked to be free of
+    it before this landed. An environment still spelled the old way now gets the
+    *default* rather than the value it names, which is why that check was made
+    against the running fleet instead of assumed.
     """
-    new = "CHRONICLE_" + name
-    if new in environ:
-        return environ[new]
-    return environ.get("BURROW_" + name)
+    return environ.get("CHRONICLE_" + name)
 
 
 def _integer(value: str | None, default: int) -> int:
