@@ -32,26 +32,36 @@ memory:
   kind: directory
   path: /data/residents/pip/memory
   journal: journal
-  journal_keep: 30
 routes:
 - id: schedule
   kind: cron
   address: steward:scheduler
   status: active
 app_grants: []
-tools: []
+tools: unrestricted
 workspace: []
 runner:
   kind: claude
-  placement: local
   model: claude-haiku-4-5-20251001
-routines: []
+  placement: container
+routines:
+- id: heartbeat
+  schedule: 0 * * * *
+  schedule_tz: Europe/Ljubljana
+  prompt: 'Answer in exactly one short plain sentence: say that you (Pip) are alive
+    and state the current date and hour. Do not use any tools and do not do anything
+    else.'
+  requires: []
+  timeout_s: 60
+  enabled: true
 board:
   claim: false
   max_claims_per_wake: 1
   lease_s: 1800
   timeout_s: 900
-budgets: {}
+budgets:
+  daily_cost_usd: 2.0
+  max_run_seconds: 120
 delegation:
   send: false
   to: []
@@ -59,3 +69,5 @@ notifications:
   'on':
   - needs_human
   status: active
+deploy:
+  container: steward-pip
