@@ -22,6 +22,11 @@ CHECKOUT = "/checkout"
 RESIDENTS = f"{CHECKOUT}/steward/residents"
 #: Where the image's ``GIT_SSH_COMMAND`` expects the deploy key that pushes the checkout.
 KEY = "/run/steward/residents-key"
+#: Where the daemons find the residents' deploy directories (warren#356). ``deploy.py``
+#: resolves ``~/docker/steward-<id>/memory`` in the asking process, and the image's HOME
+#: is ``/root`` — so the burrow's ``~/docker`` has to be there.
+HOST_DOCKER = "/home/Miha/docker"
+DAEMON_DOCKER = "/root/docker"
 
 
 @pytest.fixture(scope="module")
@@ -85,3 +90,25 @@ def test_the_daemons_read_one_tree(services: dict[str, Any]) -> None:
     """A watchdog reading a wider list than the scheduler fires would report ghosts."""
     assert residents_of(services["scheduler"]) == residents_of(services["watchdog"])
     assert mounts(services["scheduler"])[CHECKOUT] == mounts(services["watchdog"])[CHECKOUT]
+
+
+@pytest.mark.parametrize("name", ["scheduler", "watchdog"])
+def test_the_daemons_see_the_residents_deploy_directories(
+    services: dict[str, Any], name: str
+) -> None:
+    """warren#356: the scheduler looked for /root/docker/steward-pip/memory and found nothing.
+
+    A container-placed resident's memory lives at ``<deploy.path>/memory`` on the burrow,
+    and ``memory_host_dir`` expands the ``~`` in that path with the daemon's own HOME. Inside
+    the image that is ``/root``, so the host's ``~/docker`` is mounted there — read-write,
+    because the scheduler journals into and materializes skills onto that directory.
+    """
+    daemon = services[name]
+    assert mounts(daemon)[DAEMON_DOCKER] == f"{HOST_DOCKER}:{DAEMON_DOCKER}", (
+        "the daemons compute /root/docker/steward-<id>/memory; that path must be the host's"
+    )
+
+
+def test_the_api_does_not_hold_the_residents_directories(services: dict[str, Any]) -> None:
+    """The API writes declarations into the checkout, never into a resident's memory."""
+    assert DAEMON_DOCKER not in mounts(services["api"])
