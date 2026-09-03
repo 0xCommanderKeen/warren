@@ -1,5 +1,6 @@
 ---
-agent_id: claude-code:pip
+uid: 32b983a9-70b4-4a61-87ed-101cf2bb72be
+agent_id: resident:32b983a9-70b4-4a61-87ed-101cf2bb72be
 name: Pip
 char: Monk
 accent: '#6a8cc0'

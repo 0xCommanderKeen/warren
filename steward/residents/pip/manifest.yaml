@@ -2,7 +2,7 @@ version: 0
 uid: 32b983a9-70b4-4a61-87ed-101cf2bb72be
 id: pip
 home: 0
-agent_id: claude-code:pip
+agent_id: resident:32b983a9-70b4-4a61-87ed-101cf2bb72be
 summary: The fleet's canary — proves the pipeline is alive and is first to break.
 retired: false
 soul:
