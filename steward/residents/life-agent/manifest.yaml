@@ -194,8 +194,11 @@ budgets:
 # it *would* create and a 7am `docker exec` should not run against a guess. The other four
 # do not have to be, and are here because the address is the thing an operator is being
 # asked to approve, and a block that named only the container would make them look it up.
+# PARKED 2026-09-03 (warren#356): host is a placeholder, not dxp2800, so this burrow fires
+# Pip alone while the old life-agent bot keeps running. Put dxp2800 back and
+# `steward provision life-agent` when the Gmail/Calendar grants exist; that is the cutover.
 deploy:
-  host: dxp2800
+  host: parked
   user: Miha
   path: ~/docker/steward-life-agent
   container: steward-life-agent
