@@ -880,6 +880,51 @@ def test_validate_tree_rejects_duplicate_resident_uids(
     assert uid_diagnostic.example.startswith("uid: ")
 
 
+def test_validate_tree_rejects_duplicate_exact_agent_ids(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    write_resident()
+    second = valid_manifest() | {
+        "uid": SECOND_RESIDENT_UID,
+        "id": "other-agent",
+        "home": 1,
+    }
+    write_resident(second, soul=VALID_SOUL, directory="other-agent")
+
+    result = m.validate_tree(tmp_path / "residents")
+
+    assert not result.ok
+    assert "also belongs to" in problem_for(result, "agent_id")
+
+
+def test_validate_tree_rejects_explicit_collision_with_a_legacy_project_identity(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    legacy = valid_manifest()
+    del legacy["agent_id"]
+    legacy["project"] = "chronicle"
+    write_resident(
+        legacy,
+        soul=VALID_SOUL.replace("agent_id: claude-code:test-agent", "project: chronicle"),
+    )
+    second = valid_manifest() | {
+        "uid": SECOND_RESIDENT_UID,
+        "id": "other-agent",
+        "home": 1,
+        "agent_id": "steward:test-agent",
+    }
+    write_resident(
+        second,
+        soul=VALID_SOUL.replace("claude-code:test-agent", "steward:test-agent"),
+        directory="other-agent",
+    )
+
+    result = m.validate_tree(tmp_path / "residents")
+
+    assert not result.ok
+    assert "also belongs to" in problem_for(result, "agent_id")
+
+
 def test_validate_tree_collects_failures(write_resident: ResidentWriter, tmp_path: Path) -> None:
     write_resident()
     broken = valid_manifest()

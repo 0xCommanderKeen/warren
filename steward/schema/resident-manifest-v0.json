@@ -822,7 +822,7 @@
         }
       ],
       "default": null,
-      "description": "Burrow event join key, <source>:<name>. Matched before project.",
+      "description": "Chronicle event join key; resident:<uid> for Steward Residents.",
       "title": "Agent Id"
     },
     "project": {

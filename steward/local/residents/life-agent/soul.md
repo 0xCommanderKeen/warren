@@ -1,5 +1,6 @@
 ---
-agent_id: claude-code:life-agent
+uid: a52ee98b-c6c1-45e1-b449-f44fe4d09a0d
+agent_id: resident:a52ee98b-c6c1-45e1-b449-f44fe4d09a0d
 name: Hob
 char: Monk
 accent: "#a68a4f"

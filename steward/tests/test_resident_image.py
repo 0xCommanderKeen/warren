@@ -18,6 +18,7 @@ import ast
 import hashlib
 import json
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -62,6 +63,16 @@ def test_a_resident_defaults_to_the_image_this_repo_builds() -> None:
     """`steward-resident:latest` is docker/resident/Dockerfile, and it has to exist."""
     assert DEFAULT_IMAGE == "steward-resident:latest"
     assert DOCKERFILE.is_file()
+
+
+def test_runtime_switch_keeps_resident_identity_and_changes_event_source() -> None:
+    """The wire join key belongs to the Resident; source belongs to the producer."""
+    emitter = runpy.run_path(str(EMITTER))
+    identity = "resident:7e36d76a-1ad8-4d65-a619-8c6e7fb93ed9"
+
+    assert emitter["hook_agent_id"]("claude", {}, identity) == identity
+    assert emitter["hook_agent_id"]("codex", {}, identity) == identity
+    assert emitter["RUNNER_SOURCES"] == {"claude": "claude-code", "codex": "codex"}
 
 
 def test_the_compose_template_renders_the_new_default(write_resident: ResidentWriter) -> None:
