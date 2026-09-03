@@ -37,7 +37,7 @@ const GATES = {
   resident: "A resident's record",
 };
 
-export default function ResidentsPage({ page, params }) {
+export default function ResidentsPage({ page, params, model }) {
   const { locked } = useSteward();
 
   // The detail page draws its own head, because the head carries the resident's own accent
@@ -56,7 +56,7 @@ export default function ResidentsPage({ page, params }) {
       ) : page === "residentNew" ? (
         <ResidentNew />
       ) : page === "resident" ? (
-        <ResidentDetail id={params.id} />
+        <ResidentDetail id={params.id} model={model} />
       ) : (
         <>
           <ResidentList />

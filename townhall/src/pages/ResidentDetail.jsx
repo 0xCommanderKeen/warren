@@ -23,6 +23,7 @@ import {
 import { ResidentRoutines, SchedulerBadge, SchedulerNote } from "../console/routines.jsx";
 import { LifecyclePanel } from "../console/lifecycle.jsx";
 import { stamp } from "../console/time.js";
+import { agentUuid, payloadSummary } from "../model.js";
 
 /** Read five things at once and keep each answer separate, refusals included. */
 function useResidentPanels(id) {
@@ -366,9 +367,62 @@ function InboxPanel({ settled }) {
   );
 }
 
+function EventFeed({ resident, model }) {
+  const person = model?.people.find(
+    (item) => item.residency === "resident" && agentUuid(item.id) === resident.uid,
+  );
+  const events = (person?.history || []).slice().reverse();
+
+  return (
+    <>
+      <Section>Event feed</Section>
+      <p className="mb-5 max-w-[78ch] text-[12px] leading-[1.7] text-dim">
+        Chronicle's retained activity for <code>resident:{resident.uid}</code>, newest first.
+        This follows the live village snapshot; it is a bounded window, not a permanent log.
+      </p>
+      {!model ? (
+        <Empty title="Waiting for Chronicle.">
+          The resident record is available, but the live village snapshot has not arrived yet.
+        </Empty>
+      ) : !person ? (
+        <Empty title="No Chronicle identity found.">
+          Chronicle's current snapshot does not contain this resident. It may not have emitted
+          an event since the latest log reset.
+        </Empty>
+      ) : events.length ? (
+        <div className="border-t border-rule" aria-label={`${resident.soul.name} event feed`}>
+          {events.map((event, index) => {
+            const summary = payloadSummary(event) || "No payload summary";
+            return (
+              <div
+                className="grid gap-1.5 border-b border-rule py-3.5 md:grid-cols-[150px_145px_1fr] md:gap-5"
+                key={`${event.ts}:${event.type}:${index}`}
+              >
+                <time className="font-mono text-[10px] text-faint" dateTime={event.ts}>
+                  {stamp(event.ts)}
+                </time>
+                <span className="font-mono text-[10px] uppercase tracking-[.12em] text-ember">
+                  {event.type || "unknown"}
+                </span>
+                <span className="min-w-0 break-words font-mono text-[10.5px] leading-[1.6] text-dim">
+                  {summary}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <Empty title="No retained activity.">
+          Chronicle knows this resident, but its current snapshot carries no event history.
+        </Empty>
+      )}
+    </>
+  );
+}
+
 /* -- the page ------------------------------------------------------------------------- */
 
-export default function ResidentDetail({ id }) {
+export default function ResidentDetail({ id, model }) {
   const { client } = useSteward();
   const { data, error, loading, refresh } = useResidentPanels(id);
 
@@ -444,15 +498,16 @@ export default function ResidentDetail({ id }) {
       <JournalPanel settled={data.journal} />
       <InboxPanel settled={data.inbox} />
 
+      <EventFeed resident={resident} model={model} />
+
       <Section>Where the rest of this resident is</Section>
       <p className="max-w-[78ch] text-[12px] leading-[1.7] text-dim">
         The village's view of the same resident — what it has been <em>doing</em> — is the{" "}
         <Link to={routeTo.fleet()} className="text-ember no-underline">
           Fleet
         </Link>{" "}
-        page, which reads Chronicle rather than steward and needs no credential. Everything on
-        this page is steward's: the projection carries no journal text, no inbox, and no
-        spend.
+        page. The event feed above is Chronicle's; the declaration, journal text, inbox, and
+        spend on this page are steward's and need an operator credential.
       </p>
     </>
   );
