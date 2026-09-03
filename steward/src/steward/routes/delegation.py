@@ -8,6 +8,7 @@ from pydantic import ConfigDict, Field
 from steward import delegation as dg
 from steward.input_bounds import DETAIL_MAX_CHARS, IDENTIFIER_MAX_CHARS, TITLE_MAX_CHARS
 from steward.manifest import validate_path
+from steward.routes.auth import session_of
 from steward.routes.deps import Deps, _Body, _refuse
 from steward.store import JOB_STATUSES, STATUS_OPEN
 
@@ -122,7 +123,7 @@ def router(deps: Deps) -> APIRouter:
         second derivation here would only turn a swept task row into a 404 where #67
         correctly falls back to the chain the sender is really in.
         """
-        principal = deps.session_of(request)
+        principal = session_of(request)
         if principal is not None:
             if body.sender is not None and body.sender != principal.resident_id:
                 _refuse(
