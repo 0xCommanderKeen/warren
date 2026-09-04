@@ -2944,6 +2944,7 @@ def village(monkeypatch: pytest.MonkeyPatch) -> str:
     """Give the API's environment a village to point new containers at."""
     monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
     monkeypatch.setenv("CHRONICLE_TOKEN", "api-village-token")
+    monkeypatch.setenv("STEWARD_URL", "http://dxp2800:8802")
     return "api-village-token"
 
 
@@ -3017,6 +3018,7 @@ def test_a_refused_deploy_says_the_same_body_will_pick_up_where_it_stopped(
     assert "post the same body again" in refused.json()["detail"]["message"]
 
     monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("STEWARD_URL", "http://dxp2800:8802")
     retried = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
     assert retried.status_code == 201
@@ -3102,7 +3104,11 @@ def test_a_deploy_leaks_no_secret_into_the_response(
     response = harness.client.post("/residents", json=NEW_RESIDENT | {"deploy": True})
 
     assert village not in response.text
-    assert response.json()["provision"]["env_keys"] == ["CHRONICLE_TOKEN", "CHRONICLE_URL"]
+    assert response.json()["provision"]["env_keys"] == [
+        "CHRONICLE_TOKEN",
+        "CHRONICLE_URL",
+        "STEWARD_URL",
+    ]
 
 
 # --------------------------------------------------------------------------------------
@@ -4398,6 +4404,68 @@ def test_a_session_may_not_write_anything_the_fleet_is_declared_by(
         assert response.json()["detail"]["error"] == "session_credential_forbidden", route
     assert declaration(harness)["text"] == before
     assert harness.store.requests() == [], "and nothing was logged as accepted"
+
+
+def test_a_granted_session_can_create_and_update_an_ungranted_skill(
+    writable: Callable[..., Harness],
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["skills.write"]
+    harness = writable(manifest=manifest)
+    credential = open_session_run(harness)
+
+    created = harness.client.post("/skills", json=NEW_SKILL, headers=as_session(credential))
+    assert created.status_code == 201, created.text
+    assert created.json()["commit"]["committed"]
+    assert created.json()["commit"]["sha"]
+    assert "test-agent (session) <test-agent-session@localhost>" in last_commit(harness)
+
+    updated = harness.client.put(
+        "/skills/triage",
+        json={"description": "Sort the inbox, gently.", "body": NEW_SKILL["body"]},
+        headers=as_session(credential),
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["commit"]["committed"]
+
+
+def test_a_granted_session_cannot_grant_everyone_or_rewrite_a_granted_skill(
+    writable: Callable[..., Harness],
+) -> None:
+    manifest = copy.deepcopy(valid_manifest())
+    manifest["session_grants"] = ["skills.write"]
+    harness = writable(manifest=manifest)
+    credential = open_session_run(harness)
+
+    defaulted = harness.client.post(
+        "/skills", json=NEW_SKILL | {"defaults": True}, headers=as_session(credential)
+    )
+    granted = harness.client.put(
+        "/skills/daily-summary",
+        json={"description": "Rewritten", "body": "Do something else."},
+        headers=as_session(credential),
+    )
+
+    assert defaulted.status_code == 403
+    assert "grant" in defaulted.json()["detail"]["message"]
+    assert granted.status_code == 403
+    assert "rewriting" in granted.json()["detail"]["message"]
+    assert harness.store.requests() == []
+
+    assert harness.client.post("/skills", json=NEW_SKILL | {"defaults": True}).status_code == 201
+    default_skill = harness.client.put(
+        "/skills/triage",
+        json={"description": "No longer default", "body": "Changed by the session."},
+        headers=as_session(credential),
+    )
+    assert default_skill.status_code == 403
+    assert "rewriting" in default_skill.json()["detail"]["message"]
+    assert (
+        harness.client.put(
+            "/skills/daily-summary", json={"description": "Rewritten", "body": "Human edit."}
+        ).status_code
+        == 200
+    )
 
 
 def test_a_session_may_still_read_the_declaration_it_is_bound_by(

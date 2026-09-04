@@ -1128,6 +1128,21 @@ def test_request_env_wins_over_the_launching_process(
     assert observed["CHRONICLE_URL"] == "http://this-residents-village"
 
 
+def test_a_local_session_inherits_the_api_address_beside_its_run_credential(
+    stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEWARD_URL", "http://127.0.0.1:8801")
+
+    observed = child_env(
+        stub_bin,
+        tmp_path,
+        request=request_for(tmp_path, env={"STEWARD_SESSION_TOKEN": "one-run-only"}),
+    )
+
+    assert observed["STEWARD_URL"] == "http://127.0.0.1:8801"
+    assert observed["STEWARD_SESSION_TOKEN"] == "one-run-only"
+
+
 def test_an_unset_allowlisted_name_is_absent_rather_than_empty(
     stub_bin: StubWriter, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

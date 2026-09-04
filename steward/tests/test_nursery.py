@@ -246,7 +246,11 @@ def test_a_declaration_that_cannot_bind_to_the_schema_is_refused(tmp_path: Path)
 
 
 VILLAGE_TOKEN = "s3cret-village-token-nobody-should-see"
-VILLAGE = {"CHRONICLE_URL": "http://dxp2800:8737", "CHRONICLE_TOKEN": VILLAGE_TOKEN}
+VILLAGE = {
+    "CHRONICLE_URL": "http://dxp2800:8737",
+    "CHRONICLE_TOKEN": VILLAGE_TOKEN,
+    "STEWARD_URL": "http://dxp2800:8802",
+}
 
 ROUTINE = {
     "id": "tidy-notes",
@@ -342,10 +346,12 @@ def test_the_deployed_container_is_wired_to_the_village(
     assert environment["CHRONICLE_PROJECT"] == "note-keeper"
     assert environment["CHRONICLE_URL"].startswith("${CHRONICLE_URL")
     assert environment["CHRONICLE_TOKEN"].startswith("${CHRONICLE_TOKEN")
+    assert environment["STEWARD_URL"].startswith("${STEWARD_URL")
     # warren#361: no BURROW_* twins, in the compose fragment or in the .env.
     assert not [key for key in environment if key.startswith("BURROW_")]
     assert host.read("~/docker/warren/residents/note-keeper/.env") == (
         f"CHRONICLE_TOKEN={VILLAGE_TOKEN}\nCHRONICLE_URL=http://dxp2800:8737\n"
+        "STEWARD_URL=http://dxp2800:8802\n"
     )
 
 
@@ -659,6 +665,15 @@ def test_a_dry_run_never_writes_scheduler_state(
     assert not state.exists()
 
 
+def test_a_dry_run_names_the_steward_address_it_would_provision(
+    scratch_repo: ScratchRepo, host: LocalTransport
+) -> None:
+    report = raise_into(scratch_repo, host, dry_run=True)
+
+    assert report.provision is not None
+    assert "STEWARD_URL" in report.provision.env_keys
+
+
 def test_a_dry_run_on_a_dirty_tree_warns_instead_of_refusing(
     scratch_repo: ScratchRepo, host: LocalTransport
 ) -> None:
@@ -712,7 +727,7 @@ def test_the_report_names_the_secrets_without_showing_them(
     report = raise_into(scratch_repo, host)
 
     assert report.provision is not None
-    assert report.provision.env_keys == ("CHRONICLE_TOKEN", "CHRONICLE_URL")
+    assert report.provision.env_keys == ("CHRONICLE_TOKEN", "CHRONICLE_URL", "STEWARD_URL")
     assert VILLAGE_TOKEN not in json.dumps(report.to_dict())
     assert VILLAGE_TOKEN not in "\n".join(report.render())
 

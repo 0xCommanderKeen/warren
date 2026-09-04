@@ -148,28 +148,31 @@ audit trail it leaves behind. So a named operator gets their own credential too
 
 | | master token | operator | session |
 |---|---|---|---|
-| credential | `STEWARD_TOKEN` | `steward-operator-…`, minted by name | `$STEWARD_SESSION_TOKEN`, in the session's environment |
+| credential | `STEWARD_TOKEN` | `steward-operator-…`, minted by name | `$STEWARD_SESSION_TOKEN`, beside `$STEWARD_URL` in the session's environment |
 | minted | by the operator, once, in the environment | `steward operator mint <name>` | by steward, per run, at fire time |
 | identity | none — it is a shared secret | the person it was minted for | the resident whose run it is |
 | stored | in steward's environment | as a SHA-256 digest in `operator_credentials` | as a SHA-256 digest in `open_runs` |
 | ends | when the operator rotates it and restarts | `steward operator revoke <name>`, on the next request | with the run: on close, timeout, or a stale lease |
 | may read | everything | everything | everything |
-| may write | everything | everything | `POST /delegate`, and nothing else |
-| commits as | `steward (api)` | that person, by name | — |
+| may write | everything | everything | `POST /delegate`; named manifest grants may open narrow doors |
+| commits as | `steward (api)` | that person, by name | `<resident> (session)` when granted |
 
 The write allowlist below is about **sessions** and is untouched by operator credentials.
 It exists to keep a running resident out of human acts, and an operator is the human.
 
-**What a session may reach.** Every `GET`, plus `POST /delegate`. Every other write path
-is `403 session_credential_forbidden`, and nothing is recorded — it is refused at the door,
-before a route runs. This is an allowlist, so a write path added later is refused until
-somebody decides otherwise.
+**What a session may reach.** Every `GET`, plus `POST /delegate`. A resident whose current
+manifest declares `session_grants: [skills.write]` may also `POST /skills` and `PUT` an
+ungranted skill. It may not set `defaults: true` (a fleet-wide grant is a human act) or
+replace a skill any resident manifest already grants. Those narrowings and every other
+write path are `403 session_credential_forbidden`, naming the act, and nothing is recorded.
+The allowlist consults the resident named by the live credential; request data cannot name
+a different one. Adding a route does not make it session-reachable by accident.
 
 That allowlist is what makes the write API (steward #214) safe to have at all. A resident
 that could `PUT` its own declaration would be choosing the rules it is held to, and one
-that could write a skill would be handing itself instructions nobody approved — so
-`PUT /residents/{id}/declaration`, `POST /skills`, `PUT /skills/{name}` and `POST /reload`
-are all refused for a session, each naming the act rather than reciting a policy. Reading
+that could write a skill without a grant would be handing itself instructions nobody
+approved — so `PUT /residents/{id}/declaration` and `POST /reload` remain closed, while
+skill writes require the narrow grant above. Each refusal names the act. Reading
 a declaration stays open: a resident that could not see its own charter could not follow
 it.
 
@@ -1074,7 +1077,8 @@ move the *typing* into a control panel while keeping every guarantee that rule b
 
 Four rules hold for all of them.
 
-**Human callers only** — the master token or an operator credential. A session credential is `403` on every route in this section; see
+Declaration writes are human-only. Skill writes also accept the deliberately narrower
+`skills.write` session grant described under
 [Three kinds of caller](#three-kinds-of-caller).
 
 **An invalid write is never written.** The candidate is applied to a throwaway *copy* of
@@ -1195,6 +1199,12 @@ One skill's frontmatter and body, and the two ways to write one.
 rather than an overwrite, because "add" and "rewrite" must not be the same button.
 `PUT /skills/{name}` replaces one and `404`s for a name nobody wrote. Both take
 `description`, `body`, `defaults`, and an optional `revision`.
+
+A session credential reaches these two write routes only when its resident manifest grants
+`skills.write`. For that caller, `defaults: true` is refused and `PUT` is refused when any
+manifest already grants the named skill. The master token and operator credentials retain
+the full form. A session-authored commit uses `<resident> (session)
+<<resident>-session@localhost>` and keeps the same `Steward-Request-Id` trailer.
 
 **`defaults: true` is a grant to the entire fleet.** A default skill is held by every
 resident without any manifest saying so, which makes this one flag the largest blast

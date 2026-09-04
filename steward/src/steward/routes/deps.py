@@ -11,6 +11,7 @@ from steward import authoring as au
 from steward.manifest import Resident, ValidationResult
 from steward.nursery import CommitIdentity
 from steward.operator_auth import OperatorPrincipal
+from steward.session_auth import SessionPrincipal
 from steward.store import Store, new_id
 from steward.transitions.approval import ApprovalOutboxWorker, ApprovalTransitions
 from steward.transitions.task import TaskTransitions
@@ -91,11 +92,16 @@ class Deps:
     def write_settings(self, request: Request) -> dict[str, Any]:
         """Return the authoring knobs shared by resident and skill writes."""
         operator = getattr(request.state, "operator", None)
-        identity = (
-            CommitIdentity(name=operator.name, email=operator.email)
-            if isinstance(operator, OperatorPrincipal)
-            else self.settings.commit_identity or au.DEFAULT_IDENTITY
-        )
+        session = getattr(request.state, "session", None)
+        if isinstance(operator, OperatorPrincipal):
+            identity = CommitIdentity(name=operator.name, email=operator.email)
+        elif isinstance(session, SessionPrincipal):
+            identity = CommitIdentity(
+                name=f"{session.resident_id} (session)",
+                email=f"{session.resident_id}-session@localhost",
+            )
+        else:
+            identity = self.settings.commit_identity or au.DEFAULT_IDENTITY
         return {
             "identity": identity,
             "allow_uncommitted": self.settings.allow_uncommitted_writes,
@@ -106,7 +112,15 @@ class Deps:
     def acting_principal(request: Request) -> str:
         """Describe this caller in an authoring commit trailer."""
         operator = getattr(request.state, "operator", None)
-        return operator.principal if isinstance(operator, OperatorPrincipal) else API_PRINCIPAL
+        if isinstance(operator, OperatorPrincipal):
+            return operator.principal
+        session = getattr(request.state, "session", None)
+        if isinstance(session, SessionPrincipal):
+            return (
+                f"{session.resident_id}, over the steward API with a session credential "
+                f"for run {session.run_id}"
+            )
+        return API_PRINCIPAL
 
     def find_resident(  # noqa: RET503 — every fallthrough raises through the refusal seam
         self, result: ValidationResult, resident_id: str

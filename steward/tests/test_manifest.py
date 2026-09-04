@@ -665,6 +665,21 @@ def test_unknown_field_is_rejected(write_resident: ResidentWriter) -> None:
     assert "Extra inputs are not permitted" in problem_for(result, "memory.retention")
 
 
+def test_session_grants_accept_only_named_doors(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["session_grants"] = ["skills.write"]
+    assert m.validate_manifest(write_resident(data)).ok
+
+    data["session_grants"] = ["skills.destroy"]
+    unknown = m.validate_manifest(write_resident(data))
+    assert "session_grants[0]" in {item.field_path for item in unknown.diagnostics}
+    assert "skills.write" in problem_for(unknown, "session_grants[0]")
+
+    data["session_grants"] = "skills.write"
+    not_a_list = m.validate_manifest(write_resident(data))
+    assert "list" in problem_for(not_a_list, "session_grants")
+
+
 @pytest.mark.parametrize("schedule", ["every morning", "0 7 * *", "0 7 * * * *", "@daily"])
 def test_bad_cron_schedules_fail(write_resident: ResidentWriter, schedule: str) -> None:
     data = valid_manifest()

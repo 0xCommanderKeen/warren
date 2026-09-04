@@ -20,6 +20,7 @@ from steward.deploy import (
     DEFAULT_HOST,
     DEFAULT_USER,
     ENV_FILENAME,
+    STEWARD_URL_ENV,
     BurrowTransport,
     LocalTransport,
     SshTransport,
@@ -41,6 +42,7 @@ from steward.runners import CommandOutcome
 VILLAGE = {
     CHRONICLE_URL_ENV: "http://dxp2800:8737",
     CHRONICLE_TOKEN_ENV: "s3cret-village-token",
+    STEWARD_URL_ENV: "http://dxp2800:8802",
 }
 
 
@@ -233,6 +235,7 @@ def test_rendering_the_same_resident_twice_gives_the_same_bytes(write_resident) 
 def test_the_env_file_is_sorted_lines_and_nothing_else() -> None:
     assert render_env(VILLAGE) == (
         "CHRONICLE_TOKEN=s3cret-village-token\nCHRONICLE_URL=http://dxp2800:8737\n"
+        "STEWARD_URL=http://dxp2800:8802\n"
     )
     assert render_env({}) == ""
 
@@ -250,8 +253,11 @@ def test_a_village_with_no_address_is_refused_before_anything_is_built() -> None
 
 def test_a_village_with_no_token_is_allowed_and_says_so() -> None:
     """Chronicle's ingest is open when its own token is unset; that is a real deployment."""
-    assert emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737"}) == {
+    assert emitter_env(
+        {CHRONICLE_URL_ENV: "http://dxp2800:8737", STEWARD_URL_ENV: "http://dxp2800:8802"}
+    ) == {
         CHRONICLE_URL_ENV: "http://dxp2800:8737",
+        STEWARD_URL_ENV: "http://dxp2800:8802",
     }
 
 
@@ -263,10 +269,17 @@ def test_the_env_file_carries_one_spelling_of_each_variable() -> None:
     been rebuilt and re-provisioned, so the twins bought nothing and named a service that
     no longer exists.
     """
-    values = emitter_env({CHRONICLE_URL_ENV: "http://dxp2800:8737", CHRONICLE_TOKEN_ENV: "s3cret"})
+    values = emitter_env(
+        {
+            CHRONICLE_URL_ENV: "http://dxp2800:8737",
+            CHRONICLE_TOKEN_ENV: "s3cret",
+            STEWARD_URL_ENV: "http://dxp2800:8802",
+        }
+    )
     assert values == {
         CHRONICLE_URL_ENV: "http://dxp2800:8737",
         CHRONICLE_TOKEN_ENV: "s3cret",
+        STEWARD_URL_ENV: "http://dxp2800:8802",
     }
 
 

@@ -58,6 +58,9 @@ x-steward-environment: &steward-environment
   STEWARD_BURROW_HOME: /home/Miha
   # The village, through arcadia's origin, which proxies /events to chronicle on 8738.
   CHRONICLE_URL: http://dockerhost:8737
+  # Resident sessions present their per-run credential to this host-published API.
+  # Their compose projects have separate networks, so steward-api is not resolvable there.
+  STEWARD_URL: http://dockerhost:8802
   # Read by the API alone: every commit the write API makes is pushed to this branch of
   # the checkout's origin. Best effort — a save is durable before the push starts, and a
   # burrow that cannot reach GitHub answers "committed, not pushed" and carries on. Never

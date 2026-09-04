@@ -141,6 +141,7 @@ def test_a_container_session_obeys_the_rendered_mount_mode(
     compose = compose_dir / "docker-compose.yaml"
     compose.write_text(render_compose(resident, target_for(resident.manifest)), encoding="utf-8")
     monkeypatch.setenv("CHRONICLE_URL", "http://dockerhost:8737")
+    monkeypatch.setenv("STEWARD_URL", "http://dockerhost:8802")
     _docker("compose", "-f", str(compose), "up", "-d", timeout=120)
     try:
         _install_brain(name, "echo resident > /vault/from-resident")

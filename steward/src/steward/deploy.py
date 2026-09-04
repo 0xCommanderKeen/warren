@@ -184,6 +184,7 @@ FALLBACK_MEMORY_PATH = "/data/memory"
 #: remote ``.env``; never into the compose file, never into a manifest, never into git.
 CHRONICLE_URL_ENV = "CHRONICLE_URL"
 CHRONICLE_TOKEN_ENV = "CHRONICLE_TOKEN"  # noqa: S105 — a variable name, not a credential
+STEWARD_URL_ENV = "STEWARD_URL"
 
 
 #: ssh's reserved exit status for "ssh itself failed" — connection refused, host
@@ -397,6 +398,7 @@ def render_compose(
             "CHRONICLE_PROJECT": resident.project,
             "CHRONICLE_URL": ("${CHRONICLE_URL:?steward writes this into .env at provision time}"),
             "CHRONICLE_TOKEN": "${CHRONICLE_TOKEN-}",
+            "STEWARD_URL": "${STEWARD_URL:?steward writes this into .env at provision time}",
             "STEWARD_RESIDENT": resident.id,
             # The resident image runs as root (no USER: the vault and key mounts are
             # root-owned), and the claude CLI refuses `--permission-mode
@@ -472,6 +474,13 @@ def emitter_env(source: Mapping[str, str]) -> dict[str, str]:
             f"export {CHRONICLE_URL_ENV}=http://{DEFAULT_HOST}:8737 and run this again"
         )
     values = {CHRONICLE_URL_ENV: url}
+    steward_url = (source.get(STEWARD_URL_ENV) or "").strip()
+    if not steward_url:
+        raise TransportError(
+            f"{STEWARD_URL_ENV} is unset in steward's environment, so the resident's "
+            "session credential would have no API address to present itself to"
+        )
+    values[STEWARD_URL_ENV] = steward_url
     token = (source.get(CHRONICLE_TOKEN_ENV) or "").strip()
     if token:
         values[CHRONICLE_TOKEN_ENV] = token
@@ -491,7 +500,7 @@ def planned_env(source: Mapping[str, str]) -> dict[str, str]:
     actually write rather than half of them.
     """
     values: dict[str, str] = {}
-    for key in (CHRONICLE_URL_ENV, CHRONICLE_TOKEN_ENV):
+    for key in (CHRONICLE_URL_ENV, CHRONICLE_TOKEN_ENV, STEWARD_URL_ENV):
         value = (source.get(key) or "").strip()
         if value:
             values[key] = value

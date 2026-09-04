@@ -1,6 +1,6 @@
 """Authentication and request-body guards for steward routes."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from hmac import compare_digest
 
 from fastapi import HTTPException, Request
@@ -12,6 +12,7 @@ from steward.input_bounds import (
     EDIT_MAX_DEPTH,
     validate_json_container_depth,
 )
+from steward.manifest import SessionGrant
 from steward.operator_auth import OperatorPrincipal, looks_like_operator_credential
 from steward.routes.deps import _refuse
 from steward.session_auth import (
@@ -35,6 +36,20 @@ SESSION_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: ``GET /approvals/{id}`` and the human-only ``POST /approvals/{id}`` — so raising stays on
 #: the block and CLI path either way. This credential buys denial and identity, not reach.
 SESSION_WRITE_PATHS = frozenset({"/delegate"})
+
+
+#: Granted write paths, matched after the permanent session-safe allowlist above. A prefix
+#: ends in ``/`` so ``/skills-not-really`` can never inherit the skill-library door.
+def _session_grant_for(method: str, path: str) -> SessionGrant | None:
+    """Name the grant for one exact method/route shape, or keep the door closed."""
+    if method == "POST" and path == "/skills":
+        return SessionGrant.SKILLS_WRITE
+    if method == "PUT" and path.startswith("/skills/"):
+        name = path.removeprefix("/skills/")
+        if name and "/" not in name:
+            return SessionGrant.SKILLS_WRITE
+    return None
+
 
 #: Why a particular refusal is the one it is. Generic prose would tell a session it may not
 #: write; these say what the act *is*, which is the part worth knowing: these three are
@@ -144,6 +159,7 @@ def _presented_operator_credential(headers: Sequence[tuple[bytes, bytes]]) -> st
 
 type PrincipalLookup = Callable[[str], SessionPrincipal | None]
 type OperatorLookup = Callable[[str], OperatorPrincipal | None]
+type SessionGrantsLookup = Callable[[str], Collection[SessionGrant]]
 type TokenComparator = Callable[[bytes, bytes], bool]
 
 
@@ -151,6 +167,7 @@ def _auth_dependency(
     token: str | None,
     principal_for: PrincipalLookup,
     operator_for: OperatorLookup,
+    grants_for: SessionGrantsLookup,
     compare_token: TokenComparator = compare_digest,
 ) -> Callable[[Request], None]:
     """Build the gate every endpoint hangs off, and record who got through it.
@@ -167,8 +184,9 @@ def _auth_dependency(
     lives on. This is what a browser is given, so the master token stops going into one.
 
     **A session** (steward #41), looked up against the live run registry, and then held to
-    the reads-plus-``/delegate`` allowlist below. Unchanged by any of the above: that
-    allowlist exists to keep *sessions* out of human acts, and an operator is a human.
+    the reads-plus-``/delegate`` allowlist and its resident's named grants below. Unchanged
+    by any of the above: that allowlist exists to keep *sessions* out of human acts, and an
+    operator is a human.
     """
 
     def require_token(request: Request) -> None:
@@ -201,7 +219,15 @@ def _auth_dependency(
             )
         request.state.session = principal
         path = request.url.path.rstrip("/") or "/"
-        if request.method not in SESSION_SAFE_METHODS and path not in SESSION_WRITE_PATHS:
+        required_grant = _session_grant_for(request.method, path)
+        granted_path = required_grant is not None and required_grant in grants_for(
+            principal.resident_id
+        )
+        if (
+            request.method not in SESSION_SAFE_METHODS
+            and path not in SESSION_WRITE_PATHS
+            and not granted_path
+        ):
             _refuse(
                 403,
                 "session_credential_forbidden",

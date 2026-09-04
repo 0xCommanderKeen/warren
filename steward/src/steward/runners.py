@@ -184,6 +184,9 @@ SESSION_ENV_BASE = (
     # Where the village is, so a session's own emitter posts to the same burrow. The
     # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
     "CHRONICLE_URL",
+    # The API address paired with this run's per-session credential. Unlike STEWARD_TOKEN,
+    # this is an address, not authority; the credential still bounds what the caller can do.
+    "STEWARD_URL",
 )
 
 #: Names a runner adds for its own brain, on top of :data:`SESSION_ENV_BASE`.
