@@ -543,6 +543,7 @@ def project_village(
     exact, projects = _resident_indexes(resident_manifests)
 
     approvals, approval_by_id = [], {}
+    contested_approvals = set()
     tasks, task_by_id, task_origins, task_transitions = [], {}, {}, {}
     journals, journal_by_key = [], {}
     routines, routine_by_run = [], {}
@@ -623,14 +624,35 @@ def project_village(
                 approval_by_id[shape["request_id"]] = shape
                 approvals.append(shape)
         elif kind == "needs_human_resolved":
-            record = approval_by_id.get(payload["request_id"])
-            if (
+            request_id = payload["request_id"]
+            record = approval_by_id.get(request_id)
+            binds = bool(
                 record
                 and record["state"] != "collision"
                 and record["agent_id"] == event["agent_id"]
                 and record["project"] == event["project"]
                 and record["action"] == payload["action"]
-            ):
+            )
+            if binds and record["state"] == "resolved":
+                # The first close owns the answer (warren#266). Rotation carries exactly
+                # one close forward, so a projection where the newest close won read
+                # `deny` from the raw tail and `approve` from the same log once rotated —
+                # a decision that depends on when it is read is not a decision. A later
+                # disagreement is evidence about the log, not about the human, so it
+                # becomes one complaint per request: Steward replays a recorded answer on
+                # its own (the `200` path), and an exact replay is not a disagreement.
+                if (
+                    record["decision"] != payload["decision"]
+                    and request_id not in contested_approvals
+                ):
+                    contested_approvals.add(request_id)
+                    diagnostics.append(
+                        {
+                            "kind": "conflicting_approval_resolution",
+                            "request_id": request_id,
+                        }
+                    )
+            elif binds:
                 record.update(
                     state="resolved",
                     decision=payload["decision"],
@@ -640,7 +662,7 @@ def project_village(
                 diagnostics.append(
                     {
                         "kind": "orphan_approval_resolution",
-                        "request_id": payload["request_id"],
+                        "request_id": request_id,
                     }
                 )
         if kind == "chat_message_dropped":

@@ -82,6 +82,14 @@ export const KIND_WORDS = {
     title: "Decisions with nothing to decide",
     note: "A resolution arrived for a request this snapshot never saw opened.",
   },
+  conflicting_approval_resolution: {
+    title: "Approvals answered twice, differently",
+    note:
+      "One request was closed again with a different decision. The first decision is the " +
+      "one the village shows and the one Steward recorded; the later close changed " +
+      "nothing. Steward emits no second close of its own, so a line here is a replayed or " +
+      "combined log rather than somebody changing their mind.",
+  },
   journal_collision: {
     title: "Two journals for one day",
     note:
@@ -107,6 +115,7 @@ const KIND_ORDER = [
   "malformed_event",
   "approval_collision",
   "orphan_approval_resolution",
+  "conflicting_approval_resolution",
   "journal_collision",
   "orphan_routine_terminal",
   UNNAMED,
