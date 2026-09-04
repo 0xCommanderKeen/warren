@@ -1099,6 +1099,15 @@ resident may mount it `rw`; all other residents use `ro`. Tree validation warns 
 every competing writer. `steward doctor` prints each mount beside the resident's workspace,
 and a provision dry run shows the same mount in the complete rendered Compose fragment.
 
+The resident image runs as root (uid 0). If an extra mount is a Git repository, the
+repository's top directory on the host must therefore also be owned by uid 0. Git rejects
+a repository owned by another uid as dubious even when the directory is writable; adding
+`safe.directory` inside the container is not durable because `/root/.gitconfig` is not a
+volume and disappears when the container is recreated. Set the host directory's owner
+once (for example, `chown root:root ~/docker/life/vault` on the burrow) and preserve whatever
+mode and ownership its contents require. If a future resident image runs as a non-root uid,
+the mounted repository's top directory must match that uid instead.
+
 ### The image
 
 `steward-resident:latest` is built from [`docker/resident/Dockerfile`](../docker/resident/Dockerfile)
