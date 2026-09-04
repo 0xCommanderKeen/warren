@@ -248,18 +248,36 @@ its own. Chat is a *route*, because a conversation is two-way and fires a sessio
 notification is not, and putting them in one vocabulary would make `kind` mean two opposite
 things.
 
-## `app_grants` — declared app access
+## `app_grants` — declared and enforced app access
 
-Identifier and status only. There is deliberately no field for a credential or a
-credential reference.
+There is deliberately no field for a credential or credential reference. Grants remain
+declarative for every app except `id: discord`; Discord is the first integration whose
+scope vocabulary steward enforces.
 
 ```yaml
 app_grants:
   - id: gmail
     name: Gmail
     status: granted          # granted | pending | revoked
-    scopes: [gmail.readonly] # scope names, not values
     status_ref: https://myaccount.google.com/permissions   # where the grant is administered
+```
+
+For Discord, `scopes` accepts only this fixed vocabulary. A missing, pending, or revoked
+scope cannot perform its action and produces a `rejected_post` knock.
+
+| Scope | Permission |
+|---|---|
+| `channels.manage` | Create channels and set channel topics |
+| `threads.manage` | Create and archive threads |
+| `messages.pin` | Pin messages |
+| `members.read` | Refresh the resident's guild mirror |
+
+```yaml
+app_grants:
+  - id: discord
+    name: Discord
+    status: granted
+    scopes: [channels.manage, members.read]
 ```
 
 ## `tools` — what a session may reach

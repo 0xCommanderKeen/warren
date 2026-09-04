@@ -383,6 +383,32 @@ A malformed, disallowed, unknown, or failed post emits `chat_post_refused` and r
 `needs_human` under `rejected_post`; the transcript records the outcome. This is the
 outbound counterpart to the action harvesting described in [delegation.md](delegation.md).
 
+## Scoped Discord administration
+
+An active `app_grants` entry for `id: discord` exposes only the verbs covered by its
+granted scopes. The exact action blocks are:
+
+```text
+<discord create_channel>{"name":"announcements"}</discord>
+<discord set_topic channel="announcements">{"topic":"Today"}</discord>
+<discord create_thread channel="announcements">{"name":"discussion"}</discord>
+<discord archive_thread thread="123">{}</discord>
+<discord pin channel="announcements" message="123">{}</discord>
+```
+
+There is intentionally no destructive removal verb. Steward makes one authenticated REST
+call per accepted block and emits, respectively, `discord_channel_created`,
+`discord_topic_set`, `discord_thread_created`, `discord_thread_archived`, or
+`discord_message_pinned`. Missing scopes, malformed targets, and transport failures raise
+`needs_human` under `rejected_post` without making an unauthorized call. The transcript
+records only the outcome, never the authored topic or credential.
+
+With `members.read`, the chat daemon refreshes `<memory>/discord/guild.json` immediately
+before each resident session and at most every 15 minutes while polling. The bounded,
+token-free file contains channels, members and `joined_at`, resident bot reachability, and
+the last 24 hours of delegated tasks. Residents read context from that file and request
+changes only through the blocks above; mirror refresh never removes guild resources.
+
 ## Future Discord gateway (design only)
 
 This is the design for [warren#424](https://github.com/0xCommanderKeen/warren/issues/424),

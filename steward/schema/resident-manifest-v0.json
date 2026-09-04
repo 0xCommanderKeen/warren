@@ -2,7 +2,7 @@
   "$defs": {
     "AppGrant": {
       "additionalProperties": false,
-      "description": "A declared grant to use an external application. Identifier and status only.",
+      "description": "A declared app grant; Discord scopes are the first enforced capabilities.",
       "properties": {
         "id": {
           "pattern": "^[a-z0-9][a-z0-9-]*$",

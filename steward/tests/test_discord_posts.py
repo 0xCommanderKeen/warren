@@ -1,5 +1,8 @@
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import pytest
 
 from conftest import ResidentWriter, valid_manifest
 from steward import discord_posts as dp
@@ -15,6 +18,7 @@ class Rooms:
     resolved: dict[str, str] | None = field(default_factory=lambda: {"household": "42"})
     sent: list[tuple[str, str, str]] = field(default_factory=list)
     resolves: int = 0
+    admin_calls: list[tuple[str, str, Mapping[str, object] | None]] = field(default_factory=list)
 
     def channels(self, token: str, guild: str):
         """Resolve the configured fake rooms once per executor."""
@@ -27,8 +31,23 @@ class Rooms:
         self.sent.append((token, conversation, text))
         return True
 
+    def admin(
+        self, token: str, method: str, path: str, payload: Mapping[str, object] | None = None
+    ) -> bool:
+        """Capture one attempted Discord administration call."""
+        assert token == "secret"
+        self.admin_calls.append((method, path, payload))
+        return True
 
-def resident(write_resident: ResidentWriter, tmp_path: Path) -> Resident:
+    def threads(self, token: str, guild: str) -> frozenset[str]:
+        """Resolve one active thread inside the configured fake guild."""
+        assert (token, guild) == ("secret", "guild")
+        return frozenset({"77"})
+
+
+def resident(
+    write_resident: ResidentWriter, tmp_path: Path, scopes: list[str] | None = None
+) -> Resident:
     data = valid_manifest()
     data["memory"] = {"kind": "directory", "path": str(tmp_path / "memory"), "journal": "journal"}
     data["routes"].append(
@@ -40,6 +59,10 @@ def resident(write_resident: ResidentWriter, tmp_path: Path) -> Resident:
             "posts_to": ["household"],
         }
     )
+    if scopes is not None:
+        data["app_grants"] = [
+            {"id": "discord", "name": "Discord", "status": "granted", "scopes": scopes}
+        ]
     return load_manifest(write_resident(data))
 
 
@@ -142,3 +165,124 @@ def test_from_env_resolves_rooms_at_startup_only_once(write_resident, tmp_path):
             output('<discord post channel="household">{"text":"hi"}</discord>'),
         )
     assert rooms.resolves == 1
+
+
+def test_admin_action_without_scope_knocks_and_makes_no_discord_call(write_resident, tmp_path):
+    person = resident(write_resident, tmp_path, [])
+    rooms = Rooms()
+    sink = ev.NullEmitter()
+    with Store(tmp_path / "steward.db") as store:
+        poster = dp.Poster(
+            [person], store, sink, rooms, {"STEWARD_CHAT_TOKEN_DISCORD_TESTY": "secret"}, "guild"
+        )
+        [result] = poster.harvest(
+            person.manifest,
+            output('<discord create_channel>{"name":"announcements"}</discord>'),
+        )
+        [knock] = store.pending_approvals()
+    assert result.reason == "missing_scope"
+    assert knock.action == "rejected_post"
+    assert knock.detail["missing_scope"] == "channels.manage"
+    assert rooms.admin_calls == []
+
+
+def test_admin_refuses_unbounded_text_before_discord(write_resident, tmp_path):
+    person = resident(write_resident, tmp_path, ["channels.manage"])
+    rooms = Rooms()
+    with Store(tmp_path / "steward.db") as store:
+        poster = dp.Poster(
+            [person],
+            store,
+            ev.NullEmitter(),
+            rooms,
+            {"STEWARD_CHAT_TOKEN_DISCORD_TESTY": "secret"},
+            "guild",
+        )
+        [result] = poster.harvest(
+            person.manifest,
+            output(f'<discord create_channel>{{"name":"{"x" * 101}"}}</discord>'),
+        )
+    assert result.reason == dp.UNREADABLE
+    assert rooms.admin_calls == []
+
+
+def test_archive_refuses_a_thread_outside_the_configured_guild(write_resident, tmp_path):
+    person = resident(write_resident, tmp_path, ["threads.manage"])
+    rooms = Rooms()
+    with Store(tmp_path / "steward.db") as store:
+        poster = dp.Poster(
+            [person],
+            store,
+            ev.NullEmitter(),
+            rooms,
+            {"STEWARD_CHAT_TOKEN_DISCORD_TESTY": "secret"},
+            "guild",
+        )
+        [result] = poster.harvest(
+            person.manifest, output('<discord archive_thread thread="88">{}</discord>')
+        )
+    assert result.reason == dp.UNREADABLE
+    assert rooms.admin_calls == []
+
+
+def test_no_discord_admin_verb_can_delete():
+    assert all("delete" not in verb for verb in dp.ADMIN_VERBS)
+    [action] = dp.extract_admin_actions('<discord delete_channel>{"name":"household"}</discord>')
+    assert action.problem is not None
+
+
+@pytest.mark.parametrize(
+    ("scope", "block", "expected_call", "event_type"),
+    [
+        (
+            "channels.manage",
+            '<discord create_channel>{"name":"announcements"}</discord>',
+            ("POST", "/guilds/guild/channels", {"name": "announcements", "type": 0}),
+            "discord_channel_created",
+        ),
+        (
+            "channels.manage",
+            '<discord set_topic channel="household">{"topic":"Today"}</discord>',
+            ("PATCH", "/channels/42", {"topic": "Today"}),
+            "discord_topic_set",
+        ),
+        (
+            "threads.manage",
+            '<discord create_thread channel="household">{"name":"chores"}</discord>',
+            ("POST", "/channels/42/threads", {"name": "chores", "type": 11}),
+            "discord_thread_created",
+        ),
+        (
+            "threads.manage",
+            '<discord archive_thread thread="77">{}</discord>',
+            ("PATCH", "/channels/77", {"archived": True}),
+            "discord_thread_archived",
+        ),
+        (
+            "messages.pin",
+            '<discord pin channel="household" message="99">{}</discord>',
+            ("PUT", "/channels/42/pins/99", None),
+            "discord_message_pinned",
+        ),
+    ],
+)
+def test_each_scoped_admin_verb_makes_one_rest_call_and_event(  # noqa: PLR0913, PLR0917
+    write_resident,
+    tmp_path,
+    scope: str,
+    block: str,
+    expected_call: tuple[str, str, dict[str, object] | None],
+    event_type: str,
+):
+    person = resident(write_resident, tmp_path, [scope])
+    rooms = Rooms()
+    sink = ev.NullEmitter()
+    with Store(tmp_path / "steward.db") as store:
+        poster = dp.Poster(
+            [person], store, sink, rooms, {"STEWARD_CHAT_TOKEN_DISCORD_TESTY": "secret"}, "guild"
+        )
+        [result] = poster.harvest(person.manifest, output(block))
+    assert result.posted
+    assert rooms.admin_calls == [expected_call]
+    assert [event.type for event in sink.events] == [event_type]
+    assert block not in result.transcript_line()

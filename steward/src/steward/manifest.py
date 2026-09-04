@@ -1103,7 +1103,7 @@ class Notifications(_Model):
 
 
 class AppGrant(_Model):
-    """A declared grant to use an external application. Identifier and status only."""
+    """A declared app grant; Discord scopes are the first enforced capabilities."""
 
     id: str = Field(pattern=SLUG_PATTERN)
     name: str = Field(min_length=1, description="Human label, e.g. Gmail.")
@@ -1113,6 +1113,20 @@ class AppGrant(_Model):
         default=None,
         description="Where the grant is administered, e.g. a settings URL.",
     )
+
+    @model_validator(mode="after")
+    def _only_discord_has_known_scopes(self) -> Self:
+        if not self.scopes:
+            return self
+        if self.id != "discord":
+            raise ValueError("scopes are only enforced for id 'discord'; omit them for other apps")
+        known = frozenset({"channels.manage", "threads.manage", "messages.pin", "members.read"})
+        unknown = sorted(set(self.scopes) - known)
+        if unknown:
+            raise ValueError(f"unknown Discord scope(s): {', '.join(unknown)}")
+        if len(set(self.scopes)) != len(self.scopes):
+            raise ValueError("Discord scopes must be unique")
+        return self
 
 
 #: One directory in a ``workspace`` grant. Not stripped, like a tool name and a skill id:
@@ -1891,7 +1905,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "app_grants.id": "id: gmail",
     "app_grants.name": "name: Gmail",
     "app_grants.status": "status: granted  (granted | pending | revoked)",
-    "app_grants.scopes": "scopes: [gmail.readonly]",
+    "app_grants.scopes": "scopes: [channels.manage, members.read]  (only for id: discord)",
     "app_grants.status_ref": "status_ref: https://myaccount.google.com/permissions",
     "tools": "tools: [Read, Glob, Grep]  (or: tools: unrestricted)",
     "workspace": "workspace: [/data/library/books]  (absolute paths)",

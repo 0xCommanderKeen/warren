@@ -314,6 +314,35 @@ def test_credential_shaped_key_at_top_level_is_rejected(write_resident: Resident
 
 
 @pytest.mark.parametrize(
+    "scope", ["channels.manage", "threads.manage", "messages.pin", "members.read"]
+)
+def test_discord_grant_accepts_each_enforced_scope(
+    write_resident: ResidentWriter, scope: str
+) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {"id": "discord", "name": "Discord", "status": "granted", "scopes": [scope]}
+    ]
+    assert m.validate_manifest(write_resident(data)).ok
+
+
+def test_discord_grant_rejects_an_unknown_scope(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"] = [
+        {"id": "discord", "name": "Discord", "status": "granted", "scopes": ["guild.delete"]}
+    ]
+    result = m.validate_manifest(write_resident(data))
+    assert "unknown Discord scope" in problem_for(result, "app_grants[0]")
+
+
+def test_non_discord_grant_refuses_scopes(write_resident: ResidentWriter) -> None:
+    data = valid_manifest()
+    data["app_grants"][0]["scopes"] = ["gmail.readonly"]
+    result = m.validate_manifest(write_resident(data))
+    assert "only enforced for id 'discord'" in problem_for(result, "app_grants[0]")
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         ("sk-abcdefghijklmnopqrstuvwxyz0123", "an inline API key"),
