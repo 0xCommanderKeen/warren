@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import yaml
 
 from conftest import ResidentWriter, valid_manifest
 from steward import runners as r
@@ -353,3 +354,25 @@ def test_a_granted_skill_crosses_the_mount_and_pruning_removes_it(tmp_path: Path
         subprocess.run(  # noqa: S603 — cleanup must run even after a failure
             [DOCKER, "rm", "-f", name], capture_output=True, check=False, timeout=60
         )
+
+
+def test_the_rendered_clock_is_the_declared_zone_inside_a_container(
+    write_resident: ResidentWriter,
+) -> None:
+    """``date`` inside a container run with the rendered ``TZ`` names the declared zone.
+
+    warren#386. Debian slim rather than the alpine fixture: busybox ``date`` cannot read a
+    zone name without tzdata, and the resident image is Debian.
+    """
+    data = valid_manifest()
+    for routine in data["routines"]:
+        routine["schedule_tz"] = "Europe/Ljubljana"
+    one = load_manifest(write_resident(data))
+    service = yaml.safe_load(render_compose(one, target_for(one.manifest)))["services"]
+    zone = service["test-agent"]["environment"]["TZ"]
+    assert zone == "Europe/Ljubljana"
+
+    printed = _docker(
+        "run", "--rm", "-e", f"TZ={zone}", "debian:bookworm-slim", "date", "+%Z", timeout=180
+    ).strip()
+    assert printed in {"CET", "CEST"}, printed

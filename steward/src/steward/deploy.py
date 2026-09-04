@@ -63,6 +63,7 @@ from steward.manifest import (
     MANIFEST_FILENAME,
     Resident,
     ResidentManifest,
+    container_zone,
     resolve_mount_host_path,
 )
 from steward.runners import (
@@ -408,6 +409,11 @@ def render_compose(
             # manifest that names no permission mode. Measured 2026-09-04 in
             # steward-hob against CLI 2.1.243 (warren#391).
             "IS_SANDBOX": "1",
+            # The container's clock follows the routines' wall clock (warren#386), so a
+            # session that stamps "today" from `date` names the same day the schedule
+            # meant; without it the container is UTC and every skill has to spell the
+            # zone out. deploy.tz settles it when the routines disagree.
+            "TZ": container_zone(resident.manifest),
         },
         "volumes": [
             f"./memory:{memory_path}",

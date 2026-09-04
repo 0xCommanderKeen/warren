@@ -656,6 +656,51 @@ def test_the_schedule_zone_example_is_actionable(write_resident: ResidentWriter)
     assert "Europe/Ljubljana" in example
 
 
+def _two_zones(data: dict) -> dict:
+    """Give the manifest two routines whose schedules read in different zones."""
+    first = data["routines"][0]
+    second = dict(first) | {"id": "evening", "schedule_tz": "America/New_York"}
+    first["schedule_tz"] = "Europe/Ljubljana"
+    data["routines"] = [first, second]
+    return data
+
+
+def test_routines_in_different_zones_need_a_deploy_tz(write_resident: ResidentWriter) -> None:
+    """Refused, because the container clock would have no single answer (warren#386)."""
+    result = m.validate_manifest(write_resident(_two_zones(valid_manifest())))
+    assert not result.ok
+    problem = problem_for(result, "deploy.tz")
+    assert "Europe/Ljubljana" in problem
+    assert "America/New_York" in problem
+    example = next(d.example for d in result.diagnostics if d.field_path == "deploy.tz")
+    assert "tz:" in example
+
+
+def test_a_deploy_tz_settles_routines_in_different_zones(write_resident: ResidentWriter) -> None:
+    data = _two_zones(valid_manifest()) | {"deploy": {"tz": "Europe/Ljubljana"}}
+    result = m.validate_manifest(write_resident(data))
+    assert result.ok, [d.render() for d in result.diagnostics]
+    assert m.container_zone(result.residents[0].manifest) == "Europe/Ljubljana"
+
+
+def test_container_zone_follows_the_routines_when_they_agree(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    for routine in data["routines"]:
+        routine["schedule_tz"] = "Europe/Ljubljana"
+    assert m.container_zone(m.load_manifest(write_resident(data)).manifest) == "Europe/Ljubljana"
+    assert m.container_zone(m.load_manifest(write_resident()).manifest) == "UTC"
+
+
+@pytest.mark.parametrize("zone", ["Europe/Atlantis", "CEST", "+02:00", ""])
+def test_a_deploy_zone_that_is_not_iana_fails(write_resident: ResidentWriter, zone: str) -> None:
+    data = valid_manifest() | {"deploy": {"tz": zone}}
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "IANA time zone" in problem_for(result, "deploy.tz")
+
+
 def test_schedule_tz_is_in_the_json_schema() -> None:
     schema = m.manifest_json_schema()
     routine = schema["$defs"]["Routine"]["properties"]

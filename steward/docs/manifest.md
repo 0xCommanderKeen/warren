@@ -680,6 +680,10 @@ abbreviation like `CEST`, an offset like `+02:00`, a place that does not exist �
 validation with the file and field named. It defaults to `UTC`, which is a real answer
 rather than "whatever the host thinks".
 
+The container's own clock follows this zone too — see
+[The container's clock](#the-containers-clock) under `deploy` for what happens when two
+routines name different zones.
+
 Daylight saving is resolved on the wall clock, because that is what the manifest wrote
 down:
 
@@ -1042,6 +1046,7 @@ deploy:
   container: steward-hob       # the docker container name
   image: steward-resident:latest      # what the container runs
   command: [sleep, infinity]          # argv inside it
+  tz: Europe/Ljubljana                # the container's clock; see "The container's clock"
 ```
 
 Every field is optional, and every one has a default for the layout this fleet already
@@ -1056,6 +1061,7 @@ own server at `burrow/` in it, and a new resident lands in `residents/<id>` besi
 | `container` | `steward-<id>` |
 | `image` | `steward-resident:latest` |
 | `command` | `["sleep", "infinity"]` |
+| `tz` | the routines' `schedule_tz`, when they all agree |
 
 So an ordinary resident declares no `deploy` block at all and still deploys. The block is
 for the resident that does *not* live where everything else lives: a second machine, a
@@ -1107,6 +1113,27 @@ volume and disappears when the container is recreated. Set the host directory's 
 once (for example, `chown root:root ~/docker/life/vault` on the burrow) and preserve whatever
 mode and ownership its contents require. If a future resident image runs as a non-root uid,
 the mounted repository's top directory must match that uid instead.
+
+### The container's clock
+
+The rendered compose sets `TZ`, so `date` inside a session names the same day the
+routines' wall clock does. Without it the container runs on UTC: a close-of-day at 22:30
+Ljubljana is still the same date, but a resident stamping "today" from `date` is one edge
+away from a wrong journal filename, and every skill has to say `TZ=Europe/Ljubljana date`
+out loud.
+
+Where the zone comes from, in order:
+
+1. `deploy.tz`, when declared — an IANA name, validated the way `schedule_tz` is.
+2. Otherwise the routines' `schedule_tz`, when every routine agrees. A resident with no
+   routines gets `UTC`.
+3. Routines that **disagree** with no `deploy.tz` to settle it are **refused** at
+   validation (`deploy.tz`: "routines read their schedules in … and deploy.tz does not say
+   which one the container's clock follows"). Steward never picks a clock for a manifest
+   that never chose one; declare `deploy.tz` and the schedules keep their own zones.
+
+The provision dry run shows the rendered `TZ` in the compose fragment, and the
+container-integration suite reads `date` inside a container run with it.
 
 ### The image
 

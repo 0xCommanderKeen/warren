@@ -323,6 +323,19 @@
           },
           "title": "Mounts",
           "type": "array"
+        },
+        "tz": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "IANA zone the container's clock reads in (TZ). Default: the routines' schedule_tz when they all agree; required when they disagree.",
+          "title": "Tz"
         }
       },
       "title": "Deploy",

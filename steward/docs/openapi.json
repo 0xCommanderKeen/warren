@@ -398,6 +398,18 @@
             "description": "Compose directory on the host. Default: ~/docker/warren/residents/<id>.",
             "title": "Path"
           },
+          "tz": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "IANA zone the container's clock reads in (TZ). Default: the routines' schedule_tz when they all agree; required when they disagree.",
+            "title": "Tz"
+          },
           "user": {
             "anyOf": [
               {
