@@ -1977,6 +1977,35 @@
         "summary": "Post Job"
       }
     },
+    "/org": {
+      "get": {
+        "description": "Return the fleet as nodes and delegation edges, computed from the manifests.\n\nA projection of :func:`~steward.manifest.validate_path` and nothing else \u2014 no\nledger, no host, no clock \u2014 so two calls a second apart over an unchanged tree\nanswer the same bytes, and a resident that gained a grant this morning is on the\nchart without anybody having redrawn it.\n\nA manifest steward could not read is not a node \u2014 it never became a\n:class:`~steward.manifest.Resident` \u2014 so the chart is drawn from the residents\nvalidation produced and the refusals are reported beside it in ``errors``, the way\n``GET /residents`` reports them. A fleet that has gone quiet says why rather than\nanswering an empty chart. (``errors`` also carries the diagnostics validation\nraises *about* a tree whose residents did load, such as two residents claiming one\nhome; those residents are on the chart, and the complaint is right there with it.)",
+        "operationId": "get_org_org_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Org Org Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Org"
+      }
+    },
     "/reload": {
       "post": {
         "description": "Re-read the residents tree and the skills library into this process.\n\n**This process**, and the distinction is the whole of the endpoint's honesty. The\nscheduler daemon is a *different process* \u2014 usually on the same burrow, started by\n``steward serve`` \u2014 and no HTTP call can reach into it. It does not need one: it\nwatches the trees itself and reloads on its next wake-up (:class:`TreeSource`),\nwhich is within a minute. What this endpoint fixes is the API's own long-lived\ncollaborators, the run-now scheduler and the board dispatcher, which were assembled\nat startup and would otherwise fire a routine against the manifest that was on disk\nwhen the server booted.\n\nRead views need no reload at all \u2014 they re-read the tree on every request.",

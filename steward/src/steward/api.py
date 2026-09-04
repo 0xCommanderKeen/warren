@@ -69,6 +69,7 @@ from steward.routes import approvals as approval_routes
 from steward.routes import board as board_routes
 from steward.routes import delegation as delegation_routes
 from steward.routes import deps as route_deps
+from steward.routes import org as org_routes
 from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import residents as resident_routes
@@ -628,6 +629,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     app.include_router(reload_routes.router(deps))
     app.include_router(routine_routes.router(deps))
     app.include_router(delegation_routes.router(deps))
+    app.include_router(org_routes.router(deps))
 
     app.include_router(secret_routes.router(deps))
     app.include_router(resident_routes.router(deps))
