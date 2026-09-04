@@ -222,6 +222,12 @@ def test_the_token_variable_is_the_reference_upper_cased():
     assert ch.token_env_name("pip") == "STEWARD_CHAT_TOKEN_PIP"
 
 
+def test_a_non_telegram_token_variable_includes_its_transport():
+    address = ch.Address.parse("discord:pip")
+    assert address is not None
+    assert address.token_env == "STEWARD_CHAT_TOKEN_DISCORD_PIP"
+
+
 def test_a_hyphenated_reference_folds_to_a_legal_variable_name():
     assert ch.token_env_name("polica-librarian") == "STEWARD_CHAT_TOKEN_POLICA_LIBRARIAN"
 
@@ -229,6 +235,13 @@ def test_a_hyphenated_reference_folds_to_a_legal_variable_name():
 def test_operators_are_read_from_one_comma_separated_list():
     env = {ch.OPERATORS_ENV: " 4242, 99 ,"}
     assert ch.operators_from_env(env) == frozenset({"4242", "99"})
+
+
+def test_operator_ids_are_scoped_to_their_transport_with_telegram_compatibility():
+    env = {ch.OPERATORS_ENV: "4242, telegram:99, discord:31337"}
+
+    assert ch.operators_from_env(env, transport="telegram") == frozenset({"4242", "99"})
+    assert ch.operators_from_env(env, transport="discord") == frozenset({"31337"})
 
 
 def test_no_operator_list_means_nobody():
@@ -1343,6 +1356,19 @@ def test_a_bridge_names_a_transport_it_cannot_carry_at_startup(
         bridge.require_ready()
 
 
+def test_an_unsupported_route_does_not_close_a_supported_door(
+    make_bridge: BridgeMaker, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"].append(
+        {"id": "discord", "kind": "chat", "address": "discord:testy", "status": "active"}
+    )
+    bridge = make_bridge(declared)
+
+    assert bridge.preflight() == []
+    assert [route.address.transport for route in bridge.deliverable()] == ["telegram"]
+
+
 def test_a_bridge_over_an_invalid_tree_refuses_to_open(store: Store, tmp_path: Path):
     tree = tmp_path / "residents" / "broken"
     tree.mkdir(parents=True)
@@ -1587,6 +1613,45 @@ def test_a_delivery_reaches_every_operators_private_conversation(phone_resident:
         (FAKE_BOT_TOKEN, "4242", "Two things happened today."),
         (FAKE_BOT_TOKEN, "99", "Two things happened today."),
     ]
+
+
+def test_an_addressed_delivery_selects_its_route_transport_and_operators(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    data = chat_manifest(tmp_path / "memory")
+    data["routes"].append(
+        {"id": "discord", "kind": "chat", "address": "discord:testy", "status": "active"}
+    )
+    resident = load_manifest(write_resident(data))
+    discord = FakeTransport()
+    discord.name = "discord"
+    telegram = FakeTransport()
+    delivery = ch.RoutineDelivery.from_env(
+        {
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
+            ch.OPERATORS_ENV: "telegram:4242,discord:31337",
+        },
+        transports={"telegram": telegram, "discord": discord},
+    )
+    routine = DIGEST.model_copy(update={"deliver": "discord:testy"})
+
+    outcome = delivery.deliver(resident, routine, "hello")
+
+    assert outcome == Delivery(status=DELIVERED)
+    assert telegram.sent == []
+    assert discord.sent == [(FAKE_BOT_TOKEN, "31337", "hello")]
+
+
+def test_the_original_routine_delivery_constructor_remains_usable(phone_resident: Resident):
+    transport = FakeTransport()
+    delivery = ch.RoutineDelivery(
+        tokens={"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN},
+        operators=frozenset({"4242"}),
+        transport=transport,
+    )
+
+    assert delivery.deliver(phone_resident, DIGEST, "hello") == Delivery(status=DELIVERED)
+    assert transport.sent == [(FAKE_BOT_TOKEN, "4242", "hello")]
 
 
 def test_a_delivered_message_is_redacted_and_bounded(phone_resident: Resident):

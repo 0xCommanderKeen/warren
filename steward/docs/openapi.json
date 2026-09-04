@@ -1180,14 +1180,14 @@
           "deliver": {
             "anyOf": [
               {
-                "const": "chat",
+                "pattern": "^(?:chat|[a-z][a-z0-9+.-]*:\\S+)$",
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "Where the final message of a finished run goes. 'chat' sends it to each operator through the resident's active chat route.",
+            "description": "Where the final message of a finished run goes. 'chat' selects the sole active chat route; a <transport>:<reference> value selects that exact route.",
             "title": "Deliver"
           },
           "enabled": {

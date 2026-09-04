@@ -634,22 +634,26 @@ per day":
 - **The flagged routine must fire once a day.** An hourly routine flagged `close_of_day`
   would rewrite the day twenty-four times and call the last one the day.
 
-### `deliver: chat` and `quiet_word`
+### `deliver: chat`, an addressed delivery, and `quiet_word`
 
 Where a finished run's final message goes. Without it, a routine's output reaches the run
 ledger and the village and nobody's phone. With `deliver: chat`, the scheduler sends the
 message into each operator's private conversation with the resident's bot — every user id
-in `STEWARD_CHAT_OPERATORS` — after `routine_finished`, through the same redact-then-bound
-egress a chat reply takes ([chat.md](chat.md#delivered-routines)). A bot token the session
-printed never reaches the phone; a message longer than the reply bound is cut, not split.
+for the selected transport in `STEWARD_CHAT_OPERATORS` — after `routine_finished`, through
+the same redact-then-bound egress a chat reply takes
+([chat.md](chat.md#delivered-routines)). A bot token the session printed never reaches the
+phone; a message longer than the reply bound is cut, not split.
 
-`chat` names the route **kind**, not a transport. It means "this resident's active chat
-route", and the transport is whatever that route's address says — `telegram:hob` today, a
-Discord address tomorrow without this field changing. A resident has one chat route today,
-so bare `chat` is unambiguous; the intended extension, when a resident has several, is
-additive: `deliver` will also accept a specific route address (`deliver: discord:hob`),
-and bare `chat` keeps meaning "the one active chat route". Per-routine transport choice is
-deliberately not here until then.
+`chat` names the route **kind**, not a transport. It means "this resident's sole active
+chat route", and the transport is whatever that route's address says. It is unambiguous
+and backward compatible for a resident with one route. When several are active, `deliver`
+must instead name one declared address, such as `deliver: telegram:hob` or
+`deliver: discord:hob`. The address selects both the bot and its `ChatTransport`; adding a
+new transport is an adapter change, not a scheduler change.
+
+Chat route addresses must also derive distinct token environment names. Punctuation folds
+to `_`, so validation rejects aliases such as `discord:pip-prod` and `discord:pip.prod`
+instead of letting two declared bots share one credential slot.
 
 `quiet_word` is the one reply that means "say nothing". A run whose whole output, trimmed,
 equals the word sends nothing, and so does a run that says nothing at all; anything else is
@@ -663,6 +667,10 @@ What validation refuses:
   nobody has put a token behind, so there is no conversation to send into. This is an
   error where an undeliverable notification is a warning, because a digest that is written,
   paid for and dropped every morning is work thrown away.
+- **Bare `deliver: chat` with several active chat routes.** Name the intended
+  `<transport>:<reference>` address instead.
+- **An addressed delivery that is absent, pending, or disabled.** The address must exactly
+  match one active `kind: chat` route on the same resident.
 - **A `quiet_word` that is not one short token**, or one declared without `deliver`.
 
 What a delivery never changes is the routine's **outcome**. The run row and the log say
