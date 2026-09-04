@@ -29,6 +29,10 @@
 #                     to carry one.
 # `git`               claude reads and writes repos; a resident without git is a resident
 #                     that cannot do most of the work it would be asked to do.
+# `openssh-client`    git's transport to any remote a burrow reaches over a deploy key.
+#                     The slim base has none, and git without it can mount a clone it can
+#                     never fetch: Hob's `/vault` came up exactly like that (warren#389),
+#                     `git status` clean and `git fetch` dead on `ssh: not found`.
 # `curl`              For `steward-smoke`, which needs an HTTP status code it can assert on.
 #
 # ## What runs
@@ -88,15 +92,16 @@ LABEL org.opencontainers.image.revision="${IMAGE_REVISION}"
 # a suite at whatever is current, so `curl=7.88.1-10+deb12u5` stops resolving the moment
 # bookworm ships the next security update and the build starts failing for the one reason
 # nobody wants: because a patch landed. Freezing it properly means snapshot.debian.org and
-# a second thing to refresh; what these four packages actually give a resident (a CA
-# bundle, an HTTP client, git, a python) is stable across bookworm point releases in a way
-# the claude CLI and the node runtime are not — which is why those two are pinned and this
-# is not. Revisit if a bookworm update ever breaks a resident.
+# a second thing to refresh; what these five packages actually give a resident (a CA
+# bundle, an HTTP client, git, an ssh client, a python) is stable across bookworm point
+# releases in a way the claude CLI and the node runtime are not — which is why those two
+# are pinned and this is not. Revisit if a bookworm update ever breaks a resident.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         git \
+        openssh-client \
         python3 \
     && rm -rf /var/lib/apt/lists/*
 

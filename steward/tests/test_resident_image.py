@@ -618,6 +618,20 @@ def test_the_image_carries_everything_a_session_needs() -> None:
     assert "COPY settings.json /opt/steward/settings.json" in text
 
 
+def test_the_image_carries_an_ssh_client_so_git_can_reach_a_remote() -> None:
+    """Git alone cannot fetch: a remote reached over a deploy key needs `ssh` on PATH.
+
+    Found the hard way (warren#389): Hob's container mounted the vault and the key exactly
+    as declared, `git status` was clean, and `git fetch` died with `ssh: not found` —
+    `node:22-slim` ships no ssh client and the apt layer installed none. A resident whose
+    work is a repo on a burrow can neither pull nor push without it.
+    """
+    text = DOCKERFILE.read_text(encoding="utf-8")
+
+    apt_layer = text[text.index("apt-get install") : text.index("rm -rf /var/lib/apt/lists")]
+    assert "openssh-client" in apt_layer, "git needs ssh to reach a remote over a deploy key"
+
+
 def test_the_container_still_just_stays_up() -> None:
     """A resident's container is a place for sessions to happen, not a process doing work.
 
