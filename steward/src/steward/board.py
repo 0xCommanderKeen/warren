@@ -57,6 +57,7 @@ from typing import cast
 
 from steward import approvals
 from steward import delegation as dg
+from steward import discord_posts as dp
 from steward import events as ev
 from steward import notify as nf
 from steward.claims import ClaimHeld, ClaimRefused, ResidentClaims, stale_before
@@ -380,6 +381,7 @@ class Dispatcher:
     #: One per dispatcher, shared with :attr:`approvals`, so a test that hands a dispatcher a
     #: fake transport catches both the knocks a session raised and the tasks it closed.
     notifier: nf.Notifier = field(default_factory=nf.Notifier.from_env, repr=False)
+    poster: dp.Poster | None = field(default=None, repr=False)
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
 
@@ -387,6 +389,8 @@ class Dispatcher:
         """Build the shared lifecycle from the dispatcher's existing dependencies."""
         if self.claims is None and not self.dry_run:
             self.claims = ResidentClaims(self.store)
+        if self.poster is None:
+            self.poster = dp.Poster.from_env(self.residents, self.store, self.emitter)
         self.sessions = ResidentSessions(
             workdir=self.workdir,
             runner_factory=self.runner_factory,
@@ -417,6 +421,8 @@ class Dispatcher:
         self.library = library
         self.sessions.residents = tuple(residents)
         self.sessions.library = library
+        if self.poster is not None:
+            self.poster.refresh(residents)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -565,7 +571,8 @@ class Dispatcher:
         """Safely persist everything one completed session handed back."""
         raised = tuple(self._harvest_approvals(manifest, output, now))
         handed = self.hand_over(manifest, output, parent_task_id=parent_task_id, now=now)
-        return SessionHarvest(raised, handed)
+        posts = self.poster.harvest(manifest, output, now) if self.poster is not None else ()
+        return SessionHarvest(raised, handed, posts)
 
     def hand_over(
         self,

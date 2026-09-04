@@ -81,6 +81,7 @@ __all__ = [
     "DELEGATED_TITLE",
     "DELEGATION_PROTOCOL",
     "DETAIL_MAX_CHARS",
+    "DISCORD_PROTOCOL",
     "ESCALATION_PROTOCOL",
     "JOURNAL_MAX_CHARS",
     "MESSAGE_MAX_CHARS",
@@ -349,6 +350,16 @@ happens the moment you write the block: the other resident picks the work up on 
 next wake-up. You do not get an answer back in this session and must not wait for one.
 Finish your own work and say plainly what you handed over."""
 
+DISCORD_PROTOCOL = """HOW TO POST TO DISCORD (the exact mechanism)
+Your manifest permits posts only to the channel names listed below. Put each post inside
+the ===STEWARD-ACTIONS=== region at the end of your final message:
+
+    <discord post channel="announcements">{{"text": "The update to publish."}}</discord>
+
+Steward—not your session—holds the token, resolves the channel name, redacts and bounds
+the text, and records the outcome. At most five posts are attempted per session.
+Allowed channels: {channels}"""
+
 
 def _section(title: str, body: str) -> str:
     return f"{_RULE}\n{title}\n{_RULE}\n{body.strip()}\n"
@@ -519,6 +530,11 @@ def assemble_preamble(  # noqa: PLR0913, PLR0917 — one positional per section,
     charter = f"{CHARTER_FRAME}\n\n{render_charter(manifest.charter)}\n\n{ESCALATION_PROTOCOL}"
     if manifest.delegation.send:
         charter += f"\n\n{DELEGATION_PROTOCOL}"
+    post_channels = tuple(
+        name for route in manifest.routes if route.accepts_chat for name in route.posts_to
+    )
+    if post_channels:
+        charter += f"\n\n{DISCORD_PROTOCOL.format(channels=', '.join(post_channels))}"
     sections.append(_section("YOUR CHARTER (AUTHORITATIVE, LAST WORD)", charter))
 
     return "\n".join(sections)

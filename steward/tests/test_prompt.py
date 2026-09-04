@@ -52,6 +52,28 @@ def hob() -> m.Resident:
     return m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
 
 
+def test_discord_protocol_is_rendered_only_with_a_nonempty_posts_allowlist(
+    write_resident: ResidentWriter,
+) -> None:
+    plain = m.load_manifest(write_resident()).manifest
+    assert "HOW TO POST TO DISCORD" not in p.assemble_preamble(plain, None)
+
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "discord",
+            "kind": "chat",
+            "address": "discord:testy",
+            "status": "active",
+            "posts_to": ["household"],
+        }
+    )
+    allowed = m.load_manifest(write_resident(data)).manifest
+    rendered = p.assemble_preamble(allowed, None)
+    assert "HOW TO POST TO DISCORD" in rendered
+    assert "Allowed channels: household" in rendered
+
+
 # ------------------------------------------------------------------------------- order
 
 

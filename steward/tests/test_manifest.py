@@ -338,6 +338,40 @@ def test_inline_secret_values_are_rejected(
     assert expected in problem_for(result, "routes[0].address")
 
 
+def test_discord_room_allowlist_is_only_valid_on_discord_chat_routes(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "rooms",
+            "kind": "chat",
+            "address": "telegram:testy",
+            "posts_to": ["household"],
+        }
+    )
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "posts_to is allowed only" in problem_for(result, "routes[1]")
+
+
+def test_discord_room_allowlist_rejects_duplicate_or_blank_names(
+    write_resident: ResidentWriter,
+) -> None:
+    data = valid_manifest()
+    data["routes"].append(
+        {
+            "id": "rooms",
+            "kind": "chat",
+            "address": "discord:testy",
+            "posts_to": ["household", " household "],
+        }
+    )
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "unique" in problem_for(result, "routes[1].posts_to")
+
+
 def test_opaque_blob_where_a_reference_is_expected_is_rejected(
     write_resident: ResidentWriter,
 ) -> None:

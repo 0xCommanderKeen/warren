@@ -70,6 +70,7 @@ x-steward-environment: &steward-environment
   STEWARD_CHAT_TOKEN_DISCORD_PIP: ${STEWARD_CHAT_TOKEN_DISCORD_PIP:-}
   STEWARD_CHAT_TOKEN_HOB: ${STEWARD_CHAT_TOKEN_HOB:-}
   STEWARD_CHAT_OPERATORS: ${STEWARD_CHAT_OPERATORS:-}
+  STEWARD_CHAT_DISCORD_GUILD: ${STEWARD_CHAT_DISCORD_GUILD:-}
   # One fleet webhook carries one-way knocks; blank keeps Discord notifications inert.
   STEWARD_NOTIFY_DISCORD_WEBHOOK: ${STEWARD_NOTIFY_DISCORD_WEBHOOK:-}
   TZ: Europe/Ljubljana

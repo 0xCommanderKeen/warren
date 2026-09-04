@@ -103,6 +103,8 @@ def test_the_added_types_are_the_additive_set() -> None:
         "resident_declared",
         "resident_retired",
         "chat_message_dropped",
+        "chat_message_posted",
+        "chat_post_refused",
     )
 
 
