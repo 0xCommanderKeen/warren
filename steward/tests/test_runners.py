@@ -1139,6 +1139,13 @@ def test_one_spelling_of_the_villages_two_variable_names() -> None:
     assert deploy.CHRONICLE_TOKEN_ENV is r.CHRONICLE_TOKEN_ENV
     assert events.URL_ENV == r.CHRONICLE_URL_ENV
     assert events.TOKEN_ENV == r.CHRONICLE_TOKEN_ENV
+    # And the allowlist itself, which is the tuple `check_session_ingest` membership-tests
+    # against: it spells both names as literals (they are defined after it), so a rename
+    # that missed one would leave the check reasoning about a variable no session carries.
+    assert r.CHRONICLE_URL_ENV in r.SESSION_ENV_BASE
+    assert r.CHRONICLE_TOKEN_ENV not in r.SESSION_ENV_BASE
+    assert r.CHRONICLE_TOKEN_ENV not in r.CLAUDE_ENV_NAMES
+    assert r.CHRONICLE_TOKEN_ENV not in r.CODEX_ENV_NAMES
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)

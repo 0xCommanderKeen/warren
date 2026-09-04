@@ -1657,7 +1657,12 @@ def check_session_ingest(
     why.
 
     ``inherited`` is the same seam :func:`session_emitter` takes, and for the same reason:
-    doctor is reporting on the environment the *scheduler* will run in.
+    the environment that decides this is the *scheduler's*, and doctor is typed into a
+    shell. Nothing here can close that gap — a caller passing ``None`` is answering about
+    its own process — so the caller says which environment it read, exactly as it already
+    does for the emitter path. A doctor run from a shell without the token against a
+    scheduler that has it therefore prints nothing, and that is a limit worth stating
+    rather than a check worth trusting blindly.
     """
     emitter = session_emitter(placement, inherited=inherited)
     if emitter is None or placement.is_container:
@@ -1666,7 +1671,11 @@ def check_session_ingest(
     if not (source.get(CHRONICLE_TOKEN_ENV) or "").strip():
         return None
     forwarded, _ = passthrough_names(source)
-    if CHRONICLE_TOKEN_ENV in (*SESSION_ENV_BASE, *ClaudeRunner.env_names, *forwarded):
+    # Every list a session's environment can come off, not one runner's: the question is
+    # whether the name reaches a session at all, and a check scoped to the caller's kind
+    # would answer it wrongly the first time somebody asked it about another one.
+    carriers = (*SESSION_ENV_BASE, *CLAUDE_ENV_NAMES, *CODEX_ENV_NAMES, *forwarded)
+    if CHRONICLE_TOKEN_ENV in carriers:
         return None
     village = (source.get(CHRONICLE_URL_ENV) or "").strip() or "the village"
     return (
@@ -1691,9 +1700,11 @@ def session_emitter_outbox(
     sessions would 401" and "your sessions have been 401ing for three days".
 
     Local placement only, and for the same reason the complaint is: the file it reads lives
-    under the account this process runs as, which for a local session is also the account
-    the session runs as. Asking a container for its outbox would be asking a different
-    machine a question doctor has no line to print the answer on.
+    under the account **this process** runs as. That is the session's account too wherever
+    doctor and the scheduler run as the same user, which is the ordinary case and not a
+    guarantee — so the caller labels the reading with where it came from rather than
+    asserting whose outbox it is. Asking a container for its outbox would be asking a
+    different machine a question doctor has no line to print the answer on.
 
     Never raises and never fails the report. The emitter ships ``--status`` precisely so an
     operator can read this cheaply (it opens one JSON file), but an emitter path that does

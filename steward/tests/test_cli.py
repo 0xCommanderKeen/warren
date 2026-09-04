@@ -651,9 +651,42 @@ def test_doctor_says_when_a_local_sessions_events_cannot_be_delivered_from_here(
     assert f"local: per-session events via {emitter}" in result.output
     assert "rejected 401" in result.output
     assert "~/.chronicle/events.jsonl" in result.output
-    assert "chronicle emitter outbox: stalled; 41/500 queued" in result.output
+    assert "chronicle emitter outbox: stalled; 41/500 queued (read here)" in result.output
     # The secret itself is never a thing a report prints.
     assert "shared-ingest-secret" not in result.output
+
+
+def test_doctor_warns_without_an_outbox_reading_when_the_emitter_cannot_answer(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """The mixed case an operator on an old emitter actually hits (warren#449).
+
+    `--status` is a flag the vendored emitter grew late, and a copy that predates it exits
+    0 having printed nothing. The evidence is optional; the warning is not, and the line
+    has to say the reading is missing rather than trail off looking like a reading of zero.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    emitter = tmp_path / "chronicle-emit.py"
+    emitter.write_text("", encoding="utf-8")
+    stub_bin("python3", "exit 0")
+    monkeypatch.setenv("STEWARD_SESSION_EMITTER", str(emitter))
+    monkeypatch.setenv("CHRONICLE_URL", "http://dxp2800:8737")
+    monkeypatch.setenv("CHRONICLE_TOKEN", "shared-ingest-secret")
+    monkeypatch.delenv("STEWARD_SESSION_ENV_PASSTHROUGH", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "local"}, directory="local")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rejected 401" in result.output
+    assert "no outbox reading here" in result.output
 
 
 def test_doctor_stays_quiet_about_delivery_when_the_village_wants_no_token(

@@ -551,6 +551,12 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     `|| true` so that a missing emitter costs telemetry rather than denying every tool
     call, which means the resident runs, looks healthy, and says nothing.
 
+    Everything the third line below says was read from *this* process's environment and
+    this account's outbox, and it says so, for the reason the emitter line already hedges:
+    the process that will launch the session is the scheduler. A doctor typed into a shell
+    that does not hold the ingest token therefore stays quiet about a scheduler that does —
+    a limit, and the honest shape of a report about somebody else's environment.
+
     A third line, yellow and uncounted, is the one warren#449 added: an emitter that is
     there and hooks that fire still leave the second question open, which is whether what
     they post can be *delivered* from here. A local session inherits no `CHRONICLE_TOKEN`,
@@ -590,12 +596,13 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
     undeliverable = check_session_ingest(placement)
     if undeliverable:
+        # Same hedge as the line above, and it earns it twice over: the token this was
+        # decided from and the outbox this reading came out of are both *this* process's,
+        # and the process that will launch the session is the scheduler, under whatever
+        # account it runs as. Said, rather than quietly asserted.
         outbox = session_emitter_outbox(placement)
-        click.secho(
-            f"{resident.id}: per-session events — {undeliverable}"
-            + (f"; {outbox}" if outbox else ""),
-            fg="yellow",
-        )
+        reading = f"; {outbox} (read here)" if outbox else "; no outbox reading here"
+        click.secho(f"{resident.id}: per-session events — {undeliverable}{reading}", fg="yellow")
     return 0
 
 
