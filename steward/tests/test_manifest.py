@@ -1694,6 +1694,40 @@ def test_a_shared_host_path_with_only_one_writer_is_silent(
     assert [d for d in result.diagnostics if "one writer" in d.problem] == []
 
 
+def test_the_same_path_on_two_different_burrows_is_two_resources(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """#440: residents on separate hosts share no filesystem, so they cannot contend.
+
+    `deploy.host` is the documented escape hatch for a resident that does not live where
+    everything else lives. Refusing that pair would be a hard error nobody could fix
+    except by renaming a directory on an unrelated machine.
+    """
+    root = tmp_path / "residents"
+    mounts = [{"host": "~/docker/shared", "container": "/shared", "mode": "rw"}]
+    first = valid_manifest()
+    first["deploy"] = {"host": "dxp2800", "mounts": mounts}
+    second = valid_manifest() | {
+        "uid": "3a78217a-df03-4f3b-a46a-4c75b4ad929f",
+        "id": "second-agent",
+        "home": 1,
+        "agent_id": "claude-code:second-agent",
+        "deploy": {"host": "other-burrow", "mounts": mounts},
+    }
+    write_resident(first, root=root)
+    write_resident(
+        second,
+        root=root,
+        directory="second-agent",
+        soul=VALID_SOUL.replace("test-agent", "second-agent"),
+    )
+
+    result = m.validate_tree(root)
+
+    assert result.ok, field_paths(result)
+    assert [d for d in result.diagnostics if "one writer" in d.problem] == []
+
+
 @pytest.mark.parametrize(
     ("path", "why"),
     [

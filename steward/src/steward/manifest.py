@@ -2929,8 +2929,16 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
     holding the same clone open for writing race each other, and no manifest can see the
     conflict on its own. Read-only mounts are free — it is the second *writer* that is
     refused.
+
+    Two residents contend only if they share a filesystem, so the grouping key is the
+    burrow *and* the resolved path. Matching is exact after ``~/`` resolution and
+    :func:`posixpath.normpath`: a symlink to the same directory, or a mount nested inside
+    another resident's, is not seen.
     """
-    by_host: dict[str, dict[str, Resident]] = {}
+    # (burrow, path): two residents on different burrows do not share a filesystem, so
+    # the same spelling there is two resources. The default mirrors deploy.DEFAULT_HOST,
+    # which cannot be imported here — deploy imports this module.
+    by_host: dict[tuple[str, str], dict[str, Resident]] = {}
     for resident in residents:
         for mount in resident.manifest.deploy.mounts:
             if mount.mode == "rw":
@@ -2939,9 +2947,10 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
                     user = resident.manifest.deploy.user or "Miha"
                     home = (os.environ.get("STEWARD_BURROW_HOME") or f"/home/{user}").rstrip("/")
                     host = resolve_mount_host_path(host, home)
-                by_host.setdefault(posixpath.normpath(host), {})[resident.id] = resident
+                burrow = resident.manifest.deploy.host or "dxp2800"
+                by_host.setdefault((burrow, posixpath.normpath(host)), {})[resident.id] = resident
     diagnostics: list[Diagnostic] = []
-    for host_path, residents_by_id in by_host.items():
+    for (burrow, host_path), residents_by_id in by_host.items():
         group = list(residents_by_id.values())
         if len(group) <= 1:
             continue
@@ -2951,8 +2960,8 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
                 file=resident.path,
                 field_path="deploy.mounts",
                 problem=(
-                    f"host path {host_path!r} has read-write mounts for {ids}; the "
-                    "one writer per shared clone rule permits at most one"
+                    f"host path {host_path!r} on {burrow} has read-write mounts for "
+                    f"{ids}; the one writer per shared clone rule permits at most one"
                 ),
                 example="change every mount but one to mode: ro",
             )

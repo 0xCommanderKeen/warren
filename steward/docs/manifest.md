@@ -1242,11 +1242,15 @@ because Compose's short volume syntax uses it to separate source, target, and mo
 
 A host path is allowed to be shared, but a shared resource has **one writer**: at most one
 resident may mount it `rw`; all other residents use `ro`. Tree validation **refuses** a
-second writer (warren#440) and names every competing writer on each of their files; the
-host path is compared after `~/` is resolved against `STEWARD_BURROW_HOME` and normalised,
-so two spellings of one directory are one resource. The write API validates a copy of the
-tree before it commits, so a `PUT` that would introduce the second writer is refused with
-the same diagnostic. `steward doctor` prints each mount beside the resident's workspace,
+second writer (warren#440) and names every competing writer on each of their files. Two
+mounts are the same resource when they land on the same `deploy.host` *and* their paths
+match once `~/` is resolved (against `STEWARD_BURROW_HOME`, or `/home/<deploy.user>`) and
+normalised — so `~/docker/shared` and `/home/Miha/docker/shared` are one, while the same
+spelling on two different burrows is two. The comparison is exact: a symlink to the same
+directory, or a mount nested inside another resident's, is not caught, and staying out of
+that shape is on whoever writes the manifest. The write API validates a copy of the tree
+before it commits, so a `PUT` that would introduce the second writer is refused with the
+same diagnostic. `steward doctor` prints each mount beside the resident's workspace,
 and a provision dry run shows the same mount in the complete rendered Compose fragment.
 
 The rule is not really about mounts. Two residents writing one tree lose each other's

@@ -677,7 +677,7 @@ value, and the same check is importable (`steward.validate_tree`, `steward.load_
 so the scheduler, the API, and CI share one load-and-validate path.
 
 **One writer per resource** (warren#440). Every writable resource — a clone, a vault, a
-directory on the burrow — has exactly one resident that writes it. Others may read it as
+directory on a burrow — has exactly one resident that writes it. Others may read it as
 much as they like. Two residents holding the same tree open for writing produce the one
 failure nobody can debug from a transcript: a change that was there and then was not,
 overwritten by a colleague who never knew. Validation enforces it — two `mode: rw` mounts
