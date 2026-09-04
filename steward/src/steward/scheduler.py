@@ -99,6 +99,7 @@ from steward.runs import (
     QUIET,
     TRIGGER_MANUAL,
     TRIGGER_SCHEDULE,
+    DeliveryStatus,
     validate_kind_trigger,
 )
 from steward.session_auth import new_session_credential
@@ -246,6 +247,10 @@ class RunRegistry(Protocol):
         """Record that a session reported back, and return whether this call closed it."""
         ...
 
+    def record_delivery(self, run_id: str, status: DeliveryStatus, reason: str = "") -> bool:
+        """Write down what became of the run's final message (warren#385)."""
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class Delivery:
@@ -256,7 +261,7 @@ class Delivery:
     session's output, which is the thing that was being delivered.
     """
 
-    status: str
+    status: DeliveryStatus
     reason: str = ""
 
 
@@ -273,7 +278,12 @@ class Deliverer(Protocol):
     """
 
     def deliver(self, resident: Resident, routine: Routine, text: str) -> Delivery:
-        """Send ``text`` where the routine says, and report what happened."""
+        """Send ``text`` where the routine says, and report what happened.
+
+        The whole :class:`Routine` rather than its id, because ``deliver`` is the field
+        that will one day name a specific route address, and that is the deliverer's to
+        read.
+        """
         ...
 
 
@@ -1357,7 +1367,13 @@ class Scheduler:
             except Exception as exc:  # noqa: BLE001 — a phone that is off is not a failed routine
                 delivery = Delivery(status=DELIVERY_FAILED, reason=f"{type(exc).__name__}: {exc}")
         if delivery.status == DELIVERED:
-            log.info("%s: run %s delivered to %s", item.key, run_id, item.routine.deliver)
+            log.info(
+                "%s: run %s delivered to %s%s",
+                item.key,
+                run_id,
+                item.routine.deliver,
+                f" ({delivery.reason})" if delivery.reason else "",
+            )
         elif delivery.status == QUIET:
             log.info("%s: run %s was quiet; nothing delivered", item.key, run_id)
         else:
@@ -1367,11 +1383,10 @@ class Scheduler:
 
     def _record_delivery(self, item: ScheduledRoutine, run_id: str, delivery: Delivery) -> None:
         """Write the delivery onto the run row. Never raises: a lost note is not a lost run."""
-        record = getattr(self.registry, "record_delivery", None)
-        if record is None:
+        if self.registry is None:
             return
         try:
-            record(run_id, delivery.status, delivery.reason)
+            self.registry.record_delivery(run_id, delivery.status, delivery.reason)
         except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine
             log.warning("%s: could not record run %s's delivery: %s", item.key, run_id, exc)
 

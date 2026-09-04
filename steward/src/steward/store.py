@@ -63,6 +63,7 @@ from steward.runs import (
     RUN_ROUTINE,
     RUN_TASK,
     RUN_TRIGGERS,
+    DeliveryStatus,
     validate_kind_trigger,
 )
 from steward.runs import (
@@ -2996,12 +2997,14 @@ class Store:
             )
             return cursor.rowcount == 1
 
-    def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:
+    def record_delivery(self, run_id: str, status: DeliveryStatus, reason: str = "") -> bool:
         """Write down what became of a run's final message. Returns whether a row took it.
 
         Unconditional on ``closed_at``: delivery happens after the terminal transition, so
         the row it lands on is normally already closed, and that is the row that should say
-        where the message went.
+        where the message went. The membership check stays although the type is a
+        ``Literal``: this is the database boundary, and a row must never hold a word the
+        API would not know how to read back.
         """
         if status not in DELIVERY_STATUSES:
             raise ValueError(f"invalid delivery status: {status!r}")
@@ -3012,8 +3015,12 @@ class Store:
             )
             return cursor.rowcount == 1
 
-    def run(self, run_id: str) -> OpenRun | None:
-        """Return one run's record, open or closed, or ``None`` when steward never opened it."""
+    def run_record(self, run_id: str) -> OpenRun | None:
+        """Return one run's row, open or closed, or ``None`` when steward never opened it.
+
+        The read seam for a run *by id* — what a test, and a future ``GET /runs/{id}``,
+        asks; :meth:`open_runs` and :meth:`terminal_runs` answer the watchdog's questions.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT * FROM open_runs WHERE run_id = ?", (run_id,)

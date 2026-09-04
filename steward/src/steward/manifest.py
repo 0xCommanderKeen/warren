@@ -84,7 +84,7 @@ __all__ = [
     "ResidentManifest",
     "Route",
     "Routine",
-    "RoutineDelivery",
+    "RoutineDeliverKind",
     "Runner",
     "Severity",
     "SkillGrant",
@@ -269,7 +269,7 @@ CHAT_ROUTE_KIND = "chat"
 #: digest nobody received. The intended extension is additive — a specific route address
 #: (``deliver: discord:hob``) alongside the bare kind — and ``quiet_word`` is designed to
 #: read the same either way.
-RoutineDelivery = Literal["chat"]
+RoutineDeliverKind = Literal["chat"]
 ROUTINE_DELIVER_CHAT = "chat"
 
 #: A quiet word is one token: no whitespace, and short enough to be typed exactly. A
@@ -1414,7 +1414,7 @@ class Routine(_Model):
         default=None,
         description="Flag the one routine that ends the resident's day and journals.",
     )
-    deliver: RoutineDelivery | None = Field(
+    deliver: RoutineDeliverKind | None = Field(
         default=None,
         description=(
             "Where the final message of a finished run goes. 'chat' sends it to each "
@@ -1439,8 +1439,10 @@ class Routine(_Model):
                 f"quiet_word must be one short token: no whitespace, at most "
                 f"{QUIET_WORD_MAX_CHARS} characters"
             )
-        # ``deliver`` is declared above this field, so it has already been read.
-        if info.data.get("deliver") is None:
+        # ``deliver`` is declared above this field, so it has already been read — unless
+        # it failed, in which case it is absent from ``data`` and has its own diagnostic,
+        # and a second one here would only point away from it.
+        if "deliver" in info.data and info.data["deliver"] is None:
             raise ValueError(
                 "quiet_word means nothing without deliver: a run nobody hears cannot be quiet"
             )
@@ -2217,6 +2219,9 @@ def _check_deliveries_have_a_door(manifest: ResidentManifest, source: Path) -> l
     matters: a ``pending`` chat route is a bot nobody has put a token behind yet, so there
     is no conversation to send into.
     """
+    # The same question :func:`steward.chat.chat_routes` answers at send time, asked of
+    # the manifest alone: this module cannot import that one, and the address's parse is
+    # the bridge's business rather than validation's (any non-empty address is legal).
     if not any(route.accepts_chat for route in manifest.routes):
         return [
             Diagnostic(

@@ -2020,3 +2020,14 @@ def test_a_quiet_word_without_deliver_is_refused(write_resident: ResidentWriter)
     result = m.validate_manifest(write_resident(data))
     assert not result.ok
     assert "deliver" in problem_for(result, "routines[0].quiet_word")
+
+
+def test_a_broken_deliver_is_reported_once_not_also_as_a_stray_quiet_word(
+    write_resident: ResidentWriter,
+) -> None:
+    data = _delivering()
+    data["routines"][0]["deliver"] = "chats"
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "routines[0].deliver" in field_paths(result)
+    assert "routines[0].quiet_word" not in field_paths(result)

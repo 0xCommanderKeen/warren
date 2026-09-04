@@ -5,6 +5,8 @@ routine events, and the store, which persists runs, can therefore depend on one 
 the values they must agree on.
 """
 
+from typing import Literal
+
 RUN_ROUTINE = "routine"
 RUN_TASK = "task"
 RUN_DELEGATED = "delegated"
@@ -60,7 +62,8 @@ def validate_kind_trigger(kind: str, trigger: str) -> None:
 #: ``deliver:`` (warren#385). Written on the run's row by the scheduler, beside the outcome
 #: and never instead of it: a message that did not reach the phone is a delivery that
 #: failed, not a routine that did. A run whose routine delivers nowhere carries none.
-DELIVERED = "delivered"
-QUIET = "quiet"
-DELIVERY_FAILED = "delivery_failed"
-DELIVERY_STATUSES = (DELIVERED, QUIET, DELIVERY_FAILED)
+DeliveryStatus = Literal["delivered", "quiet", "delivery_failed"]
+DELIVERED: DeliveryStatus = "delivered"
+QUIET: DeliveryStatus = "quiet"
+DELIVERY_FAILED: DeliveryStatus = "delivery_failed"
+DELIVERY_STATUSES: tuple[DeliveryStatus, ...] = (DELIVERED, QUIET, DELIVERY_FAILED)

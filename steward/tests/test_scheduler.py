@@ -2164,6 +2164,9 @@ def test_a_registry_that_refuses_to_write_is_not_a_failed_routine(
         def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
             raise RuntimeError("the disk is still full")
 
+        def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:  # noqa: ARG002
+            raise RuntimeError("the disk is full of deliveries too")
+
     sink = ev.NullEmitter()
     engine = s.Scheduler(
         s.load_scheduled(path.parent),
@@ -2197,6 +2200,9 @@ def test_a_late_session_does_not_publish_success_after_the_watchdog_won(
             return False
 
         def close_run(self, run_id: str, **_kwargs: object) -> bool:  # noqa: ARG002
+            return False
+
+        def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:  # noqa: ARG002
             return False
 
     sink = ev.NullEmitter()
@@ -2466,7 +2472,7 @@ def _fire_digest(engine: s.Scheduler) -> s.FireReport:
 
 
 def _run_row(store: Store, run_id: str) -> OpenRun:
-    row = store.run(run_id)
+    row = store.run_record(run_id)
     assert row is not None
     return row
 
