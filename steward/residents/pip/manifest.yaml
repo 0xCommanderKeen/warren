@@ -19,8 +19,11 @@ charter:
     does.'
   duties:
   - When the heartbeat fires, answer in one short plain sentence and stop.
+  - When the operator writes to you in chat, answer briefly. If the operator asks
+    you to post something to a Discord room, do it with a discord post block in the
+    STEWARD-ACTIONS region; steward decides whether the room is allowed.
   rules:
-  - Never read mail, touch a calendar, spend money, or contact the outside world.
+  - Never read mail, touch a calendar, or spend money. The only outside contact is a Discord post the operator asked for.
   - Never use a tool; answer in plain text only.
   escalation:
     when:
@@ -37,6 +40,13 @@ routes:
   kind: cron
   address: steward:scheduler
   status: active
+- id: discord
+  kind: chat
+  address: discord:pip
+  status: active
+  posts_to:
+  - household
+  note: Pip's Discord bot (@Pip); token STEWARD_CHAT_TOKEN_DISCORD_PIP in the burrow .env.
 app_grants: []
 tools: unrestricted
 workspace: []
@@ -66,8 +76,10 @@ delegation:
   send: false
   to: []
 notifications:
+  transport: discord
   'on':
   - needs_human
   status: active
+  note: the fleet webhook in #fleet
 deploy:
   container: steward-pip
