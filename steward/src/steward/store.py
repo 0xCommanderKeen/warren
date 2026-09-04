@@ -56,6 +56,7 @@ from steward.events import utc_now_iso
 from steward.health import HealthJournal
 from steward.operator_auth import OperatorPrincipal
 from steward.runs import (
+    DELIVERY_STATUSES,
     RUN_CHAT,
     RUN_DELEGATED,
     RUN_KINDS,
@@ -372,6 +373,9 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "terminal_event_id": "TEXT",
         "terminal_claimed_at": "TEXT",
         "terminal_published_at": "TEXT",
+        # Where the final message went, for a routine that ``deliver:``s (warren#385).
+        "delivery": "TEXT",
+        "delivery_reason": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
@@ -895,6 +899,10 @@ class OpenRun:
     terminal_claimed_at: str | None = None
     terminal_published_at: str | None = None
     closed_at: str | None = None
+    #: What became of the final message, when the routine said where it goes: one of
+    #: :data:`steward.runs.DELIVERY_STATUSES`, or ``None`` for a run that delivers nowhere.
+    delivery: str | None = None
+    delivery_reason: str = ""
 
     @property
     def open(self) -> bool:
@@ -923,6 +931,8 @@ class OpenRun:
             terminal_claimed_at=row["terminal_claimed_at"],
             terminal_published_at=row["terminal_published_at"],
             closed_at=row["closed_at"],
+            delivery=row["delivery"],
+            delivery_reason=row["delivery_reason"] or "",
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -939,6 +949,8 @@ class OpenRun:
             "heartbeat_at": self.heartbeat_at,
             "event_log_path": self.event_log_path,
             "closed_at": self.closed_at,
+            "delivery": self.delivery,
+            "delivery_reason": self.delivery_reason,
         }
 
 
@@ -2983,6 +2995,30 @@ class Store:
                 (now or utc_now_iso(), run_id),
             )
             return cursor.rowcount == 1
+
+    def record_delivery(self, run_id: str, status: str, reason: str = "") -> bool:
+        """Write down what became of a run's final message. Returns whether a row took it.
+
+        Unconditional on ``closed_at``: delivery happens after the terminal transition, so
+        the row it lands on is normally already closed, and that is the row that should say
+        where the message went.
+        """
+        if status not in DELIVERY_STATUSES:
+            raise ValueError(f"invalid delivery status: {status!r}")
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "UPDATE open_runs SET delivery = ?, delivery_reason = ? WHERE run_id = ?",
+                (status, reason, run_id),
+            )
+            return cursor.rowcount == 1
+
+    def run(self, run_id: str) -> OpenRun | None:
+        """Return one run's record, open or closed, or ``None`` when steward never opened it."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM open_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return OpenRun.from_row(row) if row is not None else None
 
     def open_runs(self) -> list[OpenRun]:
         """Return every run steward started and has heard nothing back about, oldest first."""

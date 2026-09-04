@@ -1956,3 +1956,67 @@ def test_the_schema_carries_notifications() -> None:
     properties = schema["$defs"]["Notifications"]["properties"]
     assert set(properties) == {"transport", "on", "status", "note"}
     assert properties["on"]["items"]["enum"] == list(m.NOTIFICATION_KINDS)
+
+
+# ---------------------------------------------------------------------------- deliver: chat
+
+
+def _delivering(quiet_word: str | None = "NOTHING", **route: object) -> dict[str, Any]:
+    data = valid_manifest()
+    data["routes"].append(
+        {"id": "phone", "kind": "chat", "address": "telegram:testy", "status": "active", **route}
+    )
+    routine: dict[str, Any] = {
+        "id": "digest",
+        "schedule": "0 8 * * *",
+        "prompt": "Write the digest, or reply with the quiet word.",
+        "timeout_s": 600,
+        "deliver": "chat",
+    }
+    if quiet_word is not None:
+        routine["quiet_word"] = quiet_word
+    data["routines"] = [routine]
+    return data
+
+
+def test_a_delivered_routine_needs_an_active_chat_route(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(write_resident(_delivering()))
+    assert resident.manifest.routines[0].deliver == "chat"
+    assert resident.manifest.routines[0].quiet_word == "NOTHING"
+
+
+@pytest.mark.parametrize("status", ["pending", "disabled"])
+def test_deliver_chat_is_refused_without_an_active_chat_route(
+    write_resident: ResidentWriter, status: str
+) -> None:
+    result = m.validate_manifest(write_resident(_delivering(status=status)))
+    assert not result.ok
+    assert "no active chat route" in problem_for(result, "routines[0].deliver")
+
+
+def test_deliver_chat_is_refused_with_no_chat_route_at_all(write_resident: ResidentWriter) -> None:
+    data = _delivering()
+    data["routes"] = [r for r in data["routes"] if r["kind"] != "chat"]
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "no active chat route" in problem_for(result, "routines[0].deliver")
+
+
+def test_a_quiet_word_is_optional(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(write_resident(_delivering(quiet_word=None)))
+    assert resident.manifest.routines[0].quiet_word is None
+
+
+@pytest.mark.parametrize("word", ["", "  ", "two words", "a" * 33, "NO\nTHING"])
+def test_a_quiet_word_is_one_short_token(write_resident: ResidentWriter, word: str) -> None:
+    result = m.validate_manifest(write_resident(_delivering(quiet_word=word)))
+    assert not result.ok
+    assert "one short token" in problem_for(result, "routines[0].quiet_word")
+
+
+def test_a_quiet_word_without_deliver_is_refused(write_resident: ResidentWriter) -> None:
+    data = _delivering()
+    del data["routines"][0]["deliver"]
+    result = m.validate_manifest(write_resident(data))
+    assert not result.ok
+    assert "deliver" in problem_for(result, "routines[0].quiet_word")

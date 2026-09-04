@@ -60,6 +60,9 @@ __all__ = [
     "MANIFEST_FILENAME",
     "NOTIFICATION_KINDS",
     "NOTIFICATION_TRANSPORTS",
+    "QUIET_WORD_MAX_CHARS",
+    "QUIET_WORD_PATTERN",
+    "ROUTINE_DELIVER_CHAT",
     "SCHEMA_VERSION",
     "SECRET_REDACTION",
     "UNRESTRICTED_TOOLS",
@@ -81,6 +84,7 @@ __all__ = [
     "ResidentManifest",
     "Route",
     "Routine",
+    "RoutineDelivery",
     "Runner",
     "Severity",
     "SkillGrant",
@@ -256,6 +260,23 @@ DELEGATION_ROUTE_KIND = "delegation"
 #: for the reason every reference field in this file is one: a manifest is git, and a bot
 #: token in git is a bot anybody who clones the repo can speak as.
 CHAT_ROUTE_KIND = "chat"
+
+#: Where a routine's final message may be sent (warren#385). ``chat`` names the route
+#: *kind*, not a transport: it means "the resident's active chat route", whatever address
+#: that route carries — ``telegram:hob`` today, a Discord address tomorrow without this
+#: field changing. A single legal value rather than a free string for the same reason as
+#: :data:`NotificationTransport`: a misspelt destination must fail at validation, not be a
+#: digest nobody received. The intended extension is additive — a specific route address
+#: (``deliver: discord:hob``) alongside the bare kind — and ``quiet_word`` is designed to
+#: read the same either way.
+RoutineDelivery = Literal["chat"]
+ROUTINE_DELIVER_CHAT = "chat"
+
+#: A quiet word is one token: no whitespace, and short enough to be typed exactly. A
+#: session says it *instead of* a message, so "did the resident say the quiet word" has to
+#: be an exact comparison, and a phrase would make every near-miss a message on a phone.
+QUIET_WORD_MAX_CHARS = 32
+QUIET_WORD_PATTERN = re.compile(rf"^\S{{1,{QUIET_WORD_MAX_CHARS}}}$")
 
 #: One transport name, as a manifest spells it. A closed set for the reason
 #: :data:`PermissionMode` is one: a typo in a transport name would otherwise be a manifest
@@ -1393,6 +1414,37 @@ class Routine(_Model):
         default=None,
         description="Flag the one routine that ends the resident's day and journals.",
     )
+    deliver: RoutineDelivery | None = Field(
+        default=None,
+        description=(
+            "Where the final message of a finished run goes. 'chat' sends it to each "
+            "operator through the resident's active chat route."
+        ),
+    )
+    quiet_word: str | None = Field(
+        default=None,
+        description=(
+            "The one reply that means 'say nothing': a delivered run whose whole output "
+            "is this word sends nothing. One short token, matched exactly."
+        ),
+    )
+
+    @field_validator("quiet_word")
+    @classmethod
+    def _check_quiet_word(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
+        if not QUIET_WORD_PATTERN.match(value):
+            raise ValueError(
+                f"quiet_word must be one short token: no whitespace, at most "
+                f"{QUIET_WORD_MAX_CHARS} characters"
+            )
+        # ``deliver`` is declared above this field, so it has already been read.
+        if info.data.get("deliver") is None:
+            raise ValueError(
+                "quiet_word means nothing without deliver: a run nobody hears cannot be quiet"
+            )
+        return value
 
     @field_validator("schedule")
     @classmethod
@@ -1789,6 +1841,8 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
+    "routines.deliver": "deliver: chat  (needs an active chat route; omit it to deliver nowhere)",
+    "routines.quiet_word": "quiet_word: NOTHING  (one short token; only with deliver)",
     "delegation": "delegation: {send: true, to: [life-agent]}",
     "delegation.send": "send: true  (omit the block entirely to never delegate)",
     "delegation.to": "to: [life-agent]  (resident ids; omit it to allow any receiver)",
@@ -2151,6 +2205,35 @@ def _check_notifications_are_deliverable(
             severity=Severity.WARNING,
         )
     ]
+
+
+def _check_deliveries_have_a_door(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse ``deliver: chat`` on a resident nobody can be reached through.
+
+    An **error**, where :func:`_check_notifications_are_deliverable` settles for a warning,
+    because the two silences are not alike. A tap that never fires loses nothing. A digest
+    that was asked for, written, paid for and then dropped on the floor every morning is
+    work thrown away — and the manifest reads as if it arrives. ``active`` is the half that
+    matters: a ``pending`` chat route is a bot nobody has put a token behind yet, so there
+    is no conversation to send into.
+    """
+    if not any(route.accepts_chat for route in manifest.routes):
+        return [
+            Diagnostic(
+                file=source,
+                field_path=f"routines[{index}].deliver",
+                problem=(
+                    f"routine {routine.id!r} delivers to chat but this resident has no "
+                    f"active chat route; there is no conversation to send its message into"
+                ),
+                example=(
+                    "routes: [{id: phone, kind: chat, address: telegram:<bot>, status: active}]"
+                ),
+            )
+            for index, routine in enumerate(manifest.routines)
+            if routine.deliver == ROUTINE_DELIVER_CHAT
+        ]
+    return []
 
 
 def _check_budget_runtime(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
@@ -2897,6 +2980,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_close_of_day(manifest, source))
     diagnostics.extend(_check_board_route(manifest, source))
     diagnostics.extend(_check_notifications_are_deliverable(manifest, source))
+    diagnostics.extend(_check_deliveries_have_a_door(manifest, source))
     diagnostics.extend(_check_budget_runtime(manifest, source))
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))

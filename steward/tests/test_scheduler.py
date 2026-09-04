@@ -35,7 +35,7 @@ from steward.session_auth import (
     SESSION_TOKEN_ENV,
     SessionPrincipal,
 )
-from steward.store import Store
+from steward.store import OpenRun, Store
 
 LJUBLJANA = ZoneInfo("Europe/Ljubljana")
 
@@ -2393,3 +2393,171 @@ def test_the_board_dispatcher_is_refreshed_with_the_fleet(
         ]
     finally:
         store.close()
+
+
+# ---------------------------------------------------------------------------- deliver: chat
+
+
+DELIVERED = {
+    "id": "digest",
+    "schedule": "15 * * * *",
+    "schedule_tz": "Europe/Ljubljana",
+    "prompt": "Write the digest, or reply NOTHING.",
+    "timeout_s": 60,
+    "enabled": True,
+    "deliver": "chat",
+    "quiet_word": "NOTHING",
+}
+PHONE = {"id": "phone", "kind": "chat", "address": "telegram:testy", "status": "active"}
+
+
+class RecordingDeliverer:
+    """A deliverer that keeps every message it was handed, and answers as told."""
+
+    def __init__(self, answer: s.Delivery | None = None) -> None:
+        """Hold the delivery every call will report."""
+        self.handed: list[tuple[str, str, str]] = []
+        self.answer = answer or s.Delivery(status=s.DELIVERED)
+
+    def deliver(self, resident: m.Resident, routine: m.Routine, text: str) -> s.Delivery:
+        """Remember what was handed over and answer as configured."""
+        self.handed.append((resident.id, routine.id, text))
+        return self.answer
+
+
+@pytest.fixture
+def delivering(write_resident: ResidentWriter, tmp_path: Path):
+    """Build a scheduler over one delivering routine, a canned session, and a real registry."""
+
+    def _build(
+        output: str = "Two things happened today.",
+        outcome: r.Outcome = r.Outcome.OK,
+        deliverer: RecordingDeliverer | None = None,
+        routine: dict = DELIVERED,
+    ) -> tuple[s.Scheduler, RecordingDeliverer, Store]:
+        data = manifest_with(routine)
+        data["routes"].append(PHONE)
+        path = write_resident(data)
+        store = Store(tmp_path / "steward.db")
+        deliverer = deliverer or RecordingDeliverer()
+        engine = s.Scheduler(
+            s.load_scheduled(path.parent),
+            emitter=ev.EventEmitter(fallback=tmp_path / "events.jsonl"),
+            state=s.SchedulerState(path=tmp_path / "state.json"),
+            workdir=tmp_path,
+            registry=store,
+            runner_factory=lambda _spec, _placement: r.MockRunner(
+                behavior=lambda _req: r.RunResult(
+                    outcome=outcome, output=output, exit_status=0 if outcome is r.Outcome.OK else 1
+                )
+            ),
+            deliverer=deliverer,
+        )
+        return engine, deliverer, store
+
+    return _build
+
+
+def _fire_digest(engine: s.Scheduler) -> s.FireReport:
+    engine.due(datetime(2026, 9, 4, 10, 0, tzinfo=UTC))
+    [report] = engine.tick(datetime(2026, 9, 4, 10, 15, 30, tzinfo=UTC))
+    assert report.fired
+    return report
+
+
+def _run_row(store: Store, run_id: str) -> OpenRun:
+    row = store.run(run_id)
+    assert row is not None
+    return row
+
+
+def test_a_finished_delivered_routine_hands_its_message_over(delivering) -> None:
+    engine, deliverer, store = delivering()
+    report = _fire_digest(engine)
+    assert deliverer.handed == [("test-agent", "digest", "Two things happened today.")]
+    assert report.delivery == s.Delivery(status=s.DELIVERED)
+    assert _run_row(store, report.run_id).delivery == s.DELIVERED
+
+
+@pytest.mark.parametrize("output", ["NOTHING", "  NOTHING\n", "", "   \n"])
+def test_the_quiet_word_or_nothing_sends_nothing(delivering, output: str) -> None:
+    engine, deliverer, store = delivering(output=output)
+    report = _fire_digest(engine)
+    assert deliverer.handed == []
+    assert report.delivery == s.Delivery(status=s.QUIET)
+    assert _run_row(store, report.run_id).delivery == s.QUIET
+
+
+def test_the_quiet_word_is_matched_exactly(delivering) -> None:
+    engine, deliverer, _store = delivering(output="nothing much, really")
+    _fire_digest(engine)
+    assert [text for _r, _i, text in deliverer.handed] == ["nothing much, really"]
+
+
+@pytest.mark.parametrize("outcome", [r.Outcome.FAILED, r.Outcome.TIMEOUT])
+def test_a_failed_or_timed_out_run_delivers_nothing(delivering, outcome: r.Outcome) -> None:
+    engine, deliverer, store = delivering(output="half a digest", outcome=outcome)
+    report = _fire_digest(engine)
+    assert deliverer.handed == []
+    assert report.delivery is None
+    assert _run_row(store, report.run_id).delivery is None
+    assert report.result is not None
+    assert report.result.outcome is outcome
+
+
+def test_a_routine_without_deliver_hands_nothing_over(delivering) -> None:
+    plain = {k: v for k, v in DELIVERED.items() if k not in ("deliver", "quiet_word")}
+    engine, deliverer, _store = delivering(routine=plain)
+    report = _fire_digest(engine)
+    assert deliverer.handed == []
+    assert report.delivery is None
+
+
+def test_a_failed_delivery_is_recorded_and_does_not_fail_the_routine(
+    delivering, tmp_path: Path
+) -> None:
+    failed = s.Delivery(status=s.DELIVERY_FAILED, reason="no operators")
+    engine, _deliverer, store = delivering(deliverer=RecordingDeliverer(failed))
+    report = _fire_digest(engine)
+    assert report.delivery == failed
+    row = _run_row(store, report.run_id)
+    assert row.delivery == s.DELIVERY_FAILED
+    assert row.delivery_reason == "no operators"
+    assert report.result is not None
+    assert report.result.ok
+    types = [event["type"] for event in emitted(tmp_path / "events.jsonl")]
+    assert types == ["routine_started", "routine_finished"]
+
+
+def test_a_deliverer_that_raises_is_a_failed_delivery_not_a_crash(delivering) -> None:
+    class Exploding:
+        def deliver(self, *_args: object) -> s.Delivery:
+            raise RuntimeError("the phone is off")
+
+    engine, _deliverer, store = delivering(deliverer=Exploding())  # type: ignore[arg-type]
+    report = _fire_digest(engine)
+    assert report.delivery is not None
+    assert report.delivery.status == s.DELIVERY_FAILED
+    assert "the phone is off" in report.delivery.reason
+    assert _run_row(store, report.run_id).delivery == s.DELIVERY_FAILED
+
+
+def test_a_delivering_routine_with_no_deliverer_is_a_failed_delivery(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    data = manifest_with(DELIVERED)
+    data["routes"].append(PHONE)
+    path = write_resident(data)
+    engine = s.Scheduler(
+        s.load_scheduled(path.parent),
+        emitter=ev.NullEmitter(),
+        state=s.SchedulerState(path=tmp_path / "state.json"),
+        workdir=tmp_path,
+        runner_factory=lambda _spec, _placement: r.MockRunner(
+            behavior=lambda _req: r.RunResult(outcome=r.Outcome.OK, output="hi", exit_status=0)
+        ),
+    )
+    report = _fire_digest(engine)
+    assert report.delivery is not None
+    assert report.delivery.status == s.DELIVERY_FAILED
+    assert "no deliverer" in report.delivery.reason

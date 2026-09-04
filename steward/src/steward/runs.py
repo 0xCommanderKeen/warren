@@ -54,3 +54,13 @@ def validate_kind_trigger(kind: str, trigger: str) -> None:
     allowed = _TRIGGERS_BY_KIND.get(kind, ("",))
     if trigger not in allowed:
         raise ValueError(f"invalid trigger {trigger!r} for run kind {kind!r}")
+
+
+#: What became of a finished routine's final message when its manifest said
+#: ``deliver:`` (warren#385). Written on the run's row by the scheduler, beside the outcome
+#: and never instead of it: a message that did not reach the phone is a delivery that
+#: failed, not a routine that did. A run whose routine delivers nowhere carries none.
+DELIVERED = "delivered"
+QUIET = "quiet"
+DELIVERY_FAILED = "delivery_failed"
+DELIVERY_STATUSES = (DELIVERED, QUIET, DELIVERY_FAILED)

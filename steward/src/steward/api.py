@@ -52,6 +52,7 @@ from steward import authoring as au
 from steward import events as ev
 from steward.board import Dispatcher
 from steward.budgets import BudgetGuard
+from steward.chat import RoutineDelivery
 from steward.claims import ONE_SESSION_PER_RESIDENT, ResidentClaims
 from steward.deploy import Transport
 from steward.nursery import (
@@ -537,6 +538,9 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
             hooks=hooks,
             registry=db,
             claims=claims,
+            # A run-now of a routine that says ``deliver:`` delivers exactly as a scheduled
+            # fire would (warren#385); the API process holds the same tokens.
+            deliverer=RoutineDelivery.from_env(),
         ),
         store=db,
         claims=claims,

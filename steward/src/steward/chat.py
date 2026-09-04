@@ -80,6 +80,7 @@ from steward.manifest import (
     Resident,
     ResidentManifest,
     Route,
+    Routine,
     active_residents,
     redact_secrets,
     validate_path,
@@ -87,8 +88,8 @@ from steward.manifest import (
 from steward.prompt import TRANSCRIPT_MAX_CHARS
 from steward.run_lifecycle import RunTransitions, event_log_path, new_owner_token
 from steward.runners import RunResult, build_runner
-from steward.runs import RUN_CHAT, TRIGGER_CHAT
-from steward.scheduler import WakeHooks, default_state_path
+from steward.runs import DELIVERED, DELIVERY_FAILED, RUN_CHAT, TRIGGER_CHAT
+from steward.scheduler import Delivery, WakeHooks, default_state_path
 from steward.session_auth import new_session_credential
 from steward.sessions import (
     DEFAULT_CHAT_TIMEOUT_S,
@@ -126,6 +127,7 @@ __all__ = [
     "Drop",
     "KnockLimiter",
     "Message",
+    "RoutineDelivery",
     "TelegramTransport",
     "Transcript",
     "Turn",
@@ -1751,6 +1753,100 @@ class ChatBridge:
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+
+# --------------------------------------------------------------------------------------
+# routines[].deliver: chat — a routine's final message, sent to the operators
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RoutineDelivery:
+    """Carries a finished routine's final message to each operator (warren#385).
+
+    The outbound half the bridge deliberately did not have, and kept as narrow as it can
+    be: no polling, no session, no transcript — one text, sent once into each operator's
+    private conversation with the resident's own bot, through the same redact-then-bound
+    egress every chat reply takes (:func:`_bounded`). It satisfies
+    :class:`steward.scheduler.Deliverer`, and the scheduler is the only caller: *whether*
+    anything is sent (the routine said ``deliver:``, the run finished, the text is not the
+    quiet word) is decided there, before this is asked.
+
+    ``deliver: chat`` names the route *kind*. The route is resolved from the resident at
+    send time, so the transport is whatever the route's address says — ``telegram:hob``
+    today — and a second transport is a second :class:`ChatTransport`, not a change here.
+    A routine cannot yet name a specific route; when a resident has more than one chat
+    route, ``deliver`` will grow an address form (``deliver: discord:hob``) and the bare
+    kind will keep meaning "the one active chat route".
+    """
+
+    tokens: Mapping[str, str] = field(default_factory=dict, repr=False)
+    operators: frozenset[str] = frozenset()
+    transport: ChatTransport = field(default_factory=TelegramTransport.from_env)
+
+    @classmethod
+    def from_env(
+        cls, env: Mapping[str, str] | None = None, *, transport: ChatTransport | None = None
+    ) -> RoutineDelivery:
+        """Read the tokens and the operator list the way the bridge reads them."""
+        source = os.environ if env is None else env
+        return cls(
+            tokens=tokens_from_env(source),
+            operators=operators_from_env(source),
+            transport=transport or TelegramTransport.from_env(source),
+        )
+
+    def deliver(self, resident: Resident, routine: Routine, text: str) -> Delivery:
+        """Send ``text`` to every operator through the resident's chat route. Never raises.
+
+        Every refusal names what is missing in steward's own words — the variable, the
+        route, the transport — and never the text itself: the reason lands on the run row,
+        and the run row is not where a digest belongs.
+        """
+        routes = chat_routes([resident])
+        if not routes:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                reason=f"resident {resident.id!r} has no active chat route to deliver into",
+            )
+        route = routes[0]
+        if route.address.transport != self.transport.name:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                reason=(
+                    f"route {route.key} is on transport {route.address.transport!r}, and "
+                    f"only {self.transport.name!r} can deliver here"
+                ),
+            )
+        token = self.tokens.get(route.address.token_env)
+        if not token:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                reason=f"{route.address.token_env} is not set, so nothing can speak as the bot",
+            )
+        if not self.operators:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                reason=f"{OPERATORS_ENV} is empty; there is nobody to deliver to",
+            )
+        sent = _bounded(text)
+        reached = 0
+        for operator in sorted(self.operators):
+            try:
+                landed = self.transport.send(token, operator, sent)
+            except Exception as exc:  # noqa: BLE001 — a transport that raises is still just a failure
+                log.warning("%s: chat transport raised while delivering: %s", route.key, exc)
+                landed = False
+            reached += bool(landed)
+        total = len(self.operators)
+        if reached == 0:
+            return Delivery(
+                status=DELIVERY_FAILED,
+                reason=f"routine {routine.id!r}: reached 0 of {total} operators",
+            )
+        if reached < total:
+            return Delivery(status=DELIVERED, reason=f"reached {reached} of {total} operators")
+        return Delivery(status=DELIVERED)
 
 
 def _bounded(text: str) -> str:

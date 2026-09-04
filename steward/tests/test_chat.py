@@ -16,10 +16,12 @@ from click.testing import CliRunner
 from conftest import ClaimHolderSpawner, ResidentWriter, valid_manifest
 from steward import chat as ch
 from steward import events as ev
+from steward import manifest as m
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.manifest import (
     CHAT_ROUTE_KIND,
+    Resident,
     ResidentManifest,
     Route,
     load_manifest,
@@ -34,13 +36,15 @@ from steward.prompt import (
 )
 from steward.runners import Outcome, Runner, RunRequest, RunResult
 from steward.runs import (
+    DELIVERED,
+    DELIVERY_FAILED,
     RUN_CHAT,
     RUN_ROUTINE,
     TRIGGER_CHAT,
     TRIGGER_SCHEDULE,
     validate_kind_trigger,
 )
-from steward.scheduler import WakeHooks
+from steward.scheduler import Delivery, WakeHooks
 from steward.sessions import RunGuard
 from steward.store import Store
 
@@ -1539,3 +1543,138 @@ def test_chat_run_sits_idle_and_names_every_token_it_is_waiting_for(
     assert result.exit_code == 0
     assert "idle" in result.output
     assert "STEWARD_CHAT_TOKEN_TESTY" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# routines[].deliver: chat (warren#385)
+# --------------------------------------------------------------------------------------
+
+
+DIGEST = m.Routine.model_validate(
+    {
+        "id": "digest",
+        "schedule": "0 8 * * *",
+        "prompt": "Write the digest, or reply NOTHING.",
+        "timeout_s": 600,
+        "deliver": "chat",
+        "quiet_word": "NOTHING",
+    }
+)
+
+
+@pytest.fixture
+def phone_resident(write_resident: ResidentWriter, tmp_path: Path) -> Resident:
+    return load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
+
+
+def _delivery(
+    transport: FakeTransport | None = None, env: dict[str, str] | None = None
+) -> tuple[ch.RoutineDelivery, FakeTransport]:
+    transport = transport or FakeTransport()
+    source = {
+        "STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN,
+        ch.OPERATORS_ENV: "4242, 99",
+        **(env or {}),
+    }
+    return ch.RoutineDelivery.from_env(source, transport=transport), transport
+
+
+def test_a_delivery_reaches_every_operators_private_conversation(phone_resident: Resident):
+    delivery, transport = _delivery()
+    outcome = delivery.deliver(phone_resident, DIGEST, "Two things happened today.")
+    assert outcome == Delivery(status=DELIVERED)
+    assert transport.sent == [
+        (FAKE_BOT_TOKEN, "4242", "Two things happened today."),
+        (FAKE_BOT_TOKEN, "99", "Two things happened today."),
+    ]
+
+
+def test_a_delivered_message_is_redacted_and_bounded(phone_resident: Resident):
+    delivery, transport = _delivery()
+    text = f"the token is {FAKE_BOT_TOKEN} and then " + "x" * (ch.REPLY_MAX_CHARS * 2)
+    outcome = delivery.deliver(phone_resident, DIGEST, text)
+    assert outcome.status == DELIVERED
+    for _token, _conversation, sent in transport.sent:
+        assert FAKE_BOT_TOKEN not in sent
+        assert len(sent) <= ch.REPLY_MAX_CHARS
+
+
+def test_no_operators_means_a_failed_delivery_and_no_send(phone_resident: Resident):
+    delivery, transport = _delivery(env={ch.OPERATORS_ENV: ""})
+    outcome = delivery.deliver(phone_resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert ch.OPERATORS_ENV in outcome.reason
+    assert transport.sent == []
+
+
+def test_a_missing_token_is_a_failed_delivery_naming_the_variable(phone_resident: Resident):
+    delivery, transport = _delivery(env={"STEWARD_CHAT_TOKEN_TESTY": ""})
+    outcome = delivery.deliver(phone_resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert "STEWARD_CHAT_TOKEN_TESTY" in outcome.reason
+    assert FAKE_BOT_TOKEN not in outcome.reason
+    assert transport.sent == []
+
+
+def test_a_resident_with_no_active_chat_route_cannot_be_delivered_to(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    data = chat_manifest(tmp_path / "memory")
+    data["routes"][-1]["status"] = "pending"
+    resident = load_manifest(write_resident(data))
+    delivery, transport = _delivery()
+    outcome = delivery.deliver(resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert "no active chat route" in outcome.reason
+    assert transport.sent == []
+
+
+def test_a_transport_that_refuses_every_send_is_a_failed_delivery(phone_resident: Resident):
+    class Refusing(FakeTransport):
+        def send(self, token: str, conversation: str, text: str) -> bool:
+            super().send(token, conversation, text)
+            return False
+
+    delivery, transport = _delivery(transport=Refusing())
+    outcome = delivery.deliver(phone_resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert "0 of 2" in outcome.reason
+    assert len(transport.sent) == 2
+
+
+def test_a_partly_delivered_message_is_delivered_and_says_who_was_missed(
+    phone_resident: Resident,
+):
+    class Picky(FakeTransport):
+        def send(self, token: str, conversation: str, text: str) -> bool:
+            super().send(token, conversation, text)
+            return conversation == "4242"
+
+    delivery, _transport = _delivery(transport=Picky())
+    outcome = delivery.deliver(phone_resident, DIGEST, "hello")
+    assert outcome.status == DELIVERED
+    assert "1 of 2" in outcome.reason
+
+
+def test_a_transport_that_raises_is_a_failed_delivery_not_a_crash(phone_resident: Resident):
+    class Exploding(FakeTransport):
+        def send(self, token: str, conversation: str, text: str) -> bool:  # noqa: ARG002
+            raise OSError("no route to host")
+
+    delivery, _transport = _delivery(transport=Exploding())
+    outcome = delivery.deliver(phone_resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert "0 of 2" in outcome.reason
+
+
+def test_an_address_on_another_transport_is_not_delivered_here(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    data = chat_manifest(tmp_path / "memory")
+    data["routes"][-1]["address"] = "discord:testy"
+    resident = load_manifest(write_resident(data))
+    delivery, transport = _delivery()
+    outcome = delivery.deliver(resident, DIGEST, "hello")
+    assert outcome.status == DELIVERY_FAILED
+    assert "discord" in outcome.reason
+    assert transport.sent == []
