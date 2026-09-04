@@ -1,7 +1,7 @@
 """The residents actually shipped in this repo must always validate."""
 
 from conftest import PROJECT_AGENT_FIXTURE, REPO_ROOT, RESIDENTS_DIR
-from steward import journal
+from steward import board, journal
 from steward import manifest as m
 from steward.skills import default_skills, effective_names, load_library, missing_skills
 
@@ -41,6 +41,29 @@ def test_hob_is_the_vault_keeper_declared_on_the_burrow() -> None:
     assert all(routine.schedule_tz == "Europe/Ljubljana" for routine in hob.manifest.routines), (
         "'resident-local time' has to be written down: the NAS is not the household"
     )
+
+
+def test_hob_takes_letters_from_his_neighbours() -> None:
+    """Hob's delegation door, so the librarian can hand him vault work (warren#438).
+
+    Asserted through :func:`steward.board.delegation_residents` rather than only by
+    reading the route back: that function is what the dispatch sweep drains, so a route
+    that validates but leaves Hob out of the drain would be a door nobody opens.
+    """
+    hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
+    doors = [route for route in hob.manifest.routes if route.kind == "delegation"]
+    assert [route.id for route in doors] == ["inbox"]
+    assert doors[0].address == "steward:delegation"
+    assert doors[0].accepts_delegation, "a pending door takes no letters"
+
+    residents = m.validate_tree(RESIDENTS_DIR).residents
+    assert "hob" in {resident.id for resident in board.delegation_residents(residents)}
+
+
+def test_hob_receives_letters_but_sends_none() -> None:
+    """The door is one-way: Hob receives vault work, he does not delegate it onward."""
+    hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
+    assert not hob.manifest.delegation.send
 
 
 def test_a_project_scoped_fixture_has_no_agent_identity() -> None:
