@@ -15,7 +15,12 @@ RUN_DELEGATED = "delegated"
 #: rather than a schedule, and the ledger has to be able to say which of the two a
 #: resident spent its day on.
 RUN_CHAT = "chat"
-RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED, RUN_CHAT)
+#: One throwaway turn run from a declaration that has not been provisioned (warren#446).
+#: Its own kind because of who pays: the row is written against the *caller's* resident,
+#: names the rehearsed declaration in ``ref``, and must never be mistaken for work that
+#: resident did. Nothing declares it and nothing triggers it, so it carries no trigger.
+RUN_REHEARSAL = "rehearsal"
+RUN_KINDS = (RUN_ROUTINE, RUN_TASK, RUN_DELEGATED, RUN_CHAT, RUN_REHEARSAL)
 
 
 class AlreadyRunningError(Exception):

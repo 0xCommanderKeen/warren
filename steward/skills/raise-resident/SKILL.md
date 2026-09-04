@@ -99,6 +99,25 @@ plan naming the wrong image, the wrong host, or a mount you never declared is th
 bug you will ever catch. `dry_run: true` is required, and the refusal without it is the
 door working.
 
+## Rehearse it
+
+The dry run proves the plan; it says nothing about whether the charter reads right. So
+send the draft one message shaped like its first real one:
+
+```
+curl -sS -X POST "$STEWARD_URL/residents/<id>/rehearse" \
+  -H "Authorization: Bearer $STEWARD_SESSION_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"message": "Good morning — anything for me?"}'
+```
+
+One throwaway turn from the declaration: its charter, soul and skills in the prompt, and
+no container, no mounts, no memory directory, no credential and no tools. `reply` is what
+it said — so ask it something it can answer by talking, not by doing. **This one costs money, and the money is yours** — it is charged to your budget
+line, not the draft's, because the draft has none. So rehearse once, read the reply
+against the voice you were asked for, and fix the charter rather than the reply if they
+disagree. A separate grant, `residents.rehearse`; without it this is a 403 and the dry run
+does not stand in for it.
+
 ## Knock once, then stop
 
 The knock is the `escalate` skill's four parts carrying **one decision**:
@@ -109,6 +128,10 @@ Provision karen?
 Skeleton committed as a1b2c3. The manifest text below is complete and ready to PUT — it
 adds the mounts, the routines and the daily budget the declare form cannot express. The
 dry run is clean: one container, steward-resident:latest, on dxp2800.
+
+I sent her "Good morning — anything for me?" and she said:
+
+  Morning. Nothing due yet; I will knock when the first errand lands.
 
 Yes and the PUT and the provision are yours to run; no and the skeleton sits in the tree
 costing nothing. Nothing happens until you say.

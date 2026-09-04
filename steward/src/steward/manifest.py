@@ -200,6 +200,10 @@ UNRESTRICTED_TOOLS = "unrestricted"
 SESSION_GRANT_SKILLS_WRITE = "skills.write"
 SESSION_GRANT_RESIDENTS_DECLARE = "residents.declare"
 SESSION_GRANT_RESIDENTS_DRY_RUN = "residents.dry_run"
+#: Deliberately not implied by ``residents.dry_run`` (warren#446). A dry run reads a
+#: rendered plan and costs nothing; a rehearsal runs a model turn and spends the caller's
+#: budget, so a resident handed the cheap door must not inherit the expensive one.
+SESSION_GRANT_RESIDENTS_REHEARSE = "residents.rehearse"
 
 
 class SessionGrant(StrEnum):
@@ -208,6 +212,7 @@ class SessionGrant(StrEnum):
     SKILLS_WRITE = SESSION_GRANT_SKILLS_WRITE
     RESIDENTS_DECLARE = SESSION_GRANT_RESIDENTS_DECLARE
     RESIDENTS_DRY_RUN = SESSION_GRANT_RESIDENTS_DRY_RUN
+    RESIDENTS_REHEARSE = SESSION_GRANT_RESIDENTS_REHEARSE
 
 
 #: A built-in tool name as ``claude --tools`` spells it — ``Read``, ``Glob``, ``WebFetch``.

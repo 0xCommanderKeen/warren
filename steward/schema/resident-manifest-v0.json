@@ -783,7 +783,8 @@
       "enum": [
         "skills.write",
         "residents.declare",
-        "residents.dry_run"
+        "residents.dry_run",
+        "residents.rehearse"
       ],
       "title": "SessionGrant",
       "type": "string"

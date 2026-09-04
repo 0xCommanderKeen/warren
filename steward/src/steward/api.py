@@ -656,6 +656,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
         runs=runs,
         hooks=hooks,
         claims=claims,
+        runner_factory=runner_factory,
     )
     app.include_router(request_routes.router(deps))
     app.include_router(board_routes.router(deps))
