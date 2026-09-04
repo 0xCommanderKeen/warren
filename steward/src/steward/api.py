@@ -73,6 +73,7 @@ from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import residents as resident_routes
 from steward.routes import routines as routine_routes
+from steward.routes import secrets as secret_routes
 from steward.routes import skills as skill_routes
 from steward.routes.auth import (
     _ApprovalBodyDepthMiddleware,
@@ -628,6 +629,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     app.include_router(routine_routes.router(deps))
     app.include_router(delegation_routes.router(deps))
 
+    app.include_router(secret_routes.router(deps))
     app.include_router(resident_routes.router(deps))
     app.include_router(skill_routes.router(deps))
 

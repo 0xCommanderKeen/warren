@@ -1377,6 +1377,22 @@
         "title": "Runner",
         "type": "object"
       },
+      "SecretBody": {
+        "additionalProperties": false,
+        "description": "The one thing a caller sends, and the one thing steward never sends back.\n\nDeliberately *unconstrained* at the schema layer, which is the opposite of every other\nbody in this API. Pydantic reports a length violation by echoing the offending\n``input`` into the 422 response \u2014 which for this one field would put the credential in\na response body, and from there into whatever logged it. The bounds still apply; they\nare applied by :func:`steward.secrets.write_secret`, which refuses by *naming the rule*\nand never quotes what it refused.",
+        "properties": {
+          "value": {
+            "description": "The credential itself. Stored, never returned by any route.",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "SecretBody",
+        "type": "object"
+      },
       "SessionGrant": {
         "description": "A write door an authenticated resident session may cross.",
         "enum": [
@@ -2830,6 +2846,95 @@
           }
         ],
         "summary": "List Routines"
+      }
+    },
+    "/secrets": {
+      "get": {
+        "description": "List every credential slot, whether it is filled, and which route wants it.\n\nThree sources of names, unioned: the slots declared chat routes ask for, the files\nin the secrets directory, and the ``STEWARD_CHAT_TOKEN_*`` variables still in this\nprocess's environment. A slot no route claims is listed all the same \u2014 that is what\na half-finished provisioning looks like, and hiding it would hide the thing an\noperator came here to see.",
+        "operationId": "list_secrets_secrets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Secrets Secrets Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Secrets"
+      }
+    },
+    "/secrets/{name}": {
+      "put": {
+        "description": "Store one credential in its own private file. Returns that it was stored.\n\nEverything a caller learns is that the write happened, and the request id it\nhappened under. The name is echoed because the caller chose it; the value is not,\nbecause a response body is the easiest thing in this system to end up in a log.",
+        "operationId": "write_secret_secrets__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Write Secret Secrets  Name  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "No credential was presented, or steward refused the one that was."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Write Secret"
       }
     },
     "/skills": {

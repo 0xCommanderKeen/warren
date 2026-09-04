@@ -80,6 +80,7 @@ __all__ = [
     "resident_restarted_event",
     "resident_retired_event",
     "routine_failed_event",
+    "secret_written_event",
     "task_claimed_event",
     "task_delegated_event",
     "task_done_event",
@@ -116,6 +117,11 @@ DISCORD_THREAD_CREATED = "discord_thread_created"
 DISCORD_THREAD_ARCHIVED = "discord_thread_archived"
 DISCORD_MESSAGE_PINNED = "discord_message_pinned"
 
+#: An operator set or rotated one of steward's credentials (warren#462). The *name* only:
+#: there is deliberately nowhere in this event for a value, and the endpoint that emits it
+#: has no sibling that reads one back.
+SECRET_WRITTEN = "secret_written"  # noqa: S105 — an event type, not a credential
+
 #: The event types steward adds to the protocol. Additive in *shape* — a v0 consumer that
 #: does not know one still parses the record — but not free: chronicle validates ``type``
 #: against its own frozenset and 400s anything outside it. A type added here and not added
@@ -145,6 +151,7 @@ EVENT_TYPES = (
     DISCORD_THREAD_CREATED,
     DISCORD_THREAD_ARCHIVED,
     DISCORD_MESSAGE_PINNED,
+    SECRET_WRITTEN,
 )
 
 #: Steward's own identity, for the work steward itself does rather than a resident.
@@ -1079,6 +1086,24 @@ def resident_restarted_event(
     if supervisor:
         payload["supervisor"] = supervisor
     return Event(type=RESIDENT_RESTARTED, agent_id=agent_id, project=project, payload=payload)
+
+
+def secret_written_event(*, name: str) -> Event:
+    """Say out loud that a credential slot was filled, without saying what filled it.
+
+    A rotation is a fleet event: the moment a bot's identity could start behaving
+    differently, and the first thing anyone debugging "why did Hob go quiet at 21:04" wants
+    on the timeline. It is emitted by the API rather than by a resident because setting a
+    secret is a human act — the endpoint refuses a session credential outright — so it
+    carries steward's own identity.
+
+    The payload is one field and it is a *name*. There is no value here, no length, and no
+    prefix: each of those is a fact about a credential that a village log, which is world-
+    readable to anyone who can see the fleet, has no business carrying.
+    """
+    return Event(
+        type=SECRET_WRITTEN, agent_id=API_AGENT_ID, project=API_PROJECT, payload={"secret": name}
+    )
 
 
 def resident_declared_event(*, resident: Resident) -> Event:

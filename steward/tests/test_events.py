@@ -111,6 +111,7 @@ def test_the_added_types_are_the_additive_set() -> None:
         "discord_thread_created",
         "discord_thread_archived",
         "discord_message_pinned",
+        "secret_written",
     )
 
 

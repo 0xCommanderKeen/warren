@@ -353,6 +353,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `discord_message_pinned` | Steward pinned a Discord message for a resident | `resident`, `route`, `channel`; optional message metadata, never `text` |
 | `discord_topic_set` | Steward set a Discord channel topic for a resident | `resident`, `route`, `channel`; never topic `text` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
+| `secret_written`    | An operator set or rotated one of steward's credentials (warren#462) | `secret` — the slot's name, and nothing else; there is deliberately nowhere in this event for a value |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
 and run id, and are also first-class villager activity. A valid start can create or
