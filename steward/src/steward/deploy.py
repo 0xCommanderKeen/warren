@@ -112,7 +112,7 @@ __all__ = [
 ]
 
 #: The NAS this fleet runs on, and the user steward reaches it as. Burrow's server, the
-#: village's event log, and life-agent are all already here; a new resident that landed
+#: village's event log, and hob are all already here; a new resident that landed
 #: somewhere else by default would be a resident nobody could find.
 DEFAULT_HOST = "dxp2800"
 DEFAULT_USER = "Miha"

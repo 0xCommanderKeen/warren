@@ -113,8 +113,8 @@ describe("the steward client", () => {
     const client = createStewardClient({ credential: held(), fetch });
     await client.readSkill("a/b");
     expect(fetch.mock.calls[0][0]).toBe("/skills/a%2Fb");
-    await client.readBudget("life-agent");
-    expect(fetch.mock.calls[1][0]).toBe("/residents/life-agent/budget");
+    await client.readBudget("hob");
+    expect(fetch.mock.calls[1][0]).toBe("/residents/hob/budget");
   });
 
   it("PUTs a declaration as JSON and hands back steward's whole answer", async () => {

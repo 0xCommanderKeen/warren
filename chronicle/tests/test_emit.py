@@ -524,11 +524,11 @@ class SettingResolutionTest(unittest.TestCase):
         self.assertEqual(emit.targets(), [(emit.DEFAULT_MIRROR, "")])
 
     def test_the_resident_identity_reads_the_new_spelling(self):
-        os.environ["CHRONICLE_AGENT_ID"] = "life-agent"
-        self.assertEqual(emit._setting("AGENT_ID"), "life-agent")
+        os.environ["CHRONICLE_AGENT_ID"] = "hob"
+        self.assertEqual(emit._setting("AGENT_ID"), "hob")
 
     def test_a_pre_rename_identity_is_not_read(self):
-        os.environ["BURROW_AGENT_ID"] = "life-agent"
+        os.environ["BURROW_AGENT_ID"] = "hob"
         self.assertIsNone(emit._setting("AGENT_ID"))
 
     def test_the_detail_policy_defaults_to_full_and_reads_the_new_spelling(self):

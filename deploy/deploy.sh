@@ -35,7 +35,7 @@
 # Everything the warren puts on a burrow lives under ~/docker/warren (warren#358):
 # chronicle/ is chronicle's server, arcadia/ the origin (townhall's build inside it), steward/ the
 # control plane, residents/<id> each resident `steward provision` writes. Not the
-# pre-steward bot in ~/docker/life-agent, which is not the warren's.
+# pre-steward bot directory, which is not the warren's.
 #
 # Preconditions: ssh to $NAS with a key (BatchMode — no prompts), tar and python3 on
 # both ends, pnpm and the node versions the CI workflows pin (24 for arcadia, 22 for

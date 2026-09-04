@@ -40,10 +40,10 @@ const LIBRARY = {
 
 /** A declaration whose manifest carries both grant spellings and one block no form knows. */
 const DECLARATION = {
-  id: "life-agent",
+  id: "hob",
   manifest: {
     version: 0,
-    id: "life-agent",
+    id: "hob",
     soul: { name: "Hob", char: "Keeper", role: "life bot", accent: "#a68a4f" },
     skills: ["journal", { id: "write-journal", note: "end of run" }],
     deploy: { host: "dxp2800" },
@@ -53,7 +53,7 @@ const DECLARATION = {
   soul: "---\n---\n",
   soul_file: "soul.md",
   revision: "sha256:decl",
-  paths: ["residents/life-agent/manifest.yaml"],
+  paths: ["residents/hob/manifest.yaml"],
 };
 
 /** Steward, scripted: the library, the declaration, and whatever the write should answer. */
@@ -82,7 +82,7 @@ function mount(fetch) {
   return render(
     <NavigationProvider base="/">
       <StewardProvider storage={storage} fetch={fetch}>
-        <ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />
+        <ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />
       </StewardProvider>
     </NavigationProvider>,
   );
@@ -185,7 +185,7 @@ describe("granting and revoking a skill from the editor", () => {
           message: "the manifest does not validate",
           diagnostics: [
             {
-              file: "residents/life-agent/manifest.yaml",
+              file: "residents/hob/manifest.yaml",
               field: "skills[1].id",
               problem: "skill 'write-journal' is not in the skills library",
               example: "id: journal",

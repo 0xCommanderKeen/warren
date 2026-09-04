@@ -48,8 +48,8 @@ and deploy key next door. The API mounts the same directory at its host path, wi
 docker socket, because it is the process that writes a resident's bundle there and
 brings the container up — a resident whose `deploy.host` is this burrow is provisioned
 by the burrow, not over ssh to itself. A resident whose manifest sets `deploy.path` outside
-`residents/` is one the daemons cannot see. The pre-steward bot in `~/docker/life-agent`
-is not the warren's and stays where it is. A burrow still laid out the old way — the
+`residents/` is one the daemons cannot see. The pre-steward bot directory is not the
+warren's and stays where it is. A burrow still laid out the old way — the
 same directories at the top of `~/docker` — is refused by `deploy.sh`, not moved; see
 [Moving a burrow under `~/docker/warren`](#moving-a-burrow-under-dockerwarren).
 
@@ -270,7 +270,7 @@ places.
 
    ```sh
    api=http://dxp2800:8802; auth="Authorization: Bearer $STEWARD_TOKEN"
-   for id in pip life-agent; do
+   for id in pip hob; do
      curl -fsS -H "$auth" "$api/residents/$id/declaration" \
        | python3 -c 'import json, sys
    d = json.load(sys.stdin)
@@ -297,7 +297,7 @@ places.
      cd ~/docker/burrow && docker compose down'
    ```
 
-4. **Move.** `~/docker/life-agent` does not match `steward-*` and stays. Chronicle's directory
+4. **Move.** The pre-steward bot directory does not match `steward-*` and stays. Chronicle's directory
    changes name here, `burrow` to `chronicle`, and its compose project name follows the
    directory — which is why step 3 ran `down` from the old one: skipping it would leave the
    `burrow` project's container orphaned under the old name.

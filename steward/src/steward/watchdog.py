@@ -991,7 +991,7 @@ class Watchdog:
         """Report whether any supervisor owns a process it could put this resident back as.
 
         The question a give-up receipt implicitly claims an answer to. Giving up means
-        having tried, and of the shipped residents only ``life-agent`` declares a
+        having tried, and of the shipped residents only ``hob`` declares a
         ``deploy.container``; local test residents have nothing that could ever
         have tried (steward #130).
         """

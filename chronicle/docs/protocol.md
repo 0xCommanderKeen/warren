@@ -158,7 +158,7 @@ back to local logs and the village looks emptier than the fleet is.
 1. **Server first, token unset.** Deploy the `CHRONICLE_TOKEN`-aware `serve.py` with the
    var *not* set. Behavior is unchanged; every existing emitter keeps working.
 2. **Emitters next.** Roll `CHRONICLE_TOKEN=<secret>` out to every emitter (Mac hooks,
-   `life-agent` container, any other resident). A server with no token set ignores the
+   `hob` container, any other resident). A server with no token set ignores the
    header, so emitters can be updated one at a time with no coordination.
 3. **Server last, token set.** Once every emitter sends the secret, set `CHRONICLE_TOKEN`
    on the server and restart. Ingest is now closed; anything still unconfigured degrades
@@ -1191,7 +1191,7 @@ Env vars: `CHRONICLE_URL` (POST target, see Transport), `CHRONICLE_TOKEN` (inges
 see Ingest auth — sent as a bearer header, omitted when unset), `CHRONICLE_MIRROR` /
 `CHRONICLE_MIRROR_TOKEN` (extra POST targets, see Transport; empty disables). **Resident agents** — services
 that outlive any one Claude session, like a bot running `claude -p` per message —
-set `CHRONICLE_AGENT_ID` (stable villager identity, e.g. `life-agent`) and optionally
+set `CHRONICLE_AGENT_ID` (stable villager identity, e.g. `hob`) and optionally
 `CHRONICLE_PROJECT` (label). For a resident, `SessionEnd` maps to `idle` instead of
 `session_ended`: the session's process died, but the agent-as-service is still
 home, resting. Its children remain distinct; a child stop still ends that child,

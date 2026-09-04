@@ -307,7 +307,7 @@ def tap_for(manifest: ResidentManifest, event: ev.Event) -> Tap | None:
     its own ``notifications.on``, and that question belongs to :meth:`Notifier.tap`.
 
     The resident's own name leads, not its id: the tap arrives on a phone, where "Hob wants to
-    send email" is a sentence and ``life-agent/needs_human`` is a log line.
+    send email" is a sentence and ``hob/needs_human`` is a log line.
 
     Redaction and bounding happen **here**, once, rather than in each renderer — so a renderer
     added tomorrow cannot forget the repo rule, and cannot get redact-then-bound backwards.

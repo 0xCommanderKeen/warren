@@ -41,15 +41,15 @@ from steward.store import Store
 #: A `claude` current enough for the flag every session carries (steward #206). Doctor
 #: probes `--setting-sources` for *every* claude resident, declarations or not, so a stub
 #: that answers `--help` with nothing is now a red doctor rather than a quiet one.
-CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"'
+CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"; echo "  --add-dir <directories...>"'
 
 
 OPERATOR_BURROW_DOCKER = (
     'case "$1" in '
     "info) printf 'dxp2800\\t27.3.1\\n' ;; "
-    "inspect) case \"$4\" in steward-life-agent|steward-pip) printf 'true\\n' ;; "
+    "inspect) case \"$4\" in steward-hob|steward-pip) printf 'true\\n' ;; "
     "*) exit 1 ;; esac ;; "
-    f'exec) case "$2" in steward-life-agent|steward-pip) {CURRENT_CLAUDE} ;; '
+    f'exec) case "$2" in steward-hob|steward-pip) {CURRENT_CLAUDE} ;; '
     "*) exit 1 ;; esac ;; "
     "*) exit 1 ;; esac"
 )
@@ -68,7 +68,7 @@ def on_operator_burrow(
     stub_bin("docker", OPERATOR_BURROW_DOCKER)
     monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
     monkeypatch.setenv("HOME", str(tmp_path))
-    hob_memory = tmp_path / "docker" / "warren" / "residents" / "life-agent" / "memory"
+    hob_memory = tmp_path / "docker" / "warren" / "residents" / "hob" / "memory"
     hob_memory.mkdir(parents=True)
     (tmp_path / "docker" / "warren" / "residents" / "pip" / "memory").mkdir(parents=True)
     return hob_memory
@@ -419,14 +419,11 @@ def test_doctor_names_the_brain_and_the_next_fire(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert (
-        "life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready"
-        in result.output
-    )
+    assert "hob: runner claude (claude-opus-5) in container steward-hob — ready" in result.output
     assert "pip: runner claude (claude-haiku-4-5-20251001) in container steward-pip — ready" in (
         result.output
     )
-    assert "life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana" in result.output
+    assert "hob/morning-digest: '0 8 * * *' Europe/Ljubljana" in result.output
 
 
 @pytest.mark.usefixtures("empty_path")
@@ -437,12 +434,15 @@ def test_doctor_fails_loudly_when_the_container_runtime_is_missing(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 1
-    assert "docker could not answer for container 'steward-life-agent'" in result.output
+    assert "docker could not answer for container 'steward-hob'" in result.output
     assert "docker could not answer for container 'steward-pip'" in result.output
 
 
 #: A `claude --help` that knows how to bound a session, and one too old to.
-NEW_CLAUDE_HELP = CURRENT_CLAUDE + '; echo "  --tools <tools...>"; echo "  --strict-mcp-config"'
+NEW_CLAUDE_HELP = (
+    'echo "  --setting-sources <sources>"; echo "  --tools <tools...>"; '
+    'echo "  --strict-mcp-config"'
+)
 OLD_CLAUDE_HELP = 'echo "  --allowed-tools <tools...>"'
 
 
@@ -577,7 +577,7 @@ def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
     monkeypatch.chdir(REPO_ROOT)
     result = runner.invoke(main, ["doctor"])
     assert result.exit_code == 0, result.output
-    assert f"life-agent: journal {on_operator_burrow}/journal" in result.output
+    assert f"hob: journal {on_operator_burrow}/journal" in result.output
     assert "closed by close-of-day" in result.output
     assert "burrow-builder" not in result.output
 
@@ -1436,8 +1436,9 @@ def test_skills_lists_the_shipped_library_and_every_resident(
     assert result.exit_code == 0, result.output
     assert "write-journal  [default]" in result.output
     assert "read-inbox  [granted]" in result.output
-    assert "life-agent: daily-summary, escalate, research, write-journal, read-inbox" in (
-        result.output
+    assert (
+        "hob: daily-summary, escalate, research, write-journal, vault-keeper, morning-digest"
+        in (result.output)
     )
     assert "burrow-builder" not in result.output
     # Named as a copy the CLI does not discover: since steward #206 a claude session is
@@ -1454,7 +1455,7 @@ def test_skills_reports_json(runner: CliRunner, monkeypatch: pytest.MonkeyPatch)
     payload = json.loads(result.output)
     assert payload["library"].endswith("skills")
     assert {"errands", "escalate"} <= {skill["name"] for skill in payload["skills"]}
-    assert "errands" in payload["residents"]["life-agent"]
+    assert "vault-keeper" in payload["residents"]["hob"]
     assert payload["diagnostics"] == []
 
 

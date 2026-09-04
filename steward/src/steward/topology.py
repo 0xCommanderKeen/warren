@@ -11,7 +11,7 @@ daemon *this process's environment* points at.
 So the intended topology is one sentence, and steward #59 is what it costs to leave it
 unsaid: **the scheduler and the watchdog run on the burrow whose containers they
 supervise.** For today's fleet that is the NAS. Run them anywhere else and the watchdog
-asks a docker that has never heard of ``life-agent``, gets "no such container", and
+asks a docker that has never heard of ``hob``, gets "no such container", and
 reports the resident as *unsupervised* — quietly, forever, because "docker could not
 answer" is indistinguishable from "there is nothing here to answer about".
 

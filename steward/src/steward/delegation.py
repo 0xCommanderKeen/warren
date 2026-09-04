@@ -27,7 +27,7 @@ until the budget is gone.
 
 1. **A block in the session's output**, parsed by :func:`extract_handoffs`::
 
-       <delegate to="life-agent" route="inbox">
+       <delegate to="hob" route="inbox">
        {"title": "Check the errand list", "detail": "…"}
        </delegate>
 
@@ -275,7 +275,7 @@ def _read_block(raw: str, attrs: str, body: str) -> Handoff:
     title, detail = parse_body(body)
     return Handoff(
         raw=raw,
-        to=_read_slug(attributes, "to", "life-agent"),
+        to=_read_slug(attributes, "to", "hob"),
         route=_read_slug(attributes, "route", "inbox"),
         title=title,
         detail=detail,

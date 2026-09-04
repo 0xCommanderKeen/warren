@@ -12,7 +12,8 @@
 # `node:22-slim`      The claude CLI is an npm package, so the base is node. Slim rather
 #                     than full because everything full adds that we actually need — git,
 #                     an ssh client, python3 — is installed below by name, and a resident's
-#                     image should be readable in one screen. (life-agent's hand-rolled container uses
+#                     image should be readable in one screen. (The pre-steward hand-rolled
+#                     container uses
 #                     full `node:22` and apt-gets the rest *at runtime, on every cold
 #                     start*; baking it is the whole point of moving.) Pinned by digest,
 #                     not by that tag — see "The base pin" below.
@@ -141,7 +142,7 @@ RUN chmod 0755 /usr/local/bin/steward-entrypoint /usr/local/bin/steward-smoke \
 # the resident's memory at a path its manifest names, both bind mounts owned by the host
 # user. One caveat worth knowing before it surprises somebody — claude refuses
 # `--permission-mode bypassPermissions` when it is running as root, so a resident that
-# needs unattended edits uses `acceptEdits`, exactly as life-agent does today.
+# needs unattended edits uses `acceptEdits`, exactly as hob does today.
 WORKDIR /root
 ENTRYPOINT ["/usr/local/bin/steward-entrypoint"]
 CMD ["sleep", "infinity"]

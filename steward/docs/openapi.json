@@ -348,7 +348,7 @@
                 "type": "null"
               }
             ],
-            "description": "Docker container name, e.g. steward-life-agent. Default: steward-<id>.",
+            "description": "Docker container name, e.g. steward-hob. Default: steward-<id>.",
             "title": "Container"
           },
           "host": {

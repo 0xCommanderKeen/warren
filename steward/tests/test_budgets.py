@@ -1090,9 +1090,9 @@ def test_a_manifest_without_a_budgets_block_is_unlimited(
 def test_the_deploy_block_names_a_container(write_resident: ResidentWriter) -> None:
     """One field, and it is a declaration a supervisor can act on."""
     data = budget_manifest()
-    data["deploy"] = {"container": "steward-life-agent"}
+    data["deploy"] = {"container": "steward-hob"}
     resident = load_manifest(write_resident(data))
-    assert resident.manifest.deploy.container == "steward-life-agent"
+    assert resident.manifest.deploy.container == "steward-hob"
 
 
 def test_a_container_name_has_to_look_like_one(write_resident: ResidentWriter) -> None:

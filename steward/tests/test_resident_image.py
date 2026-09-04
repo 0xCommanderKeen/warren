@@ -87,7 +87,7 @@ def test_the_compose_template_renders_the_new_default(write_resident: ResidentWr
 
 
 def test_a_manifest_can_still_name_another_image(write_resident: ResidentWriter) -> None:
-    """The default is a default. life-agent's own manifest depends on this working."""
+    """The default is a default. hob's own manifest depends on this working."""
     manifest = valid_manifest() | {"deploy": {"image": "node:22"}}
     resident = load_manifest(write_resident(manifest))
     service = yaml.safe_load(render_compose(resident, target_for(resident.manifest)))["services"]
@@ -672,26 +672,25 @@ def test_the_local_dev_mirror_is_off_inside_a_container() -> None:
     assert "BURROW_MIRROR" not in text
 
 
-# --------------------------------------------------------------- life-agent, as it deploys
+# --------------------------------------------------------------- hob, as it deploys
 
 
-def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
+def test_hob_declares_the_address_the_nursery_provisions() -> None:
     """Steward #40: Hob's deploy block is the nursery layout, not the hand-built container.
 
-    Until this cut over it said `life-agent` / `~/docker/life-agent` / `node:22`, read off
-    the container Hob had been running in since before steward existed (#52). These values
+    The old hand-built resident used a different id, directory, and image. These values
     are the other kind of true: they are what the nursery resolves for this resident, and
     the only address a container-placed resident can have. Merging the manifest is the
-    operator's half of the cutover; `steward provision life-agent` puts the reviewed bundle
+    operator's half of the cutover; `steward provision hob` puts the reviewed bundle
     on the NAS.
     """
-    hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+    hob = load_manifest(REPO_ROOT / "residents" / "hob" / "manifest.yaml")
     deploy = hob.manifest.deploy
 
-    assert deploy.container == "steward-life-agent"
+    assert deploy.container == "steward-hob"
     assert deploy.host == "dxp2800"
     assert deploy.user == "Miha"
-    assert deploy.path == "~/docker/warren/residents/life-agent"
+    assert deploy.path == "~/docker/warren/residents/hob"
     assert deploy.image == DEFAULT_IMAGE, (
         "Hob runs the image this repo builds and ships, so his container has a brain "
         "before a session opens instead of installing one on every cold start"
@@ -702,7 +701,7 @@ def test_life_agent_declares_the_address_the_nursery_provisions() -> None:
     )
 
 
-def test_life_agent_runs_its_sessions_inside_that_container() -> None:
+def test_hob_runs_its_sessions_inside_that_container() -> None:
     """The deploy block is an address; `placement` is what makes steward use it (#58, #40).
 
     Explicit, never inferred: a resident may declare a container for the watchdog to
@@ -710,13 +709,13 @@ def test_life_agent_runs_its_sessions_inside_that_container() -> None:
     resident deployed before #58 does. Hob no longer does — which is also what puts the
     two sides of his memory mount on different machines.
     """
-    hob = load_manifest(REPO_ROOT / "residents" / "life-agent" / "manifest.yaml")
+    hob = load_manifest(REPO_ROOT / "residents" / "hob" / "manifest.yaml")
 
     assert hob.manifest.runner.placement == "container"
     assert hob.manifest.runner.container_placed is True
     host_side, container_side = memory_mount(hob.manifest)
-    assert host_side == "~/docker/warren/residents/life-agent/memory"
-    assert container_side == "/data/residents/life-agent/memory"
+    assert host_side == "~/docker/warren/residents/hob/memory"
+    assert container_side == "/data/residents/hob/memory"
 
 
 def test_pip_renders_the_nursery_container_and_memory_mount() -> None:

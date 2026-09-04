@@ -76,7 +76,7 @@ class ResidentManifestTest(unittest.TestCase):
                             "schedule": "0 7 * * *",
                             "schedule_tz": "Europe/Ljubljana",
                             "enabled": True,
-                            "steward_resident": "life-agent",
+                            "steward_resident": "hob",
                         }
                     ]
                 )
@@ -92,7 +92,7 @@ class ResidentManifestTest(unittest.TestCase):
             "schedule": "0 7 * * *",
             "schedule_tz": "Europe/Ljubljana",
             "enabled": True,
-            "steward_resident": "life-agent",
+            "steward_resident": "hob",
         }
         for field, value, path in (
             ("steward_resident", "not valid", "steward_resident"),
@@ -115,7 +115,7 @@ class ResidentManifestTest(unittest.TestCase):
             "schedule": "0 7 * * *",
             "schedule_tz": "Europe/Ljubljana",
             "enabled": True,
-            "steward_resident": "life-agent",
+            "steward_resident": "hob",
         }
         # Cross-checked against Steward's pinned croniter 6.2.4 contract. Burrow
         # transports these declarations but leaves scheduling authority there.
@@ -262,7 +262,7 @@ class ResidentManifestTest(unittest.TestCase):
             "schedule": "0 7 * * *",
             "schedule_tz": "UTC",
             "enabled": True,
-            "steward_resident": "life-agent",
+            "steward_resident": "hob",
         }
         schema = json.loads(
             (
@@ -273,7 +273,7 @@ class ResidentManifestTest(unittest.TestCase):
         for field, value in (
             ("id", "Daily-Summary"),
             ("id", "daily_summary"),
-            ("steward_resident", "Life-Agent"),
+            ("steward_resident", "Hob Agent"),
             ("steward_resident", "life.agent"),
         ):
             with self.subTest(field=field, value=value):
@@ -286,7 +286,7 @@ class ResidentManifestTest(unittest.TestCase):
                 )
                 self.assertEqual(report["residents"], [])
                 self.assertFalse(slug.fullmatch(value))
-        for value in ("a", "life-agent", "resident-42"):
+        for value in ("a", "hob", "resident-42"):
             self.assertTrue(slug.fullmatch(value))
 
     def test_manifest_version_requires_exact_integer_one(self):

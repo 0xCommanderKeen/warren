@@ -52,11 +52,11 @@ locally placed, so today the rule binds it only by way of the database it shares
 
 Run the watchdog somewhere else and nothing errors. That is the problem.
 
-`docker inspect life-agent` on a machine that has never held that container exits
+`docker inspect hob` on a machine that has never held that container exits
 non-zero, and `DockerSupervisor.health` correctly refuses to guess: it returns
 `known=False` with `docker could not answer`. The watchdog then reports the resident as
 **unsupervised** and does not restart it — which is right, given what it was able to see,
-and indistinguishable from the resident having no container at all. A dead `life-agent`
+and indistinguishable from the resident having no container at all. A dead `hob`
 stays dead, and every pass says the same calm thing.
 
 The same silence has a second half. `steward watchdog` on the wrong machine still buries
@@ -105,16 +105,16 @@ it does not need:
 ```console
 $ steward watchdog tick              # on the NAS
 topology: docker at dxp2800's own docker answers as dxp2800 27.3.1
-life-agent: container life-agent on dxp2800 — supervised from here
+hob: container hob on dxp2800 — supervised from here
 
 $ steward watchdog tick              # on a laptop (real output)
 topology: docker at Mihas-MacBook-Pro.local's own docker answers as docker-desktop 27.3.1
-life-agent: container life-agent runs on dxp2800, but this process supervises through
+hob: container hob runs on dxp2800, but this process supervises through
   Mihas-MacBook-Pro.local's own docker — the watchdog cannot see it. Run steward's daemons
   on dxp2800 (the intended topology, docs/topology.md), or point DOCKER_HOST at that
   machine's docker
-life-agent: unsupervised — steward's own state shows nothing stuck, which is not the same
-  as up; docker could not answer for 'life-agent': exit status 1
+hob: unsupervised — steward's own state shows nothing stuck, which is not the same
+  as up; docker could not answer for 'hob': exit status 1
 nothing to intervene in
 ```
 

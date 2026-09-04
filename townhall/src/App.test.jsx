@@ -69,7 +69,7 @@ const withLibrary = (fetch, skills = []) =>
       : fetch(url, init),
   );
 
-function residentHarness(fetch, initialId = "life-agent") {
+function residentHarness(fetch, initialId = "hob") {
   const storage = memoryStorage();
   storage.setItem("townhall.steward.operator", "operator-token");
   const tree = (id) => (
@@ -246,7 +246,7 @@ describe("rendering steward's answer, not the click's intention", () => {
 /* -- budgets ------------------------------------------------------------------------- */
 
 const BUDGET = {
-  resident: "life-agent",
+  resident: "hob",
   window: { tz: "Europe/Ljubljana", day: "2026-08-31", end: "2026-08-31T22:00:00.000Z" },
   spent: { runs: 6, tokens: 20400, cost_usd: 5.2, duration_s: 812.4, unreported_runs: 0 },
   budgets: [
@@ -259,13 +259,13 @@ const BUDGET = {
 };
 
 const DECLARATION = {
-  id: "life-agent",
-  manifest: { version: 0, id: "life-agent", budgets: { daily_cost_usd: 10 }, deploy: { host: "dxp2800" } },
+  id: "hob",
+  manifest: { version: 0, id: "hob", budgets: { daily_cost_usd: 10 }, deploy: { host: "dxp2800" } },
   text: "version: 0\n",
   soul: "---\n---\n",
   soul_file: "soul.md",
   revision: "sha256:decl",
-  paths: ["residents/life-agent/manifest.yaml"],
+  paths: ["residents/hob/manifest.yaml"],
 };
 
 describe("budget controls", () => {
@@ -277,7 +277,7 @@ describe("budget controls", () => {
     });
 
   it("shows the spend numbers beside the knob", async () => {
-    mount(<BudgetsPage params={{ id: "life-agent" }} />, { fetch: budgetFetch() });
+    mount(<BudgetsPage params={{ id: "hob" }} />, { fetch: budgetFetch() });
 
     // The cap, editable.
     expect(await screen.findByDisplayValue("10")).toBeTruthy();
@@ -290,7 +290,7 @@ describe("budget controls", () => {
 
   it("writes a cap through the declaration, not through a budget endpoint", async () => {
     const fetch = budgetFetch(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written and validated" }));
-    mount(<BudgetsPage params={{ id: "life-agent" }} />, { fetch });
+    mount(<BudgetsPage params={{ id: "hob" }} />, { fetch });
 
     fireEvent.change(await screen.findByDisplayValue("10"), { target: { value: "12.5" } });
     fireEvent.click(screen.getByRole("button", { name: /write caps/i }));
@@ -300,7 +300,7 @@ describe("budget controls", () => {
     // refresh has told the operator nothing.
     expect(await screen.findByText("9f1c0a77bb")).toBeTruthy();
     const [url, init] = fetch.mock.calls.find(([, call]) => call?.method === "PUT");
-    expect(url).toBe("/residents/life-agent/declaration");
+    expect(url).toBe("/residents/hob/declaration");
     const sent = JSON.parse(init.body);
     expect(sent.manifest.budgets.daily_cost_usd).toBe(12.5);
     // Everything the form has no field for survives the round trip.
@@ -310,7 +310,7 @@ describe("budget controls", () => {
 
   it("clears a cap to unlimited by deleting the key, never by writing a zero", async () => {
     const fetch = budgetFetch(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "ok" }));
-    mount(<BudgetsPage params={{ id: "life-agent" }} />, { fetch });
+    mount(<BudgetsPage params={{ id: "hob" }} />, { fetch });
 
     fireEvent.change(await screen.findByDisplayValue("10"), { target: { value: "" } });
     fireEvent.click(screen.getByRole("button", { name: /write caps/i }));
@@ -321,7 +321,7 @@ describe("budget controls", () => {
   });
 
   it("will not send a save that changes nothing", async () => {
-    mount(<BudgetsPage params={{ id: "life-agent" }} />, { fetch: budgetFetch() });
+    mount(<BudgetsPage params={{ id: "hob" }} />, { fetch: budgetFetch() });
     expect(await screen.findByRole("button", { name: /nothing changed/i })).toHaveProperty("disabled", true);
   });
 });
@@ -335,7 +335,7 @@ describe("the resident editor", () => {
         ? Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }))
         : Promise.resolve(json(200, DECLARATION)),
     );
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
 
@@ -359,7 +359,7 @@ describe("the resident editor", () => {
         ? Promise.resolve(json(200, { status: "accepted", commit: COMMIT, warnings: [], message: "written" }))
         : Promise.resolve(json(200, DECLARATION)),
     );
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
 
@@ -379,7 +379,7 @@ describe("the resident editor", () => {
       ...DECLARATION,
       manifest: { ...DECLARATION.manifest, summary: "The other operator's edit." },
       text: "version: 0\nsummary: The other operator's edit.\n",
-      soul: "---\nagent_id: life-agent\n---\nThe other operator's soul.\n",
+      soul: "---\nagent_id: hob\n---\nThe other operator's soul.\n",
       revision: "sha256:concurrent",
     };
     const fetch = vi
@@ -395,13 +395,13 @@ describe("the resident editor", () => {
       )
       .mockResolvedValueOnce(json(200, concurrent));
 
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
 
     const rejectedManifest = "version: 0\nsummary: My complete manifest draft.\n";
-    const rejectedSoul = "---\nagent_id: life-agent\n---\nMy complete soul draft.\n";
+    const rejectedSoul = "---\nagent_id: hob\n---\nMy complete soul draft.\n";
     const [manifestEditor, soulEditor] = screen.getAllByRole("textbox");
     fireEvent.change(manifestEditor, {
       target: { value: rejectedManifest },
@@ -436,14 +436,14 @@ describe("the resident editor", () => {
     const pending = deferred();
     const other = {
       ...DECLARATION,
-      id: "hob",
-      manifest: { ...DECLARATION.manifest, id: "hob" },
-      text: "version: 0\nid: hob\n",
-      revision: "sha256:hob",
+      id: "pip",
+      manifest: { ...DECLARATION.manifest, id: "pip" },
+      text: "version: 0\nid: pip\n",
+      revision: "sha256:pip",
     };
     const fetch = vi.fn().mockImplementation((url, init) => {
       if (init?.method === "PUT") return pending.promise;
-      return Promise.resolve(json(200, String(url).includes("/hob/") ? other : DECLARATION));
+      return Promise.resolve(json(200, String(url).includes("/pip/") ? other : DECLARATION));
     });
     const view = residentHarness(fetch);
 
@@ -454,7 +454,7 @@ describe("the resident editor", () => {
     fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
     await waitFor(() => expect(fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
 
-    view.show("hob");
+    view.show("pip");
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
     expect(screen.getAllByRole("textbox").some((editor) => editor.value === other.text)).toBe(true);
     await act(async () => pending.resolve(json(409, {
@@ -473,7 +473,7 @@ describe("the resident editor", () => {
       .mockResolvedValueOnce(json(409, { detail: { error: "stale_revision", message: "changed" } }))
       .mockResolvedValueOnce(json(503, { detail: { error: "unavailable", message: "try again" } }))
       .mockResolvedValueOnce(json(200, concurrent));
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
 
@@ -493,7 +493,7 @@ describe("the resident editor", () => {
       .mockResolvedValueOnce(json(200, DECLARATION))
       .mockResolvedValueOnce(json(409, { detail: { error: "stale_revision", message: "changed" } }))
       .mockResolvedValueOnce(json(200, concurrent));
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
@@ -512,14 +512,14 @@ describe("the resident editor", () => {
   });
 
   it("one explicit read unlocks recovery after several earlier reads and a remount", async () => {
-    const hob = {
+    const pip = {
       ...DECLARATION,
-      id: "hob",
-      manifest: { ...DECLARATION.manifest, id: "hob" },
-      text: "version: 0\nid: hob\n",
-      revision: "sha256:hob",
+      id: "pip",
+      manifest: { ...DECLARATION.manifest, id: "pip" },
+      text: "version: 0\nid: pip\n",
+      revision: "sha256:pip",
     };
-    let lifeReads = 0;
+    let hobReads = 0;
     let writes = 0;
     const fetch = vi.fn().mockImplementation((url, init) => {
       if (init?.method === "PUT") {
@@ -535,9 +535,9 @@ describe("the resident editor", () => {
         }
         return Promise.resolve(json(409, { detail: { error: "stale_revision", message: "changed" } }));
       }
-      if (String(url).includes("/hob/")) return Promise.resolve(json(200, hob));
-      lifeReads += 1;
-      return Promise.resolve(json(200, { ...DECLARATION, revision: `sha256:life-${lifeReads}` }));
+      if (String(url).includes("/pip/")) return Promise.resolve(json(200, pip));
+      hobReads += 1;
+      return Promise.resolve(json(200, { ...DECLARATION, revision: `sha256:hob-${hobReads}` }));
     });
     const view = residentHarness(fetch);
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
@@ -545,7 +545,7 @@ describe("the resident editor", () => {
     // A successful write refreshes the query, so the conflict below happens after more
     // than one successful read in this hook lifetime.
     fireEvent.click(screen.getByRole("button", { name: /write declaration/i }));
-    await waitFor(() => expect(lifeReads).toBe(2));
+    await waitFor(() => expect(hobReads).toBe(2));
 
     const rejected = "version: 0\nsummary: retained across routes\n";
     fireEvent.change(screen.getByDisplayValue(/version: 0/), { target: { value: rejected } });
@@ -554,25 +554,25 @@ describe("the resident editor", () => {
 
     view.show(null);
     expect(screen.getByText("away")).toBeTruthy();
-    view.show("hob");
+    view.show("pip");
     fireEvent.click(await screen.findByRole("button", { name: /^yaml$/i }));
-    expect(screen.getAllByRole("textbox").some((editor) => editor.value === hob.text)).toBe(true);
+    expect(screen.getAllByRole("textbox").some((editor) => editor.value === pip.text)).toBe(true);
     expect(screen.queryByText(/Stale draft recovery/i)).toBeNull();
-    view.show("life-agent");
+    view.show("hob");
     expect(await screen.findByText(/Stale draft recovery/i)).toBeTruthy();
     expect(screen.getAllByRole("textbox").some((editor) => editor.value === rejected)).toBe(true);
-    await waitFor(() => expect(lifeReads).toBe(3));
+    await waitFor(() => expect(hobReads).toBe(3));
     expect(screen.queryByRole("button", { name: /reapply rejected draft/i })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /re-read current server files/i }));
     expect(await screen.findByRole("button", { name: /reapply rejected draft/i })).toBeTruthy();
     expect(screen.getByRole("button", { name: /discard rejected draft/i })).toBeTruthy();
-    expect(lifeReads).toBe(4);
+    expect(hobReads).toBe(4);
   });
 
   it("shows retained recovery when the return read fails, then unlocks after retry", async () => {
     const rejectedManifest = "version: 0\nsummary: visible through failure\n";
-    const rejectedSoul = "---\nagent_id: life-agent\n---\nA soul that must remain visible.\n";
+    const rejectedSoul = "---\nagent_id: hob\n---\nA soul that must remain visible.\n";
     let reads = 0;
     const fetch = vi.fn().mockImplementation((_url, init) => {
       if (init?.method === "PUT") {
@@ -593,7 +593,7 @@ describe("the resident editor", () => {
     expect(await screen.findByText(/Stale draft recovery/i)).toBeTruthy();
 
     view.show(null);
-    view.show("life-agent");
+    view.show("hob");
     expect(await screen.findByText(/503 · unavailable/i)).toBeTruthy();
     expect(screen.getAllByText(/visible through failure/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/A soul that must remain visible/).length).toBeGreaterThan(0);
@@ -656,7 +656,7 @@ describe("reloading steward's own copy", () => {
       if (init?.method === "POST") return Promise.resolve(json(200, { status: "reloaded", residents: 3, routines: 7, skills: ["research"] }));
       return Promise.resolve(json(200, DECLARATION));
     });
-    mount(<ResidentsPage page="residentDeclaration" params={{ id: "life-agent" }} />, {
+    mount(<ResidentsPage page="residentDeclaration" params={{ id: "hob" }} />, {
       fetch: withLibrary(fetch),
     });
 

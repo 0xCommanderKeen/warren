@@ -641,7 +641,7 @@ def test_deliver_decisions_delivers_exactly_once_under_concurrency(tmp_path: Pat
     """Every caller of deliver_decisions inherits the atomic claim, not only the board (#74)."""
     with Store(tmp_path / "steward.db") as store:
         record = store.create_approval_request(
-            agent_id="a:b", project="p", action="send_email", message="…", resident="life-agent"
+            agent_id="a:b", project="p", action="send_email", message="…", resident="hob"
         )
         store.decide(record.request_id, "approve")
 
@@ -651,7 +651,7 @@ def test_deliver_decisions_delivers_exactly_once_under_concurrency(tmp_path: Pat
 
         def grab() -> None:
             barrier.wait()
-            _, delivered = ap.deliver_decisions(store, "life-agent")
+            _, delivered = ap.deliver_decisions(store, "hob")
             with lock:
                 results.append(delivered)
 

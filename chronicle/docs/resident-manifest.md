@@ -16,10 +16,10 @@ The normative machine-readable shape is [resident-manifest.schema.json](resident
     "role": "life bot",
     "description": "The household spirit."
   },
-  "skills": [{ "id": "daily-summaries", "status_ref": "life-agent:configured" }],
-  "memory": { "ref": "life-agent:/data/memory", "status_ref": "mounted" },
-  "routes": [{ "id": "telegram", "status_ref": "life-agent:configured" }],
-  "app_grants": [{ "id": "gmail", "status_ref": "life-agent:configured" }]
+  "skills": [{ "id": "daily-summaries", "status_ref": "hob:configured" }],
+  "memory": { "ref": "hob:/data/memory", "status_ref": "mounted" },
+  "routes": [{ "id": "telegram", "status_ref": "hob:configured" }],
+  "app_grants": [{ "id": "gmail", "status_ref": "hob:configured" }]
 }
 ```
 

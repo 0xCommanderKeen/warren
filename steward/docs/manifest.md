@@ -181,7 +181,7 @@ the default skills without asking, so re-granting one says nothing and is left o
 A name the library does not have fails validation with the closest match named:
 
 ```
-residents/life-agent/manifest.yaml: error: skills[0].id
+residents/hob/manifest.yaml: error: skills[0].id
     problem: skill 'read-inbx' is not in the skills library at skills; a grant that
              names nothing is a capability this resident does not have
     example: id: read-inbox
@@ -198,7 +198,7 @@ A location, never its contents.
 ```yaml
 memory:
   kind: directory            # directory | file | repo
-  path: /data/residents/life-agent/memory
+  path: /data/residents/hob/memory
   journal: journal           # directory under path; one entry per local day
   journal_keep: 30           # how many entries survive rotation, newest first
 ```
@@ -570,12 +570,12 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 
 ```console
 $ steward doctor
-life-agent: runner claude (claude-opus-5) in container steward-life-agent — ready
-life-agent: journal /home/Miha/docker/warren/residents/life-agent/memory/journal — writable, closed by close-of-day
-life-agent: inbox 2 open via handoff
-  life-agent/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
-  life-agent/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
-  life-agent/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana
+hob: runner claude (claude-opus-5) in container steward-hob — ready
+hob: journal /home/Miha/docker/warren/residents/hob/memory/journal — writable, closed by close-of-day
+hob: inbox 2 open via handoff
+  hob/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
+  hob/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
+  hob/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana
 ```
 
 `steward scheduler run` performs the same check before its first breath and refuses to
@@ -791,7 +791,7 @@ See [docs/api.md](api.md) for posting to the board and the lifecycle events.
 ```yaml
 delegation:
   send: true                 # default false: a resident with no block never delegates
-  to: [life-agent]           # optional allowlist of resident ids; omit it to allow any
+  to: [hob]           # optional allowlist of resident ids; omit it to allow any
   note: Background reading that is not village work.
 ```
 
@@ -814,8 +814,8 @@ nothing. Delivery is pull-based: the receiver drains its inbox on its own next w
 ahead of the open board, and works the item as an ordinary session.
 
 ```console
-$ steward delegate sender-resident --to life-agent --route handoff --title "…"
-$ steward inbox life-agent                 # what is waiting, from whom, at what depth
+$ steward delegate sender-resident --to hob --route handoff --title "…"
+$ steward inbox hob                 # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>           # the whole chain, root first
 ```
 
@@ -872,7 +872,7 @@ knows how, and treat the output like a password:
 
 ```console
 $ steward notify list                 # every resident: transport, kinds, and the URL to subscribe to
-$ steward notify test life-agent      # send one harmless tap and say whether it landed
+$ steward notify test hob      # send one harmless tap and say whether it landed
 ```
 
 **No secrets, here or anywhere.** The ntfy server and its optional token are steward's own
@@ -1001,7 +1001,7 @@ person told to "carry on" for the window is left running.
 
 ```console
 $ steward budget show                  # today's spend against every declared cap
-$ steward budget unpause life-agent    # or approve the needs_human from chronicle's panel
+$ steward budget unpause hob    # or approve the needs_human from chronicle's panel
 ```
 
 Lifting a pause grants an **allowance until the end of the window that tripped**: "carry
@@ -1027,8 +1027,8 @@ is worth noticing while you are reading the two numbers side by side.
 deploy:
   host: dxp2800                       # the NAS, over Tailscale
   user: Miha                          # the ssh user steward reaches it as
-  path: ~/docker/warren/residents/life-agent   # the compose directory on that host
-  container: steward-life-agent       # the docker container name
+  path: ~/docker/warren/residents/hob   # the compose directory on that host
+  container: steward-hob       # the docker container name
   image: steward-resident:latest      # what the container runs
   command: [sleep, infinity]          # argv inside it
 ```
@@ -1246,7 +1246,7 @@ a new image is exactly that. Roll out while the village is up, when the queue is
 
 **Who is actually running which emitter.** `steward-resident` containers get the vendored
 copy from the image, replaced by the entrypoint at every start — so they converge on the
-next `make image-ship` + re-provision, with no per-container step. **life-agent does not**:
+next `make image-ship` + re-provision, with no per-container step. **hob does not**:
 it predates steward provisioning, runs `node:22` rather than this image (its manifest says
 so, and a test holds it to saying so), and carries its own emitter installed into its
 claude-config volume at `/root/.claude/burrow/`. It converges when somebody re-runs
@@ -1565,7 +1565,7 @@ library /srv/steward/skills
   daily-summary  [default]  Turn a day's scattered facts into one short honest picture…
   read-inbox     [granted]  Read and triage mail on a schedule…
 
-life-agent: daily-summary, escalate, research, write-journal, read-inbox, read-calendar, errands
+hob: daily-summary, escalate, research, write-journal, read-inbox, read-calendar, errands
   runner claude — prompt — plus a copy in .claude/skills/ the session's CLI does not discover
 ```
 
@@ -1579,7 +1579,7 @@ A resident wakes up amnesiac. The journal is the narrowest honest fix for that: 
 end of its day the resident writes a short entry, and the next session opens with it.
 
 ```
-/data/residents/life-agent/memory/     # memory.path
+/data/residents/hob/memory/     # memory.path
   journal/                             # memory.journal
     2026-08-22.md
     2026-08-23.md
@@ -1590,7 +1590,7 @@ An entry is plain markdown — a small header, then free prose:
 
 ```markdown
 ---
-resident: life-agent
+resident: hob
 date: 2026-08-24
 routine: close-of-day
 ---
@@ -1638,8 +1638,8 @@ has its last entry to wake up to. An age cut-off would delete it.
 **Readable from outside.** Journals are read-only from anywhere but the session itself:
 
 ```console
-$ steward journal life-agent --limit 3
-$ steward journal life-agent --format json     # what the HTTP API serves
+$ steward journal hob --limit 3
+$ steward journal hob --format json     # what the HTTP API serves
 ```
 
 The same path is importable, which is what chronicle's house panel will eventually be
@@ -1648,7 +1648,7 @@ reading through:
 ```python
 from steward import load_manifest, read_entries
 
-resident = load_manifest("residents/life-agent/manifest.yaml")
+resident = load_manifest("residents/hob/manifest.yaml")
 for entry in read_entries(resident.manifest, limit=5):
     print(entry.date, entry.routine, entry.text)
 ```
@@ -1661,11 +1661,11 @@ one knows a path it was not told.
 
 ```
 steward validate                 # the residents/ tree
-steward validate residents/life-agent
-steward validate residents/life-agent/manifest.yaml --format json
+steward validate residents/hob
+steward validate residents/hob/manifest.yaml --format json
 steward schema                   # JSON Schema for the manifest, for chronicle and editors
 steward doctor                   # can what the manifests declare actually run, here, now?
-steward journal life-agent       # what a resident has actually written, newest first
+steward journal hob       # what a resident has actually written, newest first
 steward skills                   # the library, and what each resident effectively holds
 steward budget show              # today's spend against every declared cap
 steward watchdog tick            # one pass: probe, sweep, bury stale runs, check budgets
@@ -1694,14 +1694,14 @@ result = validate_tree("residents")
 for diagnostic in result.diagnostics:
     print(diagnostic.file, diagnostic.field_path, diagnostic.problem, diagnostic.example)
 
-resident = load_manifest("residents/life-agent/manifest.yaml")  # raises ManifestError
+resident = load_manifest("residents/hob/manifest.yaml")  # raises ManifestError
 ```
 
 Every diagnostic carries four facts: the **file**, the **field path**, the **problem**,
 and an **example** of a valid value.
 
 ```
-residents/life-agent/manifest.yaml: error: charter.mission
+residents/hob/manifest.yaml: error: charter.mission
     problem: required field is missing
     example: mission: Keep the household running day to day.
 ```

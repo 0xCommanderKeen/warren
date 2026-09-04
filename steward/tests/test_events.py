@@ -18,11 +18,11 @@ from steward.session_auth import new_session_credential
 
 def context() -> ev.RunContext:
     return ev.RunContext(
-        agent_id="claude-code:life-agent",
-        project="life-agent",
+        agent_id="claude-code:hob",
+        project="hob",
         routine="daily-summary",
         run_id="0d1a…",
-        cwd="/data/residents/life-agent/memory",
+        cwd="/data/residents/hob/memory",
     )
 
 
@@ -41,9 +41,9 @@ def test_a_routine_event_validates_against_the_protocol_shape() -> None:
     assert ev.validate_event(body) == ()
     assert body["v"] == 0
     assert body["source"] == "steward"
-    assert body["agent_id"] == "claude-code:life-agent"
-    assert body["project"] == "life-agent"
-    assert body["cwd"] == "/data/residents/life-agent/memory"
+    assert body["agent_id"] == "claude-code:hob"
+    assert body["project"] == "hob"
+    assert body["cwd"] == "/data/residents/hob/memory"
     assert body["type"] == "routine_started"
     assert body["payload"] == {
         "routine": "daily-summary",
@@ -124,7 +124,7 @@ def test_a_needs_human_knock_is_bounded_so_it_can_never_be_a_transcript() -> Non
         message="x " * 5000,
         request_id="r1",
         action="approve_transfer",
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         detail={f"field_{i}": "A" * 50_000 for i in range(10)},
     )
@@ -142,8 +142,8 @@ def test_a_needs_human_knock_is_bounded_so_it_can_never_be_a_transcript() -> Non
 
 def test_a_needs_human_detail_that_fits_is_kept_but_each_field_is_capped() -> None:
     """A reasonable detail survives; only an oversized single field is trimmed."""
-    detail = ev.bounded_detail({"resident": "life-agent", "reason": "y" * 10_000})
-    assert detail["resident"] == "life-agent"
+    detail = ev.bounded_detail({"resident": "hob", "reason": "y" * 10_000})
+    assert detail["resident"] == "hob"
     assert len(detail["reason"]) <= ev.DETAIL_FIELD_MAX_CHARS
     assert detail["reason"].endswith("…")
 
@@ -154,7 +154,7 @@ def test_a_needs_human_knock_has_its_secrets_redacted_before_it_leaves() -> None
         message="my key is sk-ant-abcdef0123456789ghij and it broke",
         request_id="r1",
         action="debug",
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         detail={
             "env": "CHRONICLE_TOKEN=supersecretvalue1234567890",
@@ -191,7 +191,7 @@ def test_a_session_cannot_leak_its_own_credential_into_a_knock() -> None:
         message=f"steward gave me {credential} — should I use it?",
         request_id="r1",
         action="debug",
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         detail={"bare": credential, "assigned": f"STEWARD_SESSION_TOKEN={credential}"},
     )
@@ -211,7 +211,7 @@ def test_a_clean_needs_human_knock_is_byte_for_byte_unchanged() -> None:
         message=message,
         request_id="r1",
         action="send_email",
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
         detail=detail,
     )
@@ -224,11 +224,11 @@ def test_needs_human_resolved_is_emitted_as_the_villager_who_knocked() -> None:
         request_id="r1",
         decision="approve",
         action="send_email",
-        agent_id="claude-code:life-agent",
+        agent_id="claude-code:hob",
         project="household",
     )
     assert ev.validate_event(event.to_dict()) == ()
-    assert event.agent_id == "claude-code:life-agent"
+    assert event.agent_id == "claude-code:hob"
     assert event.payload == {
         "request_id": "r1",
         "decision": "approve",

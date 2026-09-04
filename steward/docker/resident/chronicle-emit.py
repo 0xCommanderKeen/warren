@@ -17,7 +17,7 @@
 # rather than a resident emitting a protocol nobody reads.
 #
 # Built from these bytes and nothing else:
-#   hooks/emit.py     sha256:abc2340c2e2ef4e52362c82ddd1616571a4a3255d2aa320455dba04d481a33d7
+#   hooks/emit.py     sha256:cad48570f309f64fcb64c62fc0689b8f214bac01e774d84c4b0638615834790f
 #   hooks/durable.py  sha256:e30695fe62cb49dc88d283d29de4b2a7749ad3e7652c1fb44a43f3baee205e1b
 #
 # No commit and no date, deliberately: this header is compared byte for byte against a
@@ -53,7 +53,7 @@ open, and the shared secret has no business being handed to whatever holds port
 
 Resident agents (services that outlive any one Claude session, like a Telegram
 bot running claude -p per message) set CHRONICLE_AGENT_ID (stable villager
-identity, e.g. "life-agent") and optionally CHRONICLE_PROJECT (label). For a
+identity, e.g. "hob") and optionally CHRONICLE_PROJECT (label). For a
 resident, SessionEnd maps to `idle` rather than `session_ended`: the session's
 process is gone but the agent-as-service is still home, resting.
 
