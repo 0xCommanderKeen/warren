@@ -290,6 +290,130 @@ delivery to land. Field rules are in [manifest.md](manifest.md#deliver-chat-and-
 | `STEWARD_CHAT_API_URL` | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real thing. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
 
+## Future Discord gateway (design only)
+
+This is the design for [warren#424](https://github.com/0xCommanderKeen/warren/issues/424),
+not a promise that the gateway is enabled. It becomes useful only after the Discord REST
+transport, room posting, grants and guild mirror have had time to settle. The
+`ChatTransport` boundary remains the boundary: each Discord bot gets one gateway worker
+thread inside the existing chat daemon, and `poll()` drains that worker's bounded queue.
+Nothing that fires a resident session learns about WebSockets.
+
+### Dependency and ownership
+
+Use [`discord.py`](https://discordpy.readthedocs.io/en/stable/) rather than building the
+Gateway protocol directly on `websockets`. Discord requires more than a WebSocket: Hello
+and jittered heartbeats, heartbeat acknowledgements, sequence tracking, Resume versus
+Identify, close-code handling, session-start limits, intents, and dispatch decoding.
+`discord.py` already owns that state machine and reconnects its client; a direct
+`websockets` implementation would make Warren own and test all of it for no product
+advantage. Pin the dependency in the **control-plane** package and image only. Resident
+images never import it and never receive a bot token.
+
+`DiscordGatewayWorker` owns one `discord.Client` and event loop in one named daemon thread
+per active bot token. It translates only the dispatches Warren understands into small
+transport-neutral records and puts them into a bounded `queue.Queue`; callbacks never run
+a resident session. `DiscordTransport.poll()` drains that queue, preserves the existing
+freshness, operator, bot-author and busy-resident checks, and returns the same `Message`
+shape as REST polling. Queue overflow is a visible diagnostic and switches that bot to
+the REST catch-up path; it must never discard events silently.
+
+The declared intents are `GUILDS`, `GUILD_MESSAGES`, `DIRECT_MESSAGES`, and
+`MESSAGE_CONTENT`; add `GUILD_MEMBERS` only for the member-event feature. Message Content
+and Guild Members are privileged intents and must be enabled in each resident
+application's Developer Portal settings before that feature is declared active. Presence
+here means the bot's own connection status, not reading other members' presence, so
+`GUILD_PRESENCES` is not requested.
+
+### Connect, heartbeat, resume, and degradation
+
+`discord.py` owns protocol heartbeats and Resume. The Warren wrapper observes ready,
+disconnect, resume and terminal-error callbacks and publishes a per-bot health snapshot:
+`connecting`, `ready`, `degraded`, or `stopped`, plus the last dispatch, heartbeat and
+error times. A missed heartbeat acknowledgement, Discord's Reconnect dispatch, or a
+resumable close starts an exponential-backoff reconnect with jitter and the library's
+saved session and sequence. A non-resumable close or Invalid Session re-identifies only
+after the library's backoff; configuration close codes (bad token, disallowed intent,
+sharding required) stop that bot and make `steward chat list` name the fault rather than
+burning the Identify allowance.
+
+The REST cursor remains authoritative per known channel even while the socket is healthy.
+A gateway dispatch is first inserted into a small durable ingress spool in the shared
+state database; that insert and the channel cursor advance are one transaction. The
+thread's queue contains only a wake-up/reference to that row, and `poll()` drains the
+spool, so a full queue or process crash cannot strand a message behind its cursor. The row
+is marked handled only after the bridge accepts or deliberately drops it. Message
+snowflakes are unique in the spool, which also deduplicates Resume replay.
+
+While a worker is not `ready`, the existing daemon pass polls each operator DM and each
+configured guild channel with `GET /channels/{id}/messages?after=<cursor>`, oldest first,
+and writes the same spool transaction. On a fresh Identify, REST closes the gap before the
+worker is marked ready. This makes DMs and guild mentions slower during an outage, not
+silent, without firing one message twice.
+
+REST cannot reproduce every gateway feature. During degradation the bot appears offline;
+presence returns with Ready. Member joins fall back to the existing 15-minute guild-member
+mirror comparison. Discord offers neither an endpoint that lists component interactions
+nor a second interaction delivery mode while Gateway delivery is selected, so approval
+buttons are disabled on detection of degradation and their accompanying message points at
+the ordinary Townhall/API approval path. These limitations are explicit health, not
+pretend parity. If REST itself fails, the normal durable event fallback records the error
+and `steward chat list` reports the last successful ingress; no inbound message is claimed
+as handled until its cursor commit.
+
+The bot is online whenever its worker is Ready. When a gateway-originated DM or mention
+has passed admission and acquired the resident claim, the bridge triggers Discord's
+typing endpoint immediately and every eight seconds until the session finishes or loses
+its claim (Discord typing expires after ten seconds). Typing failures are logged and do
+not alter the run. REST-fallback messages use the same typing lease.
+
+### Guild mentions and member joins
+
+A guild message becomes inbound chat only when it is in the configured guild and an
+allowlisted channel, explicitly mentions that resident bot, is authored by a configured
+human operator, and is not authored by any bot. Strip only the bot mention used for
+routing; the remaining bounded text becomes the task. The conversation key includes
+guild and channel, so room context cannot bleed into a DM or another room. No ambient
+channel message starts a session. This deliberately enables Message Content even though
+Discord currently exempts messages that mention the app: #424 requires the intent, and
+declaring it makes Portal configuration explicit instead of making routing depend on a
+policy exception. A missing Portal toggle fails visibly in preflight.
+
+`GUILD_MEMBER_ADD` replaces Herald's periodic discovery when the worker is healthy. It
+writes the same guild-mirror member shape and the same durable "welcome pending" fact the
+poller writes; Herald's routine remains the sole consumer and its journal/idempotency rule
+still owns "exactly one welcome." Resume replay and REST comparison therefore converge on
+one member identity instead of creating two welcomes.
+
+### Approval buttons belong to approvals
+
+Buttons are an **approvals feature with a Discord adapter**, not chat messages. The
+notification/approval publisher may render an Approve or Deny component, but a click
+never enters `ChatBridge`, never starts a resident, and never becomes transcript text. It
+calls the same `ApprovalTransitions.decide` path as `POST /approvals/{id}` so expiry,
+offered decisions, atomic first-writer-wins behavior, resume effects, events and auditing
+have one owner.
+
+The component `custom_id` is an opaque, random, single-use nonce. Steward stores its hash
+against the approval request, offered decision, Discord application, guild/channel and
+message; the button carries no request authority or operator name. An
+`INTERACTION_CREATE` received on that bot's authenticated Gateway session supplies the
+pressing Discord user (`member.user.id` in a guild, `user.id` in a DM). Steward maps
+`discord:<id>` to a named configured operator, verifies the stored application and message
+binding, reloads the still-pending approval, and then passes that operator name to
+`ApprovalTransitions` as `decided_by`. Unknown users get an ephemeral refusal; expired,
+already-decided, mismatched, or replayed nonces have no transition and refresh the message
+to its terminal state.
+
+Gateway interactions are authenticated by the bot's TLS Gateway session; unlike outgoing
+interaction webhooks, they are not individually Ed25519-signed HTTP requests. The pressing
+user id is nevertheless Discord-supplied rather than message text. Warren acknowledges or
+defers the interaction inside Discord's response deadline before doing effects, disables
+both buttons after the atomic decision, and retains the ordinary approval URL/text as the
+degraded and accessibility path. A later implementation must threat-model token theft,
+nonce replay, operator revocation between publication and click, and two operators clicking
+at once before it is allowed to ship.
+
 ## Explicitly not in v0
 
 - **`needs_human` and task completions pushed into the chat.** Those are *notifications* —
