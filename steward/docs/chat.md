@@ -4,7 +4,7 @@
 daemon long-polls one Telegram bot per resident, and every message from a named operator
 fires **one ordinary session** whose final message is sent back as the reply.
 
-Text in, text out. No buttons, no outbound escalations, no group chats, one transport.
+Text in, text out. No buttons, no outbound escalations, no group chats, one shipped transport.
 The one outbound thing is a routine that says `deliver: chat` (warren#385), below. What is
 deliberately *not* here is at the bottom.
 
@@ -15,7 +15,7 @@ deliberately *not* here is at the bottom.
 2. The bot's token lives in **steward's environment**, under `STEWARD_CHAT_TOKEN_<BOT>` —
    never in the manifest, which is git.
 3. `steward chat run` polls every reachable bot. A message from a user id in
-   `STEWARD_CHAT_OPERATORS`, in a private chat, fires a session with the message as its
+`STEWARD_CHAT_OPERATORS`, in a private chat, fires a session with the message as its
    task and the last few turns of the conversation as context.
 4. The session's final message is redacted, bounded, and sent back into the conversation.
 5. A message from anybody else is dropped **without a reply** and recorded as a
@@ -259,6 +259,29 @@ If nothing comes back:
 | "…cannot answer right now: …" | a budget pause, or a memory directory the daemon cannot see. `steward budget show` and `steward doctor` say which. |
 | `telegram getUpdates failed` in the log | the token is wrong, or the burrow cannot reach `api.telegram.org`. |
 
+## Multiple routes and operator identities
+
+A resident may declare more than one chat route as long as each address is distinct. The
+address is the stable selection key: `telegram:hob` and `discord:hob` are different doors,
+even though their references happen to match. Their tokens are distinct too: Telegram
+keeps `STEWARD_CHAT_TOKEN_HOB`, while Discord uses
+`STEWARD_CHAT_TOKEN_DISCORD_HOB`. Only transports compiled into the running control plane
+are reachable; declaring a Discord route does not itself add Discord or stop a supported
+route from working. Validation also refuses distinct-looking addresses that fold to the
+same environment name (`discord:pip-prod` and `discord:pip.prod`, for example), so the
+human-readable naming rule cannot alias two credentials.
+
+`STEWARD_CHAT_OPERATORS` is one comma-separated list with transport-qualified identities:
+
+```sh
+STEWARD_CHAT_OPERATORS=telegram:123456789,discord:987654321
+```
+
+Each transport sees only its own ids. Existing bare values remain Telegram ids, so
+`STEWARD_CHAT_OPERATORS=123456789` keeps its v0 meaning. Qualification matters once the
+same numeric id could name unrelated accounts on two services; authorisation never crosses
+that boundary.
+
 ## Delivered routines
 
 `routines[].deliver: chat` is the one message a resident sends without being spoken to,
@@ -267,7 +290,9 @@ as ever, and after `routine_finished` hands the session's final message to
 `RoutineDelivery`, which sends it into each operator's private conversation with the
 resident's bot. The address is the route's own — `chat` names the route kind, not the
 transport, so a route on a second transport delivers through that transport's
-`ChatTransport` and `routines` never learns the word "telegram". The send is the same
+`ChatTransport`. Bare `chat` is valid only when exactly one active chat route exists. A
+resident with several must name the address — for example `deliver: discord:hob` — and a
+missing, pending, disabled, or undeclared address is a validation error. The send is the same
 egress as a reply: redacted, *then* bounded, so a token the session printed never reaches
 the phone.
 
@@ -279,14 +304,15 @@ reason — and the outcome is untouched by it: a phone that is off is not a fail
 A failed or timed-out run delivers nothing. The scheduler and the API both hold the same
 `STEWARD_CHAT_TOKEN_<REF>` and `STEWARD_CHAT_OPERATORS` the bridge reads, so a run-now over
 the API delivers exactly as a scheduled fire does; `steward chat run` need not be up for a
-delivery to land. Field rules are in [manifest.md](manifest.md#deliver-chat-and-quiet_word).
+delivery to land. Field rules are in
+[manifest.md](manifest.md#deliver-chat-an-addressed-delivery-and-quiet_word).
 
 ## Environment
 
 | variable | meaning |
 |---|---|
-| `STEWARD_CHAT_OPERATORS` | Comma-separated Telegram user ids steward answers. Empty means nobody, and the daemon refuses to start rather than run as an open door. |
-| `STEWARD_CHAT_TOKEN_<REF>` | The bot token for the address `<transport>:<ref>`, upper-cased with non-alphanumerics folded to `_`. One per resident. |
+| `STEWARD_CHAT_OPERATORS` | Comma-separated `<transport>:<user-id>` identities steward answers. Bare ids remain Telegram-compatible. Empty means nobody, and the daemon refuses to start rather than run as an open door. |
+| `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | Telegram keeps the v0 token name; other transports include their name, so equal references cannot share credentials. Upper-cased with non-alphanumerics folded to `_`. One per route. |
 | `STEWARD_CHAT_API_URL` | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real thing. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
 

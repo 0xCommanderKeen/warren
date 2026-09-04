@@ -21,7 +21,8 @@ readable from the manifest alone — an operator who can see ``address: telegram
 which variable to set without consulting anything else.
 
 **Only named operators are answered.** :data:`OPERATORS_ENV` is a comma-separated list of
-Telegram user ids. A message from anybody else is dropped with **no reply at all** — an
+transport-qualified user ids; legacy bare ids belong to Telegram. A message from anybody
+else is dropped with **no reply at all** — an
 answer, even a refusal, tells a scanner that the bot is live and that something is behind
 it — and recorded as a :data:`steward.events.CHAT_MESSAGE_DROPPED` event, so the operator
 can find out that somebody knocked. A message in a group chat is dropped the same way even
@@ -77,11 +78,14 @@ from steward.claims import ClaimRefused, ResidentClaims
 from steward.deploy import memory_host_dir
 from steward.manifest import (
     CHAT_ROUTE_KIND,
+    CHAT_TOKEN_ENV_PREFIX,
+    ROUTINE_DELIVER_CHAT,
     Resident,
     ResidentManifest,
     Route,
     Routine,
     active_residents,
+    chat_token_env_name,
     redact_secrets,
     validate_path,
 )
@@ -161,15 +165,15 @@ TELEGRAM = "telegram"
 DEFAULT_API_URL = "https://api.telegram.org"
 API_URL_ENV = "STEWARD_CHAT_API_URL"
 
-#: What every per-bot token variable starts with. The rest is the address's reference,
-#: upper-cased: ``telegram:pip`` is ``STEWARD_CHAT_TOKEN_PIP``. Keyed on the *reference*
-#: rather than on the resident id, because the reference is what the manifest declares —
-#: renaming a resident should not silently disconnect its bot, and reading the route should
-#: be enough to know which variable to set.
-TOKEN_ENV_PREFIX = "STEWARD_CHAT_TOKEN_"  # noqa: S105 — a variable-name prefix, not a secret
+#: What every per-bot token variable starts with. Telegram appends the reference for v0
+#: compatibility; other transports append transport then reference so credentials cannot
+#: collide. Addresses, not resident ids, own the names: renaming a resident does not silently
+#: disconnect its bot, and reading the route is enough to know which variable to set.
+TOKEN_ENV_PREFIX = CHAT_TOKEN_ENV_PREFIX
 
-#: Who steward answers: a comma-separated list of Telegram user ids. Empty or unset means
-#: nobody, which means the bridge refuses to start rather than answering the world.
+#: Who steward answers: comma-separated ``<transport>:<user-id>`` identities. Bare ids
+#: retain their original Telegram meaning. Empty means the bridge refuses to start rather
+#: than answering the world.
 OPERATORS_ENV = "STEWARD_CHAT_OPERATORS"
 
 #: How long one ``getUpdates`` call may wait for a message before coming back empty. Long
@@ -236,7 +240,6 @@ OPERATOR_SPEAKER = "operator"
 
 _ADDRESS = re.compile(r"^(?P<transport>[a-z][a-z0-9+.-]*):(?P<reference>\S.*)$")
 _UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]+")
-_ENV_NAME_UNSAFE = re.compile(r"[^A-Z0-9]+")
 
 #: How long a conversation's file name may be before steward shortens it. Telegram's own
 #: ids are far shorter; the bound exists so nothing a transport invents can produce a name
@@ -253,17 +256,19 @@ class ChatError(Exception):
 # --------------------------------------------------------------------------------------
 
 
-def token_env_name(reference: str) -> str:
-    """Return the environment variable holding the token for one address reference.
+def token_env_name(reference: str, transport: str = TELEGRAM) -> str:
+    """Return the environment variable holding the token for one chat address.
 
-    Upper-cased, with anything that is not a letter or a digit folded to ``_`` — so
-    ``telegram:polica-librarian`` reads its token from
-    ``STEWARD_CHAT_TOKEN_POLICA_LIBRARIAN``. The folding is deliberate rather than a
-    restriction on references: a variable name is not allowed to contain a hyphen, and an
-    operator should not have to know that to name their route.
+    Telegram keeps its v0 spelling: ``telegram:polica-librarian`` reads
+    ``STEWARD_CHAT_TOKEN_POLICA_LIBRARIAN``. Other transports include their name —
+    ``discord:pip`` reads ``STEWARD_CHAT_TOKEN_DISCORD_PIP`` — so two services using the
+    same reference never share a credential slot. Everything is upper-cased and non-word
+    runs fold to ``_`` because environment variable names cannot carry a hyphen.
     """
-    folded = _ENV_NAME_UNSAFE.sub("_", reference.upper()).strip("_")
-    return f"{TOKEN_ENV_PREFIX}{folded}"
+    resolved = chat_token_env_name(f"{transport}:{reference}")
+    if resolved is None:  # pragma: no cover — constructed above in the accepted grammar
+        raise ValueError(f"cannot derive a token variable for {transport}:{reference}")
+    return resolved
 
 
 def token_env_names(env: Mapping[str, str] | None = None) -> list[str]:
@@ -275,9 +280,8 @@ def token_env_names(env: Mapping[str, str] | None = None) -> list[str]:
 def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return every bot token in the environment, keyed by the variable that held it.
 
-    Keyed by variable name rather than by reference so the lookup is exact: two references
-    that fold to one variable name are the same bot as far as this module is concerned, and
-    :func:`describe_chat` is where that shows up as something an operator can read.
+    Keyed by variable name rather than address so lookup stays exact and no secret is copied
+    into a report. :class:`Address` owns the transport-aware name derivation.
     """
     source = os.environ if env is None else env
     names = set(token_env_names(source))
@@ -286,16 +290,31 @@ def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
     }
 
 
-def operators_from_env(env: Mapping[str, str] | None = None) -> frozenset[str]:
-    """Return the Telegram user ids steward will answer. Empty means nobody.
+def operators_from_env(
+    env: Mapping[str, str] | None = None, *, transport: str = TELEGRAM
+) -> frozenset[str]:
+    """Return the user ids steward will answer on one transport. Empty means nobody.
 
     Empty is a real answer and the safe one: a bridge with no operators answers no message
     from anyone, and refuses to start rather than run as an open door
-    (:meth:`ChatBridge.require_ready`).
+    (:meth:`ChatBridge.require_ready`). A qualified entry such as ``discord:31337`` belongs
+    only to that transport. An unqualified id keeps the original Telegram meaning so an
+    existing ``STEWARD_CHAT_OPERATORS=4242`` deployment changes neither identity nor access.
     """
     source = os.environ if env is None else env
     raw = (source.get(OPERATORS_ENV) or "").strip()
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+    found: set[str] = set()
+    for item in raw.split(","):
+        entry = item.strip()
+        if not entry:
+            continue
+        namespace, separator, user_id = entry.partition(":")
+        if not separator:
+            if transport == TELEGRAM:
+                found.add(entry)
+        elif namespace == transport and user_id:
+            found.add(user_id)
+    return frozenset(found)
 
 
 def poll_timeout_from_env(env: Mapping[str, str] | None = None) -> float:
@@ -346,7 +365,7 @@ class Address:
     @property
     def token_env(self) -> str:
         """Name the environment variable this bot's token is read from."""
-        return token_env_name(self.reference)
+        return token_env_name(self.reference, self.transport)
 
     def __str__(self) -> str:
         """Render the address the way the manifest spells it."""
@@ -694,7 +713,7 @@ class Message:
 
 
 class ChatTransport(Protocol):
-    """Anything that can carry a conversation. Telegram is the first and only one today.
+    """Anything that can carry a conversation. Telegram is the only shipped one today.
 
     Two methods and no state the bridge can see, so the whole of "how a message travels" is
     behind one seam: a test injects a fake, and a second transport is a class rather than a
@@ -1189,14 +1208,14 @@ class ChatBridge:
                 f"{OPERATORS_ENV} is empty, so steward would answer nobody; set it to the "
                 "comma-separated Telegram user ids that may talk to this fleet"
             )
-        for route in self.routes:
-            if route.address.transport != self.transport.name:
-                problems.append(
-                    f"{route.key}: address {route.address} names transport "
-                    f"{route.address.transport!r}, and this bridge carries "
-                    f"{self.transport.name!r}"
-                )
-                continue
+        carried = [route for route in self.routes if route.address.transport == self.transport.name]
+        if self.routes and not carried:
+            names = sorted({route.address.transport for route in self.routes})
+            problems.append(
+                f"this bridge carries {self.transport.name!r}, but no active route uses it; "
+                f"declared transports: {', '.join(names)}"
+            )
+        for route in carried:
             if not self.token_for(route):
                 problems.append(
                     f"{route.key}: no token — set {route.address.token_env} to the token "
@@ -1772,28 +1791,49 @@ class RoutineDelivery:
     anything is sent (the routine said ``deliver:``, the run finished, the text is not the
     quiet word) is decided there, before this is asked.
 
-    ``deliver: chat`` names the route *kind*. The route is resolved from the resident at
-    send time, so the transport is whatever the route's address says — ``telegram:hob``
-    today — and a second transport is a second :class:`ChatTransport`, not a change here.
-    A routine cannot yet name a specific route; when a resident has more than one chat
-    route, ``deliver`` will grow an address form (``deliver: discord:hob``) and the bare
-    kind will keep meaning "the one active chat route".
+    ``deliver: chat`` names the route *kind* and resolves only when there is exactly one
+    active chat route. ``deliver: discord:hob`` names one route address. In either form the
+    address chooses a :class:`ChatTransport`; adding Discord itself remains a separate
+    adapter rather than a branch in delivery.
     """
 
     tokens: Mapping[str, str] = field(default_factory=dict, repr=False)
     operators: frozenset[str] = frozenset()
     transport: ChatTransport = field(default_factory=TelegramTransport.from_env)
+    operators_by_transport: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    transports: Mapping[str, ChatTransport] = field(default_factory=dict)
 
     @classmethod
     def from_env(
-        cls, env: Mapping[str, str] | None = None, *, transport: ChatTransport | None = None
+        cls,
+        env: Mapping[str, str] | None = None,
+        *,
+        transport: ChatTransport | None = None,
+        transports: Mapping[str, ChatTransport] | None = None,
     ) -> RoutineDelivery:
-        """Read the tokens and the operator list the way the bridge reads them."""
+        """Read tokens and transport-scoped operators the way the bridge reads them.
+
+        ``transport`` keeps the test/integration seam from warren#385. New callers may
+        provide ``transports``; supplying both is an error rather than an order-dependent
+        override.
+        """
+        if transport is not None and transports is not None:
+            raise ValueError("provide transport or transports, not both")
         source = os.environ if env is None else env
+        if transports is not None:
+            available = dict(transports)
+        elif transport is not None:
+            available = {transport.name: transport}
+        else:
+            available = {TELEGRAM: TelegramTransport.from_env(source)}
         return cls(
             tokens=tokens_from_env(source),
             operators=operators_from_env(source),
-            transport=transport or TelegramTransport.from_env(source),
+            transport=available.get(TELEGRAM, next(iter(available.values()))),
+            operators_by_transport={
+                name: operators_from_env(source, transport=name) for name in available
+            },
+            transports=available,
         )
 
     def deliver(self, resident: Resident, routine: Routine, text: str) -> Delivery:
@@ -1809,13 +1849,16 @@ class RoutineDelivery:
                 status=DELIVERY_FAILED,
                 reason=f"resident {resident.id!r} has no active chat route to deliver into",
             )
-        route = routes[0]
-        if route.address.transport != self.transport.name:
+        route, refusal = _delivery_route(resident, routine, routes)
+        if route is None:
+            return Delivery(status=DELIVERY_FAILED, reason=refusal)
+        transport = self._transport_for(route.address.transport)
+        if transport is None:
             return Delivery(
                 status=DELIVERY_FAILED,
                 reason=(
                     f"route {route.key} is on transport {route.address.transport!r}, and "
-                    f"only {self.transport.name!r} can deliver here"
+                    "no configured chat transport can deliver there"
                 ),
             )
         token = self.tokens.get(route.address.token_env)
@@ -1824,21 +1867,25 @@ class RoutineDelivery:
                 status=DELIVERY_FAILED,
                 reason=f"{route.address.token_env} is not set, so nothing can speak as the bot",
             )
-        if not self.operators:
+        operators = self._operators_for(route.address.transport)
+        if not operators:
             return Delivery(
                 status=DELIVERY_FAILED,
-                reason=f"{OPERATORS_ENV} is empty; there is nobody to deliver to",
+                reason=(
+                    f"{OPERATORS_ENV} has no {route.address.transport} operators; "
+                    "there is nobody to deliver to"
+                ),
             )
         sent = _bounded(text)
         reached = 0
-        for operator in sorted(self.operators):
+        for operator in sorted(operators):
             try:
-                landed = self.transport.send(token, operator, sent)
+                landed = transport.send(token, operator, sent)
             except Exception as exc:  # noqa: BLE001 — a transport that raises is still just a failure
                 log.warning("%s: chat transport raised while delivering: %s", route.key, exc)
                 landed = False
             reached += bool(landed)
-        total = len(self.operators)
+        total = len(operators)
         if reached == 0:
             return Delivery(
                 status=DELIVERY_FAILED,
@@ -1847,6 +1894,37 @@ class RoutineDelivery:
         if reached < total:
             return Delivery(status=DELIVERED, reason=f"reached {reached} of {total} operators")
         return Delivery(status=DELIVERED)
+
+    def _transport_for(self, name: str) -> ChatTransport | None:
+        """Resolve a transport while preserving the original direct-constructor seam."""
+        available = self.transports or {self.transport.name: self.transport}
+        return available.get(name)
+
+    def _operators_for(self, transport: str) -> frozenset[str]:
+        """Resolve scoped operators, falling back only for the legacy transport."""
+        scoped = self.operators_by_transport.get(transport)
+        if scoped is not None:
+            return scoped
+        return self.operators if transport == self.transport.name else frozenset()
+
+
+def _delivery_route(
+    resident: Resident, routine: Routine, routes: Sequence[ChatRoute]
+) -> tuple[ChatRoute | None, str]:
+    """Resolve one routine's validated target, defensively, at the delivery boundary."""
+    if routine.deliver == ROUTINE_DELIVER_CHAT:
+        if len(routes) == 1:
+            return routes[0], ""
+        return None, (
+            f"resident {resident.id!r} has {len(routes)} active chat routes; "
+            "bare deliver: chat needs exactly one"
+        )
+    route = next(
+        (candidate for candidate in routes if str(candidate.address) == routine.deliver), None
+    )
+    if route is not None:
+        return route, ""
+    return None, f"resident {resident.id!r} has no active chat route at {routine.deliver!r}"
 
 
 def _bounded(text: str) -> str:

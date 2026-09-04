@@ -2039,6 +2039,77 @@ def test_a_delivered_routine_needs_an_active_chat_route(write_resident: Resident
     assert resident.manifest.routines[0].quiet_word == "NOTHING"
 
 
+def test_a_resident_may_declare_distinct_chat_addresses(
+    write_resident: ResidentWriter,
+) -> None:
+    data = _delivering()
+    data["routes"].append(
+        {"id": "discord", "kind": "chat", "address": "discord:testy", "status": "active"}
+    )
+    data["routines"][0]["deliver"] = "discord:testy"
+
+    resident = m.load_manifest(write_resident(data))
+
+    assert resident.manifest.routines[0].deliver == "discord:testy"
+
+
+def test_duplicate_chat_addresses_are_refused(write_resident: ResidentWriter) -> None:
+    data = _delivering()
+    data["routes"].append(
+        {"id": "other-phone", "kind": "chat", "address": "telegram:testy", "status": "pending"}
+    )
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert "duplicate chat address" in problem_for(result, "routes[2].address")
+
+
+def test_chat_addresses_may_not_fold_to_the_same_token_slot(
+    write_resident: ResidentWriter,
+) -> None:
+    data = _delivering()
+    data["routes"].extend(
+        [
+            {"id": "hyphen", "kind": "chat", "address": "discord:test-y", "status": "pending"},
+            {"id": "dot", "kind": "chat", "address": "discord:test.y", "status": "pending"},
+        ]
+    )
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    problem = problem_for(result, "routes[3].address")
+    assert "same token variable" in problem
+    assert "STEWARD_CHAT_TOKEN_DISCORD_TEST_Y" in problem
+
+
+def test_bare_chat_is_ambiguous_with_two_active_routes(write_resident: ResidentWriter) -> None:
+    data = _delivering()
+    data["routes"].append(
+        {"id": "discord", "kind": "chat", "address": "discord:testy", "status": "active"}
+    )
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    problem = problem_for(result, "routines[0].deliver")
+    assert "more than one active chat route" in problem
+    assert "deliver: <transport>:<reference>" in problem
+
+
+def test_a_delivery_address_must_name_an_active_declared_route(
+    write_resident: ResidentWriter,
+) -> None:
+    data = _delivering()
+    data["routines"][0]["deliver"] = "discord:testy"
+
+    result = m.validate_manifest(write_resident(data))
+
+    assert not result.ok
+    assert "does not name an active chat route" in problem_for(result, "routines[0].deliver")
+
+
 @pytest.mark.parametrize("status", ["pending", "disabled"])
 def test_deliver_chat_is_refused_without_an_active_chat_route(
     write_resident: ResidentWriter, status: str

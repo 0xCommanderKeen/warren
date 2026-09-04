@@ -94,6 +94,7 @@ __all__ = [
     "ValidationResult",
     "WorkspacePath",
     "active_residents",
+    "chat_token_env_name",
     "closest_match",
     "extract_voice",
     "load_manifest",
@@ -261,15 +262,34 @@ DELEGATION_ROUTE_KIND = "delegation"
 #: token in git is a bot anybody who clones the repo can speak as.
 CHAT_ROUTE_KIND = "chat"
 
-#: Where a routine's final message may be sent (warren#385). ``chat`` names the route
-#: *kind*, not a transport: it means "the resident's active chat route", whatever address
-#: that route carries — ``telegram:hob`` today, a Discord address tomorrow without this
-#: field changing. A single legal value rather than a free string for the same reason as
-#: :data:`NotificationTransport`: a misspelt destination must fail at validation, not be a
-#: digest nobody received. The intended extension is additive — a specific route address
-#: (``deliver: discord:hob``) alongside the bare kind — and ``quiet_word`` is designed to
-#: read the same either way.
-RoutineDeliverKind = Literal["chat"]
+CHAT_TOKEN_ENV_PREFIX = "STEWARD_CHAT_TOKEN_"  # noqa: S105 — variable prefix, not a secret
+_CHAT_ADDRESS = re.compile(r"^(?P<transport>[a-z][a-z0-9+.-]*):(?P<reference>\S.*)$")
+_CHAT_TOKEN_ENV_UNSAFE = re.compile(r"[^A-Z0-9]+")
+
+
+def chat_token_env_name(address: str) -> str | None:
+    """Return the credential slot for a parseable chat address.
+
+    This lives beside manifest validation so the collision check and runtime lookup cannot
+    drift. Telegram retains its v0 reference-only name; every other transport is qualified.
+    """
+    match = _CHAT_ADDRESS.match(address.strip())
+    if match is None:
+        return None
+    transport = match.group("transport")
+    reference = match.group("reference")
+    qualified = reference if transport == "telegram" else f"{transport}_{reference}"
+    folded = _CHAT_TOKEN_ENV_UNSAFE.sub("_", qualified.upper()).strip("_")
+    return f"{CHAT_TOKEN_ENV_PREFIX}{folded}"
+
+
+#: Where a routine's final message may be sent (warren#385, warren#399). ``chat`` names
+#: the route *kind* and remains the convenient spelling when exactly one active chat route
+#: exists. A transport-qualified address names one declared route when there are several.
+#: The pattern rejects misspellings before a paid-for digest can disappear into them; the
+#: cross-field check below proves an address is active and belongs to this resident.
+ROUTINE_DELIVER_PATTERN = r"^(?:chat|[a-z][a-z0-9+.-]*:\S+)$"
+RoutineDeliverKind = Annotated[str, StringConstraints(pattern=ROUTINE_DELIVER_PATTERN)]
 ROUTINE_DELIVER_CHAT = "chat"
 
 #: A quiet word is one token: no whitespace, and short enough to be typed exactly. A
@@ -1439,8 +1459,8 @@ class Routine(_Model):
     deliver: RoutineDeliverKind | None = Field(
         default=None,
         description=(
-            "Where the final message of a finished run goes. 'chat' sends it to each "
-            "operator through the resident's active chat route."
+            "Where the final message of a finished run goes. 'chat' selects the sole "
+            "active chat route; a <transport>:<reference> value selects that exact route."
         ),
     )
     quiet_word: str | None = Field(
@@ -1864,7 +1884,9 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routines.timeout_s": "timeout_s: 900",
     "routines.enabled": "enabled: true",
     "routines.journal": "journal: close_of_day  (on exactly one routine, or omit it)",
-    "routines.deliver": "deliver: chat  (needs an active chat route; omit it to deliver nowhere)",
+    "routines.deliver": (
+        "deliver: chat  (one active route), or deliver: discord:hob  (an exact route)"
+    ),
     "routines.quiet_word": "quiet_word: NOTHING  (one short token; only with deliver)",
     "delegation": "delegation: {send: true, to: [receiver-resident]}",
     "delegation.send": "send: true  (omit the block entirely to never delegate)",
@@ -1971,6 +1993,36 @@ def _check_duplicate_ids(manifest: ResidentManifest, source: Path) -> list[Diagn
                     )
                 )
             seen.add(entry.id)
+    seen_chat_addresses: set[str] = set()
+    seen_token_slots: dict[str, str] = {}
+    for index, route in enumerate(manifest.routes):
+        if route.kind != CHAT_ROUTE_KIND:
+            continue
+        if route.address in seen_chat_addresses:
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"routes[{index}].address",
+                    problem=f"duplicate chat address {route.address!r} in routes",
+                    example="one chat route per <transport>:<reference> address",
+                )
+            )
+        seen_chat_addresses.add(route.address)
+        token_slot = chat_token_env_name(route.address)
+        if token_slot is not None and token_slot in seen_token_slots:
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"routes[{index}].address",
+                    problem=(
+                        f"chat addresses {seen_token_slots[token_slot]!r} and "
+                        f"{route.address!r} fold to the same token variable {token_slot}"
+                    ),
+                    example="choose references that remain distinct as environment names",
+                )
+            )
+        elif token_slot is not None:
+            seen_token_slots[token_slot] = route.address
     return diagnostics
 
 
@@ -2231,7 +2283,7 @@ def _check_notifications_are_deliverable(
 
 
 def _check_deliveries_have_a_door(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
-    """Refuse ``deliver: chat`` on a resident nobody can be reached through.
+    """Resolve each delivery declaration to exactly one active chat route.
 
     An **error**, where :func:`_check_notifications_are_deliverable` settles for a warning,
     because the two silences are not alike. A tap that never fires loses nothing. A digest
@@ -2243,23 +2295,45 @@ def _check_deliveries_have_a_door(manifest: ResidentManifest, source: Path) -> l
     # The same question :func:`steward.chat.chat_routes` answers at send time, asked of
     # the manifest alone: this module cannot import that one, and the address's parse is
     # the bridge's business rather than validation's (any non-empty address is legal).
-    if not any(route.accepts_chat for route in manifest.routes):
-        return [
+    active = [route for route in manifest.routes if route.accepts_chat]
+    diagnostics: list[Diagnostic] = []
+    for index, routine in enumerate(manifest.routines):
+        if routine.deliver is None:
+            continue
+        if routine.deliver == ROUTINE_DELIVER_CHAT:
+            if not active:
+                problem = (
+                    f"routine {routine.id!r} delivers to chat but this resident has no "
+                    "active chat route; there is no conversation to send its message into"
+                )
+                example = (
+                    "routes: [{id: phone, kind: chat, address: telegram:<bot>, status: active}]"
+                )
+            elif len(active) > 1:
+                problem = (
+                    f"routine {routine.id!r} uses bare deliver: chat but this resident has "
+                    "more than one active chat route; use deliver: <transport>:<reference>"
+                )
+                example = f"deliver: {active[0].address}"
+            else:
+                continue
+        elif any(route.address == routine.deliver for route in active):
+            continue
+        else:
+            problem = (
+                f"routine {routine.id!r} delivers to {routine.deliver!r}, which does not "
+                "name an active chat route on this resident"
+            )
+            example = f"deliver: {active[0].address}" if active else "deliver: chat"
+        diagnostics.append(
             Diagnostic(
                 file=source,
                 field_path=f"routines[{index}].deliver",
-                problem=(
-                    f"routine {routine.id!r} delivers to chat but this resident has no "
-                    f"active chat route; there is no conversation to send its message into"
-                ),
-                example=(
-                    "routes: [{id: phone, kind: chat, address: telegram:<bot>, status: active}]"
-                ),
+                problem=problem,
+                example=example,
             )
-            for index, routine in enumerate(manifest.routines)
-            if routine.deliver == ROUTINE_DELIVER_CHAT
-        ]
-    return []
+        )
+    return diagnostics
 
 
 def _check_budget_runtime(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:

@@ -222,7 +222,7 @@ final message is redacted, bounded, and sent back into the conversation. Text in
 The route's `address` is a reference (`telegram:pip`) and the bot's token lives in
 steward's environment as `STEWARD_CHAT_TOKEN_PIP`, so a manifest can be read, reviewed and
 pasted anywhere without that being a disclosure; a token written into one is refused by
-validation and scrubbed out of any reply. Only the Telegram user ids in
+validation and scrubbed out of any reply. Only the user ids for that transport in
 `STEWARD_CHAT_OPERATORS` are answered, in private chats only — anybody else is dropped
 **without a reply**, because a refusal still tells a scanner the bot is live, and the
 attempt becomes a `chat_message_dropped` event carrying who knocked and never what they
@@ -760,8 +760,8 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
 | `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |
 | `STEWARD_NOTIFY_NAMESPACE` | notifications | Folded into every derived topic. Empty by default; set it on a second installation reading the same `residents/` tree, so a developer's test knock does not buzz the operator's real phone. |
-| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated Telegram user ids steward answers. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
-| `STEWARD_CHAT_TOKEN_<REF>` | chat bridge | The bot token for a chat route whose `address` is `<transport>:<ref>` — `telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`, with non-alphanumerics folded to `_`. One bot per resident, and never in a manifest: a token written into one is refused by validation. |
+| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated `<transport>:<user-id>` identities steward answers; bare ids remain Telegram-compatible. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
+| `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | chat bridge | Telegram keeps the v0 name (`telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`); other transports include their name (`discord:pip` reads `STEWARD_CHAT_TOKEN_DISCORD_PIP`), with non-alphanumerics folded to `_`. One bot per route, and never in a manifest: a token written into one is refused by validation. |
 | `STEWARD_CHAT_API_URL` | chat bridge | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real service. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | chat bridge | How long one `getUpdates` may wait for a message (default 25s). The socket timeout is this plus ten seconds, because the server holds the connection for the whole poll by design. |
 | `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. The pre-rename `BURROW_URL` is no longer read (warren#361): an environment that still spells it the old way is refused rather than half-configured. |
