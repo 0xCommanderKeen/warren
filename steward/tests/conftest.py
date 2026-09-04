@@ -85,8 +85,20 @@ def valid_manifest() -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def isolated_chronicle_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Require every test that talks to Chronicle to name its target explicitly."""
-    for name in ("CHRONICLE_URL", "CHRONICLE_TOKEN", "BURROW_URL", "BURROW_TOKEN"):
+    """Require every test that talks to Chronicle to name its target explicitly.
+
+    ``STEWARD_SESSION_EMITTER`` is in here for the same reason as the addresses: it decides
+    whether a locally placed session carries steward's chronicle hooks (steward #264), so a
+    developer who exports it would see a different argv from CI's over every test that pins
+    one. A test that wants the hooks sets it itself.
+    """
+    for name in (
+        "CHRONICLE_URL",
+        "CHRONICLE_TOKEN",
+        "BURROW_URL",
+        "BURROW_TOKEN",
+        "STEWARD_SESSION_EMITTER",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
