@@ -724,7 +724,7 @@ fixture uses:
 
 ```sh
 #!/bin/sh
-case "$1" in --help) echo "--setting-sources --tools --strict-mcp-config --add-dir"; exit 0 ;; esac
+case "$1" in --help) echo "--setting-sources --settings --tools --strict-mcp-config --add-dir"; exit 0 ;; esac
 echo '{"result": "Done.", "is_error": false, "total_cost_usd": 0.42, "usage": {"input_tokens": 1200, "output_tokens": 300}}'
 ```
 
@@ -767,6 +767,7 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | chat bridge | How long one `getUpdates` may wait for a message (default 25s). The socket timeout is this plus ten seconds, because the server holds the connection for the whole poll by design. |
 | `CHRONICLE_URL` | emitter, nursery | The village's ingest URL. Provisioning a resident without it is refused: a container with nowhere to emit would never appear in the village. The pre-rename `BURROW_URL` is no longer read (warren#361): an environment that still spells it the old way is refused rather than half-configured. |
 | `CHRONICLE_TOKEN` | emitter, nursery | The village's shared ingest secret, written into the resident's host `.env` at provision time and never into this repo. `BURROW_TOKEN` is no longer read (warren#361). |
+| `STEWARD_SESSION_EMITTER` | runners | Path to chronicle's emitter script on **this host**, for locally placed sessions. Set it and a local session carries steward's six chronicle hooks (`--settings`); unset — the default — it carries none and emits no per-session events. Container placement ignores it: that emitter is baked in the image steward builds. |
 | `STEWARD_SESSION_ENV_PASSTHROUGH` | runners | Comma-separated extra variable **names** a locally placed session may inherit, on top of the allowlist below (a container-placed session inherits neither — its compose `.env` is the hatch there). `STEWARD_TOKEN` and `STEWARD_SESSION_TOKEN` are refused however they are spelled, and the refusal is logged. |
 | `STEWARD_BURROW` | doctor, watchdog | What this machine is called when its hostname is not the name manifests use for it (`deploy.host`). Read only to *report* whether supervision reaches a container; never to decide where anything runs. A declaration replaces the hostname rather than joining it, and `docker info`'s own answer outranks both. See [docs/topology.md](docs/topology.md). |
 | `DOCKER_HOST` | docker, so: watchdog + container placement | Docker's own pointer. Steward never sets it and never reads it to decide anything — but every docker call steward makes inherits it (measured), so docker's own remote-endpoint support applies to *supervision*. It does not relocate *execution*: a container-placed session also needs the host side of its memory mount on this filesystem. Reported as **unverified** unless the daemon at the far end names itself as the declared host — that answer is measured; nothing else here can prove where the endpoint lands. |
@@ -783,6 +784,14 @@ of those registers hooks that run and sets the permission mode, none of it gated
 workspace trust flag that used to be the only thing in the way, and the working directory
 is the resident's own memory directory. The measurement, and what closing the channel
 costs, are in [docs/settings-sources.md](docs/settings-sources.md).
+
+**It gets steward's own six hooks instead.** Beside the closed sources, every claude session
+that has an emitter to name carries `--settings '{"hooks": …}'` — chronicle's six per-session
+events, declared by steward on argv rather than inherited from anybody's file, so the village
+sees what a session did and not only that it ran. A container-placed session always has one
+(the emitter is baked in its image); a local one has it where `$STEWARD_SESSION_EMITTER`
+names a script, and is quiet otherwise. `steward doctor` prints which, per resident. See
+[`docs/manifest.md`](docs/manifest.md#what-steward-declares-instead-six-hooks-and-nothing-else).
 
 **A session does not get steward's environment.** A locally placed session gets an
 allowlist (`SESSION_ENV_BASE` in `runners.py`) plus the facts steward deliberately hands

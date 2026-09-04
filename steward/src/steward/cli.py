@@ -77,7 +77,14 @@ from steward.nursery import (
 from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
 from steward.prompt import assemble_preamble
-from steward.runners import Placement, check_cli_support, check_runner, skills_home
+from steward.runners import (
+    SESSION_EMITTER_ENV,
+    Placement,
+    check_cli_support,
+    check_runner,
+    session_emitter,
+    skills_home,
+)
 from steward.scheduler import (
     DEFAULT_CATCHUP_S,
     FireReport,
@@ -503,9 +510,8 @@ def _report_reach(resident: Resident) -> int:
     """
     manifest = resident.manifest
     tools = manifest.tools
-    complaint = check_cli_support(
-        manifest.runner, tools, manifest.workspace, placement_for(manifest)
-    )
+    placement = placement_for(manifest)
+    complaint = check_cli_support(manifest.runner, tools, manifest.workspace, placement)
     if complaint:
         click.secho(f"{resident.id}: tools {tools.describe()} — {complaint}", fg="red", err=True)
         return 1
@@ -520,7 +526,32 @@ def _report_reach(resident: Resident) -> int:
             f"{resident.id}: mount {mount.host} -> {mount.container} ({mount.mode})",
             fg="yellow" if mount.mode == "rw" else "bright_black",
         )
+    _report_telemetry(resident, placement)
     return 0
+
+
+def _report_telemetry(resident: Resident, placement: Placement) -> None:
+    """Say whether this resident's sessions will tell the village what they did.
+
+    Not a problem either way, so it never counts: a fleet can legitimately run with
+    per-session telemetry off, and steward's own run-level events (`routine_started`,
+    `routine_finished`, task and delegation) are emitted by the control plane and are
+    unaffected by any of this. What it is not allowed to be is a *silent* choice. Since
+    steward #206 a session loads no settings file at all, so the six chronicle hooks reach
+    it only if steward declares them (#264) — and on a local placement steward declares
+    them only where an operator has named an emitter it can promise exists. Without this
+    line the difference between "the village is watching" and "the village went quiet
+    mid-run" is invisible until somebody reads an empty log.
+    """
+    emitter = session_emitter(placement)
+    if emitter is None:
+        click.secho(
+            f"{resident.id}: per-session events off — no emitter for {placement.describe()} "
+            f"placement; export {SESSION_EMITTER_ENV} to turn them on",
+            fg="yellow",
+        )
+        return
+    click.secho(f"{resident.id}: per-session events via {emitter}", fg="bright_black")
 
 
 # --------------------------------------------------------------------------------------

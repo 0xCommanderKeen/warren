@@ -172,8 +172,8 @@ re-establishing through something steward declares, and that has not been done h
 The measured groundwork for the follow-up: **`--settings <file>` survives
 `--setting-sources ""`.** A settings file named explicitly on argv had its `SessionStart`
 hook fire with the sources switched off, so steward can own a settings file and pass it,
-rather than reading whatever the host happens to have. Where that file should live for a
-local placement — steward writes none today — is the open question, and is its own issue.
+rather than reading whatever the host happens to have. That follow-up is steward #264, and
+what it measured is the next section.
 
 Three smaller ones, all from the working directory — which is to say, all from the one
 directory the resident itself can write:
@@ -199,6 +199,78 @@ than printing two channels where one works.
 
 Restoring discovery without re-opening the settings channel is a separate design
 (`--plugin-dir` is the obvious candidate and has not been measured), and a separate issue.
+
+## What steward declares instead (steward #264)
+
+**Measured 2026-09-04** against `claude` **2.1.260**, same method as above: a scratch
+`CLAUDE_CONFIG_DIR`, an untrusted workspace, `env -i`, and hooks that touch a sentinel. Four
+rows, and each one decided something.
+
+| argv | project `.claude/settings.json` present? | steward's hooks | the workspace's hook |
+|---|---|---|---|
+| `--setting-sources "" --settings <file>` | no | **fired** (`SessionStart` *and* `UserPromptSubmit`) | — |
+| `--setting-sources "" --settings '<json>'` | no | **fired**, identically | — |
+| `--setting-sources "" --settings <file>` | yes | **fired** | **did not fire** |
+| `--setting-sources "" --settings <missing path>` | no | — | — |
+
+The first two rows are the channel: a document named on argv is loaded with the sources
+closed, and **the flag takes an inline JSON string exactly as well as a path** (`--settings
+<file-or-json>`, per `--help`). The third is the boundary that makes it safe to use — a
+`.claude/settings.json` in the session's own working directory, which is the resident's own
+memory directory, still registers nothing while steward's document loads.
+
+The fourth row is why steward passes JSON rather than a path:
+
+```
+Error: Settings file not found: /…/does-not-exist.json
+```
+
+Exit 1, **no session at all.** A `--settings` path is not a best-effort channel that
+degrades to lost telemetry when it is wrong; it is a launch failure. That single line
+decided three things at once:
+
+- **Inline JSON, not a file.** Nothing can be missing, nothing can be rewritten between the
+  write and the exec, and the document a session ran under is the one steward composed in
+  the same call that launched it.
+- **No new baked path in the resident image.** A file baked at a new path would be absent
+  from every image already deployed, so the first session on an un-upgraded resident would
+  fail to launch rather than merely stay quiet. Only the *emitter script* path is baked —
+  under `/opt/steward` since #51, and under its current name since warren#361 — and a
+  resident still running an older image than that stays quiet rather than breaking, which
+  is what the guard below buys.
+- **Local placement names nothing by default.** Steward ships the container's filesystem
+  and does not ship the host's. `$STEWARD_SESSION_EMITTER` is how a host says it has an
+  emitter; unset, steward sends no `--settings` and the session is as quiet as it has been
+  since #206 — which is a choice, and `steward doctor` says so out loud.
+
+The emitter a container-placed session runs is `/opt/steward/chronicle-emit.py` — the baked
+copy, not the `/root/.claude/chronicle-emit.py` that `entrypoint.sh` seeds. `/root/.claude`
+is a bind mount from the host, and a hook command pointing into a mount is arbitrary code on
+every tool call from a path outside the image: the hole this whole document is about, entered
+from the other side.
+
+One more measurement decided the shape of the command itself. **`python3 <missing file>`
+exits 2** — and 2 is the CLI's *blocking* exit code for a hook, which at `PreToolUse` denies
+the tool call. So an emitter path that is merely wrong (a resident still on an image built
+before the emitter was baked, a typo in `$STEWARD_SESSION_EMITTER`) would not cost telemetry;
+it would deny every tool call every session made, across the fleet. Steward therefore writes
+
+```
+python3 '<emitter>' || true
+```
+
+— quoted, because the CLI runs a hook command through a shell and a path with a space in it
+would otherwise be two words; and guarded, because the emitter never blocks deliberately (it
+exits 0 even on its own transport failures), so nothing is suppressed that was ever meant to
+be heard. It is the same trade `entrypoint.sh` already makes out loud: a resident must not be
+taken down over telemetry.
+
+The sentinel halves of the third row are checked in, unlike the sweeps above:
+`tests/test_session_hooks_live.py` runs the real binary through steward's own
+`ClaudeRunner`, and skips when there is no `claude` on PATH. It can be checked in because it
+costs nothing — a `UserPromptSubmit` hook fires before the first API call, so the session is
+sealed (scratch config dir, no credentials, `ANTHROPIC_BASE_URL` at a dead port), dies
+unauthenticated, and the sentinel is already on disk.
 
 ## What did not survive verification
 

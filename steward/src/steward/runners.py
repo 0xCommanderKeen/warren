@@ -47,6 +47,7 @@ import os
 import re
 import secrets
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -64,8 +65,11 @@ from steward.manifest import Runner as RunnerSpec
 from steward.session_auth import SESSION_TOKEN_ENV
 
 __all__ = [
+    "CHRONICLE_HOOKS",
+    "CONTAINER_EMITTER",
     "COST_USD_MAX",
     "LOCAL_PLACEMENT",
+    "SESSION_EMITTER_ENV",
     "SESSION_ENV_BASE",
     "SESSION_ENV_PASSTHROUGH_ENV",
     "SESSION_ENV_REFUSED",
@@ -87,8 +91,10 @@ __all__ = [
     "build_runner",
     "check_cli_support",
     "check_runner",
+    "hook_settings",
     "required_flags",
     "run_argv",
+    "session_emitter",
     "session_environment",
     "skills_home",
     "substitute",
@@ -400,6 +406,134 @@ class Placement:
 #: The placement every session has always had: the scheduler's own machine and process
 #: environment. The default everywhere a placement is not explicitly resolved.
 LOCAL_PLACEMENT = Placement()
+
+
+# --------------------------------------------------------------------------------------
+# the hooks steward declares for a session (steward #264)
+# --------------------------------------------------------------------------------------
+
+#: The flag that names a settings document on argv — the one channel
+#: :data:`SETTING_SOURCES` deliberately leaves open.
+#:
+#: Measured 2026-09-04 against CLI 2.1.260, and 2026-08-31 against 2.1.243/2.1.252
+#: (``docs/settings-sources.md``): a document named here has its hooks fire with the
+#: sources closed, and a ``.claude/settings.json`` in the session's own working directory
+#: still fires nothing. So this is steward *declaring* a settings document rather than
+#: inheriting whatever the filesystem holds — the same shape as ``--tools`` and
+#: ``--strict-mcp-config``, and the reason #206 could close the sources without closing
+#: the village's eyes for good.
+SETTINGS_FLAG = "--settings"
+
+#: The six hook events chronicle's emitter answers to, and the whole of what steward
+#: declares. ``docker/resident/settings.json`` wires the same six for a human running
+#: ``claude`` in the container by hand, and ``tests/test_resident_image.py`` holds the two
+#: lists to each other: an event added to one and not the other is a village that half
+#: sees a session.
+CHRONICLE_HOOKS = (
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Notification",
+    "Stop",
+    "SessionEnd",
+)
+
+#: The two that fire per tool call, and therefore carry a matcher. ``"*"`` is every tool;
+#: an entry with no matcher at these two events is not "all of them" but a rule the CLI
+#: matches against a tool name, so leaving it off is how a session reports one hook and
+#: emits nothing.
+MATCHED_HOOKS = frozenset({"PreToolUse", "PostToolUse"})
+
+#: How long one hook gets before the CLI abandons it, and the same five seconds
+#: ``docker/resident/settings.json`` gives its own copy.
+#:
+#: Against a measured fire of ~50-60 ms — re-measured 2026-09-04 against the vendored
+#: warren#234 bundle with no village reachable, so it journals to its durable outbox rather
+#: than posting, matching the ~54 ms median that issue recorded. That is about 1% of the
+#: budget. The margin is for a village that is slow, not for one that is down: an emitter
+#: with nowhere to post writes to the outbox and returns, and telemetry must never be able
+#: to hold a routine open.
+HOOK_TIMEOUT_S = 5
+
+#: Where the resident image bakes chronicle's emitter, and the path a container-placed
+#: session's hooks run.
+#:
+#: Not ``/root/.claude/chronicle-emit.py``, which is the copy ``entrypoint.sh`` seeds for a
+#: human running ``claude`` in the container by hand. That directory is a bind mount from
+#: the host: declaring the copy inside it would put arbitrary code on every tool call
+#: behind a path outside the image, which is the hole #206 closed, reopened from the other
+#: side. This one is in the image layer, under no mount, and steward built it — which is
+#: the whole difference between a settings document steward *declares* and one it inherits.
+CONTAINER_EMITTER = "/opt/steward/chronicle-emit.py"
+
+#: How a host tells steward where its emitter is, for local placement.
+#:
+#: Container placement needs no configuration because steward ships that filesystem and
+#: can promise what is on it. A host is somebody else's machine: steward installs no
+#: emitter there, and naming one that is not there is not a quiet miss but a dead session
+#: — measured 2026-09-04, a ``--settings`` path that does not exist is ``Error: Settings
+#: file not found``, exit 1, no run at all. So local placement declares nothing until an
+#: operator names a file they know exists, and until they do a local session emits exactly
+#: what it has emitted since #206: nothing per-session, and steward's own run-level
+#: brackets as always.
+SESSION_EMITTER_ENV = "STEWARD_SESSION_EMITTER"
+
+
+def session_emitter(placement: Placement, inherited: Mapping[str, str] | None = None) -> str | None:
+    """Name the emitter script a session's hooks should run here, or ``None`` for silence.
+
+    One question with two answers, because the two placements know different amounts about
+    the filesystem the session lands in — see :data:`CONTAINER_EMITTER` and
+    :data:`SESSION_EMITTER_ENV` for why each is the answer it is.
+    """
+    if placement.is_container:
+        return CONTAINER_EMITTER
+    source = os.environ if inherited is None else inherited
+    return (source.get(SESSION_EMITTER_ENV) or "").strip() or None
+
+
+def hook_settings(emitter: str) -> str:
+    """Render the settings document steward hands a session, as the JSON the flag takes.
+
+    A JSON *string* rather than a path, which the flag accepts either way (``--settings
+    <file-or-json>``) and which was measured to fire hooks either way. The string is the
+    better of the two here for three reasons, in the order they bite:
+
+    - a file can be missing, and a missing one is a dead session rather than lost
+      telemetry (:data:`SESSION_EMITTER_ENV`);
+    - a file is a thing that exists between being written and being read, so a
+      container-placed session's settings would have to be shipped in an image and every
+      resident already running an older one would fail to launch rather than emit;
+    - a file is a thing something else can rewrite, and the point of #264 is a document
+      whose contents are steward's own words at the moment it launches the session.
+
+    What it carries is *only* ``hooks``. ``permissions``, ``model`` and ``env`` are settings
+    keys too, and every one of them is already a manifest dimension or a deliberate
+    refusal: a settings document that could re-decide them would be the inheritance #206
+    closed, wearing steward's name.
+
+    Two things about the command, both about failing in the right direction. The path is
+    shell-quoted, because the CLI runs a hook command through a shell and an emitter under
+    a path with a space in it would otherwise be two words — a hook that "runs" and emits
+    nothing. And ``|| true`` is not defensive noise: a hook that exits 2 is the CLI's
+    *blocking* code, and ``python3 <missing file>`` exits exactly 2 (measured). Without the
+    guard, an emitter path that is wrong — a resident on an image older than the one that
+    baked it, an operator's typo in ``$STEWARD_SESSION_EMITTER`` — would not lose telemetry
+    but deny every tool call the session made, fleet-wide. The emitter never blocks
+    deliberately (it exits 0 on its own failures too), so nothing is being suppressed that
+    was ever meant to be heard: this is the same trade ``entrypoint.sh`` already makes out
+    loud, that a resident must not be taken down over telemetry.
+    """
+    step = {
+        "type": "command",
+        "command": f"python3 {shlex.quote(emitter)} || true",
+        "timeout": HOOK_TIMEOUT_S,
+    }
+    hooks = {
+        event: [{"matcher": "*", "hooks": [step]} if event in MATCHED_HOOKS else {"hooks": [step]}]
+        for event in CHRONICLE_HOOKS
+    }
+    return json.dumps({"hooks": hooks}, separators=(",", ":"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1009,8 +1143,19 @@ class ClaudeRunner(_ProcessRunner):
         and ``local`` are files under the constrained session's own hand; ``user`` is
         whatever the launching machine happens to hold. None of the three is a source a
         resident should read, so none of them is named.
+
+        ``--settings`` is the other half of that statement and goes on beside it whenever
+        this placement has an emitter to name (steward #264): closing the sources also
+        switched off the per-session chronicle hooks that were riding on them, and this is
+        steward declaring those six hooks itself rather than inheriting six from a file
+        somebody else owns. The resident writes nothing; steward declares everything. See
+        :func:`hook_settings` for what the document may carry and :func:`session_emitter`
+        for why a local placement often names nothing at all.
         """
         argv = [self.binary, "-p", request.prompt, "--output-format", "json", *SETTING_SOURCES]
+        emitter = session_emitter(self.placement)
+        if emitter is not None:
+            argv += [SETTINGS_FLAG, hook_settings(emitter)]
         model = request.model or self.spec.model
         if model:
             argv += ["--model", model]
@@ -1347,7 +1492,12 @@ def _cli_help(binary: str, placement: Placement) -> str | None:
     return outcome.stdout + outcome.stderr
 
 
-def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str]) -> tuple[str, ...]:
+def required_flags(
+    spec: RunnerSpec,
+    tools: ToolGrant,
+    workspace: Sequence[str],
+    placement: Placement | None = None,
+) -> tuple[str, ...]:
     """Return the CLI flags a session for this manifest is launched with, in argv order.
 
     Empty for a kind that compiles none — which, for both declarations, is a kind
@@ -1357,11 +1507,18 @@ def required_flags(spec: RunnerSpec, tools: ToolGrant, workspace: Sequence[str])
     :data:`SETTING_SOURCES` is on every claude argv rather than compiled from a
     declaration, so every claude resident has something the installed binary has to
     support.
+
+    ``placement`` is here because :data:`SETTINGS_FLAG` is not a property of the manifest
+    either: whether a session carries one is :func:`session_emitter`'s answer, and a probe
+    that asked for it unconditionally would fail a perfectly good local host that names no
+    emitter and therefore never sends the flag.
     """
     if spec.kind != ClaudeRunner.kind:
         return ()
     setting_sources_flag, _value = SETTING_SOURCES
     flags: list[str] = [setting_sources_flag]
+    if session_emitter(placement if placement is not None else LOCAL_PLACEMENT) is not None:
+        flags.append(SETTINGS_FLAG)
     if not tools.unrestricted:
         flags.extend(TOOL_BOUND_FLAGS)
     if workspace:
@@ -1394,11 +1551,11 @@ def check_cli_support(
     not a session and not a brain, and lands in this module for the same reason
     :func:`run_argv` does: steward starts processes in exactly one file.
     """
-    needed = required_flags(spec, tools, workspace)
+    resolved = placement if placement is not None else LOCAL_PLACEMENT
+    needed = required_flags(spec, tools, workspace, resolved)
     if not needed:
         return None
     binary = ClaudeRunner.binary
-    resolved = placement if placement is not None else LOCAL_PLACEMENT
     help_text = _cli_help(binary, resolved)
     if help_text is None:
         where = f" inside {resolved.describe()}" if resolved.is_container else ""
@@ -1410,7 +1567,8 @@ def check_cli_support(
     if missing:
         return (
             f"the installed {binary!r} does not support {', '.join(missing)}, so a session "
-            f"for this resident would fail to launch rather than run unbounded"
+            f"for this resident would fail to launch rather than run without what "
+            f"steward declares for it"
         )
     return None
 

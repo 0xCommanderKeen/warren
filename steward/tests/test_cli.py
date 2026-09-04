@@ -41,7 +41,10 @@ from steward.store import Store
 #: A `claude` current enough for the flag every session carries (steward #206). Doctor
 #: probes `--setting-sources` for *every* claude resident, declarations or not, so a stub
 #: that answers `--help` with nothing is now a red doctor rather than a quiet one.
-CURRENT_CLAUDE = 'echo "  --setting-sources <sources>"; echo "  --add-dir <directories...>"'
+CURRENT_CLAUDE = (
+    'echo "  --setting-sources <sources>"; echo "  --settings <file-or-json>"; '
+    'echo "  --add-dir <directories...>"'
+)
 
 
 OPERATOR_BURROW_DOCKER = (
@@ -563,6 +566,48 @@ def test_doctor_says_so_when_nothing_is_scheduled(
     result = runner.invoke(main, ["doctor", str(path.parent)])
     assert result.exit_code == 0
     assert "no enabled routines" in result.output
+
+
+@pytest.mark.usefixtures("on_operator_burrow")
+def test_doctor_says_whether_the_village_will_see_the_session(
+    runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Per-session telemetry is a choice, and a choice nobody can see is a bug (#264).
+
+    Both shipped residents are container-placed, so their sessions carry steward's own
+    hooks and the report says which emitter runs them. Neither is an error: a fleet may run
+    quiet, but not silently quiet.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    monkeypatch.chdir(REPO_ROOT)
+
+    result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert "hob: per-session events via /opt/steward/chronicle-emit.py" in result.output
+    assert "pip: per-session events via /opt/steward/chronicle-emit.py" in result.output
+
+
+def test_doctor_says_when_a_local_placement_has_no_emitter_to_run(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """The quiet default, said out loud, with the name of the thing that would end it."""
+    stub_bin("claude", CURRENT_CLAUDE)
+    monkeypatch.delenv("STEWARD_SESSION_EMITTER", raising=False)
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident({**valid_manifest(), "id": "quiet"}, directory="quiet")
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert "quiet: per-session events off — no emitter for local placement" in result.output
+    assert "STEWARD_SESSION_EMITTER" in result.output
 
 
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(

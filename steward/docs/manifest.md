@@ -424,11 +424,8 @@ arriving:
   (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, `SessionEnd`)
   were emitted by hooks in a settings file on whatever machine steward ran on: the
   operator's `~/.claude/settings.json` locally, `/root/.claude/settings.json` inside the
-  resident image. Neither is loaded any more, so those events stop. Steward's own
-  run-level bracket (`routine_started`/`routine_finished`, task and delegation events) is
-  posted by `steward.events` and is untouched. Re-establishing the finer telemetry through
-  something steward *declares* — `--settings <file>`, measured to survive the flag — is
-  separate work.
+  resident image. Neither is loaded any more. **Steward declares those six hooks itself
+  instead** — see below; what stopped arriving is anybody *else's* hooks.
 - **`CLAUDE.md`** in the working directory is no longer read. Steward writes none, and a
   resident writing its own is the instruction-shaped version of the hole being closed —
   the journal is the supported channel for that.
@@ -440,6 +437,61 @@ arriving:
   the delivery path: name, description and body are injected into every session. What a
   resident loses is the CLI's own route to them — the `Skill` tool answers `Unknown skill`.
   `steward skills` says exactly that rather than printing two channels where one works.
+
+## What steward declares instead: six hooks, and nothing else
+
+Closing the sources closed the per-session chronicle telemetry that was riding on them —
+the village could still see a routine start and finish, and saw nothing in between. So
+steward names its own settings document on every claude session (steward #264):
+
+```
+claude -p <prompt> --output-format json --setting-sources "" --settings '{"hooks": …}' …
+```
+
+`--settings` survives `--setting-sources ""` — that is the measurement #206 left behind and
+#264 spends. The two flags are one statement: *load nothing anybody else wrote, and load
+exactly this.* The resident writes nothing; steward declares everything, the same shape as
+`--tools` and `--strict-mcp-config`.
+
+**What the document carries.** Only `hooks`, and only the six chronicle events, each running
+`python3 '<emitter>' || true` with a 5-second timeout. `permissions`, `model`, `env` and
+`mcpServers` are settings keys too, and every one of them is already a manifest dimension or
+a deliberate refusal — a document that could re-decide them would be the inheritance #206
+closed, wearing steward's name.
+
+The `|| true` is load-bearing. A hook that exits 2 is the CLI's *blocking* code, and
+`python3 <missing file>` exits exactly 2 (measured), so an emitter path that is merely wrong
+would deny every tool call every session made rather than cost telemetry. The emitter never
+blocks deliberately — it exits 0 even on its own transport failures — so the guard suppresses
+nothing that was meant to be heard. Same trade `docker/resident/entrypoint.sh` already makes
+out loud: a resident must not be taken down over telemetry.
+
+**A JSON string, not a file.** The flag takes `<file-or-json>` and both were measured to fire
+hooks. Steward passes the JSON, for three reasons in the order they bite: a file can be
+missing, and a missing one is not lost telemetry but a dead session (`Error: Settings file
+not found`, exit 1, no run); a file shipped in an image means every resident still running an
+older image fails to launch rather than merely staying quiet; and a file is a thing something
+else can rewrite between being written and being read.
+
+**Which emitter, per placement.** This is the one part that differs, because the two
+placements know different amounts about the filesystem the session lands in:
+
+| placement | emitter | why |
+|---|---|---|
+| `container` | `/opt/steward/chronicle-emit.py` | steward builds that image and bakes the emitter there. Not `/root/.claude/chronicle-emit.py`, which is the copy `entrypoint.sh` seeds for a human running `claude` in the container by hand: that directory is a **bind mount from the host**, so declaring the copy inside it would put arbitrary code on every tool call behind a path outside the image |
+| `local` | `$STEWARD_SESSION_EMITTER`, or **nothing** | a host is somebody else's machine and steward installs no emitter on it. Unset — the default — means no `--settings` at all and a session as quiet as it has been since #206. Set it to a path you know exists and that session's hooks run |
+
+`steward doctor` prints one line per resident either way (`per-session events via …`, or
+`per-session events off — no emitter for local placement`). Neither is an error: a fleet may
+run quiet, but not *silently* quiet.
+
+**What still does not arrive without an operator's say-so: delivery.** The emitter posts to
+`$CHRONICLE_URL` and authenticates with `$CHRONICLE_TOKEN` — and the token is deliberately
+off the session environment allowlist (`SESSION_ENV_REFUSED` in `runners.py`: one shared
+ingest secret whose holder can post as any `agent_id`). Where chronicle's own ingest token is
+unset its ingest is open and the events simply land. Where it is set, an operator who wants
+per-session events delivered live names `CHRONICLE_TOKEN` in `STEWARD_SESSION_ENV_PASSTHROUGH`
+— the hatch that exists for exactly this, and a choice that is legitimately theirs to make.
 
 ## `workspace` — where a session may act
 
@@ -515,7 +567,7 @@ that must commit and push — Hob and its vault — has today no narrower mode t
 
 | kind | what it runs |
 |---|---|
-| `claude` | `claude -p <prompt> --output-format json --setting-sources "" --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and comes from no declaration. |
+| `claude` | `claude -p <prompt> --output-format json --setting-sources "" [--settings <json>] --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and [`--settings`](#what-steward-declares-instead-six-hooks-and-nothing-else) on every session that has an emitter to name — both come from no declaration. |
 | `codex` | `codex exec [--model <model>] <prompt>`. Plain text out; usage is unavailable, and steward reports it as unknown rather than guessing. |
 | `command` | The argv template below, for anything else. |
 | `mock` | Deterministic, offline, no subprocess. Used by tests and `--dry-run`. |
