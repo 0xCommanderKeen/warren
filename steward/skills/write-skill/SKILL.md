@@ -1,6 +1,6 @@
 ---
 name: write-skill
-description: Write a skill into steward's library — interview, draft, POST, and end on the commit hash. Use when Miha asks for a new skill, when a resident delegates "I need a skill for X", or when a skill nobody holds yet needs rewriting.
+description: Write a skill into steward's library, from the interview to the commit hash. Use when someone asks for a new skill, or a skill nobody holds yet needs rewriting.
 ---
 
 A steward skill is one file: frontmatter and a body, no reference files, no scripts, no
@@ -64,10 +64,11 @@ lie by the time it matters. Delete the whole sentence rather than trimming words
   reply if you think the fleet should hold it. The door refuses the flag in any case.
 - **The body references no files.** Whatever the session needs is in the body or is not
   there at all: a link to `REFERENCE.md` resolves to nothing in a session's prompt.
-- **Keep the body under 8,000 characters** and say the count in your reply. Every skill a
-  resident holds is spent from one 24,000-character prompt budget, and a set that overflows
-  loses whichever skill rendered last, silently. `GET /skills` reports `body_chars` and
-  `holders`, which is how you check the holder's whole set rather than only your own line.
+- **Keep the body under 8,000 characters.** Every skill a resident holds is paid for out
+  of one 24,000-character prompt budget, and a set that overruns it is cut mid-sentence
+  with `[truncated at the injection cap]` where the rest of the instructions should be.
+  `GET /skills` reports every skill's `body_chars` and its `holders`, which is how you add
+  up the whole set the holder will actually be given rather than only your own line.
 
 ## Writing it
 
@@ -86,15 +87,17 @@ only while no manifest grants the skill: once a resident holds it, rewriting it 
 instructions somebody was given, and the refusal names the holders. Take that as the
 answer — knock with the new body and let a human make the swap.
 
-End the reply on the receipt, built from the response's `commit.sha`:
+End the reply on the receipt, built from the response's `commit.sha` and the two sizes:
 
 ```
-🧩 read-invoices added (a1b2c3) — 3,412 of the 8,000-character body cap.
+🧩 read-invoices added (a1b2c3) — 3,412 of the 8,000-character body cap;
+   hob's set now renders at 12,104 of the 24,000-character prompt budget.
 ```
 
-The commit hash is how the person who asked reads what you actually wrote without asking
-you to summarise it. A skill reported with no commit hash has, as far as anyone can check,
-not been written.
+Name the set only for a resident that will actually hold it; for a skill nobody holds yet,
+the body count alone is the honest half. The commit hash is how the person who asked reads
+what you wrote without asking you to summarise it: a skill reported with no commit hash
+has, as far as anyone can check, not been written.
 
 ## The grant is Miha's
 

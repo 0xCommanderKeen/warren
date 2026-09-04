@@ -1,6 +1,6 @@
 ---
 name: raise-resident
-description: Draft a new resident and hand the provision to a human — interview, read the fleet, declare the skeleton with deploy false, rehearse it, and knock once with the manifest text. Use when Miha asks for a new resident, or a job arrives that no resident covers.
+description: Draft a new resident, declare the skeleton, and hand the provision to Miha. Use when a job arrives that no resident covers, or Miha asks for one.
 ---
 
 A resident is a job with a name, a boundary and a budget. Drafting one is cheap and
@@ -43,7 +43,8 @@ something the draft can propose and a person can correct in one line.
 
 ## Draft it in Hob's shape
 
-`steward/residents/hob/manifest.yaml` is the worked example. What you write:
+`GET /residents/hob/declaration` returns the worked example, and reads are always open to
+you. Draft the whole manifest, not just the part the declare form takes:
 
 - **`summary`** — one line the village can display.
 - **`charter.mission`** — what this resident is for, two sentences at most.
@@ -76,14 +77,15 @@ with `"deploy": false` in the body. That flag is the whole grant: it writes
 asking for it spends the turn on a 403. Keep the response's `commit.sha` — it is what the
 knock points at.
 
-Send only what the form takes: `id`, `name`, `char`, `accent`, `role`, `charter`, `skills`,
-`routes`, `tools`, `runner`, `soul_body`, `voice`. It has no field for `deploy.mounts`,
-`routines`, `budgets`, `delegation` or `notifications`, and it refuses an unknown key
-rather than ignoring it. A `workspace` on a container-placed runner is refused too, because
-the mount that would make the directory reachable cannot be declared here. Everything in
-that list goes into the knock instead, as manifest text.
+The form takes most of the draft — down to `skills` with their notes, `routes`,
+`app_grants`, `session_grants`, `workspace` and `runner`. It has no field for `deploy`,
+`routines`, `budgets`, `board`, `delegation` or `notifications`, and it refuses an unknown
+key rather than ignoring it, so send those nowhere: they go into the knock as manifest
+text. One trap joins them — a `workspace` path is accepted only when something already
+provides it, the memory directory or a declared mount, so a workspace waiting on a mount
+waits in the knock beside it.
 
-## Rehearse it
+## Dry-run it
 
 ```
 curl -sS -X POST "$STEWARD_URL/residents/<id>/provision" \
@@ -91,10 +93,11 @@ curl -sS -X POST "$STEWARD_URL/residents/<id>/provision" \
   -H 'Content-Type: application/json' -d '{"dry_run": true}'
 ```
 
-The plan comes back — the compose fragment and the exact commands a real provision would
-run — and nothing is sent, started or written. Read it: a plan naming the wrong image, the
-wrong host, or a mount you never declared is the cheapest bug you will ever catch.
-`dry_run: true` is required, and the refusal without it is the door working.
+The plan comes back in `compose` and `commands` — the compose fragment, and the exact
+argv a real provision would issue — and nothing is sent, started or written. Read it: a
+plan naming the wrong image, the wrong host, or a mount you never declared is the cheapest
+bug you will ever catch. `dry_run: true` is required, and the refusal without it is the
+door working.
 
 ## Knock once, then stop
 

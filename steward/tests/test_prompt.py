@@ -569,14 +569,24 @@ def test_a_forged_rule_in_a_routine_prompt_is_neutralized(
 # ------------------------------------- the vault keeper's skills reach the prompt (warren#383)
 
 
-def vault_keeper_prompt() -> tuple[list[Skill], str]:
-    """Resolve a resident granting both Life-vault skills and assemble its preamble."""
+def prompt_granting(*granted: str) -> tuple[list[Skill], str]:
+    """Resolve a resident granting these shipped skills and assemble its preamble."""
     data = valid_manifest()
-    data["skills"] = ["vault-keeper", "morning-digest"]
+    data["skills"] = list(granted)
     data["routines"] = []
     manifest = m.ResidentManifest.model_validate(data)
     resolved = list(sk.effective_skills(manifest, sk.load_library(REPO_ROOT / "skills")))
     return resolved, p.assemble_preamble(manifest, None, None, resolved)
+
+
+def skills_section(text: str) -> str:
+    """Return just the skills block of an assembled preamble."""
+    return text.split(p.SKILLS_FRAME)[1].split("=" * 72, maxsplit=1)[0]
+
+
+def vault_keeper_prompt() -> tuple[list[Skill], str]:
+    """Resolve a resident granting both Life-vault skills and assemble its preamble."""
+    return prompt_granting("vault-keeper", "morning-digest")
 
 
 def test_both_vault_skills_reach_the_prompt_with_the_receipt_rule_and_the_quiet_word() -> None:
@@ -588,16 +598,16 @@ def test_both_vault_skills_reach_the_prompt_with_the_receipt_rule_and_the_quiet_
     """
     resolved, text = vault_keeper_prompt()
     assert [s.name for s in resolved][-2:] == ["vault-keeper", "morning-digest"]
-    skills_section = text.split(p.SKILLS_FRAME)[1].split("=" * 72)[0]
+    section = skills_section(text)
 
     # the receipt rule, as the old bot printed it
-    assert "📝 Saved (" in skills_section
-    assert "🗑" in skills_section
-    assert "no receipt means nothing was saved" in skills_section.lower()
+    assert "📝 Saved (" in section
+    assert "🗑" in section
+    assert "no receipt means nothing was saved" in section.lower()
     # the digest's quiet word
-    assert "NOTHING" in skills_section
+    assert "NOTHING" in section
     # dates are the household's wall clock, not the container's
-    assert "TZ=Europe/Ljubljana date" in skills_section
+    assert "TZ=Europe/Ljubljana date" in section
 
 
 def test_both_vault_skills_fit_beside_the_default_set_without_truncation() -> None:
@@ -616,32 +626,24 @@ def test_both_vault_skills_fit_beside_the_default_set_without_truncation() -> No
     assert "[truncated at the injection cap]" not in text
 
 
+# --------------------------------- HR's two crafts reach the prompt (warren#412, warren#413)
+
+
 def hr_prompt() -> tuple[list[Skill], str]:
     """Resolve a resident granting both of HR's crafts and assemble its preamble."""
-    data = valid_manifest()
-    data["skills"] = ["write-skill", "raise-resident"]
-    data["routines"] = []
-    manifest = m.ResidentManifest.model_validate(data)
-    resolved = list(sk.effective_skills(manifest, sk.load_library(REPO_ROOT / "skills")))
-    return resolved, p.assemble_preamble(manifest, None, None, resolved)
-
-
-def hr_skills_section() -> str:
-    """Return just the skills block of HR's preamble."""
-    _, text = hr_prompt()
-    return text.split(p.SKILLS_FRAME)[1].split("=" * 72)[0]
+    return prompt_granting("write-skill", "raise-resident")
 
 
 def test_write_skill_reaches_the_prompt_with_the_pointer_the_defaults_and_the_receipt() -> None:
     """The three rules a session would otherwise get wrong reach it as prose (warren#412).
 
-    The description rule and the ``defaults`` refusal are the two the Mac's skill-writing
+    The description rule and the ``defaults`` refusal are what the Mac's skill-writing
     skills exist to teach; the commit hash is what makes a written skill checkable by the
     person who asked for it.
     """
-    resolved, _ = hr_prompt()
-    assert "write-skill" in [s.name for s in resolved]
-    section = hr_skills_section()
+    resolved, text = hr_prompt()
+    assert [s.name for s in resolved][-2:] == ["write-skill", "raise-resident"]
+    section = skills_section(text)
 
     # the description is a pointer, and a pointer says when to reach the material
     assert "Use when" in section
@@ -651,27 +653,29 @@ def test_write_skill_reaches_the_prompt_with_the_pointer_the_defaults_and_the_re
     # the reply ends on something Miha can go and read
     assert "commit hash" in section
     assert "🧩" in section
-    # the two caps are quoted at the sizes the code actually enforces
+    # both caps are quoted at the sizes the code actually enforces, so the prose cannot
+    # drift from the constants while still reading as authoritative
     assert f"{sk.BODY_MAX_CHARS:,}-character body cap" in section
     assert f"{p.SKILLS_MAX_CHARS:,}-character prompt budget" in section
 
 
-def test_raise_resident_reaches_the_prompt_with_the_skeleton_the_rehearsal_and_the_knock() -> None:
+def test_raise_resident_reaches_the_prompt_with_the_skeleton_the_dry_run_and_the_knock() -> None:
     """Declaring is not provisioning, and the knock is what keeps them apart (warren#413).
 
     ``deploy: false`` and ``dry_run: true`` are the two flags the granted doors refuse
     without, so a session that has not read them here spends its turn on a 403.
     """
-    resolved, _ = hr_prompt()
-    assert "raise-resident" in [s.name for s in resolved]
-    section = hr_skills_section()
+    _, text = hr_prompt()
+    section = skills_section(text)
 
     # the skeleton is declared, never deployed
     assert '"deploy": false' in section
-    # the rehearsal that proves the manifest builds
+    # the plan that proves the manifest builds, read without reaching a host
     assert '{"dry_run": true}' in section
+    # "rehearse" is warren#446's word for a run that spends the caller's budget
+    assert "rehears" not in section.lower()
     # one decision, and nothing moves until it is answered
-    assert "Provision " in section
+    assert "Provision karen?" in section
     assert "nothing happens until you say" in section.lower()
 
 
@@ -679,8 +683,8 @@ def test_both_hr_skills_fit_beside_the_default_set_without_truncation() -> None:
     """The default set plus both HR crafts stays under the injection cap.
 
     Karen holds both at once (warren#410), so the pair is the set that has to fit: a
-    ``raise-resident`` that pushed the total over the cap would silently lose whichever
-    skill rendered last.
+    ``raise-resident`` that pushed the total over the cap would cut the last body
+    mid-sentence rather than refuse.
     """
     resolved, text = hr_prompt()
     rendered = p.render_skills(resolved)
@@ -688,4 +692,7 @@ def test_both_hr_skills_fit_beside_the_default_set_without_truncation() -> None:
         f"the default set plus write-skill and raise-resident renders at {len(rendered)} "
         f"characters; the injection cap is {p.SKILLS_MAX_CHARS}"
     )
-    assert "[truncated at the injection cap]" not in text
+    # `write-skill`'s body quotes the marker as prose, so a bare substring check would
+    # fire on the instructions themselves. `_truncate` appends the marker to the end of
+    # the injected section, which is where a real truncation would show.
+    assert not skills_section(text).rstrip().endswith("[truncated at the injection cap]")
