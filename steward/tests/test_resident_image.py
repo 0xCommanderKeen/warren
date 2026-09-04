@@ -503,7 +503,9 @@ def test_chat_service_shares_the_scheduler_mounts_and_declares_secret_passthroug
         }
         == document["x-steward"]["environment"]
     )
-    assert chat["environment"] == document["x-steward"]["environment"]
+    assert chat["environment"] == document["x-steward"]["environment"] | {
+        "STEWARD_EVENTS_FALLBACK": "/data/events/chat.jsonl"
+    }
 
 
 def test_the_deploy_smokes_and_reports_the_chat_daemon_without_tokens() -> None:

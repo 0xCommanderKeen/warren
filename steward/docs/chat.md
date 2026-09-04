@@ -98,8 +98,11 @@ reason) and in that villager's history when it has one for its own reasons. Town
 **Diagnostics** page draws those records (warren#279) — one line per sender, per door, with
 a count, so a knock storm reads as one fact — which is where an operator sees a knock without
 `curl`. An older chronicle 400s the event and it stays in steward's local log
-(`STEWARD_EVENTS_FALLBACK`), where `grep chat_message_dropped ~/.chronicle/events.jsonl`
-still finds it.
+(`STEWARD_EVENTS_FALLBACK`). The deployed chat daemon pins that log and its undelivered
+queue to `/data/events/chat.jsonl`, on the persistent data volume, so
+`docker exec steward-chat grep chat_message_dropped /data/events/chat.jsonl` still finds
+it after a deploy recreates the container. Each control-plane service has its own file
+under `/data/events/`, keeping the fallback's per-file lock local to one process.
 
 **A stranger may knock as often as they like; they may not fill the log.** Every message
 that reaches a closed door is dropped, but only the first in a **catch-up window** per
