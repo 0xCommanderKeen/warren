@@ -127,6 +127,56 @@ class Retention(Sequence[str]):
         return NotImplemented
 
 
+class ProjectionFold:
+    """Rebuildable bounded evidence for repeated authoritative projections.
+
+    JSONL and the private mood-authority capsule remain retention details; callers
+    exchange parsed protocol records only.
+    """
+
+    def __init__(self):
+        self._lines = []
+        self._current = []
+
+    def replace(self, events, evaluated_at):
+        current = list(events)
+        lines = [json.dumps(event, ensure_ascii=False) for event in current]
+        retained, _ = self._compact(lines, evaluated_at)
+        self._lines = retained
+        self._current = current
+        return list(current)
+
+    def extend(self, events, evaluated_at):
+        events = list(events)
+        if not events:
+            return list(self._current)
+        lines = self._lines + [
+            json.dumps(event, ensure_ascii=False) for event in events
+        ]
+        retained, current = self._compact(lines, evaluated_at)
+        self._lines = retained
+        self._current = current
+        return list(current)
+
+    def _compact(self, lines, evaluated_at):
+        now_ms = int(evaluated_at.timestamp() * 1000)
+        retained = list(carry_forward(lines, now_ms, POLICY).lines)
+        return retained, self._events(retained)
+
+    @staticmethod
+    def _events(lines):
+        events = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                event = None
+            if isinstance(event, dict) and "_burrow_internal" in event:
+                continue
+            events.append(event)
+        return events
+
+
 def _json_domain_within(value, max_depth=math.inf):
     """Iteratively prove a bounded JSON tree, rejecting cycles and aliases."""
     seen = set()

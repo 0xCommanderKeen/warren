@@ -4,60 +4,10 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
-import json
 import threading
 
 import retention
 from village_state import ProjectionPolicy, project_village
-
-
-class _ProjectionFold:
-    """Rebuildable, bounded projection evidence derived from the canonical log."""
-
-    def __init__(self):
-        self._lines = []
-        self._current = []
-
-    def replace(self, events, evaluated_at):
-        current = list(events)
-        lines = [json.dumps(event, ensure_ascii=False) for event in current]
-        retained, _ = self._compact(lines, evaluated_at)
-        self._lines = retained
-        self._current = current
-        return list(current)
-
-    def extend(self, events, evaluated_at):
-        events = list(events)
-        if not events:
-            return list(self._current)
-        lines = self._lines + [
-            json.dumps(event, ensure_ascii=False) for event in events
-        ]
-        retained, current = self._compact(lines, evaluated_at)
-        self._lines = retained
-        self._current = current
-        return list(self._current)
-
-    def current(self):
-        return list(self._current)
-
-    def _compact(self, lines, evaluated_at):
-        now_ms = int(evaluated_at.timestamp() * 1000)
-        retained = list(retention.carry_forward(lines, now_ms, retention.POLICY).lines)
-        return retained, self._events(retained)
-
-    @staticmethod
-    def _events(lines):
-        events = []
-        for line in lines:
-            try:
-                event = json.loads(line)
-            except (TypeError, json.JSONDecodeError):
-                event = None
-            if isinstance(event, dict) and "_burrow_internal" in event:
-                continue
-            events.append(event)
-        return events
 
 
 class StateCoordinator:
@@ -86,7 +36,7 @@ class StateCoordinator:
         self._signature = None
         self._generation = 0
         self._log_generation = None
-        self._fold = _ProjectionFold()
+        self._fold = retention.ProjectionFold()
         self._initialized = False
         self._cursor = None
 
