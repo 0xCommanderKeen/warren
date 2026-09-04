@@ -626,7 +626,7 @@ def project_village(
         elif kind == "needs_human_resolved":
             request_id = payload["request_id"]
             record = approval_by_id.get(request_id)
-            binds = (
+            binds = bool(
                 record
                 and record["state"] != "collision"
                 and record["agent_id"] == event["agent_id"]

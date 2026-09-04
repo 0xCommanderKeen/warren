@@ -57,7 +57,11 @@ snapshot carries:
   decision once a matching `needs_human_resolved` arrives. The question is immutable — a
   request ID reused with a different question is quarantined as a `collision` instead of
   overwritten, and a resolution that does not match on agent, project and action is a
-  diagnostic rather than a decision. Nothing here evaluates the expiry: `expires_at` is
+  diagnostic rather than a decision. The answer is immutable too: the *first* matching
+  close is the decision, an exact replay of it changes nothing, and a later close naming a
+  different decision is a `conflicting_approval_resolution` diagnostic rather than an
+  overwrite — rotation keeps one close, so the newest-wins reading rendered two different
+  answers from one log. Nothing here evaluates the expiry: `expires_at` is
   carried through as declared, and deciding what an elapsed one means is the client's.
 - **`journals`** — journal *metadata* observed from Steward's `journal_written`: day,
   agent, project, routine, path, observed time. Never the entry text. First valid append

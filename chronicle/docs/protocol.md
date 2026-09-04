@@ -733,7 +733,9 @@ close that binds the same request with a *different* decision is contested evide
 raises one bounded `conflicting_approval_resolution` diagnostic per request ID, however
 many times it repeats. This is what makes the projection a pure function of the log's
 content: rotation carries exactly one close forward, so raw tail and rotated log must
-render the same decision (warren#266). `tests/fixtures/approval-lifecycle.json` and
+render the same *decision* (warren#266). The diagnostic is evidence about the log rather
+than about the request, so it does not survive the rotation that drops the close it
+complains about; only the decision is invariant. `tests/fixtures/approval-lifecycle.json` and
 `approval-identity.json` were written as shared vectors driving the JavaScript
 projection against Python rotation. The JavaScript side is gone (warren#219), but
 the rules were always rotation's, so `tests/test_retention_approvals.py` enforces
