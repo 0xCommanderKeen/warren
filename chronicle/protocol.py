@@ -38,6 +38,13 @@ EVENT_TYPES = frozenset(
         "resident_declared",
         "resident_retired",
         "chat_message_dropped",
+        "chat_message_posted",
+        "chat_post_refused",
+        "discord_channel_created",
+        "discord_thread_created",
+        "discord_thread_archived",
+        "discord_message_pinned",
+        "discord_topic_set",
         "journal_written",
     }
 )
@@ -253,11 +260,31 @@ def _validate_chat_drop(event):
     return None
 
 
+def _validate_discord_event(event):
+    """A payload-free-of-content audit fact for one outbound Discord action."""
+    payload = event["payload"]
+    for field in ("resident", "route", "channel"):
+        if not _nonempty_text(payload.get(field)):
+            return f"invalid payload.{field}"
+    if "text" in payload:
+        return "payload.text is forbidden"
+    event_type = event["type"]
+    if event_type == "chat_message_posted":
+        length = payload.get("length")
+        if type(length) is not int or length < 0:
+            return "invalid payload.length"
+    elif event_type == "chat_post_refused":
+        if not _nonempty_text(payload.get("reason")):
+            return "invalid payload.reason"
+    return None
+
+
 _ROUTINE_AUTHORITY = "routine events require source steward"
 _TASK_AUTHORITY = "task events require source steward"
 _APPROVAL_AUTHORITY = "approval resolutions require source steward"
 _RESIDENT_AUTHORITY = "resident lifecycle events require source steward"
 _CHAT_AUTHORITY = "chat events require source steward"
+_DISCORD_AUTHORITY = "discord events require source steward"
 
 #: Every fact only Steward can witness, because only Steward runs the routines, the board,
 #: the watchdog and the chat routes. One table so the trust boundary is a list somebody can
@@ -277,6 +304,13 @@ _STEWARD_AUTHORED = {
     "resident_declared": (_validate_resident_declared, _RESIDENT_AUTHORITY),
     "resident_retired": (_validate_resident_retired, _RESIDENT_AUTHORITY),
     "chat_message_dropped": (_validate_chat_drop, _CHAT_AUTHORITY),
+    "chat_message_posted": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "chat_post_refused": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "discord_channel_created": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "discord_thread_created": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "discord_thread_archived": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "discord_message_pinned": (_validate_discord_event, _DISCORD_AUTHORITY),
+    "discord_topic_set": (_validate_discord_event, _DISCORD_AUTHORITY),
 }
 
 

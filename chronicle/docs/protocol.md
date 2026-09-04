@@ -345,6 +345,13 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `resident_declared` | Steward restated a resident's display identity before launch | exactly `name`, `char`, `accent`, `role`, `summary`, `resident_id`, `uid`, `home` |
 | `resident_retired` | Steward retired a resident and released its village plot | exactly `resident_id`, `uid` |
 | `chat_message_dropped` | somebody knocked on a resident's chat route and was deliberately not answered | `route`, `address`, `from`, `reason`; optional `suppressed` |
+| `chat_message_posted` | Steward posted a resident-authored message to an allowed Discord channel | `resident`, `route`, `channel`, `length`; never message `text` |
+| `chat_post_refused` | Steward refused a resident's requested Discord post | `resident`, `route`, `channel`, `reason`; never message `text` |
+| `discord_channel_created` | Steward created a Discord channel for a resident | `resident`, `route`, `channel`; never `text` |
+| `discord_thread_created` | Steward created a Discord thread for a resident | `resident`, `route`, `channel`; optional thread metadata, never `text` |
+| `discord_thread_archived` | Steward archived a Discord thread for a resident | `resident`, `route`, `channel`; optional thread metadata, never `text` |
+| `discord_message_pinned` | Steward pinned a Discord message for a resident | `resident`, `route`, `channel`; optional message metadata, never `text` |
+| `discord_topic_set` | Steward set a Discord channel topic for a resident | `resident`, `route`, `channel`; never topic `text` |
 | `journal_written`   | Steward observed a successful close produce a real readable daily file | `routine`, `day`, `path` |
 
 Routine events are projected into a separate bounded ledger keyed by agent, routine,
@@ -428,6 +435,12 @@ is the thing it is otherwise careful about.
 
 So every channel a knock lands in is *split* rather than merely bounded, by one shared rule
 (`village_state.ambient_share`, which `retention` imports the way it imports the ambient set):
+
+Outbound Discord events are visible audit facts, but not activity-state or mood evidence.
+They remain in a resident's bounded history and may supply its newest timeline sentence,
+while leaving its state, liveness clock and mood exactly where the preceding activity left
+them. Their payloads identify the resident, route and channel, and deliberately never carry
+the posted message or topic text.
 the fleet's own records are served first out of everything but the outsider's floor, and the
 outsider then takes whatever is genuinely left. The floors are `ambient_events_per_agent` (8
 of a villager's 80 retained events), `ambient_events_per_villager` (4 of the 40 rendered on
@@ -794,6 +807,8 @@ The villager's state is decided by its **latest** event:
   action filed under this villager, so it decides no state, refreshes no clock, and
   cannot by itself put a villager in the village. See
   [Steward's lifecycle facts](#stewards-lifecycle-facts).
+- an outbound Discord event → no state, liveness-clock or mood change. It remains visible
+  as an audit sentence such as “posted to #household”.
 
 These rules have exactly one implementation:
 `village_state.project_village()`, exercised by `tests/test_village_state.py`.
