@@ -726,9 +726,14 @@ come from `source: "steward"` and their decision is exactly `approve`, `deny`, o
 `edit`. A close appended before its request is unknown at that point: it is ignored
 with a bounded diagnostic and cannot later bind when a matching request appears.
 Likewise, request duplicates never replace the first appended immutable request.
-Exact close replays and all later conflicts are ignored with bounded, deduplicated
-diagnostics, so neither an earlier timestamp nor an equal timestamp can replace the
-rendered decision. `tests/fixtures/approval-lifecycle.json` and
+The first binding close is the decision and no later close can replace it, so neither
+an earlier timestamp nor an equal timestamp can rewrite the rendered answer. An exact
+close replay is Steward answering the same way twice and is ignored in silence; a later
+close that binds the same request with a *different* decision is contested evidence and
+raises one bounded `conflicting_approval_resolution` diagnostic per request ID, however
+many times it repeats. This is what makes the projection a pure function of the log's
+content: rotation carries exactly one close forward, so raw tail and rotated log must
+render the same decision (warren#266). `tests/fixtures/approval-lifecycle.json` and
 `approval-identity.json` were written as shared vectors driving the JavaScript
 projection against Python rotation. The JavaScript side is gone (warren#219), but
 the rules were always rotation's, so `tests/test_retention_approvals.py` enforces
