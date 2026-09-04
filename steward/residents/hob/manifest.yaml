@@ -60,6 +60,13 @@ routes:
   status: active
   note: The token is STEWARD_CHAT_TOKEN_HOB in the burrow's .env; until it is set
     the chat daemon idles.
+- id: discord
+  kind: chat
+  address: discord:hob
+  status: active
+  posts_to:
+  - household
+  note: Hob's Discord bot; token STEWARD_CHAT_TOKEN_DISCORD_HOB in the burrow .env.
 app_grants: []
 tools: unrestricted
 runner:
@@ -92,7 +99,7 @@ routines:
   - morning-digest
   timeout_s: 600
   enabled: true
-  deliver: chat
+  deliver: telegram:hob
   quiet_word: NOTHING
 - id: close-of-day
   schedule: 30 22 * * *
