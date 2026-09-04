@@ -22,7 +22,7 @@ object keys are sorted, and every string is escaped one way.
 This encoding is a wire and storage format, not an implementation detail, so the
 bytes are part of the interface:
 
-``retention._encode_mood_authority`` concatenates ``canonical_string`` and
+``retention_mood._encode_mood_authority`` concatenates ``canonical_string`` and
 ``semantic_key`` output into a ``typed-binary64-v1`` capsule, ``event_log``
 writes that line into the rotated log and its archives, and the next boot reads
 it back through ``decode_graph``.  A capsule that fails to decode is dropped

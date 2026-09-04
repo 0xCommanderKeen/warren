@@ -296,7 +296,7 @@ class RetiredParityVectors(unittest.TestCase):
 class DurableByteObligations(unittest.TestCase):
     """What the retired cross-language parity fixtures now guard: the disk.
 
-    ``retention._encode_mood_authority`` writes these bytes into rotated logs
+    ``retention_mood._encode_mood_authority`` writes these bytes into rotated logs
     and reads them back on the next boot, so the escaper and the graph encoding
     are pinned by data that already exists, not by a second implementation.
     """
