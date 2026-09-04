@@ -502,6 +502,17 @@ reached `--permission-mode` unchecked, which made a typo not a failed validation
 session that died at its next fire with a commander error — at 7am, in a log nobody was
 reading.
 
+`bypassPermissions` has one more precondition when the resident is container-placed: the
+resident image runs as root, and the CLI refuses the bypass for root — "cannot be used
+with root/sudo privileges" — unless `IS_SANDBOX=1` tells it the process is already inside
+a sandbox. The rendered compose fragment sets that variable for every resident (the
+container *is* the sandbox; its mounts and [`workspace`](#workspace--where-a-session-may-act)
+are the boundary), so the mode works there without anything in the manifest. Measured
+2026-09-04 in `steward-hob` against CLI 2.1.243 (warren#391). It is still the widest
+setting there is: a headless session cannot answer a permission prompt, so a resident
+that must commit and push — Hob and its vault — has today no narrower mode that lets
+`git` run; narrowing on evidence is warren#388.
+
 | kind | what it runs |
 |---|---|
 | `claude` | `claude -p <prompt> --output-format json --setting-sources "" --model <model>`, in the session's working directory. The JSON result carries usage and cost, so a claude run feeds the budget ledger for free; [`--setting-sources ""`](#what-a-session-loads-from-disk-nothing) is on every session and comes from no declaration. |

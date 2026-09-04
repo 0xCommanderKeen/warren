@@ -118,6 +118,23 @@ def test_the_compose_fragment_is_valid_yaml_naming_this_resident(write_resident)
     # warren#361: the pre-rename BURROW_* twins are gone, not merely unread.
     assert not [key for key in service["environment"] if key.startswith("BURROW_")]
     assert service["command"] == ["sleep", "infinity"]
+
+
+def test_the_compose_fragment_declares_the_container_a_sandbox(write_resident) -> None:
+    """``IS_SANDBOX=1`` is in every resident's compose environment (warren#391).
+
+    The resident image runs as root and the claude CLI refuses ``--permission-mode
+    bypassPermissions`` for root unless this variable says the process is already
+    sandboxed. A manifest that asks for the bypass would otherwise die at its first fire
+    with "cannot be used with root/sudo privileges" — measured in steward-hob, CLI
+    2.1.243. The container is the sandbox, so the fact is rendered for every resident,
+    not switched on by the one manifest that happens to need it today.
+    """
+    one = resident(write_resident)
+    service = yaml.safe_load(render_compose(one, target_for(one.manifest)))["services"][
+        "test-agent"
+    ]
+    assert service["environment"]["IS_SANDBOX"] == "1"
     assert "./memory:/data/residents/test-agent/memory" in service["volumes"]
     assert "./claude:/root/.claude" in service["volumes"]
     assert service["extra_hosts"] == ["dockerhost:host-gateway"], (
