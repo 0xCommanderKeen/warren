@@ -712,7 +712,7 @@ A missing binary is a diagnostic in daylight, not a silent failure at midnight:
 $ steward doctor
 hob: runner claude (claude-opus-5) in container steward-hob — ready
 hob: journal /home/Miha/docker/warren/residents/hob/memory/journal — writable, closed by close-of-day
-hob: inbox 2 open via handoff
+hob: inbox 2 open via inbox
   hob/daily-summary: '0 7 * * *' Europe/Ljubljana → next 2026-08-25 07:00 Europe/Ljubljana
   hob/inbox-read: '15 * * * *' Europe/Ljubljana → next 2026-08-24 15:15 Europe/Ljubljana
   hob/close-of-day: '30 22 * * *' Europe/Ljubljana → next 2026-08-24 22:30 Europe/Ljubljana
@@ -966,7 +966,7 @@ nothing. Delivery is pull-based: the receiver drains its inbox on its own next w
 ahead of the open board, and works the item as an ordinary session.
 
 ```console
-$ steward delegate sender-resident --to hob --route handoff --title "…"
+$ steward delegate sender-resident --to hob --route inbox --title "…"
 $ steward inbox hob                 # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>           # the whole chain, root first
 ```

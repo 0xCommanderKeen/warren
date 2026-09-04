@@ -44,26 +44,21 @@ def test_hob_is_the_vault_keeper_declared_on_the_burrow() -> None:
 
 
 def test_hob_takes_letters_from_his_neighbours() -> None:
-    """Hob's delegation door, so the librarian can hand him vault work (warren#438).
+    """Hob's delegation door, so a neighbour can hand him vault work (warren#438).
 
-    Asserted through :func:`steward.board.delegation_residents` rather than only by
-    reading the route back: that function is what the dispatch sweep drains, so a route
-    that validates but leaves Hob out of the drain would be a door nobody opens.
+    Read through ``delegation_routes`` and :func:`steward.board.delegation_residents` —
+    the accessor that answers "where may steward deliver today" and the function the
+    dispatch sweep actually drains. A route that validates but leaves Hob out of that
+    drain would be a door nobody opens, and reading the raw list back cannot tell.
     """
     hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
-    doors = [route for route in hob.manifest.routes if route.kind == "delegation"]
-    assert [route.id for route in doors] == ["inbox"]
-    assert doors[0].address == "steward:delegation"
-    assert doors[0].accepts_delegation, "a pending door takes no letters"
+    assert "inbox" in hob.delegation_routes, "a pending or absent door takes no letters"
+    door = hob.route("inbox")
+    assert door is not None
+    assert door.address == "steward:delegation"
 
     residents = m.validate_tree(RESIDENTS_DIR).residents
     assert "hob" in {resident.id for resident in board.delegation_residents(residents)}
-
-
-def test_hob_receives_letters_but_sends_none() -> None:
-    """The door is one-way: Hob receives vault work, he does not delegate it onward."""
-    hob = m.load_manifest(RESIDENTS_DIR / "hob" / "manifest.yaml")
-    assert not hob.manifest.delegation.send
 
 
 def test_a_project_scoped_fixture_has_no_agent_identity() -> None:

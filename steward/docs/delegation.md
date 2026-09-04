@@ -111,7 +111,7 @@ exactly `===STEWARD-ACTIONS===` and closed by `===END-STEWARD-ACTIONS===`:
 
 ```
 ===STEWARD-ACTIONS===
-<delegate to="hob" route="handoff">
+<delegate to="hob" route="inbox">
 {"title": "Check what the errand list actually contains", "detail": "…"}
 </delegate>
 ===END-STEWARD-ACTIONS===
@@ -155,10 +155,10 @@ For a session with shell access that wants the handoff registered before its tur
 
 ```console
 $ steward delegate sender-resident \
-    --to hob --route handoff \
+    --to hob --route inbox \
     --title "Check what the errand list actually contains" \
     --detail "I need the real shape of an errand before I render one."
-sender-resident → hob via handoff: Check what the errand list actually contains
+sender-resident → hob via inbox: Check what the errand list actually contains
 b81f…-…-…                       # the task_id, on stdout
 ```
 
@@ -212,9 +212,9 @@ The origin is inherited at every hop; the chain itself is walked through `parent
 
 ```console
 $ steward inbox hob
-hob: routes accepting delegated work: handoff
+hob: routes accepting delegated work: inbox
 open     b81f…  Check what the errand list actually contains
-         from sender-resident via handoff (depth 1, origin task:2c9a…)
+         from sender-resident via inbox (depth 1, origin task:2c9a…)
 
 $ steward task lineage b81f…
 origin task:2c9a…
@@ -232,7 +232,7 @@ Which is why `steward doctor` prints a line per resident about the post as well:
 
 ```console
 $ steward doctor
-hob: inbox 2 open via handoff
+hob: inbox 2 open via inbox
 sender-resident: inbox — takes no letters
 some-agent: inbox — 3 open letter(s) behind a closed route: handoff (disabled); nothing will pick them up
 ```
@@ -286,7 +286,7 @@ needs the token.
 
 ```console
 $ curl -sS -X POST -H "Authorization: Bearer $STEWARD_TOKEN" \
-    -d '{"from": "sender-resident", "to": "hob", "route": "handoff",
+    -d '{"from": "sender-resident", "to": "hob", "route": "inbox",
          "title": "Check the errand list"}' \
     http://127.0.0.1:8801/delegate
 ```

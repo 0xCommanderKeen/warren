@@ -383,7 +383,7 @@ It is also the one write path a session credential reaches, and it behaves diffe
 one: see [Three kinds of caller](#three-kinds-of-caller).
 
 ```json
-{"from": "sender-resident", "to": "hob", "route": "handoff",
+{"from": "sender-resident", "to": "hob", "route": "inbox",
  "title": "Check the errand list", "detail": "…", "parent_task_id": "…"}
 ```
 

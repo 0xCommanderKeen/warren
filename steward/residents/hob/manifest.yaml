@@ -71,9 +71,12 @@ routes:
     address: telegram:hob
     status: active
     note: The token is STEWARD_CHAT_TOKEN_HOB in the burrow's .env; until it is set the chat daemon idles.
-  # The librarian (#107) hands vault work over here — "Miha finished Dune, update the
-  # book note". A letter is worked on the next dispatch sweep, at most a minute later,
-  # with no routine due; Hob answers it as he answers a chat turn, receipt and all.
+  # The door the librarian team (warren#107) will hand vault work through — "Miha
+  # finished Dune, update the book note" is Hob's work, not the library's. Nobody can
+  # use it yet: no resident declares `delegation: {send: true}`, so today the only
+  # sender is a person on `POST /delegate`. A letter is worked on the next dispatch
+  # sweep, at most a minute later with no routine due, and Hob answers it as he answers
+  # a chat turn — same skills, same vault, same receipt.
   - id: inbox
     kind: delegation
     address: steward:delegation
