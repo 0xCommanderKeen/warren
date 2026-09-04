@@ -154,6 +154,7 @@ class SessionHarvest:
 
     raised: tuple[object, ...] = ()
     handed_over: tuple[object, ...] = ()
+    posts: tuple[object, ...] = ()
 
 
 @runtime_checkable
@@ -498,6 +499,7 @@ class SessionResult:
     journal_path: Path | None = None
     raised: tuple[object, ...] = ()
     handed_over: tuple[object, ...] = ()
+    posts: tuple[object, ...] = ()
 
     def require_result(self) -> RunResult:
         """Return a real run result, rejecting use on a rehearsal conclusion."""
@@ -778,6 +780,7 @@ class ResidentSessions:
             journal_path,
             harvested.raised,
             harvested.handed_over,
+            harvested.posts,
         )
 
     def revalidate(self, admission: Admission) -> Refusal | None:

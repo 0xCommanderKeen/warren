@@ -127,6 +127,7 @@ SCHEMA_VERSION = 0
 VILLAGE_HOME_MIN = 0
 VILLAGE_HOME_MAX = 7
 VOICE_MAX_CHARS = 1200
+DISCORD_CHANNEL_NAME_MAX_CHARS = 100
 VOICE_HEADING = "## Voice"
 
 #: The charter and the identity section are the two parts of a preamble that are **never**
@@ -961,6 +962,29 @@ class Route(_Model):
     address: str = Field(min_length=1, description="Reference to the channel, not a secret.")
     status: Literal["active", "pending", "disabled"] = "active"
     note: str | None = None
+    posts_to: list[str] = Field(
+        default_factory=list,
+        description="Discord channel names this resident may post to. Empty denies posting.",
+    )
+
+    @field_validator("posts_to")
+    @classmethod
+    def _clean_post_channels(cls, value: list[str]) -> list[str]:
+        cleaned = [name.strip() for name in value]
+        if any(not name or len(name) > DISCORD_CHANNEL_NAME_MAX_CHARS for name in cleaned):
+            raise ValueError(
+                "posts_to entries must be non-empty channel names of at most 100 chars"
+            )
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("posts_to channel names must be unique")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _posts_belong_to_discord_chat(self) -> Self:
+        cleaned = self.posts_to
+        if cleaned and (self.kind != CHAT_ROUTE_KIND or not self.address.startswith("discord:")):
+            raise ValueError("posts_to is allowed only on a Discord chat route")
+        return self
 
     @property
     def accepts_delegation(self) -> bool:
@@ -1857,6 +1881,7 @@ FIELD_EXAMPLES: Mapping[str, str] = {
     "routes.kind": "kind: email  (delegation makes the route deliverable)",
     "routes.address": "address: mailbox:household  (a reference, not a credential)",
     "routes.status": "status: active",
+    "routes.posts_to": "posts_to: [household]  (Discord channel names this resident may post to)",
     "notifications": "notifications: {transport: ntfy, on: [needs_human]}",
     "notifications.transport": "transport: ntfy  (omit the block entirely to tap nobody)",
     "notifications.on": "on: [needs_human, task_done]",

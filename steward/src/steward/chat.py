@@ -532,9 +532,9 @@ def describe_chat(
         elif not token_set:
             note = f"no token: set {address.token_env} to the bot token"
         elif address.transport == DISCORD:
-            bot = _transport_identity(transport, tokens[address.token_env])
-            if bot is None:
-                note = "the configured Discord token could not identify its bot"
+            bot, note = _discord_diagnostics(
+                transport, tokens[address.token_env], route.posts_to, source, note
+            )
         reports.append(
             ChatReport(
                 resident=resident.id,
@@ -565,6 +565,55 @@ def _transport_identity(transport: ChatTransport, token: str) -> str | None:
         log.warning("%s identity check failed: %s", transport.name, exc)
         return None
     return value if isinstance(value, str) and value else None
+
+
+def _discord_diagnostics(
+    transport: ChatTransport,
+    token: str,
+    posts_to: Sequence[str],
+    env: Mapping[str, str],
+    note: str | None,
+) -> tuple[str | None, str | None]:
+    """Return Discord identity and any operator-facing room configuration problem."""
+    bot = _transport_identity(transport, token)
+    if bot is None:
+        return None, "the configured Discord token could not identify its bot"
+    if not posts_to:
+        return bot, note
+    guild = (env.get("STEWARD_CHAT_DISCORD_GUILD") or "").strip()
+    if not guild:
+        return bot, "room posting is configured but STEWARD_CHAT_DISCORD_GUILD is not set"
+    channels = _transport_channels(transport, token, guild)
+    if channels is None:
+        return bot, "the configured Discord guild's channels could not be resolved"
+    unknown = [name for name in posts_to if name not in channels]
+    if unknown:
+        return bot, "unknown Discord channel name(s): " + ", ".join(unknown)
+    return bot, note
+
+
+def _transport_channels(
+    transport: ChatTransport, token: str, guild: str
+) -> Mapping[str, str] | None:
+    """Use Discord's optional room lookup without widening the two-method chat seam."""
+    channels = getattr(transport, "channels", None)
+    if not callable(channels) or not guild:
+        return None
+    try:
+        value = channels(token, guild)
+    except Exception as exc:  # noqa: BLE001 — a diagnostic must not take down the CLI
+        log.warning("%s channel lookup failed: %s", transport.name, exc)
+        return None
+    return value if isinstance(value, Mapping) else None
+
+
+def _post_outcome_line(outcome: object) -> str:
+    """Render an optional shared-harvest outcome through its deliberately tiny seam."""
+    render = getattr(outcome, "transcript_line", None)
+    if not callable(render):
+        return ""
+    value = render()
+    return value if isinstance(value, str) else ""
 
 
 # --------------------------------------------------------------------------------------
@@ -970,6 +1019,23 @@ class DiscordTransport:
             return None
         username = value.get("username")
         return f"@{username}" if isinstance(username, str) and username else None
+
+    def channels(self, token: str, guild: str) -> Mapping[str, str] | None:
+        """Resolve one guild's text channel names to ids without exposing ids in manifests."""
+        value = self._request(token, "GET", f"/guilds/{guild}/channels")
+        if not isinstance(value, list):
+            return None
+        pairs = [
+            (str(item["name"]), str(item["id"]))
+            for item in value
+            if isinstance(item, Mapping)
+            and isinstance(item.get("name"), str)
+            and str(item.get("id", "")).isdigit()
+            and item.get("type") == 0
+        ]
+        if len({name for name, _channel_id in pairs}) != len(pairs):
+            return None
+        return dict(pairs)
 
     def poll(self, token: str, offset: int) -> list[Message] | None:
         """Open operator DMs once, then fetch each channel after its cursor."""
@@ -1893,7 +1959,11 @@ class ChatBridge:
                 )
                 self.run_transitions.publish_pending(self.emitter, now=session.completed_at or now)
         reply = self._reply(route, message.conversation, self._answer_text(route, result))
-        transcript.append(resident.id, reply, now=session.completed_at or now)
+        post_outcomes = "\n".join(
+            line for outcome in session.posts if (line := _post_outcome_line(outcome))
+        )
+        transcript_text = reply if not post_outcomes else f"{reply}\n\n{post_outcomes}"
+        transcript.append(resident.id, transcript_text, now=session.completed_at or now)
         return ChatOutcome(
             resident_id=resident.id,
             route=route.route_id,

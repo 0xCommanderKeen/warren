@@ -1154,6 +1154,14 @@
             ],
             "title": "Note"
           },
+          "posts_to": {
+            "description": "Discord channel names this resident may post to. Empty denies posting.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Posts To",
+            "type": "array"
+          },
           "status": {
             "default": "active",
             "enum": [

@@ -315,6 +315,7 @@ delivery to land. Field rules are in
 | `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | Telegram keeps the v0 token name; other transports include their name, so equal references cannot share credentials. Upper-cased with non-alphanumerics folded to `_`. One per route. |
 | `STEWARD_CHAT_API_URL` | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real thing. |
 | `STEWARD_CHAT_DISCORD_API_URL` | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests override it with loopback. |
+| `STEWARD_CHAT_DISCORD_GUILD` | Guild id whose allowlisted channel names are resolved for resident posts. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
 
 ## Discord DMs
@@ -363,6 +364,24 @@ discovering arbitrary unknown-account DMs belongs to Gateway ingestion.
 prints the discovered handle, for example `pip/discord: discord:pip — reachable, bot @Pip`.
 That makes a token copied from the wrong resident's application visible before the daemon
 starts answering.
+
+## Discord room posts
+
+A Discord chat route may add `posts_to: [household, announcements]`. These are readable
+channel names, not ids; steward resolves them against `STEWARD_CHAT_DISCORD_GUILD` and
+refuses unknown names. Empty or absent means no room posting permission.
+
+Any completed session may request a post from its final machine-read action region:
+
+```text
+<discord post channel="household">{"text": "Morning summary…"}</discord>
+```
+
+Steward holds the bot token, redacts then caps each message, and attempts at most five
+posts per session. Success emits `chat_message_posted` with the bounded length but no text.
+A malformed, disallowed, unknown, or failed post emits `chat_post_refused` and raises a
+`needs_human` under `rejected_post`; the transcript records the outcome. This is the
+outbound counterpart to the action harvesting described in [delegation.md](delegation.md).
 
 ## Future Discord gateway (design only)
 

@@ -1227,6 +1227,41 @@ def test_discord_discovers_the_bot_handle(discord_api: DiscordApi):
     assert transport.identity(FAKE_DISCORD_TOKEN) == "@Pip"
 
 
+def test_discord_resolves_text_channels_by_name(discord_api: DiscordApi):
+    discord_api.queue(
+        "GET",
+        "/guilds/home/channels",
+        (
+            200,
+            [
+                {"id": "42", "name": "household", "type": 0},
+                {"id": "43", "name": "voice", "type": 2},
+            ],
+        ),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.channels(FAKE_DISCORD_TOKEN, "home") == {"household": "42"}
+    assert discord_api.calls[0][3] == f"Bot {FAKE_DISCORD_TOKEN}"
+
+
+def test_discord_refuses_ambiguous_channel_names(discord_api: DiscordApi):
+    discord_api.queue(
+        "GET",
+        "/guilds/home/channels",
+        (
+            200,
+            [
+                {"id": "42", "name": "announcements", "type": 0},
+                {"id": "43", "name": "announcements", "type": 0},
+            ],
+        ),
+    )
+    transport = ch.DiscordTransport(base_url=discord_api.url)
+
+    assert transport.channels(FAKE_DISCORD_TOKEN, "home") is None
+
+
 def test_discord_chunks_replies_below_its_limit(discord_api: DiscordApi):
     path = "/channels/900/messages"
     discord_api.queue("POST", path, (200, {"id": "1"}), (200, {"id": "2"}))
@@ -1614,6 +1649,32 @@ def test_a_discord_route_names_its_missing_token(write_resident: ResidentWriter,
 
     assert not report.reachable
     assert report.note == "no token: set STEWARD_CHAT_TOKEN_DISCORD_TESTY to the bot token"
+
+
+def test_chat_list_reports_unknown_configured_discord_rooms(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1].update(address="discord:testy", posts_to=["household", "missing"])
+    resident = load_manifest(write_resident(declared))
+
+    class DiscordRooms(FakeTransport):
+        name = "discord"
+
+        def channels(self, token: str, guild: str) -> dict[str, str]:
+            assert (token, guild) == (FAKE_BOT_TOKEN, "home")
+            return {"household": "42"}
+
+    [report] = ch.describe_chat(
+        [resident],
+        {
+            "STEWARD_CHAT_TOKEN_DISCORD_TESTY": FAKE_BOT_TOKEN,
+            "STEWARD_CHAT_DISCORD_GUILD": "home",
+        },
+        transports={"discord": DiscordRooms()},
+    )
+
+    assert report.note == "unknown Discord channel name(s): missing"
 
 
 def test_a_resident_with_nowhere_to_keep_a_conversation_says_so(tmp_path: Path):
