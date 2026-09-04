@@ -1885,6 +1885,15 @@ def test_an_unknown_transport_is_refused_by_name(write_resident: ResidentWriter)
     problem = problem_for(result, "notifications.transport")
     assert "telegram" in problem
     assert "ntfy" in problem
+    assert "discord" in problem
+
+
+def test_discord_is_a_known_notification_transport(write_resident: ResidentWriter) -> None:
+    resident = m.load_manifest(
+        write_resident(notifying({"transport": "discord", "on": ["needs_human", "task_done"]}))
+    )
+    assert resident.manifest.notifications.transport == "discord"
+    assert resident.manifest.notifications.enabled is True
 
 
 def test_a_near_miss_transport_is_told_what_it_nearly_said(

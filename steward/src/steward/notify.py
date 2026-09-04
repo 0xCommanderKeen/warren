@@ -12,8 +12,8 @@ What this module owns is everything after a manifest has said *yes, tap me*:
   from the resident's ``uid``;
 - **what a tap says** — :func:`tap_for` turns one chronicle event into a title and a body,
   redacted before it is bounded;
-- **how it is carried** — :class:`Transport`, with :class:`NtfyTransport` as the first and
-  only implementation today;
+- **how it is carried** — :class:`Transport`, with :class:`NtfyTransport` and
+  :class:`DiscordTransport` implementations;
 - **whether to send at all** — :class:`Notifier`, which reads the resident's own
   :class:`steward.manifest.Notifications` block and never raises at its caller.
 
@@ -72,12 +72,16 @@ from steward.manifest import (
 __all__ = [
     "BODY_MAX_CHARS",
     "DEFAULT_NTFY_URL",
+    "DISCORD",
+    "DISCORD_CONTENT_MAX_CHARS",
+    "DISCORD_WEBHOOK_ENV",
     "NAMESPACE_ENV",
     "NTFY",
     "NTFY_TOKEN_ENV",
     "NTFY_URL_ENV",
     "TITLE_MAX_CHARS",
     "TOPIC_PREFIX",
+    "DiscordTransport",
     "NotificationReport",
     "Notifier",
     "NtfyTransport",
@@ -90,9 +94,12 @@ __all__ = [
 
 log = logging.getLogger("steward.notify")
 
-#: The one transport that exists. Spelled once here and checked against the manifest
-#: vocabulary at import time, so "which transports are there" has a single answer.
+#: Transport names are spelled once here and checked against the manifest vocabulary at
+#: import time, so "which transports are there" has a single answer.
 NTFY = "ntfy"
+DISCORD = "discord"
+
+DISCORD_WEBHOOK_ENV = "STEWARD_NOTIFY_DISCORD_WEBHOOK"
 
 #: Where ntfy lives when nobody says otherwise. The public instance is the sane default
 #: precisely because a derived topic is safe in a public namespace; a self-hosted server is
@@ -112,7 +119,8 @@ NAMESPACE_ENV = "STEWARD_NOTIFY_NAMESPACE"
 
 #: How long one tap may take. Short on purpose: this runs inside a durable transition, and
 #: the same two seconds the event POST gets is the most a shoulder-tap may cost a run.
-NTFY_TIMEOUT_S = 2.0
+HTTP_TIMEOUT_S = 2.0
+NTFY_TIMEOUT_S = HTTP_TIMEOUT_S
 
 #: How long a failing transport is left alone after it fails, so a dead ntfy costs one
 #: timeout a minute rather than one per knock. The emitter's own idiom, and its own spelling
@@ -138,6 +146,9 @@ TITLE_MAX_CHARS = 200
 #: session that printed a 200KB escalation must not be able to make it a 200KB push.
 BODY_MAX_CHARS = 3800
 
+#: Discord rejects webhook messages whose content exceeds 2,000 characters.
+DISCORD_CONTENT_MAX_CHARS = 2000
+
 #: One detail value, rendered into a tap's body.
 DETAIL_MAX_CHARS = 1200
 
@@ -145,7 +156,7 @@ DETAIL_MAX_CHARS = 1200
 PRIORITY_HIGH = "high"
 PRIORITY_DEFAULT = "default"
 
-if set(NOTIFICATION_TRANSPORTS) != {NTFY}:  # pragma: no cover — a guard against drift
+if set(NOTIFICATION_TRANSPORTS) != {NTFY, DISCORD}:  # pragma: no cover — drift guard
     raise RuntimeError(
         f"manifest transports {NOTIFICATION_TRANSPORTS} and steward.notify disagree; "
         f"a manifest may declare a transport nothing here can deliver"
@@ -388,6 +399,53 @@ def _header_text(value: str, limit: int = TITLE_MAX_CHARS) -> str:
     return Header(collapsed, charset="utf-8", maxlinelen=0).encode()
 
 
+class _HttpTransport(Protocol):
+    """The shared state needed to enforce bounded, cooled-off HTTP delivery."""
+
+    @property
+    def name(self) -> str:
+        """The transport name used in failure logs."""
+        ...
+
+    timeout_s: float
+    clock: Callable[[], float]
+    breaker_until: float
+
+
+def _send_http(
+    carrier: _HttpTransport,
+    manifest: ResidentManifest,
+    tap: Tap,
+    request: urllib.request.Request,
+) -> bool:
+    """Send one prepared request with the failure semantics every transport shares."""
+    now = carrier.clock()
+    if now < carrier.breaker_until:
+        log.warning(
+            "%s: dropped a %s tap — %s failed recently and is not being retried for another %.0fs",
+            manifest.id,
+            tap.kind,
+            carrier.name,
+            carrier.breaker_until - now,
+        )
+        return False
+    try:
+        with urllib.request.urlopen(request, timeout=carrier.timeout_s):  # noqa: S310
+            return True
+    except (OSError, urllib.error.URLError, ValueError) as exc:
+        carrier.breaker_until = carrier.clock() + BREAKER_SECONDS
+        log.warning(
+            "%s: could not tap %s over %s — %s: %s; not retrying for %.0fs",
+            manifest.id,
+            tap.kind,
+            carrier.name,
+            type(exc).__name__,
+            exc,
+            BREAKER_SECONDS,
+        )
+        return False
+
+
 @dataclass
 class NtfyTransport:
     """ntfy: a POST whose body is the message and whose title rides in a header.
@@ -408,7 +466,7 @@ class NtfyTransport:
     timeout_s: float = NTFY_TIMEOUT_S
     namespace: str = ""
     clock: Callable[[], float] = time.monotonic
-    _breaker_until: float = field(default=0.0, repr=False)
+    breaker_until: float = field(default=0.0, repr=False)
 
     @property
     def name(self) -> str:
@@ -460,22 +518,6 @@ class NtfyTransport:
         if not url.startswith(("http://", "https://")):
             log.warning("ntfy target %r is not an http(s) URL; %s taps nowhere", url, manifest.id)
             return False
-        now = self.clock()
-        if now < self._breaker_until:
-            # Said out loud, every time, and not only on the failure that opened the window.
-            # The breaker is there so a dead ntfy costs one timeout a minute rather than one
-            # per knock — but each knock it swallows is still a knock that did not reach a
-            # phone, and a notification that silently stops arriving is exactly what this
-            # module claims not to allow. One line per dropped tap is what makes "what did I
-            # miss while ntfy was down" answerable from the log.
-            log.warning(
-                "%s: dropped a %s tap — ntfy failed recently and is not being retried for "
-                "another %.0fs",
-                manifest.id,
-                tap.kind,
-                self._breaker_until - now,
-            )
-            return False
         headers = {
             "Content-Type": "text/plain; charset=utf-8",
             "Title": _header_text(tap.title),
@@ -489,20 +531,46 @@ class NtfyTransport:
         request = urllib.request.Request(  # noqa: S310 — scheme checked just above
             url, data=tap.body.encode("utf-8"), headers=headers, method="POST"
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_s):  # noqa: S310
-                return True
-        except (OSError, urllib.error.URLError, ValueError) as exc:
-            self._breaker_until = self.clock() + BREAKER_SECONDS
+        return _send_http(self, manifest, tap, request)
+
+
+@dataclass
+class DiscordTransport:
+    """One fleet Discord webhook, with each tap speaking as its resident's soul."""
+
+    webhook_url: str
+    timeout_s: float = HTTP_TIMEOUT_S
+    clock: Callable[[], float] = time.monotonic
+    breaker_until: float = field(default=0.0, repr=False)
+
+    @property
+    def name(self) -> str:
+        """The manifest word that selects this transport."""
+        return DISCORD
+
+    def address(self, manifest: ResidentManifest) -> str:  # noqa: ARG002
+        """Describe the fleet destination without disclosing its credential-bearing URL."""
+        return "discord fleet webhook"
+
+    def send(self, manifest: ResidentManifest, tap: Tap) -> bool:
+        """POST one bounded JSON message to the fleet webhook. Never raises."""
+        url = self.webhook_url
+        if not url.startswith(("http://", "https://")):
             log.warning(
-                "%s: could not tap %s over ntfy — %s: %s; not retrying for %.0fs",
-                manifest.id,
-                tap.kind,
-                type(exc).__name__,
-                exc,
-                BREAKER_SECONDS,
+                "discord target %r is not an http(s) URL; %s taps nowhere", url, manifest.id
             )
             return False
+        content = _human(f"{tap.title}\n{tap.body}", DISCORD_CONTENT_MAX_CHARS)
+        payload = json.dumps(
+            {"content": content, "username": manifest.soul.name}, ensure_ascii=False
+        ).encode("utf-8")
+        request = urllib.request.Request(  # noqa: S310 — scheme checked just above
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        return _send_http(self, manifest, tap, request)
 
 
 # --------------------------------------------------------------------------------------
@@ -563,7 +631,12 @@ class Notifier:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Notifier:
         """Build the transports steward knows about, configured from the environment."""
-        return cls({NTFY: NtfyTransport.from_env(env)})
+        source = os.environ if env is None else env
+        transports: dict[str, Transport] = {NTFY: NtfyTransport.from_env(source)}
+        webhook_url = (source.get(DISCORD_WEBHOOK_ENV) or "").strip()
+        if webhook_url:
+            transports[DISCORD] = DiscordTransport(webhook_url=webhook_url)
+        return cls(transports)
 
     def transport_for(self, manifest: ResidentManifest) -> Transport | None:
         """Return the transport this resident's taps go through, or ``None`` when it taps nobody.

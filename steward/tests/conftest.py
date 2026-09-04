@@ -126,6 +126,7 @@ def isolated_notifications(monkeypatch: pytest.MonkeyPatch) -> str:
     monkeypatch.setenv("STEWARD_NOTIFY_NAMESPACE", "pytest")
     monkeypatch.delenv("STEWARD_NTFY_TOKEN", raising=False)
     monkeypatch.delenv("STEWARD_NTFY_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("STEWARD_NOTIFY_DISCORD_WEBHOOK", raising=False)
     return "http://127.0.0.1:1"
 
 

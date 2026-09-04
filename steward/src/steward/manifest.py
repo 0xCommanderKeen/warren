@@ -283,7 +283,7 @@ QUIET_WORD_PATTERN = re.compile(rf"^\S{{1,{QUIET_WORD_MAX_CHARS}}}$")
 #: that reads as wired up and taps nobody, discovered on the night an approval knock does
 #: not arrive. Telegram belongs here when it exists — as a second transport of *this*
 #: declaration, not as an outbound growth of the chat bridge (warren#108).
-NotificationTransport = Literal["ntfy"]
+NotificationTransport = Literal["ntfy", "discord"]
 
 #: One fact a tap may be sent about, spelled as the chronicle event type it follows rather
 #: than as a second vocabulary — so an ``on:`` list reads against ``docs/transitions.md``

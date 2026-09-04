@@ -500,6 +500,7 @@ def test_chat_service_shares_the_scheduler_mounts_and_declares_secret_passthroug
             "STEWARD_CHAT_TOKEN_PIP": "${STEWARD_CHAT_TOKEN_PIP:-}",
             "STEWARD_CHAT_TOKEN_HOB": "${STEWARD_CHAT_TOKEN_HOB:-}",
             "STEWARD_CHAT_OPERATORS": "${STEWARD_CHAT_OPERATORS:-}",
+            "STEWARD_NOTIFY_DISCORD_WEBHOOK": "${STEWARD_NOTIFY_DISCORD_WEBHOOK:-}",
         }
         == document["x-steward"]["environment"]
     )
