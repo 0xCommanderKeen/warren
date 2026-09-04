@@ -485,13 +485,26 @@ placements know different amounts about the filesystem the session lands in:
 `per-session events off — no emitter for local placement`). Neither is an error: a fleet may
 run quiet, but not *silently* quiet.
 
-**What still does not arrive without an operator's say-so: delivery.** The emitter posts to
-`$CHRONICLE_URL` and authenticates with `$CHRONICLE_TOKEN` — and the token is deliberately
-off the session environment allowlist (`SESSION_ENV_REFUSED` in `runners.py`: one shared
-ingest secret whose holder can post as any `agent_id`). Where chronicle's own ingest token is
-unset its ingest is open and the events simply land. Where it is set, an operator who wants
-per-session events delivered live names `CHRONICLE_TOKEN` in `STEWARD_SESSION_ENV_PASSTHROUGH`
-— the hatch that exists for exactly this, and a choice that is legitimately theirs to make.
+**Whether a fired hook then *delivers* is a separate question, and it has a different answer
+per placement.** The emitter posts to `$CHRONICLE_URL` with `$CHRONICLE_TOKEN` as a bearer
+token; a rejected POST is just a failed one, so the event lands in the emitter's local outbox
+rather than being lost — but it is not in the village.
+
+- **Container placement delivers.** `docker exec` runs the session in the container's own
+  environment plus the named `-e` variables (measured against docker 27.3.1), and
+  `render_compose` writes `CHRONICLE_URL` and `CHRONICLE_TOKEN` into every resident's
+  service. So a provisioned resident's hooks are already authenticated, and this change needs
+  nothing further from an operator.
+- **Local placement delivers only against an open village.** `CHRONICLE_URL` is on the
+  session allowlist and `CHRONICLE_TOKEN` deliberately is not — one shared ingest secret
+  whose holder can post as any `agent_id` (`SESSION_ENV_REFUSED`'s neighbouring comment in
+  `runners.py` argues it). Where chronicle's own ingest token is unset its ingest is open and
+  the events land. Where it is set, they 401 and journal to `~/.chronicle/events.jsonl` under
+  the account steward runs as — an outbox nothing on the control plane drains, because
+  `steward events flush` drains steward's *own* `events.jsonl.pending`, a different file. An
+  operator can name `CHRONICLE_TOKEN` in `STEWARD_SESSION_ENV_PASSTHROUGH` (the local hatch,
+  and their choice to make); per-resident ingest credentials are the real answer and are
+  their own issue.
 
 ## `workspace` — where a session may act
 

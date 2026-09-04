@@ -815,11 +815,16 @@ Two names are deliberately missing, and neither is an oversight:
   `steward delegate` exist precisely so a session never needs it, and until steward #41
   every locally launched session was carrying it anyway.
 - **`CHRONICLE_TOKEN`** is one shared ingest secret whose holder can post events as any
-  `agent_id`. A session without it loses nothing durable: its emitter queues events in
-  `events.jsonl.pending`, and a control-plane `steward events flush` delivers them under
-  the control plane's own credential — the events arrive either way. Naming it in
-  `STEWARD_SESSION_ENV_PASSTHROUGH` buys *live* emission at the price of handing every
-  session a secret that can impersonate every other resident. Prefer the flush.
+  `agent_id`. What a *locally placed* session loses without it depends on the village: where
+  chronicle's own ingest token is unset its ingest is open and the session's hook events land
+  anyway; where it is set they are rejected, and the hook emitter journals them to
+  `~/.chronicle/events.jsonl` — its own outbox, **not** the `events.jsonl.pending` that
+  `steward events flush` drains, which is steward's own emitter's queue. So they are not lost
+  and they do not arrive. Naming it in `STEWARD_SESSION_ENV_PASSTHROUGH` buys live emission
+  at the price of handing every session a secret that can impersonate every other resident;
+  per-resident ingest credentials are the real answer and are their own issue. A
+  container-placed session needs none of this — `docker exec` runs it in the container's own
+  environment, which its compose service already gives both variables.
 
 One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scoped
 credential — see [the API's two kinds of caller](docs/api.md#two-kinds-of-caller).
