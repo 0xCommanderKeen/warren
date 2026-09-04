@@ -861,8 +861,13 @@ Two names are deliberately missing, and neither is an oversight:
   `steward events flush` drains, which is steward's own emitter's queue. So they are not lost
   and they do not arrive. Naming it in `STEWARD_SESSION_ENV_PASSTHROUGH` buys live emission
   at the price of handing every session a secret that can impersonate every other resident;
-  per-resident ingest credentials are the real answer and are their own issue. A
-  container-placed session needs none of this — `docker exec` runs it in the container's own
+  per-resident ingest credentials are the real answer and are their own issue. **`steward
+  doctor` prints a yellow line when it can see that situation** — the shell it is run in
+  holds an ingest token and a local session will not inherit it — carrying the emitter's
+  own outbox reading where the emitter answers, so the choice is made in daylight rather
+  than found as an empty village (warren#449). Everything on that line is read from
+  doctor's own environment and account, which the line says, because the process that
+  launches the session is the scheduler. A container-placed session needs none of this — `docker exec` runs it in the container's own
   environment, which its compose service already gives both variables.
 
 One name is deliberately added: **`STEWARD_SESSION_TOKEN`**, this run's own scoped
