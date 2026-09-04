@@ -1,6 +1,7 @@
 import http.server
 import dataclasses
 import datetime
+import json
 import os
 import tempfile
 import threading
@@ -11,6 +12,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 import serve
+import state_coordinator
 from config import Config
 from tests.http_test_support import wait_until
 
@@ -35,6 +37,50 @@ def settled_notification_status(client, expected):
 
 
 class ASGITransportContractTests(unittest.TestCase):
+    def test_post_projects_against_bounded_carried_evidence_not_the_whole_log(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            villagers = root / "villagers"
+            villagers.mkdir()
+            events_path = root / "events.jsonl"
+            events = [
+                {
+                    "v": 0,
+                    "ts": f"2026-08-25T{index // 60:02d}:{index % 60:02d}:00.000Z",
+                    "source": "claude-code",
+                    "agent_id": "resident:pip",
+                    "project": "life",
+                    "type": "tool_called",
+                    "payload": {"tool": "Read"},
+                }
+                for index in range(500)
+            ]
+            events_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
+            config = dataclasses.replace(
+                Config(), events=events_path, villagers_dir=villagers, max_log_bytes=0
+            )
+            newest = {
+                **events[-1],
+                "ts": "2026-08-25T09:00:00.000Z",
+                "type": "idle",
+                "payload": {},
+            }
+
+            with (
+                mock.patch(
+                    "state_coordinator.project_village",
+                    wraps=state_coordinator.project_village,
+                ) as project,
+                TestClient(serve.create_app(config)) as client,
+            ):
+                project.reset_mock()
+                self.assertEqual(204, client.post("/events", json=newest).status_code)
+
+            self.assertEqual(1, project.call_count)
+            self.assertLess(len(project.call_args.args[0]), len(events))
+
     def test_discord_event_vocabulary_is_accepted_before_steward_emits_it(self):
         payloads = {
             "chat_message_posted": {"length": 42},
@@ -82,6 +128,7 @@ class ASGITransportContractTests(unittest.TestCase):
 
         def stamp(value):
             return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
         idle = {
             "v": 0,
             "ts": stamp(now - datetime.timedelta(minutes=2)),
@@ -154,16 +201,22 @@ class ASGITransportContractTests(unittest.TestCase):
                         self.assertEqual(
                             client.post("/events", json=earlier).status_code, 204
                         )
-                    self.assertEqual(client.post("/events", json=event).status_code, 204)
+                    self.assertEqual(
+                        client.post("/events", json=event).status_code, 204
+                    )
                     wait_until(lambda: bool(received))
                     villagers = client.get("/state").json()["snapshot"]["villagers"]
                     state_name = next(
-                        item["name"] for item in villagers if item["id"] == event["agent_id"]
+                        item["name"]
+                        for item in villagers
+                        if item["id"] == event["agent_id"]
                     )
 
             project = event["project"]
             message = event["payload"]["message"]
-            self.assertEqual(received[0][0], f"{state_name} is at your door ({project})")
+            self.assertEqual(
+                received[0][0], f"{state_name} is at your door ({project})"
+            )
             self.assertEqual(received[0][1], f"{state_name} · {project}\n{message}")
         finally:
             webhook.shutdown()
@@ -484,9 +537,7 @@ class ASGITransportContractTests(unittest.TestCase):
                         second.post("/events", json=shutdown_event).status_code, 204
                     )
                     wait_until(lambda: len(received[1]) >= 3)
-                    second_status = settled_notification_status(
-                        second, second_expected
-                    )
+                    second_status = settled_notification_status(second, second_expected)
 
                 self.assertEqual(first_status["queue_capacity"], 2)
                 self.assertEqual(second_status["queue_capacity"], 3)

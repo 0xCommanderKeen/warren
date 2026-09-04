@@ -1,6 +1,7 @@
 import datetime as dt
 import threading
 import unittest
+from unittest.mock import patch
 
 from state_coordinator import StateCoordinator
 from village_state import ProjectionPolicy
@@ -31,6 +32,28 @@ class StateCoordinatorTests(unittest.TestCase):
         self.assertEqual("cursor-2", changed["cursor"])
         self.assertEqual("resting", changed["villagers"][0]["state"])
 
+    def test_steady_state_projection_work_is_bounded_by_retained_evidence(self):
+        old = [event("tool_called", tool="Read", minutes=index) for index in range(500)]
+        newest = event("idle", minutes=501)
+        coordinator = StateCoordinator(
+            lambda: (old, "cursor-1", 1),
+            lambda: [],
+            ProjectionPolicy(),
+            read_updates=lambda _cursor: ([newest], "cursor-2", 1, False),
+        )
+
+        with patch(
+            "state_coordinator.project_village",
+            wraps=__import__("village_state").project_village,
+        ) as project:
+            coordinator.evaluate(NOW + dt.timedelta(minutes=500))
+            coordinator.evaluate(NOW + dt.timedelta(minutes=501))
+
+        initial_work = len(project.call_args_list[0].args[0])
+        steady_work = len(project.call_args_list[1].args[0])
+        self.assertLess(initial_work, len(old))
+        self.assertLessEqual(steady_work, initial_work + 1)
+
     def test_a_projection_cursor_reset_rebuilds_from_the_canonical_live_log(self):
         initial = event("tool_called", tool="Read")
         retained = event("idle", minutes=1)
@@ -46,6 +69,35 @@ class StateCoordinatorTests(unittest.TestCase):
         self.assertEqual("cursor-2", rebuilt["cursor"])
         self.assertEqual("resting", rebuilt["villagers"][0]["state"])
         self.assertEqual(1, rebuilt["log_generation"])
+
+    def test_restart_after_an_interrupted_fold_rebuilds_the_same_snapshot(self):
+        first = event("tool_called", tool="Read")
+        second = event("idle", minutes=1)
+        interrupted = StateCoordinator(
+            lambda: ([first], "cursor-1", 0),
+            lambda: [],
+            ProjectionPolicy(),
+            read_updates=lambda _cursor: ([second], "cursor-2", 0, False),
+        )
+        interrupted.evaluate(NOW)
+        with patch(
+            "state_coordinator.retention.carry_forward", side_effect=OSError("crash")
+        ):
+            with self.assertRaises(OSError):
+                interrupted.evaluate(NOW + dt.timedelta(minutes=1))
+
+        restarted = StateCoordinator(
+            lambda: ([first, second], "cursor-2", 0),
+            lambda: [],
+            ProjectionPolicy(),
+        ).evaluate(NOW + dt.timedelta(minutes=1))
+        expected = __import__("village_state").project_village(
+            [first, second], [], NOW + dt.timedelta(minutes=1), cursor="cursor-2"
+        )
+        for snapshot in (restarted, expected):
+            snapshot.pop("generation", None)
+            snapshot.pop("log_generation", None)
+        self.assertEqual(expected, restarted)
 
     def test_atomically_publishes_new_generations_and_ignores_no_change(self):
         evidence = [event("tool_called", tool="Read")]

@@ -4,9 +4,48 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import json
 import threading
 
+import retention
 from village_state import ProjectionPolicy, project_village
+
+
+class _ProjectionFold:
+    """Rebuildable, bounded projection evidence derived from the canonical log."""
+
+    def __init__(self):
+        self._lines = []
+
+    def replace(self, events, evaluated_at):
+        self._lines = [json.dumps(event, ensure_ascii=False) for event in events]
+        return self._compact(evaluated_at)
+
+    def extend(self, events, evaluated_at):
+        self._lines.extend(json.dumps(event, ensure_ascii=False) for event in events)
+        return self._compact(evaluated_at)
+
+    def current(self):
+        return self._events(self._lines)
+
+    def _compact(self, evaluated_at):
+        now_ms = int(evaluated_at.timestamp() * 1000)
+        retained = retention.carry_forward(self._lines, now_ms, retention.POLICY)
+        self._lines = list(retained.lines)
+        return self.current()
+
+    @staticmethod
+    def _events(lines):
+        events = []
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, json.JSONDecodeError):
+                event = None
+            if isinstance(event, dict) and "_burrow_internal" in event:
+                continue
+            events.append(event)
+        return events
 
 
 class StateCoordinator:
@@ -35,7 +74,8 @@ class StateCoordinator:
         self._signature = None
         self._generation = 0
         self._log_generation = None
-        self._events = None
+        self._fold = _ProjectionFold()
+        self._initialized = False
         self._cursor = None
 
     def evaluate(self, evaluated_at=None):
@@ -44,16 +84,18 @@ class StateCoordinator:
             # Capture, project, and publish as one serialized operation. Otherwise
             # a slow projection of an older cursor can overtake a newer one and be
             # assigned the higher public generation.
-            if self._events is None or self._read_updates is None:
+            if not self._initialized or self._read_updates is None:
                 events, cursor, log_generation = self._read_events()
-                self._events = list(events)
+                events = self._fold.replace(events, evaluated_at)
+                self._initialized = True
             else:
-                updates, cursor, log_generation, reset = self._read_updates(self._cursor)
+                updates, cursor, log_generation, reset = self._read_updates(
+                    self._cursor
+                )
                 if reset:
-                    self._events = list(updates)
+                    events = self._fold.replace(updates, evaluated_at)
                 else:
-                    self._events.extend(updates)
-                events = self._events
+                    events = self._fold.extend(updates, evaluated_at)
             self._cursor = cursor
             residents = self._read_residents()
             candidate = project_village(
