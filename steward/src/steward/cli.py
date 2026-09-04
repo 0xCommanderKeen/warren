@@ -76,6 +76,7 @@ from steward.nursery import (
 )
 from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
+from steward.org import OrgNode, org_chart
 from steward.prompt import assemble_preamble
 from steward.runners import (
     SESSION_EMITTER_ENV,
@@ -575,6 +576,95 @@ def _report_telemetry(resident: Resident, placement: Placement) -> int:
     where = "" if placement.is_container else f" (${SESSION_EMITTER_ENV}, read here)"
     click.secho(f"{resident.id}: per-session events via {emitter}{where}", fg="bright_black")
     return 0
+
+
+# --------------------------------------------------------------------------------------
+# org
+# --------------------------------------------------------------------------------------
+
+
+@main.command("org")
+@_RESIDENTS_OPTION
+@click.option(
+    "--skills",
+    "skills_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="The skills library. Defaults to the skills/ directory beside the residents tree.",
+)
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def org_command(residents: Path, skills_dir: Path | None, output_format: str) -> None:
+    """Print the org chart the manifests declare: who may hand work to whom.
+
+    The same projection ``GET /org`` answers with and Townhall's Org page draws, printed
+    for a terminal. Nothing here is a drawing anybody maintains — every line is
+    ``delegation.send``/``delegation.to`` on one manifest meeting an active ``delegation``
+    route on another, so a grant added this morning is in this output without anybody
+    having remembered to update it.
+
+    Residents are indented by rank: a resident nobody may hand work to sits flush left,
+    and everyone below is one level in from whoever may hand work to it. An edge that is
+    declared but would not deliver today is still printed, with the reason — a grant that
+    does not work is a thing to fix, not a thing to hide.
+    """
+    result = validate_paths([residents], skills_dir)
+    chart = org_chart(result.residents)
+
+    if output_format == "json":
+        click.echo(json.dumps({**chart.to_dict(), "errors": _rendered(result.errors)}, indent=2))
+        sys.exit(EXIT_OK if not result.errors else EXIT_INVALID)
+
+    if not chart.nodes:
+        click.secho("no residents", fg="yellow")
+    for node in sorted(chart.nodes, key=lambda entry: (entry.rank, entry.id)):
+        _render_org_node(node)
+    for edge in chart.edges:
+        if not edge.deliverable:
+            click.secho(
+                f"  ! {edge.sender} -> {edge.receiver}: {edge.reason}", fg="yellow", err=True
+            )
+    for diagnostic in result.errors:
+        click.secho(diagnostic.render(), fg="red", err=True)
+    sys.exit(EXIT_OK if not result.errors else EXIT_INVALID)
+
+
+def _rendered(diagnostics: Sequence[Diagnostic]) -> list[str]:
+    """Render diagnostics the way every other JSON surface prints them."""
+    return [diagnostic.render() for diagnostic in diagnostics]
+
+
+def _render_org_node(node: OrgNode) -> None:
+    """Print one resident and the chips hanging off it, indented by rank."""
+    indent = "  " * node.rank
+    label = f"{node.id} ({node.name}, {node.role})"
+    click.secho(f"{indent}{label}", fg="cyan" if not node.retired else "white", bold=True)
+    if node.retired:
+        click.secho(f"{indent}  retired", fg="white")
+    for chip in _org_chips(node):
+        click.echo(f"{indent}  {chip}")
+
+
+def _org_chips(node: OrgNode) -> list[str]:
+    """Return the one-line facts a chart draws beside a node, in a fixed order.
+
+    Every dimension speaks even when it has nothing to say ("no cap", "no mounts"),
+    because on a chart of what a resident is allowed to do, silence and unlimited must
+    not look the same — the rule :func:`steward.routes.residents.budget_summary` follows.
+    """
+    caps = [
+        f"${node.budget.daily_cost_usd:g}/day" if node.budget.daily_cost_usd else "",
+        f"{node.budget.daily_tokens} tokens/day" if node.budget.daily_tokens else "",
+        f"{node.budget.max_run_seconds}s/run" if node.budget.max_run_seconds else "",
+    ]
+    declared = [cap for cap in caps if cap]
+    mounts = [f"{mount.container} ({mount.mode})" for mount in node.mounts]
+    grants = list(node.session_grants)
+    return [
+        f"budget: {', '.join(declared) if declared else 'no cap'}",
+        f"mounts: {', '.join(mounts) if mounts else 'none'}",
+        f"grants: {', '.join(grants) if grants else 'none'}",
+        f"accepts: {', '.join(node.accepts) if node.accepts else 'no delegation route'}",
+    ]
 
 
 # --------------------------------------------------------------------------------------

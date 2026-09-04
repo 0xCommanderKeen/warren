@@ -275,6 +275,19 @@ $ steward inbox hob            # what is waiting, from whom, at what depth
 $ steward task lineage <task_id>      # the whole chain, root first
 ```
 
+**The org chart is computed, not drawn** (warren#441). Every edge above is already a
+declared fact, so `GET /org` derives the chart from the validated tree and nothing else —
+residents as nodes with their API write doors, their rw/ro mounts and their declared cap,
+delegation edges between them, and a `rank` per node so the terminal and the panel place
+the same resident on the same row. An edge only one half of the fleet agrees to is drawn
+too, marked undeliverable with the reason: `delegation.to` aimed at a shut door is a thing
+to fix, not a thing to hide. Townhall's **Org** page draws the same document.
+
+```console
+$ steward org                        # the chart, indented by rank
+$ steward org --format json          # the same document GET /org answers with
+```
+
 Closing a route stops delivery but not the pile already behind it, and nothing claims a
 letter while the door is shut — so `steward doctor` counts every resident's post and fails
 on the one case nobody would otherwise notice: open letters behind a `pending` or

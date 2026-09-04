@@ -50,6 +50,11 @@ which of the two this tab is carrying.
   manifest as it stands, *Retire* marks it retired in git, stops the container and removes
   the `.env` holding its village token. Both show steward's own plan — the exact argv, from
   a `dry_run` — before the button that does it for real exists on the screen.
+- **Org** — who may hand work to whom, computed from the manifests on every load rather
+  than drawn: `delegation.send`/`delegation.to` on one declaration meeting an active
+  `delegation` route on another (`GET /org`, warren#441). Each resident is a card carrying
+  what it may actually do — its API write doors, its rw/ro mounts, its declared cap — and a
+  handoff only one half of the fleet agrees to is still drawn, with steward's reason on it.
 - **Routines** — every routine every valid resident declares, with steward's own scheduler
   heartbeat and a run-now button.
 - **Approvals** — pending and decided, with approve / deny / edit.

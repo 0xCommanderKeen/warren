@@ -882,6 +882,57 @@ and `unreported_runs` counts the runs whose brain reported no usage at all (a `c
 `command` session has none to give); steward writes those as zero and says how many they
 were rather than inventing a number.
 
+### `GET /org`
+
+The org chart, computed from the manifests and nothing else (warren#441). Who may hand
+work to whom is already written down twice over — `delegation.send`/`delegation.to` on the
+sending manifest, an active route of kind `delegation` on the receiving one — so this
+route derives the chart rather than storing one. Nothing here reads the ledger, the host
+or the clock: two calls over an unchanged tree answer the same bytes.
+
+```json
+{
+  "nodes": [
+    {"id": "hob", "uid": "…", "name": "Hob", "role": "vault keeper", "accent": "#a68a4f",
+     "summary": "Keeps the vault.", "retired": false, "rank": 0,
+     "session_grants": ["skills.write"],
+     "app_grants": [{"id": "chronicle", "status": "granted"}],
+     "mounts": [{"host": "~/Life", "container": "/vault", "mode": "rw"}],
+     "budget": {"declared": true, "daily_cost_usd": 10.0, "daily_tokens": null,
+                "max_run_seconds": null},
+     "delegates": true, "accepts": ["inbox"]}
+  ],
+  "edges": [
+    {"sender": "hob", "receiver": "pip", "named": true, "deliverable": true, "reason": null}
+  ],
+  "errors": []
+}
+```
+
+`rank` is the layout fact: 0 for a resident nobody may hand work to, and one more than
+whoever may hand work to it otherwise. It is computed here rather than in each surface so
+the terminal's indentation and the panel's rows cannot disagree about who is above whom.
+Two residents that may delegate to each other are a cycle with no top, and everyone in one
+keeps rank 0.
+
+**An edge is drawn even when it will not deliver.** `delegation.to: [pip]` aimed at a
+resident whose door is shut is a declared intention that does not work, and a chart that
+dropped it would answer "there is no such grant" about a grant that is in the file. Such an
+edge carries `"deliverable": false` and the reason. `named` separates the two grants a
+sender can hold: `true` when `delegation.to` picked this receiver, `false` when the
+allowlist is empty and the receiver is reachable because it opened a door.
+
+`budget` is the **declared** cap, not today's spend — an org chart answers what a resident
+is allowed to do, and `GET /residents/{id}/budget` is where the ledger lives. `declared:
+false` with every cap `null` is said out loud, because unlimited must not read as unknown.
+
+`errors` carries what validation refused, the way `GET /residents` does: a manifest steward
+could not read is not a node, and a fleet that has gone quiet says why rather than
+answering an empty chart.
+
+`steward org` prints the same projection for a terminal (`--format json` emits this exact
+document), and Townhall's Org page draws it.
+
 ### `GET /residents/{id}/journal`
 
 The resident's own journal, **newest first** — the entries it wrote at the close of its

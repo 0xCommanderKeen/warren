@@ -6,13 +6,13 @@ const read = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
 /** Every page component in the tree. Adding a page means adding it here. */
 const PAGES = [
   "FleetPage", "ResidentsPage", "ResidentList", "ResidentDeclaration", "ResidentDetail", "ResidentNew", "RoutinesPage",
-  "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage", "DiagnosticsPage",
+  "ApprovalsPage", "BoardPage", "SkillsPage", "BudgetsPage", "DiagnosticsPage", "OrgPage",
 ];
 
 /** The ones the shell itself dispatches. ResidentsPage owns its own four sub-pages. */
 const MOUNTED = [
   "FleetPage", "ResidentsPage", "RoutinesPage", "ApprovalsPage", "BoardPage", "SkillsPage",
-  "BudgetsPage", "DiagnosticsPage",
+  "BudgetsPage", "DiagnosticsPage", "OrgPage",
 ];
 
 describe("frontend foundation", () => {
