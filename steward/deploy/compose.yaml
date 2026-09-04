@@ -1,11 +1,12 @@
 # Steward's control plane on a burrow — the NAS today. Published to ~/docker/warren/steward by
 # deploy/deploy.sh (or by hand: it is one file), read by `docker compose` there.
 #
-# Three processes, one image, one database:
+# Four processes, one image, one database:
 #
 #   api        `steward serve`          the token-gated HTTP API townhall and the CLI write to
 #   scheduler  `steward scheduler run`  fires routines; a locally-placed session runs in here
 #   watchdog   `steward watchdog run`   notices dead runs and unsupervised containers
+#   chat       `steward chat run`       long-polls the residents' Telegram bots
 #
 # The daemons run on the burrow whose containers they supervise (docs/topology.md), and
 # "on the burrow" is about docker, not the machine: both get this host's docker socket,
@@ -66,6 +67,11 @@ x-steward: &steward
     # main: nothing lands there without a pull request, and a push to any other branch
     # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
     STEWARD_PUSH_BRANCH: burrow/residents
+    # Bot tokens stay in the .env beside this compose file. Empty defaults let a fresh
+    # burrow come up green before chat is wired; the chat daemon names what it awaits.
+    STEWARD_CHAT_TOKEN_PIP: ${STEWARD_CHAT_TOKEN_PIP:-}
+    STEWARD_CHAT_TOKEN_HOB: ${STEWARD_CHAT_TOKEN_HOB:-}
+    STEWARD_CHAT_OPERATORS: ${STEWARD_CHAT_OPERATORS:-}
     TZ: Europe/Ljubljana
   extra_hosts:
     - "dockerhost:host-gateway"
@@ -117,3 +123,13 @@ services:
     # The same tree as the scheduler, and it must stay the same tree: a watchdog reading a
     # wider list than the scheduler fires would report residents nobody is running.
     command: ["/app/.venv/bin/steward", "watchdog", "run", "--residents", "/checkout/steward/residents"]
+
+  chat:
+    <<: *steward
+    container_name: steward-chat
+    volumes:
+      - ./data:/data
+      - ./residents-repo:/checkout:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
+    command: ["/app/.venv/bin/steward", "chat", "run", "--residents", "/checkout/steward/residents"]

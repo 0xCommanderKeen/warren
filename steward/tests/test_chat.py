@@ -1494,7 +1494,7 @@ def test_a_chat_api_that_is_not_http_reaches_nothing():
     assert transport.poll(FAKE_BOT_TOKEN, 0) is None
 
 
-def test_chat_run_refuses_loudly_when_no_bot_is_wired_up(
+def test_chat_run_sits_idle_and_names_every_token_it_is_waiting_for(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ):
     tree = write_resident(chat_manifest(tmp_path / "memory")).parent.parent
@@ -1509,9 +1509,10 @@ def test_chat_run_refuses_loudly_when_no_bot_is_wired_up(
             "--db",
             str(tmp_path / "cli.db"),
             "--max-polls",
-            "1",
+            "0",
         ],
     )
 
-    assert result.exit_code == 1
+    assert result.exit_code == 0
+    assert "idle" in result.output
     assert "STEWARD_CHAT_TOKEN_TESTY" in result.output

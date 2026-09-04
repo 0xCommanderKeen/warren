@@ -49,6 +49,9 @@ BUNDLE_BUILD = REPO_ROOT.parent / "chronicle" / "hooks" / "build.py"
 WORKFLOW = REPO_ROOT.parent / ".github" / "workflows" / "steward.yml"
 CONTROL_PLANE_DOCKERFILE = REPO_ROOT / "docker" / "control-plane" / "Dockerfile"
 DEPLOY_COMPOSE = REPO_ROOT / "deploy" / "compose.yaml"
+FLEET_DEPLOY = REPO_ROOT.parent / "deploy" / "deploy.sh"
+FLEET_STATUS = REPO_ROOT.parent / "deploy" / "status.sh"
+FLEET_RUNBOOK = REPO_ROOT.parent / "deploy" / "README.md"
 
 #: Every hook the Mac's ~/.claude/settings.json wires the emitter into, which is the whole
 #: set burrow's protocol has a mapping for. A resident missing any of them is a villager
@@ -464,9 +467,9 @@ def test_the_control_plane_carries_no_local_brain_or_login() -> None:
     )
 
 
-def test_both_daemons_read_the_same_resident_neutral_tree() -> None:
+def test_all_daemons_read_the_same_resident_neutral_tree() -> None:
     document = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
-    commands = [document["services"][name]["command"] for name in ("scheduler", "watchdog")]
+    commands = [document["services"][name]["command"] for name in ("scheduler", "watchdog", "chat")]
 
     # The burrow's checkout, not the tree baked into the image (warren#351); the same path
     # for both, and the checkout's residents tree rather than any resident's directory.
@@ -477,6 +480,50 @@ def test_both_daemons_read_the_same_resident_neutral_tree() -> None:
     assert not any(
         resident_id in " ".join(command) for resident_id in shipped_ids for command in commands
     )
+
+
+def test_chat_service_shares_the_scheduler_mounts_and_declares_secret_passthrough() -> None:
+    document = yaml.safe_load(DEPLOY_COMPOSE.read_text(encoding="utf-8"))
+    chat = document["services"]["chat"]
+
+    assert chat["volumes"] == document["services"]["scheduler"]["volumes"]
+    assert chat["command"] == [
+        "/app/.venv/bin/steward",
+        "chat",
+        "run",
+        "--residents",
+        "/checkout/steward/residents",
+    ]
+    assert (
+        document["x-steward"]["environment"]
+        | {
+            "STEWARD_CHAT_TOKEN_PIP": "${STEWARD_CHAT_TOKEN_PIP:-}",
+            "STEWARD_CHAT_TOKEN_HOB": "${STEWARD_CHAT_TOKEN_HOB:-}",
+            "STEWARD_CHAT_OPERATORS": "${STEWARD_CHAT_OPERATORS:-}",
+        }
+        == document["x-steward"]["environment"]
+    )
+    assert chat["environment"] == document["x-steward"]["environment"]
+
+
+def test_the_deploy_smokes_and_reports_the_chat_daemon_without_tokens() -> None:
+    deploy = FLEET_DEPLOY.read_text(encoding="utf-8")
+    status = FLEET_STATUS.read_text(encoding="utf-8")
+
+    assert "steward-scheduler steward-watchdog steward-chat" in deploy
+    assert "compose exec -T chat steward chat list" in deploy
+    assert "STEWARD_CHAT_TOKEN_PIP" in deploy
+    assert "STEWARD_CHAT_TOKEN_HOB" in deploy
+    assert 'grep -E "^(chronicle|arcadia|steward-)"' in status
+
+
+def test_the_burrow_runbook_explains_how_to_wire_and_recreate_chat() -> None:
+    runbook = FLEET_RUNBOOK.read_text(encoding="utf-8")
+
+    assert "STEWARD_CHAT_TOKEN_PIP=<token from BotFather>" in runbook
+    assert "STEWARD_CHAT_TOKEN_HOB=<token from BotFather>" in runbook
+    assert "STEWARD_CHAT_OPERATORS=<Telegram user id>" in runbook
+    assert "docker compose up -d --force-recreate chat" in runbook
 
 
 # ----------------------------------------------------------------------------- Dockerfile

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -1805,6 +1806,23 @@ def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per optio
                 state_path=state,
                 catchup_s=catchup_seconds,
             )
+            waiting = sorted(
+                {name for name in os.environ if name.startswith(ch.TOKEN_ENV_PREFIX)}
+                | {route.address.token_env for route in bridge.routes}
+            )
+            if waiting and not ch.tokens_from_env():
+                click.secho(
+                    f"chat: idle — waiting for {', '.join(waiting)}; "
+                    "recreate the service after setting a token",
+                    fg="yellow",
+                    err=True,
+                )
+                # An unbounded service stays alive without polling. A bounded invocation
+                # is the public probe/test seam and returns immediately after reporting.
+                if max_polls is None:
+                    while True:
+                        time.sleep(ch.IDLE_SLEEP_S)
+                return
             outcomes = bridge.run(max_polls=max_polls)
         except ch.ChatError as exc:
             click.secho(str(exc), fg="red", err=True)
