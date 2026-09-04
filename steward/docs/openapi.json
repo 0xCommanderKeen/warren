@@ -87,6 +87,92 @@
         "title": "ApprovalDecision",
         "type": "object"
       },
+      "Board": {
+        "additionalProperties": false,
+        "description": "Whether this resident takes work off the job board, and on what terms.\n\nOpting in is one boolean, and it defaults to *off*. A resident that has never heard\nof the board never claims from it, however well its skills happen to match, because\nsilence in a manifest is not consent \u2014 the whole point of a declaration is that you\ncan read what a resident will do before it does it.\n\nThe rest is the terms of the claim, all with honest defaults: one task per wake-up,\na thirty-minute lease, and a fifteen-minute session. ``lease_s`` should comfortably\nexceed ``timeout_s``; a lease that dies while the session is still running hands the\nsame task to somebody else, which is the one thing claiming exists to prevent.",
+        "properties": {
+          "claim": {
+            "default": false,
+            "description": "Whether this resident may claim open tasks from the board.",
+            "title": "Claim",
+            "type": "boolean"
+          },
+          "lease_s": {
+            "default": 1800,
+            "description": "How long a claim holds before the task returns to the board.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 86400.0,
+            "title": "Lease S",
+            "type": "integer"
+          },
+          "max_claims_per_wake": {
+            "default": 1,
+            "description": "How many tasks one wake-up may claim and work.",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Claims Per Wake",
+            "type": "integer"
+          },
+          "timeout_s": {
+            "default": 900,
+            "description": "Kill a board session after this long.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 86400.0,
+            "title": "Timeout S",
+            "type": "integer"
+          }
+        },
+        "title": "Board",
+        "type": "object"
+      },
+      "Budgets": {
+        "additionalProperties": false,
+        "description": "What one resident may spend in a day, and how long one run of it may take.\n\nEvery field is optional, and an absent field means *unlimited* \u2014 but unlimited is\nsaid out loud rather than assumed: ``GET /residents/{id}/budget`` reports a limit of\n``null`` and ``steward budget show`` prints ``no limit``, so \"Hob has no cap\" is an\nanswer somebody read rather than a silence somebody hoped about.\n\nThe two daily caps are counted in the resident's own primary time zone (see\n:mod:`steward.budgets`), because \"a day\" is a wall-clock fact where the household is.\n``max_run_seconds`` is not daily at all: it caps a *single* run, and steward enforces\nit as ``min(routine timeout, max_run_seconds)`` so a manifest cannot declare a routine\nthat outlives the budget the same manifest declares.",
+        "properties": {
+          "daily_cost_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Money this resident may spend per local day. Absent means unlimited.",
+            "title": "Daily Cost Usd"
+          },
+          "daily_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Input plus output tokens per local day. Absent means unlimited.",
+            "title": "Daily Tokens"
+          },
+          "max_run_seconds": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 86400.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Hard cap on one run, applied as min(timeout_s, this).",
+            "title": "Max Run Seconds"
+          }
+        },
+        "title": "Budgets",
+        "type": "object"
+      },
       "Charter": {
         "additionalProperties": false,
         "description": "What a resident is for. Injected into every headless session for this resident.\n\nEvery field here is bounded, and the bound is a *refusal* rather than the injection cap\nthe voice, the journal, the skills, and a task's detail get (:mod:`steward.prompt`).\nThe charter is the section that has the last word and is therefore never shortened on\nits way in: a hard rule truncated mid-clause would still be read as authoritative, and\nan unbounded one would decide how much room every bounded section above it has left.\nSo the size is settled here, where it is somebody's pull request rather than a session's\nsurprise (steward #147).",
@@ -150,6 +236,9 @@
           "manifest": {
             "anyOf": [
               {
+                "$ref": "#/components/schemas/ResidentManifest"
+              },
+              {
                 "additionalProperties": true,
                 "type": "object"
               },
@@ -201,6 +290,129 @@
           }
         },
         "title": "DeclarationPut",
+        "type": "object"
+      },
+      "Delegation": {
+        "additionalProperties": false,
+        "description": "Whether this resident may hand work to another resident, and to whom.\n\nThe sending half of steward #7, and it is one boolean that defaults to *off*, for the\nsame reason ``board.claim`` does: silence in a declaration is not consent. A resident\nthat has never been told it may delegate never delegates, however sensible the handoff\nwould have been, because the point of a manifest is that you can read what a resident\nwill do before it does it.\n\n``to`` is an optional allowlist of resident ids. Empty means \"any resident whose own\nmanifest declares a route that accepts the work\" \u2014 the receiver's declaration is\nalways the second half of the answer, and neither half can be waived by the other.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why this resident hands work over.",
+            "title": "Note"
+          },
+          "send": {
+            "default": false,
+            "description": "Whether this resident may delegate work to another resident.",
+            "title": "Send",
+            "type": "boolean"
+          },
+          "to": {
+            "description": "Resident ids this one may delegate to. Empty means any receiver.",
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "title": "Delegation",
+        "type": "object"
+      },
+      "Deploy": {
+        "additionalProperties": false,
+        "description": "Where this resident runs: the address the nursery ships it to and the watchdog probes.\n\nEvery field is optional and every one has a documented default for the dxp2800 layout\n(see :mod:`steward.deploy`), so an ordinary resident declares nothing here and still\ndeploys. What the block is for is the resident that does *not* live where everything\nelse lives \u2014 a second NAS, a different compose root, a container someone named by hand\nbefore steward existed.\n\nAn absent ``deploy`` block is still what the watchdog calls **unsupervised**: the\ndefault container name is what the nursery *would* create, and a resident nobody has\nprovisioned has no container under that name to speak for.\n\nThe patterns on ``host``, ``user``, ``path`` and ``image`` are a safety boundary, not\na style guide \u2014 see :data:`HOST_PATTERN`.",
+        "properties": {
+          "command": {
+            "description": "argv the container runs. Default: ['sleep', 'infinity'].",
+            "items": {
+              "type": "string"
+            },
+            "title": "Command",
+            "type": "array"
+          },
+          "container": {
+            "anyOf": [
+              {
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Docker container name, e.g. steward-life-agent. Default: steward-<id>.",
+            "title": "Container"
+          },
+          "host": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Host the container runs on. Default: dxp2800.",
+            "title": "Host"
+          },
+          "image": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Container image. Default: steward-resident:latest.",
+            "title": "Image"
+          },
+          "mounts": {
+            "description": "Extra bind mounts made available inside the resident container.",
+            "items": {
+              "$ref": "#/components/schemas/Mount"
+            },
+            "title": "Mounts",
+            "type": "array"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9~/][A-Za-z0-9_./-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Compose directory on the host. Default: ~/docker/warren/residents/<id>.",
+            "title": "Path"
+          },
+          "user": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z_][A-Za-z0-9._-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "SSH user steward reaches that host as. Default: Miha.",
+            "title": "User"
+          }
+        },
+        "title": "Deploy",
         "type": "object"
       },
       "Escalation": {
@@ -404,6 +616,98 @@
         "title": "Memory",
         "type": "object"
       },
+      "Mount": {
+        "additionalProperties": false,
+        "description": "One extra bind mount made available inside a resident container.",
+        "properties": {
+          "container": {
+            "description": "Absolute path inside the container.",
+            "pattern": "^/[^\\s'\"`:$;|&<>(){}\\[\\]!*?\\\\]*$",
+            "title": "Container",
+            "type": "string"
+          },
+          "host": {
+            "description": "Absolute or ~-relative path on the burrow host.",
+            "pattern": "^(?:/|~/)[^\\s'\"`:$;|&<>(){}\\[\\]!*?\\\\]+$",
+            "title": "Host",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "rw",
+              "ro"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "container",
+          "mode"
+        ],
+        "title": "Mount",
+        "type": "object"
+      },
+      "Notifications": {
+        "additionalProperties": false,
+        "description": "Where this resident's outbound taps go \u2014 the one-way twin of :class:`Route`.\n\n``routes`` answers *how work reaches this resident*: every kind in it is a doorway\nsomething arrives through, and two of them are doorways steward itself delivers into.\nThis block answers the opposite question, and the opposite direction is exactly why it\nis a dimension of its own rather than a ninth route kind. A **notification** is steward\ntapping a *person* on the shoulder about a resident \u2014 a ``needs_human`` at 2am, a task\nthat finished \u2014 and nothing listens for a reply: no session fires, no answer comes back,\nand the tap is not a channel anything can arrive through. Chat (warren#108) stays what\nit is, a two-way conversation where an operator speaks and a session answers; the two\nwould be one type only if \"a message went somewhere\" were the whole of what a channel\nmeans, and it is not.\n\nSilence is not consent, exactly as it is for :class:`Board` and :class:`Delegation`: a\nmanifest with no ``notifications`` block taps nobody, however loudly its resident knocks.\n\nDeclaring a ``transport`` is the whole opt-in, and there is deliberately **no address\nfield**. An ntfy topic is derived from the resident's ``uid``\n(:func:`steward.notify.ntfy_topic`), so it is unguessable in ntfy's public namespace, it\ncannot be typed wrong, and it cannot drift from the resident it belongs to. Nothing\nsecret is declared here either, for the reason nothing secret is declared anywhere in a\nmanifest: the ntfy server and its optional token are read from steward's own environment,\nand what a manifest says is *that* this resident taps \u2014 never how to authenticate as one.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who this taps, in words \u2014 'Miha's phone'. A label, never an address.",
+            "title": "Note"
+          },
+          "on": {
+            "default": [
+              "needs_human"
+            ],
+            "description": "Which facts are tapped. Defaults to the knock a human has to answer.",
+            "items": {
+              "enum": [
+                "needs_human",
+                "task_done"
+              ],
+              "type": "string"
+            },
+            "title": "On",
+            "type": "array"
+          },
+          "status": {
+            "default": "active",
+            "description": "Only 'active' sends; 'pending' and 'disabled' are declared and silent.",
+            "enum": [
+              "active",
+              "pending",
+              "disabled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "const": "ntfy",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which transport carries the taps. Absent means this resident taps nobody.",
+            "title": "Transport"
+          }
+        },
+        "title": "Notifications",
+        "type": "object"
+      },
       "ProvisionPost": {
         "additionalProperties": false,
         "description": "Whether to build the declared resident, or only rehearse building it.\n\nThere is nothing else to say: the manifest is the request. Everything ``new-resident``\ntakes in flags this endpoint reads off ``residents/<id>/manifest.yaml``, which is the\nwhole point of the door (warren#270).",
@@ -416,6 +720,181 @@
           }
         },
         "title": "ProvisionPost",
+        "type": "object"
+      },
+      "ResidentManifest": {
+        "additionalProperties": false,
+        "description": "The versioned declaration that makes a villager a resident.",
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "pattern": "^[a-z0-9][a-z0-9._-]*:[A-Za-z0-9._:-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Chronicle event join key; resident:<uid> for Steward Residents.",
+            "title": "Agent Id"
+          },
+          "app_grants": {
+            "description": "Declared app access (may be empty).",
+            "items": {
+              "$ref": "#/components/schemas/AppGrant"
+            },
+            "title": "App Grants",
+            "type": "array"
+          },
+          "board": {
+            "$ref": "#/components/schemas/Board",
+            "description": "Job board participation. Absent means this resident never claims."
+          },
+          "budgets": {
+            "$ref": "#/components/schemas/Budgets",
+            "description": "Daily spend caps and the per-run time cap. Absent means unlimited."
+          },
+          "charter": {
+            "$ref": "#/components/schemas/Charter"
+          },
+          "delegation": {
+            "$ref": "#/components/schemas/Delegation",
+            "description": "Handing work to other residents. Absent means this one never does."
+          },
+          "deploy": {
+            "$ref": "#/components/schemas/Deploy",
+            "description": "Where this resident runs, for the watchdog. Absent means unsupervised."
+          },
+          "home": {
+            "description": "Stable Chronicle village plot, from 0 through 7.",
+            "maximum": 7.0,
+            "minimum": 0.0,
+            "title": "Home",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Directory name under residents/.",
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/Memory"
+          },
+          "notifications": {
+            "$ref": "#/components/schemas/Notifications",
+            "description": "Outbound taps to a human. Absent means steward taps nobody about this one."
+          },
+          "project": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Project label for scoped residents.",
+            "title": "Project"
+          },
+          "retired": {
+            "default": false,
+            "description": "This resident has been retired. It keeps validating and stops working.",
+            "title": "Retired",
+            "type": "boolean"
+          },
+          "routes": {
+            "description": "Declared inbound channels (may be empty).",
+            "items": {
+              "$ref": "#/components/schemas/Route"
+            },
+            "title": "Routes",
+            "type": "array"
+          },
+          "routines": {
+            "items": {
+              "$ref": "#/components/schemas/Routine"
+            },
+            "title": "Routines",
+            "type": "array"
+          },
+          "runner": {
+            "$ref": "#/components/schemas/Runner"
+          },
+          "skills": {
+            "description": "Granted capabilities (may be empty).",
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/SkillGrant"
+                },
+                {
+                  "pattern": "^[a-z0-9][a-z0-9-]*$",
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Skills",
+            "type": "array"
+          },
+          "soul": {
+            "$ref": "#/components/schemas/SoulIdentity"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "maxLength": 400,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "One line burrow can display.",
+            "title": "Summary"
+          },
+          "tools": {
+            "$ref": "#/components/schemas/ToolGrant",
+            "description": "Tool dimension: the names a session may reach, or 'unrestricted'."
+          },
+          "uid": {
+            "description": "Durable random identity, minted once and never renamed.",
+            "format": "uuid4",
+            "title": "Uid",
+            "type": "string"
+          },
+          "version": {
+            "const": 0,
+            "default": 0,
+            "description": "Manifest schema version.",
+            "title": "Version",
+            "type": "integer"
+          },
+          "workspace": {
+            "description": "Absolute directories a session may reach beyond its working directory.",
+            "items": {
+              "pattern": "^/[^\\s'\"`$;|&<>(){}\\[\\]!*?\\\\]*$",
+              "type": "string"
+            },
+            "title": "Workspace",
+            "type": "array"
+          }
+        },
+        "required": [
+          "uid",
+          "id",
+          "home",
+          "soul",
+          "charter",
+          "skills",
+          "memory",
+          "routes",
+          "app_grants",
+          "tools"
+        ],
+        "title": "ResidentManifest",
         "type": "object"
       },
       "ResidentPost": {
@@ -679,6 +1158,76 @@
         "title": "Route",
         "type": "object"
       },
+      "Routine": {
+        "additionalProperties": false,
+        "description": "Standing work a resident performs without being prompted.",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "id": {
+            "pattern": "^[a-z0-9][a-z0-9-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "journal": {
+            "anyOf": [
+              {
+                "const": "close_of_day",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Flag the one routine that ends the resident's day and journals.",
+            "title": "Journal"
+          },
+          "prompt": {
+            "description": "Prompt template for the session.",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "requires": {
+            "description": "Skills that must be granted for this routine to run.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Requires",
+            "type": "array"
+          },
+          "schedule": {
+            "description": "Five-field cron expression, read in schedule_tz.",
+            "title": "Schedule",
+            "type": "string"
+          },
+          "schedule_tz": {
+            "default": "UTC",
+            "description": "IANA zone the schedule is read in, e.g. Europe/Ljubljana.",
+            "title": "Schedule Tz",
+            "type": "string"
+          },
+          "timeout_s": {
+            "description": "Kill the run after this long.",
+            "exclusiveMinimum": 0.0,
+            "maximum": 86400.0,
+            "title": "Timeout S",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "schedule",
+          "prompt",
+          "timeout_s"
+        ],
+        "title": "Routine",
+        "type": "object"
+      },
       "Runner": {
         "additionalProperties": false,
         "description": "Which brain a resident runs on. Every session launch goes through this seam.",
@@ -890,6 +1439,53 @@
           "name"
         ],
         "title": "SkillPost",
+        "type": "object"
+      },
+      "SoulIdentity": {
+        "additionalProperties": false,
+        "description": "The villager burrow draws. Field names match burrow's soul frontmatter.",
+        "properties": {
+          "accent": {
+            "description": "Hex accent colour, #rrggbb.",
+            "pattern": "^#[0-9a-fA-F]{6}$",
+            "title": "Accent",
+            "type": "string"
+          },
+          "char": {
+            "description": "Burrow sprite key, e.g. Monk.",
+            "minLength": 1,
+            "title": "Char",
+            "type": "string"
+          },
+          "file": {
+            "default": "soul.md",
+            "description": "Soul body: a file name beside the manifest, never a path.",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
+            "title": "File",
+            "type": "string"
+          },
+          "name": {
+            "description": "Display name, e.g. Hob.",
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "role": {
+            "description": "One-line role, e.g. life bot.",
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "char",
+          "accent",
+          "role"
+        ],
+        "title": "SoulIdentity",
         "type": "object"
       },
       "ToolGrant": {

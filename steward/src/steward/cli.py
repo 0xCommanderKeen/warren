@@ -514,6 +514,11 @@ def _report_reach(resident: Resident) -> int:
         # A widening grant, so it is worth saying out loud even when nothing is wrong: this
         # resident works somewhere other than the one directory its memory location names.
         click.secho(f"{resident.id}: workspace {', '.join(manifest.workspace)}", fg="yellow")
+    for mount in manifest.deploy.mounts:
+        click.secho(
+            f"{resident.id}: mount {mount.host} -> {mount.container} ({mount.mode})",
+            fg="yellow" if mount.mode == "rw" else "bright_black",
+        )
     return 0
 
 

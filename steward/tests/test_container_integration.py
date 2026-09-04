@@ -21,10 +21,12 @@ from pathlib import Path
 
 import pytest
 
+from conftest import ResidentWriter, valid_manifest
 from steward import runners as r
 from steward import topology
+from steward.deploy import render_compose, target_for
 from steward.manifest import Runner as RunnerSpec
-from steward.manifest import ToolGrant
+from steward.manifest import ToolGrant, load_manifest
 from steward.skills import Skill, materialize
 
 UNRESTRICTED = ToolGrant("unrestricted")
@@ -109,6 +111,66 @@ def _install_brain(container: str, script: str) -> None:
         "cat > /usr/local/bin/claude && chmod +x /usr/local/bin/claude",
         stdin=("#!/bin/sh\n" + script + "\n").encode(),
     )
+
+
+@pytest.mark.parametrize("mode", ["rw", "ro"])
+def test_a_container_session_obeys_the_rendered_mount_mode(
+    tmp_path: Path,
+    mode: str,
+    write_resident: ResidentWriter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The rendered declaration gives rw host writes and makes ro writes fail."""
+    host = tmp_path / "vault"
+    host.mkdir()
+    name = f"steward-test-mount-{secrets.token_hex(4)}"
+    data = valid_manifest()
+    data["workspace"] = ["/vault"]
+    data["deploy"] = {
+        "container": name,
+        "image": "alpine:3",
+        "command": ["sleep", "300"],
+        "mounts": [{"host": str(host), "container": "/vault", "mode": mode}],
+    }
+    resident = load_manifest(write_resident(data))
+    compose_dir = tmp_path / "compose"
+    compose_dir.mkdir()
+    (compose_dir / "memory").mkdir()
+    (compose_dir / "claude").mkdir()
+    compose = compose_dir / "docker-compose.yaml"
+    compose.write_text(render_compose(resident, target_for(resident.manifest)), encoding="utf-8")
+    monkeypatch.setenv("CHRONICLE_URL", "http://dockerhost:8737")
+    _docker("compose", "-f", str(compose), "up", "-d", timeout=120)
+    try:
+        _install_brain(name, "echo resident > /vault/from-resident")
+        runner = r.build_runner(
+            RunnerSpec(kind="claude"),
+            r.Placement(container=name, workdir="/tmp"),  # noqa: S108
+        )
+
+        result = runner.run(
+            r.RunRequest(
+                prompt="write",
+                workdir=tmp_path,
+                timeout_s=30,
+                tools=UNRESTRICTED,
+                workspace=("/vault",),
+            )
+        )
+
+        if mode == "rw":
+            assert result.ok, (result.error, result.output)
+            assert (host / "from-resident").read_text(encoding="utf-8") == "resident\n"
+        else:
+            assert not result.ok or "Read-only file system" in result.output
+            assert not (host / "from-resident").exists()
+    finally:
+        subprocess.run(  # noqa: S603 — cleanup of this test's generated compose project
+            [DOCKER, "compose", "-f", str(compose), "down"],
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
 
 
 def test_a_timed_out_session_is_verifiably_dead_inside_the_container(

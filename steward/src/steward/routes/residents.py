@@ -1,18 +1,18 @@
 """Resident HTTP routes and their local request/view vocabulary."""
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Annotated, Any
 
 import yaml
 from fastapi import APIRouter, Request
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 
 from steward import authoring as au
 from steward.budgets import BudgetStatus
 from steward.deploy import TransportError
 from steward.input_bounds import IDENTIFIER_MAX_CHARS
 from steward.journal import journal_complaint, read_entries
-from steward.manifest import Resident, validate_path
+from steward.manifest import Resident, ResidentManifest, validate_path
 from steward.nursery import (
     CLAUDE_LOGIN_REMAINS,
     COMMIT_FAILED,
@@ -84,6 +84,20 @@ class RetirePost(_Body):
     )
 
 
+def _unchanged_mapping(value: object) -> object:
+    """Publish the typed manifest input while preserving its raw mapping at runtime."""
+    return value
+
+
+ManifestMapping = Annotated[
+    dict[str, Any],
+    BeforeValidator(
+        _unchanged_mapping,
+        json_schema_input_type=ResidentManifest | dict[str, Any],
+    ),
+]
+
+
 class DeclarationPut(_Body):
     """A resident's declaration, as a form edits it.
 
@@ -94,7 +108,7 @@ class DeclarationPut(_Body):
     wrote. Neither is more validated than the other.
     """
 
-    manifest: dict[str, Any] | None = Field(
+    manifest: ManifestMapping | None = Field(
         default=None, description="The manifest as data. Steward serialises it to YAML."
     )
     text: str | None = Field(

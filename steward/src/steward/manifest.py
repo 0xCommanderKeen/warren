@@ -17,6 +17,7 @@ than being stored.
 
 import difflib
 import json
+import os
 import posixpath
 import re
 import zoneinfo
@@ -73,6 +74,7 @@ __all__ = [
     "Escalation",
     "ManifestError",
     "Memory",
+    "Mount",
     "Notifications",
     "PermissionMode",
     "Resident",
@@ -95,6 +97,7 @@ __all__ = [
     "redact_mapping",
     "redact_secrets",
     "residents_root",
+    "resolve_mount_host_path",
     "retired_complaint",
     "split_frontmatter",
     "validate_manifest",
@@ -301,6 +304,8 @@ CONTAINER_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
 HOST_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.-]*$"
 SSH_USER_PATTERN = r"^[A-Za-z_][A-Za-z0-9._-]*$"
 REMOTE_PATH_PATTERN = r"^[A-Za-z0-9~/][A-Za-z0-9_./-]*$"
+MOUNT_HOST_PATH_PATTERN = r"""^(?:/|~/)[^\s'"`:$;|&<>(){}\[\]!*?\\]+$"""
+MOUNT_CONTAINER_PATH_PATTERN = r"""^/[^\s'"`:$;|&<>(){}\[\]!*?\\]*$"""
 IMAGE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:/@-]*$"
 
 #: ``project`` becomes ``CHRONICLE_PROJECT`` in the resident's compose environment, so like
@@ -1261,6 +1266,20 @@ class Budgets(_Model):
         )
 
 
+class Mount(_Model):
+    """One extra bind mount made available inside a resident container."""
+
+    host: str = Field(
+        pattern=MOUNT_HOST_PATH_PATTERN,
+        description="Absolute or ~-relative path on the burrow host.",
+    )
+    container: str = Field(
+        pattern=MOUNT_CONTAINER_PATH_PATTERN,
+        description="Absolute path inside the container.",
+    )
+    mode: Literal["rw", "ro"]
+
+
 class Deploy(_Model):
     """Where this resident runs: the address the nursery ships it to and the watchdog probes.
 
@@ -1306,6 +1325,10 @@ class Deploy(_Model):
     command: list[str] = Field(
         default_factory=list,
         description="argv the container runs. Default: ['sleep', 'infinity'].",
+    )
+    mounts: list[Mount] = Field(
+        default_factory=list,
+        description="Extra bind mounts made available inside the resident container.",
     )
 
 
@@ -2339,7 +2362,27 @@ def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> l
 
     ``mock`` is exempt for the reason it is always exempt: it opens nothing.
     """
-    if not manifest.workspace or manifest.runner.kind not in UNBOUNDABLE_RUNNER_KINDS:
+    if not manifest.workspace:
+        return []
+    if manifest.runner.container_placed:
+        provided = [manifest.memory.path, *(mount.container for mount in manifest.deploy.mounts)]
+        diagnostics = []
+        for index, workspace in enumerate(manifest.workspace):
+            if any(_path_provides(root, workspace) for root in provided):
+                continue
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"workspace[{index}]",
+                    problem=(
+                        f"workspace path {workspace!r} is inside a container, but no declared "
+                        "mount provides it; the grant would be silently unreachable"
+                    ),
+                    example="add deploy.mounts with a container path that contains this workspace",
+                )
+            )
+        return diagnostics
+    if manifest.runner.kind not in UNBOUNDABLE_RUNNER_KINDS:
         return []
     return [
         Diagnostic(
@@ -2357,6 +2400,37 @@ def _check_workspace_is_reachable(manifest: ResidentManifest, source: Path) -> l
             ),
         )
     ]
+
+
+def _path_provides(root: str, path: str) -> bool:
+    """Whether an absolute container path is the root or one of its descendants."""
+    normal_root = PurePosixPath(posixpath.normpath(root))
+    normal_path = PurePosixPath(posixpath.normpath(path))
+    return normal_path == normal_root or normal_root in normal_path.parents
+
+
+def _check_mount_collisions(manifest: ResidentManifest, source: Path) -> list[Diagnostic]:
+    """Refuse extra mounts that mask Steward-managed container directories."""
+    managed = (manifest.memory.path, "/root/.claude")
+    diagnostics = []
+    for index, mount in enumerate(manifest.deploy.mounts):
+        collides = any(
+            _path_provides(path, mount.container) or _path_provides(mount.container, path)
+            for path in managed
+        )
+        if collides:
+            diagnostics.append(
+                Diagnostic(
+                    file=source,
+                    field_path=f"deploy.mounts[{index}].container",
+                    problem=(
+                        f"container path {mount.container!r} collides with a Steward-managed "
+                        "memory or Claude configuration mount"
+                    ),
+                    example="choose a separate container path such as /vault",
+                )
+            )
+    return diagnostics
 
 
 #: Runner kinds a session cannot be placed in a container under. ``mock`` spawns nothing,
@@ -2537,6 +2611,45 @@ def _check_shared_journal_dirs(residents: Sequence[Resident]) -> list[Diagnostic
                 )
             )
     return diagnostics
+
+
+def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagnostic]:
+    """Warn when one shared host path has more than one declared writer."""
+    by_host: dict[str, dict[str, Resident]] = {}
+    for resident in residents:
+        for mount in resident.manifest.deploy.mounts:
+            if mount.mode == "rw":
+                host = mount.host
+                if host.startswith("~/"):
+                    user = resident.manifest.deploy.user or "Miha"
+                    home = (os.environ.get("STEWARD_BURROW_HOME") or f"/home/{user}").rstrip("/")
+                    host = resolve_mount_host_path(host, home)
+                by_host.setdefault(posixpath.normpath(host), {})[resident.id] = resident
+    diagnostics: list[Diagnostic] = []
+    for host_path, residents_by_id in by_host.items():
+        group = list(residents_by_id.values())
+        if len(group) <= 1:
+            continue
+        ids = sorted(resident.id for resident in group)
+        diagnostics.extend(
+            Diagnostic(
+                file=resident.path,
+                field_path="deploy.mounts",
+                problem=(
+                    f"host path {host_path!r} has read-write mounts for {ids}; the "
+                    "one writer per shared clone rule permits at most one"
+                ),
+                example="change every mount but one to mode: ro",
+                severity=Severity.WARNING,
+            )
+            for resident in group
+        )
+    return diagnostics
+
+
+def resolve_mount_host_path(host: str, burrow_home: str) -> str:
+    """Resolve a mount's ``~/`` spelling against the burrow user's host home."""
+    return burrow_home.rstrip("/") + host[1:] if host.startswith("~/") else host
 
 
 def _check_unique_uids(residents: Sequence[Resident]) -> list[Diagnostic]:
@@ -2788,6 +2901,7 @@ def _validate_manifest(source: Path, library: SkillLibrary) -> ValidationResult:
     diagnostics.extend(_check_budget_is_enforceable(manifest, source))
     diagnostics.extend(_check_tools_are_enforceable(manifest, source))
     diagnostics.extend(_check_workspace_is_reachable(manifest, source))
+    diagnostics.extend(_check_mount_collisions(manifest, source))
     diagnostics.extend(_check_placement(manifest, source))
     diagnostics.extend(_check_delegation(manifest, source))
     diagnostics.extend(_check_soul_agreement(manifest, soul, source))
@@ -2862,6 +2976,9 @@ def validate_tree(
     )
     result = result.merged_with(
         ValidationResult(diagnostics=tuple(_check_shared_journal_dirs(result.residents)))
+    )
+    result = result.merged_with(
+        ValidationResult(diagnostics=tuple(_check_competing_mount_writers(result.residents)))
     )
 
     if not found and not result.diagnostics:

@@ -50,6 +50,13 @@ function ManifestFields({ draft, edit, diagnostics, wasRetired }) {
   );
 
   const accent = scalarValue(getIn(draft, "soul.accent"));
+  const mounts = Array.isArray(getIn(draft, "deploy.mounts"))
+    ? getIn(draft, "deploy.mounts")
+    : [];
+  const editMount = (index, key, value) => {
+    const next = mounts.map((mount, row) => (row === index ? { ...mount, [key]: value } : mount));
+    edit("deploy.mounts", next);
+  };
   return (
     <>
       <Panel title="Identity">
@@ -144,6 +151,54 @@ function ManifestFields({ draft, edit, diagnostics, wasRetired }) {
           </Field>
           {text("runner.model", "model", "Passed to the CLI. Blank means that runner's default.")}
         </div>
+      </Panel>
+      <Panel title="Extra mounts">
+        <Note>
+          Host paths are absolute or ~-relative on the burrow. Shared clones may have only
+          one rw resident; use ro for every other reader.
+        </Note>
+        {mounts.map((mount, index) => (
+          <div
+            className="grid items-end gap-x-3 [grid-template-columns:minmax(180px,1fr)_minmax(160px,1fr)_90px_auto]"
+            key={index}
+          >
+            <Field label={`mount ${index + 1} · host`} problems={diagnosticsFor(diagnostics, `deploy.mounts[${index}].host`)}>
+              <Input
+                value={scalarValue(mount.host)}
+                onChange={(event) => editMount(index, "host", event.target.value)}
+              />
+            </Field>
+            <Field label={`mount ${index + 1} · container`} problems={diagnosticsFor(diagnostics, `deploy.mounts[${index}].container`)}>
+              <Input
+                value={scalarValue(mount.container)}
+                onChange={(event) => editMount(index, "container", event.target.value)}
+              />
+            </Field>
+            <Field label={`mount ${index + 1} · mode`} problems={diagnosticsFor(diagnostics, `deploy.mounts[${index}].mode`)}>
+              <Select
+                value={mount.mode || "ro"}
+                onChange={(event) => editMount(index, "mode", event.target.value)}
+              >
+                <option value="ro" className="bg-void">ro</option>
+                <option value="rw" className="bg-void">rw</option>
+              </Select>
+            </Field>
+            <Button
+              tone="ghost"
+              tiny
+              onClick={() => edit("deploy.mounts", mounts.filter((_mount, row) => row !== index))}
+            >
+              Remove
+            </Button>
+          </div>
+        ))}
+        <Button
+          tone="ghost"
+          tiny
+          onClick={() => edit("deploy.mounts", [...mounts, { host: "", container: "", mode: "ro" }])}
+        >
+          Add mount
+        </Button>
       </Panel>
     </>
   );

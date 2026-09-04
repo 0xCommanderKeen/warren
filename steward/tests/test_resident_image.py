@@ -102,6 +102,27 @@ def test_the_claude_config_volume_is_where_the_emitter_lands(
     assert "./claude:/root/.claude" in service["test-agent"]["volumes"]
 
 
+def test_declared_extra_mounts_render_as_compose_volumes(
+    write_resident: ResidentWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("STEWARD_BURROW_HOME", "/home/Miha")
+    manifest = valid_manifest() | {
+        "deploy": {
+            "mounts": [
+                {"host": "~/docker/life/vault", "container": "/vault", "mode": "rw"},
+                {"host": "/srv/keys/hob", "container": "/root/.ssh", "mode": "ro"},
+            ]
+        }
+    }
+    resident = load_manifest(write_resident(manifest))
+    service = yaml.safe_load(render_compose(resident, target_for(resident.manifest)))["services"]
+
+    assert service["test-agent"]["volumes"][-2:] == [
+        "/home/Miha/docker/life/vault:/vault",
+        "/srv/keys/hob:/root/.ssh:ro",
+    ]
+
+
 # ------------------------------------------------------------------- the vendored emitter
 
 

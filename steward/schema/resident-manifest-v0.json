@@ -315,6 +315,14 @@
           },
           "title": "Command",
           "type": "array"
+        },
+        "mounts": {
+          "description": "Extra bind mounts made available inside the resident container.",
+          "items": {
+            "$ref": "#/$defs/Mount"
+          },
+          "title": "Mounts",
+          "type": "array"
         }
       },
       "title": "Deploy",
@@ -404,6 +412,39 @@
         "path"
       ],
       "title": "Memory",
+      "type": "object"
+    },
+    "Mount": {
+      "additionalProperties": false,
+      "description": "One extra bind mount made available inside a resident container.",
+      "properties": {
+        "host": {
+          "description": "Absolute or ~-relative path on the burrow host.",
+          "pattern": "^(?:/|~/)[^\\s'\"`:$;|&<>(){}\\[\\]!*?\\\\]+$",
+          "title": "Host",
+          "type": "string"
+        },
+        "container": {
+          "description": "Absolute path inside the container.",
+          "pattern": "^/[^\\s'\"`:$;|&<>(){}\\[\\]!*?\\\\]*$",
+          "title": "Container",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "rw",
+            "ro"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "container",
+        "mode"
+      ],
+      "title": "Mount",
       "type": "object"
     },
     "Notifications": {
