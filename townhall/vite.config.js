@@ -26,6 +26,7 @@ export default defineConfig({
           "/approvals",
           "/routines",
           "/requests",
+          "/secrets",
         ].map(
           (path) => [
             path,

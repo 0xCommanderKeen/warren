@@ -12,8 +12,9 @@ deliberately *not* here is at the bottom.
 
 1. A resident becomes reachable by declaring `routes: [{kind: chat, address:
    telegram:<bot>, status: active}]`. Nothing else in the manifest changes.
-2. The bot's token lives in **steward's environment**, under `STEWARD_CHAT_TOKEN_<BOT>` —
-   never in the manifest, which is git.
+2. The bot's token lives in the `STEWARD_CHAT_TOKEN_<BOT>` slot — a file in the burrow's
+   secrets directory, or a variable in its environment, in that order — and never in the
+   manifest, which is git.
 3. `steward chat run` polls every reachable bot. A message from a user id in
 `STEWARD_CHAT_OPERATORS`, in a private chat, fires a session with the message as its
    task and the last few turns of the conversation as context.
@@ -28,7 +29,7 @@ conversations, with two names and two faces, in two threads on your phone. A sin
 multiplexing the fleet would need a routing convention in every message and would make
 "who am I talking to" a thing you have to remember rather than a thing you can see.
 
-**The address is a reference, and the token is environment.** `telegram:pip` names a bot;
+**The address is a reference, and the token is a credential slot.** `telegram:pip` names a bot;
 `STEWARD_CHAT_TOKEN_PIP` holds the secret that speaks as it. That split is the same one
 every credential in this system lives on, and it buys the property that matters: the
 manifest can be read, reviewed, committed, rendered in townhall and pasted into an issue
@@ -217,11 +218,14 @@ Discord token that names no bot, a resident with nowhere to keep a transcript.
 the route is marked unreachable, the reason is said once in the log and stands in this
 listing, every other route keeps being polled, and the shut one is asked again every five
 minutes — so a bot re-enabled in Discord's Developer Portal, or an API that was down, comes
-back without anybody recreating the service. A **token** is not one of those: it is read
-from the environment at startup, so correcting it in `.env` still needs the service
-recreated. Only two things refuse to start `steward chat run`, and both mean the process has
-nothing to do at all: no resident declares an active chat route, or none declares one on a
-transport this build can carry.
+back without anybody recreating the service. Since warren#462 a **token** is one of those
+too: the daemon re-reads the residents tree and the secrets directory on the same five-minute
+timer, so a token written with `PUT /secrets/STEWARD_CHAT_TOKEN_…` — or a route declared a
+minute ago — reaches `reachable, bot @Name` without a recreate. What still does not change
+under a running container is its *environment*: a token corrected in `.env` rather than
+written as a file needs the service recreated, as it always did. Only two things refuse to
+start `steward chat run`, and both mean the process has nothing to do at all: no resident
+declares an active chat route, or none declares one on a transport this build can carry.
 
 ### 6. Run the daemon
 
@@ -328,6 +332,7 @@ delivery to land. Field rules are in
 | `STEWARD_CHAT_DISCORD_API_URL` | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests override it with loopback. |
 | `STEWARD_CHAT_DISCORD_GUILD` | Guild id whose allowlisted channel names are resolved for resident posts. |
 | `STEWARD_CHAT_POLL_TIMEOUT_S` | How long one `getUpdates` waits for a message (default 25s). The socket timeout is this plus ten seconds. |
+| `STEWARD_SECRETS_DIR` | Where per-secret files live (default `/secrets`, the burrow's bind mount). A file named for any variable above wins over the variable itself, which is what makes a token settable through the API and re-readable by a running daemon (warren#462). |
 
 ## Discord DMs and channel mentions
 
@@ -338,9 +343,11 @@ and sends replies with
 therefore appears offline. Only messages that mention the bot are readable in guild channels
 without privileged Message Content intent.
 
-Create one application per resident in the Discord Developer Portal, add its bot, and copy
-the bot token into `STEWARD_CHAT_TOKEN_DISCORD_<REF>`. Do not paste the token into a
-manifest. Add `discord:<your-user-id>` to `STEWARD_CHAT_OPERATORS`, then declare an active
+Create one application per resident in the Discord Developer Portal, add its bot, and put
+the bot token in the `STEWARD_CHAT_TOKEN_DISCORD_<REF>` slot — over the API with
+`PUT /secrets/STEWARD_CHAT_TOKEN_DISCORD_<REF>` (no ssh, no recreate; see
+[api.md](api.md#get-secrets--put-secretsname)), or in the burrow's `.env` as before. Do not
+paste the token into a manifest. Add `discord:<your-user-id>` to `STEWARD_CHAT_OPERATORS`, then declare an active
 route such as `address: discord:pip`. Invite the bot with Discord's OAuth2 URL Generator
 and select the `bot` scope. DM-only use needs no guild permissions. Channel listening also
 needs View Channel and Read Message History in each configured channel. The operator and bot

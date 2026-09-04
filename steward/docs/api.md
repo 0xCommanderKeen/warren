@@ -1232,6 +1232,62 @@ turns every existing grant into an error, where an absent one leaves grants unch
 it goes through the same gate as everything else, and a first skill that would invalidate
 the fleet is refused before the directory exists.
 
+### `GET /secrets` · `PUT /secrets/{name}`
+
+The credential write path (warren#462). Adding a bot to Discord used to end in an ssh
+heredoc appending a token to the burrow's `.env`, followed by
+`docker compose up -d --force-recreate chat`. The paste is a step no agent session can
+take — a classifier refuses it, correctly, because it is a credential going into a shell —
+and the recreate is a blunt way to say "one more token exists". Both are replaced by this
+endpoint and the chat daemon's own reload.
+
+`PUT /secrets/{name}` stores one credential as one file, mode 600, in the burrow's
+`secrets/` directory (`STEWARD_SECRETS_DIR`, `/secrets` in every container). The name is an
+environment variable name — `STEWARD_CHAT_TOKEN_DISCORD_HOB` — because that is the slot the
+value fills: resolution is **file first, environment second**, so a token already in the
+`.env` keeps working and one written here simply wins for that name.
+
+```json
+PUT /secrets/STEWARD_CHAT_TOKEN_DISCORD_HOB
+{"value": "…"}
+
+{"request_id": "…", "name": "STEWARD_CHAT_TOKEN_DISCORD_HOB", "set": true}
+```
+
+**The value never comes back.** There is no `GET /secrets/{name}`, no value in the listing,
+no value in the `secret_written` event, and no value in the request log — which also means
+the refusals below name the rule rather than quoting what they refused. Every consumer of
+these values is a process on the burrow that reads the file directly.
+
+**Human callers only.** A session credential is refused with `403
+session_credential_forbidden` before anything is written: a resident that could set
+`STEWARD_CHAT_TOKEN_DISCORD_PIP` could take Pip's identity, which is the boundary
+`app_grants` exists to hold.
+
+| status | error | meaning |
+|---|---|---|
+| 422 | `invalid_secret_name` | not an environment variable name (upper case, digits, `_`) |
+| 422 | `invalid_secret_value` | blank, more than one line, or longer than 8,192 characters |
+| 403 | `session_credential_forbidden` | a resident session tried to set a credential |
+
+`GET /secrets` lists the slots and never their values: every slot a declared chat route
+asks for, every file in the directory, and every `STEWARD_CHAT_TOKEN_*` still in the
+environment — with `set`, where it came from (`file` or `env`), and which route claims it.
+
+```json
+{"directory": "/secrets",
+ "secrets": [{"name": "STEWARD_CHAT_TOKEN_DISCORD_HOB", "set": true, "source": "file",
+              "route": {"resident": "hob", "route": "discord", "address": "discord:hob"}}]}
+```
+
+There is no delete. Unsetting a credential is rare, is not what this endpoint is for, and
+stays an ssh step — `rm` on the burrow, then restart what held it.
+
+**Reaching the fleet.** The chat daemon re-reads the tree and the secrets directory on its
+route-recheck timer (five minutes), so a token set here becomes `reachable, bot @Name` in
+`steward chat list` without a container recreate. `POST /reload` still only reloads the API
+process; nothing else changed about it.
+
 ### `POST /reload`
 
 Re-reads the residents tree and the skills library into **this process**.
