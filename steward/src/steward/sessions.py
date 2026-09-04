@@ -165,6 +165,10 @@ class SessionHooks(Protocol):
         """Claim and render decisions waiting for one resident."""
         ...
 
+    def answered_letters_for(self, resident_id: str) -> str | None:
+        """Claim and render delegated-task replies waiting for one resident."""
+        ...
+
     def harvest_session(
         self,
         manifest: ResidentManifest,
@@ -707,6 +711,7 @@ class ResidentSessions:
                 admission.admitted_at,
                 journal_entry=journal_entry,
                 decisions=None,
+                answered_letters=None,
             )
             return SessionResult(prompt, None, timeout_s, None)
         started = time.monotonic()
@@ -722,6 +727,7 @@ class ResidentSessions:
             skills = self._provision(admission)
             journal_entry = self._journal_for(resident)
             decisions = self._decisions_for(resident)
+            answered_letters = self._answered_letters_for(resident)
             prompt = self._prompt(
                 resident,
                 wake,
@@ -729,6 +735,7 @@ class ResidentSessions:
                 admission.admitted_at,
                 journal_entry=journal_entry,
                 decisions=decisions,
+                answered_letters=answered_letters,
             )
             runner = self.runner_factory(resident.manifest.runner, placement_for(resident.manifest))
             # This is a launch fact, not an admission attempt. Publish only after every
@@ -878,6 +885,7 @@ class ResidentSessions:
         *,
         journal_entry: str | None,
         decisions: str | None,
+        answered_letters: str | None,
     ) -> str:
         if isinstance(wake, ChatWake):
             return assemble_chat_prompt(
@@ -889,6 +897,7 @@ class ResidentSessions:
                 journal_entry=journal_entry,
                 skills=skills,
                 decisions=decisions,
+                answered_letters=answered_letters,
             )
         if isinstance(wake, DelegatedWake):
             return assemble_delegated_prompt(
@@ -903,6 +912,7 @@ class ResidentSessions:
                 journal_entry=journal_entry,
                 skills=skills,
                 decisions=decisions,
+                answered_letters=answered_letters,
             )
         if isinstance(wake, TaskWake):
             return assemble_task_prompt(
@@ -915,6 +925,7 @@ class ResidentSessions:
                 journal_entry=journal_entry,
                 skills=skills,
                 decisions=decisions,
+                answered_letters=answered_letters,
             )
         return assemble_routine_prompt(
             resident.manifest,
@@ -923,6 +934,7 @@ class ResidentSessions:
             journal_entry=journal_entry,
             skills=skills,
             decisions=decisions,
+            answered_letters=answered_letters,
             closing=self._closing_for(resident, wake, moment),
         )
 
@@ -957,6 +969,18 @@ class ResidentSessions:
             return self.hooks.decisions_for(resident.id)
         except Exception as exc:  # noqa: BLE001 - a broken inbox is absent context
             log.warning("%s: could not read pending decisions: %s", resident.id, exc)
+            return None
+
+    def _answered_letters_for(self, resident: Resident) -> str | None:
+        if self.hooks is None:
+            return None
+        read = getattr(self.hooks, "answered_letters_for", None)
+        if not callable(read):
+            return None
+        try:
+            return read(resident.id)
+        except Exception as exc:  # noqa: BLE001 - a broken inbox is absent context
+            log.warning("%s: could not read answered letters: %s", resident.id, exc)
             return None
 
     def _closing_for(self, resident: Resident, wake: RoutineWake, moment: datetime) -> str | None:

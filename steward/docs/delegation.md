@@ -23,6 +23,13 @@ The letter and its `task_delegated` are written together, past every check below
 delegation transition — `docs/transitions.md` has the guard, the payload, and the reason a
 refusal cannot reach it.
 
+The sender also gets a reply channel. When the receiver closes the task, steward retains
+the title, receiver, `done` or `failed` outcome, and a bounded copy of the receiver's final
+message. On the sender's next real wake-up—routine, chat turn, board pickup, or run-now—those
+reports appear in `LETTERS ANSWERED SINCE YOU LAST RAN` before the authoritative charter.
+They are claimed atomically and delivered once; two simultaneous sessions cannot both see
+the same answer. A dry run neither shows nor consumes them.
+
 ## Steward is the sole arbiter
 
 Both manifests have to agree, and steward checks both. Neither half can waive the other,
@@ -162,7 +169,7 @@ session should be holding. `--detail-json` takes a JSON object instead of prose,
 depth, and budget attribution past the first hop. A refusal exits non-zero with the reason
 and writes nothing.
 
-## Delivery is pull-based
+## Delivery and replies are pull-based
 
 Nobody is woken up to receive a letter. On the receiver's next wake-up — a scheduler tick
 or `steward board dispatch` — steward drains its inbox before touching the open board,
@@ -183,6 +190,11 @@ with reason `lease_expired`, rather than quietly vanishing.
 
 A resident drains its inbox whether or not it takes board work — accepting delegated work
 is declared in `routes`, not in `board`.
+
+The reply takes the same route in reverse only as context for the sender's next session; it
+does not wake the sender and is not a new delegated task. A manager can therefore receive
+workers' answers and report them through its own operator-facing chat route. Workers do not
+need chat routes merely to report completion.
 
 ## Lineage and budget attribution
 
@@ -295,8 +307,9 @@ Delegation and [Discord room posts](chat.md#discord-room-posts) share the final
 a `<discord post>` publishes bounded text through a separately allowlisted chat route.
 
 - **Not synchronous.** The sender finishes its turn and stops; it never waits for an
-  answer, and there is no reply channel back into the same session. If the sender needs the
-  result, the receiver's work product is where it appears.
+  answer in that session. The reply channel carries the task title, receiver, terminal
+  outcome, and bounded final message into the sender's next real preamble. The receiver's
+  work product remains the durable result; the reply is the manager's concise report of it.
 - **Not a way around a charter.** Delegated work is a request, and the receiver's charter
   still has the last word. A resident cannot get something done by asking a neighbour that
   its own hard rules forbid — the neighbour's rules apply to the neighbour's session.

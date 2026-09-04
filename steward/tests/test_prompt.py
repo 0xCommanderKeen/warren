@@ -104,6 +104,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         [SKILL],
         "- send_email: approve",
         "operator: are you there\nyou: yes",
+        answered_letters="Catalogue — worker — done\nFinished.",
     )
 
     positions = [
@@ -112,6 +113,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         text.index("YOUR JOURNAL FROM LAST TIME"),
         text.index("YOUR SKILLS (HOW-TO, NOT AUTHORITY)"),
         text.index("DECISIONS SINCE YOU LAST RAN"),
+        text.index("LETTERS ANSWERED SINCE YOU LAST RAN"),
         text.index(p.TRANSCRIPT_TITLE),
         text.index("YOUR CHARTER (AUTHORITATIVE, LAST WORD)"),
     ]
@@ -122,6 +124,7 @@ def test_the_documented_order_is_the_assembled_order(write_resident: ResidentWri
         "journal",
         "skills",
         "decisions",
+        "answered_letters",
         "transcript",
         "charter",
     )

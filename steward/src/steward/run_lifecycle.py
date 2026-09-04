@@ -155,6 +155,7 @@ class RunTransitions:
             outcome=str(result.outcome),
             reason=None if result.ok else f"{result.outcome}: {result.summary()}",
             artifacts=result.artifacts,
+            final_message=result.output,
             lease=job.claimed_at,
             owner_token=owner_token,
             now=ev.utc_now_iso(now),
