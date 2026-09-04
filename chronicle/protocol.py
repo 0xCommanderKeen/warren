@@ -91,13 +91,21 @@ def _duration_error(payload):
     return None
 
 
+#: What may start a routine: the schedule firing, an operator's run-now, or — since
+#: the chat bridge (warren#108) fires every message as a run — a chat message. The
+#: other half of this list is steward's ``TRIGGER_*`` in ``steward/src/steward/runs.py``;
+#: a trigger added there and not here is a 400 that empties the village of that run
+#: (warren#404).
+_ROUTINE_TRIGGERS = ("manual", "schedule", "chat")
+
+
 def _validate_routine(event):
     event_type, payload = event["type"], event["payload"]
     for field in ("routine", "run_id"):
         if not _nonempty_text(payload.get(field)):
             return f"invalid payload.{field}"
     if event_type == "routine_started":
-        if payload.get("trigger") not in ("manual", "schedule"):
+        if payload.get("trigger") not in _ROUTINE_TRIGGERS:
             return "invalid payload.trigger"
     elif event_type == "routine_finished":
         if not _nonempty_text(payload.get("outcome")):

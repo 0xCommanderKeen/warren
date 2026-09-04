@@ -332,7 +332,7 @@ fields. Parent and child always retain distinct `agent_id` values and lifecycles
 | `needs_human_resolved` | Steward recorded the human's decision   | `request_id`, `decision`, `decided_by`, `action` |
 | `idle`              | the agent finished its turn and is resting | —                          |
 | `session_ended`     | the agent is gone (villager leaves)        | —                          |
-| `routine_started`   | Steward began a declared routine           | `routine`, `run_id`, `trigger` |
+| `routine_started`   | Steward began a declared routine           | `routine`, `run_id`, `trigger` (`schedule`, `manual`, or `chat`) |
 | `routine_finished`  | that run ended successfully                 | `routine`, `run_id`, `outcome`, `artifacts`, `duration_s` |
 | `routine_failed`    | that run ended unsuccessfully                | `routine`, `run_id`, `error`; optional `duration_s` |
 | `task_posted`       | Steward accepted a job                       | `task_id`, `title`, `required_skills`, `posted_by` |
