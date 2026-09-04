@@ -70,6 +70,7 @@ class _RecordingHooks:
     def __init__(self) -> None:
         self.harvested: list[dict[str, object]] = []
         self.decision_calls = 0
+        self.answer_calls = 0
         self.prepared: list[tuple[str, datetime]] = []
 
     def prepare_session(self, resident: Resident, now: datetime, memory_fd: int | None) -> None:
@@ -81,6 +82,11 @@ class _RecordingHooks:
         del resident_id
         self.decision_calls += 1
         return "A human approved the next step."
+
+    def answered_letters_for(self, resident_id: str) -> str | None:
+        del resident_id
+        self.answer_calls += 1
+        return "Catalogue the new shelf — worker — done\nShelves A-C are catalogued."
 
     def harvest_session(
         self,
@@ -415,6 +421,42 @@ def test_materialization_stays_bound_when_workdir_is_replaced_after_revalidation
     assert result.require_result().outcome is Outcome.OK
     assert (moved / ".claude/skills/daily-summary/SKILL.md").is_file()
     assert sorted(path.name for path in memory.iterdir()) == ["replacement.txt"]
+
+
+def test_a_real_wake_up_carries_answered_letters_in_its_preamble(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    resident = load_manifest(write_resident(valid_manifest()))
+    runner = _CapturingRunner(RunResult(outcome=Outcome.OK, output="reported", exit_status=0))
+    hooks = _RecordingHooks()
+    sessions = ResidentSessions(
+        workdir=tmp_path,
+        runner_factory=lambda _spec, _placement: runner,
+        hooks=hooks,
+    )
+    admission = sessions.admit(resident, now=NOW)
+    assert isinstance(admission, Admission)
+
+    sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-1"))
+
+    assert hooks.answer_calls == 1
+    assert "LETTERS ANSWERED SINCE YOU LAST RAN" in runner.requests[0].prompt
+    assert "Catalogue the new shelf — worker — done" in runner.requests[0].prompt
+
+
+def test_a_dry_run_wake_up_does_not_claim_answered_letters(
+    write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    resident = load_manifest(write_resident(valid_manifest()))
+    hooks = _RecordingHooks()
+    sessions = ResidentSessions(workdir=tmp_path, hooks=hooks)
+    admission = sessions.admit(resident, now=NOW, rehearsal=True)
+    assert isinstance(admission, Admission)
+
+    result = sessions.run(admission, RoutineWake(resident.manifest.routines[0], "run-1"))
+
+    assert hooks.answer_calls == 0
+    assert "LETTERS ANSWERED SINCE YOU LAST RAN" not in result.prompt
 
 
 def test_provisioning_refuses_when_the_admitted_directory_moves_filesystems(

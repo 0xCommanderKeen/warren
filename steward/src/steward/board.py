@@ -561,6 +561,11 @@ class Dispatcher:
         records = self.store.claim_undelivered_decisions(resident_id)
         return approvals.decisions_preamble(records)
 
+    def answered_letters_for(self, resident_id: str) -> str | None:
+        """Claim and render the delegated-task replies owed to this sender."""
+        records = self.store.claim_answered_letters(resident_id)
+        return dg.answered_letters_preamble(records)
+
     def harvest(self, manifest: ResidentManifest, output: str) -> list[ApprovalRecord]:
         """Turn what a finished session wrote into requests and handoffs.
 

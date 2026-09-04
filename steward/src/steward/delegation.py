@@ -69,7 +69,13 @@ from steward.input_bounds import (
     validate_identifier,
     validate_work_text,
 )
-from steward.manifest import DELEGATION_ROUTE_KIND, Resident, closest_match, retired_complaint
+from steward.letter_replies import render_answer
+from steward.manifest import (
+    DELEGATION_ROUTE_KIND,
+    Resident,
+    closest_match,
+    retired_complaint,
+)
 from steward.store import STATUS_CLAIMED, JobRecord, Store
 from steward.transitions.approval import ApprovalTransitions
 from steward.transitions.delegation import DelegationTransitions
@@ -88,6 +94,7 @@ __all__ = [
     "Delegator",
     "Delivery",
     "Handoff",
+    "answered_letters_preamble",
     "extract_handoffs",
     "max_depth",
     "origin_for",
@@ -115,6 +122,23 @@ REJECTED_ACTION = "rejected_delegation"
 
 #: Who a handoff is recorded as sent by when a person asked for it over the API.
 HUMAN_SENDER = "api"
+
+
+def answered_letters_preamble(records: Sequence[JobRecord]) -> str | None:
+    """Render terminal delegated tasks for the sender's next session."""
+    if not records:
+        return None
+    answers = [
+        render_answer(
+            title=record.title,
+            receiver=record.assignee or "unknown receiver",
+            status=record.status,
+            message=record.final_message,
+        )
+        for record in records
+    ]
+    return "\n\n".join(answers)
+
 
 #: Why a handoff was refused. Every rejection carries exactly one of these, so a session,
 #: a panel, or a test can key on the reason rather than parse the sentence.

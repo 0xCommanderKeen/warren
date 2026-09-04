@@ -113,6 +113,148 @@ def test_two_independent_connections_cannot_claim_one_announcement(tmp_path: Pat
         second.close()
 
 
+def test_a_closed_letter_is_claimed_for_its_sender_once(store: Store) -> None:
+    letter = store.delegate_job(
+        title="Catalogue the new shelf",
+        assignee="worker",
+        delegated_by="librarian",
+        route="inbox",
+    )
+    claimed = store.claim_next_delegated(
+        assignee="worker",
+        claimant="claude-code:worker",
+        lease_expires_at=LATER,
+        now=EARLY,
+    )
+    assert claimed is not None
+    store.finish_job(
+        letter.task_id,
+        status="done",
+        claimant="claude-code:worker",
+        outcome="ok",
+        final_message="Shelves A-C are catalogued.",
+        lease=claimed.claimed_at,
+        now=LATER,
+    )
+
+    (answer,) = store.claim_answered_letters("librarian")
+
+    assert answer.title == "Catalogue the new shelf"
+    assert answer.assignee == "worker"
+    assert answer.status == "done"
+    assert answer.final_message == "Shelves A-C are catalogued."
+    assert answer.reply_delivered_at is not None
+    assert store.claim_answered_letters("librarian") == []
+
+
+def test_answered_letter_storage_bounds_the_receivers_final_message(store: Store) -> None:
+    letter = store.delegate_job(
+        title="Write a long report",
+        assignee="worker",
+        delegated_by="librarian",
+        route="inbox",
+    )
+    claimed = store.claim_next_delegated(
+        assignee="worker",
+        claimant="claude-code:worker",
+        lease_expires_at=LATER,
+        now=EARLY,
+    )
+    assert claimed is not None
+
+    closed = store.finish_job(
+        letter.task_id,
+        status="done",
+        claimant="claude-code:worker",
+        final_message="x" * 20_000,
+        lease=claimed.claimed_at,
+        now=LATER,
+    )
+
+    assert closed is not None
+    assert len(closed.final_message) == 4_000
+    assert closed.final_message.endswith("…")
+
+
+def test_answered_letter_overflow_waits_for_the_next_wake(store: Store) -> None:
+    for number in range(4):
+        letter = store.delegate_job(
+            title=f"Report {number}",
+            assignee="worker",
+            delegated_by="librarian",
+            route="inbox",
+        )
+        claimed = store.claim_next_delegated(
+            assignee="worker",
+            claimant="claude-code:worker",
+            lease_expires_at=LATER,
+            now=EARLY,
+        )
+        assert claimed is not None
+        store.finish_job(
+            letter.task_id,
+            status="done",
+            claimant="claude-code:worker",
+            final_message=str(number) * 4_000,
+            lease=claimed.claimed_at,
+            now=LATER,
+        )
+
+    first_wake = store.claim_answered_letters("librarian")
+    second_wake = store.claim_answered_letters("librarian")
+
+    assert 0 < len(first_wake) < 4
+    assert len(first_wake) + len(second_wake) == 4
+    assert store.claim_answered_letters("librarian") == []
+
+
+def test_two_wake_ups_cannot_claim_the_same_answered_letter(tmp_path: Path) -> None:
+    path = tmp_path / "shared.db"
+    with Store(path) as setup:
+        letter = setup.delegate_job(
+            title="Count the books",
+            assignee="worker",
+            delegated_by="librarian",
+            route="inbox",
+        )
+        claimed = setup.claim_next_delegated(
+            assignee="worker",
+            claimant="claude-code:worker",
+            lease_expires_at=LATER,
+            now=EARLY,
+        )
+        assert claimed is not None
+        setup.finish_job(
+            letter.task_id,
+            status="done",
+            claimant="claude-code:worker",
+            final_message="Forty-two.",
+            lease=claimed.claimed_at,
+            now=LATER,
+        )
+
+    first, second = Store(path), Store(path)
+    try:
+        barrier = threading.Barrier(3)
+        results: list[list[JobRecord]] = []
+
+        def wake(opened: Store) -> None:
+            barrier.wait()
+            results.append(opened.claim_answered_letters("librarian"))
+
+        threads = [threading.Thread(target=wake, args=(opened,)) for opened in (first, second)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join()
+
+        assert sum(len(answered) for answered in results) == 1
+    finally:
+        first.close()
+        second.close()
+
+
 def _acknowledged_budget_decision(store: Store) -> ApprovalRecord:
     request = store.create_approval_request(
         agent_id="claude-code:hob",

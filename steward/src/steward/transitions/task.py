@@ -245,6 +245,7 @@ class TaskTransitions:
             outcome=str(result.outcome),
             reason=reason,
             artifacts=result.artifacts,
+            final_message=result.output,
             lease=job.claimed_at,
             now=ev.utc_now_iso(now),
         )

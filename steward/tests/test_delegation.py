@@ -890,6 +890,55 @@ def test_the_receiver_works_its_inbox_on_its_next_wake_up(
     ]
 
 
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [
+        (RunResult(Outcome.OK, output="The west wall now holds 143 books.", exit_status=0), "done"),
+        (
+            RunResult(
+                Outcome.FAILED,
+                output="I could not read the damaged labels.",
+                exit_status=1,
+                error_is_child=True,
+            ),
+            "failed",
+        ),
+    ],
+)
+def test_finishing_a_letter_queues_the_receivers_final_message_for_the_sender(
+    fleet: Fleet, make_dispatcher: MakeDispatcher, result: RunResult, status: str
+) -> None:
+    residents = fleet(sender_manifest(), receiver_manifest())
+    dispatcher = make_dispatcher(residents, ScriptedRunner(result))
+    dispatcher.delegator.delegate(sender=residents[0], handoff=handoff(title="Count west wall"))
+
+    dispatcher.dispatch(NOW)
+
+    reply = dispatcher.answered_letters_for(SENDER)
+    assert reply is not None
+    assert f"Count west wall — receiver-agent — {status}" in reply
+    assert result.output in reply
+    assert dispatcher.answered_letters_for(SENDER) is None
+
+
+def test_an_answered_letters_preamble_bounds_each_final_message(
+    fleet: Fleet, make_dispatcher: MakeDispatcher
+) -> None:
+    residents = fleet(sender_manifest(), receiver_manifest())
+    dispatcher = make_dispatcher(
+        residents,
+        ScriptedRunner(RunResult(Outcome.OK, output="x" * 20_000, exit_status=0)),
+    )
+    dispatcher.delegator.delegate(sender=residents[0], handoff=handoff(title="Long report"))
+    dispatcher.dispatch(NOW)
+
+    reply = dispatcher.answered_letters_for(SENDER)
+
+    assert reply is not None
+    assert len(reply) < 4_100
+    assert reply.endswith("…")
+
+
 def test_pickup_and_completion_carry_the_parent(
     fleet: Fleet, make_dispatcher: MakeDispatcher, store: Store, sink: ev.NullEmitter
 ) -> None:

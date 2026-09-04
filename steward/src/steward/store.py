@@ -54,6 +54,7 @@ from typing import Any, Self
 from steward.claims import ResidentClaim
 from steward.events import utc_now_iso
 from steward.health import HealthJournal
+from steward.letter_replies import ANSWER_BATCH_MAX_CHARS, bounded_message, render_answer
 from steward.operator_auth import OperatorPrincipal
 from steward.runs import (
     DELIVERY_STATUSES,
@@ -333,6 +334,9 @@ _ADDED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "run_id": "TEXT",
         "owner_token": "TEXT",
         "lease_duration_s": "REAL",
+        # A terminal delegated task is also the durable reply owed to its sender.
+        "final_message": "TEXT NOT NULL DEFAULT ''",
+        "reply_delivered_at": "TEXT",
     },
     "approvals": {
         "resident": "TEXT NOT NULL DEFAULT ''",
@@ -482,6 +486,8 @@ class JobRecord:
     run_id: str | None = None
     owner_token: str | None = None
     lease_duration_s: float | None = None
+    final_message: str = ""
+    reply_delivered_at: str | None = None
 
     @property
     def claimable_by(self) -> frozenset[str]:
@@ -520,6 +526,8 @@ class JobRecord:
             run_id=row["run_id"],
             owner_token=row["owner_token"],
             lease_duration_s=row["lease_duration_s"],
+            final_message=row["final_message"],
+            reply_delivered_at=row["reply_delivered_at"],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1418,6 +1426,7 @@ class Store:
         outcome: str | None = None,
         reason: str | None = None,
         artifacts: Sequence[str] = (),
+        final_message: str = "",
         lease: str | None = None,
         now: str | None = None,
     ) -> JobRecord | None:
@@ -1437,6 +1446,7 @@ class Store:
         with self._lock, self._conn:
             cursor = self._conn.execute(
                 "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
+                "final_message = ?, "
                 "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
                 "WHERE task_id = ? AND status = ? AND claimant = ? "
                 "AND (? IS NULL OR claimed_at = ?)",
@@ -1445,6 +1455,7 @@ class Store:
                     outcome,
                     reason,
                     _dumps(list(artifacts)),
+                    bounded_message(final_message),
                     now or utc_now_iso(),
                     task_id,
                     STATUS_CLAIMED,
@@ -1458,6 +1469,40 @@ class Store:
             row = self._conn.execute("SELECT * FROM jobs WHERE task_id = ?", (task_id,)).fetchone()
         return JobRecord.from_row(row)
 
+    def claim_answered_letters(self, sender: str, now: str | None = None) -> list[JobRecord]:
+        """Take terminal letters sent by one resident, marking their replies told once."""
+        moment = now or utc_now_iso()
+        claimed: list[JobRecord] = []
+        rendered_chars = 0
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                "SELECT * FROM jobs WHERE delegated_by = ? AND status IN (?, ?) "
+                "AND reply_delivered_at IS NULL ORDER BY finished_at, rowid",
+                (sender, STATUS_DONE, STATUS_FAILED),
+            ).fetchall()
+            for row in rows:
+                rendered = render_answer(
+                    title=row["title"],
+                    receiver=row["assignee"] or "unknown receiver",
+                    status=row["status"],
+                    message=row["final_message"],
+                )
+                next_size = rendered_chars + (2 if claimed else 0) + len(rendered)
+                if next_size > ANSWER_BATCH_MAX_CHARS:
+                    break
+                cursor = self._conn.execute(
+                    "UPDATE jobs SET reply_delivered_at = ? "
+                    "WHERE task_id = ? AND reply_delivered_at IS NULL",
+                    (moment, row["task_id"]),
+                )
+                if cursor.rowcount == 1:
+                    fresh = self._conn.execute(
+                        "SELECT * FROM jobs WHERE task_id = ?", (row["task_id"],)
+                    ).fetchone()
+                    claimed.append(JobRecord.from_row(fresh))
+                    rendered_chars = next_size
+        return claimed
+
     def finish_job_and_claim_run_terminal(  # noqa: PLR0913
         self,
         task_id: str,
@@ -1470,6 +1515,7 @@ class Store:
         outcome: str | None = None,
         reason: str | None = None,
         artifacts: Sequence[str] = (),
+        final_message: str = "",
         lease: str | None = None,
         owner_token: str | None = None,
         stale_before: str | None = None,
@@ -1497,6 +1543,7 @@ class Store:
                     raise _AtomicTaskCloseLostError  # noqa: TRY301
                 job = self._conn.execute(
                     "UPDATE jobs SET status = ?, outcome = ?, reason = ?, artifacts = ?, "
+                    "final_message = ?, "
                     "finished_at = ?, lease_expires_at = NULL, run_id = NULL, owner_token = NULL "
                     "WHERE task_id = ? AND status = ? AND claimant = ? "
                     "AND (? IS NULL OR claimed_at = ?) AND run_id = ? AND owner_token = ?",
@@ -1505,6 +1552,7 @@ class Store:
                         outcome,
                         reason,
                         _dumps(list(artifacts)),
+                        bounded_message(final_message),
                         moment,
                         task_id,
                         STATUS_CLAIMED,
