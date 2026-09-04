@@ -233,6 +233,12 @@ few turns of which are injected as context *beneath* the charter. A dispatch swe
 every answered message, so a handoff written mid-conversation is delivered before you have
 read the reply.
 
+One process carries every route, so no route may take it down (warren#456): a bot the token
+cannot identify, an unset variable or a resident with nowhere to keep a transcript marks
+that one doorway unreachable in `steward chat list` and in the log, is re-asked every five
+minutes, and leaves every other conversation running. The daemon refuses to start only when
+nothing declares a chat route it could carry.
+
 It is a separate process sharing the scheduler's state directory — which is exactly what
 the cross-process session claim (warren#111) is for — and long polling means every
 connection is outbound, so nothing on the internet gets a way into the burrow. Notifications
@@ -760,7 +766,7 @@ the scheduler and the API name the ones they need on startup.
 | `STEWARD_NTFY_TOKEN` | notifications | Bearer token for a protected ntfy instance. Optional, and never in a manifest. |
 | `STEWARD_NTFY_TIMEOUT_S` | notifications | How long one tap may take (default 2s). A tap is a courtesy; it may not cost a run. |
 | `STEWARD_NOTIFY_NAMESPACE` | notifications | Folded into every derived topic. Empty by default; set it on a second installation reading the same `residents/` tree, so a developer's test knock does not buzz the operator's real phone. |
-| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated `<transport>:<user-id>` identities steward answers; bare ids remain Telegram-compatible. Empty means nobody, and `steward chat run` refuses to start rather than run as an open door. A message from anyone else is dropped without a reply. |
+| `STEWARD_CHAT_OPERATORS` | chat bridge | Comma-separated `<transport>:<user-id>` identities steward answers; bare ids remain Telegram-compatible. Empty means nobody, and every route on that transport is held shut rather than run as an open door. A message from anyone else is dropped without a reply. |
 | `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | chat bridge | Telegram keeps the v0 name (`telegram:pip` reads `STEWARD_CHAT_TOKEN_PIP`); other transports include their name (`discord:pip` reads `STEWARD_CHAT_TOKEN_DISCORD_PIP`), with non-alphanumerics folded to `_`. One bot per route, and never in a manifest: a token written into one is refused by validation. |
 | `STEWARD_CHAT_API_URL` | chat bridge | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real service. |
 | `STEWARD_CHAT_DISCORD_API_URL` | chat bridge | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests point it at loopback. |

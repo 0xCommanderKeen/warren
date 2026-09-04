@@ -210,7 +210,16 @@ pip/chat: telegram:pip — reachable
 ```
 
 `not reachable yet` names exactly what is missing — a `pending` status, an unset variable,
-an address that is not `<transport>:<reference>`, a transport this build cannot carry.
+an address that is not `<transport>:<reference>`, a transport this build cannot carry, a
+Discord token that names no bot, a resident with nowhere to keep a transcript.
+
+**A route's problem is a route's problem** (warren#456). None of the above stops the daemon:
+the route is marked unreachable, the reason is said once in the log and stands in this
+listing, every other route keeps being polled, and the shut one is asked again every five
+minutes — so a token corrected in the burrow's environment or an API that was down comes back
+without anybody recreating the service. Only two things refuse to start `steward chat run`,
+and both mean the process has nothing to do at all: no resident declares an active chat
+route, or none declares one on a transport this build can carry.
 
 ### 6. Run the daemon
 
@@ -311,7 +320,7 @@ delivery to land. Field rules are in
 
 | variable | meaning |
 |---|---|
-| `STEWARD_CHAT_OPERATORS` | Comma-separated `<transport>:<user-id>` identities steward answers. Bare ids remain Telegram-compatible. Empty means nobody, and the daemon refuses to start rather than run as an open door. |
+| `STEWARD_CHAT_OPERATORS` | Comma-separated `<transport>:<user-id>` identities steward answers. Bare ids remain Telegram-compatible. Empty means nobody, and every route on that transport is held shut rather than run as an open door. |
 | `STEWARD_CHAT_TOKEN_<REF>` / `STEWARD_CHAT_TOKEN_<TRANSPORT>_<REF>` | Telegram keeps the v0 token name; other transports include their name, so equal references cannot share credentials. Upper-cased with non-alphanumerics folded to `_`. One per route. |
 | `STEWARD_CHAT_API_URL` | Where the bot API lives. Defaults to `https://api.telegram.org`; the test suite points it at loopback so nothing in this repo can reach the real thing. |
 | `STEWARD_CHAT_DISCORD_API_URL` | Discord REST base URL. Defaults to `https://discord.com/api/v10`; tests override it with loopback. |
