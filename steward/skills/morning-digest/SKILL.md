@@ -1,6 +1,6 @@
 ---
 name: morning-digest
-description: Read the vault and say what Miha needs to know this morning — birthdays, dated items, a few todos — or reply exactly NOTHING, because a digest that fires every day regardless is wallpaper within a week.
+description: Read the vault and say what is actionable this morning — birthdays, dated items, a few todos — or reply exactly NOTHING.
 ---
 
 The digest is the push counterpart to chat: once a morning the vault at `/vault` gets read
@@ -12,9 +12,10 @@ the one morning it matters, it is not read.
 
 Get the date first: `TZ=Europe/Ljubljana date '+%Y-%m-%d %A'`. Today is the Ljubljana day,
 not the container's UTC one, and a digest written for the wrong day is wrong in every line.
-Then pull, so that edits made on the Mac overnight count:
-`git -C /vault pull --rebase --autostash`. If the pull fails, `git -C /vault rebase --abort`
-and read what is there; a stale read still beats no digest.
+Then pull, so that edits made elsewhere overnight count: `git -C /vault pull --rebase
+--autostash`. That is the one git command this turn runs. If it fails, `git -C /vault
+rebase --abort` and read what is there — a stale read still beats no digest, and the
+message says nothing about it.
 
 ## What goes in
 
@@ -23,9 +24,8 @@ Only what is actionable today. Four things, from four places, and nowhere else:
 1. **Birthdays.** `People/*.md`, frontmatter `birthday:`. Today's, plus any in the next
    seven days, saying how many days out. Match month and day; ignore the year.
 2. **Dated items.** `Areas/Upcoming.md`, for anything tied to today or the next couple of
-   days: appointments, deadlines, contractors, scheduled jobs. The note is the authority on
-   its own open reminders — one that says it nags daily from a given date is a dated item
-   on each of those days.
+   days: appointments, deadlines, contractors, scheduled jobs. Where the note says how its
+   own reminders behave, do what it says.
 3. **Todos.** `Areas/Todo.md`, and only that file. Its open `- [ ]` items, at most five,
    favouring anything time-sensitive. Do not scan `Projects/` or `Journal/` for todos:
    long-running project work is deliberately excluded, because a house job takes months
@@ -40,15 +40,15 @@ the digest.
 ## What goes out
 
 If there is genuinely nothing worth waking up to — no birthdays, no dated items, no open
-todos, not Sunday — the first line of your reply is exactly:
+todos, not Sunday — reply with exactly:
 
 ```
 NOTHING
 ```
 
-One word, nothing before it and no prose after it. That word is what the delivery reads
-to decide that no message is sent, so a reply that says "nothing today!" or explains why
-there is nothing is a message Miha receives at 08:00 about nothing.
+One word and nothing else. That is the contract with whatever delivers the digest: a reply
+of `NOTHING` is not sent, anything else is sent as written. So a reply that says "nothing
+today!" or explains why there is nothing is a message Miha receives at 08:00 about nothing.
 
 Otherwise, reply with the message itself and nothing else: no preamble, no sign-off, no
 "here is your digest". Plain text, no markdown. Short lines, each starting with `- `,
@@ -57,15 +57,16 @@ to something you read; if you did not read it, it is not in the message.
 
 ## Read only
 
-This turn creates, edits and deletes nothing, and commits nothing. The pull above is the
-only git command it runs. If you also hold the `vault-keeper` skill, its turn does not
-apply here: no leftover commit, no push, no receipt line. A dirty clone stays dirty for
-the next writing turn to commit. Whatever you write back is the whole of what Miha reads,
-and a receipt line would arrive as part of the digest.
+This turn creates, edits and deletes nothing, and commits nothing. If you also hold the
+`vault-keeper` skill, do what it says first — read the vault's `CLAUDE.md`, pull — and stop
+there: no leftover commit, no push, no receipt line. A dirty clone stays dirty for the next
+writing turn to commit. Whatever you write back is the whole of what Miha reads, and a
+receipt line would arrive as part of the digest.
 
 ## When you cannot read it
 
 If `/vault` is missing or a file you need is unreadable, do not reconstruct the morning
 from memory or from yesterday's journal. Reply `NOTHING` — a silent morning costs less
-than a confident wrong one — and raise `needs_human` in the machine-read region after it,
-naming what you could not read, so the silence is explained where a person will see it.
+than a confident wrong one — and raise it through the `escalate` skill, naming what you
+could not read, so the silence is explained where a person will see it. That machine-read
+region is for steward and comes after the word; it is the one thing allowed to follow it.

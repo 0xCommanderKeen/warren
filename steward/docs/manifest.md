@@ -1455,8 +1455,8 @@ skills/
   read-calendar/SKILL.md
   errands/SKILL.md
   write-blog-post/SKILL.md
-  vault-keeper/SKILL.md       # the Life vault's turn protocol and save receipts
-  morning-digest/SKILL.md     # what is actionable today, or exactly NOTHING
+  vault-keeper/SKILL.md       # granted to the resident that keeps the Life vault
+  morning-digest/SKILL.md
 ```
 
 ```markdown
