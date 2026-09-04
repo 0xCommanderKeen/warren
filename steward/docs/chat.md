@@ -5,7 +5,8 @@ daemon long-polls one Telegram bot per resident, and every message from a named 
 fires **one ordinary session** whose final message is sent back as the reply.
 
 Text in, text out. No buttons, no outbound escalations, no group chats, one transport.
-What is deliberately *not* here is at the bottom.
+The one outbound thing is a routine that says `deliver: chat` (warren#385), below. What is
+deliberately *not* here is at the bottom.
 
 ## The shape, in five sentences
 
@@ -255,6 +256,28 @@ If nothing comes back:
 | "…cannot answer right now: …" | a budget pause, or a memory directory the daemon cannot see. `steward budget show` and `steward doctor` say which. |
 | `telegram getUpdates failed` in the log | the token is wrong, or the burrow cannot reach `api.telegram.org`. |
 
+## Delivered routines
+
+`routines[].deliver: chat` is the one message a resident sends without being spoken to,
+and it is a *routine's* message rather than the bridge's: the scheduler fires the routine
+as ever, and after `routine_finished` hands the session's final message to
+`RoutineDelivery`, which sends it into each operator's private conversation with the
+resident's bot. The address is the route's own — `chat` names the route kind, not the
+transport, so a route on a second transport delivers through that transport's
+`ChatTransport` and `routines` never learns the word "telegram". The send is the same
+egress as a reply: redacted, *then* bounded, so a token the session printed never reaches
+the phone.
+
+`quiet_word` names the one reply that means "say nothing" (Hob's digest uses `NOTHING`);
+an empty message is quiet too. Everything else goes as written.
+
+The run row says what happened — `delivered`, `quiet`, or `delivery_failed` with the
+reason — and the outcome is untouched by it: a phone that is off is not a failed routine.
+A failed or timed-out run delivers nothing. The scheduler and the API both hold the same
+`STEWARD_CHAT_TOKEN_<REF>` and `STEWARD_CHAT_OPERATORS` the bridge reads, so a run-now over
+the API delivers exactly as a scheduled fire does; `steward chat run` need not be up for a
+delivery to land. Field rules are in [manifest.md](manifest.md#deliver-chat-and-quiet_word).
+
 ## Environment
 
 | variable | meaning |
@@ -268,13 +291,14 @@ If nothing comes back:
 
 - **`needs_human` and task completions pushed into the chat.** Those are *notifications* —
   one-way, nothing listens for a reply — and they already have a channel
-  ([warren#114](../src/steward/notify.py), ntfy). This bridge only ever speaks when spoken
-  to.
+  ([warren#114](../src/steward/notify.py), ntfy). The bridge itself only ever speaks when
+  spoken to; a delivered routine is the scheduler speaking, through the bridge's egress.
 - **Approval buttons.** An approval is an authorisation, and "who pressed it" is a security
   question a v0 chat channel has no honest answer to.
 - **Discord, or any second transport.** The seam is a `ChatTransport` protocol with two
   methods, so a second one is a class rather than a rewrite. There is no second one.
 - **Editing, reactions, photos, voice notes.** `allowed_updates: ["message"]`, text only;
   anything else is ignored rather than half-answered.
-- **A conversation the resident starts.** There is no outbound half here and there is not
-  going to be one.
+- **A conversation the resident starts.** A delivered routine is a message the *manifest*
+  scheduled, not one the resident decided to send; nothing a session says mid-run reaches
+  a phone, and there is no API a session can call to send one.

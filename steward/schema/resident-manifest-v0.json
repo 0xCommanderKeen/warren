@@ -628,6 +628,33 @@
           "default": null,
           "description": "Flag the one routine that ends the resident's day and journals.",
           "title": "Journal"
+        },
+        "deliver": {
+          "anyOf": [
+            {
+              "const": "chat",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the final message of a finished run goes. 'chat' sends it to each operator through the resident's active chat route.",
+          "title": "Deliver"
+        },
+        "quiet_word": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The one reply that means 'say nothing': a delivered run whose whole output is this word sends nothing. One short token, matched exactly.",
+          "title": "Quiet Word"
         }
       },
       "required": [

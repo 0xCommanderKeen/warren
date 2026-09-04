@@ -1573,3 +1573,30 @@ def test_a_run_that_is_not_a_routine_is_not_a_routines_last_run(store: Store) ->
     )
 
     assert store.latest_routine_runs() == {}
+
+
+# ---------------------------------------------------------------------------- delivery
+
+
+def test_a_delivery_is_written_onto_the_run_row_open_or_closed(store: Store) -> None:
+    assert store.open_run(run_id="d1", kind="routine", agent_id="a:hob", trigger="schedule")
+    opened = store.run_record("d1")
+    assert opened is not None
+    assert opened.delivery is None
+    assert store.close_run("d1")
+    assert store.record_delivery("d1", "delivery_failed", "no operators")
+    row = store.run_record("d1")
+    assert row is not None
+    assert (row.delivery, row.delivery_reason) == ("delivery_failed", "no operators")
+    assert row.to_dict()["delivery"] == "delivery_failed"
+    assert store.record_delivery("d1", "delivered")
+    again = store.run_record("d1")
+    assert again is not None
+    assert again.delivery_reason == ""
+
+
+def test_a_delivery_needs_a_run_and_a_known_status(store: Store) -> None:
+    assert not store.record_delivery("never-opened", "delivered")
+    assert store.run_record("never-opened") is None
+    with pytest.raises(ValueError, match="invalid delivery status"):
+        store.record_delivery("never-opened", "lost")  # ty: ignore[invalid-argument-type]

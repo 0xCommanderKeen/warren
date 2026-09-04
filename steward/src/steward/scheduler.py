@@ -93,7 +93,15 @@ from steward.runners import (
     build_runner,
     check_runner,
 )
-from steward.runs import TRIGGER_MANUAL, TRIGGER_SCHEDULE, validate_kind_trigger
+from steward.runs import (
+    DELIVERED,
+    DELIVERY_FAILED,
+    QUIET,
+    TRIGGER_MANUAL,
+    TRIGGER_SCHEDULE,
+    DeliveryStatus,
+    validate_kind_trigger,
+)
 from steward.session_auth import new_session_credential
 from steward.sessions import (
     Refusal,
@@ -115,10 +123,15 @@ from steward.topology import residents_on_this_burrow
 __all__ = [
     "DEFAULT_CATCHUP_S",
     "DEFAULT_STATE_PATH",
+    "DELIVERED",
+    "DELIVERY_FAILED",
     "HEARTBEAT_EVERY_S",
+    "QUIET",
     "STALE_TICK_AFTER_S",
     "TRIGGER_MANUAL",
     "TRIGGER_SCHEDULE",
+    "Deliverer",
+    "Delivery",
     "FireReport",
     "RunGuard",
     "RunRegistry",
@@ -129,6 +142,7 @@ __all__ = [
     "TreeSource",
     "WakeHooks",
     "default_state_path",
+    "delivery_text",
     "latest_fire_at_or_before",
     "load_scheduled",
     "next_fire_after",
@@ -233,6 +247,62 @@ class RunRegistry(Protocol):
         """Record that a session reported back, and return whether this call closed it."""
         ...
 
+    def record_delivery(self, run_id: str, status: DeliveryStatus, reason: str = "") -> bool:
+        """Write down what became of the run's final message (warren#385)."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class Delivery:
+    """What became of a finished routine's final message (warren#385).
+
+    ``status`` is one of :data:`steward.runs.DELIVERY_STATUSES`; ``reason`` says why when
+    it is :data:`~steward.runs.DELIVERY_FAILED`, and is steward's own sentence — never the
+    session's output, which is the thing that was being delivered.
+    """
+
+    status: DeliveryStatus
+    reason: str = ""
+
+
+class Deliverer(Protocol):
+    """Whatever carries a routine's final message to the people it is for.
+
+    A structural protocol for the same dull reason :class:`RunRegistry` is one: the thing
+    that satisfies it lives in :mod:`steward.chat`, which imports this module. The scheduler
+    decides *whether* a message is sent — the routine said ``deliver:``, the run finished,
+    the text is not the quiet word — and hands the text over; the deliverer decides *how*,
+    and owns redaction, bounding and the transport. Returns a :class:`Delivery`; a raise is
+    caught and recorded as a failed delivery, because a phone that is off must not turn a
+    finished digest into a failed routine.
+    """
+
+    def deliver(self, resident: Resident, routine: Routine, text: str) -> Delivery:
+        """Send ``text`` where the routine says, and report what happened.
+
+        The whole :class:`Routine` rather than its id, because ``deliver`` is the field
+        that will one day name a specific route address, and that is the deliverer's to
+        read.
+        """
+        ...
+
+
+def delivery_text(routine: Routine, result: RunResult) -> str | None:
+    """Return what a finished run has to say, or ``None`` when it is quiet.
+
+    Quiet is the empty message or the routine's ``quiet_word``, compared exactly after
+    trimming surrounding whitespace — a session that answers ``NOTHING`` has said nothing,
+    and one that answers "nothing much" has said something. Only a run that ended ``ok``
+    is asked: a failed or timed-out session's output is half a digest at best, and steward
+    has no way to know which half.
+    """
+    if not result.ok:
+        return None
+    text = (result.output or "").strip()
+    if not text or (routine.quiet_word is not None and text == routine.quiet_word):
+        return None
+    return text
+
 
 # --------------------------------------------------------------------------------------
 # cron
@@ -328,6 +398,9 @@ class FireReport:
     #: Where the day's journal entry ended up, when this was the closing routine and an
     #: entry exists. ``None`` means no entry — which is a real answer, not a failure.
     journal_path: Path | None = None
+    #: What became of the final message, when the routine says where it goes. ``None``
+    #: for a routine that delivers nowhere, and for a run that did not finish ``ok``.
+    delivery: Delivery | None = None
 
     @property
     def routine_id(self) -> str:
@@ -709,9 +782,13 @@ class Scheduler:
         claims: ResidentClaims | None = None,
         source: TreeSource | None = None,
         clock: Callable[[], datetime] | None = None,
+        deliverer: Deliverer | None = None,
     ) -> None:
         """Assemble a scheduler over an explicit list of routines."""
         self.scheduled = list(scheduled)
+        # No deliverer means a routine that says ``deliver:`` has nowhere to send to, and
+        # says so on its run row rather than silently keeping the message (warren#385).
+        self.deliverer = deliverer
         # Where the snapshot came from. ``None`` keeps the old contract exactly: a
         # scheduler handed a list and no source is a scheduler over that list, forever.
         self.source = source
@@ -1254,6 +1331,10 @@ class Scheduler:
                     self.run_transitions.publish_pending(
                         self.emitter, now=session.completed_at or moment
                     )
+            # After the terminal transition, so a routine the village saw finish is the
+            # one whose message goes out — and a delivery that fails changes nothing
+            # the village was told.
+            delivery = self._deliver(item, run_id, result)
         finally:
             admission.close()
         return FireReport(
@@ -1263,7 +1344,51 @@ class Scheduler:
             result=result,
             prompt=session.prompt,
             journal_path=session.journal_path,
+            delivery=delivery,
         )
+
+    def _deliver(self, item: ScheduledRoutine, run_id: str, result: RunResult) -> Delivery | None:
+        """Send a finished run's final message where its routine says, and record it.
+
+        Never raises. A message is only ever sent for a run that ended ``ok``; a failed or
+        timed-out run records nothing here, because there is nothing truthful to send and
+        the outcome already says what happened.
+        """
+        if item.routine.deliver is None or not result.ok:
+            return None
+        text = delivery_text(item.routine, result)
+        if text is None:
+            delivery = Delivery(status=QUIET)
+        elif self.deliverer is None:
+            delivery = Delivery(status=DELIVERY_FAILED, reason="no deliverer is configured")
+        else:
+            try:
+                delivery = self.deliverer.deliver(item.resident, item.routine, text)
+            except Exception as exc:  # noqa: BLE001 — a phone that is off is not a failed routine
+                delivery = Delivery(status=DELIVERY_FAILED, reason=f"{type(exc).__name__}: {exc}")
+        if delivery.status == DELIVERED:
+            log.info(
+                "%s: run %s delivered to %s%s",
+                item.key,
+                run_id,
+                item.routine.deliver,
+                f" ({delivery.reason})" if delivery.reason else "",
+            )
+        elif delivery.status == QUIET:
+            log.info("%s: run %s was quiet; nothing delivered", item.key, run_id)
+        else:
+            log.warning("%s: run %s delivery failed: %s", item.key, run_id, delivery.reason)
+        self._record_delivery(item, run_id, delivery)
+        return delivery
+
+    def _record_delivery(self, item: ScheduledRoutine, run_id: str, delivery: Delivery) -> None:
+        """Write the delivery onto the run row. Never raises: a lost note is not a lost run."""
+        if self.registry is None:
+            return
+        try:
+            self.registry.record_delivery(run_id, delivery.status, delivery.reason)
+        except Exception as exc:  # noqa: BLE001 — an unwritable registry is not a failed routine
+            log.warning("%s: could not record run %s's delivery: %s", item.key, run_id, exc)
 
     def _open_run(  # noqa: PLR0913, PLR0917 - one argument per persisted run fact
         self,

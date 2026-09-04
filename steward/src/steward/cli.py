@@ -1144,6 +1144,9 @@ def _build_scheduler(  # noqa: PLR0913 — click passes one parameter per option
             guard=guard,
             registry=registry,
             claims=claims,
+            # Where a routine's final message goes when its manifest says ``deliver:``
+            # (warren#385). A rehearsal delivers nothing, for the reason it emits nothing.
+            deliverer=None if dry_run else ch.RoutineDelivery.from_env(),
             # What makes `steward serve` notice a manifest that changed under it. A
             # rehearsal is given no source: `--dry-run` reports on the tree as it was read,
             # and a reload halfway through would make the report describe two of them.

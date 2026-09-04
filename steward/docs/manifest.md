@@ -597,6 +597,8 @@ routines:
     timeout_s: 900           # the run is killed after this and emitted as routine_failed
     enabled: true
     journal: close_of_day    # optional; on at most one routine — see below
+    deliver: chat            # optional; send the final message to the operators — see below
+    quiet_word: NOTHING      # optional, only with deliver; the one reply that sends nothing
 ```
 
 `requires` is checked against the resident's **effective** set — the library's defaults
@@ -620,6 +622,43 @@ per day":
   and therefore cannot close any day.
 - **The flagged routine must fire once a day.** An hourly routine flagged `close_of_day`
   would rewrite the day twenty-four times and call the last one the day.
+
+### `deliver: chat` and `quiet_word`
+
+Where a finished run's final message goes. Without it, a routine's output reaches the run
+ledger and the village and nobody's phone. With `deliver: chat`, the scheduler sends the
+message into each operator's private conversation with the resident's bot — every user id
+in `STEWARD_CHAT_OPERATORS` — after `routine_finished`, through the same redact-then-bound
+egress a chat reply takes ([chat.md](chat.md#delivered-routines)). A bot token the session
+printed never reaches the phone; a message longer than the reply bound is cut, not split.
+
+`chat` names the route **kind**, not a transport. It means "this resident's active chat
+route", and the transport is whatever that route's address says — `telegram:hob` today, a
+Discord address tomorrow without this field changing. A resident has one chat route today,
+so bare `chat` is unambiguous; the intended extension, when a resident has several, is
+additive: `deliver` will also accept a specific route address (`deliver: discord:hob`),
+and bare `chat` keeps meaning "the one active chat route". Per-routine transport choice is
+deliberately not here until then.
+
+`quiet_word` is the one reply that means "say nothing". A run whose whole output, trimmed,
+equals the word sends nothing, and so does a run that says nothing at all; anything else is
+sent as written, so `nothing much` is a message. It is one short token — no whitespace, at
+most 32 characters — because the comparison is exact, and it means nothing without
+`deliver`.
+
+What validation refuses:
+
+- **`deliver: chat` on a resident with no `active` chat route.** A `pending` route is a bot
+  nobody has put a token behind, so there is no conversation to send into. This is an
+  error where an undeliverable notification is a warning, because a digest that is written,
+  paid for and dropped every morning is work thrown away.
+- **A `quiet_word` that is not one short token**, or one declared without `deliver`.
+
+What a delivery never changes is the routine's **outcome**. The run row and the log say
+`delivered`, `quiet` or `delivery_failed` with the reason (no operators, no token, the
+transport refused every send); `routine_failed` and a `timeout` send nothing, because half
+a digest is not a digest. A partial delivery — some operators reached — is `delivered`
+with a note saying how many.
 
 ### `schedule_tz`
 
