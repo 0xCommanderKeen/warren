@@ -76,7 +76,7 @@ from steward.nursery import (
 )
 from steward.openapi import OPENAPI_ARTIFACT, openapi_json
 from steward.operator_auth import new_operator_credential, operator_email
-from steward.org import OrgNode, org_chart
+from steward.org import OrgEdge, OrgNode, org_chart
 from steward.prompt import assemble_preamble
 from steward.runners import (
     SESSION_EMITTER_ENV,
@@ -617,7 +617,7 @@ def org_command(residents: Path, skills_dir: Path | None, output_format: str) ->
     if not chart.nodes:
         click.secho("no residents", fg="yellow")
     for node in sorted(chart.nodes, key=lambda entry: (entry.rank, entry.id)):
-        _render_org_node(node)
+        _render_org_node(node, [edge for edge in chart.edges if edge.sender == node.id])
     for edge in chart.edges:
         if not edge.deliverable:
             click.secho(
@@ -633,28 +633,37 @@ def _rendered(diagnostics: Sequence[Diagnostic]) -> list[str]:
     return [diagnostic.render() for diagnostic in diagnostics]
 
 
-def _render_org_node(node: OrgNode) -> None:
+def _render_org_node(node: OrgNode, sends: Sequence[OrgEdge]) -> None:
     """Print one resident and the chips hanging off it, indented by rank."""
     indent = "  " * node.rank
     label = f"{node.id} ({node.name}, {node.role})"
     click.secho(f"{indent}{label}", fg="cyan" if not node.retired else "white", bold=True)
     if node.retired:
         click.secho(f"{indent}  retired", fg="white")
-    for chip in _org_chips(node):
+    for chip in _org_chips(node, sends):
         click.echo(f"{indent}  {chip}")
 
 
-def _org_chips(node: OrgNode) -> list[str]:
+def _org_chips(node: OrgNode, sends: Sequence[OrgEdge]) -> list[str]:
     """Return the one-line facts a chart draws beside a node, in a fixed order.
 
-    Every dimension speaks even when it has nothing to say ("no cap", "no mounts"),
+    Every dimension speaks even when it has nothing to say ("no cap", "none"),
     because on a chart of what a resident is allowed to do, silence and unlimited must
     not look the same — the rule :func:`steward.routes.residents.budget_summary` follows.
+
+    ``sends`` is the other half of the projection, said out loud rather than left to the
+    indentation: two managers of one resident sit on different rows, so indentation alone
+    cannot say which of them a given handoff belongs to. A grant steward would refuse is
+    named as refused here, not silently listed beside the ones that work.
     """
+    budget = node.budget
+    # Against None rather than on truthiness: a declared cap of zero is falsy, and printing
+    # "no cap" over a resident told to spend nothing would invert the very fact this line
+    # exists to state.
     caps = [
-        f"${node.budget.daily_cost_usd:g}/day" if node.budget.daily_cost_usd else "",
-        f"{node.budget.daily_tokens} tokens/day" if node.budget.daily_tokens else "",
-        f"{node.budget.max_run_seconds}s/run" if node.budget.max_run_seconds else "",
+        f"${budget.daily_cost_usd:g}/day" if budget.daily_cost_usd is not None else "",
+        f"{budget.daily_tokens} tokens/day" if budget.daily_tokens is not None else "",
+        f"{budget.max_run_seconds}s/run" if budget.max_run_seconds is not None else "",
     ]
     declared = [cap for cap in caps if cap]
     mounts = [f"{mount.container} ({mount.mode})" for mount in node.mounts]
@@ -664,7 +673,16 @@ def _org_chips(node: OrgNode) -> list[str]:
         f"mounts: {', '.join(mounts) if mounts else 'none'}",
         f"grants: {', '.join(grants) if grants else 'none'}",
         f"accepts: {', '.join(node.accepts) if node.accepts else 'no delegation route'}",
+        f"hands work to: {_org_handoffs(node, sends)}",
     ]
+
+
+def _org_handoffs(node: OrgNode, sends: Sequence[OrgEdge]) -> str:
+    """Name every receiver this resident may hand work to, refusals marked."""
+    if not node.delegates:
+        return "nobody (no delegation grant)"
+    named = [edge.receiver if edge.deliverable else f"{edge.receiver} (refused)" for edge in sends]
+    return ", ".join(named) if named else "nobody with an open door"
 
 
 # --------------------------------------------------------------------------------------

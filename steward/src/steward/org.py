@@ -26,9 +26,9 @@ from typing import Any
 
 from steward.manifest import Mount, Resident
 
-#: Why an edge that is declared will not carry work today. Each one is the receiving half
-#: of the pair failing, which is the only half an edge can fail on: the sending half is
-#: what made the edge exist at all.
+#: Why an edge that is declared will not carry work. Each one is the receiving half of the
+#: pair failing, which is the only half an edge can fail on: the sending half is what made
+#: the edge exist at all.
 NO_SUCH_RESIDENT = "no resident is declared with that id"
 RECEIVER_RETIRED = "the receiver is retired, so every door it had is closed"
 NO_OPEN_ROUTE = "the receiver declares no active route of kind 'delegation'"
@@ -146,7 +146,10 @@ class OrgEdge:
     #: sender picked it. The two are different grants and a chart that flattened them
     #: would say a manager chose a worker it has never heard of.
     named: bool
-    #: Whether steward would carry a handoff along this edge right now.
+    #: Whether both declarations agree: the sender may send here and the receiver has an
+    #: open door. It is the edge's own answer and not a promise about a particular
+    #: handoff — :data:`steward.delegation.DEFAULT_MAX_DEPTH` caps how far a *chain* may
+    #: travel, and no edge can see the lineage it would be the next hop of.
     deliverable: bool
     #: Why not, when not. ``None`` on a deliverable edge.
     reason: str | None
@@ -231,41 +234,47 @@ def _edges(residents: Sequence[Resident]) -> tuple[OrgEdge, ...]:
 
 
 def _ranks(residents: Sequence[Resident], edges: Sequence[OrgEdge]) -> Mapping[str, int]:
-    """Place each resident one level below whoever may hand it work.
+    """Place each resident strictly below everyone who may hand it work.
 
     A layout fact, computed here rather than in each surface, so the terminal's indentation
-    and the panel's rows cannot disagree about who is above whom. Breadth-first from the
-    residents nobody delegates to, over deliverable edges only: an edge that does not carry
-    work does not make anybody a manager.
+    and the panel's rows cannot disagree about who is above whom. Deliverable edges only:
+    an edge that carries nothing does not make anybody a manager.
 
-    Two residents that may delegate to each other are a cycle with no root, and a cycle has
-    no top. Everyone the walk never reaches keeps rank 0 — drawn on the top row, where a
-    reader can see the pair — rather than being dropped or given an invented order.
+    The walk is a topological one taking the **longest** path, not the shortest, and the
+    difference is the whole correctness of the picture. With ``a → b``, ``a → c`` and
+    ``c → b``, a breadth-first pass reaches ``b`` from ``a`` in one hop and puts it on the
+    same row as ``c`` — a card that says "takes work from c" sitting level with c. Waiting
+    until every manager has been placed puts ``b`` under both.
+
+    Two residents that may delegate to each other are a cycle, and a cycle has no top:
+    nobody in one ever loses their last incoming edge, so the walk never reaches them.
+    They keep rank 0 — drawn on the top row, where a reader can see the pair — rather than
+    being dropped or given an invented order. Anything reachable only through a cycle
+    keeps 0 for the same reason: there is no honest depth below a bottom that does not
+    exist.
     """
     ranks = dict.fromkeys((resident.id for resident in residents), 0)
     below: dict[str, list[str]] = {resident.id: [] for resident in residents}
-    managed: set[str] = set()
+    managers = dict.fromkeys(ranks, 0)
     for edge in edges:
         if not edge.deliverable or edge.receiver not in ranks:
             continue
         below[edge.sender].append(edge.receiver)
-        managed.add(edge.receiver)
+        managers[edge.receiver] += 1
 
-    frontier = [resident.id for resident in residents if resident.id not in managed]
-    seen = set(frontier)
-    depth = 0
+    frontier = [resident_id for resident_id, count in managers.items() if not count]
     while frontier:
-        depth += 1
-        following: list[str] = []
-        for resident_id in frontier:
-            for receiver in below[resident_id]:
-                if receiver in seen:
-                    continue
-                seen.add(receiver)
-                ranks[receiver] = depth
-                following.append(receiver)
-        frontier = following
-    return ranks
+        resident_id = frontier.pop()
+        for receiver in below[resident_id]:
+            ranks[receiver] = max(ranks[receiver], ranks[resident_id] + 1)
+            managers[receiver] -= 1
+            if not managers[receiver]:
+                frontier.append(receiver)
+    # Whatever the walk never placed is in a cycle or behind one. Its rank is the 0 it was
+    # seeded with, said here rather than left as an accident of the loop above.
+    return {
+        resident_id: rank if not managers[resident_id] else 0 for resident_id, rank in ranks.items()
+    }
 
 
 def org_chart(residents: Iterable[Resident]) -> OrgChart:

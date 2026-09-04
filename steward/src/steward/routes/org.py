@@ -32,6 +32,9 @@ def router(deps: Deps) -> APIRouter:
         raises *about* a tree whose residents did load, such as two residents claiming one
         home; those residents are on the chart, and the complaint is right there with it.)
         """
+        # Errors only, the same half ``GET /residents`` reports: a warning does not stop a
+        # manifest becoming a node, so every resident it concerns is already on the chart.
+        # ``steward validate`` is where a tree is audited; this route draws one.
         result = validate_path(residents_dir, settings.skills_dir)
         return {
             **org_chart(result.residents).to_dict(),

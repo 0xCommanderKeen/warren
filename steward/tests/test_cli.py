@@ -4317,6 +4317,30 @@ def test_org_says_no_cap_and_none_rather_than_going_quiet(
     assert "mounts: /vault (rw)" in output
 
 
+def test_org_names_the_receivers_rather_than_leaving_them_to_the_indentation(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    """A resident with two managers sits under one row, so the edge has to be said."""
+    tree = org_tree(write_resident, tmp_path)
+
+    output = runner.invoke(main, ["org", "--residents", str(tree)]).output
+
+    assert "hands work to: receiver-agent" in output
+    assert "hands work to: nobody (no delegation grant)" in output
+
+
+def test_org_marks_a_receiver_it_would_refuse_rather_than_listing_it_as_a_handoff(
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+) -> None:
+    sender = valid_manifest()
+    sender["delegation"] = {"send": True, "to": ["ghost"]}
+    write_resident(sender)
+
+    output = runner.invoke(main, ["org", "--residents", str(tmp_path / "residents")]).output
+
+    assert "hands work to: ghost (refused)" in output
+
+
 def test_org_json_is_the_same_projection_the_api_answers_with(
     runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
 ) -> None:

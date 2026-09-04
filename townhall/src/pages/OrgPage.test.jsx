@@ -116,6 +116,9 @@ describe("the org layout, as functions", () => {
     expect(budgetLine({ declared: true, daily_cost_usd: 10, max_run_seconds: 900 })).toBe(
       "$10/day · 900s/run",
     );
+    // A cap of zero is falsy, and "no cap" over a resident told to spend nothing would be
+    // the exact inversion this line exists to prevent.
+    expect(budgetLine({ declared: true, daily_cost_usd: 0 })).toBe("$0/day");
   });
 });
 
@@ -143,6 +146,24 @@ describe("the org page", () => {
     const worker = screen.getByText("pip").closest("article");
     expect(within(manager).getByText(/hands work to pip/)).toBeTruthy();
     expect(within(worker).getByText(/takes work from hob/)).toBeTruthy();
+  });
+
+  it("does not let a card claim a handoff steward would refuse", async () => {
+    // The card used to read "hands work to pip" off every edge, deliverable or not — so it
+    // asserted a working handoff two sections above the panel saying it would not happen.
+    mount({
+      ...CHART,
+      edges: [
+        { sender: "hob", receiver: "pip", named: true, deliverable: false, reason: "shut" },
+      ],
+    });
+
+    const manager = (await screen.findByText("hob")).closest("article");
+    const worker = screen.getByText("pip").closest("article");
+    expect(within(manager).queryByText(/^hands work to pip$/)).toBeNull();
+    expect(within(manager).getByText(/declared, but refused: pip/)).toBeTruthy();
+    expect(within(worker).queryByText(/^takes work from hob$/)).toBeNull();
+    expect(within(worker).getByText(/claimed by, but refused: hob/)).toBeTruthy();
   });
 
   it("keeps a declared handoff steward would refuse, with the reason", async () => {

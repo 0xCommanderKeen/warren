@@ -146,6 +146,24 @@ def test_two_residents_that_may_delegate_to_each_other_stay_on_the_top_row(
     assert sorted(pairs(chart)) == [("boss", "hand"), ("hand", "boss")]
 
 
+def test_a_resident_sits_below_its_deepest_manager_not_its_nearest(
+    write: SpecWriter, tmp_path: Path
+) -> None:
+    """Two routes to worker: boss → worker direct, and boss → hand → worker.
+
+    Worker belongs under hand. The shortest path from a root is one hop, so a
+    breadth-first walk would put worker on hand's own row while worker's card says it
+    takes work from hand. Fails against a shortest-path rank; see ``_ranks``.
+    """
+    write(resident_spec("boss", home=1, delegation={"send": True, "to": ["hand", "worker"]}))
+    write(resident_spec("hand", home=2, accepts=True, delegation={"send": True, "to": ["worker"]}))
+    write(resident_spec("worker", home=3, accepts=True))
+
+    chart = chart_of(tmp_path / "residents")
+
+    assert {node.id: node.rank for node in chart.nodes} == {"boss": 0, "hand": 1, "worker": 2}
+
+
 def test_a_named_receiver_with_no_open_door_is_drawn_and_says_why(
     write: SpecWriter, tmp_path: Path
 ) -> None:

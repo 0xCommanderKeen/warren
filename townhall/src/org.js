@@ -60,10 +60,13 @@ export function broken(chart) {
  */
 export function budgetLine(budget) {
   if (!budget) return "no cap";
+  // Against null rather than on truthiness: a declared cap of zero is falsy, and reading
+  // "no cap" over a resident told to spend nothing inverts the fact this line states.
+  const said = (value, render) => (value === null || value === undefined ? null : render(value));
   const parts = [
-    budget.daily_cost_usd ? `$${budget.daily_cost_usd}/day` : null,
-    budget.daily_tokens ? `${budget.daily_tokens} tokens/day` : null,
-    budget.max_run_seconds ? `${budget.max_run_seconds}s/run` : null,
+    said(budget.daily_cost_usd, (value) => `$${value}/day`),
+    said(budget.daily_tokens, (value) => `${value} tokens/day`),
+    said(budget.max_run_seconds, (value) => `${value}s/run`),
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "no cap";
 }

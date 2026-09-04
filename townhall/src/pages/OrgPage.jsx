@@ -42,13 +42,27 @@ function Chips({ label, items, tone }) {
   );
 }
 
+const works = (edges) => edges.filter((edge) => edge.deliverable);
+const refused = (edges) => edges.filter((edge) => !edge.deliverable);
+
+/** One line of "who is on the other end", left out entirely when there is nobody. */
+function Wire({ label, ends, tone = "text-faint" }) {
+  if (!ends.length) return null;
+  return (
+    <p className={`mt-[6px] mb-0 text-[10.5px] ${tone}`}>
+      {label} {ends.join(", ")}
+    </p>
+  );
+}
+
 function Node({ node, sends, receives }) {
   const mounts = (node.mounts || []).map((mount) => `${mount.container} (${mount.mode})`);
-  const managers = receives.map((edge) => edge.sender);
   return (
     <article
-      className="min-w-[268px] flex-1 basis-[268px] border bg-deep px-[18px] py-[15px]"
-      style={{ "--accent": node.accent || "var(--color-ember)", borderColor: "var(--color-rule)" }}
+      // The declared accent is the card's left edge, the same way a Row's is (#151): a
+      // colour set as a custom property nothing reads is a colour that is not on the screen.
+      className="min-w-[268px] flex-1 basis-[268px] border border-rule border-l-2 bg-deep px-[18px] py-[15px] border-l-[color:var(--card-accent,var(--color-ember))]"
+      style={node.accent ? { "--card-accent": node.accent } : undefined}
     >
       <header className="flex items-baseline gap-2.5">
         <Swatch accent={node.accent} className="-translate-y-px" />
@@ -74,16 +88,21 @@ function Node({ node, sends, receives }) {
       <Chips label="mounts" items={mounts} />
       <Chips label="accepts" items={node.accepts || []} />
 
-      {managers.length ? (
-        <p className="mt-[11px] mb-0 text-[10.5px] text-faint">
-          takes work from {managers.join(", ")}
-        </p>
-      ) : null}
-      {sends.length ? (
-        <p className="mt-[5px] mb-0 text-[10.5px] text-faint">
-          hands work to {sends.map((edge) => edge.receiver).join(", ")}
-        </p>
-      ) : null}
+      {/* Split by whether steward would actually carry it. Listing a refused grant in the
+          same prose as a working one would make the card assert a handoff the panel below
+          says will not happen — the page contradicting itself two sections apart. */}
+      <Wire label="takes work from" ends={works(receives).map((edge) => edge.sender)} />
+      <Wire label="hands work to" ends={works(sends).map((edge) => edge.receiver)} />
+      <Wire
+        label="declared, but refused:"
+        ends={refused(sends).map((edge) => edge.receiver)}
+        tone="text-fail"
+      />
+      <Wire
+        label="claimed by, but refused:"
+        ends={refused(receives).map((edge) => edge.sender)}
+        tone="text-fail"
+      />
     </article>
   );
 }
