@@ -61,6 +61,7 @@ import unicodedata
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from steward.letter_replies import ANSWER_BATCH_MAX_CHARS
 from steward.manifest import (
     VOICE_MAX_CHARS,
     Charter,
@@ -119,7 +120,7 @@ DECISIONS_MAX_CHARS = 4000
 
 # Several workers may finish between a manager's turns. Bound the batch as well as each
 # individual answer so replies cannot crowd the authoritative charter out of the prompt.
-ANSWERED_LETTERS_MAX_CHARS = 12_000
+ANSWERED_LETTERS_MAX_CHARS = ANSWER_BATCH_MAX_CHARS
 
 #: A task's detail — a board notice or a letter from a neighbour — is attacker-reachable
 #: text (a job posted over the API, a handoff another session wrote) injected into a

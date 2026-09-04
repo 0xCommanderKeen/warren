@@ -147,6 +147,67 @@ def test_a_closed_letter_is_claimed_for_its_sender_once(store: Store) -> None:
     assert store.claim_answered_letters("librarian") == []
 
 
+def test_answered_letter_storage_bounds_the_receivers_final_message(store: Store) -> None:
+    letter = store.delegate_job(
+        title="Write a long report",
+        assignee="worker",
+        delegated_by="librarian",
+        route="inbox",
+    )
+    claimed = store.claim_next_delegated(
+        assignee="worker",
+        claimant="claude-code:worker",
+        lease_expires_at=LATER,
+        now=EARLY,
+    )
+    assert claimed is not None
+
+    closed = store.finish_job(
+        letter.task_id,
+        status="done",
+        claimant="claude-code:worker",
+        final_message="x" * 20_000,
+        lease=claimed.claimed_at,
+        now=LATER,
+    )
+
+    assert closed is not None
+    assert len(closed.final_message) == 4_000
+    assert closed.final_message.endswith("…")
+
+
+def test_answered_letter_overflow_waits_for_the_next_wake(store: Store) -> None:
+    for number in range(4):
+        letter = store.delegate_job(
+            title=f"Report {number}",
+            assignee="worker",
+            delegated_by="librarian",
+            route="inbox",
+        )
+        claimed = store.claim_next_delegated(
+            assignee="worker",
+            claimant="claude-code:worker",
+            lease_expires_at=LATER,
+            now=EARLY,
+        )
+        assert claimed is not None
+        store.finish_job(
+            letter.task_id,
+            status="done",
+            claimant="claude-code:worker",
+            final_message=str(number) * 4_000,
+            lease=claimed.claimed_at,
+            now=LATER,
+        )
+
+    first_wake = store.claim_answered_letters("librarian")
+    second_wake = store.claim_answered_letters("librarian")
+
+    assert 0 < len(first_wake) < 4
+    assert len(first_wake) + len(second_wake) == 4
+    assert store.claim_answered_letters("librarian") == []
+
+
 def test_two_wake_ups_cannot_claim_the_same_answered_letter(tmp_path: Path) -> None:
     path = tmp_path / "shared.db"
     with Store(path) as setup:

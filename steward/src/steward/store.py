@@ -54,6 +54,7 @@ from typing import Any, Self
 from steward.claims import ResidentClaim
 from steward.events import utc_now_iso
 from steward.health import HealthJournal
+from steward.letter_replies import ANSWER_BATCH_MAX_CHARS, bounded_message, render_answer
 from steward.operator_auth import OperatorPrincipal
 from steward.runs import (
     DELIVERY_STATUSES,
@@ -1454,7 +1455,7 @@ class Store:
                     outcome,
                     reason,
                     _dumps(list(artifacts)),
-                    final_message,
+                    bounded_message(final_message),
                     now or utc_now_iso(),
                     task_id,
                     STATUS_CLAIMED,
@@ -1472,6 +1473,7 @@ class Store:
         """Take terminal letters sent by one resident, marking their replies told once."""
         moment = now or utc_now_iso()
         claimed: list[JobRecord] = []
+        rendered_chars = 0
         with self._lock, self._conn:
             rows = self._conn.execute(
                 "SELECT * FROM jobs WHERE delegated_by = ? AND status IN (?, ?) "
@@ -1479,6 +1481,15 @@ class Store:
                 (sender, STATUS_DONE, STATUS_FAILED),
             ).fetchall()
             for row in rows:
+                rendered = render_answer(
+                    title=row["title"],
+                    receiver=row["assignee"] or "unknown receiver",
+                    status=row["status"],
+                    message=row["final_message"],
+                )
+                next_size = rendered_chars + (2 if claimed else 0) + len(rendered)
+                if next_size > ANSWER_BATCH_MAX_CHARS:
+                    break
                 cursor = self._conn.execute(
                     "UPDATE jobs SET reply_delivered_at = ? "
                     "WHERE task_id = ? AND reply_delivered_at IS NULL",
@@ -1489,6 +1500,7 @@ class Store:
                         "SELECT * FROM jobs WHERE task_id = ?", (row["task_id"],)
                     ).fetchone()
                     claimed.append(JobRecord.from_row(fresh))
+                    rendered_chars = next_size
         return claimed
 
     def finish_job_and_claim_run_terminal(  # noqa: PLR0913
@@ -1540,7 +1552,7 @@ class Store:
                         outcome,
                         reason,
                         _dumps(list(artifacts)),
-                        final_message,
+                        bounded_message(final_message),
                         moment,
                         task_id,
                         STATUS_CLAIMED,

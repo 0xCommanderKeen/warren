@@ -69,11 +69,11 @@ from steward.input_bounds import (
     validate_identifier,
     validate_work_text,
 )
+from steward.letter_replies import render_answer
 from steward.manifest import (
     DELEGATION_ROUTE_KIND,
     Resident,
     closest_match,
-    redact_secrets,
     retired_complaint,
 )
 from steward.store import STATUS_CLAIMED, JobRecord, Store
@@ -123,24 +123,20 @@ REJECTED_ACTION = "rejected_delegation"
 #: Who a handoff is recorded as sent by when a person asked for it over the API.
 HUMAN_SENDER = "api"
 
-# A worker's answer is context, not an archive. Keep each reply useful without letting one
-# verbose session crowd the sender's charter out of its next prompt.
-ANSWER_MESSAGE_MAX_CHARS = 4_000
-
 
 def answered_letters_preamble(records: Sequence[JobRecord]) -> str | None:
     """Render terminal delegated tasks for the sender's next session."""
     if not records:
         return None
-    answers: list[str] = []
-    for record in records:
-        message = redact_secrets(record.final_message).strip()
-        if len(message) > ANSWER_MESSAGE_MAX_CHARS:
-            message = message[: ANSWER_MESSAGE_MAX_CHARS - 1].rstrip() + "…"
-        if not message:
-            message = "(no final message)"
-        receiver = record.assignee or "unknown receiver"
-        answers.append(f"{record.title} — {receiver} — {record.status}\n{message}")
+    answers = [
+        render_answer(
+            title=record.title,
+            receiver=record.assignee or "unknown receiver",
+            status=record.status,
+            message=record.final_message,
+        )
+        for record in records
+    ]
     return "\n\n".join(answers)
 
 
