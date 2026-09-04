@@ -265,7 +265,7 @@ exits 0 even on its own transport failures), so nothing is suppressed that was e
 be heard. It is the same trade `entrypoint.sh` already makes out loud: a resident must not be
 taken down over telemetry.
 
-The sentinel halves of the third row are checked in, unlike the sweeps above:
+The third row is checked in, unlike the sweeps above:
 `tests/test_session_hooks_live.py` runs the real binary through steward's own
 `ClaudeRunner`, and skips when there is no `claude` on PATH. It can be checked in because it
 costs nothing — a `UserPromptSubmit` hook fires before the first API call, so the session is
@@ -303,9 +303,11 @@ unauthenticated, and the sentinel is already on disk.
 
 ## Reproducing it
 
-Nothing here is checked in as a test: it measures a binary steward does not ship, on a
-machine that is not CI, and a test that spends money at someone's API is worse than a
-dated record. The shape, if it needs redoing after a CLI upgrade:
+Nothing in *these* sweeps is checked in as a test: they measure a binary steward does not
+ship, on a machine that is not CI, and a test that spends money at someone's API is worse
+than a dated record. (One row of the #264 section below is the exception, and it is one
+because it costs nothing — see there.) The shape, if a sweep needs redoing after a CLI
+upgrade:
 
 1. A scratch `CLAUDE_CONFIG_DIR` with a `.claude.json` that marks the scratch workspace
    `hasTrustDialogAccepted: true`.
@@ -315,4 +317,7 @@ dated record. The shape, if it needs redoing after a CLI upgrade:
 
 `steward doctor` is the standing check that the installed CLI still knows the flag:
 `required_flags` reports `--setting-sources` for every `claude` resident, declarations or
-not, so a CLI too old to have it is red in daylight rather than a failed 07:00 routine.
+not, so a CLI too old to have it is red in daylight rather than a failed 07:00 routine. It
+reports `--settings` beside it wherever that session would actually send one (#264), which
+is every container placement and any local one that names an emitter — conditional, because
+a probe that asked for it unconditionally would redden a host that never sends it.

@@ -66,6 +66,7 @@ from steward.session_auth import SESSION_TOKEN_ENV
 
 __all__ = [
     "CHRONICLE_HOOKS",
+    "CHRONICLE_MIRROR_ENV",
     "CONTAINER_EMITTER",
     "COST_USD_MAX",
     "LOCAL_PLACEMENT",
@@ -91,6 +92,7 @@ __all__ = [
     "build_runner",
     "check_cli_support",
     "check_runner",
+    "check_session_emitter",
     "hook_settings",
     "required_flags",
     "run_argv",
@@ -190,6 +192,9 @@ SESSION_ENV_BASE = (
     # Where the village is, so a session's own emitter posts to the same burrow. The
     # ingest token is deliberately *not* here — see :data:`SESSION_ENV_REFUSED`.
     "CHRONICLE_URL",
+    # And where else it posts. Here so an operator who *wants* a mirror can say so; the
+    # reason it needs saying at all is :data:`CHRONICLE_MIRROR_ENV`.
+    "CHRONICLE_MIRROR",
 )
 
 #: Names a runner adds for its own brain, on top of :data:`SESSION_ENV_BASE`.
@@ -478,13 +483,38 @@ CONTAINER_EMITTER = "/opt/steward/chronicle-emit.py"
 #: brackets as always.
 SESSION_EMITTER_ENV = "STEWARD_SESSION_EMITTER"
 
+#: The emitter's second target, and the one steward has to switch off by name.
+#:
+#: chronicle's emitter mirrors every event to ``http://127.0.0.1:8737`` unless this is set,
+#: and *presence* is what decides: only an explicitly empty value turns it off, so an
+#: environment that simply does not mention it gets the loopback POST. That default is a
+#: laptop convenience — a developer's chronicle running beside the session — and the
+#: resident image already bakes ``CHRONICLE_MIRROR=""`` to be rid of it, because inside a
+#: container nothing is ever listening there and every hook would pay a refused connection
+#: and write a breaker file for it.
+#:
+#: Local placement is the half of that steward does not ship, and until #264 it did not
+#: matter: a local session had no hooks, so nothing mirrored anywhere. Now it does, so
+#: steward makes the same choice the image makes — empty unless something said otherwise.
+#: The case this is really about is not the wasted connection: it is a control plane
+#: running on a machine that *does* have a chronicle dev server on 8737, where every
+#: production session would quietly duplicate its events into somebody's scratch village.
+CHRONICLE_MIRROR_ENV = "CHRONICLE_MIRROR"
 
-def session_emitter(placement: Placement, inherited: Mapping[str, str] | None = None) -> str | None:
+
+def session_emitter(
+    placement: Placement, *, inherited: Mapping[str, str] | None = None
+) -> str | None:
     """Name the emitter script a session's hooks should run here, or ``None`` for silence.
 
     One question with two answers, because the two placements know different amounts about
     the filesystem the session lands in — see :data:`CONTAINER_EMITTER` and
     :data:`SESSION_EMITTER_ENV` for why each is the answer it is.
+
+    ``inherited`` is keyword-only for the same reason :func:`session_environment`'s is, and
+    it is the honest seam for the one caller that is not the launching process: ``steward
+    doctor`` answers this question about a *scheduler* that may run under a different
+    environment than the shell the report was typed into.
     """
     if placement.is_container:
         return CONTAINER_EMITTER
@@ -1108,6 +1138,20 @@ class ClaudeRunner(_ProcessRunner):
     #: a future design that restores discovery would build on.
     skills_dir: ClassVar[str | None] = ".claude/skills"
 
+    def environment(self, request: RunRequest) -> dict[str, str]:
+        """Return the allowlisted environment, plus the one default a declared hook needs.
+
+        Only when this session actually carries hooks, and only for a name nothing else
+        set: a session with no emitter runs no emitter, and an operator who deliberately
+        exported a ``CHRONICLE_MIRROR`` (or a wake that names one) keeps it. See
+        :data:`CHRONICLE_MIRROR_ENV` for why the *absence* of this variable is a decision
+        rather than a non-answer.
+        """
+        env = super().environment(request)
+        if session_emitter(self.placement) is not None:
+            env.setdefault(CHRONICLE_MIRROR_ENV, "")
+        return env
+
     def argv(self, request: RunRequest) -> list[str]:
         """Build the claude headless argv: prompt, model, JSON output, permissions, tools.
 
@@ -1524,6 +1568,35 @@ def required_flags(
     if workspace:
         flags.append(WORKSPACE_FLAG)
     return tuple(flags)
+
+
+def check_session_emitter(placement: Placement) -> str | None:
+    """Return why this placement's declared emitter cannot run, or ``None``.
+
+    Only container placement is answerable here, and only container placement needs
+    answering: steward names :data:`CONTAINER_EMITTER` in a container it did not
+    necessarily build this version of, and a resident still running an image from before
+    warren#361 carries the emitter under its pre-rename name. For local placement the path
+    came from an operator who can see their own filesystem, and steward has no second
+    opinion worth printing.
+
+    This exists because the failure it catches is invisible by construction. The hook
+    command ends in ``|| true`` so that a missing emitter costs telemetry rather than
+    denying every tool call (:func:`hook_settings`) — which means a resident with the wrong
+    path looks perfectly healthy, runs perfectly well, and tells the village nothing. Doctor
+    is the one place that can say so, and a report that asserted the channel was live
+    without ever looking would be the most confident wrong line in it.
+    """
+    emitter = session_emitter(placement)
+    if emitter is None or not placement.is_container:
+        return None
+    outcome = run_argv(["docker", "exec", placement.container_name, "test", "-f", emitter])
+    if outcome.ok:
+        return None
+    return (
+        f"{emitter} is not in {placement.container_name} — this resident's sessions run "
+        f"and emit nothing; re-ship the image and re-provision"
+    )
 
 
 def check_cli_support(

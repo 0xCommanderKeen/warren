@@ -482,8 +482,22 @@ placements know different amounts about the filesystem the session lands in:
 | `local` | `$STEWARD_SESSION_EMITTER`, or **nothing** | a host is somebody else's machine and steward installs no emitter on it. Unset — the default — means no `--settings` at all and a session as quiet as it has been since #206. Set it to a path you know exists and that session's hooks run |
 
 `steward doctor` prints one line per resident either way (`per-session events via …`, or
-`per-session events off — no emitter for local placement`). Neither is an error: a fleet may
-run quiet, but not *silently* quiet.
+`per-session events off — no emitter for local placement`), for `claude` residents only —
+no other kind is handed a settings document. Neither line is an error: a fleet may run
+quiet, but not *silently* quiet. What **is** an error is a container placement whose emitter
+is not in the container: doctor runs `docker exec <container> test -f <emitter>` and turns
+red, because that is the failure with no other symptom — the `|| true` means the resident
+runs, looks healthy, and tells the village nothing.
+
+**One thing a local session is told, that the image already bakes.** chronicle's emitter
+mirrors every event to `http://127.0.0.1:8737` unless `CHRONICLE_MIRROR` is set, and
+*presence* decides — only an explicitly empty value turns it off. The resident image bakes
+`CHRONICLE_MIRROR=""` for that reason; steward now does the same for a local session that
+carries hooks, unless something already named a mirror (it is on the session allowlist, so
+an operator who wants one says so). The case this matters for is not the refused
+connection: it is a control plane on a machine that really does run a chronicle dev server
+on 8737, where every production session would quietly duplicate its events into somebody's
+scratch village.
 
 **Whether a fired hook then *delivers* is a separate question, and it has a different answer
 per placement.** The emitter posts to `$CHRONICLE_URL` with `$CHRONICLE_TOKEN` as a bearer

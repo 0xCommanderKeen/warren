@@ -691,6 +691,66 @@ def test_only_claude_is_told_about_hooks(
     assert r.SETTINGS_FLAG not in (tmp_path / "argv.txt").read_text().splitlines()
 
 
+def test_a_declaring_session_is_told_not_to_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The emitter's loopback mirror is on unless something says otherwise (#264).
+
+    `chronicle-emit.py` mirrors every event to `http://127.0.0.1:8737` when
+    `CHRONICLE_MIRROR` is *absent* — presence decides, so only an explicitly empty value
+    turns it off, and the resident image bakes one for exactly that reason. Local placement
+    is the half steward does not ship, and until steward declared hooks it did not matter
+    because a local session had no hooks to mirror. The case this is really about is a
+    control plane on a machine that *does* run a chronicle dev server on 8737: every
+    production session would quietly duplicate its events into somebody's scratch village.
+    """
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    env = runner.environment(request_for(tmp_path))
+
+    assert env[r.CHRONICLE_MIRROR_ENV] == ""
+
+
+def test_a_silent_session_is_told_nothing_about_mirrors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session with no emitter runs no emitter, so it gets no opinion about its targets."""
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    assert r.CHRONICLE_MIRROR_ENV not in runner.environment(request_for(tmp_path))
+
+
+def test_an_operator_who_wants_a_mirror_keeps_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A default is not an override: a named mirror survives, which is why it is allowlisted."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+    monkeypatch.setenv(r.CHRONICLE_MIRROR_ENV, "http://scratch.example:8737")
+    runner = r.ClaudeRunner(RunnerSpec(kind="claude"))
+
+    env = runner.environment(request_for(tmp_path))
+
+    assert env[r.CHRONICLE_MIRROR_ENV] == "http://scratch.example:8737"
+
+
+def test_session_emitter_answers_about_an_environment_that_is_not_this_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`doctor` asks this about a *scheduler*, which may run under a different environment."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/on/this/shell.py")
+
+    assert r.session_emitter(r.LOCAL_PLACEMENT) == "/on/this/shell.py"
+    assert r.session_emitter(r.LOCAL_PLACEMENT, inherited={}) is None
+    assert (
+        r.session_emitter(r.LOCAL_PLACEMENT, inherited={r.SESSION_EMITTER_ENV: "/theirs.py"})
+        == "/theirs.py"
+    )
+    # Container placement is not a question about anybody's environment.
+    assert r.session_emitter(PLACED, inherited={}) == r.CONTAINER_EMITTER
+
+
 def test_two_requests_that_differ_only_in_tools_are_two_requests(tmp_path: Path) -> None:
     """The mock digest has to see the bound, or a rehearsal reuses another session's answer."""
 
@@ -894,6 +954,42 @@ def test_a_session_that_will_carry_hook_settings_asks_for_that_flag_too(
     monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
 
     assert r.required_flags(claude, UNRESTRICTED, ()) == ("--setting-sources", "--settings")
+
+
+def test_a_container_emitter_that_is_not_there_is_reported(
+    stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Steward names a path in an image it did not necessarily build this version of.
+
+    A resident still running an image from before warren#361 carries the emitter under its
+    pre-rename name. The hook command's `|| true` means that costs telemetry rather than
+    denying every tool call — so the resident runs, looks healthy, and says nothing. This
+    probe is the only thing that can tell.
+    """
+    log = docker_stub(stub_bin, monkeypatch, tmp_path)
+
+    assert r.check_session_emitter(PLACED) is None
+    assert ["exec", CONTAINER, "test", "-f", r.CONTAINER_EMITTER] in docker_calls(log)
+
+    stub_bin("docker", "exit 1")
+    complaint = r.check_session_emitter(PLACED)
+
+    assert complaint is not None
+    assert r.CONTAINER_EMITTER in complaint
+    assert CONTAINER in complaint
+
+
+def test_nothing_is_probed_for_a_placement_steward_did_not_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local: the path came from an operator who can see their own filesystem."""
+    monkeypatch.setenv(r.SESSION_EMITTER_ENV, "/opt/village/chronicle-emit.py")
+
+    assert r.check_session_emitter(r.LOCAL_PLACEMENT) is None
+
+    monkeypatch.delenv(r.SESSION_EMITTER_ENV, raising=False)
+
+    assert r.check_session_emitter(r.LOCAL_PLACEMENT) is None
 
 
 # ------------------------------------------- what a brain may claim it spent (steward #129)

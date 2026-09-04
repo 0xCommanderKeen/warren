@@ -47,13 +47,16 @@ CURRENT_CLAUDE = (
 )
 
 
+#: The shipped tree's two containers, provisioned and answering. `docker exec` has two
+#: callers in `doctor` now — the `claude --help` flag probe and the `test -f <emitter>`
+#: one steward #264 added — so the stub dispatches on the command, not only the container.
 OPERATOR_BURROW_DOCKER = (
     'case "$1" in '
     "info) printf 'dxp2800\\t27.3.1\\n' ;; "
     "inspect) case \"$4\" in steward-hob|steward-pip) printf 'true\\n' ;; "
     "*) exit 1 ;; esac ;; "
-    f'exec) case "$2" in steward-hob|steward-pip) {CURRENT_CLAUDE} ;; '
-    "*) exit 1 ;; esac ;; "
+    'exec) case "$2" in steward-hob|steward-pip) ;; *) exit 1 ;; esac; '
+    f'case "$3" in test) exit 0 ;; *) {CURRENT_CLAUDE} ;; esac ;; '
     "*) exit 1 ;; esac"
 )
 
@@ -607,7 +610,70 @@ def test_doctor_says_when_a_local_placement_has_no_emitter_to_run(
     )
 
     assert "quiet: per-session events off — no emitter for local placement" in result.output
-    assert "STEWARD_SESSION_EMITTER" in result.output
+    # Named with the process it has to be set in: doctor reads its own environment, and the
+    # process that will actually launch the session is the scheduler.
+    assert "export STEWARD_SESSION_EMITTER in the environment the scheduler runs in" in (
+        result.output
+    )
+
+
+@pytest.mark.usefixtures("on_operator_burrow")
+def test_doctor_is_red_when_the_container_has_no_emitter_to_run(
+    runner: CliRunner, stub_bin: StubWriter, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The failure with no other symptom, made loud (#264).
+
+    A resident on an image built before the emitter was baked under its current name runs
+    perfectly: the hook command ends in `|| true`, so a missing script costs telemetry
+    rather than denying every tool call. Doctor is the only place that can notice, so it
+    looks rather than asserting — and counts it, unlike the merely-quiet case.
+    """
+    stub_bin("claude", CURRENT_CLAUDE)
+    stub_bin(
+        "docker",
+        'case "$1" in '
+        "info) printf 'dxp2800\\t27.3.1\\n' ;; "
+        "inspect) printf 'true\\n' ;; "
+        # The image is there and its claude answers; only the emitter is missing.
+        f'exec) case "$3" in test) exit 1 ;; *) {CURRENT_CLAUDE} ;; esac ;; '
+        "*) exit 1 ;; esac",
+    )
+    monkeypatch.setenv("STEWARD_BURROW", "dxp2800")
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    monkeypatch.chdir(REPO_ROOT)
+
+    result = runner.invoke(main, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "/opt/steward/chronicle-emit.py is not in steward-hob" in result.output
+    assert "re-ship the image and re-provision" in result.output
+
+
+def test_doctor_claims_no_hooks_for_a_brain_that_is_never_given_any(
+    runner: CliRunner,
+    stub_bin: StubWriter,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    write_resident: ResidentWriter,
+) -> None:
+    """`--settings` is a claude flag; a codex resident must not be reported as emitting.
+
+    `required_flags` answers `()` for every other kind, so a line about this resident's
+    hooks would be a confident claim about a channel that does not exist for it — and the
+    `off` line would be worse still, since exporting the variable it names would change
+    nothing.
+    """
+    stub_bin("codex", "exit 0")
+    monkeypatch.setenv("STEWARD_STATE", str(tmp_path / "state.json"))
+    manifest = write_resident(
+        {**valid_manifest(), "id": "coder", "runner": {"kind": "codex"}}, directory="coder"
+    )
+
+    result = runner.invoke(
+        main, ["doctor", str(manifest.parent.parent), "--db", str(tmp_path / "steward.db")]
+    )
+
+    assert "per-session events" not in result.output
 
 
 def test_doctor_says_where_the_journal_lives_and_who_closes_the_day(
