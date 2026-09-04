@@ -74,6 +74,14 @@ _SESSION_REFUSALS: tuple[tuple[str, str], ...] = (
         ),
     ),
     (
+        "/secrets",
+        (
+            "a credential is an identity: a session that could set one could give itself, "
+            "or take, another resident's bot — which is the boundary app_grants exists to "
+            "hold"
+        ),
+    ),
+    (
         "/skills",
         (
             "a skill is a capability somebody granted; a session that could write one would "

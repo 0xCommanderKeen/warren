@@ -39,7 +39,7 @@ interleave the warren's directories with theirs:
 | --- | --- | --- |
 | `chronicle/` | chronicle's server: `app/` (the tree its README's tar recipe ships), `data/`, `compose.yaml`, `.env` | `deploy.sh chronicle` |
 | `arcadia/` | the origin: `dist/`, `observatory-dist/` (townhall's build), `nginx.conf`, `compose.yaml` | `deploy.sh arcadia`, `deploy.sh townhall` |
-| `steward/` | the control plane: `compose.yaml`, `.env`, `data/`, `residents-key`, `residents-repo/` | `deploy.sh steward` |
+| `steward/` | the control plane: `compose.yaml`, `.env`, `data/`, `residents-key`, `residents-repo/`, `secrets/` | `deploy.sh steward` |
 | `residents/<id>/` | one resident: `docker-compose.yaml`, `.env`, `manifest.yaml`, `soul.md`, `memory/`, `claude/` | the control plane itself, on a declare or provision through the API (townhall's New resident) — or `steward provision <id>` from a laptop; never this script |
 
 The control plane's daemons bind-mount `residents/` and nothing wider: that is what lets
@@ -61,16 +61,44 @@ Secrets, in a `.env` beside each compose file, mode `0600`, never in git:
 | --- | --- | --- |
 | `~/docker/warren/chronicle` | `CHRONICLE_NOTIFY_URL` (private ntfy topic); `CHRONICLE_TOKEN` when ingest is closed | [`chronicle/deploy/compose.yaml`](../chronicle/deploy/compose.yaml) |
 | `~/docker/warren/arcadia` | — | [`arcadia/deploy/compose.yaml`](../arcadia/deploy/compose.yaml) + `nginx.conf` |
-| `~/docker/warren/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`. Beside it: `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
+| `~/docker/warren/steward` | `STEWARD_TOKEN`; `STEWARD_IMAGE_TAG` (written by the script); chat tokens per `steward/docs/chat.md`, for anything not yet moved into `secrets/`. Beside it: `secrets/` (mode `0700`, one file per credential — see below), `residents-key`, the deploy key below, and `residents-repo/`, the residents checkout | [`steward/deploy/compose.yaml`](../steward/deploy/compose.yaml) |
 
 `deploy.sh` refuses to roll out a service whose `.env` is missing and says what it must
 contain. Data — chronicle's `/data`, steward's `data/` — is never written by the script.
+
+### The `secrets/` directory (warren#462)
+
+`~/docker/warren/steward/secrets/` holds one file per credential, named for the variable
+it fills — `STEWARD_CHAT_TOKEN_DISCORD_HOB`, and so on — each mode `0600` inside a
+directory that is mode `0700`. `deploy.sh` creates it; nothing in the repository ever sees
+it. Every control-plane process resolves a credential **file first, environment second**,
+so the `.env` below keeps working unchanged and a slot moves only when somebody writes the
+file.
+
+The point of the directory is that it is writable *without ssh*:
+
+```sh
+curl -sS -X PUT "$STEWARD_URL/secrets/STEWARD_CHAT_TOKEN_DISCORD_HOB" \
+  -H "Authorization: Bearer $STEWARD_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"value": "<token from the Developer Portal>"}'
+curl -sS "$STEWARD_URL/secrets" -H "Authorization: Bearer $STEWARD_TOKEN"   # names, never values
+```
+
+Within five minutes the chat daemon re-reads the directory and the route comes up — no
+`--force-recreate`, and no shell on the burrow. The files land as `root:root` mode 0600,
+because the control-plane containers run as root: the deploy user owns the directory but
+cannot read what is inside it, so `tar`-ing `~/docker/warren/steward` as that user backs up
+the names and not the values. That is the intended shape — a credential written through the
+API is not one the shell is meant to read back — and `sudo` is how a person takes one out. Nothing reads a value back out: there is no
+`GET /secrets/{name}`, and unsetting a credential is still `rm` on the burrow followed by a
+restart of whatever held it.
 
 ### Wiring Telegram chat
 
 The chat daemon starts with the rest of the control plane. With no bot token it stays
 idle, and `docker logs steward-chat` names the variables it is waiting for. Put the
-credentials in `~/docker/warren/steward/.env` on the burrow (mode `0600`), never in a
+credentials in `secrets/` with the `PUT` above, or — the pre-warren#462 way, still
+supported — in `~/docker/warren/steward/.env` on the burrow (mode `0600`), never in a
 manifest or Compose file:
 
 ```dotenv
@@ -80,8 +108,9 @@ STEWARD_CHAT_OPERATORS=<Telegram user id>
 ```
 
 `STEWARD_CHAT_OPERATORS` is a comma-separated list when more than one Telegram user may
-talk to the fleet. Check the wiring without revealing a token, then recreate only the
-process whose environment changed:
+talk to the fleet, and it is still read from the environment at startup. Check the wiring
+without revealing a token, then recreate only the process whose *environment* changed — a
+credential written into `secrets/` needs no recreate at all:
 
 ```sh
 cd ~/docker/warren/steward

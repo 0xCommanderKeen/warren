@@ -44,8 +44,11 @@ from hmac import compare_digest
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer
 
 from steward import authoring as au
@@ -74,6 +77,7 @@ from steward.routes import reload as reload_routes
 from steward.routes import requests as request_routes
 from steward.routes import residents as resident_routes
 from steward.routes import routines as routine_routes
+from steward.routes import secrets as secret_routes
 from steward.routes import skills as skill_routes
 from steward.routes.auth import (
     _ApprovalBodyDepthMiddleware,
@@ -239,6 +243,36 @@ class ApiConfig:
             allow_uncommitted_writes=_flag(source.get(ALLOW_UNCOMMITTED_ENV)),
             push=parse_push(source.get(PUSH_BRANCH_ENV), source.get(PUSH_REMOTE_ENV)),
         )
+
+
+#: The one path whose 422 may not carry the body that caused it (warren#462). FastAPI's
+#: default handler reports a validation failure by echoing the offending ``input``, which is
+#: right everywhere else in this API and is a disclosure here: the body of a secret write
+#: *is* the credential, and a mistyped key or a wrong-typed value would otherwise put it in
+#: a response — and from there into whatever logged the response. The field bounds moved
+#: into ``steward.secrets.write_secret`` for the same reason; this closes the half that
+#: never reaches a route at all.
+SECRET_WRITE_PREFIX = "/secrets/"  # noqa: S105 — a URL prefix, not a credential
+
+
+async def _validation_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Answer a body that did not validate — without quoting a credential back at anybody."""
+    errors = exc.errors() if isinstance(exc, RequestValidationError) else []
+    if not request.url.path.startswith(SECRET_WRITE_PREFIX):
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": {
+                "error": "invalid_secret_body",
+                "message": (
+                    'the body of a secret write is exactly {"value": "<the credential>"}; '
+                    "what was sent did not match, and steward will not quote it back. "
+                    + "; ".join(sorted({str(error.get("msg", "")) for error in errors}))
+                ).strip(),
+            }
+        },
+    )
 
 
 def parse_origins(raw: str | None) -> tuple[str, ...]:
@@ -586,6 +620,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
         },
         lifespan=lifespan,
     )
+    app.add_exception_handler(RequestValidationError, _validation_handler)
     app.add_middleware(_ApprovalBodyDepthMiddleware, token=token, compare_token=compare_digest)
     if settings.cors_origins:
         app.add_middleware(
@@ -630,6 +665,7 @@ def create_app(  # noqa: PLR0913 — injectable collaborators are the public tes
     app.include_router(delegation_routes.router(deps))
     app.include_router(org_routes.router(deps))
 
+    app.include_router(secret_routes.router(deps))
     app.include_router(resident_routes.router(deps))
     app.include_router(skill_routes.router(deps))
 

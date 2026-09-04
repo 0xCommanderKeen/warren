@@ -18,6 +18,7 @@ from steward import chat as ch
 from steward import events as ev
 from steward import manifest as m
 from steward import notify as nf
+from steward import secrets as sec
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.manifest import (
@@ -2522,3 +2523,180 @@ def test_an_address_on_another_transport_is_not_delivered_here(
     assert outcome.status == DELIVERY_FAILED
     assert "discord" in outcome.reason
     assert transport.sent == []
+
+
+# --------------------------------------------------------------------------------------
+# secrets: a token that arrives as a file, and a daemon that notices (warren#462)
+# --------------------------------------------------------------------------------------
+
+
+def test_a_token_can_arrive_as_a_file_instead_of_a_variable(tmp_path: Path):
+    """The whole point: provisioning a bot writes a file, not a line in an .env."""
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+
+    tokens = ch.tokens_from_env({sec.SECRETS_DIR_ENV: str(directory)})
+
+    assert tokens == {"STEWARD_CHAT_TOKEN_TESTY": FAKE_BOT_TOKEN}
+
+
+def test_a_file_beats_the_variable_of_the_same_name(tmp_path: Path):
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+
+    tokens = ch.tokens_from_env(
+        {sec.SECRETS_DIR_ENV: str(directory), "STEWARD_CHAT_TOKEN_TESTY": "stale"}
+    )
+
+    assert tokens["STEWARD_CHAT_TOKEN_TESTY"] == FAKE_BOT_TOKEN
+
+
+def test_a_file_only_slot_is_listed_among_the_token_names(tmp_path: Path):
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+
+    assert ch.token_env_names({sec.SECRETS_DIR_ENV: str(directory)}) == ["STEWARD_CHAT_TOKEN_TESTY"]
+
+
+def test_chat_list_reports_a_route_whose_token_is_only_a_file(
+    write_resident: ResidentWriter, tmp_path: Path
+):
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+    resident = load_manifest(write_resident(chat_manifest(tmp_path / "memory")))
+
+    [report] = ch.describe_chat(
+        [resident],
+        {
+            sec.SECRETS_DIR_ENV: str(directory),
+            ch.OPERATORS_ENV: OPERATOR,
+            ch.API_URL_ENV: "http://127.0.0.1:1",
+        },
+        transports={ch.TELEGRAM: FakeTransport()},
+    )
+
+    assert report.token_set
+    assert report.reachable
+
+
+def test_a_daemon_picks_up_a_token_written_after_it_started(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """No container recreate: the file is on a mount, and the recheck re-reads it."""
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    env = {
+        sec.SECRETS_DIR_ENV: str(directory),
+        ch.OPERATORS_ENV: OPERATOR,
+        ch.API_URL_ENV: "http://127.0.0.1:1",
+    }
+    path = write_resident(chat_manifest(tmp_path / "memory"))
+    bridge = ch.ChatBridge.from_path(path.parent.parent, store, env=env, transport=FakeTransport())
+    bridge.recheck_s = 0.0
+    assert bridge.deliverable() == []
+    assert [route.key for route in bridge.reachable()] == []
+
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+
+    assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+    assert [route.key for route in bridge.deliverable()] == ["test-agent/chat"]
+
+
+def test_a_daemon_picks_up_a_route_declared_after_it_started(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """The other half of a reload: a resident that grew a chat route since startup."""
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+    env = {
+        sec.SECRETS_DIR_ENV: str(directory),
+        ch.OPERATORS_ENV: OPERATOR,
+        ch.API_URL_ENV: "http://127.0.0.1:1",
+    }
+    silent = chat_manifest(tmp_path / "memory")
+    silent["routes"][-1]["status"] = "pending"
+    silent["routes"][-1]["note"] = "waiting for a token"
+    path = write_resident(silent)
+    bridge = ch.ChatBridge.from_path(path.parent.parent, store, env=env, transport=FakeTransport())
+    bridge.recheck_s = 0.0
+    assert bridge.carried() == []
+
+    write_resident(chat_manifest(tmp_path / "memory"))
+
+    assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+    assert bridge.sessions.residents[0].id == "test-agent"
+
+
+def test_a_tree_that_stops_validating_leaves_the_daemon_on_what_it_had(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """A half-written manifest must not silently close every door in the burrow."""
+    directory = tmp_path / "secrets"
+    sec.write_secret("STEWARD_CHAT_TOKEN_TESTY", FAKE_BOT_TOKEN, directory=directory)
+    env = {
+        sec.SECRETS_DIR_ENV: str(directory),
+        ch.OPERATORS_ENV: OPERATOR,
+        ch.API_URL_ENV: "http://127.0.0.1:1",
+    }
+    path = write_resident(chat_manifest(tmp_path / "memory"))
+    bridge = ch.ChatBridge.from_path(path.parent.parent, store, env=env, transport=FakeTransport())
+    bridge.recheck_s = 0.0
+    assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+
+    path.write_text("id: [this is not a manifest]\n", encoding="utf-8")
+
+    assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+
+
+def test_a_hand_built_bridge_is_never_reloaded_under_a_test(make_bridge: BridgeMaker):
+    """A bridge assembled from explicit collaborators has no tree to re-read."""
+    bridge = make_bridge()
+    bridge.recheck_s = 0.0
+
+    assert bridge.reload() is False
+    assert [route.key for route in bridge.reachable()] == ["test-agent/chat"]
+
+
+def test_a_reload_re_registers_the_rooms_a_route_listens_in(
+    write_resident: ResidentWriter, store: Store, tmp_path: Path
+):
+    """The half a token alone does not fix: ``listen`` is a registration, not a query.
+
+    A Discord route that gains its token through ``PUT /secrets/{name}`` would otherwise
+    pass its identity check, report itself reachable, and hear nothing in any channel —
+    which is the recreate warren#462 exists to remove, still needed.
+    """
+
+    class Listening(FakeTransport):
+        name = ch.DISCORD
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.registered: list[tuple[str, tuple[str, ...]]] = []
+
+        def listen(self, token: str, names: Sequence[str]) -> bool:
+            self.registered.append((token, tuple(names)))
+            return True
+
+    directory = tmp_path / "secrets"
+    directory.mkdir()
+    env = {
+        sec.SECRETS_DIR_ENV: str(directory),
+        ch.OPERATORS_ENV: f"{ch.DISCORD}:{OPERATOR}",
+        ch.API_URL_ENV: "http://127.0.0.1:1",
+    }
+    declared = chat_manifest(tmp_path / "memory")
+    declared["routes"][-1]["address"] = "discord:testy"
+    declared["routes"][-1]["listens_in"] = ["the-hall"]
+    path = write_resident(declared)
+    transport = Listening()
+    bridge = ch.ChatBridge.from_path(
+        path.parent.parent, store, env=env, transports={ch.DISCORD: transport}
+    )
+    bridge.recheck_s = 0.0
+    assert transport.registered == [], "no token yet, so nothing to register"
+
+    sec.write_secret("STEWARD_CHAT_TOKEN_DISCORD_TESTY", FAKE_BOT_TOKEN, directory=directory)
+    bridge.reachable()
+
+    assert transport.registered == [(FAKE_BOT_TOKEN, ("the-hall",))]

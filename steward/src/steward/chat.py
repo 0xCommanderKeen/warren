@@ -77,6 +77,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from steward import events as ev
+from steward import secrets
 from steward.claims import ClaimRefused, ResidentClaims
 from steward.deploy import memory_host_dir
 from steward.manifest import (
@@ -303,9 +304,14 @@ def token_env_name(reference: str, transport: str = TELEGRAM) -> str:
 
 
 def token_env_names(env: Mapping[str, str] | None = None) -> list[str]:
-    """Return every configured bot-token variable name, including empty slots."""
-    source = os.environ if env is None else env
-    return sorted(name for name in source if name.startswith(TOKEN_ENV_PREFIX))
+    """Return every configured bot-token slot name, including empty ones.
+
+    Files and variables together (warren#462): a token that arrived as a file in the
+    secrets directory occupies exactly the same named slot as one exported into the
+    environment, so a listing that only read the environment would report a wired-up bot
+    as unassigned.
+    """
+    return sorted(name for name in secrets.overlay(env) if name.startswith(TOKEN_ENV_PREFIX))
 
 
 def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -313,9 +319,13 @@ def tokens_from_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
 
     Keyed by variable name rather than address so lookup stays exact and no secret is copied
     into a report. :class:`Address` owns the transport-aware name derivation.
+
+    The mapping is read through :func:`steward.secrets.overlay`, so a token written into the
+    secrets directory answers here without ever having been exported — which is what lets a
+    daemon that is already running pick one up (warren#462).
     """
-    source = os.environ if env is None else env
-    names = set(token_env_names(source))
+    source = secrets.overlay(env)
+    names = {name for name in source if name.startswith(TOKEN_ENV_PREFIX)}
     return {
         name: value.strip() for name, value in source.items() if name in names and value.strip()
     }
@@ -1683,6 +1693,27 @@ class KnockLimiter:
 # --------------------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class BridgeSources:
+    """Everything a running bridge can legitimately re-read without being restarted.
+
+    The unit warren#462 needed. Two of the four things a bridge is assembled from live
+    *outside* this process and change under it: the residents checkout is a git tree the API
+    commits into, and the secrets directory is a mount an operator writes a token onto. The
+    other two — the transports it can speak and the operator list — are fixed at startup by
+    construction, because they come from the container's environment and a container's
+    environment does not change under it.
+
+    Kept as one record rather than four re-read calls so that a reload is all-or-nothing: a
+    tree that stopped validating leaves the bridge on the fleet it already had, rather than
+    on new tokens for routes it no longer knows about.
+    """
+
+    routes: tuple[ChatRoute, ...]
+    tokens: Mapping[str, str]
+    library: SkillLibrary
+
+
 @dataclass
 class ChatBridge:
     """Polls each resident's bot, answers its operator, and records what happened.
@@ -1718,6 +1749,12 @@ class ChatBridge:
     #: How long a route's health is believed before it is measured again.
     recheck_s: float = ROUTE_RECHECK_S
     state_path: Path | None = None
+    #: How this bridge re-reads the tree and the secrets directory it was assembled from,
+    #: or ``None`` for a bridge built by hand from explicit collaborators (every test that
+    #: injects its own routes and tokens, and :meth:`RoutineDelivery.from_env`\ 's siblings).
+    #: :meth:`from_path` supplies it, because that is the constructor that knows *where* the
+    #: bridge came from — a bridge handed a list of routes has no tree to go back to.
+    reload_source: Callable[[], BridgeSources] | None = field(default=None, repr=False)
     sessions: ResidentSessions = field(init=False, repr=False)
     run_transitions: RunTransitions = field(init=False, repr=False)
     #: What stops a stranger deciding how much of the village an operator can see.
@@ -1725,6 +1762,11 @@ class ChatBridge:
     _offsets: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     #: One :class:`RouteHealth` per carried route, keyed by :attr:`ChatRoute.key`.
     _health: dict[str, RouteHealth] = field(default_factory=dict, init=False, repr=False)
+    #: When the tree and the secrets directory were last re-read. ``None`` means "not since
+    #: this object was built", so the first health refresh re-reads before it measures —
+    #: which is what makes a daemon that was started before the token was written come up
+    #: with the route open rather than shut for one whole recheck interval.
+    _reloaded_at: datetime | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Build the shared lifecycle from the bridge's existing dependencies."""
@@ -1732,16 +1774,7 @@ class ChatBridge:
             self.transports = {self.transport.name: self.transport}
         if not self.operators_by_transport:
             self.operators_by_transport = {self.transport.name: self.operators}
-        for route in self.routes:
-            token = self.tokens.get(route.address.token_env)
-            listen = getattr(self.transports.get(route.address.transport), "listen", None)
-            if (
-                token
-                and route.route.listens_in
-                and callable(listen)
-                and not listen(token, route.route.listens_in)
-            ):
-                log.warning("%s: Discord listen channels could not be resolved", route.key)
+        self._register_listeners()
         if self.claims is None:
             self.claims = ResidentClaims(self.store)
         self.knocks = KnockLimiter(self.catchup_s)
@@ -1756,6 +1789,27 @@ class ChatBridge:
             emitter=self.emitter,
         )
         self.run_transitions = RunTransitions(self.store)
+
+    def _register_listeners(self) -> None:
+        """Tell each transport which rooms this bridge listens in, with which token.
+
+        Not a query: :meth:`DiscordTransport.listen` *stores* the bot id and the resolved
+        channel ids, and a route whose channels were never resolved polls nowhere. It runs
+        at construction and again on every reload (warren#462), because the whole point of a
+        reload is the case where neither the route nor its token existed at construction —
+        a Discord bot declared with ``listens_in`` and tokened through ``PUT /secrets/{name}``
+        would otherwise pass its identity check, report itself reachable, and hear nothing.
+        """
+        for route in self.routes:
+            token = self.tokens.get(route.address.token_env)
+            listen = getattr(self.transports.get(route.address.transport), "listen", None)
+            if (
+                token
+                and route.route.listens_in
+                and callable(listen)
+                and not listen(token, route.route.listens_in)
+            ):
+                log.warning("%s: Discord listen channels could not be resolved", route.key)
 
     @classmethod
     def from_path(  # noqa: PLR0913 — every knob is keyword-only and independently useful
@@ -1788,6 +1842,13 @@ class ChatBridge:
                 "cannot open a chat bridge over an invalid residents tree:\n"
                 + "\n".join(d.render() for d in result.errors)
             )
+        # The raw mapping, not the secrets overlay: what the transports and the operator
+        # list read from it are *settings* — an API base URL, a guild id, who steward
+        # answers — and none of them is a credential, so none of them belongs in a directory
+        # of credentials. The tokens are the exception and they read through
+        # :func:`tokens_from_env`, freshly, on every call — which is what lets ``reload``
+        # below pick up a file written after this process started (warren#462). Pre-mixing
+        # the two here would freeze the tokens at construction and undo that.
         source = os.environ if env is None else env
         if transport is not None and transports is not None:
             raise TypeError("pass transport or transports, not both")
@@ -1799,6 +1860,21 @@ class ChatBridge:
                 DISCORD: DiscordTransport.from_env(source),
             }
         )
+
+        def reread() -> BridgeSources:
+            """Re-read the tree and the secrets directory. Raises on an invalid tree."""
+            fresh = validate_path(residents_dir, skills_dir)
+            if not fresh.ok:
+                raise ChatError(
+                    "the residents tree does not validate:\n"
+                    + "\n".join(d.render() for d in fresh.errors)
+                )
+            return BridgeSources(
+                routes=tuple(chat_routes(list(fresh.residents))),
+                tokens=tokens_from_env(source),
+                library=library_for(residents_dir, skills_dir),
+            )
+
         return cls(
             routes=chat_routes(list(result.residents)),
             store=store,
@@ -1817,6 +1893,7 @@ class ChatBridge:
             claims=claims,
             state_path=state_path,
             catchup_s=catchup_s,
+            reload_source=reread,
         )
 
     # -- startup ---------------------------------------------------------------------
@@ -1847,6 +1924,52 @@ class ChatBridge:
         self._refresh_health(now if now is not None else self.clock())
         return [route for route in self.carried() if self._health[route.key].reachable]
 
+    def reload(self) -> bool:
+        """Re-read the residents tree and the secrets directory. Return whether it happened.
+
+        The "chat reload" of warren#462, and the reason wiring a bot no longer ends in
+        ``docker compose up -d --force-recreate chat``. A recreate was never about the code:
+        it was the only way to change what the process had *read*. Two of those reads can be
+        redone in place — the tree, because the API commits into a checkout this container
+        mounts, and the tokens, because they are now files on a mount rather than lines in
+        an environment — so a token pasted into ``PUT /secrets/{name}`` reaches "reachable,
+        bot @Name" on the next recheck instead of on the next deploy.
+
+        ``False`` means there was nothing to re-read: a bridge assembled from explicit
+        routes and tokens (every hand-built one, and every test) has no tree to go back to,
+        and inventing one for it would make those bridges depend on the machine they run on.
+
+        Never raises. A tree that stopped validating mid-edit leaves this bridge on the
+        fleet it already had, exactly as ``POST /reload`` refuses rather than swapping in a
+        broken one — the alternative is one bad commit closing every door in the burrow.
+        """
+        if self.reload_source is None:
+            return False
+        try:
+            fresh = self.reload_source()
+        except Exception as exc:  # noqa: BLE001 — a bad tree must not take the daemon down
+            log.warning("chat reload found nothing usable, keeping what was loaded: %s", exc)
+            return False
+        self.routes = fresh.routes
+        self.tokens = fresh.tokens
+        self.library = fresh.library
+        # ``ResidentSessions`` is configuration around a fixed lifecycle rather than a thing
+        # holding per-run state, so the fleet it admits is updated in place: rebuilding it
+        # would hand the next session a different object for no reason.
+        self.sessions.residents = tuple(route.resident for route in fresh.routes)
+        self.sessions.library = fresh.library
+        self._register_listeners()
+        live = {route.key for route in self.routes}
+        for key in [key for key in self._health if key not in live]:
+            # A door that is no longer declared has no health to report. Left behind, it
+            # would keep ``run`` awake believing something reachable still exists.
+            del self._health[key]
+        for key in [key for key in self._offsets if key not in live]:
+            # And its poll offset goes with it, so a route that is declared, retired and
+            # declared again does not resume from a cursor belonging to the last time.
+            del self._offsets[key]
+        return True
+
     def _refresh_health(self, now: datetime) -> list[ChatOutcome]:
         """Re-ask every stale route whether it can carry a conversation; report what changed.
 
@@ -1854,7 +1977,14 @@ class ChatBridge:
         route that has been shut since Tuesday belongs in ``steward chat list``, not in a
         line of the daemon's log every second. A route that comes back says so too, because
         the operator who fixed it is owed the news as much as the one who broke it.
+
+        The reload rides on this same timer (warren#462) rather than on one of its own: what
+        a reload changes is precisely what a health check measures, so re-reading on any
+        other cadence would leave the daemon holding a token it had not yet asked about.
         """
+        if self._reloaded_at is None or (now - self._reloaded_at).total_seconds() >= self.recheck_s:
+            self._reloaded_at = now
+            self.reload()
         changed: list[ChatOutcome] = []
         for route in self.carried():
             previous = self._health.get(route.key)

@@ -15,7 +15,17 @@
 #
 # Secrets are not in this file and never will be. STEWARD_TOKEN lives in the .env beside
 # it (mode 0600), which no repository has ever seen; STEWARD_IMAGE_TAG is written into
-# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`". The
+# that same .env by deploy/deploy.sh so that a rollback is "edit one line, `up -d`".
+#
+# Bot tokens have their own home since warren#462: ./secrets (mode 0700), one file per
+# credential named for the variable it replaces, each mode 0600. The API mounts it
+# read-write because `PUT /secrets/{name}` is what writes into it — a step that used to be
+# an ssh heredoc into the .env, which no agent session is allowed to perform. The chat
+# daemon mounts it read-only and re-reads it on its route-recheck timer, so a token set
+# through the API reaches "reachable, bot @Name" without `--force-recreate`. Resolution is
+# file first, environment second, so every token still in the .env below keeps working and
+# nothing has to migrate. The scheduler gets it read-only too: it delivers a routine's
+# final message over the same routes (warren#385). The
 # deploy key that pushes the residents checkout is the file residents-key beside them,
 # mode 0600, mounted into the API and nothing else (deploy/README.md says how it is made).
 # Each daemon's local event log and undelivered queue instead live under ./data, named by
@@ -67,6 +77,8 @@ x-steward-environment: &steward-environment
   # main: nothing lands there without a pull request, and a push to any other branch
   # deploys nothing, so a charter edit cannot loop into a rollout of the fleet it edited.
   STEWARD_PUSH_BRANCH: burrow/residents
+  # The credential directory, at the path every container mounts it on below.
+  STEWARD_SECRETS_DIR: /secrets
   # Bot tokens stay in the .env beside this compose file. Empty defaults let a fresh
   # burrow come up green before chat is wired; the chat daemon names what it awaits.
   STEWARD_CHAT_TOKEN_PIP: ${STEWARD_CHAT_TOKEN_PIP:-}
@@ -104,6 +116,8 @@ services:
       - ./residents-repo:/checkout
       # The deploy key the push uses; the image's GIT_SSH_COMMAND names this path.
       - ./residents-key:/run/steward/residents-key:ro
+      # The one writable mount of the credential directory: PUT /secrets/{name} lands here.
+      - ./secrets:/secrets
       # This burrow's residents, at the SAME path as on the host, and the socket to bring
       # them up: the API provisions a resident of this burrow itself rather than ssh-ing
       # to the machine it is on (which it cannot — warren#356). Same path because the
@@ -122,6 +136,7 @@ services:
     volumes:
       - ./data:/data
       - ./residents-repo:/checkout:ro
+      - ./secrets:/secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
       # The residents' deploy directories, at the path every process computes for them.
       - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
@@ -153,6 +168,7 @@ services:
     volumes:
       - ./data:/data
       - ./residents-repo:/checkout:ro
+      - ./secrets:/secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/Miha/docker/warren/residents:/home/Miha/docker/warren/residents
     command: ["/app/.venv/bin/steward", "chat", "run", "--residents", "/checkout/steward/residents"]

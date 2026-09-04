@@ -358,6 +358,11 @@ deploy_steward() {
     # before `up` so docker does not make it root-owned on first start — `steward
     # provision` writes each resident into it as that user, over ssh.
     $SSH "$NAS" 'mkdir -p ~/docker/warren/residents'
+    # The credential directory (warren#462), made here for the same reason and with a
+    # mode of its own: `PUT /secrets/{name}` writes one file per bot token into it, and a
+    # directory docker created would be root-owned — while a directory anybody could list
+    # would leak which residents have bots even though no file inside it is readable.
+    $SSH "$NAS" 'mkdir -p ~/docker/warren/steward/secrets && chmod 700 ~/docker/warren/steward/secrets'
     publish_files docker/warren/steward "$ROOT/steward/deploy" compose.yaml
     $SSH "$NAS" "cd ~/docker/warren/steward \
         && if grep -q '^STEWARD_IMAGE_TAG=' .env; then sed -i 's/^STEWARD_IMAGE_TAG=.*/STEWARD_IMAGE_TAG=$SHORT/' .env; else printf 'STEWARD_IMAGE_TAG=%s\n' '$SHORT' >> .env; fi \
