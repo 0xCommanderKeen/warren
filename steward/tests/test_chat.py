@@ -17,6 +17,7 @@ from conftest import ClaimHolderSpawner, ResidentWriter, valid_manifest
 from steward import chat as ch
 from steward import events as ev
 from steward import manifest as m
+from steward import notify as nf
 from steward.budgets import BudgetGuard
 from steward.cli import main
 from steward.manifest import (
@@ -1140,6 +1141,7 @@ class DiscordApi:
     url: str = ""
     calls: list[tuple[str, str, dict[str, Any] | None, str]] = field(default_factory=list)
     replies: dict[tuple[str, str], list[tuple[int, Any]]] = field(default_factory=dict)
+    user_agents: list[str] = field(default_factory=list)
 
     def queue(self, method: str, path: str, *answers: tuple[int, Any]) -> None:
         """Queue ordered HTTP responses for one method and exact request path."""
@@ -1167,6 +1169,7 @@ def discord_api() -> Iterator[DiscordApi]:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length)) if length else None
             state.calls.append((method, self.path, payload, self.headers.get("Authorization", "")))
+            state.user_agents.append(self.headers.get("User-Agent", ""))
             answers = state.replies.get((method, self.path), [(200, {})])
             status, value = answers.pop(0)
             body = json.dumps(value).encode()
@@ -1231,6 +1234,9 @@ def test_discord_discovers_the_bot_handle(discord_api: DiscordApi):
     transport = ch.DiscordTransport(base_url=discord_api.url)
 
     assert transport.identity(FAKE_DISCORD_TOKEN) == "@Pip"
+    # Discord's edge answers Python's default agent with 403 before looking at the token
+    # (measured from the burrow, 2026-09-04), so every call must wear the documented one.
+    assert discord_api.user_agents == [nf.DISCORD_USER_AGENT]
 
 
 def test_discord_resolves_text_channels_by_name(discord_api: DiscordApi):

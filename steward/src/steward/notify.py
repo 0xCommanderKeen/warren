@@ -149,6 +149,12 @@ BODY_MAX_CHARS = 3800
 #: Discord rejects webhook messages whose content exceeds 2,000 characters.
 DISCORD_CONTENT_MAX_CHARS = 2000
 
+#: What every request to Discord identifies itself as. Discord's edge answers a bare
+#: ``Python-urllib`` agent with ``403`` before the token is even looked at (measured against
+#: ``/users/@me`` from the burrow, 2026-09-04: ``Python-urllib/3.14`` → 403, this string → 200),
+#: and Discord documents the ``DiscordBot ($url, $version)`` shape as the one it expects.
+DISCORD_USER_AGENT = "DiscordBot (https://github.com/0xCommanderKeen/warren, 0.1)"
+
 #: One detail value, rendered into a tap's body.
 DETAIL_MAX_CHARS = 1200
 
@@ -567,7 +573,10 @@ class DiscordTransport:
         request = urllib.request.Request(  # noqa: S310 — scheme checked just above
             url,
             data=payload,
-            headers={"Content-Type": "application/json; charset=utf-8"},
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "User-Agent": DISCORD_USER_AGENT,
+            },
             method="POST",
         )
         return _send_http(self, manifest, tap, request)

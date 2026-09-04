@@ -92,6 +92,7 @@ from steward.manifest import (
     redact_secrets,
     validate_path,
 )
+from steward.notify import DISCORD_USER_AGENT
 from steward.prompt import TRANSCRIPT_MAX_CHARS
 from steward.run_lifecycle import RunTransitions, event_log_path, new_owner_token
 from steward.runners import RunResult, build_runner
@@ -1270,7 +1271,11 @@ class DiscordTransport:
         request = urllib.request.Request(  # noqa: S310 — scheme checked just above
             url,
             data=data,
-            headers={"Authorization": f"Bot {token}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+                "User-Agent": DISCORD_USER_AGENT,
+            },
             method=method,
         )
         for attempt in range(2):
