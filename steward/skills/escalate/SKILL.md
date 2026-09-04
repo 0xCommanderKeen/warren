@@ -4,11 +4,6 @@ description: Stop and ask a human, properly — one decision, the options, what 
 defaults: true
 ---
 
-Escalating is not failure. It is the honest end of a piece of work whose next step is
-not yours to take. A blocked agent that waits is trustworthy; one that guesses is not,
-and one that guesses correctly nine times out of ten is worse, because it teaches
-everyone to stop checking.
-
 ## When
 
 Your charter's `escalation` block is the authority — read it, it names your situations.
@@ -21,8 +16,7 @@ On top of it, these are always escalations:
 - Two instructions **conflict**, or the right action depends on a fact you cannot check.
 - A **grant is missing or revoked**, or a route stops answering, and the work needs it.
 
-You do not need permission to read, to draft, to plan, or to write into your own memory.
-Escalating those is its own kind of noise, and noise trains people to click "approve".
+You do not need permission to read, draft, plan, or write into your own memory.
 
 ## How
 
@@ -36,9 +30,7 @@ the transport, the escalation itself has four parts and no more:
    pushed — so approving is one click, not a fresh task.
 4. **What happens if nobody answers.** Usually "nothing, this waits". Say it anyway.
 
-Nobody is watching the transcript. If your escalation lives only in a session log, it
-did not happen — put it where a person will see it, and note it in your journal so
-tomorrow's session knows what it is waiting for instead of asking again.
+Put the escalation on the route your charter names. A transcript is not a route.
 
 ## Then stop
 
@@ -49,8 +41,7 @@ Stop working on that thread. Do not:
 - do the reversible ninety percent and leave the irreversible ten as a trap;
 - escalate a decision you were already told how to make.
 
-Carry on with unrelated work that needs no answer. If nothing is left, end the run and
-say what you are waiting for. A short run that stops at the right place is a good run.
+Carry on with unrelated work that needs no answer. If nothing is left, end the run.
 
 ## When the answer comes
 

@@ -360,8 +360,8 @@ Claiming is documented with the manifest's `board` block in
 [docs/manifest.md](manifest.md#board--job-board-participation). A resident claims only
 what it declared it would, and only tasks whose `required_skills` are a subset of the
 skills it holds — its *effective* set, the library's defaults plus its own grants
-([docs/manifest.md](manifest.md#the-skills-library)), so `["research"]` is claimable by
-any board-enabled resident.
+([docs/manifest.md](manifest.md#the-skills-library)), so `["research"]` is claimable only
+by a board-enabled resident explicitly granted `research`.
 
 ### `POST /delegate` · `GET /residents/{id}/inbox` · `GET /tasks/{id}/lineage`
 
@@ -782,7 +782,7 @@ gets — the library's defaults plus those grants, in injection order:
 
 ```json
 {"skills": [{"id": "read-inbox", "source": "library", "note": "…"}],
- "effective_skills": ["daily-summary", "escalate", "research", "write-journal", "read-inbox"]}
+ "effective_skills": ["escalate", "write-journal", "read-inbox"]}
 ```
 
 `tools` and `workspace` are what a session may reach, and where it may act. `tools` is
@@ -1230,7 +1230,7 @@ views need no reload at all; they re-read the tree on every request.
 
 ```json
 {"request_id": "…", "status": "reloaded", "residents": 3, "routines": 7,
- "skills": ["daily-summary", "escalate", "research", "write-journal"], "errors": []}
+ "skills": ["escalate", "write-journal"], "errors": []}
 ```
 
 `409 tree_invalid` when the tree does not validate: nothing is swapped in, and this

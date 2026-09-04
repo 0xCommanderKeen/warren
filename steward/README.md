@@ -141,8 +141,8 @@ $ steward serve --allow-open         # local dev, with the missing token said ou
 ```
 
 **The skills library** (#12). `skills/<name>/SKILL.md` — a named, reusable capability
-written as instructions. A documented default set (`write-journal`, `daily-summary`,
-`research`, `escalate`) is held by every resident; everything else is granted by name in
+written as instructions. A documented default set (`write-journal`, `escalate`) is held
+by every resident; everything else is granted by name in
 a manifest, and a name the library does not have fails validation with the closest match
 named. At run time the resident session lifecycle resolves the effective set, injects it into the prompt
 under a frame saying a skill is how-to and never authority, and — for runners that take a
@@ -158,8 +158,8 @@ $ steward skills                     # the library, and each resident's effectiv
 **The job board** (#6). One place work can be dropped for the fleet, instead of prompting
 a particular resident. Dispatch is pull-based: a resident that declared `board: {claim:
 true}` in its manifest claims the oldest open task whose required skills it holds — its
-*effective* set, so a task tagged `research` is claimable by a resident that was granted
-nothing — on its own next wake-up, and works it as an ordinary headless session with the
+*effective* set, so a task tagged `research` is claimable only by a resident explicitly
+granted that skill — on its own next wake-up, and works it as an ordinary headless session with the
 same skills, journal, and charter a routine session gets. Claiming is a single
 conditional `UPDATE … WHERE status = 'open'`, so two residents waking at once can never
 both hold one task. A claim is a lease, not a deed — thirty minutes by default; when it
@@ -474,7 +474,7 @@ parent of that tree); `--dry-run`, `--allow-dirty`, and `--no-commit` behave as 
 `retire`; and **`--no-deploy`** is the only host-less path — it declares and checks but
 builds no container, for developing a resident before it has a machine. `--skills` is a
 grant *on top of* the default set every resident already gets, so naming a default skill
-(`write-journal`, `daily-summary`, `research`, `escalate`) is redundant rather than
+(`write-journal`, `escalate`) is redundant rather than
 additive — grant only what a resident holds beyond the defaults. It is not an error, and
 steward does not silently drop it: the effective set is the same either way, and the
 nursery warns by name so the line can be deleted from a manifest that means nothing by it.

@@ -1,7 +1,6 @@
 ---
 name: research
 description: Answer a question from real sources, with the uncertainty left in and every claim traceable to where it came from.
-defaults: true
 ---
 
 Research is the discipline of not knowing things out loud. The value of an answer is

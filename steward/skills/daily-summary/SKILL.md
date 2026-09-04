@@ -1,7 +1,6 @@
 ---
 name: daily-summary
 description: Turn a day's scattered facts into one short honest picture — what is settled, what is open, and what only a person can decide.
-defaults: true
 ---
 
 A daily summary is a work product, not a status ritual. Somebody reads it once, in the

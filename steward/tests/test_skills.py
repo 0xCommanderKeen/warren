@@ -7,6 +7,7 @@ import pytest
 
 from conftest import REPO_ROOT, ResidentWriter, SkillWriter, valid_manifest
 from steward import manifest as m
+from steward import prompt as p
 from steward import skills as sk
 
 LIBRARY = REPO_ROOT / "skills"
@@ -447,9 +448,7 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
     loaded = sk.load_library(LIBRARY)
     assert loaded.diagnostics == (), "\n".join(d.render() for d in loaded.diagnostics)
     assert {skill.name for skill in sk.default_skills(loaded)} == {
-        "daily-summary",
         "escalate",
-        "research",
         "write-journal",
     }
     assert {
@@ -460,6 +459,15 @@ def test_the_shipped_library_parses_and_has_a_default_set() -> None:
         "vault-keeper",
         "morning-digest",
     } <= set(loaded.names)
+
+
+def test_the_shipped_default_set_uses_less_than_a_quarter_of_the_prompt_budget() -> None:
+    rendered = p.render_skills(sk.default_skills(sk.load_library(LIBRARY)))
+    limit = p.SKILLS_MAX_CHARS // 4
+    assert len(rendered) < limit, (
+        f"the default set renders at {len(rendered)} characters; a quarter of the "
+        f"{p.SKILLS_MAX_CHARS}-character prompt budget is {limit}"
+    )
 
 
 def test_every_shipped_skill_is_written_for_a_session_to_read() -> None:
@@ -473,8 +481,8 @@ def test_hob_holds_the_defaults_plus_his_own_grants() -> None:
     resident = m.load_manifest(REPO_ROOT / "residents" / "hob" / "manifest.yaml")
     resolved = sk.effective_skills(resident.manifest, sk.load_library(LIBRARY))
     names = [skill.name for skill in resolved]
-    assert names[:4] == ["daily-summary", "escalate", "research", "write-journal"]
-    assert names[4:] == ["vault-keeper", "morning-digest"]
+    assert names[:2] == ["escalate", "write-journal"]
+    assert names[2:] == ["vault-keeper", "morning-digest"]
     assert "write-blog-post" not in names, "Hob is granted what he was granted, and no more"
 
 
