@@ -218,6 +218,13 @@ edit is made of:
 request, and the honest way to grant a different skill is to say so and let the session ask
 about that one.
 
+**The detail is the diff**, for this shape, because the diff *is* one grant: `resident` and
+`skill` are the change, and steward matches on those two exactly, so a knock that misspells
+either is refused at the write door rather than granting something else. `note` is what
+makes it answerable — everything else in the detail is ignored. A shape whose diff was more
+than one line would have to carry it, and would be the point at which the knock stops being
+readable in a notification.
+
 **The check is about the approval, not about skills.** What a caller presents is a decision
 plus a candidate document, and the question steward answers is whether the second is what
 the first says. `steward.approved_edits` knows one edit shape while answering it; a second
@@ -226,8 +233,10 @@ not another door. [docs/api.md](api.md#an-approved-declaration-edit) has the fie
 definition of "matches" and every refusal.
 
 **One approval is one edit.** The decision is *claimed* before the tree is touched and
-released if the write refuses, so a manifest typo does not cost a human's yes while two
-sessions presenting the same id cannot both write. The mark is on the approval row —
+released if the write fails for any reason the authoring seam rolls back — a validation
+refusal, a git call that died — so a manifest typo does not cost a human's yes while two
+sessions presenting the same id cannot both write. The process dying outright is the one
+uncovered case, and it fails closed: the decision reads as spent, nothing was written. The mark is on the approval row —
 `consumed_at` and `consumed_by`, visible in `GET /approvals/{id}` — which is what makes
 "what did that yes actually authorise, and was it used" an answerable question.
 

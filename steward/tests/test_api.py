@@ -4855,6 +4855,58 @@ def test_a_write_that_refuses_gives_the_decision_back(
     assert consumed_at(harness, request_id), "and the same yes still covered the same edit"
 
 
+def test_losing_the_claim_between_the_match_and_the_write_writes_nothing(
+    grantor: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The match reads the decision as unspent; the claim is what actually settles it.
+
+    Between the two, another write of the same resident can spend it. Steward has to
+    believe the claim rather than the read it made a moment earlier, or the same yes
+    authorises two edits.
+    """
+    harness = grantor()
+    credential = open_session_run(harness)
+    request_id = approved_grant(harness)
+    before = declaration(harness)["text"]
+    monkeypatch.setattr(harness.store, "consume_approval", lambda *_a, **_k: False)
+
+    response = put_declaration(
+        harness, credential, manifest_granting(harness), approval_request_id=request_id
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["error"] == "edit_not_approved"
+    assert "spent on another write" in response.json()["detail"]["message"]
+    assert declaration(harness)["text"] == before
+    assert [row.outcome for row in harness.store.requests()] == ["refused: edit_not_approved"]
+
+
+def test_a_write_that_dies_on_something_unnamed_gives_the_decision_back_too(
+    grantor: Callable[..., Harness], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The authoring seam rolls the tree back for any `Exception`; the claim follows it.
+
+    Wiring the release to `AuthoringError` alone would leave a git call that died, or an
+    `OSError` under the tree, spending a human's yes on a declaration nobody changed.
+    """
+    harness = grantor()
+    credential = open_session_run(harness)
+    request_id = approved_grant(harness)
+    before = declaration(harness)["text"]
+
+    def die(*_args: object, **_kwargs: object) -> None:
+        raise OSError("the disk went away mid-write")
+
+    monkeypatch.setattr(au, "write_declaration", die)
+    with pytest.raises(OSError, match="disk went away"):
+        put_declaration(
+            harness, credential, manifest_granting(harness), approval_request_id=request_id
+        )
+
+    assert consumed_at(harness, request_id) is None
+    assert declaration(harness)["text"] == before
+
+
 def test_the_grant_alone_writes_nothing(grantor: Callable[..., Harness]) -> None:
     """The manifest key buys the route. A human's yes is what buys the write."""
     harness = grantor()

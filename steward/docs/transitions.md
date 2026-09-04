@@ -232,6 +232,17 @@ Routine bracketing (`routine_started` / `routine_finished` / `routine_failed`) a
 rows in this matrix. The run registry and terminal ownership seam above pair the close;
 the watchdog's give-up *knock* remains in scope here because it is an A1.
 
+**The markers on a decided approval are not transitions of it either**, and that is why
+they are guarded conditional writes on `Store` with no seam around them: `mark_delivered`
+(the resident was told), `claim_approval_effects` / `release_approval_effects` (the
+announcement's idempotent effects), and `consume_approval` / `release_approval` (warren#437
+— the write door opened once against this yes). None of them changes what was decided, and
+none of them has a fact to pair with: the village heard the answer when it was given, and
+emitting a second one days later when the resident finally woke up, or when the write it
+authorised landed, would put two answers in the log for one question. `deliver_decisions`
+already carries that argument in `steward.approvals`; these are the same shape. A marker
+that ever needed a fact would stop being a marker and become an A-row here.
+
 ---
 
 ## 2. Two designs

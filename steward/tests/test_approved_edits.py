@@ -101,6 +101,12 @@ def test_a_decision_that_is_not_a_live_unspent_yes_opens_nothing(
         _read(_record(**overrides))
 
 
+def test_a_detail_that_is_not_a_mapping_is_a_refusal_rather_than_a_traceback() -> None:
+    """Nothing writes a list here today; a hand-edited ledger must still get a sentence."""
+    with pytest.raises(UnapprovedEditError, match="no detail this door can read"):
+        _read(_record(detail=["shelf-worker", "series-detection"]))
+
+
 def test_an_approval_nobody_raised_is_named_rather_than_crashed_on() -> None:
     with pytest.raises(UnapprovedEditError, match="no approval request 'req-1'"):
         _read(None)

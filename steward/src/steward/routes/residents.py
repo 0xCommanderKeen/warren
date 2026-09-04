@@ -877,7 +877,15 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
         resident = deps.find_resident(
             validate_path(residents_dir, settings.skills_dir), resident_id
         )
-        current = au.read_declaration(residents_dir, resident.id, resident.manifest.soul.file)
+        # One read of each file, and the fingerprint is of *those* bytes. Reading the
+        # declaration to compare it and then reading it again to fingerprint it would
+        # leave a window for a write to land between the two, and the revision handed to
+        # `write_declaration` would then describe bytes this gate never compared.
+        manifest_path, soul_path = au.declaration_paths(
+            residents_dir, resident.id, resident.manifest.soul.file
+        )
+        declared = manifest_path.read_bytes()
+        soul = soul_path.read_bytes() if soul_path.is_file() else None
         try:
             edit = approved_edit(
                 db.approval(body.approval_request_id),
@@ -887,7 +895,7 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
                 now=ev.utc_now_iso(deps.now()),
             )
             edit.check(
-                _manifest_data(current.manifest_text, "declared"),
+                _manifest_data(declared.decode("utf-8"), "declared"),
                 _manifest_data(manifest_text, "offered"),
             )
         except UnapprovedEditError as exc:
@@ -895,9 +903,7 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
         return _GatedEdit(
             request_id=body.approval_request_id,
             act=edit.act,
-            revision=au.revision_of(
-                *au.declaration_paths(residents_dir, resident.id, resident.manifest.soul.file)
-            ),
+            revision=au.revision_of_bytes((manifest_path.name, declared), (soul_path.name, soul)),
         )
 
     @routes.put("/residents/{resident_id}/declaration")
@@ -938,6 +944,21 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
                 f"approval {gated.request_id!r} was spent on another write while this one "
                 f"was being checked; one approval is one edit. Nothing was written.",
             )
+
+        def give_the_decision_back() -> None:
+            """Un-spend the claim, because the write it was claimed for did not happen.
+
+            Wired to every ``Exception`` and not only the named refusal, because that is
+            exactly the class :func:`steward.authoring._authoring_files` rolls the tree
+            back for: a git call that died or an ``OSError`` under the tree leaves the
+            declaration as it was just as a validation refusal does, and a manifest typo
+            must not cost a human's yes either way. What is left uncovered is the process
+            dying outright, which fails closed: the decision reads as spent, nothing was
+            written, and the honest next move is to ask again.
+            """
+            if gated is not None:
+                db.release_approval(gated.request_id, by=request_id)
+
         try:
             written = au.write_declaration(
                 residents_dir,
@@ -951,11 +972,11 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             )
         except au.AuthoringError as exc:
             db.set_request_outcome(request_id, f"refused: {exc.reason}")
-            if gated is not None:
-                # Nothing was written, so nothing was spent: the same decision still
-                # authorises the same edit, and a manifest typo must not cost a human's yes.
-                db.release_approval(gated.request_id, by=request_id)
+            give_the_decision_back()
             deps.refuse_write(exc)
+        except Exception:
+            give_the_decision_back()
+            raise
         return {
             "request_id": request_id,
             "status": "accepted",

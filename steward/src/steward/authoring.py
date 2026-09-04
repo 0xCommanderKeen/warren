@@ -84,6 +84,7 @@ __all__ = [
     "repo_toplevel",
     "resolve_skills_dir",
     "revision_of",
+    "revision_of_bytes",
     "write_declaration",
     "write_skill",
 ]
@@ -231,11 +232,26 @@ def revision_of(*paths: Path) -> str:
     the clock moved would be a UI people learn to force past. A missing file hashes as
     absent, so "there was no soul and now there is" is a change like any other.
     """
+    return revision_of_bytes(
+        *((path.name, path.read_bytes() if path.is_file() else None) for path in paths)
+    )
+
+
+def revision_of_bytes(*documents: tuple[str, bytes | None]) -> str:
+    """Fingerprint documents a caller already read, by name and content.
+
+    The same digest :func:`revision_of` produces, over bytes rather than paths, for the
+    caller that has *already* read the files and needs the fingerprint to be of exactly
+    what it read. Re-reading them to fingerprint them opens a window: a write landing
+    between the two reads yields a revision describing bytes nobody looked at, which is the
+    one thing an optimistic-concurrency token must never do. ``None`` is an absent file and
+    hashes as empty, exactly as it does there.
+    """
     digest = hashlib.sha256()
-    for path in paths:
-        digest.update(path.name.encode("utf-8"))
+    for name, contents in documents:
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes() if path.is_file() else b"")
+        digest.update(contents or b"")
         digest.update(b"\0")
     return f"sha256:{digest.hexdigest()}"
 

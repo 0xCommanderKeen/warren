@@ -37,22 +37,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from steward.approvals import GRANT_SKILL_ACTION
 from steward.store import ApprovalRecord
 
 __all__ = [
     "EDIT_SHAPES",
-    "GRANT_SKILL_ACTION",
     "ApprovedEdit",
     "GrantSkillEdit",
     "UnapprovedEditError",
     "approved_edit",
 ]
-
-#: The action a knock names when it is asking for a skill to be put on a manifest. The
-#: door recognises the *action*, not the detail: an approval to ``send_email`` carrying a
-#: mapping that happens to have ``resident`` and ``skill`` keys must never turn into a
-#: declaration edit, or a session could repurpose any yes it was ever given.
-GRANT_SKILL_ACTION = "grant_skill"
 
 #: The one answer that opens anything. ``edit`` is not accepted and the knock does not
 #: offer it: an edited detail is a human writing a *different* request, and the honest way
@@ -148,9 +142,12 @@ class GrantSkillEdit:
             )
 
 
-#: Every edit shape a decision can open the door to, by the action its knock named. One
-#: entry today; a second one is a second reader and a second ``check``, and the door,
-#: the consumption and the refusal vocabulary are already general enough to carry it.
+#: Every edit shape a decision can open the door to, **by the action its knock named**.
+#: The action is what is matched, never the detail: an approval to ``send_email`` carrying
+#: a mapping that happens to have ``resident`` and ``skill`` keys must not turn into a
+#: declaration edit, or a session could repurpose any yes it was ever given. One entry
+#: today; a second one is a second reader and a second ``check``, and the door, the
+#: consumption and the refusal vocabulary are already general enough to carry it.
 EDIT_SHAPES: Mapping[str, Callable[[Mapping[str, Any]], ApprovedEdit]] = {
     GRANT_SKILL_ACTION: GrantSkillEdit.read,
 }
@@ -209,6 +206,11 @@ def approved_edit(
         raise UnapprovedEditError(
             f"approval {request_id!r} was already spent on a write at {record.consumed_at}; "
             "one approval is one edit"
+        )
+    if not isinstance(record.detail, Mapping):
+        raise UnapprovedEditError(
+            f"approval {request_id!r} carries no detail this door can read; an edit is "
+            "described by the names in a mapping, not by prose"
         )
     edit = read(record.detail)
     if edit.resident != writing_to:
