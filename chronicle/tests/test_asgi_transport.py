@@ -77,6 +77,50 @@ class ASGITransportContractTests(unittest.TestCase):
                             client.post("/events", json=event).status_code, 400
                         )
 
+    def test_a_discord_post_does_not_change_state_clock_or_mood_over_http(self):
+        now = datetime.datetime.now(datetime.UTC)
+
+        def stamp(value):
+            return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        idle = {
+            "v": 0,
+            "ts": stamp(now - datetime.timedelta(minutes=2)),
+            "source": "claude-code",
+            "agent_id": "resident:pip",
+            "project": "life",
+            "type": "idle",
+            "payload": {},
+        }
+        posted = {
+            **idle,
+            "ts": stamp(now - datetime.timedelta(minutes=1)),
+            "source": "steward",
+            "type": "chat_message_posted",
+            "payload": {
+                "resident": "pip",
+                "route": "discord:pip",
+                "channel": "household",
+                "length": 42,
+            },
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            villagers = root / "villagers"
+            villagers.mkdir()
+            config = dataclasses.replace(
+                Config(), events=root / "events.jsonl", villagers_dir=villagers
+            )
+            with TestClient(serve.create_app(config)) as client:
+                self.assertEqual(client.post("/events", json=idle).status_code, 204)
+                before = client.get("/state").json()["snapshot"]["villagers"][0]
+                self.assertEqual(client.post("/events", json=posted).status_code, 204)
+                after = client.get("/state").json()["snapshot"]["villagers"][0]
+
+        self.assertEqual("resting", after["state"])
+        self.assertEqual(before["last_ts"], after["last_ts"])
+        self.assertEqual(before["mood"], after["mood"])
+        self.assertEqual("posted to #household", after["last_line"])
+
     def assert_knock_name_matches_public_state(self, event, earlier_events=()):
         received = []
 

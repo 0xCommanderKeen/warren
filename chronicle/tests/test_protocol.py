@@ -64,6 +64,17 @@ class ProtocolContractTest(unittest.TestCase):
             with self.subTest(kind=kind):
                 event = {**base, "type": kind, "payload": payload}
                 self.assertIsNone(validate_event(event))
+                required = ["resident", "route", "channel"]
+                if kind == "chat_message_posted":
+                    required.append("length")
+                elif kind == "chat_post_refused":
+                    required.append("reason")
+                for field in required:
+                    broken = {**event, "payload": dict(payload)}
+                    del broken["payload"][field]
+                    self.assertEqual(
+                        validate_event(broken), f"invalid payload.{field}"
+                    )
                 event["payload"] = {**payload, "text": "private message body"}
                 self.assertEqual(validate_event(event), "payload.text is forbidden")
 
