@@ -9,6 +9,89 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "protocol-v0-validation.
 
 
 class ProtocolContractTest(unittest.TestCase):
+    def test_discord_outbound_events_accept_their_minimal_payloads_without_text(self):
+        payloads = {
+            "chat_message_posted": {
+                "resident": "pip",
+                "route": "discord:pip",
+                "channel": "household",
+                "length": 42,
+            },
+            "chat_post_refused": {
+                "resident": "pip",
+                "route": "discord:pip",
+                "channel": "household",
+                "reason": "channel not allowed",
+            },
+            "discord_channel_created": {
+                "resident": "herald",
+                "route": "discord:herald",
+                "channel": "announcements",
+            },
+            "discord_thread_created": {
+                "resident": "herald",
+                "route": "discord:herald",
+                "channel": "announcements",
+                "thread": "release-42",
+            },
+            "discord_thread_archived": {
+                "resident": "herald",
+                "route": "discord:herald",
+                "channel": "announcements",
+                "thread": "release-42",
+            },
+            "discord_message_pinned": {
+                "resident": "herald",
+                "route": "discord:herald",
+                "channel": "announcements",
+                "message": "1234567890",
+            },
+            "discord_topic_set": {
+                "resident": "herald",
+                "route": "discord:herald",
+                "channel": "announcements",
+            },
+        }
+        base = {
+            "v": 0,
+            "ts": "2026-08-25T10:04:00.000Z",
+            "source": "steward",
+            "agent_id": "resident:pip",
+            "project": "life",
+        }
+
+        for kind, payload in payloads.items():
+            with self.subTest(kind=kind):
+                event = {**base, "type": kind, "payload": payload}
+                self.assertIsNone(validate_event(event))
+                event["payload"] = {**payload, "text": "private message body"}
+                self.assertEqual(validate_event(event), "payload.text is forbidden")
+
+    def test_discord_outbound_event_shapes_are_strict_and_steward_authoritative(self):
+        event = {
+            "v": 0,
+            "ts": "2026-08-25T10:04:00.000Z",
+            "source": "steward",
+            "agent_id": "resident:pip",
+            "project": "life",
+            "type": "chat_message_posted",
+            "payload": {
+                "resident": "pip",
+                "route": "discord:pip",
+                "channel": "household",
+                "length": 42,
+            },
+        }
+        for field in ("resident", "route", "channel"):
+            with self.subTest(field=field):
+                broken = {**event, "payload": {**event["payload"], field: " "}}
+                self.assertEqual(validate_event(broken), f"invalid payload.{field}")
+        event["payload"]["length"] = True
+        self.assertEqual(validate_event(event), "invalid payload.length")
+        event["payload"]["length"] = 42
+        event["source"] = "claude-code"
+        self.assertEqual(validate_event(event), "discord events require source steward")
+
     def test_shared_validation_matrix(self):
         for case in json.loads(FIXTURES.read_text()):
             with self.subTest(case["name"]):

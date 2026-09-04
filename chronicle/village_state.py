@@ -22,6 +22,20 @@ SCHEMA_VERSION = 1
 #: messaging a resident's chat bot at three in the morning must not make the village show
 #: that resident at work.
 AMBIENT_TYPES = frozenset({"chat_message_dropped", "resident_declared", "resident_retired"})
+#: Outbound Discord audit facts are visible actions but not activity evidence. They may
+#: supply the timeline's newest sentence, but never create or keep a villager present,
+#: refresh its clock, change its working/resting state, or influence its mood.
+STATE_NEUTRAL_TYPES = frozenset(
+    {
+        "chat_message_posted",
+        "chat_post_refused",
+        "discord_channel_created",
+        "discord_thread_created",
+        "discord_thread_archived",
+        "discord_message_pinned",
+        "discord_topic_set",
+    }
+)
 #: How Steward opens a row on the board. It has two doors and one table: a job posted to
 #: the open board, and a job handed to one named resident. Both write the same open,
 #: unclaimed record in Steward's own store, so both open a row here — the delegated one
@@ -169,6 +183,21 @@ def _description(event):
             f"was restarted (attempt {payload.get('attempt', '?')}): "
             f"{payload.get('reason', 'no reason given')}"
         )
+    channel = payload.get("channel", "channel")
+    if kind == "chat_message_posted":
+        return f"posted to #{channel}"
+    if kind == "chat_post_refused":
+        return f"was refused a post to #{channel}: {payload.get('reason', 'no reason given')}"
+    if kind == "discord_channel_created":
+        return f"created #{channel}"
+    if kind == "discord_thread_created":
+        return f"created thread {payload.get('thread', 'thread')} in #{channel}"
+    if kind == "discord_thread_archived":
+        return f"archived thread {payload.get('thread', 'thread')} in #{channel}"
+    if kind == "discord_message_pinned":
+        return f"pinned a message in #{channel}"
+    if kind == "discord_topic_set":
+        return f"set the topic for #{channel}"
     return kind.replace("_", " ")
 
 
@@ -638,7 +667,11 @@ def project_village(
         # Three readings of one log: what this villager *did* decides its state and its
         # clock, what it did other than beat decides the line shown, and everything but
         # the beats — a knock at its door included — is the history worth keeping.
-        evidence = [item for item in history if item[1]["type"] not in AMBIENT_TYPES]
+        evidence = [
+            item
+            for item in history
+            if item[1]["type"] not in AMBIENT_TYPES | STATE_NEUTRAL_TYPES
+        ]
         declaration = declaration_by_agent.get(agent_id)
         if not evidence and declaration is None:
             continue
@@ -650,7 +683,11 @@ def project_village(
             for item in history
             if item[1]["type"] not in {"heartbeat", "resident_declared", "resident_retired"}
         ]
-        acted = [item for item in evidence if item[1]["type"] != "heartbeat"]
+        acted = [
+            item
+            for item in history
+            if item[1]["type"] not in AMBIENT_TYPES and item[1]["type"] != "heartbeat"
+        ]
         visible_last = acted[-1][1] if acted else last
         age = (now - _instant(last["ts"])).total_seconds()
         pending = pending_by_agent[agent_id]

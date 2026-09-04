@@ -35,6 +35,48 @@ def settled_notification_status(client, expected):
 
 
 class ASGITransportContractTests(unittest.TestCase):
+    def test_discord_event_vocabulary_is_accepted_before_steward_emits_it(self):
+        payloads = {
+            "chat_message_posted": {"length": 42},
+            "chat_post_refused": {"reason": "not allowed"},
+            "discord_channel_created": {},
+            "discord_thread_created": {"thread": "release-42"},
+            "discord_thread_archived": {"thread": "release-42"},
+            "discord_message_pinned": {"message": "1234567890"},
+            "discord_topic_set": {},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            villagers = root / "villagers"
+            villagers.mkdir()
+            config = dataclasses.replace(
+                Config(), events=root / "events.jsonl", villagers_dir=villagers
+            )
+            with TestClient(serve.create_app(config)) as client:
+                for index, (kind, detail) in enumerate(payloads.items()):
+                    event = {
+                        "v": 0,
+                        "ts": f"2026-08-25T10:04:0{index}.000Z",
+                        "source": "steward",
+                        "agent_id": "resident:pip",
+                        "project": "life",
+                        "type": kind,
+                        "payload": {
+                            "resident": "pip",
+                            "route": "discord:pip",
+                            "channel": "household",
+                            **detail,
+                        },
+                    }
+                    with self.subTest(kind=kind):
+                        self.assertEqual(
+                            client.post("/events", json=event).status_code, 204
+                        )
+                        event["payload"]["text"] = "private message body"
+                        self.assertEqual(
+                            client.post("/events", json=event).status_code, 400
+                        )
+
     def assert_knock_name_matches_public_state(self, event, earlier_events=()):
         received = []
 

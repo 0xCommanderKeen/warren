@@ -112,6 +112,40 @@ class ProjectionWitnessVectorTests(unittest.TestCase):
         )
         self.assertEqual(frozenset(), result.witnesses["projection"])
 
+    def test_a_discord_post_cannot_resurrect_a_departed_villager(self):
+        """Rotation agrees that an outbound audit fact is not liveness evidence."""
+        events = [
+            {
+                "v": 0,
+                "ts": "2026-08-24T15:00:00.000Z",
+                "source": "claude-code",
+                "agent_id": "resident:pip",
+                "project": "life",
+                "type": "session_ended",
+                "payload": {},
+            },
+            {
+                "v": 0,
+                "ts": "2026-08-24T15:01:00.000Z",
+                "source": "steward",
+                "agent_id": "resident:pip",
+                "project": "life",
+                "type": "chat_message_posted",
+                "payload": {
+                    "resident": "pip",
+                    "route": "discord:pip",
+                    "channel": "household",
+                    "length": 42,
+                },
+            },
+        ]
+        result = retention.carry_forward(
+            [json.dumps(event) for event in events],
+            epoch_ms("2026-08-24T15:02:00.000Z"),
+            retention.POLICY,
+        )
+        self.assertEqual(frozenset(), result.witnesses["projection"])
+
 
 class TaskLedgerVectorTests(unittest.TestCase):
     """``task-ledger.json`` against the board half of ``carry_forward`` (warren#277).

@@ -27,6 +27,7 @@ from typed_json import canonical_string, decode_graph, semantic_key
 # is precisely the bug this prevents.
 from village_state import (
     AMBIENT_TYPES,
+    STATE_NEUTRAL_TYPES,
     TASK_LEDGER_TYPES,
     TASK_ORIGIN_TYPES,
     reopened_by_lease,
@@ -1311,7 +1312,7 @@ def _projection_keep_indexes(
         # witness budget an actually working agent needs.
         if (
             event["type"] not in ignored
-            and event["type"] not in AMBIENT_TYPES
+            and event["type"] not in AMBIENT_TYPES | STATE_NEUTRAL_TYPES
             and (index >= baseline_start or event["agent_id"] in routine_agents)
         ):
             agent_id = event["agent_id"]
@@ -1649,6 +1650,7 @@ def carry_forward(lines, now_ms, policy):
         return (
             event_type not in BOARD_ONLY_TYPES
             and event_type not in AMBIENT_TYPES
+            and event_type not in STATE_NEUTRAL_TYPES
             and event_type != "journal_written"
             and event_type != "needs_human_resolved"
         )

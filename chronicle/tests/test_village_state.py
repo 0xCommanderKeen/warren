@@ -35,6 +35,86 @@ RESIDENT = {
 
 
 class VillageProjectionTests(unittest.TestCase):
+    def test_discord_events_render_lines_without_changing_villager_state_or_mood(self):
+        idle = event("idle", minutes=1)
+        baseline = project_village([idle], [RESIDENT], NOW + dt.timedelta(minutes=3))
+        cases = {
+            "chat_message_posted": (
+                {
+                    "resident": "pip",
+                    "route": "discord:pip",
+                    "channel": "household",
+                    "length": 42,
+                },
+                "posted to #household",
+            ),
+            "chat_post_refused": (
+                {
+                    "resident": "pip",
+                    "route": "discord:pip",
+                    "channel": "household",
+                    "reason": "not allowed",
+                },
+                "was refused a post to #household: not allowed",
+            ),
+            "discord_channel_created": (
+                {
+                    "resident": "herald",
+                    "route": "discord:herald",
+                    "channel": "announcements",
+                },
+                "created #announcements",
+            ),
+            "discord_thread_created": (
+                {
+                    "resident": "herald",
+                    "route": "discord:herald",
+                    "channel": "announcements",
+                    "thread": "release-42",
+                },
+                "created thread release-42 in #announcements",
+            ),
+            "discord_thread_archived": (
+                {
+                    "resident": "herald",
+                    "route": "discord:herald",
+                    "channel": "announcements",
+                    "thread": "release-42",
+                },
+                "archived thread release-42 in #announcements",
+            ),
+            "discord_message_pinned": (
+                {
+                    "resident": "herald",
+                    "route": "discord:herald",
+                    "channel": "announcements",
+                    "message": "1234567890",
+                },
+                "pinned a message in #announcements",
+            ),
+            "discord_topic_set": (
+                {
+                    "resident": "herald",
+                    "route": "discord:herald",
+                    "channel": "announcements",
+                },
+                "set the topic for #announcements",
+            ),
+        }
+        baseline_villager = baseline["villagers"][0]
+        for kind, (payload, line) in cases.items():
+            with self.subTest(kind=kind):
+                discord_event = event(kind, minutes=2, source="steward", **payload)
+                state = project_village(
+                    [idle, discord_event], [RESIDENT], NOW + dt.timedelta(minutes=3)
+                )
+                [villager] = state["villagers"]
+                self.assertEqual("resting", villager["state"])
+                self.assertEqual(baseline_villager["last_ts"], villager["last_ts"])
+                self.assertEqual(baseline_villager["mood"], villager["mood"])
+                self.assertEqual(line, villager["last_line"])
+                self.assertEqual(kind, villager["history"][-1]["type"])
+
     def test_declaration_is_identity_not_activity_and_latest_wins_until_retired(self):
         first = event(
             "resident_declared", source="steward", name="Pip", char="Monk",
