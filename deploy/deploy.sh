@@ -398,12 +398,13 @@ deploy_steward() {
     # ended two deploys green with the marker saying live while nothing fired. The daemons
     # are the deploy: each must be running, and still the same container thirty seconds
     # later. RestartCount is docker's own tally since the container was created.
-    for daemon in steward-scheduler steward-watchdog steward-chat; do
+    steward_daemons="steward-scheduler steward-watchdog steward-chat"
+    for daemon in $steward_daemons; do
         first="$($SSH "$NAS" "docker inspect -f '{{.State.Running}} {{.RestartCount}}' $daemon" 2>/dev/null | tr -d '\r')"
         [ "${first%% *}" = "true" ] || die "$daemon is not running after up (docker says: ${first:-nothing}); its log says why — the marker is not written"
     done
     sleep 30
-    for daemon in steward-scheduler steward-watchdog steward-chat; do
+    for daemon in $steward_daemons; do
         state="$($SSH "$NAS" "docker inspect -f '{{.State.Running}} {{.RestartCount}}' $daemon" 2>/dev/null | tr -d '\r')"
         [ "${state%% *}" = "true" ] && [ "${state##* }" = "0" ] \
             || die "$daemon is not staying up (running, restarts: ${state:-nothing}); \`docker logs $daemon\` on $NAS says why — the marker is not written"

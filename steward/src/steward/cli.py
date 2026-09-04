@@ -1730,7 +1730,6 @@ def chat_list(residents: Path, output_format: str) -> None:
         return
     if not reports:
         click.secho(f"no resident under {residents} declares a chat route", fg="yellow")
-        return
     for report in reports:
         state = "reachable" if report.reachable else f"{report.status} — not reachable yet"
         click.secho(
@@ -1742,6 +1741,12 @@ def chat_list(residents: Path, output_format: str) -> None:
         )
         if report.note:
             click.echo(f"  note:    {report.note}")
+    reported = {report.token_env for report in reports}
+    for name in sorted(
+        name for name in os.environ if name.startswith(ch.TOKEN_ENV_PREFIX) and name not in reported
+    ):
+        state = "set" if os.environ[name].strip() else "unset"
+        click.echo(f"unassigned token: {name} ({state}) — no declared chat route")
 
 
 @chat_group.command("run")
@@ -1810,7 +1815,7 @@ def chat_run(  # noqa: PLR0913, PLR0917 — click passes one parameter per optio
                 {name for name in os.environ if name.startswith(ch.TOKEN_ENV_PREFIX)}
                 | {route.address.token_env for route in bridge.routes}
             )
-            if waiting and not ch.tokens_from_env():
+            if waiting and not bridge.deliverable():
                 click.secho(
                     f"chat: idle — waiting for {', '.join(waiting)}; "
                     "recreate the service after setting a token",

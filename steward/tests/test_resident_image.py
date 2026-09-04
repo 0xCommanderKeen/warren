@@ -510,7 +510,8 @@ def test_the_deploy_smokes_and_reports_the_chat_daemon_without_tokens() -> None:
     deploy = FLEET_DEPLOY.read_text(encoding="utf-8")
     status = FLEET_STATUS.read_text(encoding="utf-8")
 
-    assert "steward-scheduler steward-watchdog steward-chat" in deploy
+    assert 'steward_daemons="steward-scheduler steward-watchdog steward-chat"' in deploy
+    assert deploy.count("for daemon in $steward_daemons") == 2
     assert "compose exec -T chat steward chat list" in deploy
     assert "STEWARD_CHAT_TOKEN_PIP" in deploy
     assert "STEWARD_CHAT_TOKEN_HOB" in deploy

@@ -1245,6 +1245,21 @@ def test_chat_list_over_a_fleet_that_declares_no_chat_says_so(
     assert "declares a chat route" in result.output
 
 
+def test_chat_list_names_configured_token_slots_without_declared_routes(
+    runner: CliRunner, write_resident: ResidentWriter, monkeypatch
+):
+    tree = write_resident().parent.parent
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_PIP", "")
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_HOB", FAKE_BOT_TOKEN)
+
+    result = runner.invoke(main, ["chat", "list", "--residents", str(tree)])
+
+    assert result.exit_code == 0
+    assert "STEWARD_CHAT_TOKEN_PIP (unset)" in result.output
+    assert "STEWARD_CHAT_TOKEN_HOB (set)" in result.output
+    assert FAKE_BOT_TOKEN not in result.output
+
+
 def test_an_unreadable_poll_timeout_falls_back_to_the_default():
     assert ch.poll_timeout_from_env({ch.POLL_TIMEOUT_ENV: "soon"}) == ch.DEFAULT_POLL_TIMEOUT_S
     assert ch.poll_timeout_from_env({ch.POLL_TIMEOUT_ENV: "-3"}) == ch.DEFAULT_POLL_TIMEOUT_S
@@ -1495,8 +1510,10 @@ def test_a_chat_api_that_is_not_http_reaches_nothing():
 
 
 def test_chat_run_sits_idle_and_names_every_token_it_is_waiting_for(
-    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path
+    runner: CliRunner, write_resident: ResidentWriter, tmp_path: Path, monkeypatch
 ):
+    # A token for some future/unassigned bot does not make this route runnable.
+    monkeypatch.setenv("STEWARD_CHAT_TOKEN_HOB", FAKE_BOT_TOKEN)
     tree = write_resident(chat_manifest(tmp_path / "memory")).parent.parent
 
     result = runner.invoke(
