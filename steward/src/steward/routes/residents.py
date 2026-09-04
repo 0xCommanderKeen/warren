@@ -9,10 +9,11 @@ from pydantic import BeforeValidator, Field, model_validator
 
 from steward import authoring as au
 from steward.budgets import BudgetStatus
+from steward.chat import Transcript, chat_complaint, conversation_slug, conversation_summaries
 from steward.deploy import TransportError
 from steward.input_bounds import IDENTIFIER_MAX_CHARS
 from steward.journal import journal_complaint, read_entries
-from steward.manifest import Resident, ResidentManifest, validate_path
+from steward.manifest import Resident, ResidentManifest, redact_secrets, validate_path
 from steward.nursery import (
     CLAUDE_LOGIN_REMAINS,
     COMMIT_FAILED,
@@ -409,6 +410,55 @@ def router(deps: Deps) -> APIRouter:  # noqa: C901, PLR0915 — route factory is
             _refuse(409, "journal_unreadable", complaint)
         entries = read_entries(resident.manifest, max(0, min(limit, 100)))
         return {"resident": resident.id, "entries": [entry.as_dict() for entry in entries]}
+
+    @routes.get("/residents/{resident_id}/conversations")
+    def list_conversations(resident_id: str) -> dict[str, Any]:
+        """List the rolling conversation windows held in this resident's memory."""
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = deps.find_resident(result, resident_id)
+        if not any(route.kind == "chat" for route in resident.manifest.routes):
+            return {"resident": resident.id, "conversations": []}
+        complaint = chat_complaint(resident.manifest)
+        if complaint is not None:
+            _refuse(409, "conversations_unreadable", complaint)
+        return {
+            "resident": resident.id,
+            "conversations": [
+                {
+                    "id": summary.id,
+                    "last_turn_at": summary.last_turn_at,
+                    "turn_count": summary.turn_count,
+                }
+                for summary in conversation_summaries(resident.manifest)
+            ],
+        }
+
+    @routes.get("/residents/{resident_id}/conversations/{conversation}")
+    def get_conversation(resident_id: str, conversation: str) -> dict[str, Any]:
+        """Return one rolling conversation window, oldest turn first."""
+        result = validate_path(residents_dir, settings.skills_dir)
+        resident = deps.find_resident(result, resident_id)
+        if not any(route.kind == "chat" for route in resident.manifest.routes):
+            _refuse(404, "conversation_not_found", f"resident {resident.id!r} has no chat route")
+        complaint = chat_complaint(resident.manifest)
+        if complaint is not None:
+            _refuse(409, "conversations_unreadable", complaint)
+        transcript = Transcript(resident.manifest, conversation)
+        if not transcript.path.is_file():
+            _refuse(404, "conversation_not_found", f"conversation {conversation!r} not found")
+        turns = transcript.turns()
+        return {
+            "resident": resident.id,
+            "conversation": conversation_slug(conversation),
+            "turns": [
+                {
+                    "at": turn.at,
+                    "speaker": turn.speaker,
+                    "text": redact_secrets(turn.text),
+                }
+                for turn in turns
+            ],
+        }
 
     @routes.post("/residents", status_code=201)
     def create_resident(body: ResidentPost, request: Request) -> dict[str, Any]:

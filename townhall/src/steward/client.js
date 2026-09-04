@@ -240,6 +240,9 @@ export function createStewardClient({ baseUrl = "", fetch: fetchImpl, credential
     readBudget: (id, options) => call(`/residents/${at(id)}/budget`, options),
     readJournal: (id, options) => call(`/residents/${at(id)}/journal`, options),
     readInbox: (id, options) => call(`/residents/${at(id)}/inbox`, options),
+    listConversations: (id, options) => call(`/residents/${at(id)}/conversations`, options),
+    readConversation: (id, conversation, options) =>
+      call(`/residents/${at(id)}/conversations/${at(conversation)}`, options),
     listRoutines: (options) => call("/routines", options),
     listJobs: (options) => call("/jobs", options),
     listApprovals: (status, options) => call("/approvals", { ...options, query: { status } }),
