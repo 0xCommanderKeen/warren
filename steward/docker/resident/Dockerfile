@@ -11,8 +11,8 @@
 #
 # `node:22-slim`      The claude CLI is an npm package, so the base is node. Slim rather
 #                     than full because everything full adds that we actually need — git,
-#                     python3 — is installed below by name, and a resident's image should
-#                     be readable in one screen. (life-agent's hand-rolled container uses
+#                     an ssh client, python3 — is installed below by name, and a resident's
+#                     image should be readable in one screen. (life-agent's hand-rolled container uses
 #                     full `node:22` and apt-gets the rest *at runtime, on every cold
 #                     start*; baking it is the whole point of moving.) Pinned by digest,
 #                     not by that tag — see "The base pin" below.
@@ -30,9 +30,15 @@
 # `git`               claude reads and writes repos; a resident without git is a resident
 #                     that cannot do most of the work it would be asked to do.
 # `openssh-client`    git's transport to any remote a burrow reaches over a deploy key.
-#                     The slim base has none, and git without it can mount a clone it can
-#                     never fetch: Hob's `/vault` came up exactly like that (warren#389),
-#                     `git status` clean and `git fetch` dead on `ssh: not found`.
+#                     The slim base has none, Debian's git only *recommends* one and
+#                     `--no-install-recommends` below drops it, and git without it can mount
+#                     a clone it can never fetch: Hob's `/vault` came up exactly like that
+#                     (warren#389), `git status` clean and `git fetch` dead on
+#                     `ssh: not found`. The client is all this image supplies — a session
+#                     has no terminal to answer a host-key prompt on, so the `/root/.ssh` a
+#                     manifest mounts must carry `known_hosts` and a default-named key. The
+#                     control-plane image bakes GitHub's host keys in instead; whether a
+#                     resident's should is a separate decision.
 # `curl`              For `steward-smoke`, which needs an HTTP status code it can assert on.
 #
 # ## What runs

@@ -1063,7 +1063,9 @@ resident cannot work without:
 - **git and an ssh client** (`openssh-client`), because a resident's work is mostly repos
   and a repo it reaches from a burrow is reached over a deploy key mounted into the
   container. `node:22-slim` ships neither; git without ssh mounts a clone it can never
-  fetch (warren#389 found Hob's `/vault` that way);
+  fetch (warren#389 found Hob's `/vault` that way). The image supplies the client only: a
+  session has no terminal to answer a host-key prompt on, so the directory a manifest
+  mounts at `/root/.ssh` has to carry `known_hosts` as well as a default-named key;
 - a **vendored copy of chronicle's emitter bundle**. The emitter's source is two files
   (`chronicle/hooks/emit.py` and the durable outbox it grew, `hooks/durable.py`); what is
   vendored is the single self-contained file `chronicle/hooks/build.py` flattens them into,

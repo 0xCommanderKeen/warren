@@ -608,12 +608,27 @@ def test_the_image_labels_point_at_the_repo_that_exists() -> None:
     assert "github.com/0xCommanderKeen/steward" not in text
 
 
+def _apt_layer(dockerfile: str) -> str:
+    """Return the one `RUN apt-get …` instruction, and nothing the header says about it.
+
+    Anchored on the instruction itself rather than on the first mention of `apt-get`, because
+    the header comment names every package too — a test that sliced from a comment would
+    stay green after the package left the `RUN`.
+    """
+    match = re.search(
+        r"^RUN apt-get update.*?rm -rf /var/lib/apt/lists", dockerfile, re.MULTILINE | re.DOTALL
+    )
+    assert match is not None, "the Dockerfile has no apt layer"
+    return match.group(0)
+
+
 def test_the_image_carries_everything_a_session_needs() -> None:
     """python3 for the emitter, git for the work, and the two files the entrypoint seeds."""
     text = DOCKERFILE.read_text(encoding="utf-8")
+    apt_layer = _apt_layer(text)
 
-    assert "python3" in text
-    assert "git" in text
+    assert "python3" in apt_layer
+    assert "git" in apt_layer
     assert "COPY chronicle-emit.py /opt/steward/chronicle-emit.py" in text
     assert "COPY settings.json /opt/steward/settings.json" in text
 
@@ -623,12 +638,12 @@ def test_the_image_carries_an_ssh_client_so_git_can_reach_a_remote() -> None:
 
     Found the hard way (warren#389): Hob's container mounted the vault and the key exactly
     as declared, `git status` was clean, and `git fetch` died with `ssh: not found` —
-    `node:22-slim` ships no ssh client and the apt layer installed none. A resident whose
-    work is a repo on a burrow can neither pull nor push without it.
+    `node:22-slim` ships no ssh client, and `--no-install-recommends` drops the one git's
+    Debian package would have pulled in. A resident whose work is a repo on a burrow can
+    neither pull nor push without it.
     """
-    text = DOCKERFILE.read_text(encoding="utf-8")
+    apt_layer = _apt_layer(DOCKERFILE.read_text(encoding="utf-8"))
 
-    apt_layer = text[text.index("apt-get install") : text.index("rm -rf /var/lib/apt/lists")]
     assert "openssh-client" in apt_layer, "git needs ssh to reach a remote over a deploy key"
 
 

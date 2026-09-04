@@ -98,6 +98,15 @@ jobs:
           echo "org.opencontainers.image.revision=$revision"
           test "$revision" = "$(git rev-parse HEAD)"
 
+      # The tools a session's git needs, asked for inside the built image rather than read
+      # off the Dockerfile: the ssh client went missing for a whole image generation while
+      # every textual check stayed green, and the first thing to run it was a resident's
+      # `git fetch` on the NAS (warren#389).
+      - name: Check git and its ssh transport are on the image's PATH
+        run: |
+          docker run --rm --entrypoint sh steward-resident:latest \
+            -c 'command -v git && command -v ssh && git --version && ssh -V'
+
       # smoke.sh needs a village that answers 204 on POST /events, and CI has no
       # credentials for the real one — so it gets a village that knows how to say 204 and
       # nothing else. That is enough to run every one of smoke.sh's four checks for real,
