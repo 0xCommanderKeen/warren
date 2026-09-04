@@ -30,6 +30,7 @@ from village_state import (
     STATE_NEUTRAL_TYPES,
     TASK_LEDGER_TYPES,
     TASK_ORIGIN_TYPES,
+    later_task_event,
     reopened_by_lease,
     ambient_share,
 )
@@ -412,69 +413,8 @@ def event_ms(event):
     return int(when.timestamp() * 1000)
 
 
-def _task_event_identity(event):
-    """Return the stable final tie-breaker for equal-time task transitions.
-
-    Steward identifiers and payload text are protocol strings.  Compact JSON
-    keeps array ordering significant without depending on Python's whitespace.
-    """
-    payload = event["payload"]
-    values = (
-        event["type"],
-        event["ts"],
-        event["agent_id"],
-        event["project"],
-        payload["task_id"],
-        payload["title"],
-        payload.get("claimant", ""),
-        json.dumps(
-            payload.get("required_skills", []),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ),
-        json.dumps(
-            payload.get("artifacts", []), ensure_ascii=False, separators=(",", ":")
-        ),
-        payload.get("reason", ""),
-        payload.get("parent_task_id", ""),
-    )
-    if event["type"] == "task_delegated":
-        # Appended rather than folded into the tuple above: two handoffs of one task
-        # in one millisecond differ only by addressee and door, and every existing
-        # job event must keep the identity it already compares by.
-        values += (
-            payload["from"],
-            payload["to"],
-            payload["route"],
-            payload["depth"],
-        )
-    return "\0".join(str(value) for value in values)
-
-
-def _task_tie_rank(event):
-    """Constant-space semantic order for Steward's equal-ms transitions."""
-    if event["type"] in TASK_ORIGIN_TYPES:
-        # A handoff opens the row exactly as a post does, so it ranks with one: a
-        # claim in the same millisecond must still be the newer fact.
-        return 0
-    if event["type"] == "task_failed" and reopened_by_lease(event["payload"]):
-        return 1
-    if event["type"] == "task_claimed":
-        return 2
-    if event["type"] == "task_failed":
-        return 3
-    return 4  # task_done
-
-
 def _later_task_event(candidate, current):
-    candidate_ms, current_ms = event_ms(candidate), event_ms(current)
-    if candidate_ms != current_ms:
-        return candidate_ms > current_ms
-    candidate_rank = _task_tie_rank(candidate)
-    current_rank = _task_tie_rank(current)
-    if candidate_rank != current_rank:
-        return candidate_rank > current_rank
-    return _task_event_identity(candidate) > _task_event_identity(current)
+    return later_task_event(candidate, current)
 
 
 def _remember_task_event(task, slot, index, event):
