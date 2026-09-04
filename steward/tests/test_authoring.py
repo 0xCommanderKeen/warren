@@ -203,6 +203,33 @@ def test_a_tree_wide_warning_is_reported_without_refusing_the_write(
     assert any("memory.path" in d.field_path for d in result.validation.warnings)
 
 
+def test_a_second_writer_of_one_host_path_is_refused_by_the_write_gate(
+    fleet: ScratchRepo, write_resident: ResidentWriter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#440: the one-writer rule is an error, so saving the form cannot introduce one.
+
+    The collision only exists between two files, so this is exactly the class of mistake
+    a single-declaration check cannot see — and since #440 the copy-and-validate gate
+    refuses it rather than reporting it as advice.
+    """
+    monkeypatch.setenv("STEWARD_BURROW_HOME", "/home/Miha")
+    mount = {"host": "~/docker/shared", "container": "/shared", "mode": "rw"}
+    add_second_resident(fleet, write_resident)
+    for resident in ("test-agent", "second-agent"):
+        declaration = declaration_of(fleet, resident)
+        data = yaml.safe_load(declaration.manifest_text)
+        data["deploy"] = {"mounts": [mount]}
+        edit = au.Declaration(yaml.safe_dump(data), declaration.soul_text)
+        if resident == "test-agent":  # the first writer is unremarkable on its own
+            assert write(fleet, resident, edit).commit.committed
+            continue
+        with pytest.raises(au.AuthoringError) as refused:
+            write(fleet, resident, edit)
+
+    assert any("one writer" in d.problem for d in refused.value.diagnostics)
+    assert all(d.field_path == "deploy.mounts" for d in refused.value.diagnostics)
+
+
 # --------------------------------------------------------------------------------------
 # the happy path, and what git was told
 # --------------------------------------------------------------------------------------

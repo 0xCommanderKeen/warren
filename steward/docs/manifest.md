@@ -1240,10 +1240,24 @@ plain-data path. `mode` is `rw` or `ro`. Extra mounts may not overlap `memory.pa
 `/root/.claude`, which Steward owns and renders itself. A colon is refused on both sides
 because Compose's short volume syntax uses it to separate source, target, and mode.
 
-A host path is allowed to be shared, but a shared clone has **one writer**: at most one
-resident may mount it `rw`; all other residents use `ro`. Tree validation warns and names
-every competing writer. `steward doctor` prints each mount beside the resident's workspace,
+A host path is allowed to be shared, but a shared resource has **one writer**: at most one
+resident may mount it `rw`; all other residents use `ro`. Tree validation **refuses** a
+second writer (warren#440) and names every competing writer on each of their files; the
+host path is compared after `~/` is resolved against `STEWARD_BURROW_HOME` and normalised,
+so two spellings of one directory are one resource. The write API validates a copy of the
+tree before it commits, so a `PUT` that would introduce the second writer is refused with
+the same diagnostic. `steward doctor` prints each mount beside the resident's workspace,
 and a provision dry run shows the same mount in the complete rendered Compose fragment.
+
+The rule is not really about mounts. Two residents writing one tree lose each other's
+work silently — the loser's change is simply not there, with nothing in either transcript
+to say why — and no single manifest can see the conflict, which is why it is checked
+across the tree rather than per file. Its corollary is how residents get split: **a job
+becomes two residents when their trust differs, not when their titles do.** Backend and
+frontend work on one repository is one resident, because it is one clone. A librarian that
+recommends and a shelf worker that rewrites library data are two, because only one of them
+may destroy something. A manager owns conversations and letters rather than files, so a
+manager never contends with its own reports.
 
 The resident image runs as root (uid 0). If an extra mount is a Git repository, the
 repository's top directory on the host must therefore also be owned by uid 0. Git rejects

@@ -2923,7 +2923,13 @@ def _check_shared_journal_dirs(residents: Sequence[Resident]) -> list[Diagnostic
 
 
 def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagnostic]:
-    """Warn when one shared host path has more than one declared writer."""
+    """Refuse a tree where one shared host path has more than one declared writer.
+
+    One writer per resource is a rule of the org, not advice (warren#440): two residents
+    holding the same clone open for writing race each other, and no manifest can see the
+    conflict on its own. Read-only mounts are free — it is the second *writer* that is
+    refused.
+    """
     by_host: dict[str, dict[str, Resident]] = {}
     for resident in residents:
         for mount in resident.manifest.deploy.mounts:
@@ -2949,7 +2955,6 @@ def _check_competing_mount_writers(residents: Sequence[Resident]) -> list[Diagno
                     "one writer per shared clone rule permits at most one"
                 ),
                 example="change every mount but one to mode: ro",
-                severity=Severity.WARNING,
             )
             for resident in group
         )
