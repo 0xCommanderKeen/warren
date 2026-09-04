@@ -16,23 +16,35 @@ class _ProjectionFold:
 
     def __init__(self):
         self._lines = []
+        self._current = []
 
     def replace(self, events, evaluated_at):
-        self._lines = [json.dumps(event, ensure_ascii=False) for event in events]
-        return self._compact(evaluated_at)
+        current = list(events)
+        lines = [json.dumps(event, ensure_ascii=False) for event in current]
+        retained, _ = self._compact(lines, evaluated_at)
+        self._lines = retained
+        self._current = current
+        return list(current)
 
     def extend(self, events, evaluated_at):
-        self._lines.extend(json.dumps(event, ensure_ascii=False) for event in events)
-        return self._compact(evaluated_at)
+        events = list(events)
+        if not events:
+            return list(self._current)
+        lines = self._lines + [
+            json.dumps(event, ensure_ascii=False) for event in events
+        ]
+        retained, current = self._compact(lines, evaluated_at)
+        self._lines = retained
+        self._current = current
+        return list(self._current)
 
     def current(self):
-        return self._events(self._lines)
+        return list(self._current)
 
-    def _compact(self, evaluated_at):
+    def _compact(self, lines, evaluated_at):
         now_ms = int(evaluated_at.timestamp() * 1000)
-        retained = retention.carry_forward(self._lines, now_ms, retention.POLICY)
-        self._lines = list(retained.lines)
-        return self.current()
+        retained = list(retention.carry_forward(lines, now_ms, retention.POLICY).lines)
+        return retained, self._events(retained)
 
     @staticmethod
     def _events(lines):

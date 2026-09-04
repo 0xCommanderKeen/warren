@@ -20,6 +20,13 @@ def _reject_json_constant(value):
     raise json.JSONDecodeError("non-standard JSON constant", value, 0)
 
 
+def _decode_record(line):
+    try:
+        return json.loads(line, parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
 @dataclasses.dataclass(frozen=True)
 class EventCursor:
     """Validated event-log position with explicit resume policy."""
@@ -274,12 +281,7 @@ class EventLog:
                 with open(self.path, "rb") as stream:
                     stat = os.fstat(stream.fileno())
                     for line in stream:
-                        try:
-                            events.append(
-                                json.loads(line, parse_constant=_reject_json_constant)
-                            )
-                        except (UnicodeDecodeError, json.JSONDecodeError):
-                            events.append(None)
+                        events.append(_decode_record(line))
                     cursor = EventCursor.issued(
                         boot_id, stat, self._generation, stat.st_size
                     ).format()
@@ -297,12 +299,7 @@ class EventLog:
         if cursor.boot_id is None:
             raise ValueError("projection cursors must be server-issued")
         records, current, reset = self.read_records(cursor.boot_id, cursor)
-        events = []
-        for _, line in records:
-            try:
-                events.append(json.loads(line, parse_constant=_reject_json_constant))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                events.append(None)
+        events = [_decode_record(line) for _, line in records]
         return events, current.format(), current.generation, reset
 
     def read_records(self, boot_id, cursor):

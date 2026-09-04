@@ -51,8 +51,8 @@ class StateCoordinatorTests(unittest.TestCase):
 
         initial_work = len(project.call_args_list[0].args[0])
         steady_work = len(project.call_args_list[1].args[0])
-        self.assertLess(initial_work, len(old))
-        self.assertLessEqual(steady_work, initial_work + 1)
+        self.assertEqual(len(old), initial_work)
+        self.assertLess(steady_work, initial_work)
 
     def test_a_projection_cursor_reset_rebuilds_from_the_canonical_live_log(self):
         initial = event("tool_called", tool="Read")
@@ -86,6 +86,7 @@ class StateCoordinatorTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 interrupted.evaluate(NOW + dt.timedelta(minutes=1))
 
+        retried = interrupted.evaluate(NOW + dt.timedelta(minutes=1))
         restarted = StateCoordinator(
             lambda: ([first, second], "cursor-2", 0),
             lambda: [],
@@ -94,10 +95,24 @@ class StateCoordinatorTests(unittest.TestCase):
         expected = __import__("village_state").project_village(
             [first, second], [], NOW + dt.timedelta(minutes=1), cursor="cursor-2"
         )
-        for snapshot in (restarted, expected):
+        for snapshot in (retried, restarted, expected):
             snapshot.pop("generation", None)
             snapshot.pop("log_generation", None)
+        self.assertEqual(expected, retried)
         self.assertEqual(expected, restarted)
+
+    def test_an_unchanged_fold_keeps_malformed_evidence_visible(self):
+        coordinator = StateCoordinator(
+            lambda: ([None], "cursor-1", 0),
+            lambda: [],
+            ProjectionPolicy(),
+            read_updates=lambda _cursor: ([], "cursor-1", 0, False),
+        )
+        first = coordinator.evaluate(NOW)
+        same = coordinator.evaluate(NOW)
+
+        self.assertEqual(first["diagnostics"], same["diagnostics"])
+        self.assertEqual("malformed_event", same["diagnostics"][0]["kind"])
 
     def test_atomically_publishes_new_generations_and_ignores_no_change(self):
         evidence = [event("tool_called", tool="Read")]
