@@ -1547,10 +1547,7 @@ def test_skills_lists_the_shipped_library_and_every_resident(
     assert result.exit_code == 0, result.output
     assert "write-journal  [default]" in result.output
     assert "read-inbox  [granted]" in result.output
-    assert (
-        "hob: daily-summary, escalate, research, write-journal, vault-keeper, morning-digest"
-        in (result.output)
-    )
+    assert "hob: escalate, write-journal, vault-keeper, morning-digest" in (result.output)
     assert "burrow-builder" not in result.output
     # Named as a copy the CLI does not discover: since steward #206 a claude session is
     # launched with `--setting-sources ""`, and `.claude/skills` is discovered through the

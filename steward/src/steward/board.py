@@ -26,8 +26,8 @@ back onto the board would be the board lying about what happened to it.
 **Matching is against the effective skill set, not the granted one.** A task's
 ``required_skills`` is checked against :func:`claimable_skills` — the library's defaults
 plus this manifest's own grants (:mod:`steward.skills`) — so a task tagged ``research`` is
-claimable by a resident with no ``skills:`` block at all, because research is something
-every resident holds. The claimant is then provisioned exactly as a routine session is:
+claimable only by a resident explicitly granted that skill. The claimant is then
+provisioned exactly as a routine session is:
 same library, same prompt injection, same on-disk materialization for the runners that
 take a copy there, same refusal when a grant names nothing.
 
@@ -139,7 +139,7 @@ def claimable_skills(manifest: ResidentManifest, library: SkillLibrary) -> froze
     The **effective** set, not the granted one (:func:`steward.skills.effective_names`):
     the library's defaults plus this manifest's own grants. That distinction is the whole
     point of the library — a resident with no ``skills:`` block at all still holds
-    ``research`` and ``write-journal``, so a task tagged with a default skill is claimable
+    ``escalate`` and ``write-journal``, so a task tagged with a default skill is claimable
     by anybody, exactly as a task tagged with nothing is.
 
     Matching stays a subset test on ids and nothing cleverer. A task tagged with a skill a

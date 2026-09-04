@@ -910,8 +910,8 @@ steward first reopens tasks whose leases ran out (emitting `task_failed` with
 oldest open task whose `required_skills` are a subset of the skills it holds. "Holds"
 means the **effective** set — the library's defaults plus this manifest's own grants, the
 same set [the session prompt](#the-skills-library) is built from — so a task tagged
-`research` is claimable by a resident with no `skills:` block at all, because research is
-a default. An untagged task is claimable by any board-enabled resident, because an empty
+`research` is claimable only by a resident explicitly granted that skill. An untagged
+task is claimable by any board-enabled resident, because an empty
 set is a subset of everything. The claim is one conditional `UPDATE … WHERE status =
 'open'`: two residents waking in the same millisecond can never both hold one task.
 
@@ -1668,9 +1668,9 @@ A skill is a named, reusable capability, written as instructions a session reads
 ```
 skills/
   write-journal/SKILL.md      # default: every resident holds it
-  daily-summary/SKILL.md      # default
-  research/SKILL.md           # default
   escalate/SKILL.md           # default
+  daily-summary/SKILL.md      # granted in a manifest
+  research/SKILL.md
   read-inbox/SKILL.md         # granted in a manifest
   read-calendar/SKILL.md
   errands/SKILL.md
@@ -1737,10 +1737,11 @@ is for the library changing under a manifest that was valid when it was read.)
 ```console
 $ steward skills                      # the library, and each resident's effective set
 library /srv/steward/skills
-  daily-summary  [default]  Turn a day's scattered facts into one short honest picture…
+  daily-summary  [granted]  Turn a day's scattered facts into one short honest picture…
+  escalate       [default]  Stop and ask a human, properly…
   read-inbox     [granted]  Read and triage mail on a schedule…
 
-hob: daily-summary, escalate, research, write-journal, read-inbox, read-calendar, errands
+hob: escalate, write-journal, read-inbox, read-calendar, errands
   runner claude — prompt — plus a copy in .claude/skills/ the session's CLI does not discover
 ```
 

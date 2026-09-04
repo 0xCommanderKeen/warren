@@ -43,7 +43,7 @@ charter:
       Raise needs_human with the decision stated in one sentence and the options laid
       out, then stop and rest.
 
-# On top of the default set (daily-summary, escalate, research, write-journal).
+# On top of the default set (escalate, write-journal).
 skills:
   - id: vault-keeper
     note: Read CLAUDE.md first; git discipline; receipts.
